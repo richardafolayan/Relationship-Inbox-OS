@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "baseUrl": ".",
+    "paths": {
+      "@inbox-os/core": ["../../packages/core/dist/index.d.ts"],
+      "@inbox-os/core/*": ["../../packages/core/dist/*"]
+    },
+    "outDir": "dist",
+    "rootDir": "src",
+    "types": ["node"],
+    "noEmit": false
+  },
+  "include": ["src"]
+}

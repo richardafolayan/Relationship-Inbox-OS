@@ -1,0 +1,11 @@
+{
+  "inbox_url": "https://www.tiktok.com/messages",
+  "thread_list": "div[data-e2e='chat-list']",
+  "thread_item": "div[data-e2e='chat-item']",
+  "unread_badge": "span[data-e2e='unread-count']",
+  "message_container": "div[data-e2e='chat-message-list']",
+  "message_item": "div[data-e2e='chat-message']",
+  "message_text": "p[data-e2e='chat-text']",
+  "composer_input": "div[data-e2e='chat-input'] [contenteditable='true']",
+  "send_button": "button[data-e2e='chat-send-button']"
+}

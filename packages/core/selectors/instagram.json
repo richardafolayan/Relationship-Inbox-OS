@@ -1,0 +1,11 @@
+{
+  "inbox_url": "https://www.instagram.com/direct/inbox/",
+  "thread_list": "div[role='button'][tabindex='0']:has(span[title]):has(abbr[aria-label])",
+  "thread_item": "div[role='button'][tabindex='0']:has(span[title]):has(abbr[aria-label])",
+  "unread_badge": "span[data-visualcompletion='ignore'] div",
+  "message_container": "main, div[role='main']",
+  "message_item": "div[role='row'], div[role='listitem']",
+  "message_text": "div[dir='auto']",
+  "composer_input": "div[contenteditable='true'][role='textbox'], div[contenteditable='true']",
+  "send_button": "button[type='submit'], button[aria-label*='Send'], div[role='button'][aria-label*='Send']"
+}

@@ -1,0 +1,176 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+enum PlatformName {
+  LINKEDIN
+  INSTAGRAM
+  TIKTOK
+}
+
+enum PlatformStatus {
+  CONNECTED
+  NOT_CONNECTED
+  DEGRADED
+  ERROR
+}
+
+enum RiskLevel {
+  GREEN
+  AMBER
+  RED
+}
+
+enum Direction {
+  IN
+  OUT
+}
+
+enum AuditStatus {
+  OK
+  FAIL
+}
+
+enum SendRequestStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+model Platform {
+  id          String         @id @default(cuid())
+  name        PlatformName   @unique
+  status      PlatformStatus @default(NOT_CONNECTED)
+  lastScanAt  DateTime?
+  lastError   String?
+  connectedAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  @@map("platforms")
+}
+
+model Person {
+  id          String   @id @default(cuid())
+  displayName String
+  handle      String?
+  platform    PlatformName
+  profileUrl  String?
+  notes       String?
+  tagsJson    String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  threads Thread[]
+
+  @@index([displayName])
+  @@map("people")
+}
+
+model Thread {
+  id                String       @id @default(cuid())
+  platform          PlatformName
+  platformThreadId  String
+  threadUrl         String?
+  personId          String
+  unreadCount       Int          @default(0)
+  needsReply        Boolean      @default(false)
+  lastMessageAt     DateTime?
+  lastInboundAt     DateTime?
+  lastOutboundAt    DateTime?
+  lastInboundHash   String?
+  riskLevel         RiskLevel    @default(GREEN)
+  slaDueAt          DateTime?
+  riskReason        String?
+  rollingSummary    String?
+  whatTheyWant      String?
+  openLoopsJson     String?
+  toneNotesJson     String?
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
+
+  person       Person         @relation(fields: [personId], references: [id], onDelete: Cascade)
+  messages     Message[]
+  drafts       Draft[]
+  sendRequests SendRequest[]
+
+  @@unique([platform, platformThreadId])
+  @@index([platform, riskLevel, needsReply, lastInboundAt])
+  @@map("threads")
+}
+
+model Message {
+  id                 String    @id @default(cuid())
+  threadId           String
+  platformMessageKey String
+  direction          Direction
+  timestamp          DateTime
+  text               String
+  attachmentsJson    String?
+  createdAt          DateTime  @default(now())
+
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@unique([threadId, platformMessageKey])
+  @@index([threadId, timestamp])
+  @@map("messages")
+}
+
+model Draft {
+  id        String   @id @default(cuid())
+  threadId  String
+  text      String
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId])
+  @@map("drafts")
+}
+
+model AuditLog {
+  id             String      @id @default(cuid())
+  timestamp      DateTime    @default(now())
+  platform       PlatformName?
+  stage          String?
+  action         String
+  status         AuditStatus
+  detailsJson    String?
+  screenshotFile String?
+  domDumpFile    String?
+
+  @@index([timestamp, platform, action, status])
+  @@map("audit_logs")
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  valueJson String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("settings")
+}
+
+model SendRequest {
+  id           String            @id @default(cuid())
+  clientSendId String            @unique
+  threadId     String
+  status       SendRequestStatus @default(PENDING)
+  requestText  String
+  receiptJson  String?
+  errorJson    String?
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+
+  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId, status])
+  @@map("send_requests")
+}

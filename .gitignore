@@ -1,0 +1,20 @@
+node_modules
+.npm
+.turbo
+.next
+dist
+coverage
+.DS_Store
+.env
+.env.local
+apps/dashboard/.next
+apps/dashboard/out
+apps/runner/dist
+packages/core/generated
+
+# Data runtime state
+/data/inbox-os.sqlite
+/data/inbox-os.sqlite-journal
+/data/profiles
+/data/screenshots
+/data/dom_dumps

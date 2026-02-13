@@ -1,0 +1,34 @@
+{
+  "name": "relationship-inbox-os",
+  "private": true,
+  "version": "0.1.0",
+  "packageManager": "npm@10.8.2",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && turbo run dev --parallel",
+    "build": "turbo run build",
+    "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
+    "test": "npm run test:all",
+    "test:all": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && node --test tests/*.test.mjs",
+    "move-on": "npm run test:all",
+    "db:generate": "prisma generate --schema packages/core/prisma/schema.prisma",
+    "db:push": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma db push --schema packages/core/prisma/schema.prisma",
+    "db:migrate": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma migrate dev --schema packages/core/prisma/schema.prisma",
+    "dev:dashboard": "npm run dev --workspace @inbox-os/dashboard",
+    "dev:runner": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && npm run dev --workspace @inbox-os/runner",
+    "scan": "npm run scan --workspace @inbox-os/runner",
+    "connect:linkedin": "npm run connect:linkedin --workspace @inbox-os/runner",
+    "test:selectors:linkedin": "npm run test:selectors:linkedin --workspace @inbox-os/runner"
+  },
+  "devDependencies": {
+    "prisma": "^6.3.1",
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.3"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
