@@ -47,6 +47,12 @@ export interface RunnerConfig {
   domDumpDir: string;
   selectorDir: string;
   browserProfile: BrowserProfileConfig;
+  linkedInScan: {
+    maxThreads: number;
+    stableIterations: number;
+    scrollWaitMs: number;
+    messageBackfillAttempts: number;
+  };
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -148,6 +154,14 @@ function parseTimeoutOrDefault(value: string | undefined, fallback: number): num
   return fallback;
 }
 
+function parseIntOrDefault(value: string | undefined, fallback: number): number {
+  const parsed = Number.parseInt(value ?? "", 10);
+  if (Number.isFinite(parsed) && parsed > 0) {
+    return parsed;
+  }
+  return fallback;
+}
+
 export function resolveConnectTimeoutMs(profileMode: BrowserProfileMode, env: NodeJS.ProcessEnv = process.env): number {
   const isolatedTimeoutMs = parseTimeoutOrDefault(env.CONNECT_OPERATION_TIMEOUT_MS, 25_000);
   const personalTimeoutMs = parseTimeoutOrDefault(env.CONNECT_OPERATION_TIMEOUT_MS_PERSONAL, 90_000);
@@ -202,7 +216,13 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),
     selectorDir: resolve(projectRoot, "packages", "core", "selectors"),
-    browserProfile: resolveBrowserProfileConfig(env)
+    browserProfile: resolveBrowserProfileConfig(env),
+    linkedInScan: {
+      maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 200),
+      stableIterations: parseIntOrDefault(env.LINKEDIN_SCAN_STABLE_ITERATIONS, 3),
+      scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 700),
+      messageBackfillAttempts: parseIntOrDefault(env.LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS, 8)
+    }
   };
 }
 

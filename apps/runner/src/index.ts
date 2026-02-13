@@ -18,6 +18,7 @@ import { createSelectorTestService } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
+import { createSessionCoordinator } from "./services/session-coordinator";
 import { createSendService } from "./services/send";
 import { cleanupDemoData, seedDemoData } from "./services/demo";
 
@@ -72,7 +73,35 @@ const selectorTestService = createSelectorTestService({
   getSettings: () => settingsStore.getSettings(),
   resolveSelectors: resolveSelectorsForPlatform,
   profileDirs: runnerConfig.profileDirs,
-  screenshotDir: runnerConfig.screenshotDir
+  screenshotDir: runnerConfig.screenshotDir,
+  browserProfile: runnerConfig.browserProfile,
+  onConnectStep: async (input) => {
+    await auditService.log({
+      platform: input.platform,
+      stage: "Scan",
+      action: input.action,
+      status: input.status,
+      details: input.details
+    });
+  },
+  onPersonalProfileFallback: async (input) => {
+    await auditService.log({
+      platform: input.platform,
+      stage: "Scan",
+      action: "PERSONAL_PROFILE_FALLBACK",
+      status: "OK",
+      details: {
+        reason: input.reason,
+        personalChromeUserDataDir: input.personalChromeUserDataDir,
+        personalChromeLaunchUserDataDir: input.personalChromeLaunchUserDataDir,
+        personalChromeProfileDirectory: input.personalChromeProfileDirectory,
+        personalChromeProfileName: input.personalChromeProfileName,
+        personalChromeProfileResolutionStrategy: input.personalChromeProfileResolutionStrategy,
+        mirrorResult: input.mirrorResult,
+        fallbackProfileDir: input.fallbackProfileDir
+      }
+    });
+  }
 });
 
 const scanQueue = createScanQueue({
@@ -80,6 +109,11 @@ const scanQueue = createScanQueue({
   eventBus,
   settingsStore,
   aiService,
+  auditLog: (input) => auditService.log(input)
+});
+const sessionCoordinator = createSessionCoordinator({
+  adapters,
+  scanQueue,
   auditLog: (input) => auditService.log(input)
 });
 
@@ -199,6 +233,15 @@ function summarizeError(error: unknown): Record<string, unknown> {
 
 function connectTimeoutMsForCurrentProfile(): number {
   return resolveConnectTimeoutMs(runnerConfig.browserProfile.mode, process.env);
+}
+
+async function preemptSessionsBeforeAction(input: {
+  triggerAction: "CONNECT" | "SCAN" | "OPEN_BROWSER" | "TEST_SELECTORS";
+  platform?: PlatformName;
+}) {
+  const summary = await sessionCoordinator.preemptAll(input);
+  connectInFlight.clear();
+  return summary;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -508,21 +551,39 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     })
     .parse(req.body ?? {});
 
+  const preemptSummary = await preemptSessionsBeforeAction({
+    triggerAction: "SCAN",
+    platform: payload.platform
+  });
+
   const queued = scanQueue.enqueueScan(payload.platform);
   await auditService.log({
     platform: payload.platform,
     stage: "Scan",
     action: "SCAN_START",
     status: "OK",
-    details: { jobId: queued.jobId, scope: payload.platform ?? "ALL" }
+    details: {
+      jobId: queued.jobId,
+      scope: payload.platform ?? "ALL",
+      preemptedPlatforms: preemptSummary.closedPlatforms,
+      preemptDurationMs: preemptSummary.preemptDurationMs
+    }
   });
 
-  res.json(queued);
+  res.json({
+    ...queued,
+    preemptedPlatforms: preemptSummary.closedPlatforms,
+    preemptDurationMs: preemptSummary.preemptDurationMs
+  });
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
+  const preemptSummary = await preemptSessionsBeforeAction({
+    triggerAction: "CONNECT",
+    platform
+  });
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
   const connectTimeoutMs = connectTimeoutMsForCurrentProfile();
@@ -542,7 +603,9 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
       profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
       profileName: runnerConfig.browserProfile.personalChromeProfileName,
       profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
-      timeoutBudgetMs: connectTimeoutMs
+      timeoutBudgetMs: connectTimeoutMs,
+      preemptedPlatforms: preemptSummary.closedPlatforms,
+      preemptDurationMs: preemptSummary.preemptDurationMs
     }
   });
 
@@ -618,13 +681,17 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
         profileName: runnerConfig.browserProfile.personalChromeProfileName,
         profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
-        timeoutBudgetMs: connectTimeoutMs
+        timeoutBudgetMs: connectTimeoutMs,
+        preemptedPlatforms: preemptSummary.closedPlatforms,
+        preemptDurationMs: preemptSummary.preemptDurationMs
       }
     });
 
     res.json({
       status: "CONNECTED",
-      connectedAt: connectedAt.toISOString()
+      connectedAt: connectedAt.toISOString(),
+      preemptedPlatforms: preemptSummary.closedPlatforms,
+      preemptDurationMs: preemptSummary.preemptDurationMs
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -667,11 +734,18 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         profileName: runnerConfig.browserProfile.personalChromeProfileName,
         profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
         timeoutBudgetMs: connectTimeoutMs,
+        preemptedPlatforms: preemptSummary.closedPlatforms,
+        preemptDurationMs: preemptSummary.preemptDurationMs,
         ...summarizeError(error)
       }
     });
 
-    res.status(failure.httpStatus).json({ error: message, failureType: failure.failureType });
+    res.status(failure.httpStatus).json({
+      error: message,
+      failureType: failure.failureType,
+      preemptedPlatforms: preemptSummary.closedPlatforms,
+      preemptDurationMs: preemptSummary.preemptDurationMs
+    });
   }
 }));
 
@@ -695,6 +769,11 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
     })
     .parse(req.body);
 
+  const preemptSummary = await preemptSessionsBeforeAction({
+    triggerAction: "TEST_SELECTORS",
+    platform: payload.platform
+  });
+
   try {
     const report = await selectorTestService.run({
       platform: payload.platform,
@@ -711,7 +790,9 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
       status: report.results.every((result) => result.status === "PASS") ? "OK" : "FAIL",
       details: {
         reportId: report.reportId,
-        results: report.results
+        results: report.results,
+        preemptedPlatforms: preemptSummary.closedPlatforms,
+        preemptDurationMs: preemptSummary.preemptDurationMs
       }
     });
 
@@ -722,7 +803,11 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
       reportId: report.reportId
     });
 
-    res.json(report);
+    res.json({
+      ...report,
+      preemptedPlatforms: preemptSummary.closedPlatforms,
+      preemptDurationMs: preemptSummary.preemptDurationMs
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
 
@@ -733,12 +818,18 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
       status: "FAIL",
       details: {
         message,
-        source: "selector-test"
+        source: "selector-test",
+        preemptedPlatforms: preemptSummary.closedPlatforms,
+        preemptDurationMs: preemptSummary.preemptDurationMs
       }
     });
 
     const status = /profile.*in use|already in use|singleton/i.test(message) ? 409 : 500;
-    res.status(status).json({ error: message });
+    res.status(status).json({
+      error: message,
+      preemptedPlatforms: preemptSummary.closedPlatforms,
+      preemptDurationMs: preemptSummary.preemptDurationMs
+    });
   }
 }));
 
@@ -878,7 +969,8 @@ app.get("/data/inbox", async (req, res) => {
       return false;
     }
     if (search) {
-      const haystack = `${thread.person.displayName} ${thread.rollingSummary ?? ""}`.toLowerCase();
+      const haystack =
+        `${thread.person.displayName} ${thread.lastMessagePreview ?? ""} ${thread.rollingSummary ?? ""}`.toLowerCase();
       if (!haystack.includes(search.toLowerCase())) {
         return false;
       }
@@ -891,7 +983,7 @@ app.get("/data/inbox", async (req, res) => {
       id: thread.id,
       personName: thread.person.displayName,
       platform: thread.platform,
-      preview: thread.whatTheyWant ?? thread.rollingSummary ?? "No summary yet",
+      preview: thread.lastMessagePreview ?? thread.whatTheyWant ?? thread.rollingSummary ?? "No summary yet",
       unreadCount: thread.unreadCount,
       riskLevel: thread.riskLevel,
       needsReply: thread.needsReply,
@@ -1157,8 +1249,16 @@ app.get("/data/people", async (_req, res) => {
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
   const adapter = adapters[payload.platform];
+  const preemptSummary = await preemptSessionsBeforeAction({
+    triggerAction: "OPEN_BROWSER",
+    platform: payload.platform
+  });
   await adapter.ensureConnected();
-  res.json({ status: "ok" });
+  res.json({
+    status: "ok",
+    preemptedPlatforms: preemptSummary.closedPlatforms,
+    preemptDurationMs: preemptSummary.preemptDurationMs
+  });
 }));
 
 app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {

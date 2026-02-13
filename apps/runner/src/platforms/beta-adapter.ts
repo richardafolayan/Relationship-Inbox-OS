@@ -353,4 +353,16 @@ export class BetaAdapter implements PlatformAdapter {
       await this.openThreadFromInbox(page, selectors, thread);
     }
   }
+
+  async closeSession(_reason?: string): Promise<void> {
+    const context = this.context;
+    this.context = null;
+    this.page = null;
+
+    if (!context) {
+      return;
+    }
+
+    await context.close().catch(() => undefined);
+  }
 }

@@ -8,4 +8,5 @@ export interface PlatformAdapter {
   fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]>;
   sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt>;
   openThread(thread: ThreadStub): Promise<void>;
+  closeSession(reason?: string): Promise<void>;
 }

@@ -4,12 +4,21 @@ import type { BrowserContext } from "playwright";
 import type { PlatformName, SelectorRegistry, SelectorTestReport, SelectorTestResult } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
 import type { AppSettings } from "@inbox-os/core";
+import type { BrowserProfileConfig } from "../config.js";
+import {
+  launchPersistentContextForPlatform,
+  type ConnectStepInfo,
+  type PersonalProfileFallbackInfo
+} from "../platforms/browser-launch.js";
 
 interface SelectorTestServiceDeps {
   getSettings: () => Promise<AppSettings>;
   resolveSelectors: (platform: PlatformName) => Promise<SelectorRegistry>;
   profileDirs: Record<PlatformName, string>;
   screenshotDir: string;
+  browserProfile: BrowserProfileConfig;
+  onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
+  onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
 }
 
 const selectorKeys: Array<keyof SelectorRegistry> = [
@@ -63,9 +72,15 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
     let context: BrowserContext | null = null;
 
     try {
-      context = await chromium.launchPersistentContext(deps.profileDirs[input.platform], {
+      context = await launchPersistentContextForPlatform({
+        platform: input.platform,
+        launchPersistentContext: (userDataDir, options) =>
+          chromium.launchPersistentContext(userDataDir, options),
+        isolatedProfileDir: deps.profileDirs[input.platform],
         headless: settings.headless,
-        viewport: null
+        browserProfile: deps.browserProfile,
+        onConnectStep: deps.onConnectStep,
+        onPersonalProfileFallback: deps.onPersonalProfileFallback
       });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

@@ -15,11 +15,11 @@ import {
   captureDiagnostics,
   humanDelay,
   inferAdapterFailureKindFromMessage
-} from "./utils";
-import type { AdapterFailureKind } from "./utils";
-import type { BrowserProfileConfig } from "../config";
-import { launchPersistentContextForPlatform } from "./browser-launch";
-import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "./browser-launch";
+} from "./utils.js";
+import type { AdapterFailureKind } from "./utils.js";
+import type { BrowserProfileConfig } from "../config.js";
+import { launchPersistentContextForPlatform } from "./browser-launch.js";
+import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "./browser-launch.js";
 
 interface LinkedInAdapterDependencies {
   profileDir: string;
@@ -28,8 +28,89 @@ interface LinkedInAdapterDependencies {
   resolveSelectors: () => Promise<SelectorRegistry>;
   getSettings: () => Promise<AppSettings>;
   browserProfile: BrowserProfileConfig;
+  scanMaxThreads: number;
+  scanStableIterations: number;
+  scanScrollWaitMs: number;
+  messageBackfillAttempts: number;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
+}
+
+interface LinkedInThreadSnapshot {
+  stableKey: string;
+  displayName: string;
+  unreadCount: number;
+  lastMessagePreview: string;
+  lastMessageAt?: string;
+  threadUrl?: string;
+  avatarUrl?: string;
+}
+
+interface LinkedInThreadCollectionIteration {
+  rows: LinkedInThreadSnapshot[];
+  trailingKey: string | null;
+  didScroll: boolean;
+  reachedBottom: boolean;
+}
+
+interface LinkedInMessageSnapshot {
+  platformMessageKey: string;
+  direction: "IN" | "OUT";
+  timestamp: string;
+  text: string;
+  attachments: Array<{ type: string; manualReview: boolean; rawLabel?: string }>;
+}
+
+interface ActiveThreadDescriptor {
+  threadUrl?: string;
+  activeKey?: string;
+  displayName?: string;
+}
+
+export function updateLinkedInCollectionStability(input: {
+  previousCount: number;
+  nextCount: number;
+  previousTrailingKey: string | null;
+  nextTrailingKey: string | null;
+  noGrowthIterations: number;
+  trailingRepeatIterations: number;
+}): { noGrowthIterations: number; trailingRepeatIterations: number } {
+  const grew = input.nextCount > input.previousCount;
+  const noGrowthIterations = grew ? 0 : input.noGrowthIterations + 1;
+
+  const trailingRepeatIterations =
+    input.nextTrailingKey && input.previousTrailingKey === input.nextTrailingKey
+      ? input.trailingRepeatIterations + 1
+      : 0;
+
+  return {
+    noGrowthIterations,
+    trailingRepeatIterations
+  };
+}
+
+export function shouldStopLinkedInCollection(input: {
+  uniqueCount: number;
+  maxThreads: number;
+  noGrowthIterations: number;
+  trailingRepeatIterations: number;
+  stableIterations: number;
+  didScroll: boolean;
+  reachedBottom: boolean;
+}): boolean {
+  if (input.uniqueCount >= input.maxThreads) {
+    return true;
+  }
+  if (input.noGrowthIterations >= input.stableIterations) {
+    return true;
+  }
+  if (input.trailingRepeatIterations >= input.stableIterations) {
+    return true;
+  }
+  if (!input.didScroll && input.reachedBottom) {
+    return true;
+  }
+  return false;
 }
 
 export class LinkedInAdapter implements PlatformAdapter {
@@ -83,7 +164,6 @@ export class LinkedInAdapter implements PlatformAdapter {
       await navigate(page);
       return page;
     } catch {
-      // Retry once on a fresh tab in case the initial startup tab is stuck.
       if (!this.context) {
         throw new Error("LinkedIn browser context unavailable while navigating inbox");
       }
@@ -97,6 +177,61 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private classifyFailureKind(reason: string, fallback: AdapterFailureKind): AdapterFailureKind {
     return inferAdapterFailureKindFromMessage(reason) ?? fallback;
+  }
+
+  private normalizeTimestamp(rawValue: string | undefined): string {
+    if (!rawValue) {
+      return new Date().toISOString();
+    }
+
+    const trimmed = rawValue.trim();
+    if (!trimmed) {
+      return new Date().toISOString();
+    }
+
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) {
+      return new Date(parsed).toISOString();
+    }
+
+    return new Date().toISOString();
+  }
+
+  private normalizeIdentity(value: string | undefined): string {
+    return cleanText(value ?? "").toLowerCase();
+  }
+
+  private normalizeThreadUrl(value: string | undefined): string {
+    if (!value) {
+      return "";
+    }
+    try {
+      const parsed = new URL(value);
+      parsed.search = "";
+      parsed.hash = "";
+      return parsed.toString().replace(/\/+$/, "");
+    } catch {
+      return value.replace(/[?#].*$/, "").replace(/\/+$/, "").trim();
+    }
+  }
+
+  private resolveThreadUrlToken(value: string | undefined): string {
+    const normalized = this.normalizeThreadUrl(value);
+    if (!normalized) {
+      return "";
+    }
+
+    const threadMatch = normalized.match(/\/messaging\/thread\/([^/]+)/i);
+    if (threadMatch?.[1]) {
+      return threadMatch[1].toLowerCase();
+    }
+
+    const conversationMatch = normalized.match(/conversationid=([^&]+)/i);
+    if (conversationMatch?.[1]) {
+      return conversationMatch[1].toLowerCase();
+    }
+
+    return normalized.toLowerCase();
   }
 
   private async detectAuthRequired(
@@ -140,6 +275,416 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
+  private async collectThreadRowsWithScroll(
+    page: Page,
+    selectors: SelectorRegistry,
+    maxThreads: number
+  ): Promise<{ rows: ThreadStub[]; iterations: number }> {
+    const cappedMaxThreads = Math.max(1, maxThreads);
+    const stableIterationsTarget = Math.max(1, this.deps.scanStableIterations);
+    const merged = new Map<string, ThreadStub>();
+
+    let noGrowthIterations = 0;
+    let trailingRepeatIterations = 0;
+    let previousTrailingKey: string | null = null;
+    let iterations = 0;
+
+    while (iterations < 300) {
+      iterations += 1;
+      const iteration = await page.evaluate(
+        ({ selectors }) => {
+          const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+          const truncate = (value: string, max = 220): string => value.slice(0, max);
+
+          const findScrollableContainer = (start: Element | null): HTMLElement | null => {
+            let current = start as HTMLElement | null;
+            while (current) {
+              const style = window.getComputedStyle(current);
+              const overflowY = style.overflowY.toLowerCase();
+              const scrollable = overflowY.includes("auto") || overflowY.includes("scroll");
+              if (scrollable && current.scrollHeight > current.clientHeight + 4) {
+                return current;
+              }
+              current = current.parentElement;
+            }
+            return null;
+          };
+
+          const list = document.querySelector(selectors.thread_list) as HTMLElement | null;
+          const scrollContainer = findScrollableContainer(list) ?? list;
+
+          const nodes = Array.from(document.querySelectorAll(selectors.thread_item));
+          const rows = nodes.map((node, index) => {
+            const rowRoot =
+              (node.closest("li.msg-conversation-listitem") as HTMLElement | null) ??
+              (node.closest("[data-conversation-urn], [data-urn], [data-conversation-id], [data-id]") as HTMLElement | null) ??
+              (node as HTMLElement);
+            const link =
+              (rowRoot.querySelector("a[href*='/messaging/']") as HTMLAnchorElement | null) ??
+              (node.querySelector("a[href*='/messaging/']") as HTMLAnchorElement | null);
+
+            const displayName = clean(
+              rowRoot.querySelector("h3 span.truncate")?.textContent ??
+                rowRoot.querySelector("h3")?.textContent ??
+                rowRoot.querySelector("span[title]")?.getAttribute("title") ??
+                rowRoot.getAttribute("aria-label") ??
+                ""
+            );
+            const preview = truncate(
+              clean(
+                rowRoot.querySelector(".msg-conversation-card__message-snippet")?.textContent ??
+                  rowRoot.querySelector("p")?.textContent ??
+                  ""
+              )
+            );
+            const lastMessageAt = clean(
+              rowRoot.querySelector("time")?.getAttribute("datetime") ??
+                rowRoot.querySelector("time")?.textContent ??
+                ""
+            );
+            const unreadBadge = rowRoot.querySelector(selectors.unread_badge);
+            const unreadText = clean(unreadBadge?.textContent ?? "");
+            const unreadMatch = unreadText.match(/\d+/);
+            const unreadCount = unreadMatch ? Number(unreadMatch[0]) : unreadBadge ? 1 : 0;
+
+            const attrKeys = [
+              rowRoot.getAttribute("data-conversation-urn"),
+              rowRoot.getAttribute("data-urn"),
+              rowRoot.getAttribute("data-conversation-id"),
+              rowRoot.getAttribute("data-id"),
+              rowRoot.id
+            ].filter((value): value is string => Boolean(value && value.trim()));
+
+            const href = link?.href?.trim() || "";
+            const fallbackKey = displayName
+              ? `linkedin-name:${displayName.toLowerCase()}`
+              : `linkedin-preview:${preview.toLowerCase() || index}`;
+            const stableKey = (attrKeys[0] ?? href) || fallbackKey;
+
+            return {
+              stableKey,
+              displayName: displayName || `LinkedIn Thread ${index + 1}`,
+              unreadCount,
+              lastMessagePreview: preview,
+              lastMessageAt: lastMessageAt || undefined,
+              threadUrl: href || undefined,
+              avatarUrl: (rowRoot.querySelector("img") as HTMLImageElement | null)?.src || undefined
+            };
+          });
+
+          const beforeTop = scrollContainer?.scrollTop ?? 0;
+          const maxTop = scrollContainer ? Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight) : 0;
+          if (scrollContainer) {
+            const jump = Math.max(120, Math.floor(scrollContainer.clientHeight * 0.85));
+            scrollContainer.scrollTop = Math.min(maxTop, beforeTop + jump);
+          }
+          const afterTop = scrollContainer?.scrollTop ?? beforeTop;
+          const didScroll = afterTop > beforeTop + 1;
+          const reachedBottom = scrollContainer ? afterTop >= maxTop - 1 : true;
+          const trailingKey = rows.at(-1)?.stableKey ?? null;
+
+          return {
+            rows,
+            trailingKey,
+            didScroll,
+            reachedBottom
+          } satisfies LinkedInThreadCollectionIteration;
+        },
+        { selectors }
+      );
+
+      const previousCount = merged.size;
+      for (const row of iteration.rows) {
+        if (!merged.has(row.stableKey)) {
+          merged.set(row.stableKey, {
+            platformThreadId: row.stableKey,
+            displayName: row.displayName,
+            unreadCount: row.unreadCount,
+            lastMessagePreview: row.lastMessagePreview,
+            lastMessageAt: row.lastMessageAt,
+            threadUrl: row.threadUrl,
+            avatarUrl: row.avatarUrl
+          });
+        }
+      }
+
+      const nextCount = merged.size;
+      const stability = updateLinkedInCollectionStability({
+        previousCount,
+        nextCount,
+        previousTrailingKey,
+        nextTrailingKey: iteration.trailingKey,
+        noGrowthIterations,
+        trailingRepeatIterations
+      });
+
+      noGrowthIterations = stability.noGrowthIterations;
+      trailingRepeatIterations = stability.trailingRepeatIterations;
+      previousTrailingKey = iteration.trailingKey;
+
+      if (
+        shouldStopLinkedInCollection({
+          uniqueCount: nextCount,
+          maxThreads: cappedMaxThreads,
+          noGrowthIterations,
+          trailingRepeatIterations,
+          stableIterations: stableIterationsTarget,
+          didScroll: iteration.didScroll,
+          reachedBottom: iteration.reachedBottom
+        })
+      ) {
+        break;
+      }
+
+      await page.waitForTimeout(this.deps.scanScrollWaitMs);
+    }
+
+    return {
+      rows: Array.from(merged.values()).slice(0, cappedMaxThreads),
+      iterations
+    };
+  }
+
+  private async getActiveThreadDescriptor(page: Page, selectors: SelectorRegistry): Promise<ActiveThreadDescriptor> {
+    return page.evaluate(
+      ({ selectors }) => {
+        const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+        const activeNode =
+          (document.querySelector(
+            "li.msg-conversation-listitem .msg-conversations-container__convo-item-link--active"
+          ) as HTMLElement | null) ??
+          (document.querySelector(
+            "li.msg-conversation-listitem .msg-conversation-listitem__link--active"
+          ) as HTMLElement | null);
+
+        const activeRow =
+          (activeNode?.closest("li.msg-conversation-listitem") as HTMLElement | null) ??
+          ((activeNode as HTMLElement | null) ?? null);
+
+        const href =
+          (activeRow?.querySelector("a[href*='/messaging/']") as HTMLAnchorElement | null)?.href ??
+          (document.querySelector(`${selectors.thread_item} a[href*='/messaging/']`) as HTMLAnchorElement | null)?.href ??
+          undefined;
+
+        const displayName =
+          clean(
+            activeRow?.querySelector("h3 span.truncate")?.textContent ??
+              activeRow?.querySelector("h3")?.textContent ??
+              activeRow?.querySelector("span[title]")?.getAttribute("title") ??
+              document.querySelector(".msg-thread__link-to-profile")?.textContent ??
+              ""
+          ) || undefined;
+
+        const activeKey =
+          activeRow?.getAttribute("data-conversation-urn") ??
+          activeRow?.getAttribute("data-urn") ??
+          activeRow?.getAttribute("data-conversation-id") ??
+          activeRow?.getAttribute("data-id") ??
+          activeRow?.id ??
+          href;
+
+        return {
+          threadUrl: href,
+          activeKey: activeKey || undefined,
+          displayName
+        } satisfies ActiveThreadDescriptor;
+      },
+      { selectors }
+    );
+  }
+
+  private isThreadDescriptorMatch(
+    descriptor: ActiveThreadDescriptor,
+    thread: ThreadStub,
+    currentPageUrl: string
+  ): boolean {
+    const expectedName = this.normalizeIdentity(thread.displayName);
+    const actualName = this.normalizeIdentity(descriptor.displayName);
+    if (expectedName && actualName && expectedName === actualName) {
+      return true;
+    }
+
+    const expectedKey = this.normalizeIdentity(thread.platformThreadId);
+    const actualKey = this.normalizeIdentity(descriptor.activeKey);
+    if (expectedKey && actualKey && expectedKey === actualKey) {
+      return true;
+    }
+
+    const expectedToken = this.resolveThreadUrlToken(thread.threadUrl || thread.platformThreadId);
+    const actualToken = this.resolveThreadUrlToken(descriptor.threadUrl || currentPageUrl);
+    if (expectedToken && actualToken && (expectedToken.includes(actualToken) || actualToken.includes(expectedToken))) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private async openThreadAndWaitForActivation(
+    page: Page,
+    selectors: SelectorRegistry,
+    thread: ThreadStub
+  ): Promise<void> {
+    const before = await this.getActiveThreadDescriptor(page, selectors);
+
+    if (thread.threadUrl) {
+      await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
+    } else {
+      await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
+      await page.waitForSelector(selectors.thread_list, { timeout: LinkedInAdapter.inboxReadyTimeoutMs });
+
+      const row = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
+      if ((await row.count()) === 0) {
+        throw new AdapterFailure(`Unable to locate LinkedIn thread row for ${thread.displayName}`, {
+          kind: "THREAD_FETCH_FAILED",
+          details: {
+            targetDisplayName: thread.displayName,
+            platformThreadId: thread.platformThreadId
+          }
+        });
+      }
+
+      await row.click({ timeout: 10_000 });
+    }
+
+    await page.waitForSelector(selectors.message_container, { timeout: 15_000 });
+
+    const startedAt = Date.now();
+    let lastDescriptor: ActiveThreadDescriptor | undefined;
+
+    while (Date.now() - startedAt < 12_000) {
+      await this.throwIfAuthRequired(page, "openThreadAndWaitForActivation");
+      const descriptor = await this.getActiveThreadDescriptor(page, selectors);
+      lastDescriptor = descriptor;
+
+      const changed =
+        this.normalizeIdentity(before.activeKey) !== this.normalizeIdentity(descriptor.activeKey) ||
+        this.normalizeIdentity(before.displayName) !== this.normalizeIdentity(descriptor.displayName) ||
+        this.normalizeThreadUrl(before.threadUrl) !== this.normalizeThreadUrl(descriptor.threadUrl);
+
+      const matchesTarget = this.isThreadDescriptorMatch(descriptor, thread, page.url());
+      if (matchesTarget || changed) {
+        if (matchesTarget) {
+          return;
+        }
+      }
+
+      await page.waitForTimeout(300);
+    }
+
+    throw new AdapterFailure(`LinkedIn thread activation mismatch for ${thread.displayName}`, {
+      kind: "THREAD_FETCH_FAILED",
+      details: {
+        targetDisplayName: thread.displayName,
+        targetThreadUrl: thread.threadUrl ?? null,
+        targetPlatformThreadId: thread.platformThreadId,
+        actualDisplayName: lastDescriptor?.displayName ?? null,
+        actualThreadUrl: lastDescriptor?.threadUrl ?? page.url(),
+        actualKey: lastDescriptor?.activeKey ?? null
+      }
+    });
+  }
+
+  private async collectThreadMessagesWithBackfill(
+    page: Page,
+    selectors: SelectorRegistry,
+    limit: number
+  ): Promise<LinkedInMessageSnapshot[]> {
+    const maxAttempts = Math.max(1, this.deps.messageBackfillAttempts);
+    const merged = new Map<string, LinkedInMessageSnapshot>();
+
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const snapshot = await page.evaluate(
+        ({ selectors }) => {
+          const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+          const findScrollableContainer = (start: Element | null): HTMLElement | null => {
+            let current = start as HTMLElement | null;
+            while (current) {
+              const style = window.getComputedStyle(current);
+              const overflowY = style.overflowY.toLowerCase();
+              const scrollable = overflowY.includes("auto") || overflowY.includes("scroll");
+              if (scrollable && current.scrollHeight > current.clientHeight + 4) {
+                return current;
+              }
+              current = current.parentElement;
+            }
+            return null;
+          };
+
+          const nodes = Array.from(document.querySelectorAll(selectors.message_item));
+          const messages = nodes.map((node, index) => {
+            const root = node as HTMLElement;
+            const className = root.className || "";
+            const inbound = /other|received|incoming/i.test(className);
+            const text = clean(
+              root.querySelector(selectors.message_text)?.textContent ??
+                root.textContent ??
+                ""
+            );
+            const timeNode = root.querySelector("time") as HTMLTimeElement | null;
+            const timestamp =
+              clean(timeNode?.getAttribute("datetime")) ||
+              clean(timeNode?.textContent) ||
+              new Date().toISOString();
+            const attachmentCount = root.querySelectorAll("img, video, svg, a[download], a[href*='attachment']").length;
+            const platformMessageKey =
+              root.getAttribute("data-event-urn") ||
+              root.getAttribute("data-id") ||
+              root.getAttribute("id") ||
+              `li-msg-${index}`;
+
+            return {
+              platformMessageKey,
+              direction: inbound ? "IN" : "OUT",
+              timestamp,
+              text,
+              attachments: attachmentCount
+                ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
+                : []
+            };
+          });
+
+          const container = findScrollableContainer(document.querySelector(selectors.message_container));
+          const beforeTop = container?.scrollTop ?? 0;
+          if (container) {
+            const jump = Math.max(200, Math.floor(container.clientHeight * 0.8));
+            container.scrollTop = Math.max(0, beforeTop - jump);
+          }
+          const afterTop = container?.scrollTop ?? beforeTop;
+          const didScrollUp = afterTop < beforeTop - 1;
+
+          return {
+            messages,
+            didScrollUp
+          };
+        },
+        { selectors }
+      );
+
+      for (const message of snapshot.messages) {
+        merged.set(message.platformMessageKey, {
+          ...message,
+          direction: message.direction === "IN" ? "IN" : "OUT"
+        });
+      }
+
+      if (merged.size >= limit || !snapshot.didScrollUp) {
+        break;
+      }
+
+      await page.waitForTimeout(350);
+    }
+
+    const rows = Array.from(merged.values());
+    rows.sort((left, right) => {
+      const leftTime = Date.parse(left.timestamp);
+      const rightTime = Date.parse(right.timestamp);
+      const safeLeft = Number.isNaN(leftTime) ? 0 : leftTime;
+      const safeRight = Number.isNaN(rightTime) ? 0 : rightTime;
+      return safeLeft - safeRight;
+    });
+    return rows.slice(-limit);
+  }
+
   async ensureConnected(): Promise<void> {
     const selectors = await this.deps.resolveSelectors();
 
@@ -176,88 +721,16 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
   }
 
-  private async scrapeThreadRows(page: Page, selectors: SelectorRegistry, limit: number): Promise<ThreadStub[]> {
-    return page.evaluate(
-      ({ selectors, limit }) => {
-        const rows = Array.from(document.querySelectorAll(selectors.thread_item)).slice(0, limit);
-        return rows.map((row, index) => {
-          const anchors = Array.from(row.querySelectorAll("a[href]")) as HTMLAnchorElement[];
-          const threadLink = anchors.find((anchor) => /\/messaging\//i.test(anchor.href)) ?? null;
-          const parentItem = row.closest("li.msg-conversation-listitem") as HTMLElement | null;
-
-          const name =
-            row.querySelector("h3")?.textContent ||
-            row.querySelector("span")?.textContent ||
-            row.getAttribute("aria-label") ||
-            `LinkedIn Thread ${index + 1}`;
-
-          const preview =
-            row.querySelector("p")?.textContent ||
-            row.querySelector(".msg-conversation-card__message-snippet")?.textContent ||
-            "";
-
-          const timeText = row.querySelector("time")?.getAttribute("datetime") || row.querySelector("time")?.textContent || "";
-          const unreadNode = row.querySelector(selectors.unread_badge);
-          const unreadText = unreadNode?.textContent?.trim() || "";
-          const unreadMatch = unreadText.match(/\d+/);
-          const conversationCard = row.querySelector("[id^='conversation-card-']") as HTMLElement | null;
-          const normalizedName = name.trim().toLowerCase();
-          const fallbackKey = normalizedName
-            ? `linkedin-name:${normalizedName}`
-            : `linkedin-preview:${preview.trim().toLowerCase().slice(0, 120)}`;
-          const platformThreadId =
-            threadLink?.href ||
-            row.getAttribute("data-id") ||
-            parentItem?.getAttribute("data-id") ||
-            fallbackKey ||
-            conversationCard?.id ||
-            row.getAttribute("id") ||
-            parentItem?.id ||
-            `linkedin-${index}`;
-
-          return {
-            platformThreadId,
-            displayName: name.trim(),
-            unreadCount: unreadMatch ? Number(unreadMatch[0]) : unreadNode ? 1 : 0,
-            lastMessagePreview: preview.trim(),
-            lastMessageAt: timeText,
-            threadUrl: threadLink?.href || undefined,
-            avatarUrl: (row.querySelector("img") as HTMLImageElement | null)?.src || undefined
-          };
-        });
-      },
-      { selectors, limit }
-    );
-  }
-
-  private normalizeTimestamp(rawValue: string | undefined): string {
-    if (!rawValue) {
-      return new Date().toISOString();
-    }
-
-    const trimmed = rawValue.trim();
-    if (!trimmed) {
-      return new Date().toISOString();
-    }
-
-    const parsed = Date.parse(trimmed);
-    if (!Number.isNaN(parsed)) {
-      return new Date(parsed).toISOString();
-    }
-
-    return new Date().toISOString();
-  }
-
   async scanUnreadThreads(): Promise<ThreadStub[]> {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.navigateInbox(selectors);
 
     try {
       await this.throwIfAuthRequired(page, "scanUnreadThreads:navigation");
-      await page.waitForSelector(selectors.thread_list, { timeout: 10000 });
+      await page.waitForSelector(selectors.thread_list, { timeout: 10_000 });
       await this.throwIfAuthRequired(page, "scanUnreadThreads:thread_list");
-      const rows = await this.scrapeThreadRows(page, selectors, 120);
-      return rows
+      const collected = await this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads);
+      return collected.rows
         .filter((thread) => (thread.unreadCount ?? 0) > 0)
         .map((thread) => ({ ...thread, isUnreadCandidate: true }));
     } catch (error) {
@@ -288,10 +761,14 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     try {
       await this.throwIfAuthRequired(page, "fetchRecentThreads:navigation");
-      await page.waitForSelector(selectors.thread_list, { timeout: 10000 });
+      await page.waitForSelector(selectors.thread_list, { timeout: 10_000 });
       await this.throwIfAuthRequired(page, "fetchRecentThreads:thread_list");
-      const rows = await this.scrapeThreadRows(page, selectors, limit);
-      return rows.map((thread) => ({ ...thread, isRecentCandidate: true }));
+      const collected = await this.collectThreadRowsWithScroll(
+        page,
+        selectors,
+        Math.max(limit, this.deps.scanMaxThreads)
+      );
+      return collected.rows.slice(0, limit).map((thread) => ({ ...thread, isRecentCandidate: true }));
     } catch (error) {
       if (error instanceof AdapterFailure) {
         throw error;
@@ -316,60 +793,21 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
     const selectors = await this.deps.resolveSelectors();
-    const page = await this.getPage();
+    const page = await this.navigateInbox(selectors);
 
     try {
-      if (thread.threadUrl) {
-        await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
-        await this.throwIfAuthRequired(page, "fetchThreadMessages:thread_url");
-      } else {
-        await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
-        await this.throwIfAuthRequired(page, "fetchThreadMessages:inbox_fallback");
-        const row = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
-        if ((await row.count()) > 0) {
-          await row.click();
-        }
-      }
-
-      await humanDelay();
-      await this.throwIfAuthRequired(page, "fetchThreadMessages:before_container_wait");
-      await page.waitForSelector(selectors.message_container, { timeout: 15000 });
+      await this.throwIfAuthRequired(page, "fetchThreadMessages:navigation");
+      await this.openThreadAndWaitForActivation(page, selectors, thread);
+      await this.throwIfAuthRequired(page, "fetchThreadMessages:after_activation");
+      await page.waitForSelector(selectors.message_container, { timeout: 15_000 });
       await this.throwIfAuthRequired(page, "fetchThreadMessages:after_container_wait");
 
-      const messages = await page.evaluate(
-        ({ selectors }) => {
-          const nodes = Array.from(document.querySelectorAll(selectors.message_item));
-          return nodes.map((node, index) => {
-            const root = node as HTMLElement;
-            const className = root.className || "";
-            const inbound = /other|received|incoming/i.test(className);
-            const text =
-              root.querySelector(selectors.message_text)?.textContent ||
-              root.textContent ||
-              "";
-            const timeNode = root.querySelector("time") as HTMLTimeElement | null;
-            const timestamp = timeNode?.getAttribute("datetime") || timeNode?.textContent || new Date().toISOString();
-            const attachmentCount = root.querySelectorAll("img, video, svg, a[download]").length;
-
-            return {
-              platformMessageKey: root.getAttribute("data-id") || root.getAttribute("id") || `li-msg-${index}`,
-              direction: inbound ? "IN" : "OUT",
-              timestamp,
-              text,
-              attachments: attachmentCount
-                ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
-                : []
-            };
-          });
-        },
-        { selectors }
-      );
-
-      return messages.slice(-limit).map((msg) => ({
-        ...msg,
-        direction: msg.direction === "IN" ? "IN" : "OUT",
-        timestamp: this.normalizeTimestamp(msg.timestamp),
-        text: cleanText(msg.text)
+      const messages = await this.collectThreadMessagesWithBackfill(page, selectors, limit);
+      return messages.map((message) => ({
+        ...message,
+        direction: message.direction === "IN" ? "IN" : "OUT",
+        timestamp: this.normalizeTimestamp(message.timestamp),
+        text: cleanText(message.text)
       }));
     } catch (error) {
       if (error instanceof AdapterFailure) {
@@ -393,11 +831,10 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
   }
 
-  private async getLatestMessageSnapshot(page: Page, selectors: SelectorRegistry): Promise<{
-    direction: "IN" | "OUT";
-    timestamp: number;
-    text: string;
-  } | null> {
+  private async getLatestMessageSnapshot(
+    page: Page,
+    selectors: SelectorRegistry
+  ): Promise<{ direction: "IN" | "OUT"; timestamp: number; text: string } | null> {
     return page.evaluate(
       ({ selectors }) => {
         const nodes = Array.from(document.querySelectorAll(selectors.message_item));
@@ -442,11 +879,11 @@ export class LinkedInAdapter implements PlatformAdapter {
         }
       }
 
-      await page.waitForSelector(selectors.message_container, { timeout: 12000 });
+      await page.waitForSelector(selectors.message_container, { timeout: 12_000 });
       const preSend = await this.getLatestMessageSnapshot(page, selectors);
 
       const composer = page.locator(selectors.composer_input).first();
-      await composer.click({ timeout: 10000 });
+      await composer.click({ timeout: 10_000 });
       try {
         await composer.fill(text);
       } catch {
@@ -455,12 +892,12 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       await humanDelay(100, 300);
-      await page.locator(selectors.send_button).first().click({ timeout: 10000 });
+      await page.locator(selectors.send_button).first().click({ timeout: 10_000 });
 
       const start = Date.now();
       let verifiedBy: VerificationMethod = "best_effort";
 
-      while (Date.now() - start < 10000) {
+      while (Date.now() - start < 10_000) {
         const last = await this.getLatestMessageSnapshot(page, selectors);
         if (!last) {
           await page.waitForTimeout(300);
@@ -515,5 +952,17 @@ export class LinkedInAdapter implements PlatformAdapter {
     if ((await row.count()) > 0) {
       await row.click();
     }
+  }
+
+  async closeSession(_reason?: string): Promise<void> {
+    const context = this.context;
+    this.context = null;
+    this.page = null;
+
+    if (!context) {
+      return;
+    }
+
+    await context.close().catch(() => undefined);
   }
 }

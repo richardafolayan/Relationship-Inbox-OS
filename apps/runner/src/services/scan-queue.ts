@@ -33,6 +33,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
   const queue: ScanJob[] = [];
   let processing = false;
   let scheduler: NodeJS.Timeout | undefined;
+  let abortVersion = 0;
+  let abortReason: string | null = null;
 
   function getQueueDepth(): number {
     return queue.length + (processing ? 1 : 0);
@@ -159,8 +161,46 @@ export function createScanQueue(deps: ScanQueueDeps) {
       : settings.enabledPlatforms.filter((platform) => allPlatforms.includes(platform));
 
     let updatedThreads = 0;
+    const jobAbortVersion = abortVersion;
+    let aborted = false;
+
+    const shouldAbort = (): boolean => abortVersion !== jobAbortVersion;
+    const resolveAbortReason = (): string => abortReason ?? "session_preempt";
+
+    const markAborted = async (
+      checkpoint: string,
+      platform?: PlatformName,
+      thread?: ThreadStub
+    ): Promise<boolean> => {
+      if (!shouldAbort()) {
+        return false;
+      }
+      if (aborted) {
+        return true;
+      }
+
+      aborted = true;
+      await deps.auditLog({
+        platform,
+        stage: "Scan",
+        action: "SCAN_ABORTED",
+        status: "OK",
+        details: {
+          reason: resolveAbortReason(),
+          checkpoint,
+          updatedThreads,
+          threadDisplayName: thread?.displayName,
+          platformThreadId: thread?.platformThreadId
+        }
+      });
+      return true;
+    };
 
     for (const platform of scanPlatforms) {
+      if (await markAborted("before_platform_loop", platform)) {
+        break;
+      }
+
       let platformUpdatedThreads = 0;
       let threadFailures = 0;
       const threadFailureKinds: Record<string, number> = {};
@@ -176,7 +216,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
       const adapter = deps.adapters[platform];
 
       try {
+        if (await markAborted("before_connect", platform)) {
+          break;
+        }
         await adapter.ensureConnected();
+        if (await markAborted("after_connect", platform)) {
+          break;
+        }
         await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
 
         deps.eventBus.emit({
@@ -186,8 +232,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
           stage: "Collecting candidates"
         });
 
+        if (await markAborted("before_scan_unread", platform)) {
+          break;
+        }
         const unread = await adapter.scanUnreadThreads();
+        if (await markAborted("after_scan_unread", platform)) {
+          break;
+        }
+        if (await markAborted("before_scan_recent", platform)) {
+          break;
+        }
         const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+        if (await markAborted("after_scan_recent", platform)) {
+          break;
+        }
 
         const merged = new Map<string, ThreadStub>();
         for (const thread of unread) {
@@ -207,11 +265,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
         });
 
         for (const thread of merged.values()) {
+          if (await markAborted("before_thread_sync", platform, thread)) {
+            break;
+          }
+
           try {
             const updated = await syncThread(platform, thread, settings.maxMessagesPerThread, job.jobId);
             updatedThreads += updated;
             platformUpdatedThreads += updated;
           } catch (error) {
+            if (await markAborted("thread_sync_error", platform, thread)) {
+              break;
+            }
+
             const failureKind = resolveAdapterFailureKind(error);
             const message = error instanceof Error ? error.message : String(error);
             const resolvedFailureKind = failureKind ?? "UNKNOWN";
@@ -262,7 +328,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
             });
           }
 
+          if (await markAborted("after_thread_sync", platform, thread)) {
+            break;
+          }
+
           await humanDelay();
+        }
+
+        if (aborted) {
+          break;
         }
 
         if (authInterrupted) {
@@ -291,6 +365,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
           }
         });
       } catch (error) {
+        if (await markAborted("platform_error", platform)) {
+          break;
+        }
+
         if (error instanceof AdapterFailure) {
           const failureKind = resolveAdapterFailureKind(error);
           const resolvedFailureKind = failureKind ?? "UNKNOWN";
@@ -353,6 +431,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    if (aborted) {
+      clearAbort();
+    }
+
     deps.eventBus.emit({
       type: "SCAN_FINISHED",
       jobId: job.jobId,
@@ -398,7 +480,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           platformThreadId: candidate.platformThreadId,
           personId: person.id,
           threadUrl: candidate.threadUrl,
-          unreadCount: candidate.unreadCount ?? 0
+          unreadCount: candidate.unreadCount ?? 0,
+          lastMessagePreview: cleanText(candidate.lastMessagePreview ?? "")
         }
       }));
 
@@ -445,6 +528,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const lastMessage = latestMessages[latestMessages.length - 1];
     const lastInbound = [...latestMessages].reverse().find((msg) => msg.direction === "IN");
     const lastOutbound = [...latestMessages].reverse().find((msg) => msg.direction === "OUT");
+    const resolvedLastMessagePreview = cleanText(
+      lastMessage?.text ?? candidate.lastMessagePreview ?? thread.lastMessagePreview ?? ""
+    );
 
     const settings = await deps.settingsStore.getSettings();
     const risk = calculateRisk({
@@ -489,6 +575,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         personId: person.id,
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
+        lastMessagePreview: resolvedLastMessagePreview || null,
         lastMessageAt: lastMessage?.timestamp,
         lastInboundAt: lastInbound?.timestamp,
         lastOutboundAt: lastOutbound?.timestamp,
@@ -531,6 +618,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
     getQueueDepth,
     isScanning: () => processing,
     startScheduler,
-    runJob
+    runJob,
+    requestAbort: (reason: string) => {
+      abortVersion += 1;
+      abortReason = reason;
+      queue.length = 0;
+    },
+    clearAbort
   };
+
+  function clearAbort(): void {
+    abortReason = null;
+  }
 }

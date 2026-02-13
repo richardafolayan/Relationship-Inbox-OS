@@ -79,6 +79,7 @@ model Thread {
   personId          String
   unreadCount       Int          @default(0)
   needsReply        Boolean      @default(false)
+  lastMessagePreview String?
   lastMessageAt     DateTime?
   lastInboundAt     DateTime?
   lastOutboundAt    DateTime?
