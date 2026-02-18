@@ -29,6 +29,8 @@ export interface NormalizedMessage {
   direction: Direction;
   timestamp: string;
   text: string;
+  senderName?: string;
+  raw?: Record<string, unknown>;
   attachments: AttachmentPlaceholder[];
 }
 

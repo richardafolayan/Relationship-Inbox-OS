@@ -1,7 +1,5 @@
-import type { BrowserContext, Page } from "playwright";
-import { chromium } from "playwright";
+import type { Page } from "playwright";
 import type {
-  AppSettings,
   NormalizedMessage,
   PlatformAdapter,
   PlatformName,
@@ -9,51 +7,30 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
-import { AdapterFailure, captureDiagnostics, cleanText, humanDelay } from "./utils";
-import type { BrowserProfileConfig } from "../config";
-import { launchPersistentContextForPlatform } from "./browser-launch";
-import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "./browser-launch";
+import { AdapterFailure, cleanText, humanDelay, toStageFailure } from "./utils";
+import type { SessionManager } from "../services/session-manager";
 
 interface BetaAdapterDependencies {
   platform: PlatformName;
-  profileDir: string;
   screenshotDir: string;
   domDumpDir: string;
   resolveSelectors: () => Promise<SelectorRegistry>;
-  getSettings: () => Promise<AppSettings>;
-  browserProfile: BrowserProfileConfig;
-  onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
-  onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
+  sessionManager: SessionManager;
+  personKey?: string;
 }
 
 export class BetaAdapter implements PlatformAdapter {
   platform: PlatformName;
-  private context: BrowserContext | null = null;
-  private page: Page | null = null;
 
   constructor(private readonly deps: BetaAdapterDependencies) {
     this.platform = deps.platform;
   }
 
   private async getPage(): Promise<Page> {
-    if (this.page && !this.page.isClosed()) {
-      return this.page;
-    }
-
-    const settings = await this.deps.getSettings();
-    this.context = await launchPersistentContextForPlatform({
+    return this.deps.sessionManager.getManagedPage({
       platform: this.platform,
-      launchPersistentContext: (userDataDir, options) =>
-        chromium.launchPersistentContext(userDataDir, options),
-      isolatedProfileDir: this.deps.profileDir,
-      headless: settings.headless,
-      browserProfile: this.deps.browserProfile,
-      onConnectStep: this.deps.onConnectStep,
-      onPersonalProfileFallback: this.deps.onPersonalProfileFallback
+      personKey: this.deps.personKey ?? "default"
     });
-
-    this.page = this.context.pages()[0] ?? (await this.context.newPage());
-    return this.page;
   }
 
   private escapeCssAttribute(value: string): string {
@@ -85,6 +62,63 @@ export class BetaAdapter implements PlatformAdapter {
         { timeout }
       );
     }
+  }
+
+  private async detectAuthRequired(page: Page): Promise<{ authRequired: boolean; reason?: string; url: string }> {
+    const url = page.url();
+    const detection = await page.evaluate((platform) => {
+      const bodyText = document.body?.innerText?.toLowerCase() ?? "";
+      const has = (selector: string) => document.querySelector(selector) !== null;
+
+      if (platform === "INSTAGRAM") {
+        if (has("input[name='username']") || has("input[name='password']") || /log in to instagram/.test(bodyText)) {
+          return { authRequired: true, reason: "instagram_login_form" };
+        }
+      }
+
+      if (platform === "TIKTOK") {
+        if (
+          /log in with qr code/.test(bodyText) ||
+          /scan with your mobile device/.test(bodyText) ||
+          /confirm login or sign up/.test(bodyText)
+        ) {
+          return { authRequired: true, reason: "tiktok_qr_login" };
+        }
+        if (/log in/.test(bodyText) && !/messages/.test(bodyText)) {
+          return { authRequired: true, reason: "tiktok_login_gate" };
+        }
+      }
+
+      return { authRequired: false };
+    }, this.platform);
+
+    const urlAuthMatch =
+      (this.platform === "INSTAGRAM" && /\/accounts\/login/i.test(url)) ||
+      (this.platform === "TIKTOK" && /\/login/i.test(url));
+
+    return {
+      authRequired: detection.authRequired || urlAuthMatch,
+      reason: detection.reason ?? (urlAuthMatch ? "url_auth_pattern" : undefined),
+      url
+    };
+  }
+
+  private async throwIfAuthRequired(page: Page, context: string): Promise<void> {
+    const auth = await this.detectAuthRequired(page);
+    if (!auth.authRequired) {
+      return;
+    }
+
+    throw new AdapterFailure(`${this.platform} auth required`, {
+      kind: "AUTH_REQUIRED",
+      platform: this.platform,
+      stage: "navigate",
+      details: {
+        context,
+        reason: auth.reason ?? "unknown",
+        url: auth.url
+      }
+    });
   }
 
   private async openThreadFromInbox(page: Page, selectors: SelectorRegistry, thread: ThreadStub): Promise<void> {
@@ -192,16 +226,22 @@ export class BetaAdapter implements PlatformAdapter {
     try {
       await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
       await this.waitForInboxReady(page, selectors, 20000);
+      await this.throwIfAuthRequired(page, "ensureConnected");
     } catch (error) {
-      const files = await captureDiagnostics({
-        page,
+      if (error instanceof AdapterFailure) {
+        throw error;
+      }
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "connect",
+        message: `${this.platform} inbox selector missing`,
         action: "connect-failed",
+        error,
+        kind: "SELECTOR_MISMATCH",
+        page,
         screenshotDir: this.deps.screenshotDir,
         domDumpDir: this.deps.domDumpDir
       });
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure(`${this.platform} inbox selector missing (${reason})`, files);
     }
   }
 
@@ -212,18 +252,24 @@ export class BetaAdapter implements PlatformAdapter {
     try {
       await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
       await this.waitForInboxReady(page, selectors, 12000);
+      await this.throwIfAuthRequired(page, "scanUnreadThreads");
       const rows = await this.scrapeThreads(page, selectors, 80);
       return rows.filter((thread) => (thread.unreadCount ?? 0) > 0).map((thread) => ({ ...thread, isUnreadCandidate: true }));
     } catch (error) {
-      const files = await captureDiagnostics({
-        page,
+      if (error instanceof AdapterFailure) {
+        throw error;
+      }
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "collect_threads",
+        message: `${this.platform} unread scan failed`,
         action: "scan-unread",
+        error,
+        kind: "SELECTOR_MISMATCH",
+        page,
         screenshotDir: this.deps.screenshotDir,
         domDumpDir: this.deps.domDumpDir
       });
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure(`${this.platform} unread scan failed (${reason})`, files);
     }
   }
 
@@ -234,18 +280,24 @@ export class BetaAdapter implements PlatformAdapter {
     try {
       await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
       await this.waitForInboxReady(page, selectors, 12000);
+      await this.throwIfAuthRequired(page, "fetchRecentThreads");
       const rows = await this.scrapeThreads(page, selectors, limit);
       return rows.map((thread) => ({ ...thread, isRecentCandidate: true }));
     } catch (error) {
-      const files = await captureDiagnostics({
-        page,
+      if (error instanceof AdapterFailure) {
+        throw error;
+      }
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "collect_threads",
+        message: `${this.platform} recent scan failed`,
         action: "scan-recent",
+        error,
+        kind: "SELECTOR_MISMATCH",
+        page,
         screenshotDir: this.deps.screenshotDir,
         domDumpDir: this.deps.domDumpDir
       });
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure(`${this.platform} recent scan failed (${reason})`, files);
     }
   }
 
@@ -261,20 +313,34 @@ export class BetaAdapter implements PlatformAdapter {
       }
 
       await this.waitForConversationReady(page, selectors);
+      await this.throwIfAuthRequired(page, "fetchThreadMessages");
       const messages = await page.evaluate(
         ({ selectors }) => {
-          const nodes = Array.from(document.querySelectorAll(selectors.message_item));
+          const container =
+            (document.querySelector(selectors.message_container) as HTMLElement | null) ??
+            (document.querySelector("main, div[role='main']") as HTMLElement | null) ??
+            document.body;
+          const nodes = Array.from(container.querySelectorAll(selectors.message_item));
           return nodes.map((node, index) => {
             const root = node as HTMLElement;
             const className = root.className || "";
             const inbound = /other|left|incoming|receive/i.test(className);
             const text = root.querySelector(selectors.message_text)?.textContent || root.textContent || "";
+            const senderName =
+              root.querySelector("[role='link']")?.textContent ||
+              root.querySelector("h3, h4, strong")?.textContent ||
+              undefined;
             const attachmentCount = root.querySelectorAll("img, video, svg, a[download]").length;
             return {
               platformMessageKey: root.getAttribute("data-id") || root.getAttribute("id") || `beta-${index}`,
               direction: inbound ? "IN" : "OUT",
               timestamp: new Date().toISOString(),
               text,
+              senderName: senderName?.trim() || undefined,
+              raw: {
+                className,
+                attachmentCount
+              },
               attachments: attachmentCount
                 ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
                 : []
@@ -287,18 +353,29 @@ export class BetaAdapter implements PlatformAdapter {
       return messages.slice(-limit).map((msg) => ({
         ...msg,
         direction: msg.direction === "IN" ? "IN" : "OUT",
-        text: cleanText(msg.text)
+        text: cleanText(msg.text),
+        senderName: msg.senderName,
+        raw: msg.raw
       }));
     } catch (error) {
-      const files = await captureDiagnostics({
-        page,
+      if (error instanceof AdapterFailure) {
+        throw error;
+      }
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "parse",
+        message: `${this.platform} fetch thread failed`,
         action: "fetch-thread",
+        error,
+        kind: "THREAD_FETCH_FAILED",
+        page,
         screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir
+        domDumpDir: this.deps.domDumpDir,
+        platformThreadId: thread.platformThreadId,
+        details: {
+          threadDisplayName: thread.displayName
+        }
       });
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure(`${this.platform} fetch thread failed (${reason})`, files);
     }
   }
 
@@ -314,6 +391,7 @@ export class BetaAdapter implements PlatformAdapter {
       }
 
       await this.waitForConversationReady(page, selectors);
+      await this.throwIfAuthRequired(page, "sendMessage");
       const composer = page.locator(selectors.composer_input).first();
       await composer.click();
       await composer.fill(text).catch(async () => {
@@ -330,15 +408,24 @@ export class BetaAdapter implements PlatformAdapter {
         verifiedBy: "best_effort"
       };
     } catch (error) {
-      const files = await captureDiagnostics({
-        page,
+      if (error instanceof AdapterFailure) {
+        throw error;
+      }
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "persist",
+        message: `${this.platform} send failed`,
         action: "send",
+        error,
+        kind: "THREAD_FETCH_FAILED",
+        page,
         screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir
+        domDumpDir: this.deps.domDumpDir,
+        platformThreadId: thread.platformThreadId,
+        details: {
+          threadDisplayName: thread.displayName
+        }
       });
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure(`${this.platform} send failed (${reason})`, files);
     }
   }
 
@@ -352,17 +439,13 @@ export class BetaAdapter implements PlatformAdapter {
     } else {
       await this.openThreadFromInbox(page, selectors, thread);
     }
+    await this.throwIfAuthRequired(page, "openThread");
   }
 
   async closeSession(_reason?: string): Promise<void> {
-    const context = this.context;
-    this.context = null;
-    this.page = null;
-
-    if (!context) {
-      return;
-    }
-
-    await context.close().catch(() => undefined);
+    await this.deps.sessionManager.closePlatformPage({
+      platform: this.platform,
+      personKey: this.deps.personKey ?? "default"
+    });
   }
 }

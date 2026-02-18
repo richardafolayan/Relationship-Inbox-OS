@@ -111,6 +111,8 @@ model Message {
   direction          Direction
   timestamp          DateTime
   text               String
+  senderName         String?
+  rawJson            String?
   attachmentsJson    String?
   createdAt          DateTime  @default(now())
 

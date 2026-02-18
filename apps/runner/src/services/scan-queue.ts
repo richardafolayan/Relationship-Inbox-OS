@@ -5,12 +5,15 @@ import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanText, humanDelay } from "../platforms/utils";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
+import type { KeyedMutex } from "./keyed-mutex";
 
 interface ScanQueueDeps {
   adapters: Record<PlatformName, PlatformAdapter>;
   eventBus: EventBus;
   settingsStore: SettingsStore;
   aiService: AiService;
+  platformMutex: Pick<KeyedMutex, "runWithQueueOne" | "getQueueDepth">;
+  personKey?: string;
   auditLog: (input: {
     platform?: PlatformName;
     stage?: string;
@@ -36,8 +39,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
   let abortVersion = 0;
   let abortReason: string | null = null;
 
+  const personKey = deps.personKey ?? "default";
+
+  function lockKey(platform: PlatformName): string {
+    return `${personKey}:${platform}`;
+  }
+
+  function triggerProcessNext(): void {
+    void processNext().catch((error) => {
+      void deps.auditLog({
+        stage: "Scan",
+        action: "SCAN_QUEUE_PROCESS_FAIL",
+        status: "FAIL",
+        details: {
+          personKey,
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined
+        }
+      });
+    });
+  }
+
   function getQueueDepth(): number {
-    return queue.length + (processing ? 1 : 0);
+    return queue.length + (processing ? 1 : 0) + deps.platformMutex.getQueueDepth();
   }
 
   async function setPlatformStatus(input: {
@@ -93,7 +117,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     };
 
     queue.push(job);
-    void processNext();
+    triggerProcessNext();
 
     return {
       jobId: job.jobId,
@@ -108,20 +132,33 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     let lastRunAt = 0;
 
-    scheduler = setInterval(async () => {
-      const settings = await deps.settingsStore.getSettings();
-      if (settings.demoMode) {
-        return;
-      }
+    scheduler = setInterval(() => {
+      void (async () => {
+        const settings = await deps.settingsStore.getSettings();
+        if (settings.demoMode) {
+          return;
+        }
 
-      const now = Date.now();
-      const intervalMs = settings.scanIntervalSeconds * 1000;
-      if (processing || now - lastRunAt < intervalMs) {
-        return;
-      }
+        const now = Date.now();
+        const intervalMs = settings.scanIntervalSeconds * 1000;
+        if (processing || now - lastRunAt < intervalMs) {
+          return;
+        }
 
-      lastRunAt = now;
-      enqueueScan();
+        lastRunAt = now;
+        enqueueScan();
+      })().catch((error) => {
+        void deps.auditLog({
+          stage: "Scan",
+          action: "SCHEDULER_TICK_FAIL",
+          status: "FAIL",
+          details: {
+            personKey,
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined
+          }
+        });
+      });
     }, 1000);
   }
 
@@ -142,7 +179,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     } finally {
       processing = false;
       if (queue.length > 0) {
-        void processNext();
+        triggerProcessNext();
       }
     }
   }
@@ -197,97 +234,221 @@ export function createScanQueue(deps: ScanQueueDeps) {
     };
 
     for (const platform of scanPlatforms) {
-      if (await markAborted("before_platform_loop", platform)) {
-        break;
-      }
-
-      let platformUpdatedThreads = 0;
-      let threadFailures = 0;
-      const threadFailureKinds: Record<string, number> = {};
-      let authInterrupted = false;
-
-      deps.eventBus.emit({
-        type: "SCAN_PROGRESS",
-        jobId: job.jobId,
-        platform,
-        stage: "Connecting"
-      });
-
-      const adapter = deps.adapters[platform];
-
-      try {
-        if (await markAborted("before_connect", platform)) {
-          break;
+      await deps.platformMutex.runWithQueueOne(lockKey(platform), async () => {
+        if (await markAborted("before_platform_loop", platform)) {
+          return;
         }
-        await adapter.ensureConnected();
-        if (await markAborted("after_connect", platform)) {
-          break;
-        }
-        await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
+
+        let platformUpdatedThreads = 0;
+        let threadFailures = 0;
+        const threadFailureKinds: Record<string, number> = {};
+        let authInterrupted = false;
 
         deps.eventBus.emit({
           type: "SCAN_PROGRESS",
           jobId: job.jobId,
           platform,
-          stage: "Collecting candidates"
+          stage: "Connecting"
         });
 
-        if (await markAborted("before_scan_unread", platform)) {
-          break;
-        }
-        const unread = await adapter.scanUnreadThreads();
-        if (await markAborted("after_scan_unread", platform)) {
-          break;
-        }
-        if (await markAborted("before_scan_recent", platform)) {
-          break;
-        }
-        const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
-        if (await markAborted("after_scan_recent", platform)) {
-          break;
-        }
+        const adapter = deps.adapters[platform];
 
-        const merged = new Map<string, ThreadStub>();
-        for (const thread of unread) {
-          merged.set(thread.platformThreadId, thread);
-        }
-        for (const thread of recent) {
-          if (!merged.has(thread.platformThreadId)) {
+        try {
+          if (await markAborted("before_connect", platform)) {
+            return;
+          }
+          await adapter.ensureConnected();
+          if (await markAborted("after_connect", platform)) {
+            return;
+          }
+          await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
+
+          deps.eventBus.emit({
+            type: "SCAN_PROGRESS",
+            jobId: job.jobId,
+            platform,
+            stage: "Collecting candidates"
+          });
+
+          if (await markAborted("before_scan_unread", platform)) {
+            return;
+          }
+          const unread = await adapter.scanUnreadThreads();
+          if (await markAborted("after_scan_unread", platform)) {
+            return;
+          }
+          if (await markAborted("before_scan_recent", platform)) {
+            return;
+          }
+          const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+          if (await markAborted("after_scan_recent", platform)) {
+            return;
+          }
+
+          const merged = new Map<string, ThreadStub>();
+          for (const thread of unread) {
             merged.set(thread.platformThreadId, thread);
           }
-        }
-
-        deps.eventBus.emit({
-          type: "SCAN_PROGRESS",
-          jobId: job.jobId,
-          platform,
-          stage: `Syncing ${merged.size} thread(s)`
-        });
-
-        for (const thread of merged.values()) {
-          if (await markAborted("before_thread_sync", platform, thread)) {
-            break;
+          for (const thread of recent) {
+            if (!merged.has(thread.platformThreadId)) {
+              merged.set(thread.platformThreadId, thread);
+            }
           }
+          const metricsProvider = adapter as unknown as {
+            getLastCollectionMetrics?: () => Record<string, unknown> | null;
+          };
+          const collectionMetrics =
+            typeof metricsProvider.getLastCollectionMetrics === "function"
+              ? metricsProvider.getLastCollectionMetrics()
+              : null;
 
-          try {
-            const updated = await syncThread(platform, thread, settings.maxMessagesPerThread, job.jobId);
-            updatedThreads += updated;
-            platformUpdatedThreads += updated;
-          } catch (error) {
-            if (await markAborted("thread_sync_error", platform, thread)) {
+          deps.eventBus.emit({
+            type: "SCAN_PROGRESS",
+            jobId: job.jobId,
+            platform,
+            stage: `Syncing ${merged.size} thread(s)`
+          });
+
+          for (const thread of merged.values()) {
+            if (await markAborted("before_thread_sync", platform, thread)) {
               break;
             }
 
+            try {
+              const updated = await syncThread(platform, thread, settings.maxMessagesPerThread, job.jobId);
+              updatedThreads += updated;
+              platformUpdatedThreads += updated;
+            } catch (error) {
+              if (await markAborted("thread_sync_error", platform, thread)) {
+                break;
+              }
+
+              const failureKind = resolveAdapterFailureKind(error);
+              const message = error instanceof Error ? error.message : String(error);
+              const resolvedFailureKind = failureKind ?? "UNKNOWN";
+              const adapterError = error instanceof AdapterFailure ? error : undefined;
+
+              if (shouldStopScanForFailureKind(failureKind)) {
+                await setPlatformStatus({
+                  platform,
+                  status: "NOT_CONNECTED",
+                  lastError: message
+                });
+
+                await deps.auditLog({
+                  platform,
+                  stage: "Scan",
+                  action: "SCAN_AUTH_REQUIRED",
+                  status: "FAIL",
+                  details: {
+                    jobId: job.jobId,
+                    requestId: job.jobId,
+                    stage: adapterError?.stage ?? "parse",
+                    platform,
+                    message,
+                    failureKind: resolvedFailureKind,
+                    threadDisplayName: thread.displayName,
+                    platformThreadId: thread.platformThreadId,
+                    errorStack: error instanceof Error ? error.stack : undefined
+                  },
+                  screenshotFile: adapterError?.screenshotFile,
+                  domDumpFile: adapterError?.domDumpFile
+                });
+
+                authInterrupted = true;
+                break;
+              }
+
+              threadFailures += 1;
+              threadFailureKinds[resolvedFailureKind] = (threadFailureKinds[resolvedFailureKind] ?? 0) + 1;
+
+              await deps.auditLog({
+                platform,
+                stage: "Scan",
+                action: "THREAD_SYNC_FAIL",
+                status: "FAIL",
+                details: {
+                  jobId: job.jobId,
+                  requestId: job.jobId,
+                  stage: adapterError?.stage ?? "parse",
+                  platform,
+                  message,
+                  failureKind: resolvedFailureKind,
+                  threadDisplayName: thread.displayName,
+                  platformThreadId: thread.platformThreadId,
+                  errorStack: error instanceof Error ? error.stack : undefined
+                },
+                screenshotFile: adapterError?.screenshotFile,
+                domDumpFile: adapterError?.domDumpFile
+              });
+            }
+
+            if (await markAborted("after_thread_sync", platform, thread)) {
+              break;
+            }
+
+            await humanDelay();
+          }
+
+          if (aborted) {
+            return;
+          }
+
+          if (authInterrupted) {
+            return;
+          }
+
+          await prisma.platform.update({
+            where: { name: platform },
+            data: {
+              status: "CONNECTED",
+              lastScanAt: new Date(),
+              lastError: null
+            }
+          });
+
+          await deps.auditLog({
+            platform,
+            stage: "Scan",
+            action: "SCAN_END",
+            status: "OK",
+            details: {
+              jobId: job.jobId,
+              requestId: job.jobId,
+              stage: "persist",
+              platform,
+              updatedThreads: platformUpdatedThreads,
+              processed: platformUpdatedThreads,
+              skipped: Math.max(0, merged.size - platformUpdatedThreads),
+              totalFound:
+                typeof collectionMetrics?.totalFound === "number" ? (collectionMetrics.totalFound as number) : merged.size,
+              unreadFound:
+                typeof collectionMetrics?.unreadFound === "number"
+                  ? (collectionMetrics.unreadFound as number)
+                  : merged.size,
+              iterations:
+                typeof collectionMetrics?.iterations === "number" ? (collectionMetrics.iterations as number) : undefined,
+              stopReason:
+                typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined,
+              candidates: merged.size,
+              threadFailures,
+              threadFailureKinds
+            }
+          });
+        } catch (error) {
+          if (await markAborted("platform_error", platform)) {
+            return;
+          }
+
+          if (error instanceof AdapterFailure) {
             const failureKind = resolveAdapterFailureKind(error);
-            const message = error instanceof Error ? error.message : String(error);
             const resolvedFailureKind = failureKind ?? "UNKNOWN";
-            const adapterError = error instanceof AdapterFailure ? error : undefined;
 
             if (shouldStopScanForFailureKind(failureKind)) {
               await setPlatformStatus({
                 platform,
                 status: "NOT_CONNECTED",
-                lastError: message
+                lastError: error.message
               });
 
               await deps.auditLog({
@@ -296,138 +457,70 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 action: "SCAN_AUTH_REQUIRED",
                 status: "FAIL",
                 details: {
-                  message,
+                  jobId: job.jobId,
+                  requestId: job.jobId,
+                  stage: error.stage ?? "navigate",
+                  platform,
+                  message: error.message,
                   failureKind: resolvedFailureKind,
-                  threadDisplayName: thread.displayName,
-                  platformThreadId: thread.platformThreadId
+                  errorStack: error.stack
                 },
-                screenshotFile: adapterError?.screenshotFile,
-                domDumpFile: adapterError?.domDumpFile
+                screenshotFile: error.screenshotFile,
+                domDumpFile: error.domDumpFile
               });
-
-              authInterrupted = true;
-              break;
+              return;
             }
 
-            threadFailures += 1;
-            threadFailureKinds[resolvedFailureKind] = (threadFailureKinds[resolvedFailureKind] ?? 0) + 1;
-
-            await deps.auditLog({
-              platform,
-              stage: "Scan",
-              action: "THREAD_SYNC_FAIL",
-              status: "FAIL",
-              details: {
-                message,
-                failureKind: resolvedFailureKind,
-                threadDisplayName: thread.displayName,
-                platformThreadId: thread.platformThreadId
-              },
-              screenshotFile: adapterError?.screenshotFile,
-              domDumpFile: adapterError?.domDumpFile
-            });
-          }
-
-          if (await markAborted("after_thread_sync", platform, thread)) {
-            break;
-          }
-
-          await humanDelay();
-        }
-
-        if (aborted) {
-          break;
-        }
-
-        if (authInterrupted) {
-          continue;
-        }
-
-        await prisma.platform.update({
-          where: { name: platform },
-          data: {
-            status: "CONNECTED",
-            lastScanAt: new Date(),
-            lastError: null
-          }
-        });
-
-        await deps.auditLog({
-          platform,
-          stage: "Scan",
-          action: "SCAN_END",
-          status: "OK",
-          details: {
-            updatedThreads: platformUpdatedThreads,
-            candidates: merged.size,
-            threadFailures,
-            threadFailureKinds
-          }
-        });
-      } catch (error) {
-        if (await markAborted("platform_error", platform)) {
-          break;
-        }
-
-        if (error instanceof AdapterFailure) {
-          const failureKind = resolveAdapterFailureKind(error);
-          const resolvedFailureKind = failureKind ?? "UNKNOWN";
-
-          if (shouldStopScanForFailureKind(failureKind)) {
             await setPlatformStatus({
               platform,
-              status: "NOT_CONNECTED",
+              status: "DEGRADED",
               lastError: error.message
             });
 
             await deps.auditLog({
               platform,
               stage: "Scan",
-              action: "SCAN_AUTH_REQUIRED",
+              action: resolvedFailureKind === "SELECTOR_MISMATCH" ? "SELECTOR_FAIL" : "SCAN_FAIL",
               status: "FAIL",
               details: {
+                jobId: job.jobId,
+                requestId: job.jobId,
+                stage: error.stage ?? "collect_threads",
+                platform,
                 message: error.message,
-                failureKind: resolvedFailureKind
+                failureKind: resolvedFailureKind,
+                errorStack: error.stack
               },
               screenshotFile: error.screenshotFile,
               domDumpFile: error.domDumpFile
             });
-            continue;
+          } else {
+            await setPlatformStatus({
+              platform,
+              status: "ERROR",
+              lastError: error instanceof Error ? error.message : "Unknown error"
+            });
+
+            await deps.auditLog({
+              platform,
+              stage: "Scan",
+              action: "SCAN_FAIL",
+              status: "FAIL",
+              details: {
+                jobId: job.jobId,
+                requestId: job.jobId,
+                stage: "collect_threads",
+                platform,
+                message: error instanceof Error ? error.message : String(error),
+                errorStack: error instanceof Error ? error.stack : undefined
+              }
+            });
           }
-
-          await setPlatformStatus({
-            platform,
-            status: "DEGRADED",
-            lastError: error.message
-          });
-
-          await deps.auditLog({
-            platform,
-            stage: "Scan",
-            action: resolvedFailureKind === "SELECTOR_MISMATCH" ? "SELECTOR_FAIL" : "SCAN_FAIL",
-            status: "FAIL",
-            details: {
-              message: error.message,
-              failureKind: resolvedFailureKind
-            },
-            screenshotFile: error.screenshotFile,
-            domDumpFile: error.domDumpFile
-          });
-        } else {
-          await setPlatformStatus({
-            platform,
-            status: "ERROR",
-            lastError: error instanceof Error ? error.message : "Unknown error"
-          });
-
-          await deps.auditLog({
-            platform,
-            stage: "Scan",
-            action: "SCAN_FAIL",
-            status: "FAIL",
-            details: { message: error instanceof Error ? error.message : String(error) }
-          });
         }
+      });
+
+      if (aborted) {
+        break;
       }
     }
 
@@ -486,7 +579,34 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }));
 
     const adapter = deps.adapters[platform];
+    await deps.auditLog({
+      platform,
+      stage: "Parse",
+      action: "THREAD_PARSE_START",
+      status: "OK",
+      details: {
+        requestId: jobId,
+        jobId,
+        stage: "parse",
+        threadId: thread.id,
+        platformThreadId: candidate.platformThreadId
+      }
+    });
     const messages = await adapter.fetchThreadMessages(candidate, maxMessages);
+    await deps.auditLog({
+      platform,
+      stage: "Parse",
+      action: "THREAD_PARSE_COLLECTED",
+      status: "OK",
+      details: {
+        requestId: jobId,
+        jobId,
+        stage: "parse",
+        threadId: thread.id,
+        platformThreadId: candidate.platformThreadId,
+        collectedCount: messages.length
+      }
+    });
 
     for (const message of messages) {
       const parsedTimestamp = new Date(message.timestamp);
@@ -506,7 +626,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           text: cleanText(message.text),
           direction: message.direction,
           timestamp: safeTimestamp,
-          attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null
+          attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
+          senderName: message.senderName ?? null,
+          rawJson: message.raw ? JSON.stringify(message.raw) : null
         },
         create: {
           threadId: thread.id,
@@ -514,7 +636,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           direction: message.direction,
           timestamp: safeTimestamp,
           text: cleanText(message.text),
-          attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null
+          attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
+          senderName: message.senderName ?? null,
+          rawJson: message.raw ? JSON.stringify(message.raw) : null
         }
       });
     }
@@ -529,7 +653,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const lastInbound = [...latestMessages].reverse().find((msg) => msg.direction === "IN");
     const lastOutbound = [...latestMessages].reverse().find((msg) => msg.direction === "OUT");
     const resolvedLastMessagePreview = cleanText(
-      lastMessage?.text ?? candidate.lastMessagePreview ?? thread.lastMessagePreview ?? ""
+      candidate.lastMessagePreview ?? lastMessage?.text ?? thread.lastMessagePreview ?? ""
     );
 
     const settings = await deps.settingsStore.getSettings();
@@ -603,7 +727,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
       action: "THREAD_UPDATED",
       status: "OK",
       details: {
+        requestId: jobId,
+        jobId,
+        stage: "persist",
         threadId: thread.id,
+        platformThreadId: candidate.platformThreadId,
         messageCount: latestMessages.length,
         needsReply: risk.needsReply
       }

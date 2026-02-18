@@ -132,13 +132,13 @@ export default function PlatformsPage() {
                 <Button
                   variant="danger"
                   onClick={() => {
-                    if (!confirm(`Reset ${row.platform} session? This wipes local profile state.`)) {
+                    if (!confirm("Reset shared session context for all platforms? This wipes managed profile state.")) {
                       return;
                     }
                     void apiPost("/runner/control/platform/reset-session", { platform: row.platform }).then(refresh);
                   }}
                 >
-                  Reset session
+                  Reset shared session
                 </Button>
               </div>
             </div>

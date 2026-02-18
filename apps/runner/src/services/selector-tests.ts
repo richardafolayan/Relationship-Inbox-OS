@@ -1,24 +1,14 @@
 import { join } from "node:path";
-import { chromium } from "playwright";
-import type { BrowserContext } from "playwright";
 import type { PlatformName, SelectorRegistry, SelectorTestReport, SelectorTestResult } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
-import type { AppSettings } from "@inbox-os/core";
-import type { BrowserProfileConfig } from "../config.js";
-import {
-  launchPersistentContextForPlatform,
-  type ConnectStepInfo,
-  type PersonalProfileFallbackInfo
-} from "../platforms/browser-launch.js";
+import type { Page } from "playwright";
+import { AdapterFailure } from "../platforms/utils.js";
+import type { SessionManager } from "./session-manager";
 
 interface SelectorTestServiceDeps {
-  getSettings: () => Promise<AppSettings>;
   resolveSelectors: (platform: PlatformName) => Promise<SelectorRegistry>;
-  profileDirs: Record<PlatformName, string>;
+  sessionManager: SessionManager;
   screenshotDir: string;
-  browserProfile: BrowserProfileConfig;
-  onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
-  onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
 }
 
 const selectorKeys: Array<keyof SelectorRegistry> = [
@@ -55,6 +45,60 @@ export async function findFirstPassingProbeIndex(
 }
 
 export function createSelectorTestService(deps: SelectorTestServiceDeps) {
+  async function throwIfAuthRequired(page: Page, platform: PlatformName): Promise<void> {
+    const url = page.url();
+    const authState = await page.evaluate((targetPlatform) => {
+      const bodyText = document.body?.innerText?.toLowerCase() ?? "";
+      const hasInput = (selector: string) => document.querySelector(selector) !== null;
+
+      if (targetPlatform === "INSTAGRAM") {
+        if (hasInput("input[name='username']") || hasInput("input[name='password']")) {
+          return {
+            authRequired: true,
+            reason: "instagram_login_form"
+          };
+        }
+      }
+
+      if (targetPlatform === "TIKTOK") {
+        const qrLogin = bodyText.includes("log in with qr code");
+        const authPrompts =
+          bodyText.includes("log in") ||
+          bodyText.includes("sign up") ||
+          bodyText.includes("scan with your mobile device");
+        if (qrLogin || authPrompts) {
+          return {
+            authRequired: true,
+            reason: qrLogin ? "tiktok_qr_login" : "tiktok_auth_gate"
+          };
+        }
+      }
+
+      return {
+        authRequired: false,
+        reason: undefined
+      };
+    }, platform);
+
+    const urlSuggestsAuth =
+      (platform === "INSTAGRAM" && /\/accounts\/login/i.test(url)) ||
+      (platform === "TIKTOK" && /\/login/i.test(url));
+
+    if (!authState.authRequired && !urlSuggestsAuth) {
+      return;
+    }
+
+    throw new AdapterFailure(`${platform} requires authentication before selector tests can run`, {
+      kind: "AUTH_REQUIRED",
+      details: {
+        platform,
+        stage: "navigate",
+        reason: authState.reason ?? "url_auth_pattern",
+        url
+      }
+    });
+  }
+
   async function run(input: {
     platform: PlatformName;
     key?: keyof SelectorRegistry;
@@ -62,51 +106,29 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
   }): Promise<SelectorTestReport> {
     const reportId = uuid();
     const startedAt = new Date().toISOString();
-    const settings = await deps.getSettings();
 
     const selectors = await deps.resolveSelectors(input.platform);
     if (input.key && input.selector) {
       selectors[input.key] = input.selector;
     }
+    const page = await deps.sessionManager.getManagedPage({
+      platform: input.platform,
+      personKey: "default"
+    });
+    await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
+    await throwIfAuthRequired(page, input.platform);
 
-    let context: BrowserContext | null = null;
-
-    try {
-      context = await launchPersistentContextForPlatform({
-        platform: input.platform,
-        launchPersistentContext: (userDataDir, options) =>
-          chromium.launchPersistentContext(userDataDir, options),
-        isolatedProfileDir: deps.profileDirs[input.platform],
-        headless: settings.headless,
-        browserProfile: deps.browserProfile,
-        onConnectStep: deps.onConnectStep,
-        onPersonalProfileFallback: deps.onPersonalProfileFallback
-      });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/processsingleton|profile.*in use|singletonlock/i.test(message)) {
-        throw new Error(
-          `${input.platform} selector tests cannot start because that browser profile is already in use. Close the active session or pause scanning, then retry.`
-        );
-      }
-      throw error;
-    }
-
-    try {
-      const page = context.pages()[0] ?? (await context.newPage());
-      await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
-
-      const keys = input.key ? [input.key] : selectorKeys;
-      const results: SelectorTestResult[] = [];
-      const conversationKeys = new Set<keyof SelectorRegistry>([
-        "message_item",
-        "message_text",
-        "composer_input",
-        "send_button"
-      ]);
-      let conversationOpened = false;
-      let adaptiveProbeAttempted = false;
-      let replyCapableConversationFound = false;
+    const keys = input.key ? [input.key] : selectorKeys;
+    const results: SelectorTestResult[] = [];
+    const conversationKeys = new Set<keyof SelectorRegistry>([
+      "message_item",
+      "message_text",
+      "composer_input",
+      "send_button"
+    ]);
+    let conversationOpened = false;
+    let adaptiveProbeAttempted = false;
+    let replyCapableConversationFound = false;
 
       async function openThreadAtIndex(index: number): Promise<boolean> {
         const thread = page.locator(selectors.thread_item).nth(index);
@@ -206,8 +228,8 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
         return 0;
       }
 
-      for (const key of keys) {
-        const selector = selectors[key];
+    for (const key of keys) {
+      const selector = selectors[key];
 
         let count = 0;
         let status: "PASS" | "FAIL" = "FAIL";
@@ -256,25 +278,22 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
           status = "FAIL";
         }
 
-        results.push({
-          key,
-          selector,
-          count,
-          status,
-          screenshotFile
-        });
-      }
-
-      return {
-        reportId,
-        platform: input.platform,
-        startedAt,
-        completedAt: new Date().toISOString(),
-        results
-      };
-    } finally {
-      await context.close().catch(() => undefined);
+      results.push({
+        key,
+        selector,
+        count,
+        status,
+        screenshotFile
+      });
     }
+
+    return {
+      reportId,
+      platform: input.platform,
+      startedAt,
+      completedAt: new Date().toISOString(),
+      results
+    };
   }
 
   return {

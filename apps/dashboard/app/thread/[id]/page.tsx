@@ -223,6 +223,9 @@ export default function ThreadPage() {
                         : "border border-slate-200 bg-slate-50 text-slate-800"
                     }`}
                   >
+                    {message.senderName ? (
+                      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{message.senderName}</p>
+                    ) : null}
                     <p>{message.text}</p>
                     <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
                       <span>{formatClock(message.timestamp)}</span>

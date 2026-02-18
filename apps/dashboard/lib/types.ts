@@ -80,6 +80,8 @@ export interface ThreadMessage {
   direction: "IN" | "OUT";
   timestamp: string;
   text: string;
+  senderName?: string | null;
+  raw?: Record<string, unknown> | null;
   attachments: Array<{ type: string; manualReview: boolean; rawLabel?: string }>;
 }
 

@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  resolveLinkedInCollectionStopReason,
   shouldStopLinkedInCollection,
   updateLinkedInCollectionStability
 } from "../apps/runner/dist/platforms/linkedin-adapter.js";
@@ -110,4 +111,18 @@ test("LinkedIn collector can continue past first viewport while thread count is 
 
   assert.equal(iterations[0].nextCount < iterations[1].nextCount, true);
   assert.equal(iterations[1].nextCount < iterations[2].nextCount, true);
+});
+
+test("LinkedIn collector emits deterministic stop reason for audit metrics", () => {
+  const stopReason = resolveLinkedInCollectionStopReason({
+    uniqueCount: 92,
+    maxThreads: 200,
+    noGrowthIterations: 3,
+    trailingRepeatIterations: 1,
+    stableIterations: 3,
+    didScroll: true,
+    reachedBottom: true
+  });
+
+  assert.equal(stopReason, "no_growth");
 });

@@ -1,7 +1,5 @@
-import type { BrowserContext, Page } from "playwright";
-import { chromium } from "playwright";
+import type { Page } from "playwright";
 import type {
-  AppSettings,
   NormalizedMessage,
   PlatformAdapter,
   SelectorRegistry,
@@ -12,28 +10,25 @@ import type {
 import {
   cleanText,
   AdapterFailure,
-  captureDiagnostics,
+  toStageFailure,
   humanDelay,
-  inferAdapterFailureKindFromMessage
+  inferAdapterFailureKindFromMessage,
+  retryWithBackoff,
+  isTransientPageError
 } from "./utils.js";
 import type { AdapterFailureKind } from "./utils.js";
-import type { BrowserProfileConfig } from "../config.js";
-import { launchPersistentContextForPlatform } from "./browser-launch.js";
-import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "./browser-launch.js";
+import type { SessionManager } from "../services/session-manager";
 
 interface LinkedInAdapterDependencies {
-  profileDir: string;
   screenshotDir: string;
   domDumpDir: string;
   resolveSelectors: () => Promise<SelectorRegistry>;
-  getSettings: () => Promise<AppSettings>;
-  browserProfile: BrowserProfileConfig;
+  sessionManager: SessionManager;
+  personKey?: string;
   scanMaxThreads: number;
   scanStableIterations: number;
   scanScrollWaitMs: number;
   messageBackfillAttempts: number;
-  onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
-  onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
 }
 
 interface LinkedInThreadSnapshot {
@@ -58,6 +53,8 @@ interface LinkedInMessageSnapshot {
   direction: "IN" | "OUT";
   timestamp: string;
   text: string;
+  senderName?: string;
+  raw?: Record<string, unknown>;
   attachments: Array<{ type: string; manualReview: boolean; rawLabel?: string }>;
 }
 
@@ -66,6 +63,13 @@ interface ActiveThreadDescriptor {
   activeKey?: string;
   displayName?: string;
 }
+
+export type LinkedInCollectionStopReason =
+  | "max_threads"
+  | "no_growth"
+  | "trailing_repeat"
+  | "bottom_reached"
+  | "iteration_cap";
 
 export function updateLinkedInCollectionStability(input: {
   previousCount: number;
@@ -113,41 +117,63 @@ export function shouldStopLinkedInCollection(input: {
   return false;
 }
 
+export function resolveLinkedInCollectionStopReason(input: {
+  uniqueCount: number;
+  maxThreads: number;
+  noGrowthIterations: number;
+  trailingRepeatIterations: number;
+  stableIterations: number;
+  didScroll: boolean;
+  reachedBottom: boolean;
+}): LinkedInCollectionStopReason | null {
+  if (input.uniqueCount >= input.maxThreads) {
+    return "max_threads";
+  }
+  if (input.noGrowthIterations >= input.stableIterations) {
+    return "no_growth";
+  }
+  if (input.trailingRepeatIterations >= input.stableIterations) {
+    return "trailing_repeat";
+  }
+  if (!input.didScroll && input.reachedBottom) {
+    return "bottom_reached";
+  }
+  return null;
+}
+
+export function buildLinkedInPreviewMap(
+  threads: Array<Pick<ThreadStub, "platformThreadId" | "lastMessagePreview">>
+): Map<string, string> {
+  const previewByThread = new Map<string, string>();
+  for (const thread of threads) {
+    previewByThread.set(thread.platformThreadId, cleanText(thread.lastMessagePreview ?? ""));
+  }
+  return previewByThread;
+}
+
 export class LinkedInAdapter implements PlatformAdapter {
   platform = "LINKEDIN" as const;
+  private lastCollectionMetrics: {
+    totalFound: number;
+    unreadFound: number;
+    iterations: number;
+    stopReason: LinkedInCollectionStopReason;
+  } | null = null;
 
-  private context: BrowserContext | null = null;
-  private page: Page | null = null;
   private static readonly inboxNavigationTimeoutMs = 10_000;
   private static readonly inboxReadyTimeoutMs = 10_000;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
 
   private async getPage(): Promise<Page> {
-    if (this.page && !this.page.isClosed()) {
-      return this.page;
-    }
-
-    const settings = await this.deps.getSettings();
-    this.context = await launchPersistentContextForPlatform({
+    return this.deps.sessionManager.getManagedPage({
       platform: this.platform,
-      launchPersistentContext: (userDataDir, options) =>
-        chromium.launchPersistentContext(userDataDir, options),
-      isolatedProfileDir: this.deps.profileDir,
-      headless: settings.headless,
-      browserProfile: this.deps.browserProfile,
+      personKey: this.deps.personKey ?? "default",
       args: ["--disable-blink-features=AutomationControlled"],
-      onConnectStep: this.deps.onConnectStep,
-      onPersonalProfileFallback: this.deps.onPersonalProfileFallback
     });
-
-    this.page = this.context.pages()[0] ?? (await this.context.newPage());
-    return this.page;
   }
 
   private async navigateInbox(selectors: SelectorRegistry): Promise<Page> {
-    const page = await this.getPage();
-
     const navigate = async (target: Page): Promise<void> => {
       await target.bringToFront();
       await target.goto(selectors.inbox_url, {
@@ -160,33 +186,39 @@ export class LinkedInAdapter implements PlatformAdapter {
       await target.waitForTimeout(350);
     };
 
-    try {
-      await navigate(page);
-      return page;
-    } catch {
-      if (!this.context) {
-        throw new Error("LinkedIn browser context unavailable while navigating inbox");
-      }
+    const page = await retryWithBackoff({
+      attempts: 2,
+      baseDelayMs: 300,
+      isRetryable: (error) => isTransientPageError(error),
+      run: async (attempt) => {
+        if (attempt > 1) {
+          await this.deps.sessionManager.closePlatformPage({
+            platform: this.platform,
+            personKey: this.deps.personKey ?? "default"
+          });
+        }
 
-      const retryPage = await this.context.newPage();
-      this.page = retryPage;
-      await navigate(retryPage);
-      return retryPage;
-    }
+        const target = await this.getPage();
+        await navigate(target);
+        return target;
+      }
+    });
+
+    return page;
   }
 
   private classifyFailureKind(reason: string, fallback: AdapterFailureKind): AdapterFailureKind {
     return inferAdapterFailureKindFromMessage(reason) ?? fallback;
   }
 
-  private normalizeTimestamp(rawValue: string | undefined): string {
+  private normalizeTimestamp(rawValue: string | undefined, fallbackIso: string): string {
     if (!rawValue) {
-      return new Date().toISOString();
+      return fallbackIso;
     }
 
     const trimmed = rawValue.trim();
     if (!trimmed) {
-      return new Date().toISOString();
+      return fallbackIso;
     }
 
     const parsed = Date.parse(trimmed);
@@ -194,7 +226,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       return new Date(parsed).toISOString();
     }
 
-    return new Date().toISOString();
+    return fallbackIso;
   }
 
   private normalizeIdentity(value: string | undefined): string {
@@ -267,6 +299,8 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     throw new AdapterFailure("LinkedIn auth required in personal profile. Open browser and sign in.", {
       kind: "AUTH_REQUIRED",
+      platform: this.platform,
+      stage: "navigate",
       details: {
         context,
         url: authState.url,
@@ -279,7 +313,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     page: Page,
     selectors: SelectorRegistry,
     maxThreads: number
-  ): Promise<{ rows: ThreadStub[]; iterations: number }> {
+  ): Promise<{ rows: ThreadStub[]; iterations: number; stopReason: LinkedInCollectionStopReason }> {
     const cappedMaxThreads = Math.max(1, maxThreads);
     const stableIterationsTarget = Math.max(1, this.deps.scanStableIterations);
     const merged = new Map<string, ThreadStub>();
@@ -288,6 +322,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     let trailingRepeatIterations = 0;
     let previousTrailingKey: string | null = null;
     let iterations = 0;
+    let stopReason: LinkedInCollectionStopReason = "iteration_cap";
 
     while (iterations < 300) {
       iterations += 1;
@@ -347,19 +382,25 @@ export class LinkedInAdapter implements PlatformAdapter {
             const unreadMatch = unreadText.match(/\d+/);
             const unreadCount = unreadMatch ? Number(unreadMatch[0]) : unreadBadge ? 1 : 0;
 
-            const attrKeys = [
-              rowRoot.getAttribute("data-conversation-urn"),
-              rowRoot.getAttribute("data-urn"),
-              rowRoot.getAttribute("data-conversation-id"),
-              rowRoot.getAttribute("data-id"),
-              rowRoot.id
-            ].filter((value): value is string => Boolean(value && value.trim()));
-
             const href = link?.href?.trim() || "";
-            const fallbackKey = displayName
-              ? `linkedin-name:${displayName.toLowerCase()}`
-              : `linkedin-preview:${preview.toLowerCase() || index}`;
-            const stableKey = (attrKeys[0] ?? href) || fallbackKey;
+            const hrefToken =
+              href.match(/\/messaging\/thread\/([^/?#]+)/i)?.[1] ??
+              href.match(/[?&]conversationid=([^&#]+)/i)?.[1] ??
+              "";
+            const urnToken =
+              rowRoot.getAttribute("data-conversation-urn") ||
+              rowRoot.getAttribute("data-urn") ||
+              rowRoot.getAttribute("data-conversation-id") ||
+              "";
+            const dataIdToken = rowRoot.getAttribute("data-id") || "";
+            const safeDataIdToken = /^ember/i.test(dataIdToken) ? "" : dataIdToken;
+            const fallbackKey = `linkedin-fallback:${displayName.toLowerCase()}|${preview.toLowerCase()}|${lastMessageAt.toLowerCase()}`;
+            const stableKey =
+              (urnToken && `linkedin-urn:${urnToken.toLowerCase()}`) ||
+              (hrefToken && `linkedin-href:${hrefToken.toLowerCase()}`) ||
+              (safeDataIdToken && `linkedin-id:${safeDataIdToken.toLowerCase()}`) ||
+              fallbackKey ||
+              `linkedin-index:${index}`;
 
             return {
               stableKey,
@@ -422,17 +463,25 @@ export class LinkedInAdapter implements PlatformAdapter {
       trailingRepeatIterations = stability.trailingRepeatIterations;
       previousTrailingKey = iteration.trailingKey;
 
-      if (
-        shouldStopLinkedInCollection({
-          uniqueCount: nextCount,
-          maxThreads: cappedMaxThreads,
-          noGrowthIterations,
-          trailingRepeatIterations,
-          stableIterations: stableIterationsTarget,
-          didScroll: iteration.didScroll,
-          reachedBottom: iteration.reachedBottom
-        })
-      ) {
+      const resolvedStopReason = resolveLinkedInCollectionStopReason({
+        uniqueCount: nextCount,
+        maxThreads: cappedMaxThreads,
+        noGrowthIterations,
+        trailingRepeatIterations,
+        stableIterations: stableIterationsTarget,
+        didScroll: iteration.didScroll,
+        reachedBottom: iteration.reachedBottom
+      });
+      if (resolvedStopReason || shouldStopLinkedInCollection({
+        uniqueCount: nextCount,
+        maxThreads: cappedMaxThreads,
+        noGrowthIterations,
+        trailingRepeatIterations,
+        stableIterations: stableIterationsTarget,
+        didScroll: iteration.didScroll,
+        reachedBottom: iteration.reachedBottom
+      })) {
+        stopReason = resolvedStopReason ?? "iteration_cap";
         break;
       }
 
@@ -441,8 +490,18 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     return {
       rows: Array.from(merged.values()).slice(0, cappedMaxThreads),
-      iterations
+      iterations,
+      stopReason
     };
+  }
+
+  getLastCollectionMetrics(): {
+    totalFound: number;
+    unreadFound: number;
+    iterations: number;
+    stopReason: LinkedInCollectionStopReason;
+  } | null {
+    return this.lastCollectionMetrics;
   }
 
   private async getActiveThreadDescriptor(page: Page, selectors: SelectorRegistry): Promise<ActiveThreadDescriptor> {
@@ -536,6 +595,9 @@ export class LinkedInAdapter implements PlatformAdapter {
       if ((await row.count()) === 0) {
         throw new AdapterFailure(`Unable to locate LinkedIn thread row for ${thread.displayName}`, {
           kind: "THREAD_FETCH_FAILED",
+          platform: this.platform,
+          stage: "open_thread",
+          platformThreadId: thread.platformThreadId,
           details: {
             targetDisplayName: thread.displayName,
             platformThreadId: thread.platformThreadId
@@ -573,6 +635,9 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     throw new AdapterFailure(`LinkedIn thread activation mismatch for ${thread.displayName}`, {
       kind: "THREAD_FETCH_FAILED",
+      platform: this.platform,
+      stage: "open_thread",
+      platformThreadId: thread.platformThreadId,
       details: {
         targetDisplayName: thread.displayName,
         targetThreadUrl: thread.threadUrl ?? null,
@@ -620,11 +685,16 @@ export class LinkedInAdapter implements PlatformAdapter {
                 root.textContent ??
                 ""
             );
+            const senderName = clean(
+              root.querySelector(".msg-s-message-group__profile-link")?.textContent ??
+                root.querySelector(".msg-s-message-group__name")?.textContent ??
+                ""
+            );
             const timeNode = root.querySelector("time") as HTMLTimeElement | null;
             const timestamp =
               clean(timeNode?.getAttribute("datetime")) ||
               clean(timeNode?.textContent) ||
-              new Date().toISOString();
+              "";
             const attachmentCount = root.querySelectorAll("img, video, svg, a[download], a[href*='attachment']").length;
             const platformMessageKey =
               root.getAttribute("data-event-urn") ||
@@ -637,6 +707,12 @@ export class LinkedInAdapter implements PlatformAdapter {
               direction: inbound ? "IN" : "OUT",
               timestamp,
               text,
+              senderName: senderName || undefined,
+              raw: {
+                className,
+                hasTime: Boolean(timeNode),
+                attachmentCount
+              },
               attachments: attachmentCount
                 ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
                 : []
@@ -699,23 +775,19 @@ export class LinkedInAdapter implements PlatformAdapter {
         throw error;
       }
 
-      const files =
-        page &&
-        (await captureDiagnostics({
-          page,
-          platform: this.platform,
-          action: "connect-failed",
-          screenshotDir: this.deps.screenshotDir,
-          domDumpDir: this.deps.domDumpDir
-        }));
-
       const reason = error instanceof Error ? error.message : String(error);
       const currentUrl = page?.url();
       const suffix = currentUrl ? ` (url: ${currentUrl})` : "";
-      throw new AdapterFailure(`LinkedIn connect failed (${reason})${suffix}`, {
+      throw await toStageFailure({
+        platform: this.platform,
+        stage: "connect",
+        message: `LinkedIn connect failed (${reason})${suffix}`,
+        action: "connect-failed",
+        error,
         kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
-        screenshotFile: files?.screenshotFile,
-        domDumpFile: files?.domDumpFile,
+        page: page ?? undefined,
+        screenshotDir: this.deps.screenshotDir,
+        domDumpDir: this.deps.domDumpDir,
         details: currentUrl ? { url: currentUrl } : undefined
       });
     }
@@ -730,6 +802,12 @@ export class LinkedInAdapter implements PlatformAdapter {
       await page.waitForSelector(selectors.thread_list, { timeout: 10_000 });
       await this.throwIfAuthRequired(page, "scanUnreadThreads:thread_list");
       const collected = await this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads);
+      this.lastCollectionMetrics = {
+        totalFound: collected.rows.length,
+        unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
+        iterations: collected.iterations,
+        stopReason: collected.stopReason
+      };
       return collected.rows
         .filter((thread) => (thread.unreadCount ?? 0) > 0)
         .map((thread) => ({ ...thread, isUnreadCandidate: true }));
@@ -738,19 +816,17 @@ export class LinkedInAdapter implements PlatformAdapter {
         throw error;
       }
 
-      const files = await captureDiagnostics({
-        page,
+      const reason = error instanceof Error ? error.message : String(error);
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "collect_threads",
+        message: "Failed while scanning LinkedIn unread threads",
         action: "scan-unread",
+        error,
+        kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
+        page,
         screenshotDir: this.deps.screenshotDir,
         domDumpDir: this.deps.domDumpDir
-      });
-
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure("Failed while scanning LinkedIn unread threads", {
-        kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
-        screenshotFile: files.screenshotFile,
-        domDumpFile: files.domDumpFile
       });
     }
   }
@@ -768,25 +844,29 @@ export class LinkedInAdapter implements PlatformAdapter {
         selectors,
         Math.max(limit, this.deps.scanMaxThreads)
       );
+      this.lastCollectionMetrics = {
+        totalFound: collected.rows.length,
+        unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
+        iterations: collected.iterations,
+        stopReason: collected.stopReason
+      };
       return collected.rows.slice(0, limit).map((thread) => ({ ...thread, isRecentCandidate: true }));
     } catch (error) {
       if (error instanceof AdapterFailure) {
         throw error;
       }
 
-      const files = await captureDiagnostics({
-        page,
+      const reason = error instanceof Error ? error.message : String(error);
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "collect_threads",
+        message: "Failed while scanning LinkedIn recent threads",
         action: "scan-recent",
+        error,
+        kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
+        page,
         screenshotDir: this.deps.screenshotDir,
         domDumpDir: this.deps.domDumpDir
-      });
-
-      const reason = error instanceof Error ? error.message : String(error);
-      throw new AdapterFailure("Failed while scanning LinkedIn recent threads", {
-        kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
-        screenshotFile: files.screenshotFile,
-        domDumpFile: files.domDumpFile
       });
     }
   }
@@ -803,29 +883,30 @@ export class LinkedInAdapter implements PlatformAdapter {
       await this.throwIfAuthRequired(page, "fetchThreadMessages:after_container_wait");
 
       const messages = await this.collectThreadMessagesWithBackfill(page, selectors, limit);
-      return messages.map((message) => ({
+      const baseTimestamp = Date.now() - messages.length * 1_000;
+      return messages.map((message, index) => ({
         ...message,
         direction: message.direction === "IN" ? "IN" : "OUT",
-        timestamp: this.normalizeTimestamp(message.timestamp),
-        text: cleanText(message.text)
+        timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+        text: cleanText(message.text),
+        senderName: message.senderName,
+        raw: message.raw
       }));
     } catch (error) {
       if (error instanceof AdapterFailure) {
         throw error;
       }
-
-      const files = await captureDiagnostics({
-        page,
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "parse",
+        message: `Failed to fetch LinkedIn thread messages for ${thread.displayName}`,
         action: "fetch-thread",
-        screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir
-      });
-
-      throw new AdapterFailure(`Failed to fetch LinkedIn thread messages for ${thread.displayName}`, {
+        error,
         kind: "THREAD_FETCH_FAILED",
-        screenshotFile: files.screenshotFile,
-        domDumpFile: files.domDumpFile,
+        page,
+        screenshotDir: this.deps.screenshotDir,
+        domDumpDir: this.deps.domDumpDir,
+        platformThreadId: thread.platformThreadId,
         details: { threadDisplayName: thread.displayName, url: page.url() }
       });
     }
@@ -924,16 +1005,22 @@ export class LinkedInAdapter implements PlatformAdapter {
         sentAt: new Date().toISOString(),
         verifiedBy
       };
-    } catch {
-      const files = await captureDiagnostics({
-        page,
+    } catch (error) {
+      throw await toStageFailure({
         platform: this.platform,
+        stage: "persist",
+        message: `Failed to send LinkedIn message for ${thread.displayName}`,
         action: "send",
+        error,
+        kind: "THREAD_FETCH_FAILED",
+        page,
         screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir
+        domDumpDir: this.deps.domDumpDir,
+        platformThreadId: thread.platformThreadId,
+        details: {
+          threadDisplayName: thread.displayName
+        }
       });
-
-      throw new AdapterFailure(`Failed to send LinkedIn message for ${thread.displayName}`, files);
     }
   }
 
@@ -941,28 +1028,13 @@ export class LinkedInAdapter implements PlatformAdapter {
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
     await page.bringToFront();
-
-    if (thread.threadUrl) {
-      await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
-      return;
-    }
-
-    await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
-    const row = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
-    if ((await row.count()) > 0) {
-      await row.click();
-    }
+    await this.openThreadAndWaitForActivation(page, selectors, thread);
   }
 
   async closeSession(_reason?: string): Promise<void> {
-    const context = this.context;
-    this.context = null;
-    this.page = null;
-
-    if (!context) {
-      return;
-    }
-
-    await context.close().catch(() => undefined);
+    await this.deps.sessionManager.closePlatformPage({
+      platform: this.platform,
+      personKey: this.deps.personKey ?? "default"
+    });
   }
 }

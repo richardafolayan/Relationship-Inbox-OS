@@ -1,5 +1,5 @@
 import { createReadStream, existsSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import express from "express";
 import { z } from "zod";
@@ -18,9 +18,9 @@ import { createSelectorTestService } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
-import { createSessionCoordinator } from "./services/session-coordinator";
 import { createSendService } from "./services/send";
 import { cleanupDemoData, seedDemoData } from "./services/demo";
+import { createKeyedMutex } from "./services/keyed-mutex";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -31,7 +31,7 @@ const eventBus = createEventBus();
 const aiService = createAiService();
 const selectorReports = createSelectorTestStore();
 
-const { adapters, resolveSelectorsForPlatform } = createAdapters({
+const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
   onConnectStep: async (input) => {
     await auditService.log({
@@ -70,50 +70,22 @@ const { adapters, resolveSelectorsForPlatform } = createAdapters({
 });
 
 const selectorTestService = createSelectorTestService({
-  getSettings: () => settingsStore.getSettings(),
   resolveSelectors: resolveSelectorsForPlatform,
-  profileDirs: runnerConfig.profileDirs,
+  sessionManager,
   screenshotDir: runnerConfig.screenshotDir,
-  browserProfile: runnerConfig.browserProfile,
-  onConnectStep: async (input) => {
-    await auditService.log({
-      platform: input.platform,
-      stage: "Scan",
-      action: input.action,
-      status: input.status,
-      details: input.details
-    });
-  },
-  onPersonalProfileFallback: async (input) => {
-    await auditService.log({
-      platform: input.platform,
-      stage: "Scan",
-      action: "PERSONAL_PROFILE_FALLBACK",
-      status: "OK",
-      details: {
-        reason: input.reason,
-        personalChromeUserDataDir: input.personalChromeUserDataDir,
-        personalChromeLaunchUserDataDir: input.personalChromeLaunchUserDataDir,
-        personalChromeProfileDirectory: input.personalChromeProfileDirectory,
-        personalChromeProfileName: input.personalChromeProfileName,
-        personalChromeProfileResolutionStrategy: input.personalChromeProfileResolutionStrategy,
-        mirrorResult: input.mirrorResult,
-        fallbackProfileDir: input.fallbackProfileDir
-      }
-    });
-  }
 });
+
+const operationMutex = createKeyedMutex();
+const defaultPersonKey = "default";
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
 
 const scanQueue = createScanQueue({
   adapters,
   eventBus,
   settingsStore,
   aiService,
-  auditLog: (input) => auditService.log(input)
-});
-const sessionCoordinator = createSessionCoordinator({
-  adapters,
-  scanQueue,
+  platformMutex: operationMutex,
+  personKey: defaultPersonKey,
   auditLog: (input) => auditService.log(input)
 });
 
@@ -124,6 +96,22 @@ const sendService = createSendService({
   auditLog: (input) => auditService.log(input)
 });
 const connectInFlight = new Map<PlatformName, Promise<void>>();
+
+function platformLockKey(platform: PlatformName): string {
+  return `${defaultPersonKey}:${platform}`;
+}
+
+function globalResetLockKey(): string {
+  return `${defaultPersonKey}:GLOBAL_RESET`;
+}
+
+async function withPlatformControlLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T> {
+  return operationMutex.runExclusive(platformLockKey(platform), work);
+}
+
+async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
+  return operationMutex.runExclusive(globalResetLockKey(), work);
+}
 
 function parsePlatform(value: unknown): PlatformName {
   const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).parse(value);
@@ -219,10 +207,13 @@ function summarizeControlBody(body: unknown): Record<string, unknown> {
 
 function summarizeError(error: unknown): Record<string, unknown> {
   if (error instanceof Error) {
+    const rawCause = "cause" in error ? (error as { cause?: unknown }).cause : undefined;
+    const cause = rawCause === undefined ? undefined : summarizeError(rawCause);
     return {
       name: error.name,
       message: error.message,
-      stack: error.stack?.split("\n").slice(0, 6).join("\n")
+      stack: error.stack,
+      cause
     };
   }
 
@@ -233,15 +224,6 @@ function summarizeError(error: unknown): Record<string, unknown> {
 
 function connectTimeoutMsForCurrentProfile(): number {
   return resolveConnectTimeoutMs(runnerConfig.browserProfile.mode, process.env);
-}
-
-async function preemptSessionsBeforeAction(input: {
-  triggerAction: "CONNECT" | "SCAN" | "OPEN_BROWSER" | "TEST_SELECTORS";
-  platform?: PlatformName;
-}) {
-  const summary = await sessionCoordinator.preemptAll(input);
-  connectInFlight.clear();
-  return summary;
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
@@ -291,6 +273,7 @@ async function ensureRuntimeDirs(): Promise<void> {
   await mkdir(runnerConfig.profileDirs.LINKEDIN, { recursive: true });
   await mkdir(runnerConfig.profileDirs.INSTAGRAM, { recursive: true });
   await mkdir(runnerConfig.profileDirs.TIKTOK, { recursive: true });
+  await mkdir(sessionManager.getProfileDir(defaultPersonKey), { recursive: true });
 }
 
 async function getThreadStub(threadId: string): Promise<{
@@ -391,7 +374,7 @@ app.use("/control", (req, res, next) => {
   next();
 });
 
-app.get("/health", async (_req, res) => {
+app.get("/health", asyncRoute(async (_req, res) => {
   const platforms = await prisma.platform.findMany();
   const lastScanAt = platforms
     .map((platform) => platform.lastScanAt)
@@ -407,7 +390,7 @@ app.get("/health", async (_req, res) => {
     queueDepth: scanQueue.getQueueDepth(),
     connectedPlatforms
   });
-});
+}));
 
 app.get("/events", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream");
@@ -491,10 +474,10 @@ app.get("/artifacts/:type/:name", (req, res) => {
   }
 });
 
-app.get("/data/settings", async (_req, res) => {
+app.get("/data/settings", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   res.json(settings);
-});
+}));
 
 app.post("/control/settings", asyncRoute(async (req, res) => {
   const payload = z
@@ -551,11 +534,6 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     })
     .parse(req.body ?? {});
 
-  const preemptSummary = await preemptSessionsBeforeAction({
-    triggerAction: "SCAN",
-    platform: payload.platform
-  });
-
   const queued = scanQueue.enqueueScan(payload.platform);
   await auditService.log({
     platform: payload.platform,
@@ -565,188 +543,171 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     details: {
       jobId: queued.jobId,
       scope: payload.platform ?? "ALL",
-      preemptedPlatforms: preemptSummary.closedPlatforms,
-      preemptDurationMs: preemptSummary.preemptDurationMs
+      lockPolicy: "queue_one"
     }
   });
 
-  res.json({
-    ...queued,
-    preemptedPlatforms: preemptSummary.closedPlatforms,
-    preemptDurationMs: preemptSummary.preemptDurationMs
-  });
+  res.json(queued);
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
-  const preemptSummary = await preemptSessionsBeforeAction({
-    triggerAction: "CONNECT",
-    platform
-  });
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
   const connectTimeoutMs = connectTimeoutMsForCurrentProfile();
 
-  await auditService.log({
-    platform,
-    stage: "Connect",
-    action: "CONNECT_START",
-    status: "OK",
-    details: {
-      requestId,
-      profileMode: runnerConfig.browserProfile.mode,
-      fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
-      syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
-      sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
-      launchUserDataDir: runnerConfig.profileDirs[platform],
-      profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
-      profileName: runnerConfig.browserProfile.personalChromeProfileName,
-      profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
-      timeoutBudgetMs: connectTimeoutMs,
-      preemptedPlatforms: preemptSummary.closedPlatforms,
-      preemptDurationMs: preemptSummary.preemptDurationMs
-    }
-  });
-
-  try {
-    const existingConnect = connectInFlight.get(platform);
-    let connectPromise: Promise<void>;
-    let reusedInFlight = false;
-
-    if (existingConnect) {
-      connectPromise = existingConnect;
-      reusedInFlight = true;
-    } else {
-      let trackedPromise: Promise<void>;
-      trackedPromise = adapters[platform].ensureConnected().finally(() => {
-        if (connectInFlight.get(platform) === trackedPromise) {
-          connectInFlight.delete(platform);
-        }
-      });
-      connectInFlight.set(platform, trackedPromise);
-      connectPromise = trackedPromise;
-    }
-
-    if (reusedInFlight) {
-      await auditService.log({
-        platform,
-        stage: "Connect",
-        action: "CONNECT_JOIN_INFLIGHT",
-        status: "OK",
-        details: {
-          requestId,
-          timeoutBudgetMs: connectTimeoutMs
-        }
-      });
-    }
-
-    await withTimeout(connectPromise, connectTimeoutMs, `CONNECT_${platform}`);
-    const connectedAt = new Date();
-
-    await prisma.platform.upsert({
-      where: { name: platform },
-      update: {
-        status: "CONNECTED",
-        connectedAt,
-        lastError: null
-      },
-      create: {
-        name: platform,
-        status: "CONNECTED",
-        connectedAt
-      }
-    });
-
-    eventBus.emit({
-      type: "PLATFORM_STATUS_CHANGED",
-      jobId: uuid(),
-      platform,
-      status: "CONNECTED"
-    });
-
+  await withPlatformControlLock(platform, async () => {
     await auditService.log({
       platform,
       stage: "Connect",
-      action: "CONNECT_OK",
+      action: "CONNECT_START",
       status: "OK",
       details: {
         requestId,
-        durationMs: Date.now() - startedAt,
         profileMode: runnerConfig.browserProfile.mode,
         fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
         syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
         sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
-        launchUserDataDir: runnerConfig.profileDirs[platform],
+        launchUserDataDir: sessionManager.getProfileDir(defaultPersonKey),
         profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
         profileName: runnerConfig.browserProfile.personalChromeProfileName,
         profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
-        timeoutBudgetMs: connectTimeoutMs,
-        preemptedPlatforms: preemptSummary.closedPlatforms,
-        preemptDurationMs: preemptSummary.preemptDurationMs
+        timeoutBudgetMs: connectTimeoutMs
       }
     });
 
-    res.json({
-      status: "CONNECTED",
-      connectedAt: connectedAt.toISOString(),
-      preemptedPlatforms: preemptSummary.closedPlatforms,
-      preemptDurationMs: preemptSummary.preemptDurationMs
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    const failure = resolveConnectFailureResponse({
-      message,
-      error
-    });
-    const failureUrl = extractFailureUrl(error, message);
+    try {
+      const existingConnect = connectInFlight.get(platform);
+      let connectPromise: Promise<void>;
+      let reusedInFlight = false;
 
-    await prisma.platform.upsert({
-      where: { name: platform },
-      update: {
-        status: failure.platformStatus,
-        lastError: message
-      },
-      create: {
-        name: platform,
-        status: failure.platformStatus,
-        lastError: message
+      if (existingConnect) {
+        connectPromise = existingConnect;
+        reusedInFlight = true;
+      } else {
+        let trackedPromise: Promise<void>;
+        trackedPromise = adapters[platform].ensureConnected().finally(() => {
+          if (connectInFlight.get(platform) === trackedPromise) {
+            connectInFlight.delete(platform);
+          }
+        });
+        connectInFlight.set(platform, trackedPromise);
+        connectPromise = trackedPromise;
       }
-    });
 
-    await auditService.log({
-      platform,
-      stage: "Connect",
-      action: "CONNECT_FAIL",
-      status: "FAIL",
-      details: {
-        requestId,
-        durationMs: Date.now() - startedAt,
-        failureKind: failure.failureKind ?? "UNKNOWN",
-        failureType: failure.failureType,
-        failureUrl: failureUrl ?? null,
-        profileMode: runnerConfig.browserProfile.mode,
-        fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
-        syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
-        sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
-        launchUserDataDir: runnerConfig.profileDirs[platform],
-        profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
-        profileName: runnerConfig.browserProfile.personalChromeProfileName,
-        profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
-        timeoutBudgetMs: connectTimeoutMs,
-        preemptedPlatforms: preemptSummary.closedPlatforms,
-        preemptDurationMs: preemptSummary.preemptDurationMs,
-        ...summarizeError(error)
+      if (reusedInFlight) {
+        await auditService.log({
+          platform,
+          stage: "Connect",
+          action: "CONNECT_JOIN_INFLIGHT",
+          status: "OK",
+          details: {
+            requestId,
+            timeoutBudgetMs: connectTimeoutMs
+          }
+        });
       }
-    });
 
-    res.status(failure.httpStatus).json({
-      error: message,
-      failureType: failure.failureType,
-      preemptedPlatforms: preemptSummary.closedPlatforms,
-      preemptDurationMs: preemptSummary.preemptDurationMs
-    });
-  }
+      await withTimeout(connectPromise, connectTimeoutMs, `CONNECT_${platform}`);
+      const connectedAt = new Date();
+
+      await prisma.platform.upsert({
+        where: { name: platform },
+        update: {
+          status: "CONNECTED",
+          connectedAt,
+          lastError: null
+        },
+        create: {
+          name: platform,
+          status: "CONNECTED",
+          connectedAt
+        }
+      });
+
+      eventBus.emit({
+        type: "PLATFORM_STATUS_CHANGED",
+        jobId: uuid(),
+        platform,
+        status: "CONNECTED"
+      });
+
+      await auditService.log({
+        platform,
+        stage: "Connect",
+        action: "CONNECT_OK",
+        status: "OK",
+        details: {
+          requestId,
+          durationMs: Date.now() - startedAt,
+          profileMode: runnerConfig.browserProfile.mode,
+          fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
+          syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
+          sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
+          launchUserDataDir: sessionManager.getProfileDir(defaultPersonKey),
+          profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
+          profileName: runnerConfig.browserProfile.personalChromeProfileName,
+          profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
+          timeoutBudgetMs: connectTimeoutMs
+        }
+      });
+
+      res.json({
+        status: "CONNECTED",
+        connectedAt: connectedAt.toISOString()
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const failure = resolveConnectFailureResponse({
+        message,
+        error
+      });
+      const failureUrl = extractFailureUrl(error, message);
+
+      await prisma.platform.upsert({
+        where: { name: platform },
+        update: {
+          status: failure.platformStatus,
+          lastError: message
+        },
+        create: {
+          name: platform,
+          status: failure.platformStatus,
+          lastError: message
+        }
+      });
+
+      await auditService.log({
+        platform,
+        stage: "Connect",
+        action: "CONNECT_FAIL",
+        status: "FAIL",
+        details: {
+          requestId,
+          durationMs: Date.now() - startedAt,
+          failureKind: failure.failureKind ?? "UNKNOWN",
+          failureType: failure.failureType,
+          failureUrl: failureUrl ?? null,
+          profileMode: runnerConfig.browserProfile.mode,
+          fallbackBehavior: runnerConfig.browserProfile.fallbackBehavior,
+          syncMode: runnerConfig.browserProfile.personalProfileSyncMode,
+          sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
+          launchUserDataDir: sessionManager.getProfileDir(defaultPersonKey),
+          profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory,
+          profileName: runnerConfig.browserProfile.personalChromeProfileName,
+          profileResolutionStrategy: runnerConfig.browserProfile.personalChromeProfileResolutionStrategy,
+          timeoutBudgetMs: connectTimeoutMs,
+          ...summarizeError(error)
+        }
+      });
+
+      res.status(failure.httpStatus).json({
+        error: message,
+        failureType: failure.failureType
+      });
+    }
+  });
 }));
 
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
@@ -769,68 +730,58 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
     })
     .parse(req.body);
 
-  const preemptSummary = await preemptSessionsBeforeAction({
-    triggerAction: "TEST_SELECTORS",
-    platform: payload.platform
+  await withPlatformControlLock(payload.platform, async () => {
+    try {
+      const report = await selectorTestService.run({
+        platform: payload.platform,
+        key: payload.key,
+        selector: payload.selector
+      });
+
+      selectorReports.setReport(report);
+
+      await auditService.log({
+        platform: payload.platform,
+        stage: "Scan",
+        action: "SELECTOR_TEST",
+        status: report.results.every((result) => result.status === "PASS") ? "OK" : "FAIL",
+        details: {
+          reportId: report.reportId,
+          results: report.results
+        }
+      });
+
+      eventBus.emit({
+        type: "SELECTOR_TEST_RESULT",
+        jobId: uuid(),
+        platform: payload.platform,
+        reportId: report.reportId
+      });
+
+      res.json(report);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+
+      await auditService.log({
+        platform: payload.platform,
+        stage: "Scan",
+        action: "SELECTOR_FAIL",
+        status: "FAIL",
+        details: {
+          message,
+          source: "selector-test",
+          failureKind: error instanceof Error && "kind" in error ? (error as Record<string, unknown>).kind : "UNKNOWN"
+        }
+      });
+
+      const status = /profile.*in use|already in use|singleton/i.test(message)
+        ? 409
+        : /auth|login|required/i.test(message)
+          ? 401
+          : 500;
+      res.status(status).json({ error: message });
+    }
   });
-
-  try {
-    const report = await selectorTestService.run({
-      platform: payload.platform,
-      key: payload.key,
-      selector: payload.selector
-    });
-
-    selectorReports.setReport(report);
-
-    await auditService.log({
-      platform: payload.platform,
-      stage: "Scan",
-      action: "SELECTOR_TEST",
-      status: report.results.every((result) => result.status === "PASS") ? "OK" : "FAIL",
-      details: {
-        reportId: report.reportId,
-        results: report.results,
-        preemptedPlatforms: preemptSummary.closedPlatforms,
-        preemptDurationMs: preemptSummary.preemptDurationMs
-      }
-    });
-
-    eventBus.emit({
-      type: "SELECTOR_TEST_RESULT",
-      jobId: uuid(),
-      platform: payload.platform,
-      reportId: report.reportId
-    });
-
-    res.json({
-      ...report,
-      preemptedPlatforms: preemptSummary.closedPlatforms,
-      preemptDurationMs: preemptSummary.preemptDurationMs
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-
-    await auditService.log({
-      platform: payload.platform,
-      stage: "Scan",
-      action: "SELECTOR_FAIL",
-      status: "FAIL",
-      details: {
-        message,
-        source: "selector-test",
-        preemptedPlatforms: preemptSummary.closedPlatforms,
-        preemptDurationMs: preemptSummary.preemptDurationMs
-      }
-    });
-
-    const status = /profile.*in use|already in use|singleton/i.test(message) ? 409 : 500;
-    res.status(status).json({
-      error: message,
-      preemptedPlatforms: preemptSummary.closedPlatforms,
-      preemptDurationMs: preemptSummary.preemptDurationMs
-    });
-  }
 }));
 
 app.post("/control/platform/save-selector-override", asyncRoute(async (req, res) => {
@@ -884,43 +835,77 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
       clientSendId: z.string().uuid()
     })
     .parse(req.body);
+  const target = await getThreadStub(threadId);
 
-  try {
-    const receipt = await sendService.sendMessage({
-      threadId,
-      text: payload.text,
-      clientSendId: payload.clientSendId
-    });
+  await withPlatformControlLock(target.platform, async () => {
+    try {
+      const receipt = await sendService.sendMessage({
+        threadId,
+        text: payload.text,
+        clientSendId: payload.clientSendId
+      });
 
-    res.json(receipt);
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to send" });
-  }
+      res.json(receipt);
+    } catch (error) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "SEND_FAIL",
+        status: "FAIL",
+        details: {
+          threadId,
+          platformThreadId: target.platformThreadId,
+          stage: "persist",
+          ...summarizeError(error)
+        }
+      });
+      throw error;
+    }
+  });
 }));
 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
-  try {
-    const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-    const target = await getThreadStub(threadId);
-    await adapters[target.platform].openThread({
-      platformThreadId: target.platformThreadId,
-      displayName: target.displayName,
-      lastMessagePreview: "",
-      threadUrl: target.threadUrl
-    });
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const target = await getThreadStub(threadId);
 
-    await auditService.log({
-      platform: target.platform,
-      stage: "Connect",
-      action: "OPEN_THREAD",
-      status: "OK",
-      details: { threadId: target.threadId }
-    });
+  await withPlatformControlLock(target.platform, async () => {
+    try {
+      await adapters[target.platform].openThread({
+        platformThreadId: target.platformThreadId,
+        displayName: target.displayName,
+        lastMessagePreview: "",
+        threadUrl: target.threadUrl
+      });
 
-    res.json({ status: "ok" });
-  } catch (error) {
-    res.status(500).json({ error: error instanceof Error ? error.message : "Failed to open thread" });
-  }
+      await auditService.log({
+        platform: target.platform,
+        stage: "Connect",
+        action: "OPEN_THREAD",
+        status: "OK",
+        details: {
+          threadId: target.threadId,
+          platformThreadId: target.platformThreadId,
+          stage: "open_thread"
+        }
+      });
+
+      res.json({ status: "ok" });
+    } catch (error) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Connect",
+        action: "OPEN_THREAD_FAIL",
+        status: "FAIL",
+        details: {
+          threadId: target.threadId,
+          platformThreadId: target.platformThreadId,
+          stage: "open_thread",
+          ...summarizeError(error)
+        }
+      });
+      throw error;
+    }
+  });
 }));
 
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
@@ -942,7 +927,7 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
   res.json({ text });
 }));
 
-app.get("/data/inbox", async (req, res) => {
+app.get("/data/inbox", asyncRoute(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
   const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
@@ -1035,11 +1020,12 @@ app.get("/data/inbox", async (req, res) => {
   };
 
   res.json({ rows, summary });
-});
+}));
 
-app.get("/data/thread/:threadId", async (req, res) => {
+app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const thread = await prisma.thread.findUnique({
-    where: { id: req.params.threadId },
+    where: { id: threadId },
     include: {
       person: true,
       messages: {
@@ -1096,6 +1082,8 @@ app.get("/data/thread/:threadId", async (req, res) => {
       direction: message.direction,
       timestamp: message.timestamp.toISOString(),
       text: message.text,
+      senderName: message.senderName ?? null,
+      raw: message.rawJson ? JSON.parse(message.rawJson) : null,
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
     })),
     suggestedReplies: suggested,
@@ -1110,9 +1098,9 @@ app.get("/data/thread/:threadId", async (req, res) => {
       domDumpFile: log.domDumpFile
     }))
   });
-});
+}));
 
-app.get("/data/receipts", async (req, res) => {
+app.get("/data/receipts", asyncRoute(async (req, res) => {
   const threadId = typeof req.query.threadId === "string" ? req.query.threadId : undefined;
   const limit = Number(req.query.limit ?? 100);
 
@@ -1139,15 +1127,16 @@ app.get("/data/receipts", async (req, res) => {
       domDumpFile: log.domDumpFile
     }))
   );
-});
+}));
 
-app.get("/data/platforms", async (_req, res) => {
+app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
 
   const data = await Promise.all(
     (["LINKEDIN", "INSTAGRAM", "TIKTOK"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
+      const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       return {
         platform,
         status: row?.status ?? "NOT_CONNECTED",
@@ -1155,7 +1144,7 @@ app.get("/data/platforms", async (_req, res) => {
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
         enabled: settings.enabledPlatforms.includes(platform),
-        profileDir: runnerConfig.profileDirs[platform],
+        profileDir: sharedProfileDir,
         browserProfileMode: runnerConfig.browserProfile.mode,
         browserProfileSyncMode:
           runnerConfig.browserProfile.mode === "personal"
@@ -1167,8 +1156,8 @@ app.get("/data/platforms", async (_req, res) => {
             : null,
         browserProfileLaunchUserDataDir:
           runnerConfig.browserProfile.mode === "personal"
-            ? runnerConfig.profileDirs[platform]
-            : runnerConfig.profileDirs[platform],
+            ? sharedProfileDir
+            : sharedProfileDir,
         browserProfileDirectory:
           runnerConfig.browserProfile.mode === "personal"
             ? runnerConfig.browserProfile.personalChromeProfileDirectory
@@ -1187,9 +1176,9 @@ app.get("/data/platforms", async (_req, res) => {
   );
 
   res.json(data);
-});
+}));
 
-app.get("/data/logs", async (req, res) => {
+app.get("/data/logs", asyncRoute(async (req, res) => {
   const limit = Number(req.query.limit ?? 200);
   const logs = await prisma.auditLog.findMany({
     orderBy: { timestamp: "desc" },
@@ -1209,9 +1198,9 @@ app.get("/data/logs", async (req, res) => {
       domDumpFile: log.domDumpFile
     }))
   );
-});
+}));
 
-app.get("/data/people", async (_req, res) => {
+app.get("/data/people", asyncRoute(async (_req, res) => {
   const people = await prisma.person.findMany({
     include: {
       threads: true
@@ -1244,20 +1233,14 @@ app.get("/data/people", async (_req, res) => {
       }, "GREEN")
     }))
   );
-});
+}));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
-  const adapter = adapters[payload.platform];
-  const preemptSummary = await preemptSessionsBeforeAction({
-    triggerAction: "OPEN_BROWSER",
-    platform: payload.platform
-  });
-  await adapter.ensureConnected();
-  res.json({
-    status: "ok",
-    preemptedPlatforms: preemptSummary.closedPlatforms,
-    preemptDurationMs: preemptSummary.preemptDurationMs
+  await withPlatformControlLock(payload.platform, async () => {
+    const adapter = adapters[payload.platform];
+    await adapter.ensureConnected();
+    res.json({ status: "ok" });
   });
 }));
 
@@ -1331,33 +1314,57 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
-  const profileDir = runnerConfig.profileDirs[payload.platform];
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional() }).parse(req.body ?? {});
 
-  await rm(profileDir, { recursive: true, force: true });
-  await mkdir(profileDir, { recursive: true });
+  await withGlobalResetLock(async () => {
+    scanQueue.requestAbort("session_reset:manual");
+    connectInFlight.clear();
 
-  await prisma.platform.upsert({
-    where: { name: payload.platform },
-    update: {
-      status: "NOT_CONNECTED",
-      connectedAt: null,
-      lastError: null
-    },
-    create: {
-      name: payload.platform,
-      status: "NOT_CONNECTED"
+    for (const platform of allPlatforms) {
+      await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
     }
-  });
 
-  await auditService.log({
-    platform: payload.platform,
-    stage: "Connect",
-    action: "RESET_SESSION",
-    status: "OK"
-  });
+    const summary = await sessionManager.resetPersonSession({
+      personKey: defaultPersonKey,
+      reason: "manual_reset",
+      clearProfileDir: true
+    });
 
-  res.json({ status: "ok" });
+    for (const platform of allPlatforms) {
+      await prisma.platform.upsert({
+        where: { name: platform },
+        update: {
+          status: "NOT_CONNECTED",
+          connectedAt: null,
+          lastError: null
+        },
+        create: {
+          name: platform,
+          status: "NOT_CONNECTED"
+        }
+      });
+    }
+
+    await auditService.log({
+      platform: payload.platform,
+      stage: "Connect",
+      action: "RESET_SESSION_SHARED",
+      status: "OK",
+      details: {
+        resetScope: "PERSON_CONTEXT",
+        personKey: summary.personKey,
+        profileDir: summary.profileDir,
+        clearedProfileDir: summary.clearedProfileDir
+      }
+    });
+
+    res.json({
+      status: "ok",
+      resetScope: "PERSON_CONTEXT",
+      personKey: summary.personKey,
+      profileDir: summary.profileDir
+    });
+  });
 }));
 
 app.post("/control/system/clear-db", asyncRoute(async (_req, res) => {
@@ -1420,6 +1427,38 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
   // eslint-disable-next-line no-console
   console.error(`[runner:error] ${req.method} ${path} -> ${statusCode}: ${message}`);
   res.status(statusCode).json({ error: message });
+});
+
+process.on("unhandledRejection", (reason) => {
+  void auditService
+    .log({
+      stage: "System",
+      action: "UNHANDLED_REJECTION",
+      status: "FAIL",
+      details: {
+        source: "process.unhandledRejection",
+        ...summarizeError(reason)
+      }
+    })
+    .catch(() => undefined);
+});
+
+process.on("uncaughtException", (error) => {
+  void auditService
+    .log({
+      stage: "System",
+      action: "UNCAUGHT_EXCEPTION",
+      status: "FAIL",
+      details: {
+        source: "process.uncaughtException",
+        ...summarizeError(error)
+      }
+    })
+    .finally(() => {
+      // eslint-disable-next-line no-console
+      console.error("Uncaught exception", error);
+      process.exit(1);
+    });
 });
 
 async function start(): Promise<void> {
