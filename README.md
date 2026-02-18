@@ -73,18 +73,19 @@ Stack:
 - Audit logging with screenshot/DOM artifact pointers.
 - Idempotent send workflow using `clientSendId`.
 - Browser profile modes:
-  - Isolated platform profiles under `data/profiles/*`.
+  - Managed shared person context under `data/profiles/__managed_person_profiles/default`.
   - Personal Chrome mirrored profile mode.
 - Personal mode mirror behavior:
   - Sync mode support (`smart`, `always`, `never`).
   - Directory-first profile resolution.
   - Fallback behavior (`error` or `allow_isolated`).
-- Session preemption before user-triggered browser actions:
-  - Applied to connect, scan, open-browser, and selector tests.
-  - Closes runner-managed contexts to reduce profile lock collisions.
+- Shared session lifecycle + keyed locks:
+  - One browser context per person, with one managed tab per platform.
+  - Queue-one lock policy per `person+platform` to prevent overlap.
+  - Shared reset path rebuilds the whole managed person context.
 - Abort-aware scan queue:
-  - Graceful `SCAN_ABORTED` behavior on intentional preemption.
-  - Avoids false degradation from preemption interruptions.
+  - Graceful `SCAN_ABORTED` behavior on reset/abort.
+  - Avoids false degradation from lifecycle interruptions.
 - LinkedIn reliability mode:
   - Auth-required detection (`AUTH_REQUIRED` with `401` and platform `NOT_CONNECTED`).
   - Deep thread list collection for virtualized/infinite inbox.
@@ -261,15 +262,13 @@ curl http://localhost:4001/health
 
 ### Isolated mode
 
-- Launches with platform-specific user-data directories:
-  - `data/profiles/linkedin`
-  - `data/profiles/instagram`
-  - `data/profiles/tiktok`
+- Launches with a shared managed person directory:
+  - `data/profiles/__managed_person_profiles/default`
 - Best for predictable automation isolation.
 
 ### Personal mode
 
-- Uses your local Chrome user-data source and mirrors selected profile into platform launch dirs.
+- Uses your local Chrome user-data source and mirrors selected profile into the shared managed person launch dir.
 - Uses `channel: chrome` with `--profile-directory=<resolved profile>`.
 - Profile resolution is directory-first, then name match.
 
@@ -279,19 +278,20 @@ curl http://localhost:4001/health
 - `always`: always sync before launch.
 - `never`: skip sync.
 
-### Profile lock behavior and preemption
+### Profile lock behavior and shared session ownership
 
-- Preemption closes runner-managed browser sessions before user-triggered browser control actions.
-- Preemption does not close manually opened personal Chrome windows.
+- Runner uses one managed context per person and coordinates actions with per-platform mutex keys.
+- Reset session acquires global reset lock, aborts scans, and recreates the managed person context.
+- Runner does not close manually opened personal Chrome windows.
 - If a personal profile is locked by external Chrome processes:
   - with `PERSONAL_PROFILE_FALLBACK=error`: connect/test fails fast with explicit error.
   - with `PERSONAL_PROFILE_FALLBACK=allow_isolated`: runner falls back to isolated profile launch.
 
 ### Expected behavior for browser control actions
 
-- `Connect`: preempts sessions, launches browser, validates platform connection.
-- `Run selector tests`: preempts sessions, launches through shared profile pipeline, runs read-only selector checks.
-- `Open browser window`: preempts sessions, launches browser window for manual interaction.
+- `Connect`: uses managed shared session tab, validates platform connection.
+- `Run selector tests`: uses managed shared session tab and auth-aware readiness checks.
+- `Open browser window`: opens managed shared session tab for manual interaction.
 
 ## API Surface (Practical Reference)
 
@@ -406,6 +406,7 @@ Actions:
 1. Verify runner health (`/health`).
 2. Verify ports and env (`RUNNER_PORT`, `DASHBOARD_PORT`).
 3. On `/platforms`: `Reset session` -> `Connect`.
+   - Reset now rebuilds the shared person context for all platforms.
 4. Run selector tests for failing platform.
 5. Re-run scan.
 6. Check Activity Log and receipts for remaining blockers.
@@ -416,7 +417,7 @@ Actions:
 - Sending is always user-triggered from UI. No autonomous send loop.
 - Instagram/TikTok adapters are beta and can degrade gracefully with selector diagnostics.
 - Receipts and artifacts are first-class debugging primitives and should be checked before changing selectors.
-- Session preemption targets runner-owned Playwright contexts only.
+- Shared session reset targets runner-owned managed Playwright context only.
 
 ## Commands Cheat Sheet
 
