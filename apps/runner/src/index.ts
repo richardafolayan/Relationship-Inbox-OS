@@ -87,6 +87,8 @@ const scanQueue = createScanQueue({
   aiService,
   platformMutex: operationMutex,
   personKey: defaultPersonKey,
+  screenshotDir: runnerConfig.screenshotDir,
+  domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input)
 });
 
@@ -587,7 +589,36 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     })
     .parse(req.body ?? {});
 
-  const queued = scanQueue.enqueueScan(payload.platform);
+  const requestId = getControlTrace(res)?.requestId ?? uuid();
+  const queued = scanQueue.enqueueScan(payload.platform, {
+    requestId,
+    respectCooldown: true
+  });
+  const traceMeta = {
+    runTraceEnabled: scanQueue.isRunTraceEnabled(),
+    runTraceDir: scanQueue.isRunTraceEnabled() ? scanQueue.getRunTraceBaseDir() : null
+  };
+  if (!queued.ok) {
+    await auditService.log({
+      platform: payload.platform,
+      stage: "Scan",
+      action: "SCAN_BLOCKED_COOLDOWN",
+      status: "OK",
+      details: {
+        requestId,
+        reason: queued.reason,
+        retryAfterSeconds: queued.retryAfterSeconds,
+        scope: payload.platform ?? "ALL"
+      }
+    });
+
+    res.status(200).json({
+      ...queued,
+      ...traceMeta
+    });
+    return;
+  }
+
   await auditService.log({
     platform: payload.platform,
     stage: "Scan",
@@ -595,12 +626,16 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     status: "OK",
     details: {
       jobId: queued.jobId,
+      requestId,
       scope: payload.platform ?? "ALL",
       lockPolicy: "queue_one"
     }
   });
 
-  res.json(queued);
+  res.json({
+    ...queued,
+    ...traceMeta
+  });
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
@@ -994,8 +1029,16 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
-  const queued = scanQueue.enqueueScan(target.platform);
-  res.json(queued);
+  const requestId = getControlTrace(res)?.requestId ?? uuid();
+  const queued = scanQueue.enqueueScan(target.platform, {
+    requestId,
+    respectCooldown: true
+  });
+  res.json({
+    ...queued,
+    runTraceEnabled: scanQueue.isRunTraceEnabled(),
+    runTraceDir: scanQueue.isRunTraceEnabled() ? scanQueue.getRunTraceBaseDir() : null
+  });
 }));
 
 app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {

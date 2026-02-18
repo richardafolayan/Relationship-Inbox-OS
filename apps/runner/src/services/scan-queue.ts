@@ -1,11 +1,21 @@
 import type { PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
+import { join, resolve } from "node:path";
 import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanText, humanDelay } from "../platforms/utils";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import type { KeyedMutex } from "./keyed-mutex";
+import {
+  ScanRetryController,
+  type ScanCooldownStatus
+} from "./scan-retry-controller";
+import {
+  createRunLogger,
+  type RunLogger,
+  type RunTraceSummary
+} from "./run-logger";
 
 interface ScanQueueDeps {
   adapters: Record<PlatformName, PlatformAdapter>;
@@ -14,6 +24,8 @@ interface ScanQueueDeps {
   aiService: AiService;
   platformMutex: Pick<KeyedMutex, "runWithQueueOne" | "getQueueDepth">;
   personKey?: string;
+  screenshotDir: string;
+  domDumpDir: string;
   auditLog: (input: {
     platform?: PlatformName;
     stage?: string;
@@ -30,7 +42,28 @@ type ScanJob = {
   platform?: PlatformName;
 };
 
+interface TraceAwareAdapter {
+  setRunLogger?: (logger: RunLogger | null) => void;
+}
+
 const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+
+export type EnqueueScanResult =
+  | {
+      ok: true;
+      jobId: string;
+      status: "queued" | "running";
+      requestId: string;
+      platform?: PlatformName;
+    }
+  | {
+      ok: false;
+      blocked: true;
+      reason: "cooldown_active";
+      retryAfterSeconds: number;
+      requestId: string;
+      platform?: PlatformName;
+    };
 
 export function createScanQueue(deps: ScanQueueDeps) {
   const queue: ScanJob[] = [];
@@ -38,8 +71,36 @@ export function createScanQueue(deps: ScanQueueDeps) {
   let scheduler: NodeJS.Timeout | undefined;
   let abortVersion = 0;
   let abortReason: string | null = null;
+  const activeRunLoggerByPlatform = new Map<PlatformName, RunLogger>();
+  const latestRunSummaryByPlatform = new Map<PlatformName, RunTraceSummary>();
+  const runTraceBaseDir = resolve(process.env.RUN_TRACE_DIR ?? "./logs/runs");
 
   const personKey = deps.personKey ?? "default";
+  const retryController = new ScanRetryController(undefined, undefined, undefined, (event) => {
+    const candidateLoggers = event.platform
+      ? [activeRunLoggerByPlatform.get(event.platform)]
+      : Array.from(activeRunLoggerByPlatform.values());
+    for (const logger of candidateLoggers) {
+      if (!logger?.enabled) {
+        continue;
+      }
+      logger.logEvent({
+        level: event.action === "reload_guard_blocked" ? "warn" : "info",
+        component: "scan-retry-controller",
+        stage: "retry_control",
+        action: event.action,
+        details: event.details
+      });
+      if (event.action === "reload_guard_blocked") {
+        logger.logDecision({
+          stage: "retry_control",
+          level: "warn",
+          decision: "Reload suppressed due to guard/cooldown",
+          details: event.details
+        });
+      }
+    }
+  });
 
   function lockKey(platform: PlatformName): string {
     return `${personKey}:${platform}`;
@@ -79,6 +140,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     }
     if (normalized.includes("referenceerror")) {
       return "evaluate_reference_error";
+    }
+    if (normalized.includes("target page, context or browser has been closed")) {
+      return "page_closed_mid_stage";
+    }
+    if (normalized.includes("reload suppressed") || normalized.includes("retry loop")) {
+      return "repeated_reload_guard_triggered";
     }
     if (normalized.includes("timeouterror") || normalized.includes("timeout")) {
       return "timeout";
@@ -163,6 +230,133 @@ export function createScanQueue(deps: ScanQueueDeps) {
     return `${stage}${reasonPart} · request ${input.requestId}: ${input.message}`;
   }
 
+  function extractRecoveryAttempts(error: AdapterFailure | undefined): number {
+    const details = adapterErrorDetails(error);
+    const value = details.recoveryAttempts;
+    if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+      return Math.floor(value);
+    }
+    return 0;
+  }
+
+  function toTraceAwareAdapter(adapter: PlatformAdapter): TraceAwareAdapter {
+    return adapter as unknown as TraceAwareAdapter;
+  }
+
+  function resolveFailureArtifactPath(input: {
+    artifactName?: string;
+    type: "screenshot" | "dom";
+  }): string | undefined {
+    if (!input.artifactName) {
+      return undefined;
+    }
+    const baseDir = input.type === "screenshot" ? deps.screenshotDir : deps.domDumpDir;
+    return join(baseDir, input.artifactName);
+  }
+
+  async function markPlatformFailure(input: {
+    platform: PlatformName;
+    status: "DEGRADED" | "ERROR" | "NOT_CONNECTED";
+    failureReason?: string;
+    summary: string;
+    requestId: string;
+    stage: string;
+    message: string;
+    adapterError?: AdapterFailure;
+    error?: unknown;
+    action: string;
+    failureKind?: string;
+    threadDisplayName?: string;
+    platformThreadId?: string;
+    runLogger?: RunLogger;
+  }): Promise<void> {
+    const retry = retryController.markFailure(input.platform);
+    const reloadGuard = retryController.registerReloadAttempt(
+      input.platform,
+      extractRecoveryAttempts(input.adapterError)
+    );
+    const effectiveReason = reloadGuard.blocked ? "repeated_reload_guard_triggered" : input.failureReason ?? "unknown";
+    const withCooldown =
+      retry.retryAfterSeconds > 0
+        ? `${input.summary} (cooldown ${retry.retryAfterSeconds}s)`
+        : input.summary;
+
+    input.runLogger?.logError({
+      component: "scan-queue",
+      stage: input.stage,
+      action: input.action,
+      error: input.error ?? input.adapterError ?? new Error(input.message),
+      details: {
+        platform: input.platform,
+        failureKind: input.failureKind ?? "UNKNOWN",
+        reason: effectiveReason,
+        status: input.status,
+        retryAfterSeconds: retry.retryAfterSeconds,
+        consecutiveFailures: retry.consecutiveFailures,
+        reloadGuardBlocked: reloadGuard.blocked,
+        reloadGuardRetryAfterSeconds: reloadGuard.retryAfterSeconds
+      }
+    });
+    input.runLogger?.logDecision({
+      level: reloadGuard.blocked ? "warn" : "info",
+      stage: input.stage,
+      decision: reloadGuard.blocked ? "Reload suppressed due to guard/cooldown" : "Failure recorded with cooldown policy",
+      details: {
+        reason: effectiveReason,
+        retryAfterSeconds: retry.retryAfterSeconds,
+        consecutiveFailures: retry.consecutiveFailures,
+        reloadGuardBlocked: reloadGuard.blocked,
+        reloadGuardRetryAfterSeconds: reloadGuard.retryAfterSeconds
+      }
+    });
+    if (input.adapterError) {
+      input.runLogger?.copyFailureArtifacts({
+        screenshotPath: resolveFailureArtifactPath({
+          artifactName: input.adapterError.screenshotFile,
+          type: "screenshot"
+        }),
+        domDumpPath: resolveFailureArtifactPath({
+          artifactName: input.adapterError.domDumpFile,
+          type: "dom"
+        })
+      });
+    }
+
+    await setPlatformStatus({
+      platform: input.platform,
+      status: input.status,
+      lastError: withCooldown
+    });
+
+    await deps.auditLog({
+      platform: input.platform,
+      stage: "Scan",
+      action: input.action,
+      status: "FAIL",
+      details: {
+        jobId: input.requestId,
+        requestId: input.requestId,
+        stage: input.stage,
+        platform: input.platform,
+        message: input.message,
+        reason: effectiveReason,
+        failureKind: input.failureKind ?? "UNKNOWN",
+        retryAfterSeconds: retry.retryAfterSeconds,
+        consecutiveFailures: retry.consecutiveFailures,
+        reloadGuardBlocked: reloadGuard.blocked,
+        reloadGuardRetryAfterSeconds: reloadGuard.retryAfterSeconds,
+        threadDisplayName: input.threadDisplayName,
+        platformThreadId: input.platformThreadId,
+        errorStack: input.error instanceof Error ? input.error.stack : undefined,
+        innerError: extractInnerError(input.adapterError),
+        stageReceipts: adapterErrorDetails(input.adapterError).stageReceipts,
+        runtimeContext: adapterErrorDetails(input.adapterError).runtimeContext
+      },
+      screenshotFile: input.adapterError?.screenshotFile,
+      domDumpFile: input.adapterError?.domDumpFile
+    });
+  }
+
   function triggerProcessNext(): void {
     void processNext().catch((error) => {
       void deps.auditLog({
@@ -228,9 +422,52 @@ export function createScanQueue(deps: ScanQueueDeps) {
     }
   }
 
-  function enqueueScan(platform?: PlatformName): { jobId: string; status: "queued" | "running" } {
+  function enqueueScan(
+    platform?: PlatformName,
+    options?: { respectCooldown?: boolean; requestId?: string }
+  ): EnqueueScanResult {
+    const requestId = options?.requestId ?? uuid();
+    const cooldown = options?.respectCooldown === false
+      ? { blocked: false, retryAfterSeconds: 0, platform }
+      : retryController.getCooldown(platform);
+    if (cooldown.blocked) {
+      const blockedLogger = createRunLogger({
+        requestId,
+        platform: platform ?? "ALL",
+        runType: "scan",
+        outDirBase: runTraceBaseDir
+      });
+      blockedLogger.logDecision({
+        stage: "enqueue",
+        level: "warn",
+        decision: "Scan request blocked by cooldown",
+        details: {
+          platform: platform ?? "ALL",
+          retryAfterSeconds: cooldown.retryAfterSeconds
+        }
+      });
+      const blockedSummary = blockedLogger.flush({
+        success: false,
+        stopReason: "cooldown_active",
+        counters: {
+          retryAfterSeconds: cooldown.retryAfterSeconds
+        }
+      });
+      if (platform) {
+        latestRunSummaryByPlatform.set(platform, blockedSummary);
+      }
+      return {
+        ok: false,
+        blocked: true,
+        reason: "cooldown_active",
+        retryAfterSeconds: cooldown.retryAfterSeconds,
+        requestId,
+        platform
+      };
+    }
+
     const job: ScanJob = {
-      jobId: uuid(),
+      jobId: requestId,
       platform
     };
 
@@ -238,8 +475,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
     triggerProcessNext();
 
     return {
+      ok: true,
       jobId: job.jobId,
-      status: processing ? "queued" : "running"
+      status: processing ? "queued" : "running",
+      requestId: job.jobId,
+      platform
     };
   }
 
@@ -264,7 +504,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         }
 
         lastRunAt = now;
-        enqueueScan();
+        enqueueScan(undefined, { respectCooldown: true });
       })().catch((error) => {
         void deps.auditLog({
           stage: "Scan",
@@ -335,6 +575,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
 
       aborted = true;
+      if (platform) {
+        const runLogger = activeRunLoggerByPlatform.get(platform);
+        runLogger?.logDecision({
+          stage: "scan_abort",
+          level: "warn",
+          decision: "Scan aborted",
+          details: {
+            checkpoint,
+            reason: resolveAbortReason(),
+            threadDisplayName: thread?.displayName,
+            platformThreadId: thread?.platformThreadId
+          }
+        });
+      }
       await deps.auditLog({
         platform,
         stage: "Scan",
@@ -353,30 +607,101 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     for (const platform of scanPlatforms) {
       await deps.platformMutex.runWithQueueOne(lockKey(platform), async () => {
-        if (await markAborted("before_platform_loop", platform)) {
-          return;
-        }
+        const runLogger = createRunLogger({
+          requestId: job.jobId,
+          platform,
+          runType: "scan",
+          outDirBase: runTraceBaseDir
+        });
+        activeRunLoggerByPlatform.set(platform, runLogger);
+
+        const adapter = deps.adapters[platform];
+        const traceAwareAdapter = toTraceAwareAdapter(adapter);
+        traceAwareAdapter.setRunLogger?.(runLogger);
 
         let platformUpdatedThreads = 0;
         let threadFailures = 0;
         const threadFailureKinds: Record<string, number> = {};
         let authInterrupted = false;
+        let openedThreadsCount = 0;
+        let messagesParsedCount = 0;
+        let candidatesCount = 0;
+        let unreadCandidatesCount = 0;
+        let runSuccess = false;
+        let runStopReason: string | undefined;
+        let runError: unknown;
 
-        deps.eventBus.emit({
-          type: "SCAN_PROGRESS",
-          jobId: job.jobId,
-          platform,
-          stage: "Connecting"
+        runLogger.logEvent({
+          level: "info",
+          component: "scan-queue",
+          stage: "scan_start",
+          action: "platform_scan_start",
+          details: {
+            requestId: job.jobId,
+            platform,
+            scope: job.platform ?? "ALL",
+            queueDepth: getQueueDepth()
+          }
         });
 
-        const adapter = deps.adapters[platform];
-
         try {
+          if (await markAborted("before_platform_loop", platform)) {
+            runStopReason = "aborted";
+            return;
+          }
+          const cooldown = retryController.getCooldown(platform);
+          if (cooldown.blocked) {
+            runStopReason = "cooldown_active";
+            runLogger.logDecision({
+              stage: "collect_threads",
+              decision: "Scan blocked because cooldown is active",
+              details: {
+                retryAfterSeconds: cooldown.retryAfterSeconds,
+                platform
+              }
+            });
+            const cooldownMessage = `collect_threads · cooldown_active · request ${job.jobId}: Cooling down — next retry in ${cooldown.retryAfterSeconds}s`;
+            await setPlatformStatus({
+              platform,
+              status: "DEGRADED",
+              lastError: cooldownMessage
+            });
+            await deps.auditLog({
+              platform,
+              stage: "Scan",
+              action: "SCAN_COOLDOWN_ACTIVE",
+              status: "OK",
+              details: {
+                jobId: job.jobId,
+                requestId: job.jobId,
+                stage: "collect_threads",
+                platform,
+                reason: "cooldown_active",
+                retryAfterSeconds: cooldown.retryAfterSeconds
+              }
+            });
+            return;
+          }
+
+          deps.eventBus.emit({
+            type: "SCAN_PROGRESS",
+            jobId: job.jobId,
+            platform,
+            stage: "Connecting"
+          });
+
           if (await markAborted("before_connect", platform)) {
+            runStopReason = "aborted";
             return;
           }
           await adapter.ensureConnected();
+          runLogger.logAction({
+            stage: "connect",
+            action: "ensure_connected",
+            result: "ok"
+          });
           if (await markAborted("after_connect", platform)) {
+            runStopReason = "aborted";
             return;
           }
           await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
@@ -389,17 +714,38 @@ export function createScanQueue(deps: ScanQueueDeps) {
           });
 
           if (await markAborted("before_scan_unread", platform)) {
+            runStopReason = "aborted";
             return;
           }
           const unread = await adapter.scanUnreadThreads();
+          unreadCandidatesCount = unread.length;
+          runLogger.logAction({
+            stage: "collect_threads",
+            action: "scan_unread_threads",
+            result: "ok",
+            counts: {
+              unreadCandidatesCount
+            }
+          });
           if (await markAborted("after_scan_unread", platform)) {
+            runStopReason = "aborted";
             return;
           }
           if (await markAborted("before_scan_recent", platform)) {
+            runStopReason = "aborted";
             return;
           }
           const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+          runLogger.logAction({
+            stage: "collect_threads",
+            action: "scan_recent_threads",
+            result: "ok",
+            counts: {
+              recentCandidatesCount: recent.length
+            }
+          });
           if (await markAborted("after_scan_recent", platform)) {
+            runStopReason = "aborted";
             return;
           }
 
@@ -412,6 +758,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
               merged.set(thread.platformThreadId, thread);
             }
           }
+          candidatesCount = merged.size;
+          runLogger.logDecision({
+            stage: "collect_threads",
+            decision: "Merged unread and recent candidates",
+            details: {
+              unreadCandidatesCount,
+              recentCandidatesCount: recent.length,
+              mergedCandidatesCount: candidatesCount
+            }
+          });
           const metricsProvider = adapter as unknown as {
             getLastCollectionMetrics?: () => Record<string, unknown> | null;
           };
@@ -429,15 +785,41 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
           for (const thread of merged.values()) {
             if (await markAborted("before_thread_sync", platform, thread)) {
+              runStopReason = "aborted";
               break;
             }
 
+            openedThreadsCount += 1;
+            runLogger.logAction({
+              stage: "open_thread",
+              action: "thread_sync_start",
+              result: "ok",
+              counts: {
+                openedThreadsCount
+              },
+              note: `${thread.displayName} (${thread.platformThreadId})`
+            });
+
             try {
-              const updated = await syncThread(platform, thread, settings.maxMessagesPerThread, job.jobId);
-              updatedThreads += updated;
-              platformUpdatedThreads += updated;
+              const syncResult = await syncThread(platform, thread, settings.maxMessagesPerThread, job.jobId, runLogger);
+              updatedThreads += syncResult.updatedThreads;
+              platformUpdatedThreads += syncResult.updatedThreads;
+              messagesParsedCount += syncResult.parsedMessages;
+              runLogger.logAction({
+                stage: "read_thread",
+                action: "thread_sync_complete",
+                result: "ok",
+                counts: {
+                  openedThreadsCount,
+                  messagesParsedCount,
+                  updatedThreads: platformUpdatedThreads
+                },
+                note: thread.displayName
+              });
             } catch (error) {
+              runError = error;
               if (await markAborted("thread_sync_error", platform, thread)) {
+                runStopReason = "aborted";
                 break;
               }
 
@@ -456,7 +838,34 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 message
               });
 
+              runLogger.logError({
+                component: "scan-queue",
+                stage: failureStage,
+                action: "thread_sync_fail",
+                error,
+                details: {
+                  reason: failureReason ?? "unknown",
+                  failureKind: resolvedFailureKind,
+                  threadDisplayName: thread.displayName,
+                  platformThreadId: thread.platformThreadId
+                }
+              });
+
+              if (adapterError) {
+                runLogger.copyFailureArtifacts({
+                  screenshotPath: resolveFailureArtifactPath({
+                    artifactName: adapterError.screenshotFile,
+                    type: "screenshot"
+                  }),
+                  domDumpPath: resolveFailureArtifactPath({
+                    artifactName: adapterError.domDumpFile,
+                    type: "dom"
+                  })
+                });
+              }
+
               if (shouldStopScanForFailureKind(failureKind)) {
+                runStopReason = failureReason ?? "auth_required";
                 await setPlatformStatus({
                   platform,
                   status: "NOT_CONNECTED",
@@ -520,6 +929,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             }
 
             if (await markAborted("after_thread_sync", platform, thread)) {
+              runStopReason = "aborted";
               break;
             }
 
@@ -527,10 +937,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
           }
 
           if (aborted) {
+            runStopReason = runStopReason ?? "aborted";
             return;
           }
 
           if (authInterrupted) {
+            runSuccess = false;
+            runStopReason = runStopReason ?? "auth_required";
             return;
           }
 
@@ -542,6 +955,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
               lastError: null
             }
           });
+
+          runStopReason =
+            typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : runStopReason;
+          runLogger.setStopReason(runStopReason ?? "scan_complete");
 
           await deps.auditLog({
             platform,
@@ -571,12 +988,28 @@ export function createScanQueue(deps: ScanQueueDeps) {
               threadFailureKinds
             }
           });
+          retryController.markSuccess(platform);
+          runError = undefined;
+          runSuccess = true;
         } catch (error) {
+          runError = error;
           if (await markAborted("platform_error", platform)) {
+            runStopReason = "aborted";
             return;
           }
 
           if (error instanceof AdapterFailure) {
+            runLogger.copyFailureArtifacts({
+              screenshotPath: resolveFailureArtifactPath({
+                artifactName: error.screenshotFile,
+                type: "screenshot"
+              }),
+              domDumpPath: resolveFailureArtifactPath({
+                artifactName: error.domDumpFile,
+                type: "dom"
+              })
+            });
+
             const failureKind = resolveAdapterFailureKind(error);
             const resolvedFailureKind = failureKind ?? "UNKNOWN";
             const message = extractFailureMessage(error, error.message);
@@ -589,6 +1022,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
               requestId,
               message
             });
+            runStopReason = failureReason ?? "scan_fail";
 
             if (shouldStopScanForFailureKind(failureKind)) {
               await setPlatformStatus({
@@ -621,64 +1055,69 @@ export function createScanQueue(deps: ScanQueueDeps) {
               return;
             }
 
-            await setPlatformStatus({
+            await markPlatformFailure({
               platform,
               status: "DEGRADED",
-              lastError: summarizedFailure
-            });
-
-            await deps.auditLog({
-              platform,
-              stage: "Scan",
+              failureReason,
+              summary: summarizedFailure,
+              requestId,
+              stage: failureStage,
+              message,
+              adapterError: error,
+              error,
               action: resolvedFailureKind === "SELECTOR_MISMATCH" ? "SELECTOR_FAIL" : "SCAN_FAIL",
-              status: "FAIL",
-              details: {
-                jobId: job.jobId,
-                requestId,
-                stage: failureStage,
-                platform,
-                message,
-                reason: failureReason ?? "unknown",
-                failureKind: resolvedFailureKind,
-                errorStack: error.stack,
-                innerError: extractInnerError(error),
-                stageReceipts: adapterErrorDetails(error).stageReceipts,
-                runtimeContext: adapterErrorDetails(error).runtimeContext
-              },
-              screenshotFile: error.screenshotFile,
-              domDumpFile: error.domDumpFile
+              failureKind: resolvedFailureKind,
+              runLogger
             });
           } else {
             const message = error instanceof Error ? error.message : String(error);
             const requestId = job.jobId;
+            const reason = classifyFailureReason({
+              message,
+              details: {}
+            });
+            runStopReason = reason;
             const summarizedFailure = summarizeScanFailure({
               stage: "collect_threads",
-              reason: "unknown",
+              reason,
               requestId,
               message
             });
-            await setPlatformStatus({
+            await markPlatformFailure({
               platform,
               status: "ERROR",
-              lastError: summarizedFailure
-            });
-
-            await deps.auditLog({
-              platform,
-              stage: "Scan",
+              failureReason: reason,
+              summary: summarizedFailure,
+              requestId,
+              stage: "collect_threads",
+              message,
+              error,
               action: "SCAN_FAIL",
-              status: "FAIL",
-              details: {
-                jobId: job.jobId,
-                requestId,
-                stage: "collect_threads",
-                platform,
-                message,
-                reason: "unknown",
-                errorStack: error instanceof Error ? error.stack : undefined
-              }
+              failureKind: "UNKNOWN",
+              runLogger
             });
           }
+        } finally {
+          traceAwareAdapter.setRunLogger?.(null);
+          activeRunLoggerByPlatform.delete(platform);
+          runLogger.mergeCounters({
+            candidatesToOpenCount: candidatesCount,
+            openedThreadsCount,
+            messagesParsedCount,
+            threadFailures,
+            threadFailureKinds,
+            updatedThreads: platformUpdatedThreads,
+            unreadCandidatesCount
+          });
+          if (runStopReason) {
+            runLogger.setStopReason(runStopReason);
+          }
+          const summary = runLogger.flush({
+            success: runSuccess,
+            stopReason: runStopReason,
+            error: runError
+          });
+          latestRunSummaryByPlatform.set(platform, summary);
         }
       });
 
@@ -708,8 +1147,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     platform: PlatformName,
     candidate: ThreadStub,
     maxMessages: number,
-    jobId: string
-  ): Promise<number> {
+    jobId: string,
+    runLogger?: RunLogger
+  ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const person =
       (await prisma.person.findFirst({ where: { displayName: candidate.displayName, platform } })) ??
       (await prisma.person.create({
@@ -755,6 +1195,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         platformThreadId: candidate.platformThreadId
       }
     });
+    runLogger?.logAction({
+      stage: "read_thread",
+      action: "thread_parse_start",
+      result: "ok",
+      note: `${candidate.displayName} (${candidate.platformThreadId})`
+    });
     const messages = await adapter.fetchThreadMessages(candidate, maxMessages);
     await deps.auditLog({
       platform,
@@ -769,6 +1215,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
         platformThreadId: candidate.platformThreadId,
         collectedCount: messages.length
       }
+    });
+    runLogger?.logAction({
+      stage: "read_thread",
+      action: "thread_parse_collected",
+      result: "ok",
+      counts: {
+        messageCount: messages.length
+      },
+      note: candidate.displayName
     });
 
     for (const message of messages) {
@@ -899,12 +1354,37 @@ export function createScanQueue(deps: ScanQueueDeps) {
         needsReply: risk.needsReply
       }
     });
+    runLogger?.logAction({
+      stage: "persist",
+      action: "thread_updated",
+      result: "ok",
+      counts: {
+        messageCount: latestMessages.length,
+        needsReply: risk.needsReply
+      },
+      note: candidate.displayName
+    });
 
-    return 1;
+    return {
+      updatedThreads: 1,
+      parsedMessages: messages.length
+    };
   }
 
   return {
     enqueueScan,
+    getCooldownStatus: (platform?: PlatformName) => retryController.getCooldown(platform),
+    isRunTraceEnabled: () => process.env.RUN_TRACE === "1" || process.env.RUN_TRACE?.toLowerCase() === "true",
+    getRunTraceBaseDir: () => runTraceBaseDir,
+    getLatestRunSummary: (platform?: PlatformName): RunTraceSummary | undefined => {
+      if (platform) {
+        return latestRunSummaryByPlatform.get(platform);
+      }
+      const first = allPlatforms
+        .map((name) => latestRunSummaryByPlatform.get(name))
+        .find((summary) => Boolean(summary));
+      return first;
+    },
     processNext,
     getQueueDepth,
     isScanning: () => processing,

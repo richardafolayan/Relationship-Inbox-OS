@@ -1,4 +1,6 @@
 import type { Locator, Page } from "playwright";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type {
   NormalizedMessage,
   PlatformAdapter,
@@ -18,6 +20,10 @@ import {
 } from "./utils.js";
 import type { AdapterFailureKind } from "./utils.js";
 import type { SessionManager } from "../services/session-manager";
+import {
+  executeTracedOperation,
+  type RunLogger
+} from "../services/run-logger.js";
 
 interface LinkedInAdapterDependencies {
   screenshotDir: string;
@@ -78,6 +84,21 @@ interface LinkedInScanRuntimeContext {
   overlayReason?: LinkedInScanFailureReason;
 }
 
+interface LinkedInRunCounters {
+  unreadViewActive: boolean;
+  threadsVisibleCount: number;
+  threadsCollectedTotal: number;
+  threadsWithUnreadBadgeCount: number;
+  candidatesToOpenCount: number;
+  openedThreadsCount: number;
+  messagesParsedCount: number;
+  scrollIterations: number;
+  noProgressStreak: number;
+  stopReason?: string;
+  recoveryAttemptsUsed: number;
+  reloadSuppressed: boolean;
+}
+
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
 const linkedInLoadingSpinnerSelector = [
   ".artdeco-loader",
@@ -86,6 +107,11 @@ const linkedInLoadingSpinnerSelector = [
   ".msg-conversations-container__loading",
   "[aria-label*='Loading']"
 ].join(", ");
+
+const linkedInRecoveryGuardWindowMs = 5 * 60 * 1000;
+const linkedInRecoveryGuardLimit = 3;
+let linkedInRecoveryWindowStartMs = 0;
+let linkedInRecoveryAttempts = 0;
 
 export type LinkedInUnreadRefreshReason =
   | "state_flip"
@@ -108,10 +134,12 @@ export type LinkedInScanFailureReason =
   | "evaluate_reference_error"
   | "timeout"
   | "thread_list_not_ready"
+  | "page_closed_mid_stage"
   | "login_required"
   | "checkpoint_required"
   | "rate_limited"
   | "linkedin_error_overlay"
+  | "repeated_reload_guard_triggered"
   | "unknown";
 
 export interface LinkedInScanStageReceipt {
@@ -128,7 +156,6 @@ export function isRetryableLinkedInCollectError(error: unknown): boolean {
   return (
     /execution context was destroyed/i.test(message) ||
     /detached/i.test(message) ||
-    /target page, context or browser has been closed/i.test(message) ||
     /navigation.*interrupted/i.test(message) ||
     /timeout/i.test(message)
   );
@@ -153,6 +180,9 @@ export function resolveLinkedInScanFailureReason(input: {
   }
   if (message.includes("referenceerror")) {
     return "evaluate_reference_error";
+  }
+  if (message.includes("target page, context or browser has been closed")) {
+    return "page_closed_mid_stage";
   }
   if (message.includes("timeouterror") || message.includes("timeout")) {
     return "timeout";
@@ -226,6 +256,16 @@ export async function waitForLinkedInUnreadRefresh(input: {
 }
 
 export async function activateLinkedInUnreadFilter(page: Page): Promise<LinkedInUnreadFilterActivationResult> {
+  return activateLinkedInUnreadFilterWithHooks(page);
+}
+
+async function activateLinkedInUnreadFilterWithHooks(
+  page: Page,
+  hooks?: {
+    clickUnreadPill?: () => Promise<boolean>;
+    waitForTimeout?: (ms: number) => Promise<void>;
+  }
+): Promise<LinkedInUnreadFilterActivationResult> {
   async function readPillState(): Promise<{
     present: boolean;
     active: boolean;
@@ -264,12 +304,14 @@ export async function activateLinkedInUnreadFilter(page: Page): Promise<LinkedIn
       };
     }
 
-    const clicked = await page
-      .locator(linkedInUnreadPillSelector)
-      .first()
-      .click({ timeout: 5000 })
-      .then(() => true)
-      .catch(() => false);
+    const clicked = hooks?.clickUnreadPill
+      ? await hooks.clickUnreadPill()
+      : await page
+          .locator(linkedInUnreadPillSelector)
+          .first()
+          .click({ timeout: 5000 })
+          .then(() => true)
+          .catch(() => false);
     if (!clicked) {
       continue;
     }
@@ -297,7 +339,11 @@ export async function activateLinkedInUnreadFilter(page: Page): Promise<LinkedIn
             sawSpinner = true;
             break;
           }
-          await page.waitForTimeout(100);
+          if (hooks?.waitForTimeout) {
+            await hooks.waitForTimeout(100);
+          } else {
+            await page.waitForTimeout(100);
+          }
         }
 
         if (!sawSpinner) {
@@ -310,12 +356,16 @@ export async function activateLinkedInUnreadFilter(page: Page): Promise<LinkedIn
           if (count === 0) {
             return true;
           }
-          await page.waitForTimeout(100);
+          if (hooks?.waitForTimeout) {
+            await hooks.waitForTimeout(100);
+          } else {
+            await page.waitForTimeout(100);
+          }
         }
 
         return false;
       },
-      waitForTimeout: (ms) => page.waitForTimeout(ms)
+      waitForTimeout: (ms) => (hooks?.waitForTimeout ? hooks.waitForTimeout(ms) : page.waitForTimeout(ms))
     });
 
     const finalState = await readPillState();
@@ -335,12 +385,40 @@ export async function activateLinkedInUnreadFilter(page: Page): Promise<LinkedIn
   };
 }
 
+function consumeLinkedInRecoveryBudget(nowMs = Date.now()): {
+  allowed: boolean;
+  retryAfterSeconds: number;
+  attemptsInWindow: number;
+} {
+  if (linkedInRecoveryWindowStartMs <= 0 || nowMs - linkedInRecoveryWindowStartMs >= linkedInRecoveryGuardWindowMs) {
+    linkedInRecoveryWindowStartMs = nowMs;
+    linkedInRecoveryAttempts = 0;
+  }
+
+  if (linkedInRecoveryAttempts >= linkedInRecoveryGuardLimit) {
+    const retryAfterMs = Math.max(1_000, linkedInRecoveryGuardWindowMs - (nowMs - linkedInRecoveryWindowStartMs));
+    return {
+      allowed: false,
+      retryAfterSeconds: Math.ceil(retryAfterMs / 1_000),
+      attemptsInWindow: linkedInRecoveryAttempts
+    };
+  }
+
+  linkedInRecoveryAttempts += 1;
+  return {
+    allowed: true,
+    retryAfterSeconds: 0,
+    attemptsInWindow: linkedInRecoveryAttempts
+  };
+}
+
 export type LinkedInCollectionStopReason =
   | "max_threads"
-  | "no_growth"
-  | "trailing_repeat"
-  | "bottom_reached"
-  | "iteration_cap";
+  | "end_of_list_no_progress"
+  | "end_of_list_reached"
+  | "max_iterations"
+  | "max_duration"
+  | "zero_threads_found";
 
 export function updateLinkedInCollectionStability(input: {
   previousCount: number;
@@ -401,13 +479,13 @@ export function resolveLinkedInCollectionStopReason(input: {
     return "max_threads";
   }
   if (input.noGrowthIterations >= input.stableIterations) {
-    return "no_growth";
+    return "end_of_list_no_progress";
   }
   if (input.trailingRepeatIterations >= input.stableIterations) {
-    return "trailing_repeat";
+    return "end_of_list_reached";
   }
   if (!input.didScroll && input.reachedBottom) {
-    return "bottom_reached";
+    return "end_of_list_reached";
   }
   return null;
 }
@@ -433,42 +511,570 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private static readonly inboxNavigationTimeoutMs = 10_000;
   private static readonly inboxReadyTimeoutMs = 10_000;
+  private runLogger: RunLogger | null = null;
+  private activeStage: string | null = null;
+  private readonly pageTraceIds = new WeakMap<Page, string>();
+  private pageTraceSequence = 0;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
+
+  setRunLogger(logger: RunLogger | null): void {
+    this.runLogger = logger;
+  }
+
+  private resolveActiveStage(stage?: string | null): string | null {
+    return stage ?? this.activeStage;
+  }
+
+  private getPageTraceId(page: Page): string {
+    const existing = this.pageTraceIds.get(page);
+    if (existing) {
+      return existing;
+    }
+    this.pageTraceSequence += 1;
+    const created = `linkedin-page-${this.pageTraceSequence}`;
+    this.pageTraceIds.set(page, created);
+    return created;
+  }
+
+  private logTraceEvent(input: {
+    level?: "debug" | "info" | "warn" | "error";
+    action: string;
+    stage?: string | null;
+    details?: Record<string, unknown>;
+    url?: string;
+    page?: Page;
+    attempt?: number;
+    elapsedMs?: number;
+  }): void {
+    if (!this.runLogger?.enabled) {
+      return;
+    }
+    this.runLogger.logEvent({
+      level: input.level ?? "info",
+      component: "linkedin-adapter",
+      stage: this.resolveActiveStage(input.stage),
+      action: input.action,
+      details: input.details ?? {},
+      url: input.url,
+      pageId: input.page ? this.getPageTraceId(input.page) : undefined,
+      attempt: input.attempt,
+      elapsedMs: input.elapsedMs
+    });
+  }
+
+  private logTraceDecision(input: {
+    decision: string;
+    details?: Record<string, unknown>;
+    stage?: string | null;
+    level?: "debug" | "info" | "warn" | "error";
+    attempt?: number;
+  }): void {
+    if (!this.runLogger?.enabled) {
+      return;
+    }
+    this.runLogger.logDecision({
+      stage: this.resolveActiveStage(input.stage),
+      decision: input.decision,
+      details: input.details,
+      level: input.level,
+      attempt: input.attempt
+    });
+  }
+
+  private async runTracedPageAction<T>(input: {
+    page: Page;
+    action: string;
+    stage?: string | null;
+    selector?: string;
+    url?: string;
+    note?: string;
+    attempt?: number;
+    details?: Record<string, unknown>;
+    counts?: Record<string, unknown>;
+    run: () => Promise<T>;
+  }): Promise<T> {
+    if (!this.runLogger?.enabled) {
+      return input.run();
+    }
+
+    return executeTracedOperation({
+      logger: this.runLogger,
+      component: "linkedin-adapter",
+      stage: this.resolveActiveStage(input.stage),
+      action: input.action,
+      selector: input.selector,
+      url: input.url,
+      note: input.note,
+      counts: input.counts,
+      attempt: input.attempt,
+      details: {
+        pageId: this.getPageTraceId(input.page),
+        ...(input.details ?? {})
+      },
+      run: input.run
+    });
+  }
+
+  private async tracedClick(
+    page: Page,
+    selector: string,
+    input?: {
+      stage?: string | null;
+      timeoutMs?: number;
+      note?: string;
+      attempt?: number;
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "click",
+      selector,
+      note: input?.note,
+      attempt: input?.attempt,
+      run: async () => {
+        await page.locator(selector).first().click({
+          timeout: input?.timeoutMs
+        });
+      }
+    });
+  }
+
+  private async tracedWaitForVisible(
+    page: Page,
+    selector: string,
+    timeoutMs: number,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "wait_for_visible",
+      selector,
+      note: input?.note,
+      attempt: input?.attempt,
+      run: async () => {
+        await page.waitForSelector(selector, {
+          state: "visible",
+          timeout: timeoutMs
+        });
+      }
+    });
+  }
+
+  private async tracedLocatorCount(
+    page: Page,
+    selector: string,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+    }
+  ): Promise<number> {
+    return this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "locator_count",
+      selector,
+      note: input?.note,
+      attempt: input?.attempt,
+      run: async () => page.locator(selector).count()
+    });
+  }
+
+  private async tracedScrollContainer(
+    page: Page,
+    containerSelector: string,
+    delta: number,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "scroll_container",
+      selector: containerSelector,
+      note: input?.note,
+      attempt: input?.attempt,
+      details: {
+        delta
+      },
+      run: async () => {
+        const target = page.locator(containerSelector).first();
+        await target.hover({ force: true }).catch(() => undefined);
+        await page.mouse.wheel(0, delta);
+      }
+    });
+  }
+
+  private async tracedScreenshot(
+    page: Page,
+    filePath: string,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "screenshot",
+      note: input?.note,
+      attempt: input?.attempt,
+      details: {
+        filePath
+      },
+      run: async () => {
+        await page.screenshot({
+          path: filePath,
+          fullPage: true
+        });
+      }
+    });
+  }
+
+  private async tracedDomDump(
+    page: Page,
+    filePath: string,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "dom_dump",
+      note: input?.note,
+      attempt: input?.attempt,
+      details: {
+        filePath
+      },
+      run: async () => {
+        const html = await page.content();
+        await writeFile(filePath, html, "utf8");
+      }
+    });
+  }
+
+  private async tracedGoto(
+    page: Page,
+    url: string,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+      timeoutMs?: number;
+      waitUntil?: "commit" | "domcontentloaded" | "load" | "networkidle";
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "goto",
+      url,
+      note: input?.note,
+      attempt: input?.attempt,
+      run: async () => {
+        await page.goto(url, {
+          waitUntil: input?.waitUntil ?? "domcontentloaded",
+          timeout: input?.timeoutMs
+        });
+      }
+    });
+  }
+
+  private async tracedReload(
+    page: Page,
+    input?: {
+      stage?: string | null;
+      note?: string;
+      attempt?: number;
+      timeoutMs?: number;
+      waitUntil?: "commit" | "domcontentloaded" | "load" | "networkidle";
+    }
+  ): Promise<void> {
+    await this.runTracedPageAction({
+      page,
+      stage: input?.stage,
+      action: "reload",
+      note: input?.note,
+      attempt: input?.attempt,
+      url: page.url(),
+      run: async () => {
+        await page.reload({
+          waitUntil: input?.waitUntil ?? "domcontentloaded",
+          timeout: input?.timeoutMs
+        });
+      }
+    });
+  }
+
+  private async startRunTracing(page: Page): Promise<() => Promise<void>> {
+    const cleanup: Array<() => void> = [];
+    let tracingStarted = false;
+
+    if (this.runLogger?.enabled) {
+      const pageId = this.getPageTraceId(page);
+      const onConsole = (msg: any): void => {
+        this.logTraceEvent({
+          level: "debug",
+          stage: "browser_events",
+          action: "browser_console",
+          details: {
+            type: msg.type(),
+            text: msg.text()
+          },
+          page
+        });
+      };
+      const onPageError = (error: any): void => {
+        this.logTraceEvent({
+          level: "error",
+          stage: "browser_events",
+          action: "pageerror",
+          details: {
+            message: error.message,
+            stack: error.stack
+          },
+          page
+        });
+      };
+      const onRequestFailed = (request: any): void => {
+        this.logTraceEvent({
+          level: "warn",
+          stage: "browser_events",
+          action: "requestfailed",
+          details: {
+            url: request.url(),
+            method: request.method(),
+            failure: request.failure()?.errorText ?? "unknown"
+          },
+          url: request.url(),
+          page
+        });
+      };
+      const onResponse = (response: any): void => {
+        const status = response.status();
+        if (status < 400) {
+          return;
+        }
+        this.logTraceEvent({
+          level: "warn",
+          stage: "browser_events",
+          action: "http_error",
+          details: {
+            url: response.url(),
+            status
+          },
+          url: response.url(),
+          page
+        });
+      };
+      const onFrameNavigated = (frame: any): void => {
+        if (frame !== page.mainFrame()) {
+          return;
+        }
+        this.logTraceEvent({
+          level: "info",
+          stage: "browser_events",
+          action: "navigated",
+          details: {
+            url: frame.url(),
+            pageId
+          },
+          url: frame.url(),
+          page
+        });
+      };
+      const onClose = (): void => {
+        this.logTraceEvent({
+          level: "warn",
+          stage: "browser_events",
+          action: "page_closed",
+          details: {
+            pageId
+          }
+        });
+      };
+
+      page.on("console", onConsole);
+      page.on("pageerror", onPageError);
+      page.on("requestfailed", onRequestFailed);
+      page.on("response", onResponse);
+      page.on("framenavigated", onFrameNavigated);
+      page.on("close", onClose);
+      cleanup.push(() => page.off("console", onConsole));
+      cleanup.push(() => page.off("pageerror", onPageError));
+      cleanup.push(() => page.off("requestfailed", onRequestFailed));
+      cleanup.push(() => page.off("response", onResponse));
+      cleanup.push(() => page.off("framenavigated", onFrameNavigated));
+      cleanup.push(() => page.off("close", onClose));
+
+      try {
+        await page.context().tracing.start({
+          screenshots: true,
+          snapshots: true,
+          sources: true
+        });
+        tracingStarted = true;
+        this.logTraceEvent({
+          level: "info",
+          stage: "browser_events",
+          action: "playwright_trace_started",
+          details: {
+            pageId
+          },
+          page
+        });
+      } catch (error) {
+        this.runLogger.logError({
+          component: "linkedin-adapter",
+          stage: this.resolveActiveStage("browser_events"),
+          action: "playwright_trace_start_failed",
+          error
+        });
+      }
+    }
+
+    return async () => {
+      for (const dispose of cleanup) {
+        dispose();
+      }
+      if (!this.runLogger?.enabled || !tracingStarted || !this.runLogger.runDir) {
+        return;
+      }
+
+      const tracePath = join(this.runLogger.runDir, "playwright-trace.zip");
+      try {
+        await page.context().tracing.stop({
+          path: tracePath
+        });
+        this.runLogger.attachArtifact({
+          playwrightTracePath: tracePath
+        });
+        this.logTraceEvent({
+          stage: "browser_events",
+          action: "playwright_trace_saved",
+          details: {
+            tracePath
+          },
+          page
+        });
+      } catch (error) {
+        this.runLogger.logError({
+          component: "linkedin-adapter",
+          stage: this.resolveActiveStage("browser_events"),
+          action: "playwright_trace_stop_failed",
+          error
+        });
+      }
+    };
+  }
+
+  private async captureRunFailureArtifacts(page: Page): Promise<void> {
+    if (!this.runLogger?.enabled || !this.runLogger.runDir || page.isClosed()) {
+      return;
+    }
+    const failureScreenshotPath = join(this.runLogger.runDir, "failure.png");
+    const failureDomPath = join(this.runLogger.runDir, "dom.html");
+
+    try {
+      await this.tracedScreenshot(page, failureScreenshotPath, {
+        stage: this.resolveActiveStage("failure_artifacts"),
+        note: "failure_capture"
+      });
+      this.runLogger.attachArtifact({
+        failureScreenshotPath
+      });
+    } catch {
+      // best effort only
+    }
+
+    try {
+      await this.tracedDomDump(page, failureDomPath, {
+        stage: this.resolveActiveStage("failure_artifacts"),
+        note: "failure_capture"
+      });
+      this.runLogger.attachArtifact({
+        failureDomDumpPath: failureDomPath
+      });
+    } catch {
+      // best effort only
+    }
+  }
+
+  private async runWithPlatformLease<T>(work: () => Promise<T>): Promise<T> {
+    const manager = this.deps.sessionManager as SessionManager & {
+      withPlatformLease?: (input: { platform: "LINKEDIN"; personKey?: string }, work: () => Promise<T>) => Promise<T>;
+    };
+    if (typeof manager.withPlatformLease !== "function") {
+      return work();
+    }
+    return manager.withPlatformLease({
+      platform: this.platform,
+      personKey: this.deps.personKey ?? "default"
+    }, work);
+  }
 
   private async getPage(): Promise<Page> {
     return this.deps.sessionManager.getManagedPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default",
       args: ["--disable-blink-features=AutomationControlled"],
+      runLogger: this.runLogger ?? undefined
     });
   }
 
   private async navigateInbox(selectors: SelectorRegistry): Promise<Page> {
     const navigate = async (target: Page): Promise<void> => {
       await target.bringToFront();
-      await target.goto(selectors.inbox_url, {
+      await this.tracedGoto(target, selectors.inbox_url, {
+        stage: "navigate",
+        note: "navigate_inbox",
         waitUntil: "commit",
-        timeout: LinkedInAdapter.inboxNavigationTimeoutMs
+        timeoutMs: LinkedInAdapter.inboxNavigationTimeoutMs
       });
-      await target.waitForLoadState("domcontentloaded", {
-        timeout: 4_000
-      }).catch(() => undefined);
-      await target.waitForTimeout(350);
+      await this.runTracedPageAction({
+        page: target,
+        stage: "navigate",
+        action: "wait_for_domcontentloaded",
+        note: "post_goto_domcontentloaded",
+        run: async () => {
+          await target.waitForLoadState("domcontentloaded", {
+            timeout: 4_000
+          }).catch(() => undefined);
+        }
+      });
+      await this.runTracedPageAction({
+        page: target,
+        stage: "navigate",
+        action: "wait_for_timeout",
+        note: "post_navigation_settle",
+        details: {
+          delayMs: 350
+        },
+        run: async () => {
+          await target.waitForTimeout(350);
+        }
+      });
     };
 
     const page = await retryWithBackoff({
       attempts: 2,
       baseDelayMs: 300,
       isRetryable: (error) => isTransientPageError(error),
-      run: async (attempt) => {
-        if (attempt > 1) {
-          await this.deps.sessionManager.closePlatformPage({
-            platform: this.platform,
-            personKey: this.deps.personKey ?? "default"
-          });
-        }
-
+      run: async () => {
         const target = await this.getPage();
         await navigate(target);
         return target;
@@ -545,15 +1151,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       return { authRequired: true, url, source: "url" };
     }
 
-    const hasLoginDom = await page.evaluate(() => {
-      const hasUsername = document.querySelector("#username") !== null;
-      const hasPassword = document.querySelector("#password") !== null;
-      const hasLoginForm =
-        document.querySelector("form[action*='login-submit']") !== null ||
-        document.querySelector("form[data-id='sign-in-form']") !== null ||
-        document.querySelector("[data-id='sign-in-form']") !== null;
-      return hasUsername || hasPassword || hasLoginForm;
-    });
+    const hasUsername = (await page.locator("#username").count().catch(() => 0)) > 0;
+    const hasPassword = (await page.locator("#password").count().catch(() => 0)) > 0;
+    const hasLoginForm =
+      (await page.locator("form[action*='login-submit']").count().catch(() => 0)) > 0 ||
+      (await page.locator("form[data-id='sign-in-form']").count().catch(() => 0)) > 0 ||
+      (await page.locator("[data-id='sign-in-form']").count().catch(() => 0)) > 0;
+    const hasLoginDom = hasUsername || hasPassword || hasLoginForm;
 
     return {
       authRequired: hasLoginDom,
@@ -651,9 +1255,18 @@ export class LinkedInAdapter implements PlatformAdapter {
     let stableIterations = 0;
     let previousFingerprint = "";
     while (Date.now() < deadline) {
-      const threadItemCount = await page.locator(selectors.thread_item).count().catch(() => 0);
-      const unreadBadgeCount = await page.locator(selectors.unread_badge).count().catch(() => 0);
-      const spinnerCount = await page.locator(linkedInLoadingSpinnerSelector).count().catch(() => 0);
+      const threadItemCount = await this.tracedLocatorCount(page, selectors.thread_item, {
+        stage: "unread_filter",
+        note: "settle_thread_count"
+      }).catch(() => 0);
+      const unreadBadgeCount = await this.tracedLocatorCount(page, selectors.unread_badge, {
+        stage: "unread_filter",
+        note: "settle_unread_badge_count"
+      }).catch(() => 0);
+      const spinnerCount = await this.tracedLocatorCount(page, linkedInLoadingSpinnerSelector, {
+        stage: "unread_filter",
+        note: "settle_spinner_count"
+      }).catch(() => 0);
       const firstRow = page.locator(selectors.thread_item).first();
       const firstRowText =
         (await firstRow.count().catch(() => 0)) > 0
@@ -677,29 +1290,146 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       previousFingerprint = fingerprint;
-      await page.waitForTimeout(140);
+      await this.runTracedPageAction({
+        page,
+        stage: "unread_filter",
+        action: "wait_for_timeout",
+        note: "settle_poll_wait",
+        details: {
+          delayMs: 140
+        },
+        run: async () => {
+          await page.waitForTimeout(140);
+        }
+      });
     }
   }
 
-  private async captureThreadRowsSnapshot(
+  async ensureUnreadFilterActive(page: Page, selectors: SelectorRegistry): Promise<LinkedInUnreadFilterActivationResult> {
+    const result = await activateLinkedInUnreadFilterWithHooks(page, {
+      clickUnreadPill: async () => {
+        return this.tracedClick(page, linkedInUnreadPillSelector, {
+          stage: "unread_filter",
+          timeoutMs: 5_000,
+          note: "activate_unread_pill"
+        })
+          .then(() => true)
+          .catch(() => false);
+      },
+      waitForTimeout: async (ms: number) => {
+        await this.runTracedPageAction({
+          page,
+          stage: "unread_filter",
+          action: "wait_for_timeout",
+          note: "unread_filter_refresh_wait",
+          details: {
+            delayMs: ms
+          },
+          run: async () => {
+            await page.waitForTimeout(ms);
+          }
+        });
+      }
+    });
+    this.logTraceDecision({
+      stage: "unread_filter",
+      decision: "Unread filter activation result",
+      details: { ...result }
+    });
+    await this.waitForUnreadListSettle(page, selectors);
+    return result;
+  }
+
+  async waitForThreadListReadyOrClassified(
+    page: Page,
+    selectors: SelectorRegistry,
+    timeoutMs = 8_000
+  ): Promise<{ ready: boolean; empty: boolean; reason?: LinkedInScanFailureReason | LinkedInCollectionStopReason }> {
+    const deadline = Date.now() + Math.max(1_000, timeoutMs);
+    while (Date.now() < deadline) {
+      if (page.isClosed()) {
+        throw new Error("Target page, context or browser has been closed");
+      }
+
+      const overlayReason = await this.detectLinkedInOverlayReason(page);
+      if (overlayReason) {
+        return {
+          ready: false,
+          empty: false,
+          reason: overlayReason
+        };
+      }
+
+      const listLocator = page.locator(selectors.thread_list).first();
+      const listVisible = await listLocator.isVisible({ timeout: 0 }).catch(() => false);
+      const threadCount = await this.tracedLocatorCount(page, selectors.thread_item, {
+        stage: "collect_threads",
+        note: "read_thread_item_count"
+      }).catch(() => 0);
+      if (listVisible || threadCount > 0) {
+        return {
+          ready: true,
+          empty: false
+        };
+      }
+
+      const emptyStateCount = await this.tracedLocatorCount(
+        page,
+        ".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]",
+        {
+          stage: "collect_threads",
+          note: "read_empty_state_count"
+        }
+      ).catch(() => 0);
+      if (emptyStateCount > 0) {
+        return {
+          ready: true,
+          empty: true,
+          reason: "zero_threads_found"
+        };
+      }
+
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "wait_for_timeout",
+        note: "thread_list_poll_wait",
+        details: {
+          delayMs: 140
+        },
+        run: async () => {
+          await page.waitForTimeout(140);
+        }
+      });
+    }
+
+    throw new Error("Timed out waiting for LinkedIn thread list container to become ready.");
+  }
+
+  async collectThreadCandidates(
     page: Page,
     selectors: SelectorRegistry
-  ): Promise<Omit<LinkedInThreadCollectionIteration, "didScroll" | "reachedBottom">> {
+  ): Promise<{
+    rows: LinkedInThreadSnapshot[];
+    trailingKey: string | null;
+    threadListCount: number;
+    threadItemCount: number;
+    spinnerCount: number;
+    visibleSetHash: string;
+    bottomKey: string | null;
+  }> {
     const threadListLocator = page.locator(selectors.thread_list).first();
     const threadListCount = await threadListLocator.count().catch(() => 0);
-
     const rowRoots = page.locator(".msg-conversation-listitem");
-    const rowRootCount = await rowRoots.count().catch(() => 0);
-    const selectorItems = page.locator(selectors.thread_item);
-    const selectorItemCount = rowRootCount > 0 ? rowRootCount : await selectorItems.count().catch(() => 0);
-
+    const selectorItemCount = await rowRoots.count().catch(() => 0);
     const rows: LinkedInThreadSnapshot[] = [];
+
     const readText = async (locator: Locator): Promise<string | null> => {
       const first = locator.first();
       if ((await first.count().catch(() => 0)) <= 0) {
         return null;
       }
-      return first.textContent({ timeout: 0 }).catch(() => null);
+      return first.innerText({ timeout: 0 }).catch(() => null);
     };
     const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
       const first = locator.first();
@@ -710,25 +1440,14 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
 
     for (let index = 0; index < selectorItemCount; index += 1) {
-      const selectorItem = selectorItems.nth(index);
-      const rootCandidate =
-        rowRootCount > 0
-          ? rowRoots.nth(index)
-          : selectorItem
-              .locator(
-                "xpath=ancestor-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-conversation-listitem ')][1]"
-              )
-              .first();
-      const rootExists = (await rootCandidate.count().catch(() => 0)) > 0;
-      const scope = rootExists ? rootCandidate : selectorItem;
-
+      const scope = rowRoots.nth(index);
       const clickTarget = scope.locator(".msg-conversation-listitem__link").first();
       const clickTargetExists = (await clickTarget.count().catch(() => 0)) > 0;
       const linkContainer = clickTargetExists ? clickTarget : scope;
 
       const hrefRaw =
-        (await readAttr(linkContainer.locator("a[href*='/messaging/']"), "href")) ??
         (await readAttr(linkContainer, "href")) ??
+        (await readAttr(linkContainer.locator("a[href*='/messaging/']"), "href")) ??
         "";
       let href = hrefRaw.trim();
       if (href) {
@@ -744,19 +1463,15 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(scope.locator(".msg-conversation-listitem__participant-names"))) ??
           (await readText(scope.locator("h3 span.truncate"))) ??
           (await readText(scope.locator("h3"))) ??
-          (await readAttr(scope.locator("span[title]"), "title")) ??
-          (await readAttr(scope, "aria-label")) ??
           ""
       );
-
       const preview = cleanText(
         (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
-          (await readText(scope.locator("p"))) ??
+          (await readText(scope.locator("p.msg-conversation-card__message-snippet"))) ??
           ""
       ).slice(0, 220);
-
       const lastMessageAt = cleanText(
-        (await readAttr(scope.locator("time"), "datetime")) ??
+        (await readText(scope.locator("time.msg-conversation-listitem__time-stamp"))) ??
           (await readText(scope.locator("time"))) ??
           ""
       );
@@ -766,7 +1481,6 @@ export class LinkedInAdapter implements PlatformAdapter {
       const unreadText = cleanText(
         (await readText(unreadContainer.locator(".notification-badge__count"))) ??
           (await readText(unreadContainer)) ??
-          (await readText(scope.locator(selectors.unread_badge))) ??
           ""
       );
       const unreadMatch = unreadText.match(/\d+/);
@@ -775,23 +1489,19 @@ export class LinkedInAdapter implements PlatformAdapter {
       const urnToken =
         (await readAttr(scope, "data-conversation-urn")) ??
         (await readAttr(scope, "data-urn")) ??
+        (await readAttr(scope, "data-event-urn")) ??
         (await readAttr(scope, "data-conversation-id")) ??
+        (await readAttr(scope, "data-id")) ??
+        (await readAttr(scope, "id")) ??
         "";
-      const dataIdToken = (await readAttr(scope, "data-id")) ?? "";
-      const safeDataIdToken = /^ember/i.test(dataIdToken) ? "" : dataIdToken;
-      const hrefToken =
-        href.match(/\/messaging\/thread\/([^/?#]+)/i)?.[1] ??
-        href.match(/[?&]conversationid=([^&#]+)/i)?.[1] ??
-        "";
-      const fallbackKey = `linkedin-fallback:${displayName.toLowerCase()}|${preview.toLowerCase()}|${lastMessageAt.toLowerCase()}`;
+      const hrefToken = this.resolveThreadUrlToken(href);
+      const fallbackKey = `linkedin-fallback:${displayName.toLowerCase()}|${preview.toLowerCase()}|${unreadCount}`;
       const stableKey =
+        (hrefToken && `linkedin-href:${hrefToken}`) ||
         (urnToken && `linkedin-urn:${urnToken.toLowerCase()}`) ||
-        (hrefToken && `linkedin-href:${hrefToken.toLowerCase()}`) ||
-        (safeDataIdToken && `linkedin-id:${safeDataIdToken.toLowerCase()}`) ||
-        fallbackKey ||
-        `linkedin-index:${index}`;
-
+        fallbackKey;
       const avatarUrl = (await readAttr(scope.locator("img"), "src")) ?? undefined;
+
       rows.push({
         stableKey,
         displayName: displayName || `LinkedIn Thread ${index + 1}`,
@@ -803,69 +1513,216 @@ export class LinkedInAdapter implements PlatformAdapter {
       });
     }
 
+    const visibleSetHash = rows.map((row) => row.stableKey).join("|");
+    const bottomKey = rows.at(-1)?.stableKey ?? null;
     return {
       rows,
-      trailingKey: rows.at(-1)?.stableKey ?? null,
+      trailingKey: bottomKey,
       threadListCount,
       threadItemCount: selectorItemCount,
-      spinnerCount: await page.locator(linkedInLoadingSpinnerSelector).count().catch(() => 0)
+      spinnerCount: await page.locator(linkedInLoadingSpinnerSelector).count().catch(() => 0),
+      visibleSetHash,
+      bottomKey
     };
   }
 
-  private async scrollThreadListContainer(
+  async captureThreadRowsSnapshot(
     page: Page,
     selectors: SelectorRegistry
-  ): Promise<{ didScroll: boolean; reachedBottom: boolean }> {
-    const linkTargets = page.locator(".msg-conversation-listitem .msg-conversation-listitem__link");
-    const linkTargetCount = await linkTargets.count().catch(() => 0);
-    if (linkTargetCount > 0) {
-      const target = linkTargets.nth(linkTargetCount - 1);
-      await target.scrollIntoViewIfNeeded().catch(() => undefined);
-      await target.hover({ force: true }).catch(() => undefined);
-      await page.mouse.wheel(0, 960).catch(() => undefined);
-      return { didScroll: true, reachedBottom: false };
-    }
-
-    const rowTargets = page.locator(".msg-conversation-listitem");
-    const rowTargetCount = await rowTargets.count().catch(() => 0);
-    if (rowTargetCount > 0) {
-      const target = rowTargets.nth(rowTargetCount - 1);
-      await target.scrollIntoViewIfNeeded().catch(() => undefined);
-      await target.hover({ force: true }).catch(() => undefined);
-      await page.mouse.wheel(0, 960).catch(() => undefined);
-      return { didScroll: true, reachedBottom: false };
-    }
-
-    const listTarget = page.locator(selectors.thread_list).first();
-    const listTargetCount = await listTarget.count().catch(() => 0);
-    if (listTargetCount > 0) {
-      await listTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-      await listTarget.hover({ force: true }).catch(() => undefined);
-      await page.mouse.wheel(0, 960).catch(() => undefined);
-      return { didScroll: true, reachedBottom: false };
-    }
-
-    return { didScroll: false, reachedBottom: true };
+  ): Promise<{
+    rows: LinkedInThreadSnapshot[];
+    trailingKey: string | null;
+    threadListCount: number;
+    threadItemCount: number;
+    spinnerCount: number;
+    visibleSetHash: string;
+    bottomKey: string | null;
+  }> {
+    return this.collectThreadCandidates(page, selectors);
   }
 
-  private async collectThreadRowsWithScroll(
+  async deepScrollThreadList(
+    page: Page,
+    selectors: SelectorRegistry,
+    state: { bottomKey: string | null; visibleSetHash: string }
+  ): Promise<{ didScroll: boolean; reachedBottom: boolean; moved: boolean }> {
+    const listTarget = page.locator(selectors.thread_list).first();
+    const listTargetCount = await listTarget.count().catch(() => 0);
+    if (listTargetCount <= 0) {
+      return { didScroll: false, reachedBottom: true, moved: false };
+    }
+
+    const rowRoots = page.locator(".msg-conversation-listitem");
+    const beforeCount = await rowRoots.count().catch(() => 0);
+    if (beforeCount > 0) {
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "scroll_into_view",
+        note: "row_tail_scroll",
+        run: async () => {
+          await rowRoots
+            .nth(beforeCount - 1)
+            .scrollIntoViewIfNeeded()
+            .catch(() => undefined);
+        }
+      });
+    } else {
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "scroll_into_view",
+        selector: selectors.thread_list,
+        note: "container_scroll",
+        run: async () => {
+          await listTarget.scrollIntoViewIfNeeded().catch(() => undefined);
+        }
+      });
+    }
+
+    await this.tracedScrollContainer(page, selectors.thread_list, 840, {
+      stage: "collect_threads",
+      note: "primary_scroll"
+    });
+    await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "wait_for_timeout",
+      note: "after_primary_scroll",
+      details: {
+        delayMs: Math.max(80, this.deps.scanScrollWaitMs)
+      },
+      run: async () => {
+        await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
+      }
+    });
+
+    let after = await this.collectThreadCandidates(page, selectors).catch(() => null);
+    let moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+    if (!moved) {
+      await this.tracedScrollContainer(page, selectors.thread_list, 840, {
+        stage: "collect_threads",
+        note: "secondary_scroll"
+      });
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "wait_for_timeout",
+        note: "after_secondary_scroll",
+        details: {
+          delayMs: Math.max(80, this.deps.scanScrollWaitMs)
+        },
+        run: async () => {
+          await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
+        }
+      });
+      after = await this.collectThreadCandidates(page, selectors).catch(() => null);
+      moved = Boolean(after && after.bottomKey && after.bottomKey !== state.bottomKey);
+    }
+
+    return {
+      didScroll: true,
+      reachedBottom: !moved,
+      moved
+    };
+  }
+
+  async collectThreadRowsWithScroll(
     page: Page,
     selectors: SelectorRegistry,
     maxThreads: number
-  ): Promise<{ rows: ThreadStub[]; iterations: number; stopReason: LinkedInCollectionStopReason }> {
+  ): Promise<{
+    rows: ThreadStub[];
+    iterations: number;
+    stopReason: LinkedInCollectionStopReason;
+    noProgressStreak: number;
+    bottomRepeatStreak: number;
+    scrollNoMoveStreak: number;
+    scrollIterations: number;
+  }> {
+    const readiness = await this.waitForThreadListReadyOrClassified(page, selectors, 8_000);
+    if (!readiness.ready) {
+      if (readiness.reason === "login_required" || readiness.reason === "checkpoint_required") {
+        throw new AdapterFailure("LinkedIn auth required in personal profile. Open browser and sign in.", {
+          kind: "AUTH_REQUIRED",
+          stage: "collect_threads",
+          platform: this.platform,
+          details: {
+            reason: readiness.reason,
+            url: page.url()
+          }
+        });
+      }
+      if (readiness.reason === "rate_limited" || readiness.reason === "linkedin_error_overlay") {
+        throw new AdapterFailure("LinkedIn unread thread list is blocked by an overlay.", {
+          kind: "SELECTOR_MISMATCH",
+          stage: "collect_threads",
+          platform: this.platform,
+          details: {
+            reason: readiness.reason,
+            url: page.url()
+          }
+        });
+      }
+      throw new Error("LinkedIn thread list is not ready for unread collection.");
+    }
+
+    if (readiness.empty) {
+      return {
+        rows: [],
+        iterations: 0,
+        stopReason: "zero_threads_found",
+        noProgressStreak: 0,
+        bottomRepeatStreak: 0,
+        scrollNoMoveStreak: 0,
+        scrollIterations: 0
+      };
+    }
+
     const cappedMaxThreads = Math.max(1, maxThreads);
     const stableIterationsTarget = Math.max(1, this.deps.scanStableIterations);
+    const maxIterations = Math.max(20, Math.min(60, this.deps.scanMaxThreads * 3));
+    const maxDurationMs = 45_000;
     const merged = new Map<string, ThreadStub>();
+    const startedAt = Date.now();
+    let scrollIterations = 0;
 
-    let noGrowthIterations = 0;
-    let trailingRepeatIterations = 0;
-    let previousTrailingKey: string | null = null;
     let iterations = 0;
     let loadingWindowIterations = 0;
     let missingListIterations = 0;
-    let stopReason: LinkedInCollectionStopReason = "iteration_cap";
+    let noProgressStreak = 0;
+    let bottomRepeatStreak = 0;
+    let scrollNoMoveStreak = 0;
+    let previousBottomKey: string | null = null;
+    let stopReason: LinkedInCollectionStopReason = "max_iterations";
 
-    while (iterations < 300) {
+    this.logTraceEvent({
+      stage: "collect_threads",
+      action: "collection_start",
+      details: {
+        maxThreads: cappedMaxThreads,
+        stableIterationsTarget,
+        maxIterations,
+        maxDurationMs
+      },
+      page
+    });
+
+    while (iterations < maxIterations) {
+      if (Date.now() - startedAt >= maxDurationMs) {
+        stopReason = "max_duration";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to max duration",
+          details: {
+            maxDurationMs,
+            elapsedMs: Date.now() - startedAt
+          },
+          level: "warn"
+        });
+        break;
+      }
+
       iterations += 1;
       const snapshot = await retryWithBackoff({
         attempts: 3,
@@ -873,27 +1730,81 @@ export class LinkedInAdapter implements PlatformAdapter {
         isRetryable: (error) => isRetryableLinkedInCollectError(error),
         run: async () => this.captureThreadRowsSnapshot(page, selectors)
       });
+      this.logTraceEvent({
+        stage: "collect_threads",
+        action: "collection_iteration_snapshot",
+        details: {
+          iteration: iterations,
+          threadListCount: snapshot.threadListCount,
+          threadItemCount: snapshot.threadItemCount,
+          spinnerCount: snapshot.spinnerCount,
+          visibleCount: snapshot.rows.length
+        },
+        attempt: iterations,
+        page
+      });
 
       if (snapshot.threadItemCount === 0 && snapshot.spinnerCount > 0) {
         loadingWindowIterations += 1;
-        if (loadingWindowIterations >= 10) {
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Thread list still loading after unread filter",
+          details: {
+            loadingWindowIterations,
+            spinnerCount: snapshot.spinnerCount
+          },
+          attempt: iterations
+        });
+        if (loadingWindowIterations >= 12) {
           throw new Error("LinkedIn thread list is still loading after unread filter activation.");
         }
-        await page.waitForTimeout(this.deps.scanScrollWaitMs);
+        await this.runTracedPageAction({
+          page,
+          stage: "collect_threads",
+          action: "wait_for_timeout",
+          note: "loading_window_wait",
+          details: {
+            delayMs: this.deps.scanScrollWaitMs
+          },
+          attempt: iterations,
+          run: async () => {
+            await page.waitForTimeout(this.deps.scanScrollWaitMs);
+          }
+        });
         continue;
       }
 
       loadingWindowIterations = 0;
       if (snapshot.threadListCount <= 0) {
         missingListIterations += 1;
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Thread list container missing during collection",
+          details: {
+            missingListIterations
+          },
+          attempt: iterations
+        });
         if (missingListIterations >= 6) {
           throw new Error("LinkedIn thread list container is missing while collecting unread threads.");
         }
-        await page.waitForTimeout(this.deps.scanScrollWaitMs);
+        await this.runTracedPageAction({
+          page,
+          stage: "collect_threads",
+          action: "wait_for_timeout",
+          note: "missing_list_wait",
+          details: {
+            delayMs: this.deps.scanScrollWaitMs
+          },
+          attempt: iterations,
+          run: async () => {
+            await page.waitForTimeout(this.deps.scanScrollWaitMs);
+          }
+        });
         continue;
       }
-
       missingListIterations = 0;
+
       if (snapshot.threadItemCount === 0) {
         const overlayReason = await this.detectLinkedInOverlayReason(page);
         if (overlayReason === "login_required" || overlayReason === "checkpoint_required") {
@@ -907,7 +1818,6 @@ export class LinkedInAdapter implements PlatformAdapter {
             }
           });
         }
-
         if (overlayReason === "rate_limited" || overlayReason === "linkedin_error_overlay") {
           throw new AdapterFailure("LinkedIn unread thread list is blocked by an overlay.", {
             kind: "SELECTOR_MISMATCH",
@@ -923,63 +1833,157 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       const previousCount = merged.size;
       for (const row of snapshot.rows) {
-        if (!merged.has(row.stableKey)) {
-          merged.set(row.stableKey, {
-            platformThreadId: row.stableKey,
-            displayName: row.displayName,
-            unreadCount: row.unreadCount,
-            lastMessagePreview: row.lastMessagePreview,
-            lastMessageAt: row.lastMessageAt,
-            threadUrl: row.threadUrl,
-            avatarUrl: row.avatarUrl
-          });
+        if (merged.has(row.stableKey)) {
+          continue;
         }
+        merged.set(row.stableKey, {
+          platformThreadId: row.stableKey,
+          displayName: row.displayName,
+          unreadCount: row.unreadCount,
+          lastMessagePreview: row.lastMessagePreview,
+          lastMessageAt: row.lastMessageAt,
+          threadUrl: row.threadUrl,
+          avatarUrl: row.avatarUrl
+        });
       }
-
       const nextCount = merged.size;
-      const stability = updateLinkedInCollectionStability({
-        previousCount,
-        nextCount,
-        previousTrailingKey,
-        nextTrailingKey: snapshot.trailingKey,
-        noGrowthIterations,
-        trailingRepeatIterations
-      });
+      const grew = nextCount > previousCount;
+      const bottomRepeated = Boolean(snapshot.bottomKey && snapshot.bottomKey === previousBottomKey);
 
-      noGrowthIterations = stability.noGrowthIterations;
-      trailingRepeatIterations = stability.trailingRepeatIterations;
-      previousTrailingKey = snapshot.trailingKey;
-      const scrollOutcome = await this.scrollThreadListContainer(page, selectors);
+      if (grew) {
+        noProgressStreak = 0;
+      } else {
+        noProgressStreak += 1;
+      }
+      bottomRepeatStreak = bottomRepeated ? bottomRepeatStreak + 1 : 0;
 
-      const resolvedStopReason = resolveLinkedInCollectionStopReason({
-        uniqueCount: nextCount,
-        maxThreads: cappedMaxThreads,
-        noGrowthIterations,
-        trailingRepeatIterations,
-        stableIterations: stableIterationsTarget,
-        didScroll: scrollOutcome.didScroll,
-        reachedBottom: scrollOutcome.reachedBottom
-      });
-      if (resolvedStopReason || shouldStopLinkedInCollection({
-        uniqueCount: nextCount,
-        maxThreads: cappedMaxThreads,
-        noGrowthIterations,
-        trailingRepeatIterations,
-        stableIterations: stableIterationsTarget,
-        didScroll: scrollOutcome.didScroll,
-        reachedBottom: scrollOutcome.reachedBottom
-      })) {
-        stopReason = resolvedStopReason ?? "iteration_cap";
+      previousBottomKey = snapshot.bottomKey;
+
+      if (nextCount >= cappedMaxThreads) {
+        stopReason = "max_threads";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection after hitting max thread cap",
+          details: {
+            nextCount,
+            cappedMaxThreads
+          }
+        });
+        break;
+      }
+      if (noProgressStreak >= stableIterationsTarget) {
+        stopReason = "end_of_list_no_progress";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to no growth streak",
+          details: {
+            noProgressStreak,
+            stableIterationsTarget
+          }
+        });
+        break;
+      }
+      if (bottomRepeatStreak >= stableIterationsTarget) {
+        stopReason = "end_of_list_reached";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to repeated bottom key",
+          details: {
+            bottomRepeatStreak,
+            stableIterationsTarget
+          }
+        });
+        break;
+      }
+      if (scrollNoMoveStreak >= stableIterationsTarget) {
+        stopReason = "end_of_list_no_progress";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to repeated scroll no-move streak",
+          details: {
+            scrollNoMoveStreak,
+            stableIterationsTarget
+          }
+        });
         break;
       }
 
-      await page.waitForTimeout(this.deps.scanScrollWaitMs);
+      const scrollOutcome = await this.deepScrollThreadList(page, selectors, {
+        bottomKey: snapshot.bottomKey,
+        visibleSetHash: snapshot.visibleSetHash
+      });
+      scrollIterations += 1;
+      this.logTraceEvent({
+        stage: "collect_threads",
+        action: "scroll_iteration",
+        details: {
+          scrollIterations,
+          moved: scrollOutcome.moved,
+          reachedBottom: scrollOutcome.reachedBottom,
+          didScroll: scrollOutcome.didScroll
+        },
+        attempt: iterations,
+        page
+      });
+      if (!scrollOutcome.moved) {
+        scrollNoMoveStreak += 1;
+      } else {
+        scrollNoMoveStreak = 0;
+      }
+      if (!scrollOutcome.didScroll || scrollOutcome.reachedBottom) {
+        stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection because list reached bottom",
+          details: {
+            mergedCount: merged.size,
+            stopReason
+          }
+        });
+        break;
+      }
+
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "wait_for_timeout",
+        note: "post_scroll_wait",
+        details: {
+          delayMs: this.deps.scanScrollWaitMs
+        },
+        run: async () => {
+          await page.waitForTimeout(this.deps.scanScrollWaitMs);
+        }
+      });
     }
+
+    if (merged.size <= 0 && stopReason !== "max_threads") {
+      stopReason = "zero_threads_found";
+    }
+
+    this.logTraceEvent({
+      stage: "collect_threads",
+      action: "collection_complete",
+      details: {
+        iterations,
+        stopReason,
+        threadsCollectedTotal: merged.size,
+        noProgressStreak,
+        bottomRepeatStreak,
+        scrollNoMoveStreak,
+        scrollIterations
+      },
+      page
+    });
 
     return {
       rows: Array.from(merged.values()).slice(0, cappedMaxThreads),
       iterations,
-      stopReason
+      stopReason,
+      noProgressStreak,
+      bottomRepeatStreak,
+      scrollNoMoveStreak,
+      scrollIterations
     };
   }
 
@@ -1074,10 +2078,19 @@ export class LinkedInAdapter implements PlatformAdapter {
     const before = await this.getActiveThreadDescriptor(page, selectors);
 
     if (thread.threadUrl) {
-      await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
+      await this.tracedGoto(page, thread.threadUrl, {
+        stage: "open_thread",
+        note: "open_by_thread_url"
+      });
     } else {
-      await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
-      await page.waitForSelector(selectors.thread_list, { timeout: LinkedInAdapter.inboxReadyTimeoutMs });
+      await this.tracedGoto(page, selectors.inbox_url, {
+        stage: "open_thread",
+        note: "open_by_inbox_navigation"
+      });
+      await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
+        stage: "open_thread",
+        note: "wait_thread_list_before_click"
+      });
 
       const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
       const fallbackRow = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
@@ -1101,10 +2114,25 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       await clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-      await clickTarget.click({ timeout: 10_000 });
+      await this.runTracedPageAction({
+        page,
+        stage: "open_thread",
+        action: "click",
+        selector: rowExists ? ".msg-conversation-listitem__link" : selectors.thread_item,
+        note: "activate_thread_row",
+        details: {
+          targetDisplayName: thread.displayName
+        },
+        run: async () => {
+          await clickTarget.click({ timeout: 10_000 });
+        }
+      });
     }
 
-    await page.waitForSelector(selectors.message_container, { timeout: 15_000 });
+    await this.tracedWaitForVisible(page, selectors.message_container, 15_000, {
+      stage: "open_thread",
+      note: "wait_message_container_after_open"
+    });
 
     const startedAt = Date.now();
     let lastDescriptor: ActiveThreadDescriptor | undefined;
@@ -1126,7 +2154,18 @@ export class LinkedInAdapter implements PlatformAdapter {
         }
       }
 
-      await page.waitForTimeout(300);
+      await this.runTracedPageAction({
+        page,
+        stage: "open_thread",
+        action: "wait_for_timeout",
+        note: "activation_poll_wait",
+        details: {
+          delayMs: 300
+        },
+        run: async () => {
+          await page.waitForTimeout(300);
+        }
+      });
     }
 
     throw new AdapterFailure(`LinkedIn thread activation mismatch for ${thread.displayName}`, {
@@ -1154,6 +2193,18 @@ export class LinkedInAdapter implements PlatformAdapter {
     const merged = new Map<string, LinkedInMessageSnapshot>();
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      this.logTraceEvent({
+        stage: "read_thread",
+        action: "message_backfill_attempt_start",
+        details: {
+          attempt: attempt + 1,
+          maxAttempts,
+          limit,
+          mergedCount: merged.size
+        },
+        attempt: attempt + 1,
+        page
+      });
       const snapshot = await page.evaluate(
         ({ selectors }) => {
           const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
@@ -1240,12 +2291,36 @@ export class LinkedInAdapter implements PlatformAdapter {
           direction: message.direction === "IN" ? "IN" : "OUT"
         });
       }
+      this.logTraceEvent({
+        stage: "read_thread",
+        action: "message_backfill_attempt_end",
+        details: {
+          attempt: attempt + 1,
+          collectedInAttempt: snapshot.messages.length,
+          mergedCount: merged.size,
+          didScrollUp: snapshot.didScrollUp
+        },
+        attempt: attempt + 1,
+        page
+      });
 
       if (merged.size >= limit || !snapshot.didScrollUp) {
         break;
       }
 
-      await page.waitForTimeout(350);
+      await this.runTracedPageAction({
+        page,
+        stage: "read_thread",
+        action: "wait_for_timeout",
+        note: "message_backfill_wait",
+        details: {
+          delayMs: 350
+        },
+        attempt: attempt + 1,
+        run: async () => {
+          await page.waitForTimeout(350);
+        }
+      });
     }
 
     const rows = Array.from(merged.values());
@@ -1256,231 +2331,572 @@ export class LinkedInAdapter implements PlatformAdapter {
       const safeRight = Number.isNaN(rightTime) ? 0 : rightTime;
       return safeLeft - safeRight;
     });
+    this.logTraceEvent({
+      stage: "read_thread",
+      action: "message_backfill_complete",
+      details: {
+        totalMessages: rows.length,
+        returnedMessages: Math.min(rows.length, limit)
+      },
+      page
+    });
     return rows.slice(-limit);
   }
 
   async ensureConnected(): Promise<void> {
-    const selectors = await this.deps.resolveSelectors();
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
 
-    let page: Page | null = null;
-    try {
-      page = await this.navigateInbox(selectors);
-      await this.throwIfAuthRequired(page, "ensureConnected:navigation");
-      await page.waitForSelector(selectors.thread_list, { timeout: LinkedInAdapter.inboxReadyTimeoutMs });
-      await this.throwIfAuthRequired(page, "ensureConnected:thread_list");
-    } catch (error) {
-      if (error instanceof AdapterFailure) {
-        throw error;
+      let page: Page | null = null;
+      try {
+        this.activeStage = "connect";
+        this.runLogger?.logStage({
+          stage: "connect",
+          phase: "start"
+        });
+        page = await this.navigateInbox(selectors);
+        await this.throwIfAuthRequired(page, "ensureConnected:navigation");
+        await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
+          stage: "connect",
+          note: "wait_thread_list_connected"
+        });
+        await this.throwIfAuthRequired(page, "ensureConnected:thread_list");
+        this.runLogger?.logStage({
+          stage: "connect",
+          phase: "end"
+        });
+      } catch (error) {
+        this.runLogger?.logError({
+          component: "linkedin-adapter",
+          stage: "connect",
+          action: "ensure_connected_failed",
+          error
+        });
+        if (page) {
+          await this.captureRunFailureArtifacts(page);
+        }
+        if (error instanceof AdapterFailure) {
+          throw error;
+        }
+
+        const reason = error instanceof Error ? error.message : String(error);
+        const currentUrl = page?.url();
+        const suffix = currentUrl ? ` (url: ${currentUrl})` : "";
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "connect",
+          message: `LinkedIn connect failed (${reason})${suffix}`,
+          action: "connect-failed",
+          error,
+          kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
+          page: page ?? undefined,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir,
+          details: currentUrl ? { url: currentUrl } : undefined
+        });
+      } finally {
+        this.activeStage = null;
       }
-
-      const reason = error instanceof Error ? error.message : String(error);
-      const currentUrl = page?.url();
-      const suffix = currentUrl ? ` (url: ${currentUrl})` : "";
-      throw await toStageFailure({
-        platform: this.platform,
-        stage: "connect",
-        message: `LinkedIn connect failed (${reason})${suffix}`,
-        action: "connect-failed",
-        error,
-        kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
-        page: page ?? undefined,
-        screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir,
-        details: currentUrl ? { url: currentUrl } : undefined
-      });
-    }
+    });
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
-    const selectors = await this.deps.resolveSelectors();
-    const page = await this.navigateInbox(selectors);
-    const stageReceipts: LinkedInScanStageReceipt[] = [];
-    const runStage = async <T>(
-      stage: LinkedInScanStageReceipt["stage"],
-      run: () => Promise<T>,
-      details?: Record<string, unknown>
-    ): Promise<T> => {
-      const started = Date.now();
-      const startedAt = new Date(started).toISOString();
-      try {
-        const value = await run();
-        stageReceipts.push({
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.navigateInbox(selectors);
+      const stageReceipts: LinkedInScanStageReceipt[] = [];
+      let activeStage: LinkedInScanStageReceipt["stage"] = "navigate";
+      let recoveryAttempts = 0;
+      const runCounters: LinkedInRunCounters = {
+        unreadViewActive: false,
+        threadsVisibleCount: 0,
+        threadsCollectedTotal: 0,
+        threadsWithUnreadBadgeCount: 0,
+        candidatesToOpenCount: 0,
+        openedThreadsCount: 0,
+        messagesParsedCount: 0,
+        scrollIterations: 0,
+        noProgressStreak: 0,
+        recoveryAttemptsUsed: 0,
+        reloadSuppressed: false
+      };
+
+      const stopRunTracing = await this.startRunTracing(page);
+      const runStage = async <T>(
+        stage: LinkedInScanStageReceipt["stage"],
+        run: () => Promise<T>,
+        details?: Record<string, unknown>
+      ): Promise<T> => {
+        activeStage = stage;
+        this.activeStage = stage;
+        const started = Date.now();
+        const startedAt = new Date(started).toISOString();
+        this.runLogger?.logStage({
           stage,
-          status: "OK",
-          startedAt,
-          completedAt: new Date().toISOString(),
-          durationMs: Date.now() - started,
+          phase: "start",
           details
         });
-        return value;
-      } catch (error) {
-        stageReceipts.push({
-          stage,
-          status: "FAIL",
-          startedAt,
-          completedAt: new Date().toISOString(),
-          durationMs: Date.now() - started,
-          details: {
-            ...(details ?? {}),
-            ...this.summarizeError(error)
-          }
-        });
-        throw error;
-      }
-    };
-
-    try {
-      await runStage("navigate", async () => {
-        await page.waitForSelector(selectors.thread_list, { timeout: 10_000 });
-      }, {
-        url: page.url()
-      });
-      await runStage("auth_check", async () => {
-        await this.throwIfAuthRequired(page, "scanUnreadThreads:navigation");
-        await this.throwIfAuthRequired(page, "scanUnreadThreads:thread_list");
-      });
-      const unreadFilterResult = await runStage("unread_filter", async () => {
-        const result = await activateLinkedInUnreadFilter(page);
-        await this.waitForUnreadListSettle(page, selectors);
-        return result;
-      });
-      const collected = await runStage(
-        "collect_threads",
-        async () => this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads),
-        {
-          unreadFilterResult
+        try {
+          const value = await run();
+          const durationMs = Date.now() - started;
+          stageReceipts.push({
+            stage,
+            status: "OK",
+            startedAt,
+            completedAt: new Date().toISOString(),
+            durationMs,
+            details
+          });
+          this.runLogger?.logStage({
+            stage,
+            phase: "end",
+            details: {
+              status: "OK",
+              ...(details ?? {})
+            },
+            elapsedMs: durationMs
+          });
+          return value;
+        } catch (error) {
+          const durationMs = Date.now() - started;
+          stageReceipts.push({
+            stage,
+            status: "FAIL",
+            startedAt,
+            completedAt: new Date().toISOString(),
+            durationMs,
+            details: {
+              ...(details ?? {}),
+              ...this.summarizeError(error)
+            }
+          });
+          this.runLogger?.logStage({
+            stage,
+            phase: "end",
+            details: {
+              status: "FAIL",
+              ...(details ?? {})
+            },
+            elapsedMs: durationMs
+          });
+          throw error;
         }
-      );
-      this.lastCollectionMetrics = {
-        totalFound: collected.rows.length,
-        unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
-        iterations: collected.iterations,
-        stopReason: collected.stopReason
       };
-      return collected.rows
-        .filter((thread) => (thread.unreadCount ?? 0) > 0)
-        .map((thread) => ({ ...thread, isUnreadCandidate: true }));
-    } catch (error) {
-      const runtimeContext = await this.captureUnreadScanRuntimeContext(page, selectors).catch(() => undefined);
-      const failureReason = resolveLinkedInScanFailureReason({
-        message: error instanceof Error ? error.message : String(error),
-        url: runtimeContext?.url ?? page.url(),
-        overlayReason: runtimeContext?.overlayReason,
-        threadListCount: runtimeContext?.threadListCount,
-        threadItemCount: runtimeContext?.threadItemCount,
-        spinnerCount: runtimeContext?.spinnerCount
-      });
 
-      if (error instanceof AdapterFailure) {
-        error.details = {
-          ...(error.details ?? {}),
-          reason: failureReason,
-          runtimeContext,
-          stageReceipts
-        };
-        throw error;
-      }
+      try {
+        for (let attempt = 0; attempt <= 1; attempt += 1) {
+          try {
+            await runStage("navigate", async () => {
+              const readiness = await this.waitForThreadListReadyOrClassified(page, selectors, 8_000);
+              if (!readiness.ready) {
+                if (readiness.reason === "login_required" || readiness.reason === "checkpoint_required") {
+                  throw new AdapterFailure("LinkedIn auth required in personal profile. Open browser and sign in.", {
+                    kind: "AUTH_REQUIRED",
+                    platform: this.platform,
+                    stage: "navigate",
+                    details: {
+                      reason: readiness.reason,
+                      url: page.url()
+                    }
+                  });
+                }
+                if (readiness.reason === "rate_limited" || readiness.reason === "linkedin_error_overlay") {
+                  throw new AdapterFailure("LinkedIn inbox is blocked by a LinkedIn overlay.", {
+                    kind: "SELECTOR_MISMATCH",
+                    platform: this.platform,
+                    stage: "navigate",
+                    details: {
+                      reason: readiness.reason,
+                      url: page.url()
+                    }
+                  });
+                }
+                throw new Error("LinkedIn thread list container not ready.");
+              }
+            }, {
+              url: page.url()
+            });
 
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      throw await toStageFailure({
-        platform: this.platform,
-        stage: "collect_threads",
-        message: "Failed while scanning LinkedIn unread threads",
-        action: "scan-unread",
-        error,
-        kind: this.classifyFailureKind(errorMessage, "SELECTOR_MISMATCH"),
-        page,
-        screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir,
-        details: {
-          reason: failureReason,
-          message: errorMessage,
-          runtimeContext,
-          stageReceipts
+            await runStage("auth_check", async () => {
+              await this.throwIfAuthRequired(page, "scanUnreadThreads:navigation");
+              await this.throwIfAuthRequired(page, "scanUnreadThreads:thread_list");
+            });
+
+            const unreadFilterResult = await runStage("unread_filter", async () => {
+              return this.ensureUnreadFilterActive(page, selectors);
+            });
+
+            const collected = await runStage(
+              "collect_threads",
+              async () => this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads),
+              {
+                unreadFilterResult: { ...unreadFilterResult },
+                attempt: attempt + 1,
+                recoveryAttempts
+              }
+            );
+            const latestReceipt = stageReceipts.at(-1);
+            if (latestReceipt && latestReceipt.stage === "collect_threads") {
+              latestReceipt.details = {
+                ...(latestReceipt.details ?? {}),
+                iterations: collected.iterations,
+                stopReason: collected.stopReason,
+                uniqueThreads: collected.rows.length,
+                noProgressStreak: collected.noProgressStreak,
+                bottomRepeatStreak: collected.bottomRepeatStreak,
+                scrollNoMoveStreak: collected.scrollNoMoveStreak,
+                scrollIterations: collected.scrollIterations
+              };
+            }
+
+            const unreadCandidates = collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0);
+            runCounters.unreadViewActive = unreadFilterResult.pillPresent && unreadFilterResult.waitReason !== "pill_missing";
+            runCounters.threadsVisibleCount = collected.rows.length;
+            runCounters.threadsCollectedTotal = collected.rows.length;
+            runCounters.threadsWithUnreadBadgeCount = unreadCandidates.length;
+            runCounters.candidatesToOpenCount = unreadCandidates.length;
+            runCounters.scrollIterations = collected.scrollIterations;
+            runCounters.noProgressStreak = collected.noProgressStreak;
+            runCounters.stopReason = collected.stopReason;
+            runCounters.recoveryAttemptsUsed = recoveryAttempts;
+            this.runLogger?.mergeCounters({ ...runCounters });
+
+            this.logTraceDecision({
+              stage: "collect_threads",
+              decision: runCounters.unreadViewActive
+                ? "Unread pill active => unread badge filtering used"
+                : "Unread badge filtering used",
+              details: {
+                threadsCollectedTotal: runCounters.threadsCollectedTotal,
+                unreadCandidatesCount: runCounters.candidatesToOpenCount
+              }
+            });
+
+            if (runCounters.candidatesToOpenCount === 0 && runCounters.unreadViewActive) {
+              this.logTraceDecision({
+                stage: "collect_threads",
+                level: "warn",
+                decision: "Candidate selection empty => failing with reason unread_candidates_empty_in_unread_view",
+                details: {
+                  reason: "unread_candidates_empty_in_unread_view",
+                  threadsVisibleCount: runCounters.threadsVisibleCount
+                }
+              });
+            }
+
+            this.lastCollectionMetrics = {
+              totalFound: collected.rows.length,
+              unreadFound: unreadCandidates.length,
+              iterations: collected.iterations,
+              stopReason: collected.stopReason
+            };
+            return unreadCandidates.map((thread) => ({ ...thread, isUnreadCandidate: true }));
+          } catch (error) {
+            if (attempt === 0 && isRetryableLinkedInCollectError(error)) {
+              this.logTraceDecision({
+                stage: activeStage,
+                level: "warn",
+                decision: "Recovery triggered because retryable collect error was detected",
+                details: {
+                  attempt: attempt + 1,
+                  message: error instanceof Error ? error.message : String(error)
+                }
+              });
+              const recoveryBudget = consumeLinkedInRecoveryBudget();
+              if (!recoveryBudget.allowed) {
+                runCounters.reloadSuppressed = true;
+                runCounters.recoveryAttemptsUsed = recoveryAttempts;
+                this.runLogger?.mergeCounters({ ...runCounters });
+                this.logTraceDecision({
+                  stage: activeStage,
+                  level: "warn",
+                  decision: "Reload suppressed due to guard/cooldown",
+                  details: {
+                    retryAfterSeconds: recoveryBudget.retryAfterSeconds,
+                    attemptsInWindow: recoveryBudget.attemptsInWindow
+                  }
+                });
+                throw new AdapterFailure(
+                  `Reload suppressed to prevent retry loop; next retry scheduled in ${recoveryBudget.retryAfterSeconds} seconds.`,
+                  {
+                    kind: "SELECTOR_MISMATCH",
+                    platform: this.platform,
+                    stage: activeStage,
+                    details: {
+                      reason: "repeated_reload_guard_triggered",
+                      retryAfterSeconds: recoveryBudget.retryAfterSeconds,
+                      attemptsInWindow: recoveryBudget.attemptsInWindow,
+                      recoveryAttempts
+                    }
+                  }
+                );
+              }
+              recoveryAttempts += 1;
+              runCounters.recoveryAttemptsUsed = recoveryAttempts;
+              await this.tracedGoto(page, selectors.inbox_url, {
+                stage: "navigate",
+                note: "recovery_renavigate",
+                attempt: recoveryAttempts + 1
+              }).catch(() => undefined);
+              await this.runTracedPageAction({
+                page,
+                stage: "navigate",
+                action: "wait_for_timeout",
+                note: "recovery_wait",
+                details: {
+                  delayMs: 350
+                },
+                run: async () => {
+                  await page.waitForTimeout(350).catch(() => undefined);
+                }
+              });
+              stageReceipts.push({
+                stage: "navigate",
+                status: "OK",
+                startedAt: new Date().toISOString(),
+                completedAt: new Date().toISOString(),
+                durationMs: 0,
+                details: {
+                  recovery: "renavigate",
+                  recoveryAttempt: recoveryAttempts
+                }
+              });
+              continue;
+            }
+
+            const runtimeContext = await this.captureUnreadScanRuntimeContext(page, selectors).catch(() => undefined);
+            const failureReason = resolveLinkedInScanFailureReason({
+              message: error instanceof Error ? error.message : String(error),
+              url: runtimeContext?.url ?? page.url(),
+              overlayReason: runtimeContext?.overlayReason,
+              threadListCount: runtimeContext?.threadListCount,
+              threadItemCount: runtimeContext?.threadItemCount,
+              spinnerCount: runtimeContext?.spinnerCount
+            });
+            runCounters.recoveryAttemptsUsed = recoveryAttempts;
+            runCounters.stopReason = failureReason;
+            this.runLogger?.mergeCounters({ ...runCounters });
+
+            this.runLogger?.logError({
+              component: "linkedin-adapter",
+              stage: activeStage,
+              action: "scan_unread_fail",
+              error,
+              details: {
+                reason: failureReason,
+                runtimeContext,
+                recoveryAttempts
+              },
+              url: page.url(),
+              pageId: this.getPageTraceId(page)
+            });
+            await this.captureRunFailureArtifacts(page);
+
+            if (error instanceof AdapterFailure) {
+              error.details = {
+                ...(error.details ?? {}),
+                stage: error.stage ?? activeStage,
+                reason: failureReason,
+                runtimeContext,
+                stageReceipts,
+                recoveryAttempts
+              };
+              throw error;
+            }
+
+            const errorMessage = error instanceof Error ? error.message : String(error);
+            throw await toStageFailure({
+              platform: this.platform,
+              stage: activeStage,
+              message: "Failed while scanning LinkedIn unread threads",
+              action: "scan-unread",
+              error,
+              kind: this.classifyFailureKind(errorMessage, "SELECTOR_MISMATCH"),
+              page,
+              screenshotDir: this.deps.screenshotDir,
+              domDumpDir: this.deps.domDumpDir,
+              details: {
+                stage: activeStage,
+                reason: failureReason,
+                message: errorMessage,
+                runtimeContext,
+                stageReceipts,
+                recoveryAttempts
+              }
+            });
+          }
         }
-      });
-    }
+
+        throw new Error("LinkedIn unread scan exhausted retries.");
+      } finally {
+        runCounters.recoveryAttemptsUsed = recoveryAttempts;
+        this.runLogger?.mergeCounters({ ...runCounters });
+        this.activeStage = null;
+        await stopRunTracing();
+      }
+    });
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
-    const selectors = await this.deps.resolveSelectors();
-    const page = await this.navigateInbox(selectors);
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.navigateInbox(selectors);
 
-    try {
-      await this.throwIfAuthRequired(page, "fetchRecentThreads:navigation");
-      await page.waitForSelector(selectors.thread_list, { timeout: 10_000 });
-      await this.throwIfAuthRequired(page, "fetchRecentThreads:thread_list");
-      const collected = await this.collectThreadRowsWithScroll(
-        page,
-        selectors,
-        Math.max(limit, this.deps.scanMaxThreads)
-      );
-      this.lastCollectionMetrics = {
-        totalFound: collected.rows.length,
-        unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
-        iterations: collected.iterations,
-        stopReason: collected.stopReason
-      };
-      return collected.rows.slice(0, limit).map((thread) => ({ ...thread, isRecentCandidate: true }));
-    } catch (error) {
-      if (error instanceof AdapterFailure) {
-        throw error;
+      try {
+        this.activeStage = "collect_threads";
+        this.runLogger?.logStage({
+          stage: "collect_threads",
+          phase: "start",
+          details: {
+            mode: "recent",
+            limit
+          }
+        });
+        await this.throwIfAuthRequired(page, "fetchRecentThreads:navigation");
+        await this.tracedWaitForVisible(page, selectors.thread_list, 10_000, {
+          stage: "collect_threads",
+          note: "wait_recent_thread_list"
+        });
+        await this.throwIfAuthRequired(page, "fetchRecentThreads:thread_list");
+        const collected = await this.collectThreadRowsWithScroll(
+          page,
+          selectors,
+          Math.max(limit, this.deps.scanMaxThreads)
+        );
+        this.lastCollectionMetrics = {
+          totalFound: collected.rows.length,
+          unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
+          iterations: collected.iterations,
+          stopReason: collected.stopReason
+        };
+        this.runLogger?.logStage({
+          stage: "collect_threads",
+          phase: "end",
+          details: {
+            mode: "recent",
+            status: "OK",
+            totalFound: collected.rows.length,
+            stopReason: collected.stopReason
+          }
+        });
+        return collected.rows.slice(0, limit).map((thread) => ({ ...thread, isRecentCandidate: true }));
+      } catch (error) {
+        this.runLogger?.logError({
+          component: "linkedin-adapter",
+          stage: "collect_threads",
+          action: "scan_recent_fail",
+          error
+        });
+        await this.captureRunFailureArtifacts(page);
+        if (error instanceof AdapterFailure) {
+          throw error;
+        }
+
+        const reason = error instanceof Error ? error.message : String(error);
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "collect_threads",
+          message: "Failed while scanning LinkedIn recent threads",
+          action: "scan-recent",
+          error,
+          kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
+          page,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir
+        });
+      } finally {
+        this.activeStage = null;
       }
-
-      const reason = error instanceof Error ? error.message : String(error);
-      throw await toStageFailure({
-        platform: this.platform,
-        stage: "collect_threads",
-        message: "Failed while scanning LinkedIn recent threads",
-        action: "scan-recent",
-        error,
-        kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
-        page,
-        screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir
-      });
-    }
+    });
   }
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
-    const selectors = await this.deps.resolveSelectors();
-    const page = await this.navigateInbox(selectors);
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.navigateInbox(selectors);
 
-    try {
-      await this.throwIfAuthRequired(page, "fetchThreadMessages:navigation");
-      await this.openThreadAndWaitForActivation(page, selectors, thread);
-      await this.throwIfAuthRequired(page, "fetchThreadMessages:after_activation");
-      await page.waitForSelector(selectors.message_container, { timeout: 15_000 });
-      await this.throwIfAuthRequired(page, "fetchThreadMessages:after_container_wait");
+      try {
+        this.activeStage = "read_thread";
+        this.runLogger?.logStage({
+          stage: "read_thread",
+          phase: "start",
+          details: {
+            platformThreadId: thread.platformThreadId,
+            displayName: thread.displayName,
+            limit
+          }
+        });
+        await this.throwIfAuthRequired(page, "fetchThreadMessages:navigation");
+        await this.openThreadAndWaitForActivation(page, selectors, thread);
+        await this.throwIfAuthRequired(page, "fetchThreadMessages:after_activation");
+        await this.tracedWaitForVisible(page, selectors.message_container, 15_000, {
+          stage: "read_thread",
+          note: "wait_message_container"
+        });
+        await this.throwIfAuthRequired(page, "fetchThreadMessages:after_container_wait");
 
-      const messages = await this.collectThreadMessagesWithBackfill(page, selectors, limit);
-      const baseTimestamp = Date.now() - messages.length * 1_000;
-      return messages.map((message, index) => ({
-        ...message,
-        direction: message.direction === "IN" ? "IN" : "OUT",
-        timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
-        text: cleanText(message.text),
-        senderName: message.senderName,
-        raw: message.raw
-      }));
-    } catch (error) {
-      if (error instanceof AdapterFailure) {
-        throw error;
+        const messages = await this.collectThreadMessagesWithBackfill(page, selectors, limit);
+        this.logTraceEvent({
+          stage: "read_thread",
+          action: "messages_parsed",
+          details: {
+            platformThreadId: thread.platformThreadId,
+            displayName: thread.displayName,
+            messagesParsedCount: messages.length
+          },
+          page
+        });
+        this.runLogger?.logStage({
+          stage: "read_thread",
+          phase: "end",
+          details: {
+            status: "OK",
+            platformThreadId: thread.platformThreadId,
+            displayName: thread.displayName,
+            messagesParsedCount: messages.length
+          }
+        });
+        const baseTimestamp = Date.now() - messages.length * 1_000;
+        return messages.map((message, index) => ({
+          ...message,
+          direction: message.direction === "IN" ? "IN" : "OUT",
+          timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+          text: cleanText(message.text),
+          senderName: message.senderName,
+          raw: message.raw
+        }));
+      } catch (error) {
+        this.runLogger?.logError({
+          component: "linkedin-adapter",
+          stage: "read_thread",
+          action: "fetch_thread_messages_fail",
+          error,
+          details: {
+            platformThreadId: thread.platformThreadId,
+            displayName: thread.displayName
+          }
+        });
+        await this.captureRunFailureArtifacts(page);
+        if (error instanceof AdapterFailure) {
+          throw error;
+        }
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "parse",
+          message: `Failed to fetch LinkedIn thread messages for ${thread.displayName}`,
+          action: "fetch-thread",
+          error,
+          kind: "THREAD_FETCH_FAILED",
+          page,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir,
+          platformThreadId: thread.platformThreadId,
+          details: { threadDisplayName: thread.displayName, url: page.url() }
+        });
+      } finally {
+        this.activeStage = null;
       }
-      throw await toStageFailure({
-        platform: this.platform,
-        stage: "parse",
-        message: `Failed to fetch LinkedIn thread messages for ${thread.displayName}`,
-        action: "fetch-thread",
-        error,
-        kind: "THREAD_FETCH_FAILED",
-        page,
-        screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir,
-        platformThreadId: thread.platformThreadId,
-        details: { threadDisplayName: thread.displayName, url: page.url() }
-      });
-    }
+    });
   }
 
   private async getLatestMessageSnapshot(
@@ -1517,95 +2933,99 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
-    const selectors = await this.deps.resolveSelectors();
-    const page = await this.getPage();
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.getPage();
 
-    try {
-      if (thread.threadUrl) {
-        await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
-      } else {
-        await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
-        const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
-        const fallbackRow = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
-        const rowExists = (await rowRoot.count()) > 0;
-        const clickTarget = rowExists
-          ? rowRoot.locator(".msg-conversation-listitem__link").first()
-          : fallbackRow;
-        if ((await clickTarget.count()) > 0) {
-          await clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-          await clickTarget.click();
-        }
-      }
-
-      await page.waitForSelector(selectors.message_container, { timeout: 12_000 });
-      const preSend = await this.getLatestMessageSnapshot(page, selectors);
-
-      const composer = page.locator(selectors.composer_input).first();
-      await composer.click({ timeout: 10_000 });
       try {
-        await composer.fill(text);
-      } catch {
-        await page.keyboard.press("Meta+A").catch(() => undefined);
-        await page.keyboard.type(text, { delay: 12 });
+        if (thread.threadUrl) {
+          await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
+        } else {
+          await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
+          const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
+          const fallbackRow = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
+          const rowExists = (await rowRoot.count()) > 0;
+          const clickTarget = rowExists
+            ? rowRoot.locator(".msg-conversation-listitem__link").first()
+            : fallbackRow;
+          if ((await clickTarget.count()) > 0) {
+            await clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
+            await clickTarget.click();
+          }
+        }
+
+        await page.waitForSelector(selectors.message_container, { timeout: 12_000 });
+        const preSend = await this.getLatestMessageSnapshot(page, selectors);
+
+        const composer = page.locator(selectors.composer_input).first();
+        await composer.click({ timeout: 10_000 });
+        try {
+          await composer.fill(text);
+        } catch {
+          await page.keyboard.press("Meta+A").catch(() => undefined);
+          await page.keyboard.type(text, { delay: 12 });
+        }
+
+        await humanDelay(100, 300);
+        await page.locator(selectors.send_button).first().click({ timeout: 10_000 });
+
+        const start = Date.now();
+        let verifiedBy: VerificationMethod = "best_effort";
+
+        while (Date.now() - start < 10_000) {
+          const last = await this.getLatestMessageSnapshot(page, selectors);
+          if (!last) {
+            await page.waitForTimeout(300);
+            continue;
+          }
+
+          const timestampAdvanced = !preSend || last.timestamp > preSend.timestamp;
+          const textMatch = cleanText(last.text).includes(cleanText(text));
+
+          if (last.direction === "OUT" && timestampAdvanced && textMatch) {
+            verifiedBy = "bubble_detected";
+            break;
+          }
+
+          if (last.direction === "OUT" && timestampAdvanced) {
+            verifiedBy = "timestamp_advanced";
+            break;
+          }
+
+          await page.waitForTimeout(400);
+        }
+
+        return {
+          sentAt: new Date().toISOString(),
+          verifiedBy
+        };
+      } catch (error) {
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "persist",
+          message: `Failed to send LinkedIn message for ${thread.displayName}`,
+          action: "send",
+          error,
+          kind: "THREAD_FETCH_FAILED",
+          page,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir,
+          platformThreadId: thread.platformThreadId,
+          details: {
+            threadDisplayName: thread.displayName
+          }
+        });
       }
-
-      await humanDelay(100, 300);
-      await page.locator(selectors.send_button).first().click({ timeout: 10_000 });
-
-      const start = Date.now();
-      let verifiedBy: VerificationMethod = "best_effort";
-
-      while (Date.now() - start < 10_000) {
-        const last = await this.getLatestMessageSnapshot(page, selectors);
-        if (!last) {
-          await page.waitForTimeout(300);
-          continue;
-        }
-
-        const timestampAdvanced = !preSend || last.timestamp > preSend.timestamp;
-        const textMatch = cleanText(last.text).includes(cleanText(text));
-
-        if (last.direction === "OUT" && timestampAdvanced && textMatch) {
-          verifiedBy = "bubble_detected";
-          break;
-        }
-
-        if (last.direction === "OUT" && timestampAdvanced) {
-          verifiedBy = "timestamp_advanced";
-          break;
-        }
-
-        await page.waitForTimeout(400);
-      }
-
-      return {
-        sentAt: new Date().toISOString(),
-        verifiedBy
-      };
-    } catch (error) {
-      throw await toStageFailure({
-        platform: this.platform,
-        stage: "persist",
-        message: `Failed to send LinkedIn message for ${thread.displayName}`,
-        action: "send",
-        error,
-        kind: "THREAD_FETCH_FAILED",
-        page,
-        screenshotDir: this.deps.screenshotDir,
-        domDumpDir: this.deps.domDumpDir,
-        platformThreadId: thread.platformThreadId,
-        details: {
-          threadDisplayName: thread.displayName
-        }
-      });
-    }
+    });
   }
 
   async openThread(thread: ThreadStub): Promise<void> {
-    const selectors = await this.deps.resolveSelectors();
-    const page = await this.getPage();
-    await page.bringToFront();
-    await this.openThreadAndWaitForActivation(page, selectors, thread);
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.getPage();
+      await page.bringToFront();
+      await this.openThreadAndWaitForActivation(page, selectors, thread);
+    });
   }
 
   async closeSession(_reason?: string): Promise<void> {
