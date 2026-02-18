@@ -83,7 +83,7 @@ test("LinkedIn unread scan survives unread-click rerender and container-only scr
   assert.equal(names.includes("India Nine"), true);
 });
 
-test("LinkedIn unread scan retries transient execution-context errors during collect", async (t) => {
+test("LinkedIn unread scan requires manual refresh when a transient collect error occurs", async (t) => {
   const fixture = await createAdapterPageFixture();
   if (fixture.skipped) {
     t.skip(fixture.reason);
@@ -95,19 +95,18 @@ test("LinkedIn unread scan retries transient execution-context errors during col
     await fixture.browser.close();
   });
 
-  const originalSnapshot = fixture.adapter.captureThreadRowsSnapshot.bind(fixture.adapter);
-  let injectedFailure = false;
+  let injectedFailureCount = 0;
   fixture.adapter.captureThreadRowsSnapshot = async (...args) => {
-    if (!injectedFailure) {
-      injectedFailure = true;
-      throw new Error("Execution context was destroyed, most likely because of a navigation.");
-    }
-    return originalSnapshot(...args);
+    void args;
+    injectedFailureCount += 1;
+    throw new Error("Execution context was destroyed, most likely because of a navigation.");
   };
 
-  const threads = await fixture.adapter.scanUnreadThreads();
-  assert.equal(injectedFailure, true);
-  assert.equal(threads.length > 0, true);
+  await assert.rejects(
+    fixture.adapter.scanUnreadThreads(),
+    /manual refresh required/i
+  );
+  assert.equal(injectedFailureCount >= 1, true);
 });
 
 test("LinkedIn unread scan never passes string scripts to page.evaluate in production path", async (t) => {

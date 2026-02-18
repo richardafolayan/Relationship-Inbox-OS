@@ -108,11 +108,6 @@ const linkedInLoadingSpinnerSelector = [
   "[aria-label*='Loading']"
 ].join(", ");
 
-const linkedInRecoveryGuardWindowMs = 5 * 60 * 1000;
-const linkedInRecoveryGuardLimit = 3;
-let linkedInRecoveryWindowStartMs = 0;
-let linkedInRecoveryAttempts = 0;
-
 export type LinkedInUnreadRefreshReason =
   | "state_flip"
   | "spinner_cycle"
@@ -139,6 +134,7 @@ export type LinkedInScanFailureReason =
   | "checkpoint_required"
   | "rate_limited"
   | "linkedin_error_overlay"
+  | "manual_refresh_required"
   | "repeated_reload_guard_triggered"
   | "unknown";
 
@@ -204,6 +200,9 @@ export function resolveLinkedInScanFailureReason(input: {
   }
   if (message.includes("something went wrong")) {
     return "linkedin_error_overlay";
+  }
+  if (message.includes("manual refresh required") || message.includes("refresh linkedin manually")) {
+    return "manual_refresh_required";
   }
 
   if ((input.threadListCount ?? 0) <= 0 || ((input.threadItemCount ?? 0) <= 0 && (input.spinnerCount ?? 0) > 0)) {
@@ -382,33 +381,6 @@ async function activateLinkedInUnreadFilterWithHooks(
     pillPresent: true,
     clicked: false,
     waitReason: "click_failed"
-  };
-}
-
-function consumeLinkedInRecoveryBudget(nowMs = Date.now()): {
-  allowed: boolean;
-  retryAfterSeconds: number;
-  attemptsInWindow: number;
-} {
-  if (linkedInRecoveryWindowStartMs <= 0 || nowMs - linkedInRecoveryWindowStartMs >= linkedInRecoveryGuardWindowMs) {
-    linkedInRecoveryWindowStartMs = nowMs;
-    linkedInRecoveryAttempts = 0;
-  }
-
-  if (linkedInRecoveryAttempts >= linkedInRecoveryGuardLimit) {
-    const retryAfterMs = Math.max(1_000, linkedInRecoveryGuardWindowMs - (nowMs - linkedInRecoveryWindowStartMs));
-    return {
-      allowed: false,
-      retryAfterSeconds: Math.ceil(retryAfterMs / 1_000),
-      attemptsInWindow: linkedInRecoveryAttempts
-    };
-  }
-
-  linkedInRecoveryAttempts += 1;
-  return {
-    allowed: true,
-    retryAfterSeconds: 0,
-    attemptsInWindow: linkedInRecoveryAttempts
   };
 }
 
@@ -2596,72 +2568,29 @@ export class LinkedInAdapter implements PlatformAdapter {
               this.logTraceDecision({
                 stage: activeStage,
                 level: "warn",
-                decision: "Recovery triggered because retryable collect error was detected",
+                decision: "Retryable collect error detected; automatic reload is disabled and manual refresh is required",
                 details: {
                   attempt: attempt + 1,
                   message: error instanceof Error ? error.message : String(error)
                 }
               });
-              const recoveryBudget = consumeLinkedInRecoveryBudget();
-              if (!recoveryBudget.allowed) {
-                runCounters.reloadSuppressed = true;
-                runCounters.recoveryAttemptsUsed = recoveryAttempts;
-                this.runLogger?.mergeCounters({ ...runCounters });
-                this.logTraceDecision({
-                  stage: activeStage,
-                  level: "warn",
-                  decision: "Reload suppressed due to guard/cooldown",
-                  details: {
-                    retryAfterSeconds: recoveryBudget.retryAfterSeconds,
-                    attemptsInWindow: recoveryBudget.attemptsInWindow
-                  }
-                });
-                throw new AdapterFailure(
-                  `Reload suppressed to prevent retry loop; next retry scheduled in ${recoveryBudget.retryAfterSeconds} seconds.`,
-                  {
-                    kind: "SELECTOR_MISMATCH",
-                    platform: this.platform,
-                    stage: activeStage,
-                    details: {
-                      reason: "repeated_reload_guard_triggered",
-                      retryAfterSeconds: recoveryBudget.retryAfterSeconds,
-                      attemptsInWindow: recoveryBudget.attemptsInWindow,
-                      recoveryAttempts
-                    }
-                  }
-                );
-              }
-              recoveryAttempts += 1;
+              runCounters.reloadSuppressed = true;
               runCounters.recoveryAttemptsUsed = recoveryAttempts;
-              await this.tracedGoto(page, selectors.inbox_url, {
-                stage: "navigate",
-                note: "recovery_renavigate",
-                attempt: recoveryAttempts + 1
-              }).catch(() => undefined);
-              await this.runTracedPageAction({
-                page,
-                stage: "navigate",
-                action: "wait_for_timeout",
-                note: "recovery_wait",
-                details: {
-                  delayMs: 350
-                },
-                run: async () => {
-                  await page.waitForTimeout(350).catch(() => undefined);
+              this.runLogger?.mergeCounters({ ...runCounters });
+              throw new AdapterFailure(
+                "Manual refresh required: LinkedIn page became unstable. Refresh LinkedIn manually, then rerun scan. Automatic reload is disabled to preserve browser console diagnostics.",
+                {
+                  kind: "SELECTOR_MISMATCH",
+                  platform: this.platform,
+                  stage: activeStage,
+                  details: {
+                    reason: "manual_refresh_required",
+                    requiresManualRefresh: true,
+                    guidance: "Refresh LinkedIn manually and rerun scan.",
+                    recoveryAttempts
+                  }
                 }
-              });
-              stageReceipts.push({
-                stage: "navigate",
-                status: "OK",
-                startedAt: new Date().toISOString(),
-                completedAt: new Date().toISOString(),
-                durationMs: 0,
-                details: {
-                  recovery: "renavigate",
-                  recoveryAttempt: recoveryAttempts
-                }
-              });
-              continue;
+              );
             }
 
             const runtimeContext = await this.captureUnreadScanRuntimeContext(page, selectors).catch(() => undefined);

@@ -170,6 +170,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     if (normalized.includes("too many requests") || normalized.includes("rate limit")) {
       return "rate_limited";
     }
+    if (normalized.includes("manual refresh required") || normalized.includes("refresh linkedin manually")) {
+      return "manual_refresh_required";
+    }
     if (normalized.includes("something went wrong") || normalized.includes("overlay")) {
       return "linkedin_error_overlay";
     }
