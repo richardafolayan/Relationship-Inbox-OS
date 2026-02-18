@@ -1,14 +1,15 @@
+import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PlatformName, SelectorRegistry, SelectorTestReport, SelectorTestResult } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
 import type { Page } from "playwright";
-import { AdapterFailure } from "../platforms/utils.js";
 import type { SessionManager } from "./session-manager";
 
 interface SelectorTestServiceDeps {
   resolveSelectors: (platform: PlatformName) => Promise<SelectorRegistry>;
   sessionManager: SessionManager;
   screenshotDir: string;
+  domDumpDir: string;
 }
 
 const selectorKeys: Array<keyof SelectorRegistry> = [
@@ -22,7 +23,69 @@ const selectorKeys: Array<keyof SelectorRegistry> = [
   "send_button"
 ];
 
+const conversationKeys = new Set<keyof SelectorRegistry>([
+  "message_item",
+  "message_text",
+  "composer_input",
+  "send_button"
+]);
+
 const adaptiveConversationProbeLimit = 8;
+const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
+
+type SelectorTestStage = "connect" | "navigate" | "auth_check" | "open_thread" | "evaluate" | "screenshot" | "persist";
+
+export interface SelectorTestReceipt {
+  stage: SelectorTestStage;
+  status: "OK" | "FAIL";
+  startedAt: string;
+  completedAt: string;
+  durationMs: number;
+  details?: Record<string, unknown>;
+}
+
+export interface SelectorTestFailurePayload {
+  ok: false;
+  platform: PlatformName;
+  stage: SelectorTestStage;
+  error: string;
+  requestId: string;
+  reason?: string;
+  receipts: SelectorTestReceipt[];
+  artifacts?: {
+    screenshot?: string;
+    domDump?: string;
+  };
+}
+
+export interface SelectorTestRunReport extends SelectorTestReport {
+  receipts: SelectorTestReceipt[];
+}
+
+class SelectorAuthRequiredError extends Error {
+  constructor(
+    readonly reason: string,
+    readonly details?: Record<string, unknown>
+  ) {
+    super("Platform authentication is required before selector tests can run.");
+    this.name = "SelectorAuthRequiredError";
+  }
+}
+
+export class SelectorTestServiceError extends Error {
+  constructor(
+    readonly statusCode: number,
+    readonly payload: SelectorTestFailurePayload,
+    options?: { cause?: unknown }
+  ) {
+    super(payload.error, options?.cause !== undefined ? { cause: options.cause } : undefined);
+    this.name = "SelectorTestServiceError";
+  }
+}
+
+export function isSelectorTestServiceError(error: unknown): error is SelectorTestServiceError {
+  return error instanceof SelectorTestServiceError;
+}
 
 export function buildAdaptiveProbeIndices(threadCount: number, maxProbeThreads = adaptiveConversationProbeLimit): number[] {
   const safeCount = Number.isFinite(threadCount) ? Math.max(0, Math.floor(threadCount)) : 0;
@@ -44,66 +107,157 @@ export async function findFirstPassingProbeIndex(
   return -1;
 }
 
-export function createSelectorTestService(deps: SelectorTestServiceDeps) {
-  async function throwIfAuthRequired(page: Page, platform: PlatformName): Promise<void> {
-    const url = page.url();
-    const authState = await page.evaluate((targetPlatform) => {
-      const bodyText = document.body?.innerText?.toLowerCase() ?? "";
-      const hasInput = (selector: string) => document.querySelector(selector) !== null;
+export function buildSelectorCountEvaluateSource(): string {
+  return ((selectorList: string[]) =>
+    selectorList.map((selector) => {
+      try {
+        return document.querySelectorAll(selector).length;
+      } catch {
+        return 0;
+      }
+    })).toString();
+}
 
-      if (targetPlatform === "INSTAGRAM") {
-        if (hasInput("input[name='username']") || hasInput("input[name='password']")) {
-          return {
-            authRequired: true,
-            reason: "instagram_login_form"
-          };
+export async function evaluateSelectorCounts(page: Page, selectorList: string[]): Promise<number[]> {
+  return page.evaluate(
+    (selectors) =>
+      selectors.map((selector) => {
+        try {
+          return document.querySelectorAll(selector).length;
+        } catch {
+          return 0;
         }
-      }
+      }),
+    selectorList
+  );
+}
 
-      if (targetPlatform === "TIKTOK") {
-        const qrLogin = bodyText.includes("log in with qr code");
-        const authPrompts =
-          bodyText.includes("log in") ||
-          bodyText.includes("sign up") ||
-          bodyText.includes("scan with your mobile device");
-        if (qrLogin || authPrompts) {
-          return {
-            authRequired: true,
-            reason: qrLogin ? "tiktok_qr_login" : "tiktok_auth_gate"
-          };
-        }
-      }
-
-      return {
-        authRequired: false,
-        reason: undefined
-      };
-    }, platform);
-
-    const urlSuggestsAuth =
-      (platform === "INSTAGRAM" && /\/accounts\/login/i.test(url)) ||
-      (platform === "TIKTOK" && /\/login/i.test(url));
-
-    if (!authState.authRequired && !urlSuggestsAuth) {
-      return;
-    }
-
-    throw new AdapterFailure(`${platform} requires authentication before selector tests can run`, {
-      kind: "AUTH_REQUIRED",
-      details: {
-        platform,
-        stage: "navigate",
-        reason: authState.reason ?? "url_auth_pattern",
-        url
-      }
-    });
+async function captureSelectorFailureArtifacts(input: {
+  page?: Page;
+  stage: SelectorTestStage;
+  platform: PlatformName;
+  requestId: string;
+  screenshotDir: string;
+  domDumpDir: string;
+}): Promise<{ screenshot?: string; domDump?: string }> {
+  const page = input.page;
+  if (!page) {
+    return {};
   }
 
+  try {
+    if (page.isClosed()) {
+      return {};
+    }
+  } catch {
+    return {};
+  }
+
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const prefix = `${input.platform.toLowerCase()}-selector-${input.stage}-${input.requestId}-${stamp}`;
+
+  let screenshot: string | undefined;
+  let domDump: string | undefined;
+
+  try {
+    screenshot = `${prefix}.png`;
+    await page.screenshot({ path: join(input.screenshotDir, screenshot), fullPage: true });
+  } catch {
+    screenshot = undefined;
+  }
+
+  try {
+    domDump = `${prefix}.html`;
+    const html = await page.content();
+    await writeFile(join(input.domDumpDir, domDump), html, "utf8");
+  } catch {
+    domDump = undefined;
+  }
+
+  return {
+    screenshot,
+    domDump
+  };
+}
+
+function summarizeError(error: unknown): Record<string, unknown> {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: error.stack
+    };
+  }
+
+  return {
+    message: String(error)
+  };
+}
+
+function selectorTestFailureStatus(error: unknown): number {
+  const message = error instanceof Error ? error.message : String(error);
+  if (error instanceof SelectorAuthRequiredError) {
+    return 401;
+  }
+  if (/profile.*in use|already in use|singleton|session.*busy|locked/i.test(message)) {
+    return 409;
+  }
+  return 500;
+}
+
+async function detectAuthRequired(page: Page, platform: PlatformName): Promise<{ required: boolean; reason?: string }> {
+  const url = page.url().toLowerCase();
+
+  if (platform === "LINKEDIN") {
+    const linkedInUrlGate = /\/uas\/login|\/checkpoint\//i.test(url);
+    if (linkedInUrlGate) {
+      return { required: true, reason: "login_required" };
+    }
+
+    const usernameCount = await page.locator("#username").count().catch(() => 0);
+    const passwordCount = await page.locator("#password").count().catch(() => 0);
+    if (usernameCount > 0 || passwordCount > 0) {
+      return { required: true, reason: "login_required" };
+    }
+  }
+
+  if (platform === "INSTAGRAM") {
+    if (/\/accounts\/login/i.test(url)) {
+      return { required: true, reason: "login_required" };
+    }
+
+    const usernameCount = await page.locator("input[name='username']").count().catch(() => 0);
+    const passwordCount = await page.locator("input[name='password']").count().catch(() => 0);
+    if (usernameCount > 0 || passwordCount > 0) {
+      return { required: true, reason: "login_required" };
+    }
+  }
+
+  if (platform === "TIKTOK") {
+    if (/\/login|\/signup/i.test(url)) {
+      return { required: true, reason: "login_required" };
+    }
+
+    const bodyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
+    const hasQrGate = bodyText.includes("log in with qr code") || bodyText.includes("scan with your mobile device");
+    const hasAuthPrompt = bodyText.includes("log in") || bodyText.includes("sign up");
+    if (hasQrGate || hasAuthPrompt) {
+      return { required: true, reason: hasQrGate ? "qr_login_required" : "login_required" };
+    }
+  }
+
+  return {
+    required: false
+  };
+}
+
+export function createSelectorTestService(deps: SelectorTestServiceDeps) {
   async function run(input: {
     platform: PlatformName;
     key?: keyof SelectorRegistry;
     selector?: string;
-  }): Promise<SelectorTestReport> {
+  }): Promise<SelectorTestRunReport> {
+    const requestId = uuid();
     const reportId = uuid();
     const startedAt = new Date().toISOString();
 
@@ -111,172 +265,322 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
     if (input.key && input.selector) {
       selectors[input.key] = input.selector;
     }
-    const page = await deps.sessionManager.getManagedPage({
-      platform: input.platform,
-      personKey: "default"
+
+    const receipts: SelectorTestReceipt[] = [];
+    let page: Page | undefined;
+
+    const runStage = async <T>(
+      stage: SelectorTestStage,
+      action: () => Promise<T>,
+      details?: Record<string, unknown>
+    ): Promise<T> => {
+      const started = Date.now();
+      const startedIso = new Date(started).toISOString();
+
+      try {
+        const value = await action();
+        receipts.push({
+          stage,
+          status: "OK",
+          startedAt: startedIso,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - started,
+          details
+        });
+        return value;
+      } catch (error) {
+        const artifacts = await captureSelectorFailureArtifacts({
+          page,
+          stage,
+          platform: input.platform,
+          requestId,
+          screenshotDir: deps.screenshotDir,
+          domDumpDir: deps.domDumpDir
+        });
+
+        const authReason = error instanceof SelectorAuthRequiredError ? error.reason : undefined;
+        const payload: SelectorTestFailurePayload = {
+          ok: false,
+          platform: input.platform,
+          stage,
+          error: error instanceof Error ? error.message : String(error),
+          requestId,
+          reason: authReason,
+          receipts: receipts.concat([
+            {
+              stage,
+              status: "FAIL",
+              startedAt: startedIso,
+              completedAt: new Date().toISOString(),
+              durationMs: Date.now() - started,
+              details: {
+                ...(details ?? {}),
+                ...summarizeError(error),
+                ...(error instanceof SelectorAuthRequiredError && error.details ? error.details : {})
+              }
+            }
+          ]),
+          artifacts
+        };
+
+        throw new SelectorTestServiceError(selectorTestFailureStatus(error), payload, {
+          cause: error
+        });
+      }
+    };
+
+    page = await runStage("connect", async () => {
+      return deps.sessionManager.getManagedPage({
+        platform: input.platform,
+        personKey: "default"
+      });
     });
-    await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
-    await throwIfAuthRequired(page, input.platform);
+
+    await runStage("navigate", async () => {
+      await page!.bringToFront();
+      await page!.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
+      await page!.waitForTimeout(400);
+    }, {
+      inboxUrl: selectors.inbox_url
+    });
+
+    await runStage("auth_check", async () => {
+      const authState = await detectAuthRequired(page!, input.platform);
+      if (authState.required) {
+        throw new SelectorAuthRequiredError(authState.reason ?? "login_required", {
+          url: page!.url()
+        });
+      }
+    });
 
     const keys = input.key ? [input.key] : selectorKeys;
     const results: SelectorTestResult[] = [];
-    const conversationKeys = new Set<keyof SelectorRegistry>([
-      "message_item",
-      "message_text",
-      "composer_input",
-      "send_button"
-    ]);
     let conversationOpened = false;
     let adaptiveProbeAttempted = false;
     let replyCapableConversationFound = false;
 
-      async function openThreadAtIndex(index: number): Promise<boolean> {
-        const thread = page.locator(selectors.thread_item).nth(index);
-        if ((await thread.count()) === 0) {
-          return false;
+    async function countWithRetry(selector: string, attempts = 4, delayMs = 300): Promise<number> {
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        const counts = await evaluateSelectorCounts(page!, [selector]);
+        const count = counts[0] ?? 0;
+        if (count > 0) {
+          return count;
         }
 
-        await thread.click({ timeout: 5000 }).catch(() => undefined);
-        await page.waitForTimeout(800);
-        return true;
+        if (attempt < attempts - 1) {
+          await page!.waitForTimeout(delayMs);
+        }
       }
 
-      async function probeReplyCapableConversation(): Promise<boolean> {
-        const threadCount = await page.locator(selectors.thread_item).count();
-        const indices = buildAdaptiveProbeIndices(threadCount);
-        const matchIndex = await findFirstPassingProbeIndex(indices, async (index) => {
-          const clicked = await openThreadAtIndex(index);
-          if (!clicked) {
-            return false;
-          }
+      return 0;
+    }
 
-          const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
-          const sendCount = await countWithRetry(selectors.send_button, 2, 200);
-          const containerCount = await countWithRetry(selectors.message_container, 2, 200);
-
-          if (containerCount > 0) {
-            conversationOpened = true;
-          }
-
-          return composerCount > 0 || sendCount > 0;
-        });
-
-        if (matchIndex >= 0) {
-          conversationOpened = true;
-          replyCapableConversationFound = true;
-          return true;
-        }
-
+    async function openThreadAtIndex(index: number): Promise<boolean> {
+      const thread = page!.locator(selectors.thread_item).nth(index);
+      if ((await thread.count()) === 0) {
         return false;
       }
 
-      async function ensureConversationContext(key: keyof SelectorRegistry): Promise<void> {
-        if (!conversationKeys.has(key)) {
-          return;
+      await thread.click({ timeout: 5000 }).catch(() => undefined);
+      await page!.waitForTimeout(700);
+      return true;
+    }
+
+    async function probeReplyCapableConversation(): Promise<boolean> {
+      const threadCount = await page!.locator(selectors.thread_item).count();
+      const indices = buildAdaptiveProbeIndices(threadCount);
+      const matchIndex = await findFirstPassingProbeIndex(indices, async (index) => {
+        const clicked = await openThreadAtIndex(index);
+        if (!clicked) {
+          return false;
         }
 
-        const hasMessages = (await page.locator(selectors.message_item).count()) > 0;
-        const hasComposer = (await page.locator(selectors.composer_input).count()) > 0;
-        const hasContainer = (await page.locator(selectors.message_container).count()) > 0;
-        const needsReplyCapableProbe = key === "composer_input" || key === "send_button";
+        const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
+        const sendCount = await countWithRetry(selectors.send_button, 2, 200);
+        const containerCount = await countWithRetry(selectors.message_container, 2, 200);
 
-        if (hasMessages || hasComposer || hasContainer) {
+        if (containerCount > 0) {
           conversationOpened = true;
-          if (hasComposer) {
-            replyCapableConversationFound = true;
+        }
+
+        return composerCount > 0 || sendCount > 0;
+      });
+
+      if (matchIndex >= 0) {
+        conversationOpened = true;
+        replyCapableConversationFound = true;
+        return true;
+      }
+
+      return false;
+    }
+
+    async function ensureConversationContext(key: keyof SelectorRegistry): Promise<void> {
+      if (!conversationKeys.has(key)) {
+        return;
+      }
+
+      if (input.platform === "LINKEDIN") {
+        const unreadPill = page!.locator(linkedInUnreadPillSelector).first();
+        if ((await unreadPill.count()) > 0) {
+          const isActive = ((await unreadPill.getAttribute("aria-pressed")) ?? "").toLowerCase() === "true";
+          if (isActive) {
+            await unreadPill.click({ timeout: 3000 }).catch(() => undefined);
+            await page!.waitForTimeout(250);
           }
         }
+      }
 
-        if (needsReplyCapableProbe && !replyCapableConversationFound && !adaptiveProbeAttempted) {
-          adaptiveProbeAttempted = true;
-          const foundReplyCapableConversation = await probeReplyCapableConversation();
-          if (foundReplyCapableConversation) {
-            return;
-          }
-        }
+      const hasMessages = (await page!.locator(selectors.message_item).count()) > 0;
+      const hasComposer = (await page!.locator(selectors.composer_input).count()) > 0;
+      const hasContainer = (await page!.locator(selectors.message_container).count()) > 0;
+      const needsReplyCapableProbe = key === "composer_input" || key === "send_button";
 
-        if (conversationOpened) {
-          return;
-        }
-
-        const openedFirstThread = await openThreadAtIndex(0);
-        if (!openedFirstThread) {
-          return;
-        }
-
-        const nowHasMessages = (await page.locator(selectors.message_item).count()) > 0;
-        const nowHasComposer = (await page.locator(selectors.composer_input).count()) > 0;
-        const nowHasContainer = (await page.locator(selectors.message_container).count()) > 0;
-
-        conversationOpened = nowHasMessages || nowHasComposer || nowHasContainer;
-        if (nowHasComposer) {
+      if (hasMessages || hasComposer || hasContainer) {
+        conversationOpened = true;
+        if (hasComposer) {
           replyCapableConversationFound = true;
         }
       }
 
-      async function countWithRetry(selector: string, attempts = 4, delayMs = 350): Promise<number> {
-        for (let attempt = 0; attempt < attempts; attempt += 1) {
-          const count = await page.locator(selector).count();
-          if (count > 0) {
-            return count;
-          }
-          if (attempt < attempts - 1) {
-            await page.waitForTimeout(delayMs);
-          }
+      if (needsReplyCapableProbe && !replyCapableConversationFound && !adaptiveProbeAttempted) {
+        adaptiveProbeAttempted = true;
+        const foundReplyCapableConversation = await probeReplyCapableConversation();
+        if (foundReplyCapableConversation) {
+          return;
         }
-
-        return 0;
       }
+
+      if (conversationOpened) {
+        return;
+      }
+
+      const openedFirstThread = await openThreadAtIndex(0);
+      if (!openedFirstThread) {
+        return;
+      }
+
+      const nowHasMessages = (await page!.locator(selectors.message_item).count()) > 0;
+      const nowHasComposer = (await page!.locator(selectors.composer_input).count()) > 0;
+      const nowHasContainer = (await page!.locator(selectors.message_container).count()) > 0;
+
+      conversationOpened = nowHasMessages || nowHasComposer || nowHasContainer;
+      if (nowHasComposer) {
+        replyCapableConversationFound = true;
+      }
+    }
 
     for (const key of keys) {
       const selector = selectors[key];
+      let count = 0;
+      let status: "PASS" | "FAIL" = "FAIL";
+      let screenshotFile: string | undefined;
 
-        let count = 0;
-        let status: "PASS" | "FAIL" = "FAIL";
-        let screenshotFile: string | undefined;
-
+      if (conversationKeys.has(key)) {
+        const started = Date.now();
+        const startedAtValue = new Date(started).toISOString();
         try {
           await ensureConversationContext(key);
-
-          count = await countWithRetry(selector);
-          status = count > 0 ? "PASS" : "FAIL";
-
-          if (status === "FAIL" && key === "message_item") {
-            const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
-            if (composerCount > 0) {
-              // Empty/new threads can have a composer with zero existing message rows.
-              status = "PASS";
-            }
-          }
-
-          if (status === "FAIL" && key === "send_button") {
-            const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
-            if (composerCount > 0) {
-              // Some platforms only surface a visible send button after typing.
-              status = "PASS";
-            }
-          }
-
-          await page.evaluate((value) => {
-            document.querySelectorAll("[data-inbox-selector-highlight='1']").forEach((el) => {
-              el.removeAttribute("data-inbox-selector-highlight");
-            });
-
-            document.querySelectorAll(value).forEach((el) => {
-              (el as HTMLElement).setAttribute("data-inbox-selector-highlight", "1");
-            });
-          }, selector);
-
-          await page.addStyleTag({
-            content:
-              "[data-inbox-selector-highlight='1'] { outline: 2px solid #2563eb !important; box-shadow: 0 0 0 3px rgba(37,99,235,0.2) !important; }"
+          receipts.push({
+            stage: "open_thread",
+            status: "OK",
+            startedAt: startedAtValue,
+            completedAt: new Date().toISOString(),
+            durationMs: Date.now() - started,
+            details: { key }
           });
-
-          screenshotFile = `${input.platform.toLowerCase()}-${key}-${Date.now()}.png`;
-          await page.screenshot({ path: join(deps.screenshotDir, screenshotFile), fullPage: true });
-        } catch {
-          status = "FAIL";
+        } catch (error) {
+          receipts.push({
+            stage: "open_thread",
+            status: "FAIL",
+            startedAt: startedAtValue,
+            completedAt: new Date().toISOString(),
+            durationMs: Date.now() - started,
+            details: {
+              key,
+              ...summarizeError(error)
+            }
+          });
         }
+      }
+
+      const evalStarted = Date.now();
+      const evalStartedAt = new Date(evalStarted).toISOString();
+      try {
+        count = await countWithRetry(selector);
+        status = count > 0 ? "PASS" : "FAIL";
+
+        if (status === "FAIL" && key === "message_item") {
+          const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
+          if (composerCount > 0) {
+            status = "PASS";
+          }
+        }
+
+        if (status === "FAIL" && key === "send_button") {
+          const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
+          if (composerCount > 0) {
+            status = "PASS";
+          }
+        }
+
+        receipts.push({
+          stage: "evaluate",
+          status: "OK",
+          startedAt: evalStartedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - evalStarted,
+          details: { key, selector, count }
+        });
+      } catch (error) {
+        receipts.push({
+          stage: "evaluate",
+          status: "FAIL",
+          startedAt: evalStartedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - evalStarted,
+          details: {
+            key,
+            selector,
+            ...summarizeError(error)
+          }
+        });
+        status = "FAIL";
+      }
+
+      const screenshotStarted = Date.now();
+      const screenshotStartedAt = new Date(screenshotStarted).toISOString();
+      try {
+        screenshotFile = `${input.platform.toLowerCase()}-${key}-${Date.now()}.png`;
+        await page.screenshot({ path: join(deps.screenshotDir, screenshotFile), fullPage: true });
+
+        receipts.push({
+          stage: "screenshot",
+          status: "OK",
+          startedAt: screenshotStartedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - screenshotStarted,
+          details: {
+            key,
+            selector,
+            screenshotFile
+          }
+        });
+      } catch (error) {
+        screenshotFile = undefined;
+        receipts.push({
+          stage: "screenshot",
+          status: "FAIL",
+          startedAt: screenshotStartedAt,
+          completedAt: new Date().toISOString(),
+          durationMs: Date.now() - screenshotStarted,
+          details: {
+            key,
+            selector,
+            ...summarizeError(error)
+          }
+        });
+      }
 
       results.push({
         key,
@@ -287,12 +591,19 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
       });
     }
 
+    await runStage("persist", async () => undefined, {
+      reportId,
+      resultCount: results.length,
+      failedCount: results.filter((result) => result.status === "FAIL").length
+    });
+
     return {
       reportId,
       platform: input.platform,
       startedAt,
       completedAt: new Date().toISOString(),
-      results
+      results,
+      receipts
     };
   }
 

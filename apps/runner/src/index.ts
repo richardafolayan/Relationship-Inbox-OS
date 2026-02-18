@@ -14,7 +14,7 @@ import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
 import { createAiService } from "./services/ai";
 import { createSelectorTestStore } from "./services/selector-report-store";
-import { createSelectorTestService } from "./services/selector-tests";
+import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
@@ -73,6 +73,7 @@ const selectorTestService = createSelectorTestService({
   resolveSelectors: resolveSelectorsForPlatform,
   sessionManager,
   screenshotDir: runnerConfig.screenshotDir,
+  domDumpDir: runnerConfig.domDumpDir,
 });
 
 const operationMutex = createKeyedMutex();
@@ -219,6 +220,58 @@ function summarizeError(error: unknown): Record<string, unknown> {
 
   return {
     message: String(error)
+  };
+}
+
+function parseJsonRecord(value: string | null | undefined): Record<string, unknown> | undefined {
+  if (!value) {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(value);
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Record<string, unknown>;
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+function summarizeFailureDetails(details: Record<string, unknown> | undefined): {
+  requestId?: string;
+  stage?: string;
+  reason?: string;
+  errorSummary?: string;
+} {
+  if (!details) {
+    return {};
+  }
+
+  const nestedMessage = (value: unknown): string | undefined => {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message;
+    }
+    return undefined;
+  };
+
+  const message =
+    (typeof details.message === "string" && details.message.trim() ? details.message : undefined) ??
+    nestedMessage(details.innerError) ??
+    nestedMessage(details.error);
+  const stage = typeof details.stage === "string" ? details.stage : undefined;
+  const reason = typeof details.reason === "string" ? details.reason : undefined;
+  const requestId = typeof details.requestId === "string" ? details.requestId : undefined;
+
+  return {
+    requestId,
+    stage,
+    reason,
+    errorSummary: message
   };
 }
 
@@ -737,8 +790,9 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
         key: payload.key,
         selector: payload.selector
       });
+      const { receipts, ...reportForStore } = report;
 
-      selectorReports.setReport(report);
+      selectorReports.setReport(reportForStore);
 
       await auditService.log({
         platform: payload.platform,
@@ -747,6 +801,9 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
         status: report.results.every((result) => result.status === "PASS") ? "OK" : "FAIL",
         details: {
           reportId: report.reportId,
+          requestId: report.reportId,
+          stage: "persist",
+          receipts: report.receipts,
           results: report.results
         }
       });
@@ -758,9 +815,28 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
         reportId: report.reportId
       });
 
-      res.json(report);
+      res.status(200).json({
+        ok: true,
+        reportId: report.reportId,
+        platform: report.platform,
+        startedAt: report.startedAt,
+        completedAt: report.completedAt,
+        results: report.results,
+        receipts
+      });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const defaultPayload = {
+        ok: false as const,
+        platform: payload.platform,
+        stage: "persist",
+        error: error instanceof Error ? error.message : String(error),
+        requestId: uuid(),
+        reason: undefined as string | undefined,
+        receipts: [] as Array<Record<string, unknown>>
+      };
+      const failurePayload = isSelectorTestServiceError(error)
+        ? error.payload
+        : defaultPayload;
 
       await auditService.log({
         platform: payload.platform,
@@ -768,18 +844,25 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
         action: "SELECTOR_FAIL",
         status: "FAIL",
         details: {
-          message,
+          ...failurePayload,
           source: "selector-test",
-          failureKind: error instanceof Error && "kind" in error ? (error as Record<string, unknown>).kind : "UNKNOWN"
+          stack: error instanceof Error ? error.stack : undefined,
+          failureKind:
+            error instanceof Error && "kind" in error
+              ? (error as Record<string, unknown>).kind
+              : failurePayload.reason ?? "UNKNOWN"
         }
       });
 
-      const status = /profile.*in use|already in use|singleton/i.test(message)
-        ? 409
-        : /auth|login|required/i.test(message)
-          ? 401
-          : 500;
-      res.status(status).json({ error: message });
+      const status = isSelectorTestServiceError(error)
+        ? error.statusCode
+        : /profile.*in use|already in use|singleton/i.test(defaultPayload.error)
+          ? 409
+          : /auth|login|required/i.test(defaultPayload.error)
+            ? 401
+            : 500;
+
+      res.status(status).json(failurePayload);
     }
   });
 }));
@@ -1132,11 +1215,23 @@ app.get("/data/receipts", asyncRoute(async (req, res) => {
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
+  const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
 
   const data = await Promise.all(
     (["LINKEDIN", "INSTAGRAM", "TIKTOK"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
+      const latestFailure = await prisma.auditLog.findFirst({
+        where: {
+          platform,
+          status: "FAIL",
+          action: { in: [...failureActions] }
+        },
+        orderBy: { timestamp: "desc" }
+      });
+      const failureDetails = parseJsonRecord(latestFailure?.detailsJson);
+      const failureSummary = summarizeFailureDetails(failureDetails);
+
       return {
         platform,
         status: row?.status ?? "NOT_CONNECTED",
@@ -1170,7 +1265,18 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
           runnerConfig.browserProfile.mode === "personal"
             ? runnerConfig.browserProfile.personalChromeProfileResolutionStrategy
             : null,
-        latestSelectorReport: selectorReports.getLatestReport(platform)
+        latestSelectorReport: selectorReports.getLatestReport(platform),
+        lastScanFailure: latestFailure
+          ? {
+              requestId: failureSummary.requestId ?? latestFailure.id,
+              stage: failureSummary.stage ?? latestFailure.stage ?? "collect_threads",
+              reason: failureSummary.reason ?? undefined,
+              errorSummary: failureSummary.errorSummary ?? row?.lastError ?? "LinkedIn scan failed",
+              timestamp: latestFailure.timestamp.toISOString(),
+              screenshotFile: latestFailure.screenshotFile ?? undefined,
+              domDumpFile: latestFailure.domDumpFile ?? undefined
+            }
+          : undefined
       };
     })
   );

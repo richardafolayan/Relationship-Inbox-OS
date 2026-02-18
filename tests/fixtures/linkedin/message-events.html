@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn message events fixture</title>
+    <style>
+      .msg-s-message-list {
+        max-height: 240px;
+        overflow-y: auto;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="msg-s-message-list">
+      <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="urn:li:msg_event:1">
+        <time datetime="2026-02-18T12:00:00.000Z">12:00 PM</time>
+        <div class="msg-s-event-listitem__body">Incoming hello</div>
+      </div>
+
+      <div class="msg-s-event-listitem" data-event-urn="urn:li:msg_event:2">
+        <time datetime="2026-02-18T12:01:00.000Z">12:01 PM</time>
+        <div class="msg-s-event-listitem__body">Outgoing reply</div>
+      </div>
+
+      <div class="msg-s-event-listitem" data-event-urn="urn:li:msg_event:3">
+        <time datetime="2026-02-18T12:02:00.000Z">12:02 PM</time>
+        <img src="https://example.com/file.png" alt="attachment" />
+      </div>
+
+      <div class="msg-s-event-listitem msg-s-message-list__event" data-event-urn="urn:li:msg_event:4">
+        <time datetime="2026-02-18T12:03:00.000Z">12:03 PM</time>
+      </div>
+    </div>
+  </body>
+</html>

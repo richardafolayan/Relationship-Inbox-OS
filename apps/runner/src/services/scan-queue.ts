@@ -45,6 +45,124 @@ export function createScanQueue(deps: ScanQueueDeps) {
     return `${personKey}:${platform}`;
   }
 
+  function adapterErrorDetails(error: AdapterFailure | undefined): Record<string, unknown> {
+    if (!error?.details || typeof error.details !== "object") {
+      return {};
+    }
+    return error.details;
+  }
+
+  function extractNestedMessage(value: unknown): string | undefined {
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    const record = value as Record<string, unknown>;
+    if (typeof record.message === "string" && record.message.trim()) {
+      return record.message;
+    }
+    return undefined;
+  }
+
+  function classifyFailureReason(input: {
+    message: string;
+    details: Record<string, unknown>;
+  }): string {
+    const normalized = input.message.toLowerCase();
+    const runtimeContext = input.details.runtimeContext;
+    const runtimeContextUrl =
+      runtimeContext && typeof runtimeContext === "object" && typeof (runtimeContext as Record<string, unknown>).url === "string"
+        ? ((runtimeContext as Record<string, unknown>).url as string).toLowerCase()
+        : "";
+
+    if (normalized.includes("__name is not defined")) {
+      return "evaluate_helper_missing";
+    }
+    if (normalized.includes("referenceerror")) {
+      return "evaluate_reference_error";
+    }
+    if (normalized.includes("timeouterror") || normalized.includes("timeout")) {
+      return "timeout";
+    }
+    if (normalized.includes("execution context was destroyed")) {
+      return "transient_context_destroyed";
+    }
+    if (normalized.includes("detached")) {
+      return "element_detached";
+    }
+    if (
+      normalized.includes("auth required") ||
+      normalized.includes("login required") ||
+      normalized.includes("sign in") ||
+      runtimeContextUrl.includes("/uas/login")
+    ) {
+      return "login_required";
+    }
+    if (normalized.includes("checkpoint") || normalized.includes("verify") || runtimeContextUrl.includes("/checkpoint/")) {
+      return "checkpoint_required";
+    }
+    if (normalized.includes("too many requests") || normalized.includes("rate limit")) {
+      return "rate_limited";
+    }
+    if (normalized.includes("something went wrong") || normalized.includes("overlay")) {
+      return "linkedin_error_overlay";
+    }
+    if (
+      normalized.includes("thread list") ||
+      normalized.includes("still loading") ||
+      normalized.includes("container is missing")
+    ) {
+      return "thread_list_not_ready";
+    }
+
+    return "unknown";
+  }
+
+  function extractFailureReason(error: AdapterFailure | undefined, message: string): string | undefined {
+    const details = adapterErrorDetails(error);
+    if (typeof details.reason === "string" && details.reason.trim()) {
+      return details.reason;
+    }
+    return classifyFailureReason({
+      message,
+      details
+    });
+  }
+
+  function extractFailureMessage(error: AdapterFailure | undefined, fallback: string): string {
+    if (!error) {
+      return fallback;
+    }
+    const details = adapterErrorDetails(error);
+    if (typeof details.message === "string" && details.message.trim()) {
+      return details.message;
+    }
+    const nestedDetailErrorMessage = extractNestedMessage(details.error);
+    if (nestedDetailErrorMessage) {
+      return nestedDetailErrorMessage;
+    }
+    const nestedInnerErrorMessage = extractNestedMessage(details.innerError);
+    if (nestedInnerErrorMessage) {
+      return nestedInnerErrorMessage;
+    }
+    return fallback;
+  }
+
+  function extractInnerError(error: AdapterFailure | undefined): unknown {
+    const details = adapterErrorDetails(error);
+    return details.error ?? details.innerError;
+  }
+
+  function summarizeScanFailure(input: {
+    stage?: string;
+    reason?: string;
+    requestId: string;
+    message: string;
+  }): string {
+    const stage = input.stage ?? "collect_threads";
+    const reasonPart = input.reason ? ` · ${input.reason}` : "";
+    return `${stage}${reasonPart} · request ${input.requestId}: ${input.message}`;
+  }
+
   function triggerProcessNext(): void {
     void processNext().catch((error) => {
       void deps.auditLog({
@@ -324,15 +442,25 @@ export function createScanQueue(deps: ScanQueueDeps) {
               }
 
               const failureKind = resolveAdapterFailureKind(error);
-              const message = error instanceof Error ? error.message : String(error);
+              const baseMessage = error instanceof Error ? error.message : String(error);
               const resolvedFailureKind = failureKind ?? "UNKNOWN";
               const adapterError = error instanceof AdapterFailure ? error : undefined;
+              const message = extractFailureMessage(adapterError, baseMessage);
+              const failureReason = extractFailureReason(adapterError, message);
+              const failureStage = adapterError?.stage ?? "parse";
+              const requestId = job.jobId;
+              const summarizedFailure = summarizeScanFailure({
+                stage: failureStage,
+                reason: failureReason,
+                requestId,
+                message
+              });
 
               if (shouldStopScanForFailureKind(failureKind)) {
                 await setPlatformStatus({
                   platform,
                   status: "NOT_CONNECTED",
-                  lastError: message
+                  lastError: summarizedFailure
                 });
 
                 await deps.auditLog({
@@ -342,14 +470,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   status: "FAIL",
                   details: {
                     jobId: job.jobId,
-                    requestId: job.jobId,
-                    stage: adapterError?.stage ?? "parse",
+                    requestId,
+                    stage: failureStage,
                     platform,
                     message,
+                    reason: failureReason ?? "unknown",
                     failureKind: resolvedFailureKind,
                     threadDisplayName: thread.displayName,
                     platformThreadId: thread.platformThreadId,
-                    errorStack: error instanceof Error ? error.stack : undefined
+                    errorStack: error instanceof Error ? error.stack : undefined,
+                    innerError: extractInnerError(adapterError),
+                    stageReceipts: adapterErrorDetails(adapterError).stageReceipts,
+                    runtimeContext: adapterErrorDetails(adapterError).runtimeContext
                   },
                   screenshotFile: adapterError?.screenshotFile,
                   domDumpFile: adapterError?.domDumpFile
@@ -369,14 +501,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 status: "FAIL",
                 details: {
                   jobId: job.jobId,
-                  requestId: job.jobId,
-                  stage: adapterError?.stage ?? "parse",
+                  requestId,
+                  stage: failureStage,
                   platform,
                   message,
+                  reason: failureReason ?? "unknown",
                   failureKind: resolvedFailureKind,
                   threadDisplayName: thread.displayName,
                   platformThreadId: thread.platformThreadId,
-                  errorStack: error instanceof Error ? error.stack : undefined
+                  errorStack: error instanceof Error ? error.stack : undefined,
+                  innerError: extractInnerError(adapterError),
+                  stageReceipts: adapterErrorDetails(adapterError).stageReceipts,
+                  runtimeContext: adapterErrorDetails(adapterError).runtimeContext
                 },
                 screenshotFile: adapterError?.screenshotFile,
                 domDumpFile: adapterError?.domDumpFile
@@ -443,12 +579,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
           if (error instanceof AdapterFailure) {
             const failureKind = resolveAdapterFailureKind(error);
             const resolvedFailureKind = failureKind ?? "UNKNOWN";
+            const message = extractFailureMessage(error, error.message);
+            const failureReason = extractFailureReason(error, message);
+            const failureStage = error.stage ?? "collect_threads";
+            const requestId = job.jobId;
+            const summarizedFailure = summarizeScanFailure({
+              stage: failureStage,
+              reason: failureReason,
+              requestId,
+              message
+            });
 
             if (shouldStopScanForFailureKind(failureKind)) {
               await setPlatformStatus({
                 platform,
                 status: "NOT_CONNECTED",
-                lastError: error.message
+                lastError: summarizedFailure
               });
 
               await deps.auditLog({
@@ -458,12 +604,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 status: "FAIL",
                 details: {
                   jobId: job.jobId,
-                  requestId: job.jobId,
-                  stage: error.stage ?? "navigate",
+                  requestId,
+                  stage: failureStage,
                   platform,
-                  message: error.message,
+                  message,
+                  reason: failureReason ?? "unknown",
                   failureKind: resolvedFailureKind,
-                  errorStack: error.stack
+                  errorStack: error.stack,
+                  innerError: extractInnerError(error),
+                  stageReceipts: adapterErrorDetails(error).stageReceipts,
+                  runtimeContext: adapterErrorDetails(error).runtimeContext
                 },
                 screenshotFile: error.screenshotFile,
                 domDumpFile: error.domDumpFile
@@ -474,7 +624,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             await setPlatformStatus({
               platform,
               status: "DEGRADED",
-              lastError: error.message
+              lastError: summarizedFailure
             });
 
             await deps.auditLog({
@@ -484,21 +634,33 @@ export function createScanQueue(deps: ScanQueueDeps) {
               status: "FAIL",
               details: {
                 jobId: job.jobId,
-                requestId: job.jobId,
-                stage: error.stage ?? "collect_threads",
+                requestId,
+                stage: failureStage,
                 platform,
-                message: error.message,
+                message,
+                reason: failureReason ?? "unknown",
                 failureKind: resolvedFailureKind,
-                errorStack: error.stack
+                errorStack: error.stack,
+                innerError: extractInnerError(error),
+                stageReceipts: adapterErrorDetails(error).stageReceipts,
+                runtimeContext: adapterErrorDetails(error).runtimeContext
               },
               screenshotFile: error.screenshotFile,
               domDumpFile: error.domDumpFile
             });
           } else {
+            const message = error instanceof Error ? error.message : String(error);
+            const requestId = job.jobId;
+            const summarizedFailure = summarizeScanFailure({
+              stage: "collect_threads",
+              reason: "unknown",
+              requestId,
+              message
+            });
             await setPlatformStatus({
               platform,
               status: "ERROR",
-              lastError: error instanceof Error ? error.message : "Unknown error"
+              lastError: summarizedFailure
             });
 
             await deps.auditLog({
@@ -508,10 +670,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
               status: "FAIL",
               details: {
                 jobId: job.jobId,
-                requestId: job.jobId,
+                requestId,
                 stage: "collect_threads",
                 platform,
-                message: error instanceof Error ? error.message : String(error),
+                message,
+                reason: "unknown",
                 errorStack: error instanceof Error ? error.stack : undefined
               }
             });

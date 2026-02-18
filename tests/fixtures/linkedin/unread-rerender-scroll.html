@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn unread rerender scroll fixture</title>
+    <style>
+      body {
+        margin: 16px;
+        font-family: Arial, sans-serif;
+      }
+
+      #thread-pane {
+        height: 240px;
+        width: 420px;
+        overflow-y: auto;
+        border: 1px solid #d1d5db;
+      }
+
+      .msg-conversations-container__conversations-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      .msg-conversation-listitem {
+        border-bottom: 1px solid #e5e7eb;
+      }
+
+      .msg-conversation-listitem__link {
+        display: block;
+        min-height: 88px;
+        padding: 8px 10px;
+      }
+
+      .msg-conversation-listitem__participant-names {
+        margin: 0;
+        font-size: 15px;
+      }
+
+      .msg-conversation-card__message-snippet {
+        margin: 6px 0 4px;
+        color: #475569;
+      }
+
+      .msg-conversation-card__unread-count {
+        display: inline-block;
+        background: #2563eb;
+        color: #fff;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 12px;
+      }
+
+      .artdeco-loader {
+        margin: 10px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <button
+      id="unread-pill"
+      type="button"
+      data-test-messaging-inbox-filters__filter-pill="UNREAD"
+      aria-pressed="false"
+    >
+      Unread
+    </button>
+    <div id="spinner" class="artdeco-loader" hidden>Loading…</div>
+    <div id="thread-pane">
+      <ul id="thread-list" class="msg-conversations-container__conversations-list"></ul>
+    </div>
+
+    <script>
+      (() => {
+        const allRows = [
+          { id: "alpha", name: "Alpha One", snippet: "Intro message", unread: 0, time: "8:01 AM" },
+          { id: "bravo", name: "Bravo Two", snippet: "Warm follow up", unread: 1, time: "8:05 AM" },
+          { id: "charlie", name: "Charlie Three", snippet: "Checking in", unread: 0, time: "8:09 AM" },
+          { id: "delta", name: "Delta Four", snippet: "Long time no see", unread: 0, time: "8:14 AM" },
+          { id: "echo", name: "Echo Five", snippet: "Can we reconnect?", unread: 0, time: "8:18 AM" },
+          { id: "foxtrot", name: "Foxtrot Six", snippet: "Are you available?", unread: 0, time: "8:22 AM" },
+          { id: "golf", name: "Golf Seven", snippet: "Partnership note", unread: 0, time: "8:27 AM" },
+          { id: "hotel", name: "Hotel Eight", snippet: "Unread target one", unread: 2, time: "8:31 AM" },
+          { id: "india", name: "India Nine", snippet: "Unread target two", unread: 3, time: "8:36 AM" }
+        ];
+
+        const pane = document.getElementById("thread-pane");
+        const spinner = document.getElementById("spinner");
+        const unreadPill = document.getElementById("unread-pill");
+        const chunkSize = 3;
+        let rendered = 0;
+
+        const rowMarkup = (row) => `
+          <li class="msg-conversation-listitem" data-conversation-urn="urn:li:msg_thread:${row.id}">
+            <div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link">
+              <a href="https://www.linkedin.com/messaging/thread/${row.id}/">open</a>
+              <h3 class="msg-conversation-listitem__participant-names">
+                <span class="truncate">${row.name}</span>
+              </h3>
+              <p class="msg-conversation-card__message-snippet">${row.snippet}</p>
+              <time>${row.time}</time>
+              ${
+                row.unread > 0
+                  ? `<div class="msg-conversation-card__unread-count"><span class="notification-badge__count">${row.unread}</span></div>`
+                  : ""
+              }
+            </div>
+          </li>
+        `;
+
+        const appendChunk = () => {
+          const list = document.getElementById("thread-list");
+          if (!list || rendered >= allRows.length) {
+            return;
+          }
+
+          const nextRows = allRows.slice(rendered, rendered + chunkSize);
+          for (const row of nextRows) {
+            list.insertAdjacentHTML("beforeend", rowMarkup(row));
+          }
+          rendered += nextRows.length;
+        };
+
+        const resetListNode = () => {
+          const current = document.getElementById("thread-list");
+          if (!current) {
+            return;
+          }
+          const replacement = document.createElement("ul");
+          replacement.id = "thread-list";
+          replacement.className = "msg-conversations-container__conversations-list";
+          current.replaceWith(replacement);
+          rendered = 0;
+        };
+
+        pane.addEventListener("scroll", () => {
+          const nearBottom = pane.scrollTop + pane.clientHeight >= pane.scrollHeight - 20;
+          if (nearBottom) {
+            window.setTimeout(appendChunk, 0);
+          }
+        });
+
+        unreadPill.addEventListener("click", () => {
+          unreadPill.setAttribute("aria-pressed", "true");
+          spinner.hidden = false;
+          resetListNode();
+          window.setTimeout(() => {
+            spinner.hidden = true;
+            appendChunk();
+          }, 450);
+        });
+
+        appendChunk();
+      })();
+    </script>
+  </body>
+</html>

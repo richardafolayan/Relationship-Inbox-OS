@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  resolveLinkedInScanFailureReason,
   resolveLinkedInCollectionStopReason,
   shouldStopLinkedInCollection,
   updateLinkedInCollectionStability
@@ -125,4 +126,20 @@ test("LinkedIn collector emits deterministic stop reason for audit metrics", () 
   });
 
   assert.equal(stopReason, "no_growth");
+});
+
+test("LinkedIn scan failure reason classifies __name helper leakage explicitly", () => {
+  const reason = resolveLinkedInScanFailureReason({
+    message: "page.evaluate: ReferenceError: __name is not defined"
+  });
+
+  assert.equal(reason, "evaluate_helper_missing");
+});
+
+test("LinkedIn scan failure reason classifies generic reference errors separately", () => {
+  const reason = resolveLinkedInScanFailureReason({
+    message: "ReferenceError: someInjectedHelper is not defined"
+  });
+
+  assert.equal(reason, "evaluate_reference_error");
 });

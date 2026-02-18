@@ -30,6 +30,7 @@ interface SessionState {
   context: BrowserContext | null;
   contextPromise: Promise<BrowserContext> | null;
   pages: Map<PlatformName, Page>;
+  pageOwners: Map<Page, PlatformName>;
 }
 
 function sanitizePersonKey(personKey: string): string {
@@ -42,6 +43,19 @@ function isContextUsable(context: BrowserContext): boolean {
   try {
     context.pages();
     return true;
+  } catch {
+    return false;
+  }
+}
+
+function isBlankPageUrl(url: string): boolean {
+  const trimmed = url.trim().toLowerCase();
+  return trimmed === "" || trimmed === "about:blank";
+}
+
+function isPageOpen(page: Page): boolean {
+  try {
+    return !page.isClosed();
   } catch {
     return false;
   }
@@ -79,15 +93,21 @@ export class SessionManager {
 
       if (existing?.isClosed()) {
         state.pages.delete(input.platform);
+        state.pageOwners.delete(existing);
       }
 
-      const page = await context.newPage();
-      state.pages.set(input.platform, page);
-      page.on("close", () => {
-        const current = state.pages.get(input.platform);
-        if (current === page) {
-          state.pages.delete(input.platform);
-        }
+      const reusableBlank = this.findReusableBlankPageLocked({
+        context,
+        state,
+        platform: input.platform
+      });
+
+      const page = reusableBlank ?? (await context.newPage());
+      this.registerPageLocked(state, input.platform, page);
+      await this.closeUnassignedBlankPagesLocked({
+        context,
+        state,
+        keepPage: page
       });
       return page;
     });
@@ -135,6 +155,7 @@ export class SessionManager {
       }
 
       state.pages.delete(input.platform);
+      state.pageOwners.delete(page);
       if (!page.isClosed()) {
         await page.close().catch(() => undefined);
       }
@@ -151,7 +172,8 @@ export class SessionManager {
       profileDir: this.getProfileDir(personKey),
       context: null,
       contextPromise: null,
-      pages: new Map<PlatformName, Page>()
+      pages: new Map<PlatformName, Page>(),
+      pageOwners: new Map<Page, PlatformName>()
     };
     this.states.set(personKey, created);
     return created;
@@ -168,6 +190,7 @@ export class SessionManager {
 
     input.state.context = null;
     input.state.pages.clear();
+    input.state.pageOwners.clear();
 
     if (input.state.contextPromise) {
       return input.state.contextPromise;
@@ -216,12 +239,92 @@ export class SessionManager {
       }
     }
     state.pages.clear();
+    state.pageOwners.clear();
 
     const context = state.context;
     state.context = null;
     state.contextPromise = null;
     if (context) {
       await context.close().catch(() => undefined);
+    }
+  }
+
+  private registerPageLocked(state: SessionState, platform: PlatformName, page: Page): void {
+    state.pages.set(platform, page);
+    state.pageOwners.set(page, platform);
+    page.on("close", () => {
+      const current = state.pages.get(platform);
+      if (current === page) {
+        state.pages.delete(platform);
+      }
+      state.pageOwners.delete(page);
+    });
+  }
+
+  private findReusableBlankPageLocked(input: {
+    context: BrowserContext;
+    state: SessionState;
+    platform: PlatformName;
+  }): Page | null {
+    const pages = input.context.pages();
+    for (const page of pages) {
+      if (!isPageOpen(page)) {
+        continue;
+      }
+
+      const owner = input.state.pageOwners.get(page);
+      if (owner && owner !== input.platform) {
+        continue;
+      }
+
+      const mappedToOtherPlatform = Array.from(input.state.pages.entries()).some(
+        ([platformName, mappedPage]) => platformName !== input.platform && mappedPage === page
+      );
+      if (mappedToOtherPlatform) {
+        continue;
+      }
+
+      const currentUrl = page.url();
+      if (!isBlankPageUrl(currentUrl)) {
+        continue;
+      }
+
+      return page;
+    }
+
+    return null;
+  }
+
+  private async closeUnassignedBlankPagesLocked(input: {
+    context: BrowserContext;
+    state: SessionState;
+    keepPage: Page;
+  }): Promise<void> {
+    const pages = input.context.pages();
+    for (const page of pages) {
+      if (page === input.keepPage) {
+        continue;
+      }
+
+      if (!isPageOpen(page)) {
+        continue;
+      }
+
+      const owner = input.state.pageOwners.get(page);
+      if (owner) {
+        continue;
+      }
+
+      const mapped = Array.from(input.state.pages.values()).some((mappedPage) => mappedPage === page);
+      if (mapped) {
+        continue;
+      }
+
+      if (!isBlankPageUrl(page.url())) {
+        continue;
+      }
+
+      await page.close().catch(() => undefined);
     }
   }
 }
