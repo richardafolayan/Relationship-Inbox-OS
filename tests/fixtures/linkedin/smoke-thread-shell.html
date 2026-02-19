@@ -1,10 +1,29 @@
 <!doctype html>
 <html>
   <body>
+    <div class="msg-conversations-container__filters-list">
+      <button data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="false">All</button>
+      <button data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="true">Unread</button>
+      <button data-test-messaging-inbox-filters__filter-pill="JOBS" aria-pressed="false">Jobs</button>
+    </div>
     <section class="msg-conversations-container">
       <input aria-label="Search messages" placeholder="Search messages" />
       <ul class="msg-conversations-container__conversations-list">
         <li></li>
+        <li>
+          <a class="msg-conversation-listitem__link msg-conversations-container__convo-item-link" href="/messaging/thread/abc/" tabindex="0">
+            <span class="msg-conversation-listitem__participant-names">Anchor Person</span>
+            <time class="msg-conversation-listitem__time-stamp">Yesterday</time>
+            <p class="msg-conversation-card__message-snippet">Anchor row</p>
+          </a>
+        </li>
+        <li>
+          <button class="msg-conversation-listitem__link msg-conversations-container__convo-item-link" type="button">
+            <span class="msg-conversation-listitem__participant-names">Button Person</span>
+            <time class="msg-conversation-listitem__time-stamp">Tue</time>
+            <p class="msg-conversation-card__message-snippet">Button row</p>
+          </button>
+        </li>
         <li>
           <div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link" tabindex="0">
             <span class="msg-conversation-listitem__participant-names">Thread Route Person</span>
@@ -14,10 +33,9 @@
         </li>
       </ul>
     </section>
-    <section class="msg-s-message-list">
-      <div class="msg-s-event-listitem">
-        <p class="msg-s-event-listitem__body">Thread body panel present.</p>
-      </div>
+    <section class="msg-conversation-empty-state">
+      <h2>No messages...yet!</h2>
+      <button type="button">New message</button>
     </section>
   </body>
 </html>

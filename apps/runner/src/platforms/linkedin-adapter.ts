@@ -125,18 +125,18 @@ const linkedInSmokeListContainerSelectors = [
   "ul.msg-conversations-container__conversations-list",
   "[class*='msg-conversations-container__conversations-list']"
 ];
+const linkedInSmokeFilterPillSelector = "button[data-test-messaging-inbox-filters__filter-pill]";
 const linkedInSmokeBlockedModalSelectors = [
-  "#onetrust-banner-sdk",
-  ".artdeco-modal[role='dialog']",
-  "[aria-modal='true']",
-  "[data-test-modal]",
-  ".msg-overlay-conversations-container--expanded",
-  ".artdeco-global-alert",
-  "#artdeco-global-alert-container"
+  "#artdeco-modal-outlet .artdeco-modal[aria-modal='true']",
+  ".artdeco-modal-overlay",
+  ".artdeco-modal__overlay",
+  "[role='dialog'][aria-modal='true']"
 ];
 const linkedInSmokeEmptyStatePatterns = [/no unread/i, /you're all caught up/i, /no messages match/i];
 const linkedInSmokeSelectorMismatchError =
   "Selector mismatch: Unread view shows list structure/counters but 0 detectable conversation rows. See list-probe.* in LOG_DIR.";
+const linkedInSmokeRowMismatchMessage =
+  "Selector mismatch: list has X direct li children but 0 real rows (has participant+link).";
 const linkedInLoadingSpinnerSelector = [
   ".artdeco-loader",
   ".artdeco-spinner",
@@ -224,9 +224,10 @@ export interface LinkedInMessagingShellProbe {
   title: string;
   searchInputCounts: Record<string, number>;
   listContainerCounts: Record<string, number>;
-  participantNamesCount: number;
-  convoItemLinkCount: number;
-  conversationListItemCount: number;
+  filterPillCount: number;
+  visibleSearchInput: boolean;
+  visibleListContainer: boolean;
+  visibleFilterPills: boolean;
   bodyTextSnippet: string;
 }
 
@@ -234,7 +235,30 @@ export type LinkedInSmokeNavigateBlockedReason = "login_required" | "checkpoint_
 
 export type LinkedInSmokeNavigateState =
   | { blocked: false }
-  | { blocked: true; reason: LinkedInSmokeNavigateBlockedReason; signal: string };
+  | { blocked: true; reason: LinkedInSmokeNavigateBlockedReason; signal: string; modalTextSnippet?: string };
+
+export interface LinkedInConversationRowCandidate {
+  liIndex: number;
+  stableKey: string;
+  participantName: string;
+  listTimestamp?: string;
+  previewSnippet?: string;
+  threadUrl?: string;
+  clickSelector: string;
+}
+
+export interface LinkedInConversationRowDiscovery {
+  containerSelector: string | null;
+  directLiCount: number;
+  liWithParticipantCount: number;
+  liWithLinkCount: number;
+  liWithParticipantAndLinkCount: number;
+  participantNamesCount: number;
+  linkCount: number;
+  snippetCount: number;
+  timeCount: number;
+  candidates: LinkedInConversationRowCandidate[];
+}
 
 function cleanLocatorText(value: string | null | undefined): string {
   return cleanText(value ?? "");
@@ -321,6 +345,48 @@ function hasAnySelectorMatch(counts: Record<string, number>): boolean {
   return Object.values(counts).some((count) => count > 0);
 }
 
+async function hasVisibleMatch(page: Page, selectors: string[]): Promise<boolean> {
+  for (const selector of selectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+    for (let index = 0; index < Math.min(count, 5); index += 1) {
+      const visible = await locator.nth(index).isVisible().catch(() => false);
+      if (visible) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+async function resolveLinkedInConversationListContainer(page: Page): Promise<{
+  selector: string;
+  locator: Locator;
+} | null> {
+  let fallback: { selector: string; locator: Locator } | null = null;
+  for (const selector of linkedInSmokeListContainerSelectors) {
+    const locator = page.locator(selector).first();
+    const count = await locator.count().catch(() => 0);
+    if (count <= 0) {
+      continue;
+    }
+    if (!fallback) {
+      fallback = {
+        selector,
+        locator
+      };
+    }
+    const visible = await locator.isVisible().catch(() => false);
+    if (visible) {
+      return {
+        selector,
+        locator
+      };
+    }
+  }
+  return fallback;
+}
+
 async function readText(locator: Locator): Promise<string> {
   const first = locator.first();
   if (!(await hasAny(first))) {
@@ -347,7 +413,14 @@ interface LinkedInDiscoveredUnreadRowsWithHandles {
   namesCount: number;
   clickTargetsCount: number;
   primaryClickTargetsCount: number;
+  directLiCount: number;
+  liWithParticipantAndLinkCount: number;
+  containerSelector: string | null;
   rows: LinkedInDiscoveredUnreadRowHandle[];
+}
+
+interface LinkedInConversationRowDiscoveryWithContainer extends LinkedInConversationRowDiscovery {
+  containerLocator: Locator | null;
 }
 
 interface LinkedInUnreadCounterProbe {
@@ -360,6 +433,16 @@ interface LinkedInUnreadCounterProbe {
 interface LinkedInUnreadListProbeData {
   url: string;
   generatedAt: string;
+  directLiCount: number;
+  realRowCount: number;
+  liWithParticipantCount: number;
+  liWithLinkCount: number;
+  liWithParticipantAndLinkCount: number;
+  participantNamesCount: number;
+  linkCount: number;
+  snippetCount: number;
+  timeCount: number;
+  unreadPillActive: boolean;
   containerProbes: Array<{
     selector: string;
     count: number;
@@ -379,6 +462,7 @@ interface LinkedInUnreadListProbeData {
     previewSnippet: string | null;
     unreadCount: number | null;
   }>;
+  firstDirectLiOuterHtml: string[];
   emptyStateTextMatches: string[];
 }
 
@@ -429,128 +513,179 @@ async function readUnreadCountFromScope(scope: Locator): Promise<number | undefi
   return first;
 }
 
-async function resolveRowScopeFromName(nameNode: Locator): Promise<Locator> {
-  const liScope = nameNode.locator("xpath=ancestor::li[1]").first();
-  if (await hasAny(liScope)) {
-    return liScope;
+async function getConversationRowCandidatesWithContainer(
+  page: Page
+): Promise<LinkedInConversationRowDiscoveryWithContainer> {
+  const container = await resolveLinkedInConversationListContainer(page);
+  if (!container) {
+    return {
+      containerSelector: null,
+      containerLocator: null,
+      directLiCount: 0,
+      liWithParticipantCount: 0,
+      liWithLinkCount: 0,
+      liWithParticipantAndLinkCount: 0,
+      participantNamesCount: 0,
+      linkCount: 0,
+      snippetCount: 0,
+      timeCount: 0,
+      candidates: []
+    };
   }
 
-  const classScope = nameNode
-    .locator(
-      "xpath=ancestor::*[contains(@class,'msg-conversation-listitem') or contains(@class,'msg-conversations-container__convo-item-link') or contains(@class,'msg-conversation-listitem__link')][1]"
-    )
-    .first();
-  if (await hasAny(classScope)) {
-    return classScope;
-  }
+  const raw = await container.locator
+    .evaluate((containerNode) => {
+      const liNodes = Array.from(containerNode.querySelectorAll(":scope > li"));
+      const rows: Array<{
+        liIndex: number;
+        participantName: string;
+        listTimestamp: string | null;
+        previewSnippet: string | null;
+        href: string | null;
+        clickSelector: string;
+      }> = [];
+      let liWithParticipantCount = 0;
+      let liWithLinkCount = 0;
+      let liWithParticipantAndLinkCount = 0;
 
-  return nameNode;
+      for (let index = 0; index < liNodes.length; index += 1) {
+        const node = liNodes[index];
+        if (!node) {
+          continue;
+        }
+        const participant = node.querySelector(".msg-conversation-listitem__participant-names");
+        const link = node.querySelector(".msg-conversation-listitem__link");
+        if (participant) {
+          liWithParticipantCount += 1;
+        }
+        if (link) {
+          liWithLinkCount += 1;
+        }
+        if (!(participant && link)) {
+          continue;
+        }
+        liWithParticipantAndLinkCount += 1;
+
+        const participantName = (participant.textContent ?? "").replace(/\s+/g, " ").trim();
+        if (!participantName) {
+          continue;
+        }
+        const listTimestamp = (
+          node.querySelector("time.msg-conversation-listitem__time-stamp")?.textContent ?? ""
+        )
+          .replace(/\s+/g, " ")
+          .trim();
+        const previewSnippet = (node.querySelector(".msg-conversation-card__message-snippet")?.textContent ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
+        const anchor = link.tagName.toLowerCase() === "a" ? link : node.querySelector("a[href*='/messaging/']");
+        const href = (anchor?.getAttribute("href") ?? "").replace(/\s+/g, " ").trim();
+        rows.push({
+          liIndex: index,
+          participantName,
+          listTimestamp: listTimestamp || null,
+          previewSnippet: previewSnippet || null,
+          href: href || null,
+          clickSelector: ".msg-conversation-listitem__link"
+        });
+      }
+
+      return {
+        directLiCount: liNodes.length,
+        liWithParticipantCount,
+        liWithLinkCount,
+        liWithParticipantAndLinkCount,
+        rows
+      };
+    })
+    .catch(() => {
+      return {
+        directLiCount: 0,
+        liWithParticipantCount: 0,
+        liWithLinkCount: 0,
+        liWithParticipantAndLinkCount: 0,
+        rows: []
+      };
+    });
+
+  const candidates = raw.rows.map((entry) => {
+    const threadUrl = resolveSmokeThreadUrl(entry.href ?? "", page.url());
+    const stableToken = resolveSmokeThreadToken(threadUrl);
+    const fallback = `linkedin-smoke:${entry.participantName.toLowerCase()}|${(entry.previewSnippet ?? "").toLowerCase()}|${(entry.listTimestamp ?? "").toLowerCase()}`;
+    return {
+      liIndex: entry.liIndex,
+      stableKey: stableToken || fallback,
+      participantName: entry.participantName,
+      listTimestamp: entry.listTimestamp ?? undefined,
+      previewSnippet: entry.previewSnippet ?? undefined,
+      threadUrl,
+      clickSelector: entry.clickSelector
+    };
+  });
+
+  return {
+    containerSelector: container.selector,
+    containerLocator: container.locator,
+    directLiCount: raw.directLiCount,
+    liWithParticipantCount: raw.liWithParticipantCount,
+    liWithLinkCount: raw.liWithLinkCount,
+    liWithParticipantAndLinkCount: raw.liWithParticipantAndLinkCount,
+    participantNamesCount: await container.locator.locator(linkedInSmokeParticipantSelector).count().catch(() => 0),
+    linkCount: await container.locator.locator(".msg-conversation-listitem__link").count().catch(() => 0),
+    snippetCount: await container.locator.locator(linkedInSmokePreviewSelector).count().catch(() => 0),
+    timeCount: await container.locator.locator(linkedInSmokeListTimestampSelector).count().catch(() => 0),
+    candidates
+  };
 }
 
-async function resolveClickTargetFromScope(input: {
-  page: Page;
-  nameNode: Locator;
-  scope: Locator;
-  index: number;
-}): Promise<Locator | null> {
-  const scopedClickable = input.scope
-    .locator(
-      ":scope :is(div,a,button)[class*='msg-conversation-listitem__link'], :scope :is(div,a,button)[class*='msg-conversations-container__convo-item-link'], :scope a[href*='/messaging/thread/'], :scope a[href*='/messaging/'], :scope [tabindex='0']"
-    )
-    .first();
-  if (await hasAny(scopedClickable)) {
-    return scopedClickable;
-  }
-
-  const ancestorClickable = input.nameNode
-    .locator(
-      "xpath=ancestor::*[@tabindex='0' or self::a or self::button or contains(@class,'msg-conversation-listitem__link') or contains(@class,'msg-conversations-container__convo-item-link')][1]"
-    )
-    .first();
-  if (await hasAny(ancestorClickable)) {
-    return ancestorClickable;
-  }
-
-  const marker = `li-smoke-target-${Date.now()}-${input.index}`;
-  const marked = await input.nameNode
-    .evaluate((node, markerValue) => {
-      const element = node as HTMLElement;
-      const clickable = element.closest(
-        "[tabindex='0'],a,button,.msg-conversation-listitem__link,[class*='__convo-item-link']"
-      ) as HTMLElement | null;
-      if (!clickable) {
-        return false;
-      }
-      clickable.setAttribute("data-li-smoke-click-target", markerValue);
-      return true;
-    }, marker)
-    .catch(() => false);
-  if (!marked) {
-    return null;
-  }
-
-  const markerTarget = input.page.locator(`[data-li-smoke-click-target="${marker}"]`).first();
-  return (await hasAny(markerTarget)) ? markerTarget : null;
+export async function getConversationRowCandidates(page: Page): Promise<LinkedInConversationRowDiscovery> {
+  const discovered = await getConversationRowCandidatesWithContainer(page);
+  return {
+    containerSelector: discovered.containerSelector,
+    directLiCount: discovered.directLiCount,
+    liWithParticipantCount: discovered.liWithParticipantCount,
+    liWithLinkCount: discovered.liWithLinkCount,
+    liWithParticipantAndLinkCount: discovered.liWithParticipantAndLinkCount,
+    participantNamesCount: discovered.participantNamesCount,
+    linkCount: discovered.linkCount,
+    snippetCount: discovered.snippetCount,
+    timeCount: discovered.timeCount,
+    candidates: discovered.candidates
+  };
 }
 
 async function discoverLinkedInUnreadRowsWithHandles(page: Page): Promise<LinkedInDiscoveredUnreadRowsWithHandles> {
-  const namesLocator = page.locator(linkedInSmokeParticipantSelector);
-  const rawNamesCount = await namesLocator.count().catch(() => 0);
-  const primaryClickTargets = page.locator(
-    ":is(div,a,button)[class*='msg-conversation-listitem__link'], :is(div,a,button)[class*='msg-conversations-container__convo-item-link']",
-    { has: page.locator(linkedInSmokeParticipantSelector) }
-  );
-  const primaryClickTargetsCount = await primaryClickTargets.count().catch(() => 0);
-
+  const discovered = await getConversationRowCandidatesWithContainer(page);
   const rows: LinkedInDiscoveredUnreadRowHandle[] = [];
-  for (let index = 0; index < rawNamesCount; index += 1) {
-    const nameNode = namesLocator.nth(index);
-    const participantName = await readText(nameNode);
-    if (!participantName) {
-      continue;
+  if (discovered.containerLocator) {
+    for (const candidate of discovered.candidates) {
+      const scope = discovered.containerLocator.locator(":scope > li").nth(candidate.liIndex);
+      const clickTarget = scope.locator(candidate.clickSelector).first();
+      if ((await clickTarget.count().catch(() => 0)) <= 0) {
+        continue;
+      }
+      rows.push({
+        metadata: {
+          stableKey: candidate.stableKey,
+          participantName: candidate.participantName,
+          listTimestamp: candidate.listTimestamp,
+          previewSnippet: candidate.previewSnippet,
+          unreadCount: await readUnreadCountFromScope(scope),
+          threadUrl: candidate.threadUrl
+        },
+        clickTarget,
+        scope
+      });
     }
-
-    const scope = await resolveRowScopeFromName(nameNode);
-    const clickTarget = await resolveClickTargetFromScope({
-      page,
-      nameNode,
-      scope,
-      index
-    });
-    if (!clickTarget) {
-      continue;
-    }
-
-    const listTimestamp = await readText(scope.locator(linkedInSmokeListTimestampSelector));
-    const previewSnippet = await readText(scope.locator(linkedInSmokePreviewSelector));
-    const href = resolveSmokeThreadUrl(
-      (await readAttr(clickTarget, "href")) || (await readAttr(scope.locator("a[href*='/messaging/']"), "href")),
-      page.url()
-    );
-    const unreadCount = await readUnreadCountFromScope(scope);
-    const stableToken = resolveSmokeThreadToken(href);
-    const stableKey =
-      stableToken ||
-      `linkedin-smoke:${participantName.toLowerCase()}|${previewSnippet.toLowerCase()}|${listTimestamp.toLowerCase()}`;
-
-    rows.push({
-      metadata: {
-        stableKey,
-        participantName,
-        listTimestamp: listTimestamp || undefined,
-        previewSnippet: previewSnippet || undefined,
-        unreadCount,
-        threadUrl: href
-      },
-      clickTarget,
-      scope
-    });
   }
 
   return {
-    namesCount: rawNamesCount,
+    namesCount: discovered.participantNamesCount,
     clickTargetsCount: rows.length,
-    primaryClickTargetsCount,
+    primaryClickTargetsCount: discovered.linkCount,
+    directLiCount: discovered.directLiCount,
+    liWithParticipantAndLinkCount: discovered.liWithParticipantAndLinkCount,
+    containerSelector: discovered.containerSelector,
     rows
   };
 }
@@ -602,12 +737,10 @@ export async function isLinkedInMessagingShellReady(
 ): Promise<{ ok: boolean; details: LinkedInMessagingShellProbe }> {
   const searchInputCounts = await collectSelectorCounts(page, linkedInSmokeSearchInputSelectors);
   const listContainerCounts = await collectSelectorCounts(page, linkedInSmokeListContainerSelectors);
-  const participantNamesCount = await page.locator(linkedInSmokeParticipantSelector).count().catch(() => 0);
-  const convoItemLinkCount = await page
-    .locator("[class*='msg-conversations-container__convo-item-link']")
-    .count()
-    .catch(() => 0);
-  const conversationListItemCount = await page.locator(".msg-conversation-listitem").count().catch(() => 0);
+  const filterPillCount = await page.locator(linkedInSmokeFilterPillSelector).count().catch(() => 0);
+  const visibleSearchInput = await hasVisibleMatch(page, linkedInSmokeSearchInputSelectors);
+  const visibleListContainer = await hasVisibleMatch(page, linkedInSmokeListContainerSelectors);
+  const visibleFilterPills = await hasVisibleMatch(page, [linkedInSmokeFilterPillSelector]);
   const title = cleanText(await page.title().catch(() => ""));
   const rawBodyText = cleanText(await page.locator("body").innerText().catch(() => ""));
   const bodySnippet = rawBodyText.slice(0, 500);
@@ -617,18 +750,15 @@ export async function isLinkedInMessagingShellReady(
     title,
     searchInputCounts,
     listContainerCounts,
-    participantNamesCount,
-    convoItemLinkCount,
-    conversationListItemCount,
+    filterPillCount,
+    visibleSearchInput,
+    visibleListContainer,
+    visibleFilterPills,
     bodyTextSnippet: redactSmokeBodySnippet(bodySnippet)
   };
 
-  const searchPresent = hasAnySelectorMatch(searchInputCounts);
-  const listPresent = hasAnySelectorMatch(listContainerCounts);
-  const rowSignalPresent = participantNamesCount > 0 || convoItemLinkCount > 0 || conversationListItemCount > 0;
-
   return {
-    ok: searchPresent && listPresent && rowSignalPresent,
+    ok: visibleSearchInput && visibleListContainer && visibleFilterPills,
     details
   };
 }
@@ -664,18 +794,99 @@ export async function classifyLinkedInSmokeNavigateState(
     };
   }
 
-  const modalCounts = await collectSelectorCounts(page, linkedInSmokeBlockedModalSelectors);
-  const firstModalMatch = Object.entries(modalCounts).find(([, count]) => count > 0)?.[0];
-  if (firstModalMatch) {
-    return {
-      blocked: true,
-      reason: "blocked_by_modal",
-      signal: firstModalMatch
-    };
+  for (const selector of linkedInSmokeBlockedModalSelectors) {
+    const locator = page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+    for (let index = 0; index < Math.min(count, 4); index += 1) {
+      const node = locator.nth(index);
+      const visible = await node.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      const box = await node.boundingBox().catch(() => null);
+      if (!box || box.width <= 200 || box.height <= 200) {
+        continue;
+      }
+      const modalTextSnippet = cleanText(await node.innerText({ timeout: 0 }).catch(() => "")).slice(0, 120);
+      return {
+        blocked: true,
+        reason: "blocked_by_modal",
+        signal: selector,
+        modalTextSnippet
+      };
+    }
   }
 
   return {
     blocked: false
+  };
+}
+
+export async function waitForLinkedInShellReady(
+  page: Page,
+  timeoutMs = 15_000
+): Promise<
+  | { state: "READY"; probe: LinkedInMessagingShellProbe }
+  | { state: "BLOCKED"; probe: LinkedInMessagingShellProbe; blocked: Exclude<LinkedInSmokeNavigateState, { blocked: false }> }
+  | { state: "TIMEOUT"; probe: LinkedInMessagingShellProbe }
+> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  let latest = await isLinkedInMessagingShellReady(page);
+  while (Date.now() < deadline) {
+    if (latest.ok) {
+      return {
+        state: "READY",
+        probe: latest.details
+      };
+    }
+    const navigateState = await classifyLinkedInSmokeNavigateState(page, latest.details);
+    if (navigateState.blocked) {
+      return {
+        state: "BLOCKED",
+        probe: latest.details,
+        blocked: navigateState
+      };
+    }
+    await page.waitForTimeout(250);
+    latest = await isLinkedInMessagingShellReady(page);
+  }
+  return {
+    state: "TIMEOUT",
+    probe: latest.details
+  };
+}
+
+export async function waitUnreadRowsOrEmptyState(
+  page: Page,
+  timeoutMs = 12_000
+): Promise<
+  | { state: "ROWS_READY"; discovery: LinkedInConversationRowDiscovery }
+  | { state: "EMPTY_UNREAD"; discovery: LinkedInConversationRowDiscovery; matches: string[] }
+  | { state: "TIMEOUT"; discovery: LinkedInConversationRowDiscovery }
+> {
+  const deadline = Date.now() + Math.max(1_000, timeoutMs);
+  let discovery = await getConversationRowCandidates(page);
+  while (Date.now() < deadline) {
+    if (discovery.candidates.length > 0) {
+      return {
+        state: "ROWS_READY",
+        discovery
+      };
+    }
+    const emptyState = await detectLinkedInUnreadEmptyState(page);
+    if (emptyState.detected) {
+      return {
+        state: "EMPTY_UNREAD",
+        discovery,
+        matches: emptyState.matches
+      };
+    }
+    await page.waitForTimeout(250);
+    discovery = await getConversationRowCandidates(page);
+  }
+  return {
+    state: "TIMEOUT",
+    discovery
   };
 }
 
@@ -695,9 +906,10 @@ async function dumpLinkedInSmokeNavigateProbe(input: {
     title: input.probe.title,
     searchInputCounts: input.probe.searchInputCounts,
     listContainerCounts: input.probe.listContainerCounts,
-    participantNamesCount: input.probe.participantNamesCount,
-    convoItemLinkCount: input.probe.convoItemLinkCount,
-    conversationListItemCount: input.probe.conversationListItemCount,
+    filterPillCount: input.probe.filterPillCount,
+    visibleSearchInput: input.probe.visibleSearchInput,
+    visibleListContainer: input.probe.visibleListContainer,
+    visibleFilterPills: input.probe.visibleFilterPills,
     bodyTextSnippet: input.probe.bodyTextSnippet
   };
   await writeFile(navigateProbeJson, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
@@ -729,12 +941,28 @@ async function dumpLinkedInSmokeNavigateProbe(input: {
 }
 
 async function detectLinkedInUnreadEmptyState(page: Page): Promise<{ detected: boolean; matches: string[] }> {
-  const panelLocator = page
-    .locator(
-      ".msg-conversations-container, ul.msg-conversations-container__conversations-list, [class*='msg-conversations-container']"
-    )
-    .first();
-  const panelText = await readText(panelLocator.locator(":scope"));
+  const container = await resolveLinkedInConversationListContainer(page);
+  let panelLocator: Locator | null = null;
+  if (container) {
+    const ancestor = container.locator
+      .locator("xpath=ancestor::*[contains(@class,'msg-conversations-container')][1]")
+      .first();
+    if ((await ancestor.count().catch(() => 0)) > 0) {
+      panelLocator = ancestor;
+    } else {
+      panelLocator = container.locator;
+    }
+  } else {
+    const fallback = page
+      .locator(
+        ".msg-conversations-container, .msg-overlay-list-bubble__content, [class*='msg-conversations-container']"
+      )
+      .first();
+    if ((await fallback.count().catch(() => 0)) > 0) {
+      panelLocator = fallback;
+    }
+  }
+  const panelText = panelLocator ? await readText(panelLocator.locator(":scope")) : "";
   const matches = linkedInSmokeEmptyStatePatterns
     .filter((pattern) => pattern.test(panelText))
     .map((pattern) => pattern.source);
@@ -780,8 +1008,9 @@ async function captureLinkedInSmokeFailureArtifacts(input: {
 async function dumpLinkedInUnreadListProbe(input: {
   page: Page;
   logDir: string;
-  discoveredRows: LinkedInDiscoveredUnreadRowsResult;
+  discovery: LinkedInConversationRowDiscovery;
   emptyStateMatches: string[];
+  unreadPillActive: boolean;
 }): Promise<{ artifacts: LinkedInSmokeProbeArtifacts; data: LinkedInUnreadListProbeData }> {
   const containerCandidates = [
     "ul.msg-conversations-container__conversations-list",
@@ -873,41 +1102,44 @@ async function dumpLinkedInUnreadListProbe(input: {
     });
   }
 
-  const sampleRows: LinkedInUnreadListProbeData["sampleRows"] = [];
-  const sampleNameNodes = input.page.locator(linkedInSmokeParticipantSelector);
-  const sampleNameCount = await sampleNameNodes.count().catch(() => 0);
-  for (let index = 0; index < sampleNameCount && sampleRows.length < 10; index += 1) {
-    const nameNode = sampleNameNodes.nth(index);
-    const name = await readText(nameNode);
-    if (!name) {
-      continue;
-    }
-    const scope = await resolveRowScopeFromName(nameNode);
-    sampleRows.push({
-      name,
-      listTimestamp: (await readText(scope.locator(linkedInSmokeListTimestampSelector))) || null,
-      previewSnippet: (await readText(scope.locator(linkedInSmokePreviewSelector))) || null,
-      unreadCount: (await readUnreadCountFromScope(scope)) ?? null
-    });
-  }
-  if (sampleRows.length <= 0) {
-    sampleRows.push(
-      ...input.discoveredRows.rows.slice(0, 10).map((row) => ({
-        name: row.participantName,
-        listTimestamp: row.listTimestamp ?? null,
-        previewSnippet: row.previewSnippet ?? null,
-        unreadCount: row.unreadCount ?? null
-      }))
-    );
-  }
+  const sampleRows: LinkedInUnreadListProbeData["sampleRows"] = input.discovery.candidates.slice(0, 10).map((row) => ({
+    name: row.participantName,
+    listTimestamp: row.listTimestamp ?? null,
+    previewSnippet: row.previewSnippet ?? null,
+    unreadCount: null
+  }));
 
   const listProbeJson = join(input.logDir, "list-probe.json");
   const listProbeHtml = join(input.logDir, "list-probe.html");
   const listProbePng = join(input.logDir, "list-probe.png");
+  const firstDirectLiOuterHtml: string[] = [];
+  if (chosenContainerLocator) {
+    const directLi = chosenContainerLocator.locator(":scope > li");
+    const count = await directLi.count().catch(() => 0);
+    for (let index = 0; index < Math.min(8, count); index += 1) {
+      const html = await directLi
+        .nth(index)
+        .evaluate((node) => (node as HTMLElement).outerHTML ?? "")
+        .catch(() => "");
+      if (html) {
+        firstDirectLiOuterHtml.push(truncateForLog(html, 1800));
+      }
+    }
+  }
 
   const data: LinkedInUnreadListProbeData = {
     url: input.page.url(),
     generatedAt: new Date().toISOString(),
+    directLiCount: input.discovery.directLiCount,
+    realRowCount: input.discovery.candidates.length,
+    liWithParticipantCount: input.discovery.liWithParticipantCount,
+    liWithLinkCount: input.discovery.liWithLinkCount,
+    liWithParticipantAndLinkCount: input.discovery.liWithParticipantAndLinkCount,
+    participantNamesCount: input.discovery.participantNamesCount,
+    linkCount: input.discovery.linkCount,
+    snippetCount: input.discovery.snippetCount,
+    timeCount: input.discovery.timeCount,
+    unreadPillActive: input.unreadPillActive,
     containerProbes,
     chosenContainer: chosenContainerSelector
       ? {
@@ -920,29 +1152,11 @@ async function dumpLinkedInUnreadListProbe(input: {
     unreadCounterProbes,
     unreadCounterValues,
     sampleRows,
+    firstDirectLiOuterHtml,
     emptyStateTextMatches: input.emptyStateMatches
   };
 
   await writeFile(listProbeJson, `${JSON.stringify(data, null, 2)}\n`, "utf8");
-
-  const clickableCandidates = input.page.locator(
-    ":is(div,a,button)[class*='msg-conversation-listitem__link'], :is(div,a,button)[class*='msg-conversations-container__convo-item-link'], a[href*='/messaging/thread/'], a[href*='/messaging/']"
-  );
-  const clickableCount = await clickableCandidates.count().catch(() => 0);
-  const clickableHtml: string[] = [];
-  for (let index = 0; index < Math.min(10, clickableCount); index += 1) {
-    const node = clickableCandidates.nth(index);
-    const html = await node
-      .evaluate((el) => {
-        const element = el as HTMLElement;
-        const parent = element.parentElement;
-        return parent ? parent.outerHTML : element.outerHTML;
-      })
-      .catch(() => "");
-    if (html) {
-      clickableHtml.push(truncateForLog(html, 1800));
-    }
-  }
 
   const probeHtml = [
     "<!doctype html>",
@@ -950,9 +1164,9 @@ async function dumpLinkedInUnreadListProbe(input: {
     "<h1>LinkedIn Smoke List Probe</h1>",
     "<h2>Chosen Container</h2>",
     `<pre>${escapeHtml(data.chosenContainer?.outerHtmlExcerpt ?? "(none)")}</pre>`,
-    "<h2>Candidate Clickable Row Nodes (parent outerHTML)</h2>",
-    clickableHtml.length
-      ? clickableHtml.map((entry, index) => `<h3>#${index + 1}</h3><pre>${escapeHtml(entry)}</pre>`).join("\n")
+    "<h2>First 8 Direct LI Children</h2>",
+    firstDirectLiOuterHtml.length
+      ? firstDirectLiOuterHtml.map((entry, index) => `<h3>#${index + 1}</h3><pre>${escapeHtml(entry)}</pre>`).join("\n")
       : "<pre>(none)</pre>",
     "</body></html>"
   ].join("\n");
@@ -3428,9 +3642,10 @@ export class LinkedInAdapter implements PlatformAdapter {
           const counts = {
             searchInputCounts: readiness.details.searchInputCounts,
             listContainerCounts: readiness.details.listContainerCounts,
-            participantNamesCount: readiness.details.participantNamesCount,
-            convoItemLinkCount: readiness.details.convoItemLinkCount,
-            conversationListItemCount: readiness.details.conversationListItemCount
+            filterPillCount: readiness.details.filterPillCount,
+            visibleSearchInput: readiness.details.visibleSearchInput,
+            visibleListContainer: readiness.details.visibleListContainer,
+            visibleFilterPills: readiness.details.visibleFilterPills
           };
           await input.logLine?.(
             `[LI][SMOKE][req=${input.requestId}][navigate] url=${readiness.details.url} ` +
@@ -3448,34 +3663,31 @@ export class LinkedInAdapter implements PlatformAdapter {
         const urlAfterGoto = page.url();
         await page.waitForTimeout(1_000);
         const urlAfter1s = page.url();
-        const navigateDeadline = Date.now() + 15_000;
-        let shellReadiness = await isLinkedInMessagingShellReady(page);
-        let navigateState = await classifyLinkedInSmokeNavigateState(page, shellReadiness.details);
-        while (Date.now() < navigateDeadline && !shellReadiness.ok && !navigateState.blocked) {
-          await page.waitForTimeout(250);
-          shellReadiness = await isLinkedInMessagingShellReady(page);
-          navigateState = await classifyLinkedInSmokeNavigateState(page, shellReadiness.details);
-        }
+        const shellWait = await waitForLinkedInShellReady(page, 15_000);
 
-        if (!shellReadiness.ok) {
-          const reason = navigateState.blocked ? navigateState.reason : "messaging_shell_not_ready";
+        if (shellWait.state !== "READY") {
+          const reason = shellWait.state === "BLOCKED" ? shellWait.blocked.reason : "messaging_shell_not_ready";
           const navigateArtifacts = await dumpLinkedInSmokeNavigateProbe({
             page,
             logDir: input.logDir,
-            probe: shellReadiness.details,
+            probe: shellWait.probe,
             reason
           });
           const counts = {
-            searchInputCounts: shellReadiness.details.searchInputCounts,
-            listContainerCounts: shellReadiness.details.listContainerCounts,
-            participantNamesCount: shellReadiness.details.participantNamesCount,
-            convoItemLinkCount: shellReadiness.details.convoItemLinkCount,
-            conversationListItemCount: shellReadiness.details.conversationListItemCount
+            searchInputCounts: shellWait.probe.searchInputCounts,
+            listContainerCounts: shellWait.probe.listContainerCounts,
+            filterPillCount: shellWait.probe.filterPillCount,
+            visibleSearchInput: shellWait.probe.visibleSearchInput,
+            visibleListContainer: shellWait.probe.visibleListContainer,
+            visibleFilterPills: shellWait.probe.visibleFilterPills
           };
           await input.logLine?.(
-            `[LI][SMOKE][req=${input.requestId}][navigate] url=${shellReadiness.details.url} ` +
-              `title=${shellReadiness.details.title || "(untitled)"} ready=false ` +
-              `counts=${JSON.stringify(counts)} reason=${reason}`
+            `[LI][SMOKE][req=${input.requestId}][navigate] url=${shellWait.probe.url} ` +
+              `title=${shellWait.probe.title || "(untitled)"} ready=false ` +
+              `counts=${JSON.stringify(counts)} reason=${reason}` +
+              (shellWait.state === "BLOCKED" && reason === "blocked_by_modal"
+                ? ` modalSelector=${shellWait.blocked.signal} modalText="${shellWait.blocked.modalTextSnippet ?? ""}"`
+                : "")
           );
           const failureMessage =
             reason === "login_required"
@@ -3489,23 +3701,27 @@ export class LinkedInAdapter implements PlatformAdapter {
             urlBefore,
             urlAfterGoto,
             urlAfter1s,
-            probe: shellReadiness.details,
-            signal: navigateState.blocked ? navigateState.signal : "timeout_waiting_for_shell",
+            probe: shellWait.probe,
+            signal: shellWait.state === "BLOCKED" ? shellWait.blocked.signal : "timeout_waiting_for_shell",
+            modalTextSnippet: shellWait.state === "BLOCKED" ? shellWait.blocked.modalTextSnippet : undefined,
             navigateProbeArtifacts: navigateArtifacts
           });
         }
+        const shellReadiness = shellWait.probe;
+        await input.logLine?.(`[LI][SMOKE][req=${input.requestId}][navigate] shellReady=true url=${shellReadiness.url}`);
 
         await logStep(1, "entry_url", "forced unread entry", {
           URL_BEFORE: urlBefore,
           URL_AFTER_GOTO: urlAfterGoto,
           URL_AFTER_1S: urlAfter1s,
-          shellReady: shellReadiness.ok,
-          title: shellReadiness.details.title,
-          searchInputCounts: shellReadiness.details.searchInputCounts,
-          listContainerCounts: shellReadiness.details.listContainerCounts,
-          participantNamesCount: shellReadiness.details.participantNamesCount,
-          convoItemLinkCount: shellReadiness.details.convoItemLinkCount,
-          conversationListItemCount: shellReadiness.details.conversationListItemCount
+          shellReady: true,
+          title: shellReadiness.title,
+          searchInputCounts: shellReadiness.searchInputCounts,
+          listContainerCounts: shellReadiness.listContainerCounts,
+          filterPillCount: shellReadiness.filterPillCount,
+          visibleSearchInput: shellReadiness.visibleSearchInput,
+          visibleListContainer: shellReadiness.visibleListContainer,
+          visibleFilterPills: shellReadiness.visibleFilterPills
         });
 
         await logStep(2, "unread_filter", "activating Unread filter");
@@ -3547,48 +3763,31 @@ export class LinkedInAdapter implements PlatformAdapter {
           activeAfter,
           clicked
         });
+        await input.logLine?.(`[LI][SMOKE][req=${input.requestId}][unread] activeAfter=${activeAfter}`);
         if (!activeAfter) {
           fail("collect_threads", "unread_filter_not_active", "LinkedIn Unread filter did not become active.");
         }
 
         await logStep(3, "list_ready", "waiting for unread rows or empty state");
-        const settleDeadline = Date.now() + 12_000;
-        let emptyStateDetected = false;
-        let emptyStateMatches: string[] = [];
-        let settledRows: LinkedInDiscoveredUnreadRowsResult = {
-          namesCount: 0,
-          clickTargetsCount: 0,
-          primaryClickTargetsCount: 0,
-          rows: []
-        };
-
-        while (Date.now() < settleDeadline) {
-          settledRows = await discoverLinkedInUnreadRows(page);
-          if (settledRows.namesCount > 0 || settledRows.clickTargetsCount > 0) {
-            break;
-          }
-
-          const emptyState = await detectLinkedInUnreadEmptyState(page);
-          if (emptyState.detected) {
-            emptyStateDetected = true;
-            emptyStateMatches = emptyState.matches;
-            break;
-          }
-
-          await page.waitForTimeout(220);
+        const unreadWait = await waitUnreadRowsOrEmptyState(page, 12_000);
+        const emptyStateDetected = unreadWait.state === "EMPTY_UNREAD";
+        const emptyStateMatches = unreadWait.state === "EMPTY_UNREAD" ? unreadWait.matches : [];
+        let rowDiscovery = unreadWait.discovery;
+        if (unreadWait.state === "ROWS_READY") {
+          rowDiscovery = unreadWait.discovery;
+        } else if (unreadWait.state === "TIMEOUT") {
+          rowDiscovery = await getConversationRowCandidates(page);
         }
-
-        if (!emptyStateDetected && settledRows.namesCount <= 0 && settledRows.clickTargetsCount <= 0) {
-          const emptyState = await detectLinkedInUnreadEmptyState(page);
-          emptyStateDetected = emptyState.detected;
-          emptyStateMatches = emptyState.matches;
-        }
+        await input.logLine?.(
+          `[LI][SMOKE][req=${input.requestId}][rows] rows=${rowDiscovery.candidates.length} emptyUnreadState=${emptyStateDetected}`
+        );
 
         const probe = await dumpLinkedInUnreadListProbe({
           page,
           logDir: input.logDir,
-          discoveredRows: settledRows,
-          emptyStateMatches
+          discovery: rowDiscovery,
+          emptyStateMatches,
+          unreadPillActive: activeAfter
         });
         probeArtifacts = {
           ...baseArtifacts,
@@ -3606,22 +3805,16 @@ export class LinkedInAdapter implements PlatformAdapter {
         await logStep(3, "list_ready", "unread list settled", {
           containerSelector: probe.data.chosenContainer?.selector ?? null,
           containerChildCount: listContainerChildCount,
-          namesCount: settledRows.namesCount,
-          clickTargetsCount: settledRows.clickTargetsCount,
+          namesCount: rowDiscovery.participantNamesCount,
+          clickTargetsCount: rowDiscovery.candidates.length,
+          directLiCount: rowDiscovery.directLiCount,
+          realRowCount: rowDiscovery.candidates.length,
           unreadCounterCounts,
           unreadCounterValues: unreadCounterValues.slice(0, 5),
           emptyStateDetected
         });
 
-        const classification = classifyLinkedInSmokeUnreadOutcome({
-          emptyStateDetected,
-          namesCount: settledRows.namesCount,
-          clickTargetsCount: settledRows.clickTargetsCount,
-          listContainerChildCount,
-          unreadCounterValues
-        });
-
-        if (classification.outcome === "EMPTY") {
+        if (emptyStateDetected) {
           await logStep(8, "done", "SMOKE_OK_UNREAD_EMPTY", {
             unreadCount: 0
           });
@@ -3638,9 +3831,9 @@ export class LinkedInAdapter implements PlatformAdapter {
             },
             probeArtifacts,
             diagnostics: {
-              namesCount: settledRows.namesCount,
-              clickTargetsCount: settledRows.clickTargetsCount,
-              primaryClickTargetsCount: settledRows.primaryClickTargetsCount,
+              namesCount: rowDiscovery.participantNamesCount,
+              clickTargetsCount: rowDiscovery.candidates.length,
+              primaryClickTargetsCount: rowDiscovery.linkCount,
               listContainerChildCount,
               unreadCounterValues,
               emptyStateDetected
@@ -3648,16 +3841,25 @@ export class LinkedInAdapter implements PlatformAdapter {
           };
         }
 
-        if (classification.outcome === "MISMATCH") {
-          await logStep(3, "list_ready", linkedInSmokeSelectorMismatchError, {
-            namesCount: settledRows.namesCount,
-            clickTargetsCount: settledRows.clickTargetsCount,
-            listContainerChildCount,
-            unreadCounterValues: unreadCounterValues.slice(0, 5)
+        if (rowDiscovery.candidates.length <= 0) {
+          const mismatchMessage = linkedInSmokeRowMismatchMessage.replace(
+            "X",
+            String(rowDiscovery.directLiCount)
+          );
+          await input.logLine?.(
+            `[LI][SMOKE][req=${input.requestId}] ${mismatchMessage}`
+          );
+          await logStep(3, "list_ready", mismatchMessage, {
+            directLiCount: rowDiscovery.directLiCount,
+            liWithParticipantAndLinkCount: rowDiscovery.liWithParticipantAndLinkCount
           });
-          fail("collect_threads", classification.reason ?? "selector_mismatch_thread_rows", linkedInSmokeSelectorMismatchError, {
-            namesCount: settledRows.namesCount,
-            clickTargetsCount: settledRows.clickTargetsCount,
+          fail("collect_threads", "selector_mismatch_thread_rows", mismatchMessage, {
+            directLiCount: rowDiscovery.directLiCount,
+            liWithParticipantCount: rowDiscovery.liWithParticipantCount,
+            liWithLinkCount: rowDiscovery.liWithLinkCount,
+            liWithParticipantAndLinkCount: rowDiscovery.liWithParticipantAndLinkCount,
+            participantNamesCount: rowDiscovery.participantNamesCount,
+            linkCount: rowDiscovery.linkCount,
             listContainerChildCount,
             unreadCounterValues
           });
@@ -3665,12 +3867,29 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         const discoveredHandles = await discoverLinkedInUnreadRowsWithHandles(page);
         if (!discoveredHandles.rows[0]) {
-          fail("collect_threads", "selector_mismatch_thread_rows", linkedInSmokeSelectorMismatchError, {
+          const mismatchMessage = linkedInSmokeRowMismatchMessage.replace(
+            "X",
+            String(discoveredHandles.directLiCount)
+          );
+          fail("collect_threads", "selector_mismatch_thread_rows", mismatchMessage, {
             namesCount: discoveredHandles.namesCount,
-            clickTargetsCount: discoveredHandles.clickTargetsCount
+            clickTargetsCount: discoveredHandles.clickTargetsCount,
+            directLiCount: discoveredHandles.directLiCount,
+            liWithParticipantAndLinkCount: discoveredHandles.liWithParticipantAndLinkCount
           });
         }
         const firstRow = discoveredHandles.rows[0]!;
+        const topCandidates = rowDiscovery.candidates.slice(0, 3).map((candidate) => ({
+          name: candidate.participantName,
+          time: candidate.listTimestamp ?? "",
+          preview: candidate.previewSnippet ?? ""
+        }));
+        await input.logLine?.(
+          `[LI][SMOKE][req=${input.requestId}][candidates] n=${rowDiscovery.candidates.length} first="${firstRow.metadata.participantName}" time="${firstRow.metadata.listTimestamp ?? ""}"`
+        );
+        await input.logLine?.(
+          `[LI][SMOKE][req=${input.requestId}][candidates] top3=${JSON.stringify(topCandidates)}`
+        );
 
         const threadMeta = firstRow.metadata;
         await logStep(4, "thread_row_meta", "first thread metadata extracted", {
@@ -3773,12 +3992,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       } catch (error) {
         if (!probeData) {
           try {
-            const discoveredRows = await discoverLinkedInUnreadRows(page);
+            const discovery = await getConversationRowCandidates(page);
             const fallbackProbe = await dumpLinkedInUnreadListProbe({
               page,
               logDir: input.logDir,
-              discoveredRows,
-              emptyStateMatches: []
+              discovery,
+              emptyStateMatches: [],
+              unreadPillActive: false
             });
             probeArtifacts = {
               ...baseArtifacts,

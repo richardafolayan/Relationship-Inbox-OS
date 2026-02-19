@@ -9,7 +9,9 @@ import {
   discoverLinkedInUnreadRows,
   extractLinkedInSmokeFirstThreadRow,
   extractLinkedInSmokeMessages,
-  isLinkedInMessagingShellReady
+  getConversationRowCandidates,
+  isLinkedInMessagingShellReady,
+  waitUnreadRowsOrEmptyState
 } from "../apps/runner/dist/platforms/linkedin-adapter.js";
 
 async function withPlaywrightPage(t, run) {
@@ -61,37 +63,19 @@ test("LinkedIn smoke discovery ignores spacer rows and parses unread counters", 
   });
 });
 
-test("LinkedIn smoke discovery uses clickable ancestor fallback when wrapper classes are absent", async (t) => {
+test("LinkedIn smoke row candidates ignore spacer li and accept div/a/button link targets", async (t) => {
   await withPlaywrightPage(t, async (page) => {
-    await page.setContent(
-      `<!doctype html>
-       <html>
-         <body>
-           <ul class="msg-conversations-container__conversations-list">
-             <li></li>
-             <li>
-               <div tabindex="0" data-row="fallback">
-                 <span class="msg-conversation-listitem__participant-names">Fallback Person</span>
-                 <time class="msg-conversation-listitem__time-stamp">Now</time>
-                 <p class="msg-conversation-card__message-snippet">Fallback snippet</p>
-                 <span class="artdeco-notification-badge" aria-label="3 unread messages"></span>
-               </div>
-             </li>
-           </ul>
-         </body>
-       </html>`,
-      { waitUntil: "domcontentloaded" }
-    );
+    const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", "smoke-thread-shell.html");
+    const fixture = await readFile(fixturePath, "utf8");
+    await page.setContent(fixture, { waitUntil: "domcontentloaded" });
 
-    const discovered = await discoverLinkedInUnreadRows(page);
-    const row = await extractLinkedInSmokeFirstThreadRow(page);
-
-    assert.equal(discovered.namesCount, 1);
-    assert.equal(discovered.primaryClickTargetsCount, 0);
-    assert.equal(discovered.clickTargetsCount, 1);
-    assert.ok(row);
-    assert.equal(row.participantName, "Fallback Person");
-    assert.equal(row.unreadCount, 3);
+    const discovery = await getConversationRowCandidates(page);
+    assert.equal(discovery.directLiCount, 4);
+    assert.equal(discovery.candidates.length, 3);
+    assert.equal(discovery.liWithParticipantAndLinkCount, 3);
+    assert.equal(discovery.candidates[0].participantName, "Anchor Person");
+    assert.equal(discovery.candidates[1].participantName, "Button Person");
+    assert.equal(discovery.candidates[2].participantName, "Thread Route Person");
   });
 });
 
@@ -147,6 +131,7 @@ test("LinkedIn smoke shell readiness accepts messaging thread URL when DOM shell
     const readiness = await isLinkedInMessagingShellReady(page);
     assert.equal(readiness.ok, true);
     assert.equal(readiness.details.url.includes("/messaging/thread/"), true);
+    assert.equal(readiness.details.visibleFilterPills, true);
   });
 });
 
@@ -188,17 +173,50 @@ test("LinkedIn smoke navigate classifier detects login, checkpoint, and blocked 
     assert.equal(checkpointState.blocked, true);
     assert.equal(checkpointState.reason, "checkpoint_required");
 
-    await page.route("**/messaging/?filter=unread", (route) =>
+    await page.route("**/messaging/modal", (route) =>
       route.fulfill({
         status: 200,
         contentType: "text/html",
-        body: "<!doctype html><html><body><div id='onetrust-banner-sdk'>Cookie banner</div></body></html>"
+        body:
+          "<!doctype html><html><body><div role='dialog' aria-modal='true' style='width:320px;height:320px'>Visible modal body text</div></body></html>"
       })
     );
-    await page.goto("https://www.linkedin.com/messaging/?filter=unread", { waitUntil: "domcontentloaded" });
+    await page.goto("https://www.linkedin.com/messaging/modal", { waitUntil: "domcontentloaded" });
     const modalProbe = (await isLinkedInMessagingShellReady(page)).details;
     const modalState = await classifyLinkedInSmokeNavigateState(page, modalProbe);
     assert.equal(modalState.blocked, true);
     assert.equal(modalState.reason, "blocked_by_modal");
+    assert.equal((modalState.modalTextSnippet ?? "").includes("Visible modal body text"), true);
+
+    await page.setContent("<!doctype html><html><body><div id='artdeco-modal-outlet'></div></body></html>", {
+      waitUntil: "domcontentloaded"
+    });
+    const scaffoldingProbe = (await isLinkedInMessagingShellReady(page)).details;
+    const scaffoldingState = await classifyLinkedInSmokeNavigateState(page, scaffoldingProbe);
+    assert.equal(scaffoldingState.blocked, false);
+  });
+});
+
+test("LinkedIn unread wait ignores center 'No messages...yet!' state", async (t) => {
+  await withPlaywrightPage(t, async (page) => {
+    const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", "smoke-thread-shell.html");
+    const fixture = await readFile(fixturePath, "utf8");
+    await page.setContent(fixture, { waitUntil: "domcontentloaded" });
+    const rowsReady = await waitUnreadRowsOrEmptyState(page, 1200);
+    assert.equal(rowsReady.state, "ROWS_READY");
+
+    await page.setContent(
+      `<!doctype html><html><body>
+        <button data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="true">Unread</button>
+        <section class="msg-conversations-container">
+          <input aria-label="Search messages" placeholder="Search messages" />
+          <ul class="msg-conversations-container__conversations-list"><li></li></ul>
+        </section>
+        <section><h2>No messages...yet!</h2><button>New message</button></section>
+      </body></html>`,
+      { waitUntil: "domcontentloaded" }
+    );
+    const timedOut = await waitUnreadRowsOrEmptyState(page, 700);
+    assert.equal(timedOut.state, "TIMEOUT");
   });
 });

@@ -400,6 +400,31 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`
 5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
 
+### BUG-020: LinkedIn smoke false modal block + spacer-row unread discovery failures
+- Symptom:
+1. Smoke runs failed with `blocked_by_modal` while screenshot showed normal messaging UI (Unread active, rows visible, center “No messages...yet!” state).
+2. Runs also misclassified unread rows as absent when list contained spacer `<li>` entries and rows hydrated with variant markup.
+- Repro steps:
+1. Open LinkedIn messaging unread view where URL can be `/messaging/thread/...`.
+2. Run `npm run linkedin:smoke`.
+3. Observe occasional `blocked_by_modal` false positives and/or selector-mismatch due to zero detected rows despite visible list rows.
+- Root cause:
+1. Modal detection used DOM-presence style checks that could match non-blocking scaffolding.
+2. Shell readiness was coupled to row signals.
+3. Row discovery relied on brittle selectors rather than direct-list structure and real row filtering.
+- Fix:
+1. Changed modal classification to visible overlay/dialog detection only (`isVisible` + bounding box threshold).
+2. Refactored shell readiness to shell-level UI (search input + list container + filter pills), independent of row hydration.
+3. Added bounded `waitForLinkedInShellReady` and `waitUnreadRowsOrEmptyState` helpers.
+4. Added `getConversationRowCandidates` using direct `:scope > li` evaluation, spacer skipping, and required participant+link structure.
+5. Enforced unread behavior rule: in Unread view, all discovered rows are candidates; unread badge is optional metadata.
+6. Added stronger mismatch diagnostics and compact list probe content (direct li counts + first 8 li outerHTML).
+7. Added milestone logs (`navigate`, `unread`, `rows`, `candidates`) to terminal/pretty log.
+- Files changed:
+1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
+2. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`
+3. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
+
 ## Final Changed Files by Bug ID
 
 - BUG-001: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/utils.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
@@ -421,3 +446,4 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 - BUG-017: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/run-logger.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-logger.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/cli.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/.env.example`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
 - BUG-018: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
 - BUG-019: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
+- BUG-020: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
