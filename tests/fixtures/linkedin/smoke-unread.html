@@ -1,0 +1,38 @@
+<!doctype html>
+<html>
+  <body>
+    <button data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="true">Unread</button>
+
+    <ul class="msg-conversations-container__conversations-list">
+      <li></li>
+      <li data-id="conversation-1">
+        <div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link" tabindex="0">
+          <span class="msg-conversation-listitem__participant-names">Ada Lovelace</span>
+          <time class="msg-conversation-listitem__time-stamp">Feb 18</time>
+          <p class="msg-conversation-card__message-snippet">Can we sync tomorrow?</p>
+          <span class="artdeco-notification-badge" aria-label="6 unread messages">
+            <span class="notification-badge__count">6</span>
+          </span>
+        </div>
+      </li>
+      <li data-id="conversation-2">
+        <div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link" tabindex="0">
+          <span class="msg-conversation-listitem__participant-names">Grace Hopper</span>
+          <time class="msg-conversation-listitem__time-stamp">Feb 17</time>
+          <p class="msg-conversation-card__message-snippet">Thanks for the update.</p>
+          <span class="artdeco-notification-badge" aria-label="1 new notification">
+            <span class="notification-badge__count">1</span>
+          </span>
+        </div>
+      </li>
+    </ul>
+
+    <section class="msg-s-message-list">
+      <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="urn:li:msg_event:1">
+        <span class="msg-s-message-group__name">Ada Lovelace</span>
+        <time class="msg-s-message-group__timestamp" datetime="2026-02-18T16:15:00.000Z">4:15 PM</time>
+        <p class="msg-s-event-listitem__body">Can we sync tomorrow?</p>
+      </div>
+    </section>
+  </body>
+</html>

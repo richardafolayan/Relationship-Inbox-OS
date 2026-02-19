@@ -21,7 +21,8 @@
     "dev:runner": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && npm run dev --workspace @inbox-os/runner",
     "scan": "npm run scan --workspace @inbox-os/runner",
     "connect:linkedin": "npm run connect:linkedin --workspace @inbox-os/runner",
-    "test:selectors:linkedin": "npm run test:selectors:linkedin --workspace @inbox-os/runner"
+    "test:selectors:linkedin": "npm run test:selectors:linkedin --workspace @inbox-os/runner",
+    "linkedin:smoke": "npm run linkedin:smoke --workspace @inbox-os/runner"
   },
   "devDependencies": {
     "prisma": "^6.3.1",

@@ -101,6 +101,7 @@ Stack:
 - `scan`: trigger scan.
 - `connect <PLATFORM>`: connect a platform.
 - `test-selectors <PLATFORM>`: run selector tests.
+- `linkedin-smoke`: run one-thread LinkedIn unread smoke ingest.
 
 ## Quick Start (Step-by-Step, First Run)
 
@@ -314,6 +315,7 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/platform/save-selector-override`
 - `POST /control/platform/reset-selector-override`
 - `POST /control/platform/open-browser`
+- `POST /control/platform/linkedin/smoke-unread`
 - `POST /control/platform/reset-session`
 - `POST /control/system/clear-db`
 - `POST /control/thread/:threadId/send`
@@ -323,6 +325,25 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/thread/:threadId/draft`
 - `POST /control/thread/:threadId/mark-done`
 - `POST /control/thread/:threadId/snooze`
+
+### LinkedIn smoke unread run
+
+- `POST /control/platform/linkedin/smoke-unread`
+- `npm run linkedin:smoke`
+- Always writes smoke artifacts under the run folder:
+  - `pretty.log`
+  - `events.ndjson`
+  - `actions.csv`
+  - `list-probe.json`
+  - `list-probe.html`
+  - `list-probe.png`
+  - failure-only: `dom.html`, `failure.png`
+- Updates latest pointer: `apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt`
+- Success response shape:
+  - `{ ok: true, requestId, logDir, result: { outcome, unreadCount, name, listTimestamp, preview, messagesParsed, probeArtifacts } }`
+  - `outcome` is `INGESTED_ONE_THREAD` or `UNREAD_EMPTY`
+- Failure response shape:
+  - `{ ok: false, requestId, logDir, stage, reason, error }`
 
 ### Data routes
 
@@ -449,6 +470,7 @@ npm run dev:runner
 npm run scan
 npm run connect:linkedin
 npm run test:selectors:linkedin
+npm run linkedin:smoke
 ```
 
 ## Notes

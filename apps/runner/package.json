@@ -11,7 +11,8 @@
     "test": "echo 'No runner tests yet'",
     "scan": "tsx src/cli.ts scan",
     "connect:linkedin": "tsx src/cli.ts connect LINKEDIN",
-    "test:selectors:linkedin": "tsx src/cli.ts test-selectors LINKEDIN"
+    "test:selectors:linkedin": "tsx src/cli.ts test-selectors LINKEDIN",
+    "linkedin:smoke": "tsx src/cli.ts linkedin-smoke"
   },
   "dependencies": {
     "@inbox-os/core": "0.1.0",

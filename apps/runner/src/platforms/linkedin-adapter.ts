@@ -18,7 +18,7 @@ import {
   retryWithBackoff,
   isTransientPageError
 } from "./utils.js";
-import type { AdapterFailureKind } from "./utils.js";
+import type { AdapterFailureKind, AdapterStage } from "./utils.js";
 import type { SessionManager } from "../services/session-manager";
 import {
   executeTracedOperation,
@@ -100,6 +100,31 @@ interface LinkedInRunCounters {
 }
 
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
+const linkedInSmokeEntryUrl = "https://www.linkedin.com/messaging/?filter=unread";
+const linkedInSmokeThreadRowSelector = ".msg-conversation-listitem";
+const linkedInSmokeThreadLinkSelector = ".msg-conversation-listitem__link";
+const linkedInSmokeThreadRowFallbackSelector = [
+  "ul.msg-conversations-container__conversations-list li:has(.msg-conversation-listitem__link)",
+  "ul.msg-conversations-container__conversations-list li:has(a[href*='/messaging/thread/'])",
+  "ul.msg-conversations-container__conversations-list li:has(a[href*='/messaging/'])"
+].join(", ");
+const linkedInSmokeParticipantSelector = ".msg-conversation-listitem__participant-names";
+const linkedInSmokeListTimestampSelector = "time.msg-conversation-listitem__time-stamp";
+const linkedInSmokePreviewSelector = ".msg-conversation-card__message-snippet";
+const linkedInSmokeMessageContainerSelector = ".msg-s-message-list";
+const linkedInSmokeMessageRowSelector = ".msg-s-message-list__event, .msg-s-event-listitem";
+const linkedInSmokeMessageTextSelector = ".msg-s-event-listitem__body";
+const linkedInSmokeMessageSenderSelector = ".msg-s-message-group__name";
+const linkedInSmokeMessageTimestampSelector = "time.msg-s-message-group__timestamp";
+const linkedInSmokeMessagingShellSelectors = [
+  "ul.msg-conversations-container__conversations-list",
+  ".msg-conversations-container",
+  "input[placeholder*='Search messages']",
+  "input[aria-label*='Search messages']"
+];
+const linkedInSmokeEmptyStatePatterns = [/no unread/i, /you're all caught up/i, /no messages match/i];
+const linkedInSmokeSelectorMismatchError =
+  "Selector mismatch: Unread view shows list structure/counters but 0 detectable conversation rows. See list-probe.* in LOG_DIR.";
 const linkedInLoadingSpinnerSelector = [
   ".artdeco-loader",
   ".artdeco-spinner",
@@ -107,6 +132,732 @@ const linkedInLoadingSpinnerSelector = [
   ".msg-conversations-container__loading",
   "[aria-label*='Loading']"
 ].join(", ");
+
+export interface LinkedInSmokeThreadRowMetadata {
+  stableKey: string;
+  participantName: string;
+  listTimestamp?: string;
+  previewSnippet?: string;
+  unreadCount?: number;
+  threadUrl?: string;
+}
+
+export interface LinkedInSmokeParsedMessage {
+  platformMessageKey: string;
+  direction: "IN" | "OUT";
+  text: string;
+  senderName?: string;
+  timestamp?: string;
+}
+
+export interface LinkedInSmokePersistInput {
+  thread: ThreadStub;
+  messages: NormalizedMessage[];
+}
+
+export interface LinkedInSmokeProbeArtifacts {
+  listProbeJson: string;
+  listProbeHtml: string;
+  listProbePng: string;
+  domHtml?: string;
+  failurePng?: string;
+}
+
+export interface LinkedInDiscoveredUnreadRowsResult {
+  namesCount: number;
+  clickTargetsCount: number;
+  primaryClickTargetsCount: number;
+  rows: LinkedInSmokeThreadRowMetadata[];
+}
+
+export type LinkedInSmokeOutcome = "INGESTED_ONE_THREAD" | "UNREAD_EMPTY";
+
+export interface LinkedInSmokeIngestResult {
+  outcome: LinkedInSmokeOutcome;
+  unreadCount: number;
+  thread?: ThreadStub;
+  messagesParsed: number;
+  messages: NormalizedMessage[];
+  persisted?: {
+    updatedThreads: number;
+    parsedMessages: number;
+  };
+  summary: {
+    name: string | null;
+    listTimestamp: string | null;
+    previewSnippet: string | null;
+    unreadCount: number;
+  };
+  probeArtifacts: LinkedInSmokeProbeArtifacts;
+  diagnostics: {
+    namesCount: number;
+    clickTargetsCount: number;
+    primaryClickTargetsCount: number;
+    listContainerChildCount: number;
+    unreadCounterValues: number[];
+    emptyStateDetected: boolean;
+  };
+}
+
+export type LinkedInSmokeStepLog = (input: {
+  step: number;
+  totalSteps: number;
+  stepName: string;
+  message: string;
+  details?: Record<string, unknown>;
+}) => void | Promise<void>;
+
+function cleanLocatorText(value: string | null | undefined): string {
+  return cleanText(value ?? "");
+}
+
+function resolveSmokeThreadUrl(rawHref: string, baseUrl: string): string | undefined {
+  const trimmed = rawHref.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+  try {
+    return new URL(trimmed, baseUrl).toString();
+  } catch {
+    return trimmed;
+  }
+}
+
+function resolveSmokeThreadToken(rawUrl: string | undefined): string {
+  const normalized = (rawUrl ?? "").trim().toLowerCase();
+  if (!normalized) {
+    return "";
+  }
+  const threadMatch = normalized.match(/\/messaging\/thread\/([^/?#]+)/i);
+  if (threadMatch?.[1]) {
+    return threadMatch[1];
+  }
+  const conversationMatch = normalized.match(/conversationid=([^&]+)/i);
+  if (conversationMatch?.[1]) {
+    return conversationMatch[1];
+  }
+  return normalized;
+}
+
+async function hasAny(locator: Locator): Promise<boolean> {
+  return (await locator.count().catch(() => 0)) > 0;
+}
+
+function extractNumbersFromText(value: string): number[] {
+  const matches = value.match(/\d+/g) ?? [];
+  return matches.map((entry) => Number(entry)).filter((entry) => Number.isFinite(entry));
+}
+
+function truncateForLog(value: string, limit = 1200): string {
+  if (value.length <= limit) {
+    return value;
+  }
+  return `${value.slice(0, limit)}…[truncated:${value.length}]`;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll("\"", "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+async function readText(locator: Locator): Promise<string> {
+  const first = locator.first();
+  if (!(await hasAny(first))) {
+    return "";
+  }
+  return cleanLocatorText(await first.innerText({ timeout: 0 }).catch(() => ""));
+}
+
+async function readAttr(locator: Locator, name: string): Promise<string> {
+  const first = locator.first();
+  if (!(await hasAny(first))) {
+    return "";
+  }
+  return cleanLocatorText(await first.getAttribute(name, { timeout: 0 }).catch(() => ""));
+}
+
+interface LinkedInDiscoveredUnreadRowHandle {
+  metadata: LinkedInSmokeThreadRowMetadata;
+  clickTarget: Locator;
+  scope: Locator;
+}
+
+interface LinkedInDiscoveredUnreadRowsWithHandles {
+  namesCount: number;
+  clickTargetsCount: number;
+  primaryClickTargetsCount: number;
+  rows: LinkedInDiscoveredUnreadRowHandle[];
+}
+
+interface LinkedInUnreadCounterProbe {
+  selector: string;
+  count: number;
+  samples: string[];
+  numbers: number[];
+}
+
+interface LinkedInUnreadListProbeData {
+  url: string;
+  generatedAt: string;
+  containerProbes: Array<{
+    selector: string;
+    count: number;
+    firstOuterHtmlExcerpt: string | null;
+  }>;
+  chosenContainer: {
+    selector: string;
+    childCount: number;
+    outerHtmlExcerpt: string | null;
+  } | null;
+  rowProbes: Array<{ selector: string; count: number }>;
+  unreadCounterProbes: LinkedInUnreadCounterProbe[];
+  unreadCounterValues: number[];
+  sampleRows: Array<{
+    name: string;
+    listTimestamp: string | null;
+    previewSnippet: string | null;
+    unreadCount: number | null;
+  }>;
+  emptyStateTextMatches: string[];
+}
+
+async function readOuterHtmlExcerpt(locator: Locator): Promise<string | null> {
+  const first = locator.first();
+  if (!(await hasAny(first))) {
+    return null;
+  }
+  return first
+    .evaluate((node) => (node as HTMLElement).outerHTML ?? "")
+    .then((value) => truncateForLog(value))
+    .catch(() => null);
+}
+
+function pickFirstNumber(...candidates: Array<number | undefined>): number | undefined {
+  for (const candidate of candidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+async function readUnreadCountFromScope(scope: Locator): Promise<number | undefined> {
+  const selectors = [
+    ".msg-conversation-card__unread-count .notification-badge__count",
+    ".msg-conversation-card__unread-count",
+    ".artdeco-notification-badge .notification-badge__count",
+    ".artdeco-notification-badge[aria-label*='unread']",
+    "[aria-label*='unread message']",
+    "[aria-label*='new notification']"
+  ];
+
+  let first: number | undefined;
+  for (const selector of selectors) {
+    const value = await readText(scope.locator(selector));
+    const numbers = extractNumbersFromText(value);
+    first = pickFirstNumber(first, numbers[0]);
+
+    const aria = await readAttr(scope.locator(selector), "aria-label");
+    const ariaNumbers = extractNumbersFromText(aria);
+    first = pickFirstNumber(first, ariaNumbers[0]);
+
+    if (first !== undefined) {
+      return first;
+    }
+  }
+  return first;
+}
+
+async function resolveRowScopeFromName(nameNode: Locator): Promise<Locator> {
+  const liScope = nameNode.locator("xpath=ancestor::li[1]").first();
+  if (await hasAny(liScope)) {
+    return liScope;
+  }
+
+  const classScope = nameNode
+    .locator(
+      "xpath=ancestor::*[contains(@class,'msg-conversation-listitem') or contains(@class,'msg-conversations-container__convo-item-link') or contains(@class,'msg-conversation-listitem__link')][1]"
+    )
+    .first();
+  if (await hasAny(classScope)) {
+    return classScope;
+  }
+
+  return nameNode;
+}
+
+async function resolveClickTargetFromScope(input: {
+  page: Page;
+  nameNode: Locator;
+  scope: Locator;
+  index: number;
+}): Promise<Locator | null> {
+  const scopedClickable = input.scope
+    .locator(
+      ":scope :is(div,a,button)[class*='msg-conversation-listitem__link'], :scope :is(div,a,button)[class*='msg-conversations-container__convo-item-link'], :scope a[href*='/messaging/thread/'], :scope a[href*='/messaging/'], :scope [tabindex='0']"
+    )
+    .first();
+  if (await hasAny(scopedClickable)) {
+    return scopedClickable;
+  }
+
+  const ancestorClickable = input.nameNode
+    .locator(
+      "xpath=ancestor::*[@tabindex='0' or self::a or self::button or contains(@class,'msg-conversation-listitem__link') or contains(@class,'msg-conversations-container__convo-item-link')][1]"
+    )
+    .first();
+  if (await hasAny(ancestorClickable)) {
+    return ancestorClickable;
+  }
+
+  const marker = `li-smoke-target-${Date.now()}-${input.index}`;
+  const marked = await input.nameNode
+    .evaluate((node, markerValue) => {
+      const element = node as HTMLElement;
+      const clickable = element.closest(
+        "[tabindex='0'],a,button,.msg-conversation-listitem__link,[class*='__convo-item-link']"
+      ) as HTMLElement | null;
+      if (!clickable) {
+        return false;
+      }
+      clickable.setAttribute("data-li-smoke-click-target", markerValue);
+      return true;
+    }, marker)
+    .catch(() => false);
+  if (!marked) {
+    return null;
+  }
+
+  const markerTarget = input.page.locator(`[data-li-smoke-click-target="${marker}"]`).first();
+  return (await hasAny(markerTarget)) ? markerTarget : null;
+}
+
+async function discoverLinkedInUnreadRowsWithHandles(page: Page): Promise<LinkedInDiscoveredUnreadRowsWithHandles> {
+  const namesLocator = page.locator(linkedInSmokeParticipantSelector);
+  const rawNamesCount = await namesLocator.count().catch(() => 0);
+  const primaryClickTargets = page.locator(
+    ":is(div,a,button)[class*='msg-conversation-listitem__link'], :is(div,a,button)[class*='msg-conversations-container__convo-item-link']",
+    { has: page.locator(linkedInSmokeParticipantSelector) }
+  );
+  const primaryClickTargetsCount = await primaryClickTargets.count().catch(() => 0);
+
+  const rows: LinkedInDiscoveredUnreadRowHandle[] = [];
+  for (let index = 0; index < rawNamesCount; index += 1) {
+    const nameNode = namesLocator.nth(index);
+    const participantName = await readText(nameNode);
+    if (!participantName) {
+      continue;
+    }
+
+    const scope = await resolveRowScopeFromName(nameNode);
+    const clickTarget = await resolveClickTargetFromScope({
+      page,
+      nameNode,
+      scope,
+      index
+    });
+    if (!clickTarget) {
+      continue;
+    }
+
+    const listTimestamp = await readText(scope.locator(linkedInSmokeListTimestampSelector));
+    const previewSnippet = await readText(scope.locator(linkedInSmokePreviewSelector));
+    const href = resolveSmokeThreadUrl(
+      (await readAttr(clickTarget, "href")) || (await readAttr(scope.locator("a[href*='/messaging/']"), "href")),
+      page.url()
+    );
+    const unreadCount = await readUnreadCountFromScope(scope);
+    const stableToken = resolveSmokeThreadToken(href);
+    const stableKey =
+      stableToken ||
+      `linkedin-smoke:${participantName.toLowerCase()}|${previewSnippet.toLowerCase()}|${listTimestamp.toLowerCase()}`;
+
+    rows.push({
+      metadata: {
+        stableKey,
+        participantName,
+        listTimestamp: listTimestamp || undefined,
+        previewSnippet: previewSnippet || undefined,
+        unreadCount,
+        threadUrl: href
+      },
+      clickTarget,
+      scope
+    });
+  }
+
+  return {
+    namesCount: rawNamesCount,
+    clickTargetsCount: rows.length,
+    primaryClickTargetsCount,
+    rows
+  };
+}
+
+export async function discoverLinkedInUnreadRows(page: Page): Promise<LinkedInDiscoveredUnreadRowsResult> {
+  const discovered = await discoverLinkedInUnreadRowsWithHandles(page);
+  return {
+    namesCount: discovered.namesCount,
+    clickTargetsCount: discovered.clickTargetsCount,
+    primaryClickTargetsCount: discovered.primaryClickTargetsCount,
+    rows: discovered.rows.map((row) => row.metadata)
+  };
+}
+
+export function classifyLinkedInSmokeUnreadOutcome(input: {
+  emptyStateDetected: boolean;
+  namesCount: number;
+  clickTargetsCount: number;
+  listContainerChildCount: number;
+  unreadCounterValues: number[];
+}): {
+  outcome: "INGEST" | "EMPTY" | "MISMATCH";
+  reason?: "selector_mismatch_thread_rows";
+} {
+  if (input.emptyStateDetected) {
+    return {
+      outcome: "EMPTY"
+    };
+  }
+  if (input.namesCount > 0 || input.clickTargetsCount > 0) {
+    return {
+      outcome: "INGEST"
+    };
+  }
+  const appearsPopulated = input.listContainerChildCount > 0 || input.unreadCounterValues.length > 0;
+  if (appearsPopulated) {
+    return {
+      outcome: "MISMATCH",
+      reason: "selector_mismatch_thread_rows"
+    };
+  }
+  return {
+    outcome: "EMPTY"
+  };
+}
+
+async function detectLinkedInUnreadEmptyState(page: Page): Promise<{ detected: boolean; matches: string[] }> {
+  const panelLocator = page
+    .locator(
+      ".msg-conversations-container, ul.msg-conversations-container__conversations-list, [class*='msg-conversations-container']"
+    )
+    .first();
+  const panelText = await readText(panelLocator.locator(":scope"));
+  const matches = linkedInSmokeEmptyStatePatterns
+    .filter((pattern) => pattern.test(panelText))
+    .map((pattern) => pattern.source);
+  return {
+    detected: matches.length > 0,
+    matches
+  };
+}
+
+async function captureLinkedInSmokeFailureArtifacts(input: {
+  page: Page;
+  logDir: string;
+}): Promise<{ domHtml?: string; failurePng?: string }> {
+  const domHtml = join(input.logDir, "dom.html");
+  const failurePng = join(input.logDir, "failure.png");
+  let savedDom: string | undefined;
+  let savedPng: string | undefined;
+
+  try {
+    const html = await input.page.content();
+    await writeFile(domHtml, html, "utf8");
+    savedDom = domHtml;
+  } catch {
+    // best effort
+  }
+
+  try {
+    await input.page.screenshot({
+      path: failurePng,
+      fullPage: true
+    });
+    savedPng = failurePng;
+  } catch {
+    // best effort
+  }
+
+  return {
+    domHtml: savedDom,
+    failurePng: savedPng
+  };
+}
+
+async function dumpLinkedInUnreadListProbe(input: {
+  page: Page;
+  logDir: string;
+  discoveredRows: LinkedInDiscoveredUnreadRowsResult;
+  emptyStateMatches: string[];
+}): Promise<{ artifacts: LinkedInSmokeProbeArtifacts; data: LinkedInUnreadListProbeData }> {
+  const containerCandidates = [
+    "ul.msg-conversations-container__conversations-list",
+    ".msg-conversations-container__conversations-list",
+    "[class*='msg-conversations-container__conversations-list']",
+    "[class*='msg-conversations-container__convo-item-link']",
+    ":is(section,div,aside,main):has(input[placeholder*='Search messages']), :is(section,div,aside,main):has(input[aria-label*='Search messages'])"
+  ];
+  const rowSelectors = [
+    "li.msg-conversation-listitem",
+    ".msg-conversation-listitem",
+    "div.msg-conversation-listitem__link",
+    "a.msg-conversation-listitem__link",
+    "[class*='msg-conversations-container__convo-item-link']",
+    ".msg-conversation-listitem__participant-names",
+    ".msg-conversation-card__message-snippet",
+    "time.msg-conversation-listitem__time-stamp"
+  ];
+  const unreadCounterSelectors = [
+    ".msg-conversation-card__unread-count",
+    ".msg-conversation-card__unread-count .notification-badge__count",
+    ".artdeco-notification-badge[aria-label*='unread']",
+    ".artdeco-notification-badge .notification-badge__count",
+    "[aria-label*='unread message']",
+    "[aria-label*='new notification']"
+  ];
+
+  const containerProbes: LinkedInUnreadListProbeData["containerProbes"] = [];
+  let chosenContainerSelector: string | null = null;
+  let chosenContainerLocator: Locator | null = null;
+  for (const selector of containerCandidates) {
+    const locator = input.page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+    const firstOuterHtmlExcerpt = await readOuterHtmlExcerpt(locator);
+    containerProbes.push({
+      selector,
+      count,
+      firstOuterHtmlExcerpt
+    });
+    if (!chosenContainerSelector && count > 0) {
+      chosenContainerSelector = selector;
+      chosenContainerLocator = locator.first();
+    }
+  }
+
+  const chosenContainerChildCount = chosenContainerLocator
+    ? await chosenContainerLocator
+        .locator(":scope > *")
+        .count()
+        .catch(() => 0)
+    : 0;
+
+  const rowProbes: LinkedInUnreadListProbeData["rowProbes"] = [];
+  for (const selector of rowSelectors) {
+    const count = await input.page.locator(selector).count().catch(() => 0);
+    rowProbes.push({
+      selector,
+      count
+    });
+  }
+
+  const unreadCounterProbes: LinkedInUnreadCounterProbe[] = [];
+  const unreadCounterValues: number[] = [];
+  for (const selector of unreadCounterSelectors) {
+    const locator = input.page.locator(selector);
+    const count = await locator.count().catch(() => 0);
+    const sampleLimit = Math.min(5, count);
+    const samples: string[] = [];
+    const numbers: number[] = [];
+    for (let index = 0; index < sampleLimit; index += 1) {
+      const node = locator.nth(index);
+      const text = (await readText(node)) || (await readAttr(node, "aria-label"));
+      if (text) {
+        samples.push(text);
+        numbers.push(...extractNumbersFromText(text));
+      }
+      const aria = await readAttr(node, "aria-label");
+      if (aria && aria !== text) {
+        samples.push(aria);
+        numbers.push(...extractNumbersFromText(aria));
+      }
+    }
+    unreadCounterValues.push(...numbers);
+    unreadCounterProbes.push({
+      selector,
+      count,
+      samples,
+      numbers
+    });
+  }
+
+  const sampleRows: LinkedInUnreadListProbeData["sampleRows"] = [];
+  const sampleNameNodes = input.page.locator(linkedInSmokeParticipantSelector);
+  const sampleNameCount = await sampleNameNodes.count().catch(() => 0);
+  for (let index = 0; index < sampleNameCount && sampleRows.length < 10; index += 1) {
+    const nameNode = sampleNameNodes.nth(index);
+    const name = await readText(nameNode);
+    if (!name) {
+      continue;
+    }
+    const scope = await resolveRowScopeFromName(nameNode);
+    sampleRows.push({
+      name,
+      listTimestamp: (await readText(scope.locator(linkedInSmokeListTimestampSelector))) || null,
+      previewSnippet: (await readText(scope.locator(linkedInSmokePreviewSelector))) || null,
+      unreadCount: (await readUnreadCountFromScope(scope)) ?? null
+    });
+  }
+  if (sampleRows.length <= 0) {
+    sampleRows.push(
+      ...input.discoveredRows.rows.slice(0, 10).map((row) => ({
+        name: row.participantName,
+        listTimestamp: row.listTimestamp ?? null,
+        previewSnippet: row.previewSnippet ?? null,
+        unreadCount: row.unreadCount ?? null
+      }))
+    );
+  }
+
+  const listProbeJson = join(input.logDir, "list-probe.json");
+  const listProbeHtml = join(input.logDir, "list-probe.html");
+  const listProbePng = join(input.logDir, "list-probe.png");
+
+  const data: LinkedInUnreadListProbeData = {
+    url: input.page.url(),
+    generatedAt: new Date().toISOString(),
+    containerProbes,
+    chosenContainer: chosenContainerSelector
+      ? {
+          selector: chosenContainerSelector,
+          childCount: chosenContainerChildCount,
+          outerHtmlExcerpt: await readOuterHtmlExcerpt(input.page.locator(chosenContainerSelector))
+        }
+      : null,
+    rowProbes,
+    unreadCounterProbes,
+    unreadCounterValues,
+    sampleRows,
+    emptyStateTextMatches: input.emptyStateMatches
+  };
+
+  await writeFile(listProbeJson, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+
+  const clickableCandidates = input.page.locator(
+    ":is(div,a,button)[class*='msg-conversation-listitem__link'], :is(div,a,button)[class*='msg-conversations-container__convo-item-link'], a[href*='/messaging/thread/'], a[href*='/messaging/']"
+  );
+  const clickableCount = await clickableCandidates.count().catch(() => 0);
+  const clickableHtml: string[] = [];
+  for (let index = 0; index < Math.min(10, clickableCount); index += 1) {
+    const node = clickableCandidates.nth(index);
+    const html = await node
+      .evaluate((el) => {
+        const element = el as HTMLElement;
+        const parent = element.parentElement;
+        return parent ? parent.outerHTML : element.outerHTML;
+      })
+      .catch(() => "");
+    if (html) {
+      clickableHtml.push(truncateForLog(html, 1800));
+    }
+  }
+
+  const probeHtml = [
+    "<!doctype html>",
+    "<html><head><meta charset='utf-8'><title>LinkedIn Smoke List Probe</title></head><body>",
+    "<h1>LinkedIn Smoke List Probe</h1>",
+    "<h2>Chosen Container</h2>",
+    `<pre>${escapeHtml(data.chosenContainer?.outerHtmlExcerpt ?? "(none)")}</pre>`,
+    "<h2>Candidate Clickable Row Nodes (parent outerHTML)</h2>",
+    clickableHtml.length
+      ? clickableHtml.map((entry, index) => `<h3>#${index + 1}</h3><pre>${escapeHtml(entry)}</pre>`).join("\n")
+      : "<pre>(none)</pre>",
+    "</body></html>"
+  ].join("\n");
+  await writeFile(listProbeHtml, probeHtml, "utf8");
+
+  let captured = false;
+  if (chosenContainerLocator) {
+    const bbox = await chosenContainerLocator.boundingBox().catch(() => null);
+    if (bbox && bbox.width > 4 && bbox.height > 4) {
+      const viewport = input.page.viewportSize();
+      const width = viewport?.width ?? (await input.page.evaluate(() => window.innerWidth).catch(() => 1280));
+      const height = viewport?.height ?? (await input.page.evaluate(() => window.innerHeight).catch(() => 720));
+      const clip = {
+        x: Math.max(0, Math.min(bbox.x, width - 1)),
+        y: Math.max(0, Math.min(bbox.y, height - 1)),
+        width: Math.max(1, Math.min(bbox.width, width - Math.max(0, Math.min(bbox.x, width - 1)))),
+        height: Math.max(1, Math.min(bbox.height, height - Math.max(0, Math.min(bbox.y, height - 1))))
+      };
+      await input.page.screenshot({
+        path: listProbePng,
+        clip
+      });
+      captured = true;
+    }
+  }
+  if (!captured) {
+    await input.page.screenshot({
+      path: listProbePng,
+      fullPage: true
+    });
+  }
+
+  return {
+    artifacts: {
+      listProbeJson,
+      listProbeHtml,
+      listProbePng
+    },
+    data
+  };
+}
+
+export async function extractLinkedInSmokeFirstThreadRow(page: Page): Promise<LinkedInSmokeThreadRowMetadata | null> {
+  const discovered = await discoverLinkedInUnreadRowsWithHandles(page);
+  return discovered.rows[0]?.metadata ?? null;
+}
+
+export async function extractLinkedInSmokeMessages(
+  page: Page,
+  limit = 20
+): Promise<LinkedInSmokeParsedMessage[]> {
+  const rows = page.locator(linkedInSmokeMessageRowSelector);
+  const count = await rows.count().catch(() => 0);
+  if (count <= 0) {
+    return [];
+  }
+
+  const parsed: LinkedInSmokeParsedMessage[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const row = rows.nth(index);
+    const text = await readText(row.locator(linkedInSmokeMessageTextSelector));
+    if (!text) {
+      continue;
+    }
+
+    const className = await readAttr(row, "class");
+    const inbound =
+      className.includes("msg-s-event-listitem--other") ||
+      /other|received|incoming/i.test(className);
+    const senderName = await readText(row.locator(linkedInSmokeMessageSenderSelector));
+    const timestamp =
+      (await readAttr(row.locator(linkedInSmokeMessageTimestampSelector), "datetime")) ||
+      (await readText(row.locator(linkedInSmokeMessageTimestampSelector)));
+    const platformMessageKey =
+      (await readAttr(row, "data-event-urn")) ||
+      (await readAttr(row, "data-id")) ||
+      (await readAttr(row, "id")) ||
+      `linkedin-smoke-msg-${index + 1}`;
+
+    parsed.push({
+      platformMessageKey,
+      direction: inbound ? "IN" : "OUT",
+      text,
+      senderName: senderName || undefined,
+      timestamp: timestamp || undefined
+    });
+  }
+
+  if (parsed.length <= limit) {
+    return parsed;
+  }
+  return parsed.slice(parsed.length - limit);
+}
 
 export type LinkedInUnreadRefreshReason =
   | "state_flip"
@@ -1057,6 +1808,14 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   private classifyFailureKind(reason: string, fallback: AdapterFailureKind): AdapterFailureKind {
+    const normalized = reason.toLowerCase();
+    if (
+      normalized.includes("target page, context or browser has been closed") ||
+      normalized.includes("execution context was destroyed") ||
+      normalized.includes("manual refresh required")
+    ) {
+      return "NAVIGATION_FAILED";
+    }
     return inferAdapterFailureKindFromMessage(reason) ?? fallback;
   }
 
@@ -1969,51 +2728,73 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   private async getActiveThreadDescriptor(page: Page, selectors: SelectorRegistry): Promise<ActiveThreadDescriptor> {
-    return page.evaluate(
-      ({ selectors }) => {
-        const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
-        const activeNode =
-          (document.querySelector(
-            "li.msg-conversation-listitem .msg-conversations-container__convo-item-link--active"
-          ) as HTMLElement | null) ??
-          (document.querySelector(
-            "li.msg-conversation-listitem .msg-conversation-listitem__link--active"
-          ) as HTMLElement | null);
+    const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+    const readText = async (locator: Locator): Promise<string | null> => {
+      const first = locator.first();
+      if ((await first.count().catch(() => 0)) <= 0) {
+        return null;
+      }
+      return first.innerText({ timeout: 0 }).catch(() => null);
+    };
+    const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
+      const first = locator.first();
+      if ((await first.count().catch(() => 0)) <= 0) {
+        return null;
+      }
+      return first.getAttribute(name, { timeout: 0 }).catch(() => null);
+    };
 
-        const activeRow =
-          (activeNode?.closest("li.msg-conversation-listitem") as HTMLElement | null) ??
-          ((activeNode as HTMLElement | null) ?? null);
+    const primaryActive = page
+      .locator("li.msg-conversation-listitem .msg-conversations-container__convo-item-link--active")
+      .first();
+    const fallbackActive = page
+      .locator("li.msg-conversation-listitem .msg-conversation-listitem__link--active")
+      .first();
+    const activeNode = ((await primaryActive.count().catch(() => 0)) > 0 ? primaryActive : fallbackActive).first();
 
-        const href =
-          (activeRow?.querySelector("a[href*='/messaging/']") as HTMLAnchorElement | null)?.href ??
-          (document.querySelector(`${selectors.thread_item} a[href*='/messaging/']`) as HTMLAnchorElement | null)?.href ??
-          undefined;
+    const activeRowCandidate = activeNode.locator("xpath=ancestor::li[contains(@class,'msg-conversation-listitem')]").first();
+    const activeRow =
+      (await activeRowCandidate.count().catch(() => 0)) > 0
+        ? activeRowCandidate
+        : page.locator("li.msg-conversation-listitem").first();
+    const activeRowExists = (await activeRow.count().catch(() => 0)) > 0;
+    const scope = activeRowExists ? activeRow : activeNode;
 
-        const displayName =
-          clean(
-            activeRow?.querySelector("h3 span.truncate")?.textContent ??
-              activeRow?.querySelector("h3")?.textContent ??
-              activeRow?.querySelector("span[title]")?.getAttribute("title") ??
-              document.querySelector(".msg-thread__link-to-profile")?.textContent ??
-              ""
-          ) || undefined;
+    const hrefRaw =
+      (await readAttr(scope.locator("a[href*='/messaging/']").first(), "href")) ??
+      (await readAttr(page.locator(`${selectors.thread_item} a[href*='/messaging/']`).first(), "href")) ??
+      "";
+    let href = hrefRaw.trim();
+    if (href) {
+      try {
+        href = new URL(href, page.url()).toString();
+      } catch {
+        href = href.trim();
+      }
+    }
 
-        const activeKey =
-          activeRow?.getAttribute("data-conversation-urn") ??
-          activeRow?.getAttribute("data-urn") ??
-          activeRow?.getAttribute("data-conversation-id") ??
-          activeRow?.getAttribute("data-id") ??
-          activeRow?.id ??
-          href;
+    const displayName =
+      clean(
+        (await readText(scope.locator("h3 span.truncate").first())) ??
+          (await readText(scope.locator("h3").first())) ??
+          (await readAttr(scope.locator("span[title]").first(), "title")) ??
+          (await readText(page.locator(".msg-thread__link-to-profile").first())) ??
+          ""
+      ) || undefined;
 
-        return {
-          threadUrl: href,
-          activeKey: activeKey || undefined,
-          displayName
-        } satisfies ActiveThreadDescriptor;
-      },
-      { selectors }
-    );
+    const activeKey =
+      (await readAttr(scope, "data-conversation-urn")) ??
+      (await readAttr(scope, "data-urn")) ??
+      (await readAttr(scope, "data-conversation-id")) ??
+      (await readAttr(scope, "data-id")) ??
+      (await readAttr(scope, "id")) ??
+      href;
+
+    return {
+      threadUrl: href || undefined,
+      activeKey: activeKey || undefined,
+      displayName
+    };
   }
 
   private isThreadDescriptorMatch(
@@ -2163,6 +2944,26 @@ export class LinkedInAdapter implements PlatformAdapter {
   ): Promise<LinkedInMessageSnapshot[]> {
     const maxAttempts = Math.max(1, this.deps.messageBackfillAttempts);
     const merged = new Map<string, LinkedInMessageSnapshot>();
+    const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+    const readText = async (locator: Locator): Promise<string | null> => {
+      const first = locator.first();
+      if ((await first.count().catch(() => 0)) <= 0) {
+        return null;
+      }
+      return first.innerText({ timeout: 0 }).catch(() => null);
+    };
+    const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
+      const first = locator.first();
+      if ((await first.count().catch(() => 0)) <= 0) {
+        return null;
+      }
+      return first.getAttribute(name, { timeout: 0 }).catch(() => null);
+    };
+    const readMessageKey = async (root: Locator, index: number): Promise<string> =>
+      (await readAttr(root, "data-event-urn")) ??
+      (await readAttr(root, "data-id")) ??
+      (await readAttr(root, "id")) ??
+      `li-msg-${index}`;
 
     for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
       this.logTraceEvent({
@@ -2177,85 +2978,83 @@ export class LinkedInAdapter implements PlatformAdapter {
         attempt: attempt + 1,
         page
       });
-      const snapshot = await page.evaluate(
-        ({ selectors }) => {
-          const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
-          const findScrollableContainer = (start: Element | null): HTMLElement | null => {
-            let current = start as HTMLElement | null;
-            while (current) {
-              const style = window.getComputedStyle(current);
-              const overflowY = style.overflowY.toLowerCase();
-              const scrollable = overflowY.includes("auto") || overflowY.includes("scroll");
-              if (scrollable && current.scrollHeight > current.clientHeight + 4) {
-                return current;
-              }
-              current = current.parentElement;
-            }
-            return null;
-          };
+      const messageNodes = page.locator(selectors.message_item);
+      const initialCount = await messageNodes.count().catch(() => 0);
+      const beforeFirstKey = initialCount > 0 ? await readMessageKey(messageNodes.nth(0), 0) : "";
 
-          const nodes = Array.from(document.querySelectorAll(selectors.message_item));
-          const messages = nodes.map((node, index) => {
-            const root = node as HTMLElement;
-            const className = root.className || "";
-            const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
-            const attachmentCount = root.querySelectorAll("img, video, svg, a[download], a[href*='attachment']").length;
-            const rawBodyText = clean(
-              root.querySelector(selectors.message_text)?.textContent ??
-                ""
-            );
-            const text =
-              rawBodyText ||
-              (attachmentCount > 0 ? "[non-text message]" : "[system event]");
-            const senderName = clean(
-              root.querySelector(".msg-s-message-group__profile-link")?.textContent ??
-                root.querySelector(".msg-s-message-group__name")?.textContent ??
-                ""
-            );
-            const timeNode = root.querySelector("time") as HTMLTimeElement | null;
-            const timestamp =
-              clean(timeNode?.getAttribute("datetime")) ||
-              clean(timeNode?.textContent) ||
-              "";
-            const platformMessageKey =
-              root.getAttribute("data-event-urn") ||
-              root.getAttribute("data-id") ||
-              root.getAttribute("id") ||
-              `li-msg-${index}`;
+      const messages: LinkedInMessageSnapshot[] = [];
+      for (let index = 0; index < initialCount; index += 1) {
+        const root = messageNodes.nth(index);
+        const className = (await readAttr(root, "class")) ?? "";
+        const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
+        const attachmentCount = await root
+          .locator("img, video, svg, a[download], a[href*='attachment']")
+          .count()
+          .catch(() => 0);
+        const rawBodyText = clean((await readText(root.locator(selectors.message_text).first())) ?? "");
+        const text = rawBodyText || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
+        const senderName = clean(
+          (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??
+            (await readText(root.locator(".msg-s-message-group__name").first())) ??
+            ""
+        );
+        const timeLocator = root.locator("time").first();
+        const timestamp = clean((await readAttr(timeLocator, "datetime")) ?? (await readText(timeLocator)) ?? "");
+        const platformMessageKey = await readMessageKey(root, index);
+        messages.push({
+          platformMessageKey,
+          direction: inbound ? "IN" : "OUT",
+          timestamp,
+          text,
+          senderName: senderName || undefined,
+          raw: {
+            className,
+            hasTime: Boolean(timestamp),
+            attachmentCount
+          },
+          attachments: attachmentCount
+            ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
+            : []
+        });
+      }
 
-            return {
-              platformMessageKey,
-              direction: inbound ? "IN" : "OUT",
-              timestamp,
-              text,
-              senderName: senderName || undefined,
-              raw: {
-                className,
-                hasTime: Boolean(timeNode),
-                attachmentCount
-              },
-              attachments: attachmentCount
-                ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
-                : []
-            };
-          });
-
-          const container = findScrollableContainer(document.querySelector(selectors.message_container));
-          const beforeTop = container?.scrollTop ?? 0;
-          if (container) {
-            const jump = Math.max(200, Math.floor(container.clientHeight * 0.8));
-            container.scrollTop = Math.max(0, beforeTop - jump);
-          }
-          const afterTop = container?.scrollTop ?? beforeTop;
-          const didScrollUp = afterTop < beforeTop - 1;
-
-          return {
-            messages,
-            didScrollUp
-          };
+      await this.runTracedPageAction({
+        page,
+        stage: "read_thread",
+        action: "scroll_container",
+        selector: selectors.message_container,
+        note: "message_backfill_scroll_up",
+        attempt: attempt + 1,
+        details: {
+          delta: -840
         },
-        { selectors }
-      );
+        run: async () => {
+          const container = page.locator(selectors.message_container).first();
+          await container.hover({ force: true }).catch(() => undefined);
+          await page.mouse.wheel(0, -840);
+        }
+      });
+      await this.runTracedPageAction({
+        page,
+        stage: "read_thread",
+        action: "wait_for_timeout",
+        note: "message_backfill_post_scroll_wait",
+        attempt: attempt + 1,
+        details: {
+          delayMs: 220
+        },
+        run: async () => {
+          await page.waitForTimeout(220);
+        }
+      });
+
+      const afterCount = await messageNodes.count().catch(() => 0);
+      const afterFirstKey = afterCount > 0 ? await readMessageKey(messageNodes.nth(0), 0) : "";
+      const didScrollUp = afterCount > initialCount || afterFirstKey !== beforeFirstKey;
+      const snapshot = {
+        messages,
+        didScrollUp
+      };
 
       for (const message of snapshot.messages) {
         merged.set(message.platformMessageKey, {
@@ -2368,6 +3167,406 @@ export class LinkedInAdapter implements PlatformAdapter {
         });
       } finally {
         this.activeStage = null;
+      }
+    });
+  }
+
+  async smokeUnreadIngest(input: {
+    requestId: string;
+    logDir: string;
+    persist: (input: LinkedInSmokePersistInput) => Promise<{ updatedThreads: number; parsedMessages: number }>;
+    logStep?: LinkedInSmokeStepLog;
+    maxMessages?: number;
+  }): Promise<LinkedInSmokeIngestResult> {
+    const totalSteps = 8;
+    const maxMessages = Math.max(1, Math.min(50, input.maxMessages ?? 12));
+    const logStep = async (
+      step: number,
+      stepName: string,
+      message: string,
+      details?: Record<string, unknown>
+    ): Promise<void> => {
+      await input.logStep?.({
+        step,
+        totalSteps,
+        stepName,
+        message,
+        details
+      });
+    };
+    const fail = (
+      stage: AdapterStage,
+      reason: string,
+      message: string,
+      details?: Record<string, unknown>
+    ): never => {
+      throw new AdapterFailure(message, {
+        kind: "SELECTOR_MISMATCH",
+        platform: this.platform,
+        stage,
+        details: {
+          requestId: input.requestId,
+          reason,
+          ...(details ?? {})
+        }
+      });
+    };
+
+    await this.ensureConnected();
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.getPage();
+      const baseArtifacts: LinkedInSmokeProbeArtifacts = {
+        listProbeJson: join(input.logDir, "list-probe.json"),
+        listProbeHtml: join(input.logDir, "list-probe.html"),
+        listProbePng: join(input.logDir, "list-probe.png")
+      };
+      let probeArtifacts: LinkedInSmokeProbeArtifacts = {
+        ...baseArtifacts
+      };
+      let probeData: LinkedInUnreadListProbeData | null = null;
+
+      try {
+        const urlBefore = page.url();
+        await page.goto(linkedInSmokeEntryUrl, { waitUntil: "domcontentloaded" }).catch((error: unknown) => {
+          fail("navigate", "smoke_entry_navigation_failed", "Unable to open LinkedIn messaging unread entry URL.", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+        let urlAfter = page.url();
+        const redirectedToThread = /\/messaging\/thread\//i.test(urlAfter);
+        let correctiveNavApplied = false;
+        if (redirectedToThread) {
+          await page.goto(linkedInSmokeEntryUrl, { waitUntil: "domcontentloaded" }).catch((error: unknown) => {
+            fail(
+              "navigate",
+              "smoke_entry_navigation_redirect_thread",
+              "LinkedIn redirected smoke run to a thread view and corrective navigation failed.",
+              {
+                error: error instanceof Error ? error.message : String(error)
+              }
+            );
+          });
+          correctiveNavApplied = true;
+          urlAfter = page.url();
+        }
+
+        const shellSignals: Array<{ selector: string; count: number }> = [];
+        for (const selector of linkedInSmokeMessagingShellSelectors) {
+          shellSignals.push({
+            selector,
+            count: await page.locator(selector).count().catch(() => 0)
+          });
+        }
+        if (!shellSignals.some((entry) => entry.count > 0)) {
+          fail("navigate", "messaging_shell_not_ready", "LinkedIn messaging shell did not become ready for smoke run.", {
+            urlBefore,
+            urlAfter,
+            shellSignals
+          });
+        }
+        await logStep(1, "entry_url", "forced unread entry", {
+          URL_BEFORE: urlBefore,
+          URL_AFTER: urlAfter,
+          redirectedToThread,
+          correctiveNavApplied
+        });
+
+        await logStep(2, "unread_filter", "activating Unread filter");
+        const unreadPill = page.locator(linkedInUnreadPillSelector).first();
+        const pillFound = (await unreadPill.count().catch(() => 0)) > 0;
+        if (!pillFound) {
+          fail("collect_threads", "unread_pill_missing", "LinkedIn Unread filter pill is missing.");
+        }
+
+        const activeBefore = isLinkedInUnreadPillActive({
+          ariaPressed: await unreadPill.getAttribute("aria-pressed").catch(() => null),
+          ariaChecked: await unreadPill.getAttribute("aria-checked").catch(() => null)
+        });
+        let clicked = false;
+        if (!activeBefore) {
+          await unreadPill.scrollIntoViewIfNeeded().catch(() => undefined);
+          await unreadPill.click({ timeout: 5_000 }).catch((error: unknown) => {
+            fail("collect_threads", "unread_pill_click_failed", "Failed to click LinkedIn Unread filter.", {
+              error: error instanceof Error ? error.message : String(error)
+            });
+          });
+          clicked = true;
+        }
+
+        const activationDeadline = Date.now() + 4_000;
+        let activeAfter = activeBefore;
+        while (Date.now() < activationDeadline) {
+          activeAfter = isLinkedInUnreadPillActive({
+            ariaPressed: await unreadPill.getAttribute("aria-pressed").catch(() => null),
+            ariaChecked: await unreadPill.getAttribute("aria-checked").catch(() => null)
+          });
+          if (activeAfter) {
+            break;
+          }
+          await page.waitForTimeout(120);
+        }
+        await logStep(2, "unread_filter", "Unread pill state", {
+          activeBefore,
+          activeAfter,
+          clicked
+        });
+        if (!activeAfter) {
+          fail("collect_threads", "unread_filter_not_active", "LinkedIn Unread filter did not become active.");
+        }
+
+        await logStep(3, "list_ready", "waiting for unread rows or empty state");
+        const settleDeadline = Date.now() + 12_000;
+        let emptyStateDetected = false;
+        let emptyStateMatches: string[] = [];
+        let settledRows: LinkedInDiscoveredUnreadRowsResult = {
+          namesCount: 0,
+          clickTargetsCount: 0,
+          primaryClickTargetsCount: 0,
+          rows: []
+        };
+
+        while (Date.now() < settleDeadline) {
+          settledRows = await discoverLinkedInUnreadRows(page);
+          if (settledRows.namesCount > 0 || settledRows.clickTargetsCount > 0) {
+            break;
+          }
+
+          const emptyState = await detectLinkedInUnreadEmptyState(page);
+          if (emptyState.detected) {
+            emptyStateDetected = true;
+            emptyStateMatches = emptyState.matches;
+            break;
+          }
+
+          await page.waitForTimeout(220);
+        }
+
+        if (!emptyStateDetected && settledRows.namesCount <= 0 && settledRows.clickTargetsCount <= 0) {
+          const emptyState = await detectLinkedInUnreadEmptyState(page);
+          emptyStateDetected = emptyState.detected;
+          emptyStateMatches = emptyState.matches;
+        }
+
+        const probe = await dumpLinkedInUnreadListProbe({
+          page,
+          logDir: input.logDir,
+          discoveredRows: settledRows,
+          emptyStateMatches
+        });
+        probeArtifacts = {
+          ...baseArtifacts,
+          ...probe.artifacts
+        };
+        probeData = probe.data;
+
+        const listContainerChildCount = probe.data.chosenContainer?.childCount ?? 0;
+        const unreadCounterValues = probe.data.unreadCounterValues;
+        const unreadCounterCounts = probe.data.unreadCounterProbes.map((entry) => ({
+          selector: entry.selector,
+          count: entry.count,
+          samples: entry.samples.slice(0, 3)
+        }));
+        await logStep(3, "list_ready", "unread list settled", {
+          containerSelector: probe.data.chosenContainer?.selector ?? null,
+          containerChildCount: listContainerChildCount,
+          namesCount: settledRows.namesCount,
+          clickTargetsCount: settledRows.clickTargetsCount,
+          unreadCounterCounts,
+          unreadCounterValues: unreadCounterValues.slice(0, 5),
+          emptyStateDetected
+        });
+
+        const classification = classifyLinkedInSmokeUnreadOutcome({
+          emptyStateDetected,
+          namesCount: settledRows.namesCount,
+          clickTargetsCount: settledRows.clickTargetsCount,
+          listContainerChildCount,
+          unreadCounterValues
+        });
+
+        if (classification.outcome === "EMPTY") {
+          await logStep(8, "done", "SMOKE_OK_UNREAD_EMPTY", {
+            unreadCount: 0
+          });
+          return {
+            outcome: "UNREAD_EMPTY",
+            unreadCount: 0,
+            messagesParsed: 0,
+            messages: [],
+            summary: {
+              name: null,
+              listTimestamp: null,
+              previewSnippet: null,
+              unreadCount: 0
+            },
+            probeArtifacts,
+            diagnostics: {
+              namesCount: settledRows.namesCount,
+              clickTargetsCount: settledRows.clickTargetsCount,
+              primaryClickTargetsCount: settledRows.primaryClickTargetsCount,
+              listContainerChildCount,
+              unreadCounterValues,
+              emptyStateDetected
+            }
+          };
+        }
+
+        if (classification.outcome === "MISMATCH") {
+          await logStep(3, "list_ready", linkedInSmokeSelectorMismatchError, {
+            namesCount: settledRows.namesCount,
+            clickTargetsCount: settledRows.clickTargetsCount,
+            listContainerChildCount,
+            unreadCounterValues: unreadCounterValues.slice(0, 5)
+          });
+          fail("collect_threads", classification.reason ?? "selector_mismatch_thread_rows", linkedInSmokeSelectorMismatchError, {
+            namesCount: settledRows.namesCount,
+            clickTargetsCount: settledRows.clickTargetsCount,
+            listContainerChildCount,
+            unreadCounterValues
+          });
+        }
+
+        const discoveredHandles = await discoverLinkedInUnreadRowsWithHandles(page);
+        if (!discoveredHandles.rows[0]) {
+          fail("collect_threads", "selector_mismatch_thread_rows", linkedInSmokeSelectorMismatchError, {
+            namesCount: discoveredHandles.namesCount,
+            clickTargetsCount: discoveredHandles.clickTargetsCount
+          });
+        }
+        const firstRow = discoveredHandles.rows[0]!;
+
+        const threadMeta = firstRow.metadata;
+        await logStep(4, "thread_row_meta", "first thread metadata extracted", {
+          participantName: threadMeta.participantName,
+          listTimestamp: threadMeta.listTimestamp ?? null,
+          previewSnippet: threadMeta.previewSnippet ?? null,
+          unreadCount: threadMeta.unreadCount ?? null
+        });
+
+        await logStep(5, "open_thread", "opening first detected thread");
+        await firstRow.clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
+        await firstRow.clickTarget.click({ timeout: 8_000 }).catch((error: unknown) => {
+          fail("open_thread", "thread_open_click_failed", "Failed to open first LinkedIn thread row.", {
+            error: error instanceof Error ? error.message : String(error)
+          });
+        });
+        const messageContainerSelector = `${linkedInSmokeMessageContainerSelector}, ${selectors.message_container}`;
+        await page
+          .waitForSelector(messageContainerSelector, {
+            state: "visible",
+            timeout: 8_000
+          })
+          .catch(() => {
+            fail("open_thread", "message_container_not_ready", "LinkedIn message container did not become ready.");
+          });
+        await logStep(5, "open_thread", "thread opened", {
+          messageContainerSelector
+        });
+
+        await logStep(6, "parse_messages", "parsing visible messages");
+        const rawMessages = await extractLinkedInSmokeMessages(page, maxMessages);
+        if (rawMessages.length <= 0) {
+          fail("parse", "no_messages_parsed", "Smoke ingest could not parse visible message text.");
+        }
+        const baseTimestamp = Date.now() - rawMessages.length * 1_000;
+        const messages: NormalizedMessage[] = rawMessages.map((message, index) => ({
+          platformMessageKey: message.platformMessageKey,
+          direction: message.direction,
+          timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+          text: cleanText(message.text),
+          senderName: message.senderName,
+          attachments: [],
+          raw: {
+            smoke: true
+          }
+        }));
+        await logStep(6, "parse_messages", "messages parsed", {
+          messagesParsed: messages.length
+        });
+
+        await logStep(7, "persist", "persisting thread and messages");
+        const unreadCount = threadMeta.unreadCount ?? 1;
+        const thread: ThreadStub = {
+          platformThreadId: threadMeta.stableKey,
+          displayName: threadMeta.participantName,
+          lastMessagePreview: threadMeta.previewSnippet ?? cleanText(messages.at(-1)?.text ?? ""),
+          lastMessageAt: threadMeta.listTimestamp,
+          threadUrl: threadMeta.threadUrl,
+          unreadCount,
+          isUnreadCandidate: true
+        };
+        const persisted = await input.persist({
+          thread,
+          messages
+        });
+        await logStep(7, "persist", "persist complete", {
+          updatedThreads: persisted.updatedThreads,
+          parsedMessages: persisted.parsedMessages
+        });
+
+        await logStep(8, "done", "SMOKE_OK", {
+          name: threadMeta.participantName,
+          listTimestamp: threadMeta.listTimestamp ?? null,
+          unreadCount,
+          messagesParsed: messages.length
+        });
+        return {
+          outcome: "INGESTED_ONE_THREAD",
+          unreadCount,
+          thread,
+          messagesParsed: messages.length,
+          messages,
+          persisted,
+          summary: {
+            name: threadMeta.participantName,
+            listTimestamp: threadMeta.listTimestamp ?? null,
+            previewSnippet: threadMeta.previewSnippet ?? null,
+            unreadCount
+          },
+          probeArtifacts,
+          diagnostics: {
+            namesCount: discoveredHandles.namesCount,
+            clickTargetsCount: discoveredHandles.clickTargetsCount,
+            primaryClickTargetsCount: discoveredHandles.primaryClickTargetsCount,
+            listContainerChildCount,
+            unreadCounterValues,
+            emptyStateDetected
+          }
+        };
+      } catch (error) {
+        if (!probeData) {
+          try {
+            const discoveredRows = await discoverLinkedInUnreadRows(page);
+            const fallbackProbe = await dumpLinkedInUnreadListProbe({
+              page,
+              logDir: input.logDir,
+              discoveredRows,
+              emptyStateMatches: []
+            });
+            probeArtifacts = {
+              ...baseArtifacts,
+              ...fallbackProbe.artifacts
+            };
+            probeData = fallbackProbe.data;
+          } catch {
+            // best effort
+          }
+        }
+        const artifacts = await captureLinkedInSmokeFailureArtifacts({
+          page,
+          logDir: input.logDir
+        });
+        if (error instanceof AdapterFailure) {
+          error.details = {
+            ...(error.details ?? {}),
+            probeArtifacts: {
+              ...probeArtifacts,
+              ...artifacts
+            }
+          };
+        }
+        throw error;
       }
     });
   }
@@ -2710,14 +3909,63 @@ export class LinkedInAdapter implements PlatformAdapter {
         });
         return collected.rows.slice(0, limit).map((thread) => ({ ...thread, isRecentCandidate: true }));
       } catch (error) {
+        const runtimeContext = await this.captureUnreadScanRuntimeContext(page, selectors).catch(() => undefined);
+        const failureReason = resolveLinkedInScanFailureReason({
+          message: error instanceof Error ? error.message : String(error),
+          url: runtimeContext?.url ?? page.url(),
+          overlayReason: runtimeContext?.overlayReason,
+          threadListCount: runtimeContext?.threadListCount,
+          threadItemCount: runtimeContext?.threadItemCount,
+          spinnerCount: runtimeContext?.spinnerCount
+        });
         this.runLogger?.logError({
           component: "linkedin-adapter",
           stage: "collect_threads",
           action: "scan_recent_fail",
-          error
+          error,
+          details: {
+            reason: failureReason,
+            runtimeContext
+          }
         });
         await this.captureRunFailureArtifacts(page);
+
+        if (isRetryableLinkedInCollectError(error)) {
+          this.logTraceDecision({
+            stage: "collect_threads",
+            level: "warn",
+            decision: "Recent-thread collection became unstable; automatic reload is disabled and manual refresh is required",
+            details: {
+              reason: failureReason,
+              message: error instanceof Error ? error.message : String(error)
+            }
+          });
+          this.runLogger?.mergeCounters({
+            reloadSuppressed: true,
+            stopReason: "manual_refresh_required"
+          });
+          throw new AdapterFailure(
+            "Manual refresh required: LinkedIn page closed or context reset during recent-thread scan. Refresh LinkedIn manually, then rerun scan. Automatic reload is disabled to preserve browser console diagnostics.",
+            {
+              kind: "NAVIGATION_FAILED",
+              platform: this.platform,
+              stage: "collect_threads",
+              details: {
+                reason: "manual_refresh_required",
+                requiresManualRefresh: true,
+                guidance: "Refresh LinkedIn manually and rerun scan.",
+                runtimeContext
+              }
+            }
+          );
+        }
+
         if (error instanceof AdapterFailure) {
+          error.details = {
+            ...(error.details ?? {}),
+            reason: failureReason,
+            runtimeContext
+          };
           throw error;
         }
 
@@ -2728,10 +3976,14 @@ export class LinkedInAdapter implements PlatformAdapter {
           message: "Failed while scanning LinkedIn recent threads",
           action: "scan-recent",
           error,
-          kind: this.classifyFailureKind(reason, "SELECTOR_MISMATCH"),
+          kind: this.classifyFailureKind(reason, "NAVIGATION_FAILED"),
           page,
           screenshotDir: this.deps.screenshotDir,
-          domDumpDir: this.deps.domDumpDir
+          domDumpDir: this.deps.domDumpDir,
+          details: {
+            reason: failureReason,
+            runtimeContext
+          }
         });
       } finally {
         this.activeStage = null;
@@ -2832,33 +4084,31 @@ export class LinkedInAdapter implements PlatformAdapter {
     page: Page,
     selectors: SelectorRegistry
   ): Promise<{ direction: "IN" | "OUT"; timestamp: number; text: string } | null> {
-    return page.evaluate(
-      ({ selectors }) => {
-        const nodes = Array.from(document.querySelectorAll(selectors.message_item));
-        const last = nodes[nodes.length - 1] as HTMLElement | undefined;
-        if (!last) {
-          return null;
-        }
+    const nodes = page.locator(selectors.message_item);
+    const count = await nodes.count().catch(() => 0);
+    if (count <= 0) {
+      return null;
+    }
 
-        const className = last.className || "";
-        const inbound = /other|received|incoming/i.test(className);
-        const timeNode = last.querySelector("time") as HTMLTimeElement | null;
-        const timestampRaw = timeNode?.getAttribute("datetime") || timeNode?.textContent || "";
-        const parsed = Date.parse(timestampRaw);
+    const last = nodes.nth(count - 1);
+    const className = (await last.getAttribute("class", { timeout: 0 }).catch(() => null)) ?? "";
+    const inbound = /other|received|incoming/i.test(className);
+    const timeNode = last.locator("time").first();
+    const timestampRaw =
+      (await timeNode.getAttribute("datetime", { timeout: 0 }).catch(() => null)) ??
+      (await timeNode.innerText({ timeout: 0 }).catch(() => null)) ??
+      "";
+    const parsed = Date.parse(timestampRaw);
+    const text =
+      (await last.locator(selectors.message_text).first().innerText({ timeout: 0 }).catch(() => null)) ??
+      (await last.innerText({ timeout: 0 }).catch(() => null)) ??
+      "";
 
-        const text =
-          last.querySelector(selectors.message_text)?.textContent ||
-          last.textContent ||
-          "";
-
-        return {
-          direction: inbound ? "IN" : "OUT",
-          timestamp: Number.isNaN(parsed) ? Date.now() : parsed,
-          text
-        };
-      },
-      { selectors }
-    );
+    return {
+      direction: inbound ? "IN" : "OUT",
+      timestamp: Number.isNaN(parsed) ? Date.now() : parsed,
+      text
+    };
   }
 
   async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {

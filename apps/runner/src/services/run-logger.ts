@@ -244,7 +244,10 @@ function appendLine(path: string, line: string): void {
   appendFileSync(path, `${line}\n`, "utf8");
 }
 
-function prettyPrint(event: RunTraceEvent): void {
+function prettyPrint(event: RunTraceEvent, enabled = true): void {
+  if (!enabled) {
+    return;
+  }
   const stage = event.stage ?? "-";
   const action = event.action ?? "-";
   const elapsed = typeof event.elapsedMs === "number" ? ` elapsedMs=${event.elapsedMs}` : "";
@@ -292,8 +295,10 @@ export function createRunLogger(input: {
   platform: PlatformName | string;
   runType: string;
   outDirBase?: string;
+  forceEnabled?: boolean;
+  emitConsole?: boolean;
 }): RunLogger {
-  const traceEnabled = isEnabled(process.env.RUN_TRACE);
+  const traceEnabled = input.forceEnabled || isEnabled(process.env.RUN_TRACE);
   if (!traceEnabled) {
     return noOpLogger({
       requestId: input.requestId,
@@ -332,6 +337,7 @@ export function createRunLogger(input: {
   }
 
   const counters: Record<string, unknown> = {};
+  const emitConsole = input.emitConsole ?? true;
   const artifacts: {
     playwrightTracePath?: string;
     failureScreenshotPath?: string;
@@ -348,7 +354,7 @@ export function createRunLogger(input: {
       details: sanitizeValue(event.details ?? {}, piiEnabled, "details") as Record<string, unknown>
     };
     appendLine(eventsPath, stringifyJson(normalizedEvent));
-    prettyPrint(normalizedEvent);
+    prettyPrint(normalizedEvent, emitConsole);
   }
 
   function summarizeError(error: unknown): Record<string, unknown> {
@@ -549,14 +555,16 @@ export function createRunLogger(input: {
       };
       writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, "utf8");
 
-      // eslint-disable-next-line no-console
-      console.info(
-        `[run-trace:${input.platform}:${input.requestId}] summary success=${summary.success} stopReason=${
-          summary.stopReason ?? "none"
-        } runDir=${runDir} events=${eventsPath} actions=${actionsPath} trace=${summary.playwrightTracePath ?? "n/a"} failurePng=${
-          summary.failureScreenshotPath ?? "n/a"
-        } failureDom=${summary.failureDomDumpPath ?? "n/a"} counters=${stringifyJson(summary.counters)}`
-      );
+      if (emitConsole) {
+        // eslint-disable-next-line no-console
+        console.info(
+          `[run-trace:${input.platform}:${input.requestId}] summary success=${summary.success} stopReason=${
+            summary.stopReason ?? "none"
+          } runDir=${runDir} events=${eventsPath} actions=${actionsPath} trace=${summary.playwrightTracePath ?? "n/a"} failurePng=${
+            summary.failureScreenshotPath ?? "n/a"
+          } failureDom=${summary.failureDomDumpPath ?? "n/a"} counters=${stringifyJson(summary.counters)}`
+        );
+      }
       return summary;
     }
   };

@@ -1,4 +1,4 @@
-import type { PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
+import type { NormalizedMessage, PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
 import { join, resolve } from "node:path";
@@ -1151,8 +1151,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
     candidate: ThreadStub,
     maxMessages: number,
     jobId: string,
-    runLogger?: RunLogger
+    runLogger?: RunLogger,
+    preParsedMessages?: NormalizedMessage[]
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
+    const candidateListTimestamp = (() => {
+      if (!candidate.lastMessageAt) {
+        return null;
+      }
+      const parsed = new Date(candidate.lastMessageAt);
+      if (Number.isNaN(parsed.getTime())) {
+        return null;
+      }
+      return parsed;
+    })();
+
     const person =
       (await prisma.person.findFirst({ where: { displayName: candidate.displayName, platform } })) ??
       (await prisma.person.create({
@@ -1180,7 +1192,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           personId: person.id,
           threadUrl: candidate.threadUrl,
           unreadCount: candidate.unreadCount ?? 0,
-          lastMessagePreview: cleanText(candidate.lastMessagePreview ?? "")
+          lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
+          lastMessageAt: candidateListTimestamp ?? undefined
         }
       }));
 
@@ -1204,7 +1217,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       result: "ok",
       note: `${candidate.displayName} (${candidate.platformThreadId})`
     });
-    const messages = await adapter.fetchThreadMessages(candidate, maxMessages);
+    const messages = preParsedMessages ?? (await adapter.fetchThreadMessages(candidate, maxMessages));
     await deps.auditLog({
       platform,
       stage: "Parse",
@@ -1271,6 +1284,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     });
 
     const lastMessage = latestMessages[latestMessages.length - 1];
+    const resolvedLastMessageAt = candidateListTimestamp ?? lastMessage?.timestamp;
     const lastInbound = [...latestMessages].reverse().find((msg) => msg.direction === "IN");
     const lastOutbound = [...latestMessages].reverse().find((msg) => msg.direction === "OUT");
     const resolvedLastMessagePreview = cleanText(
@@ -1321,7 +1335,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
         lastMessagePreview: resolvedLastMessagePreview || null,
-        lastMessageAt: lastMessage?.timestamp,
+        lastMessageAt: resolvedLastMessageAt,
         lastInboundAt: lastInbound?.timestamp,
         lastOutboundAt: lastOutbound?.timestamp,
         lastInboundHash,
@@ -1398,6 +1412,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
       abortReason = reason;
       queue.length = 0;
     },
+    syncThreadForIngest: (
+      input: {
+        platform: PlatformName;
+        candidate: ThreadStub;
+        maxMessages: number;
+        requestId: string;
+        runLogger?: RunLogger;
+        messages?: NormalizedMessage[];
+      }
+    ) =>
+      syncThread(
+        input.platform,
+        input.candidate,
+        input.maxMessages,
+        input.requestId,
+        input.runLogger,
+        input.messages
+      ),
     clearAbort
   };
 
