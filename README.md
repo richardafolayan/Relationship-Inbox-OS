@@ -245,6 +245,13 @@ curl http://localhost:4001/health
 | `LINKEDIN_SCAN_STABLE_ITERATIONS` | `3` | Stop after stable no-growth iterations. |
 | `LINKEDIN_SCAN_SCROLL_WAIT_MS` | `700` | Wait between LinkedIn scroll collection iterations. |
 | `LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS` | `8` | Max message pane backfill attempts per thread. |
+| `LINKEDIN_DEV_SCAN_MAX_THREADS` | empty | Dev-only cap for LinkedIn full scan candidate count. |
+| `LINKEDIN_DEV_SCAN_MAX_OPENS` | empty | Dev-only cap for how many LinkedIn threads are opened in one full scan. |
+| `LINKEDIN_DEV_SCAN_DISABLE_DEEP_SCROLL` | `0` | Dev-only toggle to disable LinkedIn deep scroll and keep one visible pass. |
+| `LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Dev-only runner scheduler guard; disables background autoscan ticks by default. |
+| `LINKEDIN_DEV_LOG_STAGE_HEADLINES` | `1` | Dev-only toggle for always-visible `[LI][SCAN]` headline logs. |
+| `NEXT_PUBLIC_DISABLE_AUTOSCAN` | `1` | Dashboard autoscan gate; in dev it defaults to disabled unless explicitly set `0`. |
+| `NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Legacy dashboard autoscan disable flag (still honored). |
 
 ### Runtime settings (`/settings`)
 

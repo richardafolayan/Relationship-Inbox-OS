@@ -72,6 +72,25 @@ export interface PlatformCard {
   };
 }
 
+export interface ScanControlQueuedResponse {
+  ok: true;
+  jobId: string;
+  status: "queued" | "running";
+  requestId: string;
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+}
+
+export interface ScanControlBlockedResponse {
+  ok: false;
+  blocked: true;
+  reason: "cooldown_active" | "in_flight";
+  retryAfterSeconds: number;
+  requestId: string;
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+}
+
+export type ScanControlResponse = ScanControlQueuedResponse | ScanControlBlockedResponse;
+
 export interface AuditLogRow {
   id: string;
   timestamp: string;

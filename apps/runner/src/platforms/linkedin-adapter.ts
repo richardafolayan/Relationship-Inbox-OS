@@ -99,6 +99,14 @@ interface LinkedInRunCounters {
   reloadSuppressed: boolean;
 }
 
+export interface LinkedInFullScanOptions {
+  maxThreads?: number;
+  maxOpens?: number;
+  disableDeepScroll?: boolean;
+  requestId: string;
+  runLogger?: RunLogger;
+}
+
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
 const linkedInSmokeEntryUrl = "https://www.linkedin.com/messaging/?filter=unread";
 const linkedInSmokeThreadRowSelector = ".msg-conversation-listitem";
@@ -2763,9 +2771,11 @@ export class LinkedInAdapter implements PlatformAdapter {
   async collectThreadRowsWithScroll(
     page: Page,
     selectors: SelectorRegistry,
-    maxThreads: number
+    maxThreads: number,
+    options?: LinkedInFullScanOptions
   ): Promise<{
     rows: ThreadStub[];
+    rowsBeforeCapCount: number;
     iterations: number;
     stopReason: LinkedInCollectionStopReason;
     noProgressStreak: number;
@@ -2803,6 +2813,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     if (readiness.empty) {
       return {
         rows: [],
+        rowsBeforeCapCount: 0,
         iterations: 0,
         stopReason: "zero_threads_found",
         noProgressStreak: 0,
@@ -2812,7 +2823,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       };
     }
 
-    const cappedMaxThreads = Math.max(1, maxThreads);
+    const cappedMaxThreads = Math.max(1, options?.maxThreads ?? maxThreads);
     const stableIterationsTarget = Math.max(1, this.deps.scanStableIterations);
     const maxIterations = Math.max(20, Math.min(60, this.deps.scanMaxThreads * 3));
     const maxDurationMs = 45_000;
@@ -2834,6 +2845,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       action: "collection_start",
       details: {
         maxThreads: cappedMaxThreads,
+        disableDeepScroll: options?.disableDeepScroll ?? false,
         stableIterationsTarget,
         maxIterations,
         maxDurationMs
@@ -3040,6 +3052,18 @@ export class LinkedInAdapter implements PlatformAdapter {
         });
         break;
       }
+      if (options?.disableDeepScroll) {
+        stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection because deep scroll is disabled for this run",
+          details: {
+            mergedCount: merged.size,
+            stopReason
+          }
+        });
+        break;
+      }
 
       const scrollOutcome = await this.deepScrollThreadList(page, selectors, {
         bottomKey: snapshot.bottomKey,
@@ -3111,6 +3135,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     return {
       rows: Array.from(merged.values()).slice(0, cappedMaxThreads),
+      rowsBeforeCapCount: merged.size,
       iterations,
       stopReason,
       noProgressStreak,
@@ -4027,7 +4052,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
-  async scanUnreadThreads(): Promise<ThreadStub[]> {
+  async scanUnreadThreads(options?: LinkedInFullScanOptions): Promise<ThreadStub[]> {
     return this.runWithPlatformLease(async () => {
       const selectors = await this.deps.resolveSelectors();
       const page = await this.navigateInbox(selectors);
@@ -4155,7 +4180,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
             const collected = await runStage(
               "collect_threads",
-              async () => this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads),
+              async () => this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads, options),
               {
                 unreadFilterResult: { ...unreadFilterResult },
                 attempt: attempt + 1,
@@ -4177,16 +4202,32 @@ export class LinkedInAdapter implements PlatformAdapter {
             }
 
             const unreadCandidates = collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0);
+            const unreadCandidatesBeforeCap = collected.rowsBeforeCapCount;
+            const unreadCandidatesAfterCap = unreadCandidates.length;
             runCounters.unreadViewActive = unreadFilterResult.pillPresent && unreadFilterResult.waitReason !== "pill_missing";
             runCounters.threadsVisibleCount = collected.rows.length;
-            runCounters.threadsCollectedTotal = collected.rows.length;
-            runCounters.threadsWithUnreadBadgeCount = unreadCandidates.length;
-            runCounters.candidatesToOpenCount = unreadCandidates.length;
+            runCounters.threadsCollectedTotal = collected.rowsBeforeCapCount;
+            runCounters.threadsWithUnreadBadgeCount = unreadCandidatesAfterCap;
+            runCounters.candidatesToOpenCount = unreadCandidatesAfterCap;
             runCounters.scrollIterations = collected.scrollIterations;
             runCounters.noProgressStreak = collected.noProgressStreak;
             runCounters.stopReason = collected.stopReason;
             runCounters.recoveryAttemptsUsed = recoveryAttempts;
             this.runLogger?.mergeCounters({ ...runCounters });
+            if (options?.runLogger && options.requestId) {
+              options.runLogger.headline({
+                platform: "LI",
+                requestId: options.requestId,
+                stage: "collect_threads",
+                message: "LinkedIn adapter collection complete",
+                details: {
+                  candidatesBeforeCap: unreadCandidatesBeforeCap,
+                  candidatesAfterCap: unreadCandidatesAfterCap,
+                  disableDeepScroll: options.disableDeepScroll ?? false,
+                  stopReason: collected.stopReason
+                }
+              });
+            }
 
             this.logTraceDecision({
               stage: "collect_threads",
@@ -4212,8 +4253,8 @@ export class LinkedInAdapter implements PlatformAdapter {
             }
 
             this.lastCollectionMetrics = {
-              totalFound: collected.rows.length,
-              unreadFound: unreadCandidates.length,
+              totalFound: collected.rowsBeforeCapCount,
+              unreadFound: unreadCandidatesAfterCap,
               iterations: collected.iterations,
               stopReason: collected.stopReason
             };
@@ -4321,7 +4362,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
-  async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
+  async fetchRecentThreads(limit: number, options?: LinkedInFullScanOptions): Promise<ThreadStub[]> {
     return this.runWithPlatformLease(async () => {
       const selectors = await this.deps.resolveSelectors();
       const page = await this.navigateInbox(selectors);
@@ -4345,10 +4386,11 @@ export class LinkedInAdapter implements PlatformAdapter {
         const collected = await this.collectThreadRowsWithScroll(
           page,
           selectors,
-          Math.max(limit, this.deps.scanMaxThreads)
+          Math.max(limit, this.deps.scanMaxThreads),
+          options
         );
         this.lastCollectionMetrics = {
-          totalFound: collected.rows.length,
+          totalFound: collected.rowsBeforeCapCount,
           unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
           iterations: collected.iterations,
           stopReason: collected.stopReason

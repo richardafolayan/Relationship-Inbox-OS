@@ -1,19 +1,34 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AppSettings, HealthResponse } from "@/lib/types";
 
+const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
+const linkedInAutoScanIntervalMs = 600_000;
+
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [autoScanEnabled, setAutoScanEnabled] = useState(false);
+  const autoScanInFlightRef = useRef(false);
+  const autoScanDisabled = useMemo(
+    () =>
+      resolveAutoScanDisabled({
+        nodeEnv: process.env.NODE_ENV,
+        disableAutoScan: process.env.NEXT_PUBLIC_DISABLE_AUTOSCAN,
+        legacyDisableAutoScan: process.env.NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN
+      }),
+    []
+  );
 
   const refreshMeta = useCallback(async () => {
     const [healthData, settingsData] = await Promise.all([
@@ -33,6 +48,47 @@ export function AppShell({ children }: { children: ReactNode }) {
 
     return () => clearInterval(timer);
   }, [refreshMeta]);
+
+  useEffect(() => {
+    if (autoScanDisabled) {
+      setAutoScanEnabled(false);
+      return;
+    }
+    const stored = window.localStorage.getItem(linkedInAutoScanStorageKey);
+    setAutoScanEnabled(
+      resolveAutoScanInitialEnabled({
+        envDisabled: autoScanDisabled,
+        storedValue: stored
+      })
+    );
+  }, [autoScanDisabled]);
+
+  useEffect(() => {
+    if (autoScanDisabled) {
+      return;
+    }
+    window.localStorage.setItem(linkedInAutoScanStorageKey, autoScanEnabled ? "true" : "false");
+  }, [autoScanDisabled, autoScanEnabled]);
+
+  useEffect(() => {
+    if (autoScanDisabled || !autoScanEnabled) {
+      return undefined;
+    }
+
+    const timer = setInterval(() => {
+      if (autoScanInFlightRef.current) {
+        return;
+      }
+      autoScanInFlightRef.current = true;
+      void apiPost("/runner/control/scan", { platform: "LINKEDIN" })
+        .catch(() => undefined)
+        .finally(() => {
+          autoScanInFlightRef.current = false;
+        });
+    }, linkedInAutoScanIntervalMs);
+
+    return () => clearInterval(timer);
+  }, [autoScanDisabled, autoScanEnabled]);
 
   useEffect(() => {
     const previousEventId = Number(window.sessionStorage.getItem("runner_last_event_id") ?? "0");
@@ -96,6 +152,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     setSettings(updated);
   };
 
+  const toggleAutoScan = (): void => {
+    if (autoScanDisabled) {
+      setAutoScanEnabled(false);
+      return;
+    }
+    setAutoScanEnabled((current) => !current);
+  };
+
   return (
     <div className="min-h-screen bg-bg">
       <Sidebar health={health} lastScanAt={lastScanAt} onScanNow={runScanNow} />
@@ -103,7 +167,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Topbar
           settings={settings}
           health={health}
+          autoScanEnabled={autoScanEnabled}
+          autoScanDisabled={autoScanDisabled}
           onToggleHeadless={toggleHeadless}
+          onToggleAutoScan={toggleAutoScan}
           onOpenCommandPalette={() => setPaletteOpen(true)}
         />
         <main className="p-6">{children}</main>

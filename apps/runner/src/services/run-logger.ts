@@ -7,6 +7,7 @@ import {
 } from "node:fs";
 import { join, resolve } from "node:path";
 import type { PlatformName } from "@inbox-os/core";
+import { getDevLoggingFlags } from "../dev-flags.js";
 
 export type RunTraceLevel = "debug" | "info" | "warn" | "error";
 
@@ -48,6 +49,14 @@ export interface RunLogger {
   readonly requestId: string;
   readonly platform: PlatformName | string;
   readonly runDir?: string;
+  readonly prettyLogPath?: string;
+  headline(input: {
+    platform: string;
+    requestId: string;
+    stage: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }): void;
   logEvent(event: Omit<RunTraceEvent, "ts" | "requestId" | "platform"> & { ts?: string }): void;
   logAction(action: {
     ts?: string;
@@ -244,6 +253,13 @@ function appendLine(path: string, line: string): void {
   appendFileSync(path, `${line}\n`, "utf8");
 }
 
+function appendPretty(path: string | undefined, line: string): void {
+  if (!path) {
+    return;
+  }
+  appendLine(path, line);
+}
+
 function prettyPrint(event: RunTraceEvent, enabled = true): void {
   if (!enabled) {
     return;
@@ -263,7 +279,33 @@ function noOpLogger(input: {
   requestId: string;
   platform: PlatformName | string;
   runType: string;
+  runDir?: string;
+  prettyLogPath?: string;
+  emitConsole?: boolean;
 }): RunLogger {
+  const emitConsole = input.emitConsole ?? true;
+  const stageHeadlinesEnabled = getDevLoggingFlags().stageHeadlines;
+  const emitHeadline = (headlineInput: {
+    platform: string;
+    requestId: string;
+    stage: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }): void => {
+    if (!stageHeadlinesEnabled) {
+      return;
+    }
+    const detailsSuffix = headlineInput.details ? ` details=${stringifyJson(headlineInput.details)}` : "";
+    const line =
+      `[${headlineInput.platform}][SCAN][req=${headlineInput.requestId}][stage=${headlineInput.stage}] ` +
+      `${headlineInput.message}${detailsSuffix}`;
+    if (emitConsole) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    appendPretty(input.prettyLogPath, line);
+  };
+
   const summaryFactory = (success: boolean): RunTraceSummary => ({
     requestId: input.requestId,
     platform: input.platform,
@@ -271,12 +313,16 @@ function noOpLogger(input: {
     startedAt: nowIso(),
     completedAt: nowIso(),
     success,
+    runDir: input.runDir,
     counters: {}
   });
   return {
     enabled: false,
     requestId: input.requestId,
     platform: input.platform,
+    runDir: input.runDir,
+    prettyLogPath: input.prettyLogPath,
+    headline: emitHeadline,
     logEvent: () => undefined,
     logAction: () => undefined,
     logStage: () => undefined,
@@ -297,20 +343,45 @@ export function createRunLogger(input: {
   outDirBase?: string;
   forceEnabled?: boolean;
   emitConsole?: boolean;
+  createLogDirWhenDisabled?: boolean;
 }): RunLogger {
+  const startedAt = nowIso();
+  const emitConsole = input.emitConsole ?? true;
+  const outDirBase = resolve(input.outDirBase ?? process.env.RUN_TRACE_DIR ?? defaultOutDir);
+  const runDir = resolve(outDirBase, dateFolder(new Date(startedAt)), String(input.platform).toLowerCase(), input.requestId);
+  const prettyLogPath = join(runDir, "pretty.log");
   const traceEnabled = input.forceEnabled || isEnabled(process.env.RUN_TRACE);
   if (!traceEnabled) {
+    if (input.createLogDirWhenDisabled) {
+      try {
+        mkdirSync(runDir, { recursive: true });
+        writeFileSync(prettyLogPath, "", "utf8");
+      } catch {
+        return noOpLogger({
+          requestId: input.requestId,
+          platform: input.platform,
+          runType: input.runType,
+          emitConsole
+        });
+      }
+      return noOpLogger({
+        requestId: input.requestId,
+        platform: input.platform,
+        runType: input.runType,
+        runDir,
+        prettyLogPath,
+        emitConsole
+      });
+    }
     return noOpLogger({
       requestId: input.requestId,
       platform: input.platform,
-      runType: input.runType
+      runType: input.runType,
+      emitConsole
     });
   }
 
   const piiEnabled = isEnabled(process.env.RUN_TRACE_PII);
-  const startedAt = nowIso();
-  const outDirBase = resolve(input.outDirBase ?? process.env.RUN_TRACE_DIR ?? defaultOutDir);
-  const runDir = resolve(outDirBase, dateFolder(new Date(startedAt)), String(input.platform).toLowerCase(), input.requestId);
   const eventsPath = join(runDir, "events.ndjson");
   const actionsPath = join(runDir, "actions.csv");
   const summaryPath = join(runDir, "summary.json");
@@ -320,6 +391,7 @@ export function createRunLogger(input: {
 
   try {
     mkdirSync(runDir, { recursive: true });
+    writeFileSync(prettyLogPath, "", "utf8");
     writeFileSync(eventsPath, "", "utf8");
     writeFileSync(actionsPath, `${csvHeaders}\n`, "utf8");
   } catch (error) {
@@ -332,12 +404,13 @@ export function createRunLogger(input: {
     return noOpLogger({
       requestId: input.requestId,
       platform: input.platform,
-      runType: input.runType
+      runType: input.runType,
+      emitConsole
     });
   }
 
   const counters: Record<string, unknown> = {};
-  const emitConsole = input.emitConsole ?? true;
+  const stageHeadlinesEnabled = getDevLoggingFlags().stageHeadlines;
   const artifacts: {
     playwrightTracePath?: string;
     failureScreenshotPath?: string;
@@ -401,11 +474,49 @@ export function createRunLogger(input: {
     appendLine(actionsPath, row);
   }
 
+  function writeHeadline(headlineInput: {
+    platform: string;
+    requestId: string;
+    stage: string;
+    message: string;
+    details?: Record<string, unknown>;
+  }): void {
+    if (!stageHeadlinesEnabled) {
+      return;
+    }
+    const safeDetails = headlineInput.details
+      ? (sanitizeValue(headlineInput.details, piiEnabled, "details") as Record<string, unknown>)
+      : undefined;
+    const detailsSuffix = safeDetails ? ` details=${stringifyJson(safeDetails)}` : "";
+    const line =
+      `[${headlineInput.platform}][SCAN][req=${headlineInput.requestId}][stage=${headlineInput.stage}] ` +
+      `${headlineInput.message}${detailsSuffix}`;
+    if (emitConsole) {
+      // eslint-disable-next-line no-console
+      console.info(line);
+    }
+    appendPretty(prettyLogPath, line);
+    writeEvent({
+      ts: nowIso(),
+      level: "info",
+      component: "runner",
+      stage: headlineInput.stage,
+      action: "headline",
+      details: {
+        platformPrefix: headlineInput.platform,
+        message: headlineInput.message,
+        ...(safeDetails ?? {})
+      }
+    });
+  }
+
   const logger: RunLogger = {
     enabled: true,
     requestId: input.requestId,
     platform: input.platform,
     runDir,
+    prettyLogPath,
+    headline: writeHeadline,
     logEvent: (event) => {
       writeEvent({
         ts: event.ts ?? nowIso(),

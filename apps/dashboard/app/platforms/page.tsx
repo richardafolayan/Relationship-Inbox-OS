@@ -5,6 +5,8 @@ import { ApiRequestError, apiGet, apiPost } from "@/lib/api";
 import type {
   AuditLogRow,
   PlatformCard,
+  ScanControlBlockedResponse,
+  ScanControlResponse,
   SelectorTestFailurePayload,
   SelectorTestSuccessPayload
 } from "@/lib/types";
@@ -35,6 +37,7 @@ export default function PlatformsPage() {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [editingSelector, setEditingSelector] = useState<Record<string, string>>({});
   const [selectorErrors, setSelectorErrors] = useState<Record<string, SelectorTestFailurePayload | undefined>>({});
+  const [scanBlocks, setScanBlocks] = useState<Record<string, ScanControlBlockedResponse | undefined>>({});
 
   const refresh = useCallback(async () => {
     const [platforms, logRows] = await Promise.all([
@@ -100,6 +103,33 @@ export default function PlatformsPage() {
     [normalizeSelectorError, refresh]
   );
 
+  const runScan = useCallback(
+    async (platform: PlatformCard["platform"]) => {
+      try {
+        const response = await apiPost<ScanControlResponse>("/runner/control/scan", { platform });
+        if (!response.ok && response.blocked) {
+          setScanBlocks((prev) => ({
+            ...prev,
+            [platform]: response
+          }));
+          return;
+        }
+
+        setScanBlocks((prev) => ({
+          ...prev,
+          [platform]: undefined
+        }));
+        await refresh();
+      } catch {
+        setScanBlocks((prev) => ({
+          ...prev,
+          [platform]: undefined
+        }));
+      }
+    },
+    [refresh]
+  );
+
   return (
     <div className="space-y-4">
       <div>
@@ -138,6 +168,14 @@ export default function PlatformsPage() {
                   <span className="text-sm text-slate-500">Last scan {formatRelative(row.lastScanAt)}</span>
                 </div>
                 {row.lastError ? <p className="mt-2 text-sm text-rose-600">{row.lastError}</p> : null}
+                {scanBlocks[row.platform] ? (
+                  <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+                    {scanBlocks[row.platform]?.reason === "in_flight"
+                      ? `Scan already in flight - retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`
+                      : `Cooling down - next retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`}{" "}
+                    (request {scanBlocks[row.platform]?.requestId})
+                  </p>
+                ) : null}
                 {row.lastScanFailure ? (
                   <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
                     <p className="font-medium">{row.lastScanFailure.errorSummary}</p>
@@ -198,7 +236,7 @@ export default function PlatformsPage() {
                 >
                   {row.status === "CONNECTED" ? "Reconnect" : "Connect"}
                 </Button>
-                <Button variant="secondary" onClick={() => void apiPost("/runner/control/scan", { platform: row.platform })}>
+                <Button variant="secondary" onClick={() => void runScan(row.platform)}>
                   Run scan
                 </Button>
                 <Button

@@ -1,7 +1,9 @@
 import type { NormalizedMessage, PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
-import { join, resolve } from "node:path";
+import { mkdir, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanText, humanDelay } from "../platforms/utils";
@@ -11,11 +13,17 @@ import {
   ScanRetryController,
   type ScanCooldownStatus
 } from "./scan-retry-controller";
+import { isLinkedInInFlight } from "./linkedin-inflight-guard";
 import {
   createRunLogger,
   type RunLogger,
   type RunTraceSummary
 } from "./run-logger";
+import {
+  getDevLoggingFlags,
+  getLinkedInDevScanCaps,
+  isAutoScanDisabledInDev
+} from "../dev-flags";
 
 interface ScanQueueDeps {
   adapters: Record<PlatformName, PlatformAdapter>;
@@ -46,6 +54,23 @@ interface TraceAwareAdapter {
   setRunLogger?: (logger: RunLogger | null) => void;
 }
 
+interface LinkedInScanAdapter extends PlatformAdapter {
+  scanUnreadThreads(options?: {
+    maxThreads?: number;
+    maxOpens?: number;
+    disableDeepScroll?: boolean;
+    requestId: string;
+    runLogger?: RunLogger;
+  }): Promise<ThreadStub[]>;
+  fetchRecentThreads(limit: number, options?: {
+    maxThreads?: number;
+    maxOpens?: number;
+    disableDeepScroll?: boolean;
+    requestId: string;
+    runLogger?: RunLogger;
+  }): Promise<ThreadStub[]>;
+}
+
 const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
 
 export type EnqueueScanResult =
@@ -59,15 +84,18 @@ export type EnqueueScanResult =
   | {
       ok: false;
       blocked: true;
-      reason: "cooldown_active";
+      reason: "cooldown_active" | "in_flight";
       retryAfterSeconds: number;
       requestId: string;
       platform?: PlatformName;
     };
 
 export function createScanQueue(deps: ScanQueueDeps) {
+  const runnerRootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
+  const latestLinkedInScanPointerPath = resolve(runnerRootDir, "LATEST_LINKEDIN_SCAN.txt");
   const queue: ScanJob[] = [];
   let processing = false;
+  let currentJob: ScanJob | null = null;
   let scheduler: NodeJS.Timeout | undefined;
   let abortVersion = 0;
   let abortReason: string | null = null;
@@ -104,6 +132,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
   function lockKey(platform: PlatformName): string {
     return `${personKey}:${platform}`;
+  }
+
+  async function writeLatestLinkedInScanPointer(input: {
+    requestId: string;
+    logDir: string;
+  }): Promise<void> {
+    await mkdir(dirname(latestLinkedInScanPointerPath), { recursive: true });
+    await writeFile(
+      latestLinkedInScanPointerPath,
+      `LOG_DIR=${resolve(input.logDir)}\nrequestId=${input.requestId}\n`,
+      "utf8"
+    );
   }
 
   function adapterErrorDetails(error: AdapterFailure | undefined): Record<string, unknown> {
@@ -430,6 +470,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
     options?: { respectCooldown?: boolean; requestId?: string }
   ): EnqueueScanResult {
     const requestId = options?.requestId ?? uuid();
+    if (isLinkedInInFlight({
+      requestedPlatform: platform,
+      currentJob,
+      queuedJobs: queue
+    })) {
+      return {
+        ok: false,
+        blocked: true,
+        reason: "in_flight",
+        retryAfterSeconds: 30,
+        requestId,
+        platform
+      };
+    }
     const cooldown = options?.respectCooldown === false
       ? { blocked: false, retryAfterSeconds: 0, platform }
       : retryController.getCooldown(platform);
@@ -487,6 +541,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
   }
 
   function startScheduler(): void {
+    if (isAutoScanDisabledInDev()) {
+      if (scheduler) {
+        clearInterval(scheduler);
+        scheduler = undefined;
+      }
+      return;
+    }
+
     if (scheduler) {
       clearInterval(scheduler);
     }
@@ -534,11 +596,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
     }
 
     processing = true;
+    currentJob = next;
 
     try {
       await runJob(next);
     } finally {
       processing = false;
+      currentJob = null;
       if (queue.length > 0) {
         triggerProcessNext();
       }
@@ -614,11 +678,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
           requestId: job.jobId,
           platform,
           runType: "scan",
-          outDirBase: runTraceBaseDir
+          outDirBase: runTraceBaseDir,
+          createLogDirWhenDisabled: platform === "LINKEDIN"
         });
         activeRunLoggerByPlatform.set(platform, runLogger);
 
+        const linkedInDevCaps = platform === "LINKEDIN" ? getLinkedInDevScanCaps() : { disableDeepScroll: false };
+        const stageHeadlinesEnabled = platform === "LINKEDIN" && getDevLoggingFlags().stageHeadlines;
+        const logDir = runLogger.runDir ?? null;
+        const headline = (stage: string, message: string, details?: Record<string, unknown>): void => {
+          if (!stageHeadlinesEnabled) {
+            return;
+          }
+          runLogger.headline({
+            platform: "LI",
+            requestId: job.jobId,
+            stage,
+            message,
+            details
+          });
+        };
+
         const adapter = deps.adapters[platform];
+        const linkedInAdapter = platform === "LINKEDIN" ? (adapter as LinkedInScanAdapter) : null;
         const traceAwareAdapter = toTraceAwareAdapter(adapter);
         traceAwareAdapter.setRunLogger?.(runLogger);
 
@@ -646,6 +728,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
             queueDepth: getQueueDepth()
           }
         });
+        if (platform === "LINKEDIN" && logDir) {
+          await writeLatestLinkedInScanPointer({
+            requestId: job.jobId,
+            logDir
+          }).catch(() => undefined);
+        }
+        headline("SCAN_START", "scan run started", {
+          LOG_DIR: logDir,
+          caps: linkedInDevCaps
+        });
+        if (logDir) {
+          headline("SCAN_START", `LOG_DIR: ${logDir}`);
+        }
 
         try {
           if (await markAborted("before_platform_loop", platform)) {
@@ -683,6 +778,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 retryAfterSeconds: cooldown.retryAfterSeconds
               }
             });
+            headline("SCAN_END_FAIL", "scan blocked by cooldown", {
+              reason: "cooldown_active",
+              retryAfterSeconds: cooldown.retryAfterSeconds,
+              LOG_DIR: logDir
+            });
+            if (logDir) {
+              headline("SCAN_END_FAIL", `LOG_DIR: ${logDir}`);
+            }
             return;
           }
 
@@ -691,6 +794,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
             jobId: job.jobId,
             platform,
             stage: "Connecting"
+          });
+          headline("CONNECT_START", "connecting to platform", {
+            platform
           });
 
           if (await markAborted("before_connect", platform)) {
@@ -708,6 +814,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
             return;
           }
           await setPlatformStatus({ platform, status: "CONNECTED", connected: true });
+          headline("CONNECT_OK", "connection ready", {
+            platform
+          });
 
           deps.eventBus.emit({
             type: "SCAN_PROGRESS",
@@ -715,12 +824,25 @@ export function createScanQueue(deps: ScanQueueDeps) {
             platform,
             stage: "Collecting candidates"
           });
+          headline("COLLECT_UNREAD_START", "collecting unread and recent candidates", {
+            disableDeepScroll: linkedInDevCaps.disableDeepScroll,
+            maxThreads: linkedInDevCaps.maxThreads ?? null,
+            maxOpens: linkedInDevCaps.maxOpens ?? null
+          });
 
           if (await markAborted("before_scan_unread", platform)) {
             runStopReason = "aborted";
             return;
           }
-          const unread = await adapter.scanUnreadThreads();
+          const unread = linkedInAdapter
+            ? await linkedInAdapter.scanUnreadThreads({
+                maxThreads: linkedInDevCaps.maxThreads,
+                maxOpens: linkedInDevCaps.maxOpens,
+                disableDeepScroll: linkedInDevCaps.disableDeepScroll,
+                requestId: job.jobId,
+                runLogger
+              })
+            : await adapter.scanUnreadThreads();
           unreadCandidatesCount = unread.length;
           runLogger.logAction({
             stage: "collect_threads",
@@ -738,7 +860,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
             runStopReason = "aborted";
             return;
           }
-          const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+          const recent = linkedInAdapter
+            ? await linkedInAdapter.fetchRecentThreads(settings.recentThreadSweepCount, {
+                maxThreads: linkedInDevCaps.maxThreads,
+                maxOpens: linkedInDevCaps.maxOpens,
+                disableDeepScroll: linkedInDevCaps.disableDeepScroll,
+                requestId: job.jobId,
+                runLogger
+              })
+            : await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
           runLogger.logAction({
             stage: "collect_threads",
             action: "scan_recent_threads",
@@ -761,14 +891,21 @@ export function createScanQueue(deps: ScanQueueDeps) {
               merged.set(thread.platformThreadId, thread);
             }
           }
-          candidatesCount = merged.size;
+          const candidatesBeforeCap = merged.size;
+          const mergedCandidates = Array.from(merged.values());
+          const cappedCandidates =
+            typeof linkedInDevCaps.maxThreads === "number" && linkedInDevCaps.maxThreads > 0
+              ? mergedCandidates.slice(0, linkedInDevCaps.maxThreads)
+              : mergedCandidates;
+          candidatesCount = cappedCandidates.length;
           runLogger.logDecision({
             stage: "collect_threads",
             decision: "Merged unread and recent candidates",
             details: {
               unreadCandidatesCount,
               recentCandidatesCount: recent.length,
-              mergedCandidatesCount: candidatesCount
+              mergedCandidatesCount: candidatesBeforeCap,
+              cappedCandidatesCount: candidatesCount
             }
           });
           const metricsProvider = adapter as unknown as {
@@ -783,16 +920,35 @@ export function createScanQueue(deps: ScanQueueDeps) {
             type: "SCAN_PROGRESS",
             jobId: job.jobId,
             platform,
-            stage: `Syncing ${merged.size} thread(s)`
+            stage: `Syncing ${candidatesCount} thread(s)`
+          });
+          headline("COLLECT_UNREAD_OK", "candidate collection complete", {
+            rows: candidatesBeforeCap,
+            candidates: candidatesCount,
+            stopReason:
+              typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined
           });
 
-          for (const thread of merged.values()) {
+          const maxOpens = linkedInDevCaps.maxOpens;
+          const maxOpenCount = typeof maxOpens === "number" && maxOpens > 0 ? maxOpens : cappedCandidates.length;
+
+          for (const thread of cappedCandidates) {
+            if (openedThreadsCount >= maxOpenCount) {
+              break;
+            }
             if (await markAborted("before_thread_sync", platform, thread)) {
               runStopReason = "aborted";
               break;
             }
 
             openedThreadsCount += 1;
+            headline("OPEN_THREAD_START", "opening candidate thread", {
+              index: openedThreadsCount,
+              total: Math.min(cappedCandidates.length, maxOpenCount),
+              name: thread.displayName,
+              listTimestamp: thread.lastMessageAt ?? null,
+              url: thread.threadUrl ?? null
+            });
             runLogger.logAction({
               stage: "open_thread",
               action: "thread_sync_start",
@@ -808,6 +964,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
               messagesParsedCount += syncResult.parsedMessages;
+              headline("OPEN_THREAD_OK", "thread opened and synced", {
+                index: openedThreadsCount,
+                total: Math.min(cappedCandidates.length, maxOpenCount),
+                name: thread.displayName
+              });
+              headline("PARSE_MESSAGES_OK", "thread messages parsed", {
+                name: thread.displayName,
+                messagesParsed: syncResult.parsedMessages
+              });
+              headline("PERSIST_OK", "thread persisted", {
+                name: thread.displayName,
+                threadsUpserted: syncResult.updatedThreads,
+                messagesUpserted: syncResult.parsedMessages
+              });
               runLogger.logAction({
                 stage: "read_thread",
                 action: "thread_sync_complete",
@@ -962,6 +1132,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
           runStopReason =
             typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : runStopReason;
           runLogger.setStopReason(runStopReason ?? "scan_complete");
+          headline("SCAN_END_OK", "scan completed", {
+            stopReason: runStopReason ?? "scan_complete",
+            updatedThreads: platformUpdatedThreads,
+            LOG_DIR: logDir
+          });
+          if (logDir) {
+            headline("SCAN_END_OK", `LOG_DIR: ${logDir}`);
+          }
 
           await deps.auditLog({
             platform,
@@ -975,18 +1153,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
               platform,
               updatedThreads: platformUpdatedThreads,
               processed: platformUpdatedThreads,
-              skipped: Math.max(0, merged.size - platformUpdatedThreads),
+              skipped: Math.max(0, candidatesCount - platformUpdatedThreads),
               totalFound:
-                typeof collectionMetrics?.totalFound === "number" ? (collectionMetrics.totalFound as number) : merged.size,
+                typeof collectionMetrics?.totalFound === "number"
+                  ? (collectionMetrics.totalFound as number)
+                  : candidatesBeforeCap,
               unreadFound:
                 typeof collectionMetrics?.unreadFound === "number"
                   ? (collectionMetrics.unreadFound as number)
-                  : merged.size,
+                  : candidatesCount,
               iterations:
                 typeof collectionMetrics?.iterations === "number" ? (collectionMetrics.iterations as number) : undefined,
               stopReason:
                 typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined,
-              candidates: merged.size,
+              candidates: candidatesCount,
               threadFailures,
               threadFailureKinds
             }
@@ -1000,6 +1180,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
             runStopReason = "aborted";
             return;
           }
+          const firstStackLine =
+            error instanceof Error && typeof error.stack === "string"
+              ? error.stack.split("\n")[0] ?? error.message
+              : String(error);
 
           if (error instanceof AdapterFailure) {
             runLogger.copyFailureArtifacts({
@@ -1026,6 +1210,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
               message
             });
             runStopReason = failureReason ?? "scan_fail";
+            headline("SCAN_END_FAIL", "scan failed", {
+              stage: failureStage,
+              reason: runStopReason,
+              error: firstStackLine,
+              LOG_DIR: logDir
+            });
+            if (logDir) {
+              headline("SCAN_END_FAIL", `LOG_DIR: ${logDir}`);
+            }
 
             if (shouldStopScanForFailureKind(failureKind)) {
               await setPlatformStatus({
@@ -1086,6 +1279,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
               requestId,
               message
             });
+            headline("SCAN_END_FAIL", "scan failed", {
+              stage: "collect_threads",
+              reason,
+              error: firstStackLine,
+              LOG_DIR: logDir
+            });
+            if (logDir) {
+              headline("SCAN_END_FAIL", `LOG_DIR: ${logDir}`);
+            }
             await markPlatformFailure({
               platform,
               status: "ERROR",

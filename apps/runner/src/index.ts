@@ -648,7 +648,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     await auditService.log({
       platform: payload.platform,
       stage: "Scan",
-      action: "SCAN_BLOCKED_COOLDOWN",
+      action: queued.reason === "in_flight" ? "SCAN_BLOCKED_IN_FLIGHT" : "SCAN_BLOCKED_COOLDOWN",
       status: "OK",
       details: {
         requestId,

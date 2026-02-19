@@ -12,15 +12,18 @@ function withTraceEnv(overrides = {}) {
   const previous = {
     RUN_TRACE: process.env.RUN_TRACE,
     RUN_TRACE_DIR: process.env.RUN_TRACE_DIR,
-    RUN_TRACE_PII: process.env.RUN_TRACE_PII
+    RUN_TRACE_PII: process.env.RUN_TRACE_PII,
+    LINKEDIN_DEV_LOG_STAGE_HEADLINES: process.env.LINKEDIN_DEV_LOG_STAGE_HEADLINES
   };
   process.env.RUN_TRACE = overrides.RUN_TRACE ?? "1";
   process.env.RUN_TRACE_DIR = overrides.RUN_TRACE_DIR;
   process.env.RUN_TRACE_PII = overrides.RUN_TRACE_PII ?? "0";
+  process.env.LINKEDIN_DEV_LOG_STAGE_HEADLINES = overrides.LINKEDIN_DEV_LOG_STAGE_HEADLINES ?? "1";
   return () => {
     process.env.RUN_TRACE = previous.RUN_TRACE;
     process.env.RUN_TRACE_DIR = previous.RUN_TRACE_DIR;
     process.env.RUN_TRACE_PII = previous.RUN_TRACE_PII;
+    process.env.LINKEDIN_DEV_LOG_STAGE_HEADLINES = previous.LINKEDIN_DEV_LOG_STAGE_HEADLINES;
   };
 }
 
@@ -178,6 +181,46 @@ test("run trace redacts long message text when RUN_TRACE_PII=0", async () => {
     const eventsRaw = await readFile(summary.eventsPath, "utf8");
     assert.equal(eventsRaw.includes(sensitiveBody), false);
     assert.equal(eventsRaw.includes("[redacted]"), true);
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("headline logger writes to pretty.log when RUN_TRACE=0 with forced run dir", async () => {
+  const outDir = await mkdtemp(join(tmpdir(), "runner-headline-pretty-"));
+  const restoreEnv = withTraceEnv({
+    RUN_TRACE: "0",
+    RUN_TRACE_DIR: outDir,
+    RUN_TRACE_PII: "0",
+    LINKEDIN_DEV_LOG_STAGE_HEADLINES: "1"
+  });
+
+  try {
+    const logger = createRunLogger({
+      requestId: "req-headline-pretty",
+      platform: "LINKEDIN",
+      runType: "scan",
+      outDirBase: outDir,
+      createLogDirWhenDisabled: true
+    });
+
+    logger.headline({
+      platform: "LI",
+      requestId: "req-headline-pretty",
+      stage: "SCAN_START",
+      message: "scan run started",
+      details: {
+        LOG_DIR: logger.runDir
+      }
+    });
+    const summary = logger.flush({
+      success: true
+    });
+
+    assert.equal(Boolean(summary.runDir), true);
+    const prettyLogPath = join(summary.runDir, "pretty.log");
+    const prettyRaw = await readFile(prettyLogPath, "utf8");
+    assert.equal(prettyRaw.includes("[LI][SCAN][req=req-headline-pretty][stage=SCAN_START] scan run started"), true);
   } finally {
     restoreEnv();
   }

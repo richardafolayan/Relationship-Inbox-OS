@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
+    },
+    "./autoscan": {
+      "types": "./dist/autoscan.d.ts",
+      "import": "./dist/autoscan.js"
     }
   },
   "scripts": {
