@@ -79,8 +79,9 @@ test("LinkedIn unread scan survives unread-click rerender and container-only scr
 
   assert.equal(threads.length > 0, true);
   assert.equal(names.includes("Bravo Two"), true);
-  assert.equal(names.includes("Hotel Eight"), true);
-  assert.equal(names.includes("India Nine"), true);
+  assert.equal(names.includes("Alpha One"), true);
+  assert.equal(names.includes("Sponsored Row"), false);
+  assert.equal(names.includes("Juliet Ten"), false);
 });
 
 test("LinkedIn unread scan requires manual refresh when a transient collect error occurs", async (t) => {

@@ -23,8 +23,15 @@ export function resolveSelectors(
 ): SelectorRegistry {
   const defaults = loadDefaultSelectors(platform, baseDir);
   const platformOverrides = overrides?.[platform] ?? {};
-  return {
+  const resolved: SelectorRegistry = {
     ...defaults,
     ...platformOverrides
   };
+  if (platform === "LINKEDIN") {
+    const legacyThreadListSelector = (resolved.thread_list ?? "").trim();
+    if (legacyThreadListSelector === "ul.msg-conversations-container") {
+      resolved.thread_list = "ul.msg-conversations-container__conversations-list";
+    }
+  }
+  return resolved;
 }

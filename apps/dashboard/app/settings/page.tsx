@@ -12,6 +12,11 @@ const platforms = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [resetToken, setResetToken] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetStatus, setResetStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
   useEffect(() => {
     void apiGet<AppSettings>("/runner/data/settings").then(setSettings);
@@ -26,6 +31,44 @@ export default function SettingsPage() {
     const next = await apiPost<AppSettings>("/runner/control/settings", partial);
     setSettings(next);
     setSaving(false);
+  };
+
+  const closeResetModal = () => {
+    setShowResetModal(false);
+    setResetToken("");
+    setResetConfirm("");
+    setResetBusy(false);
+  };
+
+  const submitLinkedInReset = async () => {
+    setResetBusy(true);
+    setResetStatus(null);
+    try {
+      await apiPost(
+        "/runner/admin/reset",
+        {
+          platform: "LINKEDIN",
+          confirm: "RESET"
+        },
+        {
+          headers: {
+            "x-admin-reset-token": resetToken
+          }
+        }
+      );
+      setResetStatus({
+        type: "success",
+        message: "LinkedIn inbox data cleared. Run a fresh scan to rebuild."
+      });
+      closeResetModal();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Reset failed";
+      setResetStatus({
+        type: "error",
+        message
+      });
+      setResetBusy(false);
+    }
   };
 
   return (
@@ -148,6 +191,17 @@ export default function SettingsPage() {
 
       <Card className="space-y-3 border-rose-200 bg-rose-50">
         <h3 className="text-lg font-semibold text-rose-900">Danger zone</h3>
+        {resetStatus ? (
+          <div
+            className={
+              resetStatus.type === "success"
+                ? "rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
+                : "rounded-lg border border-rose-300 bg-rose-100 px-3 py-2 text-sm text-rose-900"
+            }
+          >
+            {resetStatus.message}
+          </div>
+        ) : null}
         <div className="flex flex-wrap gap-2">
           {platforms.map((platform) => (
             <Button
@@ -167,15 +221,66 @@ export default function SettingsPage() {
         <Button
           variant="danger"
           onClick={() => {
-            if (!confirm("Clear the local database? This cannot be undone.")) {
-              return;
-            }
-            void apiPost("/runner/control/system/clear-db", {});
+            setShowResetModal(true);
+            setResetStatus(null);
           }}
         >
-          Clear DB
+          Clear LinkedIn inbox and rebuild
         </Button>
       </Card>
+
+      {showResetModal ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 px-4">
+          <Card className="w-full max-w-lg space-y-4 border-rose-300">
+            <div>
+              <h3 className="text-lg font-semibold text-slate-900">Confirm LinkedIn reset</h3>
+              <p className="mt-1 text-sm text-slate-600">
+                This will remove LinkedIn threads/messages in the local DB. Type <code>RESET</code> and enter your admin token.
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-slate-700">Admin reset token</label>
+              <Input
+                type="password"
+                value={resetToken}
+                onChange={(event) => setResetToken(event.target.value)}
+                placeholder="Enter ADMIN_RESET_TOKEN"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <label className="block text-sm font-medium text-slate-700">Type RESET to confirm</label>
+              <Input
+                value={resetConfirm}
+                onChange={(event) => setResetConfirm(event.target.value)}
+                placeholder="RESET"
+                autoComplete="off"
+              />
+            </div>
+
+            <div className="flex justify-end gap-2">
+              <Button
+                variant="secondary"
+                onClick={closeResetModal}
+                disabled={resetBusy}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                disabled={resetBusy || resetConfirm !== "RESET" || resetToken.trim().length === 0}
+                onClick={() => {
+                  void submitLinkedInReset();
+                }}
+              >
+                {resetBusy ? "Resetting..." : "Confirm reset"}
+              </Button>
+            </div>
+          </Card>
+        </div>
+      ) : null}
     </div>
   );
 }

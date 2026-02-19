@@ -18,3 +18,11 @@ packages/core/generated
 /data/profiles
 /data/screenshots
 /data/dom_dumps
+/data/repair
+/data/traces
+/apps/runner/logs/runs
+/apps/runner/LATEST_LINKEDIN_SCAN.txt
+/apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt
+/apps/runner/logs/**/*.trace
+/apps/runner/logs/**/*.ndjson
+/apps/runner/logs/**/*.csv

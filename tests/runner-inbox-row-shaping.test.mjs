@@ -45,19 +45,19 @@ function buildRow(overrides = {}) {
   };
 }
 
-test("thread row shaping dedupes multiple rows for the same canonical thread", () => {
+test("thread row shaping first-pass dedupes duplicate source rows by thread.id", () => {
   const rows = shapeThreadRows([
     buildRow({
       id: "thread-a",
       platformThreadId: "linkedin-temp:a",
-      threadUrl: "https://www.linkedin.com/messaging/thread/abc/",
+      threadUrl: "https://www.linkedin.com/messaging/thread/thread-a/",
       _count: { messages: 5 },
       updatedAt: new Date("2026-02-19T10:00:00.000Z")
     }),
     buildRow({
-      id: "thread-b",
-      platformThreadId: "abc",
-      threadUrl: "https://www.linkedin.com/messaging/thread/abc/",
+      id: "thread-a",
+      platformThreadId: "thread-a",
+      threadUrl: "https://www.linkedin.com/messaging/thread/thread-a/",
       _count: { messages: 1 },
       updatedAt: new Date("2026-02-19T09:00:00.000Z")
     })

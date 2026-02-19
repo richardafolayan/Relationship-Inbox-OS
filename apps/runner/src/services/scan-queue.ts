@@ -60,6 +60,27 @@ interface TraceAwareAdapter {
 }
 
 interface LinkedInScanAdapter extends PlatformAdapter {
+  scanInboxThreadsStream(options: {
+    maxThreads?: number;
+    maxOpens?: number;
+    disableDeepScroll?: boolean;
+    requestId: string;
+    runLogger?: RunLogger;
+    onThreadCandidate: (input: {
+      rowKey: string;
+      thread: ThreadStub;
+      messages: NormalizedMessage[];
+    }) => Promise<void>;
+  }): Promise<{
+    stopReason: string;
+    iterations: number;
+    scrollIterations: number;
+    processedRows: number;
+    actionableRows: number;
+    openedRows: number;
+    skippedRows: number;
+    failures: number;
+  }>;
   scanUnreadThreads(options?: {
     maxThreads?: number;
     maxOpens?: number;
@@ -194,6 +215,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     }
     if (normalized.includes("timeouterror") || normalized.includes("timeout")) {
       return "timeout";
+    }
+    if (normalized.includes("list_hydration_timeout")) {
+      return "thread_list_not_ready";
     }
     if (normalized.includes("execution context was destroyed")) {
       return "transient_context_destroyed";
@@ -835,91 +859,152 @@ export function createScanQueue(deps: ScanQueueDeps) {
             maxOpens: linkedInDevCaps.maxOpens ?? null
           });
 
-          if (await markAborted("before_scan_unread", platform)) {
-            runStopReason = "aborted";
-            return;
-          }
-          const unread = linkedInAdapter
-            ? await linkedInAdapter.scanUnreadThreads({
-                maxThreads: linkedInDevCaps.maxThreads,
-                maxOpens: linkedInDevCaps.maxOpens,
-                disableDeepScroll: linkedInDevCaps.disableDeepScroll,
-                requestId: job.jobId,
-                runLogger
-              })
-            : await adapter.scanUnreadThreads();
-          unreadCandidatesCount = unread.length;
-          runLogger.logAction({
-            stage: "collect_threads",
-            action: "scan_unread_threads",
-            result: "ok",
-            counts: {
-              unreadCandidatesCount
-            }
-          });
-          if (await markAborted("after_scan_unread", platform)) {
-            runStopReason = "aborted";
-            return;
-          }
-          if (await markAborted("before_scan_recent", platform)) {
-            runStopReason = "aborted";
-            return;
-          }
-          const recent = linkedInAdapter
-            ? await linkedInAdapter.fetchRecentThreads(settings.recentThreadSweepCount, {
-                maxThreads: linkedInDevCaps.maxThreads,
-                maxOpens: linkedInDevCaps.maxOpens,
-                disableDeepScroll: linkedInDevCaps.disableDeepScroll,
-                requestId: job.jobId,
-                runLogger
-              })
-            : await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
-          runLogger.logAction({
-            stage: "collect_threads",
-            action: "scan_recent_threads",
-            result: "ok",
-            counts: {
-              recentCandidatesCount: recent.length
-            }
-          });
-          if (await markAborted("after_scan_recent", platform)) {
-            runStopReason = "aborted";
-            return;
-          }
+          let candidatesBeforeCap = 0;
+          let collectionMetrics: Record<string, unknown> | null = null;
+          let candidatesToSync: Array<{ thread: ThreadStub; messages?: NormalizedMessage[] }> = [];
 
-          const merged = new Map<string, ThreadStub>();
-          for (const thread of unread) {
-            merged.set(thread.platformThreadId, thread);
-          }
-          for (const thread of recent) {
-            if (!merged.has(thread.platformThreadId)) {
+          if (linkedInAdapter) {
+            if (await markAborted("before_scan_stream", platform)) {
+              runStopReason = "aborted";
+              return;
+            }
+
+            const streamedCandidates: Array<{ rowKey: string; thread: ThreadStub; messages: NormalizedMessage[] }> = [];
+            const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
+              maxThreads: linkedInDevCaps.maxThreads,
+              maxOpens: linkedInDevCaps.maxOpens,
+              disableDeepScroll: linkedInDevCaps.disableDeepScroll,
+              requestId: job.jobId,
+              runLogger,
+              onThreadCandidate: async (input) => {
+                streamedCandidates.push({
+                  rowKey: input.rowKey,
+                  thread: input.thread,
+                  messages: input.messages
+                });
+              }
+            });
+
+            runLogger.logAction({
+              stage: "collect_threads",
+              action: "scan_inbox_stream",
+              result: "ok",
+              counts: {
+                processedRows: streamMetrics.processedRows,
+                actionableRows: streamMetrics.actionableRows,
+                openedRows: streamMetrics.openedRows,
+                streamFailures: streamMetrics.failures
+              }
+            });
+
+            if (await markAborted("after_scan_stream", platform)) {
+              runStopReason = "aborted";
+              return;
+            }
+
+            const cappedStreamedCandidates =
+              typeof linkedInDevCaps.maxThreads === "number" && linkedInDevCaps.maxThreads > 0
+                ? streamedCandidates.slice(0, linkedInDevCaps.maxThreads)
+                : streamedCandidates;
+
+            unreadCandidatesCount = streamMetrics.actionableRows;
+            candidatesBeforeCap = streamedCandidates.length;
+            candidatesToSync = cappedStreamedCandidates.map((candidate) => ({
+              thread: candidate.thread,
+              messages: candidate.messages
+            }));
+            collectionMetrics = {
+              totalFound: streamMetrics.processedRows,
+              unreadFound: streamMetrics.actionableRows,
+              iterations: streamMetrics.iterations,
+              stopReason: streamMetrics.stopReason
+            };
+            runLogger.logDecision({
+              stage: "collect_threads",
+              decision: "Collected LinkedIn stream candidates",
+              details: {
+                processedRows: streamMetrics.processedRows,
+                actionableRows: streamMetrics.actionableRows,
+                openedRows: streamMetrics.openedRows,
+                streamFailures: streamMetrics.failures,
+                mergedCandidatesCount: candidatesBeforeCap,
+                cappedCandidatesCount: candidatesToSync.length,
+                stopReason: streamMetrics.stopReason
+              }
+            });
+          } else {
+            if (await markAborted("before_scan_unread", platform)) {
+              runStopReason = "aborted";
+              return;
+            }
+            const unread = await adapter.scanUnreadThreads();
+            unreadCandidatesCount = unread.length;
+            runLogger.logAction({
+              stage: "collect_threads",
+              action: "scan_unread_threads",
+              result: "ok",
+              counts: {
+                unreadCandidatesCount
+              }
+            });
+            if (await markAborted("after_scan_unread", platform)) {
+              runStopReason = "aborted";
+              return;
+            }
+            if (await markAborted("before_scan_recent", platform)) {
+              runStopReason = "aborted";
+              return;
+            }
+            const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+            runLogger.logAction({
+              stage: "collect_threads",
+              action: "scan_recent_threads",
+              result: "ok",
+              counts: {
+                recentCandidatesCount: recent.length
+              }
+            });
+            if (await markAborted("after_scan_recent", platform)) {
+              runStopReason = "aborted";
+              return;
+            }
+
+            const merged = new Map<string, ThreadStub>();
+            for (const thread of unread) {
               merged.set(thread.platformThreadId, thread);
             }
-          }
-          const candidatesBeforeCap = merged.size;
-          const mergedCandidates = Array.from(merged.values());
-          const cappedCandidates =
-            typeof linkedInDevCaps.maxThreads === "number" && linkedInDevCaps.maxThreads > 0
-              ? mergedCandidates.slice(0, linkedInDevCaps.maxThreads)
-              : mergedCandidates;
-          candidatesCount = cappedCandidates.length;
-          runLogger.logDecision({
-            stage: "collect_threads",
-            decision: "Merged unread and recent candidates",
-            details: {
-              unreadCandidatesCount,
-              recentCandidatesCount: recent.length,
-              mergedCandidatesCount: candidatesBeforeCap,
-              cappedCandidatesCount: candidatesCount
+            for (const thread of recent) {
+              if (!merged.has(thread.platformThreadId)) {
+                merged.set(thread.platformThreadId, thread);
+              }
             }
-          });
-          const metricsProvider = adapter as unknown as {
-            getLastCollectionMetrics?: () => Record<string, unknown> | null;
-          };
-          const collectionMetrics =
-            typeof metricsProvider.getLastCollectionMetrics === "function"
-              ? metricsProvider.getLastCollectionMetrics()
-              : null;
+            const mergedCandidates = Array.from(merged.values());
+            const cappedCandidates =
+              typeof linkedInDevCaps.maxThreads === "number" && linkedInDevCaps.maxThreads > 0
+                ? mergedCandidates.slice(0, linkedInDevCaps.maxThreads)
+                : mergedCandidates;
+            candidatesBeforeCap = merged.size;
+            candidatesToSync = cappedCandidates.map((thread) => ({ thread }));
+            runLogger.logDecision({
+              stage: "collect_threads",
+              decision: "Merged unread and recent candidates",
+              details: {
+                unreadCandidatesCount,
+                recentCandidatesCount: recent.length,
+                mergedCandidatesCount: candidatesBeforeCap,
+                cappedCandidatesCount: candidatesToSync.length
+              }
+            });
+
+            const metricsProvider = adapter as unknown as {
+              getLastCollectionMetrics?: () => Record<string, unknown> | null;
+            };
+            collectionMetrics =
+              typeof metricsProvider.getLastCollectionMetrics === "function"
+                ? metricsProvider.getLastCollectionMetrics()
+                : null;
+          }
+          candidatesCount = candidatesToSync.length;
 
           deps.eventBus.emit({
             type: "SCAN_PROGRESS",
@@ -935,9 +1020,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
           });
 
           const maxOpens = linkedInDevCaps.maxOpens;
-          const maxOpenCount = typeof maxOpens === "number" && maxOpens > 0 ? maxOpens : cappedCandidates.length;
+          const maxOpenCount = typeof maxOpens === "number" && maxOpens > 0 ? maxOpens : candidatesToSync.length;
 
-          for (const thread of cappedCandidates) {
+          for (const candidateToSync of candidatesToSync) {
+            const thread = candidateToSync.thread;
             if (openedThreadsCount >= maxOpenCount) {
               break;
             }
@@ -949,7 +1035,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             openedThreadsCount += 1;
             headline("OPEN_THREAD_START", "opening candidate thread", {
               index: openedThreadsCount,
-              total: Math.min(cappedCandidates.length, maxOpenCount),
+              total: Math.min(candidatesToSync.length, maxOpenCount),
               name: thread.displayName,
               listTimestamp: thread.lastMessageAt ?? null,
               url: thread.threadUrl ?? null
@@ -965,13 +1051,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
             });
 
             try {
-              const syncResult = await syncThread(platform, thread, settings.maxMessagesPerThread, job.jobId, runLogger);
+              const syncResult = await syncThread(
+                platform,
+                thread,
+                settings.maxMessagesPerThread,
+                job.jobId,
+                runLogger,
+                candidateToSync.messages
+              );
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
               messagesParsedCount += syncResult.parsedMessages;
               headline("OPEN_THREAD_OK", "thread opened and synced", {
                 index: openedThreadsCount,
-                total: Math.min(cappedCandidates.length, maxOpenCount),
+                total: Math.min(candidatesToSync.length, maxOpenCount),
                 name: thread.displayName
               });
               headline("PARSE_MESSAGES_OK", "thread messages parsed", {

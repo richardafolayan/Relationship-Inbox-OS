@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "dev": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && turbo run dev --parallel",
+    "dev:fast": "turbo run dev --parallel",
     "build": "turbo run build",
     "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
     "test": "npm run test:all",
@@ -23,7 +24,9 @@
     "connect:linkedin": "npm run connect:linkedin --workspace @inbox-os/runner",
     "test:selectors:linkedin": "npm run test:selectors:linkedin --workspace @inbox-os/runner",
     "linkedin:smoke": "npm run linkedin:smoke --workspace @inbox-os/runner",
-    "repair:linkedin-threads": "npm run repair:linkedin-threads --workspace @inbox-os/runner"
+    "repair:linkedin-threads": "npm run repair:linkedin-threads --workspace @inbox-os/runner",
+    "db:reset:linkedin": "npm run db:reset:linkedin --workspace @inbox-os/runner",
+    "cleanup:artifacts": "npm run cleanup:artifacts --workspace @inbox-os/runner"
   },
   "devDependencies": {
     "prisma": "^6.3.1",

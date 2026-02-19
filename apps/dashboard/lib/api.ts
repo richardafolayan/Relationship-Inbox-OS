@@ -41,12 +41,16 @@ export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
-export async function apiPost<T>(path: string, body: unknown): Promise<T> {
+export async function apiPost<T>(path: string, body: unknown, init?: RequestInit): Promise<T> {
+  const headers = new Headers(init?.headers);
+  if (!headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
   const response = await fetch(path, {
+    ...init,
     method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
+    headers,
     body: JSON.stringify(body)
   });
 

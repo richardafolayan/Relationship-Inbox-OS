@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming narrow layout back fixture</title>
+    <style>
+      body { margin: 12px; font-family: Arial, sans-serif; }
+      #thread-view { border: 1px solid #cbd5e1; padding: 8px; }
+      #message-container { min-height: 150px; border: 1px solid #d1d5db; padding: 8px; }
+      #list-shell { margin-top: 10px; border: 1px solid #cbd5e1; padding: 8px; }
+      .msg-conversations-container__conversations-list { list-style: none; margin: 0; padding: 0; }
+      .msg-conversation-listitem { border-bottom: 1px solid #e2e8f0; }
+      .msg-conversation-listitem__link { display: block; min-height: 74px; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div style="display:flex; gap:8px; margin-bottom:8px;">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+    </div>
+
+    <section id="thread-view">
+      <button id="back-to-list" type="button" aria-label="Back to conversations">Back</button>
+      <h3>Mobile thread pane</h3>
+      <div id="message-container" class="msg-s-message-list">
+        <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="mobile-existing-msg">
+          <div class="msg-s-event-listitem__message-bubble">
+            <p class="msg-s-event-listitem__body">mobile thread already visible</p>
+          </div>
+          <time datetime="2026-02-18T09:44:00.000Z">2026-02-18T09:44:00.000Z</time>
+        </div>
+      </div>
+    </section>
+
+    <section id="list-shell" class="msg-conversations-container"></section>
+
+    <script>
+      (() => {
+        window.__narrowFixtureMetrics = { backClicks: 0 };
+        const listShell = document.getElementById("list-shell");
+        const backButton = document.getElementById("back-to-list");
+        const messageContainer = document.getElementById("message-container");
+
+        function mountList() {
+          if (!listShell || listShell.querySelector("ul")) {
+            return;
+          }
+          listShell.innerHTML = `
+            <ul class="msg-conversations-container__conversations-list" role="list">
+              <li class="msg-conversation-listitem" id="ember-narrow-one" data-conversation-urn="urn:li:msg_thread:narrow-one">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <a href="https://www.linkedin.com/messaging/thread/narrow-one/">open</a>
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Narrow One</span></h3>
+                  <p class="msg-conversation-card__message-snippet">Narrow One: can you reply?</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:44 AM</time>
+                </div>
+              </li>
+            </ul>
+          `;
+
+          const row = listShell.querySelector("#ember-narrow-one .msg-conversation-listitem__link");
+          if (row) {
+            row.addEventListener("click", (event) => {
+              event.preventDefault();
+              if (messageContainer) {
+                messageContainer.innerHTML = `
+                  <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="narrow-one-msg-1">
+                    <div class="msg-s-event-listitem__message-bubble">
+                      <p class="msg-s-event-listitem__body">narrow layout row opened</p>
+                    </div>
+                    <time datetime="2026-02-18T09:45:00.000Z">2026-02-18T09:45:00.000Z</time>
+                  </div>
+                `;
+              }
+              try {
+                history.replaceState({}, "", "/messaging/thread/narrow-one/");
+              } catch {
+                window.location.hash = "#/messaging/thread/narrow-one/";
+              }
+            });
+          }
+        }
+
+        if (backButton) {
+          backButton.addEventListener("click", () => {
+            window.__narrowFixtureMetrics.backClicks += 1;
+            mountList();
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

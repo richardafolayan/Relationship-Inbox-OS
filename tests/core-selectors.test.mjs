@@ -24,3 +24,13 @@ test("resolveSelectors returns defaults when no override exists", () => {
 
   assert.deepEqual(resolved, defaults);
 });
+
+test("resolveSelectors normalizes legacy LinkedIn thread_list override", () => {
+  const resolved = resolveSelectors("LINKEDIN", selectorDir, {
+    LINKEDIN: {
+      thread_list: "ul.msg-conversations-container"
+    }
+  });
+
+  assert.equal(resolved.thread_list, "ul.msg-conversations-container__conversations-list");
+});

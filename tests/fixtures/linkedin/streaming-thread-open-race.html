@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming thread hydration race fixture</title>
+    <style>
+      body {
+        margin: 14px;
+        font-family: Arial, sans-serif;
+      }
+
+      .filters {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 430px 1fr;
+        gap: 14px;
+      }
+
+      .msg-conversations-container {
+        border: 1px solid #d1d5db;
+        padding: 8px;
+      }
+
+      .thread-pane {
+        height: 250px;
+        overflow-y: auto;
+        border: 1px solid #cbd5e1;
+      }
+
+      ul.msg-conversations-container__conversations-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      li.msg-conversation-listitem {
+        border-bottom: 1px solid #e2e8f0;
+      }
+
+      .msg-conversation-listitem__link {
+        display: block;
+        min-height: 82px;
+        padding: 8px;
+      }
+
+      .msg-s-message-list {
+        min-height: 190px;
+        border: 1px solid #d1d5db;
+        padding: 8px;
+      }
+
+      .artdeco-spinner {
+        display: inline-block;
+        padding: 2px 6px;
+        border: 1px solid #a5b4fc;
+        margin-bottom: 6px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="filters">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+    </div>
+
+    <main role="main" class="scaffold-layout__main">
+      <div class="layout">
+        <section class="msg-conversations-container msg__messaging-container">
+          <div class="thread-pane scaffold-layout__list msg__list">
+            <ul class="msg-conversations-container__conversations-list" role="list">
+              <li class="msg-conversation-listitem" id="ember-race-initial" data-conversation-urn="urn:li:msg_thread:race-initial">
+                <div class="msg-conversation-listitem__link msg-conversation-listitem__link--active msg-conversations-container__convo-item-link--active" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Initial Thread</span></h3>
+                  <p class="msg-conversation-card__message-snippet">You: old active thread</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:59 AM</time>
+                </div>
+              </li>
+              <li class="msg-conversation-listitem" id="ember-race-target" data-conversation-urn="urn:li:msg_thread:race-target">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Race Target</span></h3>
+                  <p class="msg-conversation-card__message-snippet">Race Target: follow up?</p>
+                  <time class="msg-conversation-listitem__time-stamp">7:01 AM</time>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </section>
+
+        <section>
+          <h3 id="active-title">Initial Thread</h3>
+          <div id="message-container" class="msg-s-message-list">
+            <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="old-1">
+              <div class="msg-s-event-listitem__message-bubble">
+                <p class="msg-s-event-listitem__body">OLD thread message</p>
+              </div>
+              <time datetime="2026-02-18T09:59:00.000Z">2026-02-18T09:59:00.000Z</time>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      (() => {
+        const rows = Array.from(document.querySelectorAll("li.msg-conversation-listitem"));
+        const messageContainer = document.getElementById("message-container");
+        const activeTitle = document.getElementById("active-title");
+
+        function activateRow(rowId) {
+          for (const row of rows) {
+            const link = row.querySelector(".msg-conversation-listitem__link");
+            if (!link) {
+              continue;
+            }
+            link.classList.remove("msg-conversation-listitem__link--active");
+            link.classList.remove("msg-conversations-container__convo-item-link--active");
+          }
+          const activeRow = rows.find((row) => row.id === rowId);
+          const activeLink = activeRow?.querySelector(".msg-conversation-listitem__link");
+          if (activeLink) {
+            activeLink.classList.add("msg-conversation-listitem__link--active");
+            activeLink.classList.add("msg-conversations-container__convo-item-link--active");
+          }
+        }
+
+        function renderTargetThread() {
+          if (!messageContainer) {
+            return;
+          }
+          messageContainer.innerHTML = `
+            <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="new-system-1">
+              <p class="msg-s-event-listitem__body">system divider</p>
+            </div>
+            <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="new-msg-1">
+              <div class="msg-s-event-listitem__message-bubble">
+                <p class="msg-s-event-listitem__body">NEW thread message</p>
+              </div>
+              <time datetime="2026-02-18T10:02:00.000Z">2026-02-18T10:02:00.000Z</time>
+            </div>
+          `;
+        }
+
+        function openTargetThread() {
+          activateRow("ember-race-target");
+          if (activeTitle) {
+            activeTitle.textContent = "Race Target";
+          }
+          try {
+            history.replaceState({}, "", "/messaging/thread/race-target/");
+          } catch {
+            window.location.hash = "#/messaging/thread/race-target/";
+          }
+          if (messageContainer) {
+            messageContainer.innerHTML = '<div class="artdeco-spinner">Loading…</div>';
+          }
+          window.setTimeout(renderTargetThread, 450);
+        }
+
+        for (const row of rows) {
+          const link = row.querySelector(".msg-conversation-listitem__link");
+          if (!link) {
+            continue;
+          }
+          link.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (row.id === "ember-race-target") {
+              openTargetThread();
+            }
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

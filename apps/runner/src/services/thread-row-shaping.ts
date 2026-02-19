@@ -60,10 +60,6 @@ export interface ShapedThreadGroupRow {
   identityWarning: IdentityWarning | null;
 }
 
-function clean(value: string | null | undefined): string {
-  return (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
 function resolveLinkedInCanonicalId(row: ThreadRowSource): string | null {
   const canonical = normalizeCanonicalLinkedInThreadId({
     platformThreadId: row.platformThreadId,
@@ -75,58 +71,34 @@ function resolveLinkedInCanonicalId(row: ThreadRowSource): string | null {
   return canonical;
 }
 
-function unresolvedDedupKey(row: ThreadRowSource): string {
-  const threadUrlKey = clean(row.threadUrl);
-  const previewKey = clean(row.lastMessagePreview);
-  const timeKey = row.lastMessageAt ? row.lastMessageAt.toISOString().slice(0, 19) : "no_time";
-  return `${row.platform}:unresolved:${row.personId}:${threadUrlKey}:${previewKey}:${timeKey}`;
-}
-
-function dedupeKeyForRow(row: ThreadRowSource): {
-  key: string;
-  identityWarning: IdentityWarning | null;
-  canonicalId: string | null;
-} {
+function identityWarningForRow(row: ThreadRowSource): IdentityWarning | null {
   if (row.platform !== "LINKEDIN") {
-    const stable = clean(row.platformThreadId) || row.id;
-    return {
-      key: `${row.platform}:${stable}`,
-      identityWarning: null,
-      canonicalId: stable
-    };
+    return null;
   }
-
-  const canonicalId = resolveLinkedInCanonicalId(row);
-  if (canonicalId) {
-    return {
-      key: `LINKEDIN:${canonicalId}`,
-      identityWarning: null,
-      canonicalId
-    };
-  }
-
-  return {
-    key: unresolvedDedupKey(row),
-    identityWarning: "unresolved_id",
-    canonicalId: null
-  };
+  return resolveLinkedInCanonicalId(row) ? null : "unresolved_id";
 }
 
-function shouldPreferRow(current: ShapedThreadGroupRow, next: ShapedThreadGroupRow): boolean {
-  if (next.messageCount !== current.messageCount) {
-    return next.messageCount > current.messageCount;
+function messageCountForRow(row: ThreadRowSource): number {
+  return row._count?.messages ?? 0;
+}
+
+function shouldPreferSourceRow(current: ThreadRowSource, next: ThreadRowSource): boolean {
+  const nextCount = messageCountForRow(next);
+  const currentCount = messageCountForRow(current);
+  if (nextCount !== currentCount) {
+    return nextCount > currentCount;
   }
-  const nextUpdated = next.source.updatedAt.getTime();
-  const currentUpdated = current.source.updatedAt.getTime();
+  const nextUpdated = next.updatedAt.getTime();
+  const currentUpdated = current.updatedAt.getTime();
   if (nextUpdated !== currentUpdated) {
     return nextUpdated > currentUpdated;
   }
-  const nextTime = next.source.lastMessageAt?.getTime() ?? 0;
-  const currentTime = current.source.lastMessageAt?.getTime() ?? 0;
+  const nextTime = next.lastMessageAt?.getTime() ?? 0;
+  const currentTime = current.lastMessageAt?.getTime() ?? 0;
   if (nextTime !== currentTime) {
     return nextTime > currentTime;
   }
-  return next.source.id > current.source.id;
+  return next.id > current.id;
 }
 
 function deriveNeedsReply(row: ThreadRowSource): boolean {
@@ -137,29 +109,38 @@ function deriveNeedsReply(row: ThreadRowSource): boolean {
 }
 
 export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[] {
+  const byThreadId = new Map<string, ThreadRowSource>();
+  for (const row of rows) {
+    const existing = byThreadId.get(row.id);
+    if (!existing || shouldPreferSourceRow(existing, row)) {
+      byThreadId.set(row.id, row);
+    }
+  }
+
   const deduped = new Map<string, ShapedThreadGroupRow>();
 
-  for (const row of rows) {
-    const messageCount = row._count?.messages ?? 0;
-    const identity = dedupeKeyForRow(row);
+  for (const row of byThreadId.values()) {
+    const messageCount = messageCountForRow(row);
+    const identityWarning = identityWarningForRow(row);
     const unresolvedZeroMessageLinkedIn =
-      row.platform === "LINKEDIN" && identity.identityWarning === "unresolved_id" && messageCount <= 0;
+      row.platform === "LINKEDIN" && identityWarning === "unresolved_id" && messageCount <= 0;
 
     if (unresolvedZeroMessageLinkedIn) {
       continue;
     }
 
+    const dedupeKey = `thread:${row.id}`;
     const candidate: ShapedThreadGroupRow = {
       source: row,
-      dedupeKey: identity.key,
+      dedupeKey,
       messageCount,
       needsReply: deriveNeedsReply(row),
-      identityWarning: identity.identityWarning
+      identityWarning
     };
 
-    const existing = deduped.get(identity.key);
-    if (!existing || shouldPreferRow(existing, candidate)) {
-      deduped.set(identity.key, candidate);
+    const existing = deduped.get(dedupeKey);
+    if (!existing) {
+      deduped.set(dedupeKey, candidate);
     }
   }
 

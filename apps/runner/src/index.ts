@@ -18,6 +18,11 @@ import { extractFailureUrl, resolveConnectFailureResponse } from "./services/fai
 import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
 import { createSendService } from "./services/send";
+import {
+  AdminResetGuardError,
+  resetPlatformInboxGraph,
+  validateAdminResetGuards
+} from "./services/admin-reset";
 import { cleanupDemoData, seedDemoData } from "./services/demo";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
@@ -420,6 +425,68 @@ async function loadVisibleThreadRows(): Promise<ReturnType<typeof shapeThreadRow
 
   return shapeThreadRows(threads as ThreadRowSource[]);
 }
+
+app.post("/admin/reset", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).default("LINKEDIN"),
+      confirm: z.string().trim().min(1),
+      token: z.string().trim().optional()
+    })
+    .parse(req.body ?? {});
+
+  const headerToken = req.header("x-admin-reset-token");
+  try {
+    validateAdminResetGuards({
+      token: headerToken ?? payload.token,
+      confirm: payload.confirm
+    });
+  } catch (error) {
+    if (error instanceof AdminResetGuardError) {
+      res.status(error.statusCode).json({
+        error: error.message,
+        code: error.code
+      });
+      return;
+    }
+    throw error;
+  }
+
+  const requestId = uuid();
+  const resetResult = await withGlobalResetLock(async () => {
+    scanQueue.requestAbort(`admin_reset:${payload.platform.toLowerCase()}`);
+    connectInFlight.clear();
+    try {
+      for (const platform of allPlatforms) {
+        await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
+      }
+
+      const result = await resetPlatformInboxGraph(payload.platform);
+      await auditService.log({
+        platform: payload.platform,
+        stage: "System",
+        action: "ADMIN_RESET",
+        status: "OK",
+        details: {
+          requestId,
+          platform: payload.platform,
+          matchedThreadCount: result.matchedThreadCount,
+          deleted: result.deleted
+        }
+      });
+
+      return result;
+    } finally {
+      scanQueue.clearAbort();
+    }
+  });
+
+  res.json({
+    status: "ok",
+    requestId,
+    ...resetResult
+  });
+}));
 
 app.use("/control", (req, res, next) => {
   const requestId = uuid();
@@ -1711,22 +1778,9 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/system/clear-db", asyncRoute(async (_req, res) => {
-  await prisma.sendRequest.deleteMany();
-  await prisma.message.deleteMany();
-  await prisma.draft.deleteMany();
-  await prisma.thread.deleteMany();
-  await prisma.person.deleteMany();
-  await prisma.platform.deleteMany();
-  await prisma.auditLog.deleteMany();
-  await prisma.setting.deleteMany();
-
-  await auditService.log({
-    stage: "Scan",
-    action: "CLEAR_DB",
-    status: "OK"
+  res.status(410).json({
+    error: "Deprecated endpoint. Use POST /admin/reset with x-admin-reset-token and confirm=RESET."
   });
-
-  res.json({ status: "ok" });
 }));
 
 app.use((error: unknown, req: express.Request, res: express.Response, _next: express.NextFunction) => {

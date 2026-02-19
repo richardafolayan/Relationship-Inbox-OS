@@ -29,15 +29,19 @@ test("selector test service returns counts and screenshots on deterministic loca
   const html = `
     <html>
       <body>
-        <ul class="thread-list">
-          <li class="thread-item">Alice</li>
-          <li class="thread-item">Bob</li>
-        </ul>
-        <div class="message-container">
-          <div class="message-item"><span class="message-text">Hello there</span></div>
-        </div>
-        <div class="composer" contenteditable="true"></div>
-        <button class="send">Send</button>
+        <main class="scaffold-layout__main">
+          <section class="msg-conversations-container">
+            <ul class="thread-list">
+              <li class="thread-item">Alice</li>
+              <li class="thread-item">Bob</li>
+            </ul>
+          </section>
+          <div class="message-container">
+            <div class="message-item"><span class="message-text">Hello there</span></div>
+          </div>
+          <div class="composer" contenteditable="true"></div>
+          <button class="send">Send</button>
+        </main>
       </body>
     </html>
   `;
@@ -68,6 +72,14 @@ test("selector test service returns counts and screenshots on deterministic loca
   assert.equal(report.results.length >= 8, true);
   assert.equal(report.results.some((entry) => entry.key === "thread_item" && entry.count === 2), true);
   assert.equal(report.results.some((entry) => entry.key === "message_text" && entry.count === 1), true);
+  const navigateReceipt = report.receipts.find((entry) => entry.stage === "navigate");
+  assert.equal(typeof navigateReceipt?.details?.effectiveSelectors?.thread_list, "string");
+  assert.equal(typeof navigateReceipt?.details?.effectiveSelectors?.thread_item, "string");
+  assert.equal(typeof navigateReceipt?.details?.counts?.global?.thread_list, "number");
+  assert.equal(typeof navigateReceipt?.details?.counts?.global?.thread_item, "number");
+  assert.equal(typeof navigateReceipt?.details?.counts?.shell?.thread_list, "number");
+  assert.equal(typeof navigateReceipt?.details?.counts?.shell?.thread_item, "number");
+  assert.equal(typeof navigateReceipt?.details?.shellSummary?.selector, "string");
 
   const screenshotFile = report.results.find((entry) => entry.screenshotFile)?.screenshotFile;
   assert.equal(typeof screenshotFile, "string");

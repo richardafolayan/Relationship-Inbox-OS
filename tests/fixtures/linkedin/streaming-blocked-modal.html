@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn blocked modal fixture</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: Arial, sans-serif;
+      }
+
+      .shell {
+        min-height: 100vh;
+        padding: 20px;
+      }
+
+      .artdeco-modal-overlay {
+        position: fixed;
+        inset: 0;
+        background: rgba(15, 23, 42, 0.55);
+      }
+
+      .artdeco-modal {
+        position: fixed;
+        top: 15%;
+        left: 50%;
+        transform: translateX(-50%);
+        width: 520px;
+        min-height: 260px;
+        background: #fff;
+        border: 1px solid #cbd5e1;
+        padding: 18px;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="shell scaffold-layout__main">
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+        <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+      </div>
+      <p>Messaging shell placeholder</p>
+    </main>
+
+    <div class="artdeco-modal-overlay"></div>
+    <div class="artdeco-modal" role="dialog" aria-modal="true">
+      <h2>Continue to LinkedIn Premium</h2>
+      <p>Upgrade to premium to continue messaging.</p>
+      <button type="button" aria-label="Dismiss">Dismiss</button>
+    </div>
+  </body>
+</html>

@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PlatformName, SelectorRegistry, SelectorTestReport, SelectorTestResult } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
-import type { Page } from "playwright";
+import type { ElementHandle, Page } from "playwright";
 import type { SessionManager } from "./session-manager";
 
 interface SelectorTestServiceDeps {
@@ -32,6 +32,14 @@ const conversationKeys = new Set<keyof SelectorRegistry>([
 
 const adaptiveConversationProbeLimit = 8;
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
+const linkedInShellProbeSelectors = [
+  "main",
+  "#main",
+  ".scaffold-layout__main",
+  ".msg-overlay-list-bubble__content",
+  ".msg-conversations-container",
+  "[class*='msg-conversations-container']"
+];
 
 type SelectorTestStage = "connect" | "navigate" | "auth_check" | "open_thread" | "evaluate" | "screenshot" | "persist";
 
@@ -130,6 +138,75 @@ export async function evaluateSelectorCounts(page: Page, selectorList: string[])
       }),
     selectorList
   );
+}
+
+async function resolveLinkedInShellForSelectorDiagnostics(page: Page): Promise<{
+  handle: ElementHandle<Element>;
+  selector: string;
+  index: number;
+  summary: { tag: string; id: string; className: string };
+} | null> {
+  const resolution = await page
+    .evaluate((selectors) => {
+      const candidates: Array<{
+        selector: string;
+        index: number;
+        score: number;
+        summary: { tag: string; id: string; className: string };
+      }> = [];
+      for (const selector of selectors) {
+        const nodes = Array.from(document.querySelectorAll(selector));
+        for (let index = 0; index < nodes.length; index += 1) {
+          const node = nodes[index];
+          if (!node) {
+            continue;
+          }
+          const rowSignalCount = node.querySelectorAll("li.msg-conversation-listitem, div.msg-conversation-listitem__link").length;
+          const messagePaneCount = node.querySelectorAll(".msg-s-message-list, [class*='msg-s-message']").length;
+          const filterCount = node.querySelectorAll("button[data-test-messaging-inbox-filters__filter-pill]").length;
+          const score = rowSignalCount * 4 + messagePaneCount + filterCount;
+          const asElement = node as HTMLElement;
+          candidates.push({
+            selector,
+            index,
+            score,
+            summary: {
+              tag: asElement.tagName.toLowerCase(),
+              id: (asElement.id ?? "").trim(),
+              className: (asElement.className ?? "").toString().replace(/\s+/g, " ").trim()
+            }
+          });
+        }
+      }
+      candidates.sort((left, right) => right.score - left.score);
+      return candidates[0] ?? null;
+    }, linkedInShellProbeSelectors)
+    .catch(() => null);
+  if (!resolution) {
+    return null;
+  }
+  const handle = await page.locator(resolution.selector).nth(resolution.index).elementHandle().catch(() => null);
+  if (!handle) {
+    return null;
+  }
+  return {
+    handle,
+    selector: resolution.selector,
+    index: resolution.index,
+    summary: resolution.summary
+  };
+}
+
+async function countSelectorWithinShell(shell: ElementHandle<Element>, selector: string): Promise<number> {
+  return shell
+    .evaluate((shellNode, selectorInput) => {
+      try {
+        return shellNode.querySelectorAll(selectorInput).length;
+      } catch {
+        return 0;
+      }
+    }, selector)
+    .catch(() => 0);
 }
 
 async function captureSelectorFailureArtifacts(input: {
@@ -357,13 +434,46 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
       });
     });
 
+    const navigateDetails: Record<string, unknown> = {
+      inboxUrl: selectors.inbox_url,
+      effectiveSelectors: {
+        thread_list: selectors.thread_list,
+        thread_item: selectors.thread_item
+      }
+    };
     await runStage("navigate", async () => {
       await page!.bringToFront();
       await page!.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
       await page!.waitForTimeout(400);
-    }, {
-      inboxUrl: selectors.inbox_url
-    });
+      if (input.platform === "LINKEDIN") {
+        const globalThreadListCount = await page!.locator(selectors.thread_list).count().catch(() => 0);
+        const globalThreadItemCount = await page!.locator(selectors.thread_item).count().catch(() => 0);
+        const shellResolution = await resolveLinkedInShellForSelectorDiagnostics(page!);
+        let shellThreadListCount = 0;
+        let shellThreadItemCount = 0;
+        if (shellResolution) {
+          shellThreadListCount = await countSelectorWithinShell(shellResolution.handle, selectors.thread_list);
+          shellThreadItemCount = await countSelectorWithinShell(shellResolution.handle, selectors.thread_item);
+        }
+        navigateDetails["shellSummary"] = shellResolution
+          ? {
+              selector: shellResolution.selector,
+              index: shellResolution.index,
+              ...shellResolution.summary
+            }
+          : null;
+        navigateDetails["counts"] = {
+          global: {
+            thread_list: globalThreadListCount,
+            thread_item: globalThreadItemCount
+          },
+          shell: {
+            thread_list: shellThreadListCount,
+            thread_item: shellThreadItemCount
+          }
+        };
+      }
+    }, navigateDetails);
 
     await runStage("auth_check", async () => {
       const authState = await detectAuthRequired(page!, input.platform);

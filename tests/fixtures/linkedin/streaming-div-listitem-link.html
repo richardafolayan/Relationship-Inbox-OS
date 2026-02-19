@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming UL+LI+div link fixture</title>
+    <style>
+      body {
+        margin: 12px;
+        font-family: Arial, sans-serif;
+      }
+
+      .filters {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 430px 1fr;
+        gap: 14px;
+      }
+
+      .msg__messaging-container {
+        border: 1px solid #cbd5e1;
+        padding: 8px;
+      }
+
+      .scaffold-layout__list.msg__list {
+        height: 260px;
+        overflow-y: auto;
+        border: 1px solid #d1d5db;
+      }
+
+      ul.msg-conversations-container__conversations-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      li.msg-conversation-listitem {
+        border-bottom: 1px solid #e2e8f0;
+      }
+
+      div.msg-conversation-listitem__link {
+        min-height: 84px;
+        padding: 8px;
+        cursor: pointer;
+      }
+
+      .msg-conversation-card__unread-count {
+        display: inline-flex;
+        border-radius: 999px;
+        background: #2563eb;
+        color: white;
+        padding: 1px 7px;
+        font-size: 12px;
+      }
+
+      .msg-s-message-list {
+        min-height: 210px;
+        border: 1px solid #d1d5db;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="filters">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+    </div>
+    <main role="main" class="scaffold-layout__main">
+      <div class="layout">
+        <section class="msg__messaging-container msg-conversations-container">
+          <div class="scaffold-layout__list msg__list">
+            <ul class="msg-conversations-container__conversations-list" role="list">
+              <li class="msg-conversation-listitem" id="ember-row-one" data-conversation-urn="urn:li:msg_thread:row-one">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Row One</span></h3>
+                  <p class="msg-conversation-card__message-snippet">Row One: quick follow up</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:41 AM</time>
+                </div>
+              </li>
+              <li class="msg-conversation-listitem" id="ember-row-two" data-conversation-urn="urn:li:msg_thread:row-two">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Row Two</span></h3>
+                  <p class="msg-conversation-card__message-snippet">You: already replied</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:42 AM</time>
+                </div>
+              </li>
+              <li class="msg-conversation-listitem" id="ember-row-sponsored" data-conversation-urn="urn:li:msg_thread:row-sponsored">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Sponsored Row</span></h3>
+                  <p class="msg-conversation-card__message-snippet">special offer</p>
+                  <span class="msg-conversation-card__pill">Sponsored</span>
+                  <time class="msg-conversation-listitem__time-stamp">6:43 AM</time>
+                  <div class="msg-conversation-card__unread-count"><span class="notification-badge__count">5</span></div>
+                </div>
+              </li>
+              <li class="msg-conversation-listitem" id="ember-row-three" data-conversation-urn="urn:li:msg_thread:row-three">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Row Three</span></h3>
+                  <p class="msg-conversation-card__message-snippet">You: done</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:44 AM</time>
+                  <div class="msg-conversation-card__unread-count"><span class="notification-badge__count">2</span></div>
+                </div>
+              </li>
+              <li class="msg-conversation-listitem" id="ember-row-four" data-conversation-urn="urn:li:msg_thread:row-four">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Row Four</span></h3>
+                  <p class="msg-conversation-card__message-snippet">Row Four: checking back in</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:45 AM</time>
+                </div>
+              </li>
+              <li class="msg-conversation-listitem" id="ember-row-five" data-conversation-urn="urn:li:msg_thread:row-five">
+                <div class="msg-conversation-listitem__link" tabindex="0">
+                  <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Row Five</span></h3>
+                  <p class="msg-conversation-card__message-snippet">You: ack</p>
+                  <time class="msg-conversation-listitem__time-stamp">6:46 AM</time>
+                </div>
+              </li>
+            </ul>
+          </div>
+        </section>
+        <section>
+          <h3 id="active-title">None selected</h3>
+          <div id="message-container" class="msg-s-message-list" hidden></div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      (() => {
+        const rows = Array.from(document.querySelectorAll("li.msg-conversation-listitem"));
+        const messageContainer = document.getElementById("message-container");
+        const activeTitle = document.getElementById("active-title");
+        window.__streamingFixtureMetrics = {
+          divClickCount: 0,
+          liDirectClickCount: 0,
+          keyEnterCount: 0,
+          pointerDownCount: 0,
+          opened: []
+        };
+
+        function toIdFromRow(row) {
+          const raw = row.id || "row-unknown";
+          return raw.replace(/^ember-/, "");
+        }
+
+        function openThread(row, source) {
+          const id = toIdFromRow(row);
+          const name =
+            row.querySelector(".msg-conversation-listitem__participant-names .truncate")?.textContent?.trim() ||
+            row.querySelector(".msg-conversation-listitem__participant-names")?.textContent?.trim() ||
+            id;
+          const snippet = row.querySelector(".msg-conversation-card__message-snippet")?.textContent?.trim() || "";
+          for (const linkNode of Array.from(document.querySelectorAll("div.msg-conversation-listitem__link"))) {
+            linkNode.classList.remove("msg-conversation-listitem__link--active");
+            linkNode.classList.remove("msg-conversations-container__convo-item-link--active");
+          }
+          const activeLink = row.querySelector("div.msg-conversation-listitem__link");
+          if (activeLink) {
+            activeLink.classList.add("msg-conversation-listitem__link--active");
+            activeLink.classList.add("msg-conversations-container__convo-item-link--active");
+          }
+          window.__streamingFixtureMetrics.opened.push({ id, source });
+          if (activeTitle) {
+            activeTitle.textContent = name;
+          }
+          if (messageContainer) {
+            messageContainer.hidden = false;
+            messageContainer.innerHTML = `
+              <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="${id}-inbound">
+                <p class="msg-s-event-listitem__body">${snippet}</p>
+                <time datetime="2026-02-18T09:45:00.000Z">2026-02-18T09:45:00.000Z</time>
+              </div>
+            `;
+          }
+          try {
+            history.replaceState({}, "", `/messaging/thread/${id}/`);
+          } catch {
+            window.location.hash = `#/messaging/thread/${id}/`;
+          }
+        }
+
+        for (const row of rows) {
+          const link = row.querySelector("div.msg-conversation-listitem__link");
+          if (!link) {
+            continue;
+          }
+          row.addEventListener("click", (event) => {
+            if (event.target === row) {
+              window.__streamingFixtureMetrics.liDirectClickCount += 1;
+              openThread(row, "li_direct_click");
+            }
+          });
+          link.addEventListener("pointerdown", () => {
+            window.__streamingFixtureMetrics.pointerDownCount += 1;
+          });
+          link.addEventListener("click", (event) => {
+            event.preventDefault();
+            window.__streamingFixtureMetrics.divClickCount += 1;
+            openThread(row, "div_click");
+          });
+          link.addEventListener("keydown", (event) => {
+            if (event.key !== "Enter") {
+              return;
+            }
+            event.preventDefault();
+            window.__streamingFixtureMetrics.keyEnterCount += 1;
+            openThread(row, "enter_key");
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

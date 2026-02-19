@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming hydration timeout fixture</title>
+    <style>
+      body {
+        margin: 14px;
+        font-family: Arial, sans-serif;
+      }
+
+      .filters {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 8px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 430px 1fr;
+        gap: 12px;
+      }
+
+      .msg-conversations-container {
+        border: 1px solid #d1d5db;
+        padding: 8px;
+      }
+
+      .thread-pane {
+        height: 250px;
+        overflow-y: auto;
+        border: 1px solid #cbd5e1;
+      }
+
+      ul.msg-conversations-container__conversations-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="filters">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+    </div>
+    <main role="main" class="scaffold-layout__main">
+      <div class="layout">
+        <section class="msg-conversations-container msg__messaging-container">
+          <div class="thread-pane scaffold-layout__list msg__list">
+            <ul class="msg-conversations-container__conversations-list" role="list"></ul>
+          </div>
+        </section>
+        <section>
+          <div id="message-container" class="msg-s-message-list"></div>
+        </section>
+      </div>
+    </main>
+  </body>
+</html>

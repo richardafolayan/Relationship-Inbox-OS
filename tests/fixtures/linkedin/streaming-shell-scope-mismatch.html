@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming shell scope mismatch fixture</title>
+    <style>
+      body { margin: 12px; font-family: Arial, sans-serif; }
+      #decoy-shell { border: 1px solid #cbd5e1; padding: 8px; margin-bottom: 12px; }
+      #real-shell { border: 1px solid #cbd5e1; padding: 8px; }
+      #real-thread-list { list-style: none; margin: 0; padding: 0; }
+      .msg-conversation-listitem { border-bottom: 1px solid #e2e8f0; }
+      .msg-conversation-listitem__link { display: block; min-height: 74px; padding: 8px; }
+      .msg-s-message-list { min-height: 160px; border: 1px solid #d1d5db; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div id="decoy-shell" class="msg-conversations-container">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+      <div>Decoy shell with pills but no list rows.</div>
+    </div>
+
+    <section id="real-shell">
+      <ul id="real-thread-list">
+        <li class="msg-conversation-listitem" id="ember-global-fallback" data-conversation-urn="urn:li:msg_thread:global-fallback">
+          <div class="msg-conversation-listitem__link" tabindex="0">
+            <a href="https://www.linkedin.com/messaging/thread/global-fallback/">open</a>
+            <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Global Fallback</span></h3>
+            <p class="msg-conversation-card__message-snippet">Global Fallback: please reply</p>
+            <time class="msg-conversation-listitem__time-stamp">6:34 AM</time>
+          </div>
+        </li>
+      </ul>
+      <div id="message-container" class="msg-s-message-list" hidden></div>
+    </section>
+
+    <script>
+      (() => {
+        const row = document.querySelector("#ember-global-fallback .msg-conversation-listitem__link");
+        const messageContainer = document.getElementById("message-container");
+        if (row) {
+          row.addEventListener("click", (event) => {
+            event.preventDefault();
+            if (messageContainer) {
+              messageContainer.hidden = false;
+              messageContainer.innerHTML = `
+                <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="global-fallback-msg-1">
+                  <div class="msg-s-event-listitem__message-bubble">
+                    <p class="msg-s-event-listitem__body">opened through selector fallback</p>
+                  </div>
+                  <time datetime="2026-02-18T09:34:00.000Z">2026-02-18T09:34:00.000Z</time>
+                </div>
+              `;
+            }
+            try {
+              history.replaceState({}, "", "/messaging/thread/global-fallback/");
+            } catch {
+              window.location.hash = "#/messaging/thread/global-fallback/";
+            }
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>

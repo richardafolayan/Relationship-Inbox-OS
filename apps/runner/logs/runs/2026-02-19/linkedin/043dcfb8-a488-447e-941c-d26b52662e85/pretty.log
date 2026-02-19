@@ -1,8 +1,0 @@
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/043dcfb8-a488-447e-941c-d26b52662e85
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85][step=1/8] connect: ensureConnected complete details={"url":"https://www.linkedin.com/messaging/thread/2-OTg5OGU3OWUtNmVlZi00NzQzLWE2YmMtZjdkMGRiZTZhYjMyXzEwMA==/","isClosed":false,"threadListVisible":true}
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85][step=2/8] unread_filter: activating Unread filter
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85][step=2/8] unread_filter: Unread pill state details={"pillFound":true,"activeBefore":false,"clicked":true,"activeAfter":true}
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85][step=3/8] list_ready: waiting for thread list
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85][step=3/8] list_ready: thread list ready details={"threadRowCount":0,"fallbackThreadRowCount":0,"listItemCount":2,"unreadBadgeCount":0,"emptyStateCount":0,"firstListItemClass":null,"firstFallbackClass":null}
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85] SMOKE_FAIL stage=collect_threads reason=unread_view_empty_or_not_applied error=Unread view returned zero conversation rows.
-[LI][SMOKE][req=043dcfb8-a488-447e-941c-d26b52662e85] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/043dcfb8-a488-447e-941c-d26b52662e85

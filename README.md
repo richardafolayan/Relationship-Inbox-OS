@@ -13,6 +13,7 @@ This guide is for:
 - [Quick Start (Step-by-Step, First Run)](#quick-start-step-by-step-first-run)
 - [Daily Usage Workflow (Operator Runbook)](#daily-usage-workflow-operator-runbook)
 - [LinkedIn Repair CLI](#linkedin-repair-cli)
+- [Admin Reset + Artifact Cleanup](#admin-reset--artifact-cleanup)
 - [Configuration Reference](#configuration-reference)
 - [Profiles and Browser Session Model](#profiles-and-browser-session-model)
 - [API Surface (Practical Reference)](#api-surface-practical-reference)
@@ -60,7 +61,7 @@ Stack:
   - Headless toggle.
   - Demo mode toggle.
   - Enabled platforms.
-  - Danger zone: reset platform sessions, clear DB.
+  - Danger zone: reset platform sessions, clear LinkedIn inbox and rebuild (token + typed confirmation).
 - Activity Log:
   - Receipts-first trace of scans, sends, selector checks, failures.
   - Artifact links for screenshots and DOM dumps.
@@ -128,6 +129,49 @@ npm run repair:linkedin-threads -- --apply --delete-zero-message-unresolved
 ```
 
 Every run writes an NDJSON report under `/Users/richard/IdeaProjects/relationship-inbox-os/data/repair` unless `--report <path>` is provided.
+
+## Admin Reset + Artifact Cleanup
+
+### Token-guarded LinkedIn reset
+
+- Runner route: `POST /admin/reset` (dashboard path: `/runner/admin/reset`).
+- Guard rails:
+  - Dev-only unless `ADMIN_RESET_ENABLED=1`.
+  - Requires `ADMIN_RESET_TOKEN` match (`x-admin-reset-token` header or request body `token`).
+  - Requires `confirm: "RESET"`.
+- Default scope for dashboard action: `platform: "LINKEDIN"`.
+- Deletes LinkedIn graph in FK-safe order (`sendRequests`, `drafts`, `messages`, `threads`) and then removes only truly orphan `Person` rows (`threads.none` across all platforms).
+
+CLI wrapper:
+
+```bash
+npm run db:reset:linkedin
+```
+
+Equivalent direct runner script:
+
+```bash
+npm run db:reset:linkedin --workspace @inbox-os/runner
+```
+
+### Artifact cleanup (dry-run first)
+
+Runtime artifacts are ignored by git and can be pruned safely:
+
+```bash
+npm run cleanup:artifacts
+```
+
+Apply deletion:
+
+```bash
+npm run cleanup:artifacts -- --apply
+```
+
+Defaults:
+- keep last `20` run folders
+- keep artifacts newer than `7` days
+- never touches SQLite DB files
 
 ## Quick Start (Step-by-Step, First Run)
 
@@ -276,6 +320,8 @@ curl http://localhost:4001/health
 | `LINKEDIN_DEV_SCAN_DISABLE_DEEP_SCROLL` | `0` | Dev-only toggle to disable LinkedIn deep scroll and keep one visible pass. |
 | `LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Dev-only runner scheduler guard; disables background autoscan ticks by default. |
 | `LINKEDIN_DEV_LOG_STAGE_HEADLINES` | `1` | Dev-only toggle for always-visible `[LI][SCAN]` headline logs. |
+| `ADMIN_RESET_TOKEN` | empty | Required token for `/admin/reset` and reset CLI guard. |
+| `ADMIN_RESET_ENABLED` | unset | Optional explicit enable in non-dev environments (`1` to allow reset route). |
 | `NEXT_PUBLIC_DISABLE_AUTOSCAN` | `1` | Dashboard autoscan gate; in dev it defaults to disabled unless explicitly set `0`. |
 | `NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Legacy dashboard autoscan disable flag (still honored). |
 
@@ -350,7 +396,6 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/platform/open-browser`
 - `POST /control/platform/linkedin/smoke-unread`
 - `POST /control/platform/reset-session`
-- `POST /control/system/clear-db`
 - `POST /control/thread/:threadId/send`
 - `POST /control/thread/:threadId/open`
 - `POST /control/thread/:threadId/rescan`
@@ -358,6 +403,10 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/thread/:threadId/draft`
 - `POST /control/thread/:threadId/mark-done`
 - `POST /control/thread/:threadId/snooze`
+
+### Admin routes
+
+- `POST /admin/reset` (dev/token/confirm guarded)
 
 ### LinkedIn smoke unread run
 
@@ -479,6 +528,9 @@ Actions:
 # Full local startup (db generate/push + core build + dashboard+runner dev)
 npm run dev
 
+# Faster dev loop (skips db generate/push + core build)
+npm run dev:fast
+
 # Build all packages
 npm run build
 
@@ -504,6 +556,8 @@ npm run scan
 npm run connect:linkedin
 npm run test:selectors:linkedin
 npm run linkedin:smoke
+npm run db:reset:linkedin
+npm run cleanup:artifacts
 ```
 
 ## Notes

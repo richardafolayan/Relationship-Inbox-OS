@@ -1,5 +1,0 @@
-ts,requestId,platform,stage,action,selector,url,result,elapsedMs,counts_json,note
-2026-02-19T00:13:59.707Z,043dcfb8-a488-447e-941c-d26b52662e85,LINKEDIN,navigate,goto,,https://www.linkedin.com/messaging/,ok,288,{},navigate_inbox
-2026-02-19T00:14:00.523Z,043dcfb8-a488-447e-941c-d26b52662e85,LINKEDIN,navigate,wait_for_domcontentloaded,,,ok,815,{},post_goto_domcontentloaded
-2026-02-19T00:14:00.876Z,043dcfb8-a488-447e-941c-d26b52662e85,LINKEDIN,navigate,wait_for_timeout,,,ok,353,{},post_navigation_settle
-2026-02-19T00:14:04.289Z,043dcfb8-a488-447e-941c-d26b52662e85,LINKEDIN,connect,wait_for_visible,ul.msg-conversations-container__conversations-list,,ok,3390,{},wait_thread_list_connected

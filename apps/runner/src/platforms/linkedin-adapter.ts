@@ -1,4 +1,4 @@
-import type { Locator, Page } from "playwright";
+import type { ElementHandle, Locator, Page } from "playwright";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -9,6 +9,7 @@ import type {
   ThreadStub,
   VerificationMethod
 } from "@inbox-os/core";
+import { stableHash } from "@inbox-os/core";
 import {
   cleanText,
   AdapterFailure,
@@ -57,6 +58,81 @@ interface LinkedInThreadSnapshot {
   threadUrl?: string;
   avatarUrl?: string;
   needsReplyFromList: boolean;
+}
+
+interface LinkedInVisibleRowSnapshot {
+  rowKey: string;
+  displayName: string;
+  previewSnippet: string;
+  listTimestamp: string;
+  unreadCount: number;
+  sponsored: boolean;
+  needsReplyFromList: boolean;
+  locatorPath?: string;
+  href?: string;
+  activeKey?: string;
+  threadUrl?: string;
+}
+
+interface LinkedInStreamingRowRawSnapshot {
+  locatorPath: string;
+  id: string;
+  conversationUrn: string;
+  urn: string;
+  conversationId: string;
+  dataId: string;
+  controlId: string;
+  displayName: string;
+  previewSnippet: string;
+  listTimestamp: string;
+  unreadText: string;
+  unreadContainerPresent: boolean;
+  pillText: string;
+  href: string;
+  activeKey: string;
+}
+
+interface LinkedInResolverNodeProbe {
+  tag: string;
+  class: string;
+  id: string;
+  overflowY: string;
+  clientHeight: number;
+  scrollHeight: number;
+  delta: number;
+  outerHtmlSample: string;
+}
+
+interface LinkedInResolverNodeResolution {
+  handle: ElementHandle<Element>;
+  selector: string;
+  index: number;
+  score: number;
+  mode: "selector" | "fallback";
+  triedSelectorCounts: Record<string, number>;
+  topCandidates: LinkedInResolverNodeProbe[];
+}
+
+interface LinkedInScrollContainerResolution {
+  handle: ElementHandle<Element>;
+  mode:
+    | "ancestor_scrollable"
+    | "wrapper_ancestor"
+    | "shell_heuristic"
+    | "nonstandard_overflow_fallback";
+  topCandidates: LinkedInResolverNodeProbe[];
+}
+
+interface LinkedInSelectorScopeCounts {
+  threadList: number;
+  threadItem: number;
+  rowSignals: Record<string, number>;
+}
+
+interface LinkedInStreamingBlockerSignal {
+  reason: "blocked_by_modal";
+  signal: string;
+  modalTextSnippet?: string;
 }
 
 interface LinkedInThreadCollectionIteration {
@@ -119,7 +195,45 @@ export interface LinkedInFullScanOptions {
   runLogger?: RunLogger;
 }
 
+export type LinkedInStreamFailureReason =
+  | "row_not_mounted"
+  | "row_not_found_after_scroll"
+  | "activation_mismatch"
+  | "unresolved_thread_id_after_open"
+  | "open_click_failed"
+  | "message_container_not_ready";
+
+export interface LinkedInStreamThreadCandidate {
+  rowKey: string;
+  thread: ThreadStub;
+  messages: NormalizedMessage[];
+}
+
+export interface LinkedInStreamCandidateSignals {
+  rowKey: string;
+  displayName: string;
+  unreadCount: number;
+  needsReplyFromList: boolean;
+  sponsored: boolean;
+}
+
+export interface LinkedInStreamScanMetrics {
+  stopReason: LinkedInCollectionStopReason;
+  iterations: number;
+  scrollIterations: number;
+  processedRows: number;
+  actionableRows: number;
+  openedRows: number;
+  skippedRows: number;
+  failures: number;
+}
+
+export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
+  onThreadCandidate: (input: LinkedInStreamThreadCandidate) => Promise<void>;
+}
+
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
+const linkedInAllPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='ALL']";
 const linkedInSmokeEntryUrl = "https://www.linkedin.com/messaging/?filter=unread";
 const linkedInSmokeThreadRowSelector = ".msg-conversation-listitem";
 const linkedInSmokeThreadLinkSelector = ".msg-conversation-listitem__link";
@@ -145,6 +259,59 @@ const linkedInSmokeListContainerSelectors = [
   "ul.msg-conversations-container__conversations-list",
   "[class*='msg-conversations-container__conversations-list']"
 ];
+const linkedInStreamingShellSelectors = [
+  "main",
+  "#main",
+  ".scaffold-layout__main",
+  ".msg-overlay-list-bubble__content",
+  ".msg-conversations-container",
+  "[class*='msg-conversations-container']"
+];
+const linkedInStreamingListRootSelectors = [
+  "ul.msg-conversations-container__conversations-list",
+  "[class*='msg-conversations-container__conversations-list']",
+  ".msg-conversations-container",
+  "[data-test*='conversations']",
+  "[role='list']",
+  "[role='listbox']"
+];
+const linkedInStreamingRowClickTargetSelectors = [
+  "div.msg-conversation-listitem__link",
+  "a.msg-conversation-card__conversation-link",
+  "a.msg-conversation-card__conversation-link *",
+  "[data-control-name*='conversation_item']"
+];
+const linkedInStreamingHydrationRowSignalSelectors = [
+  "li.msg-conversation-listitem",
+  "div.msg-conversation-listitem__link",
+  "a.msg-conversation-card__conversation-link"
+];
+const linkedInStreamingHydrationRowSignalSelector = linkedInStreamingHydrationRowSignalSelectors.join(", ");
+const linkedInStreamingEmptyStateSelector =
+  ".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]";
+const linkedInStreamingListRootValidationSelectors = [
+  "li.msg-conversation-listitem",
+  "div.msg-conversation-listitem__link",
+  "a.msg-conversation-card__conversation-link"
+];
+const linkedInStreamingListRootValidationSelector = linkedInStreamingListRootValidationSelectors.join(", ");
+const linkedInStreamingShellReadySelectors = [
+  "div.msg__messaging-container",
+  "main[role='main']",
+  "main .msg-conversations-container",
+  ".msg-conversations-container",
+  "[class*='msg-conversations-container']"
+];
+const linkedInStreamingRowRootSelectors = [
+  "li.msg-conversation-listitem",
+  "div.msg-conversation-listitem",
+  "[data-control-name*='conversation_item']",
+  "[role='option']",
+  "[role='listitem']"
+];
+const linkedInStreamingRowRootSelector = linkedInStreamingRowRootSelectors.join(", ");
+const linkedInStreamingRowClickTargetSelector = linkedInStreamingRowClickTargetSelectors.join(", ");
+const linkedInStreamingWrapperClassHints = ["scaffold-finite-scroll", "artdeco-scroll", "scaffold-layout__list", "msg__list"];
 const linkedInSmokeFilterPillSelector = "button[data-test-messaging-inbox-filters__filter-pill]";
 const linkedInSmokeBlockedModalSelectors = [
   "#artdeco-modal-outlet .artdeco-modal[aria-modal='true']",
@@ -164,6 +331,15 @@ const linkedInLoadingSpinnerSelector = [
   ".msg-conversations-container__loading",
   "[aria-label*='Loading']"
 ].join(", ");
+const linkedInStreamingBackControlSelectors = [
+  "button[aria-label*='Back to conversations' i]",
+  "button[aria-label*='Back to messaging' i]",
+  "button[aria-label='Back']",
+  "button[aria-label*='Back' i]",
+  "[data-control-name*='back_to_conversation']",
+  "[data-control-name*='back_to_thread_list']",
+  ".msg-thread-actions__back-button"
+];
 
 export interface LinkedInSmokeThreadRowMetadata {
   stableKey: string;
@@ -288,6 +464,63 @@ export interface LinkedInConversationRowDiscovery {
 
 function cleanLocatorText(value: string | null | undefined): string {
   return cleanText(value ?? "");
+}
+
+function normalizeLinkedInRowKeyInput(value: string | null | undefined): string {
+  return cleanText(value ?? "").toLowerCase();
+}
+
+function buildLinkedInRowFallbackKey(input: {
+  displayName: string;
+  previewSnippet: string;
+  listTimestamp: string;
+}): string {
+  const displayName = normalizeLinkedInRowKeyInput(input.displayName);
+  const previewSnippet = normalizeLinkedInRowKeyInput(input.previewSnippet);
+  const timestampSalt = normalizeLinkedInRowKeyInput(input.listTimestamp);
+  const baseParts = [displayName, previewSnippet].filter((entry) => entry.length > 0);
+  let signature = baseParts.join("|");
+  if (!signature && timestampSalt) {
+    signature = `ts:${timestampSalt}`;
+  } else if (baseParts.length === 1 && timestampSalt) {
+    signature = `${baseParts[0]}|ts:${timestampSalt}`;
+  } else if (!signature) {
+    signature = "missing-row-identity";
+  }
+  return `li-row:${stableHash(signature)}`;
+}
+
+function resolveLinkedInRowKey(input: {
+  id?: string | null;
+  conversationUrn?: string | null;
+  urn?: string | null;
+  conversationId?: string | null;
+  dataId?: string | null;
+  controlId?: string | null;
+  displayName: string;
+  previewSnippet: string;
+  listTimestamp: string;
+}): string {
+  const directCandidates = [
+    input.id,
+    input.conversationUrn,
+    input.urn,
+    input.conversationId,
+    input.dataId,
+    input.controlId
+  ]
+    .map((value) => cleanText(value ?? ""))
+    .filter((value) => value.length > 0);
+
+  if (directCandidates[0]) {
+    return directCandidates[0];
+  }
+
+  return buildLinkedInRowFallbackKey({
+    displayName: input.displayName,
+    previewSnippet: input.previewSnippet,
+    listTimestamp: input.listTimestamp
+  });
 }
 
 function resolveSmokeThreadUrl(rawHref: string, baseUrl: string): string | undefined {
@@ -1329,10 +1562,12 @@ export type LinkedInScanFailureReason =
   | "evaluate_helper_missing"
   | "evaluate_reference_error"
   | "timeout"
+  | "list_hydration_timeout"
   | "thread_list_not_ready"
   | "page_closed_mid_stage"
   | "login_required"
   | "checkpoint_required"
+  | "blocked_by_modal"
   | "rate_limited"
   | "linkedin_error_overlay"
   | "manual_refresh_required"
@@ -1384,6 +1619,9 @@ export function resolveLinkedInScanFailureReason(input: {
   if (message.includes("timeouterror") || message.includes("timeout")) {
     return "timeout";
   }
+  if (message.includes("list_hydration_timeout")) {
+    return "list_hydration_timeout";
+  }
   if (message.includes("execution context was destroyed")) {
     return "transient_context_destroyed";
   }
@@ -1395,6 +1633,9 @@ export function resolveLinkedInScanFailureReason(input: {
   }
   if (url.includes("/checkpoint/") || message.includes("checkpoint") || message.includes("verify")) {
     return "checkpoint_required";
+  }
+  if (message.includes("blocked_by_modal") || message.includes("paywall") || message.includes("interstitial")) {
+    return "blocked_by_modal";
   }
   if (message.includes("too many requests") || message.includes("rate limit")) {
     return "rate_limited";
@@ -1589,6 +1830,7 @@ export type LinkedInCollectionStopReason =
   | "max_threads"
   | "end_of_list_no_progress"
   | "end_of_list_reached"
+  | "no_scroll_container"
   | "max_iterations"
   | "max_duration"
   | "zero_threads_found";
@@ -2340,6 +2582,104 @@ export class LinkedInAdapter implements PlatformAdapter {
     return normalized.toLowerCase();
   }
 
+  private extractThreadTokenFromUrlLike(value: string | undefined): string | null {
+    const trimmed = cleanText(value ?? "");
+    if (!trimmed) {
+      return null;
+    }
+    try {
+      const parsed = new URL(trimmed, "https://www.linkedin.com");
+      const fromPath = parsed.pathname.match(/\/messaging\/thread\/([^/?#]+)/i)?.[1]?.trim().toLowerCase();
+      if (fromPath) {
+        return fromPath;
+      }
+      const fromHash = parsed.hash.match(/\/messaging\/thread\/([^/?#]+)/i)?.[1]?.trim().toLowerCase();
+      if (fromHash) {
+        return fromHash;
+      }
+      const fromConversationId =
+        parsed.searchParams.get("conversationId")?.trim().toLowerCase() ??
+        parsed.searchParams.get("conversationid")?.trim().toLowerCase();
+      if (fromConversationId) {
+        return fromConversationId;
+      }
+      if (parsed.protocol === "data:" || parsed.protocol === "blob:") {
+        return null;
+      }
+    } catch {
+      // fall through
+    }
+    const fromRaw = trimmed.match(/\/messaging\/thread\/([^/?#]+)/i)?.[1]?.trim().toLowerCase();
+    if (fromRaw) {
+      return fromRaw;
+    }
+    return null;
+  }
+
+  private resolveCurrentActiveThreadToken(page: Page): string | null {
+    return this.extractThreadTokenFromUrlLike(page.url());
+  }
+
+  private async extractCandidateRowToken(
+    rowHandle: ElementHandle<Element> | null,
+    row: LinkedInVisibleRowSnapshot
+  ): Promise<string | null> {
+    const fromRowSnapshot =
+      this.extractThreadTokenFromUrlLike(row.threadUrl ?? row.href) ??
+      this.extractThreadTokenFromUrlLike(row.activeKey);
+    if (fromRowSnapshot) {
+      return fromRowSnapshot;
+    }
+    if (!rowHandle) {
+      return null;
+    }
+    const domToken = await rowHandle
+      .evaluate((node) => {
+        const asElement = node as HTMLElement;
+        const rawCandidates = [
+          asElement.getAttribute("data-thread-id"),
+          asElement.getAttribute("data-conversation-id"),
+          asElement.getAttribute("data-id"),
+          asElement.getAttribute("data-conversation-urn"),
+          asElement.getAttribute("data-urn"),
+          (asElement.querySelector("a[href*='/messaging/thread/']") as HTMLAnchorElement | null)?.getAttribute("href"),
+          (asElement.querySelector("a[href*='/messaging/']") as HTMLAnchorElement | null)?.getAttribute("href")
+        ];
+        for (const entry of rawCandidates) {
+          const value = (entry ?? "").trim();
+          if (value) {
+            return value;
+          }
+        }
+        return null;
+      })
+      .catch(() => null);
+    return this.extractThreadTokenFromUrlLike(domToken ?? undefined);
+  }
+
+  private async isRowMarkedActive(rowHandle: ElementHandle<Element>): Promise<boolean> {
+    return rowHandle
+      .evaluate((node) => {
+        const target = node as HTMLElement;
+        const clickTarget =
+          target.matches(".msg-conversation-listitem__link")
+            ? target
+            : (target.querySelector(".msg-conversation-listitem__link") as HTMLElement | null) ?? target;
+        const className = (clickTarget.className ?? "").toString().toLowerCase();
+        if (className.includes("convo-item-link--active") || className.includes("conversation-listitem__link--active")) {
+          return true;
+        }
+        const ariaCurrent = (clickTarget.getAttribute("aria-current") ?? "").toLowerCase();
+        const ariaSelected = (clickTarget.getAttribute("aria-selected") ?? "").toLowerCase();
+        if (ariaCurrent === "true" || ariaCurrent === "page" || ariaSelected === "true") {
+          return true;
+        }
+        const activeAncestor = clickTarget.closest("[aria-current='true'], [aria-selected='true']");
+        return Boolean(activeAncestor);
+      })
+      .catch(() => false);
+  }
+
   private async detectAuthRequired(
     page: Page
   ): Promise<{ authRequired: boolean; url: string; source?: "url" | "dom" }> {
@@ -2406,6 +2746,9 @@ export class LinkedInAdapter implements PlatformAdapter {
     const bodyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
     if (bodyText.includes("verify your identity") || bodyText.includes("checkpoint")) {
       return "checkpoint_required";
+    }
+    if (bodyText.includes("upgrade to premium") || bodyText.includes("start free trial")) {
+      return "blocked_by_modal";
     }
     if (bodyText.includes("too many requests") || bodyText.includes("try again later")) {
       return "rate_limited";
@@ -2537,6 +2880,54 @@ export class LinkedInAdapter implements PlatformAdapter {
     return result;
   }
 
+  private async ensureAllFilterActive(page: Page): Promise<void> {
+    const allPill = page.locator(linkedInAllPillSelector).first();
+    const allPillCount = await allPill.count().catch(() => 0);
+    if (allPillCount <= 0) {
+      this.logTraceDecision({
+        stage: "collect_threads",
+        decision: "All filter pill not present; proceeding with default inbox filter"
+      });
+      return;
+    }
+
+    const ariaPressed = await allPill.getAttribute("aria-pressed").catch(() => null);
+    const ariaChecked = await allPill.getAttribute("aria-checked").catch(() => null);
+    const active = isLinkedInUnreadPillActive({
+      ariaPressed,
+      ariaChecked
+    });
+
+    if (active) {
+      return;
+    }
+
+    await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "click",
+      selector: linkedInAllPillSelector,
+      note: "activate_all_pill",
+      run: async () => {
+        await allPill.click({
+          timeout: 5_000
+        });
+      }
+    });
+    await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "wait_for_timeout",
+      note: "after_activate_all_pill",
+      details: {
+        delayMs: 300
+      },
+      run: async () => {
+        await page.waitForTimeout(300);
+      }
+    });
+  }
+
   async waitForThreadListReadyOrClassified(
     page: Page,
     selectors: SelectorRegistry,
@@ -2558,12 +2949,12 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       const listLocator = page.locator(selectors.thread_list).first();
-      const listVisible = await listLocator.isVisible({ timeout: 0 }).catch(() => false);
+      await listLocator.isVisible({ timeout: 0 }).catch(() => false);
       const threadCount = await this.tracedLocatorCount(page, selectors.thread_item, {
         stage: "collect_threads",
         note: "read_thread_item_count"
       }).catch(() => 0);
-      if (listVisible || threadCount > 0) {
+      if (threadCount > 0) {
         return {
           ready: true,
           empty: false
@@ -2572,7 +2963,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       const emptyStateCount = await this.tracedLocatorCount(
         page,
-        ".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]",
+        linkedInStreamingEmptyStateSelector,
         {
           stage: "collect_threads",
           note: "read_empty_state_count"
@@ -3233,6 +3624,2760 @@ export class LinkedInAdapter implements PlatformAdapter {
     return this.lastCollectionMetrics;
   }
 
+  private async resolveElementByScopedPath(
+    root: ElementHandle<Element>,
+    scopedPath: string | undefined
+  ): Promise<ElementHandle<Element> | null> {
+    if (!scopedPath) {
+      return null;
+    }
+    const handle = await root.evaluateHandle((node, path) => {
+      const parts = (path ?? "")
+        .trim()
+        .split(">")
+        .map((entry) => entry.trim())
+        .filter((entry) => entry.length > 0);
+      if (!parts.length) {
+        return null;
+      }
+      let cursor: Element | null = node as Element;
+      for (const part of parts) {
+        const match = part.match(/^\*:nth-child\((\d+)\)$/i);
+        if (!match?.[1] || !cursor) {
+          return null;
+        }
+        const index = Number(match[1]) - 1;
+        if (!Number.isFinite(index) || index < 0) {
+          return null;
+        }
+        cursor = cursor.children.item(index);
+      }
+      return cursor;
+    }, scopedPath);
+    return handle.asElement();
+  }
+
+  private async probeResolverNodeHandle(handle: ElementHandle<Element>): Promise<LinkedInResolverNodeProbe> {
+    return handle.evaluate((node) => {
+      const asElement = node as HTMLElement;
+      const style = window.getComputedStyle(asElement);
+      const clientHeight = Math.max(0, Math.floor(asElement.clientHeight || 0));
+      const scrollHeight = Math.max(clientHeight, Math.floor(asElement.scrollHeight || 0));
+      const delta = Math.max(0, scrollHeight - clientHeight);
+      const className = (asElement.className ?? "").toString().replace(/\s+/g, " ").trim();
+      const outerHtmlSample = (asElement.outerHTML ?? "").replace(/\s+/g, " ").trim().slice(0, 200);
+      return {
+        tag: asElement.tagName.toLowerCase(),
+        class: className,
+        id: (asElement.id ?? "").trim(),
+        overflowY: (style.overflowY ?? "").toLowerCase(),
+        clientHeight,
+        scrollHeight,
+        delta,
+        outerHtmlSample
+      };
+    });
+  }
+
+  private dedupeResolverNodeProbes(candidates: LinkedInResolverNodeProbe[]): LinkedInResolverNodeProbe[] {
+    const seen = new Set<string>();
+    const deduped: LinkedInResolverNodeProbe[] = [];
+    for (const candidate of candidates) {
+      const key = `${candidate.tag}|${candidate.id}|${candidate.class}|${candidate.clientHeight}|${candidate.scrollHeight}`;
+      if (seen.has(key)) {
+        continue;
+      }
+      seen.add(key);
+      deduped.push(candidate);
+    }
+    return deduped
+      .sort((left, right) => right.delta - left.delta || right.scrollHeight - left.scrollHeight)
+      .slice(0, 20);
+  }
+
+  private async collectScopeCounts(input: {
+    page: Page;
+    selectors: SelectorRegistry;
+    shell?: ElementHandle<Element> | null;
+  }): Promise<{ global: LinkedInSelectorScopeCounts; shell: LinkedInSelectorScopeCounts | null }> {
+    const globalRowSignals: Record<string, number> = {};
+    for (const selector of linkedInStreamingListRootValidationSelectors) {
+      globalRowSignals[selector] = await input.page.locator(selector).count().catch(() => 0);
+    }
+    const globalCounts: LinkedInSelectorScopeCounts = {
+      threadList: await input.page.locator(input.selectors.thread_list).count().catch(() => 0),
+      threadItem: await input.page.locator(input.selectors.thread_item).count().catch(() => 0),
+      rowSignals: globalRowSignals
+    };
+
+    if (!input.shell) {
+      return {
+        global: globalCounts,
+        shell: null
+      };
+    }
+
+    const shellCounts = await input.shell
+      .evaluate((shellNode, payload) => {
+        const rowSignals: Record<string, number> = {};
+        for (const selector of payload.rowSignalSelectors) {
+          rowSignals[selector] = shellNode.querySelectorAll(selector).length;
+        }
+        let threadList = 0;
+        let threadItem = 0;
+        try {
+          threadList = shellNode.querySelectorAll(payload.threadListSelector).length;
+        } catch {
+          threadList = 0;
+        }
+        try {
+          threadItem = shellNode.querySelectorAll(payload.threadItemSelector).length;
+        } catch {
+          threadItem = 0;
+        }
+        return {
+          threadList,
+          threadItem,
+          rowSignals
+        };
+      }, {
+        rowSignalSelectors: linkedInStreamingListRootValidationSelectors,
+        threadListSelector: input.selectors.thread_list,
+        threadItemSelector: input.selectors.thread_item
+      })
+      .catch(() => null);
+
+    return {
+      global: globalCounts,
+      shell: shellCounts
+    };
+  }
+
+  private async resolveConversationListRootFromConfiguredSelector(
+    page: Page,
+    selectors: SelectorRegistry,
+    scope?: ElementHandle<Element> | null
+  ): Promise<LinkedInResolverNodeResolution | null> {
+    type ConfigSelectorEvalInput = {
+      threadListSelector: string;
+      threadItemSelector: string;
+      rowSignalSelector: string;
+    };
+    type ConfigSelectorEvalResult = {
+      selectedIndex: number;
+      selectedScore: number;
+      selectedProbe: LinkedInResolverNodeProbe | null;
+      totalCount: number;
+      probes: LinkedInResolverNodeProbe[];
+    };
+    const resolution = scope
+      ? await scope
+          .evaluate((shellNode, input: ConfigSelectorEvalInput): ConfigSelectorEvalResult => {
+            const toProbe = (node: Element): LinkedInResolverNodeProbe => {
+              const asElement = node as HTMLElement;
+              const style = window.getComputedStyle(asElement);
+              const clientHeight = Math.max(0, Math.floor(asElement.clientHeight || 0));
+              const scrollHeight = Math.max(clientHeight, Math.floor(asElement.scrollHeight || 0));
+              const delta = Math.max(0, scrollHeight - clientHeight);
+              return {
+                tag: asElement.tagName.toLowerCase(),
+                class: (asElement.className ?? "").toString().replace(/\s+/g, " ").trim(),
+                id: (asElement.id ?? "").trim(),
+                overflowY: (style.overflowY ?? "").toLowerCase(),
+                clientHeight,
+                scrollHeight,
+                delta,
+                outerHtmlSample: (asElement.outerHTML ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
+              };
+            };
+            let nodes: Element[] = [];
+            try {
+              nodes = Array.from(shellNode.querySelectorAll(input.threadListSelector));
+            } catch {
+              return {
+                selectedIndex: -1,
+                selectedScore: 0,
+                selectedProbe: null,
+                totalCount: 0,
+                probes: []
+              };
+            }
+            let selectedIndex = -1;
+            let selectedScore = 0;
+            let selectedProbe: LinkedInResolverNodeProbe | null = null;
+            const probes: LinkedInResolverNodeProbe[] = [];
+            for (let index = 0; index < nodes.length; index += 1) {
+              const node = nodes[index];
+              if (!node) {
+                continue;
+              }
+              const probe = toProbe(node);
+              probes.push(probe);
+              let threadItemCount = 0;
+              try {
+                threadItemCount = node.querySelectorAll(input.threadItemSelector).length;
+              } catch {
+                threadItemCount = 0;
+              }
+              const rowSignalCount = node.querySelectorAll(input.rowSignalSelector).length;
+              if (threadItemCount <= 0 && rowSignalCount <= 0) {
+                continue;
+              }
+              const score = threadItemCount * 5 + rowSignalCount * 2 + (probe.tag === "ul" ? 2 : 0);
+              if (score <= selectedScore) {
+                continue;
+              }
+              selectedScore = score;
+              selectedIndex = index;
+              selectedProbe = probe;
+            }
+            return {
+              selectedIndex,
+              selectedScore,
+              selectedProbe,
+              totalCount: nodes.length,
+              probes
+            };
+          }, {
+            threadListSelector: selectors.thread_list,
+            threadItemSelector: selectors.thread_item,
+            rowSignalSelector: linkedInStreamingListRootValidationSelector
+          })
+          .catch(() => null)
+      : await page
+          .evaluate((input: ConfigSelectorEvalInput): ConfigSelectorEvalResult => {
+            const toProbe = (node: Element): LinkedInResolverNodeProbe => {
+              const asElement = node as HTMLElement;
+              const style = window.getComputedStyle(asElement);
+              const clientHeight = Math.max(0, Math.floor(asElement.clientHeight || 0));
+              const scrollHeight = Math.max(clientHeight, Math.floor(asElement.scrollHeight || 0));
+              const delta = Math.max(0, scrollHeight - clientHeight);
+              return {
+                tag: asElement.tagName.toLowerCase(),
+                class: (asElement.className ?? "").toString().replace(/\s+/g, " ").trim(),
+                id: (asElement.id ?? "").trim(),
+                overflowY: (style.overflowY ?? "").toLowerCase(),
+                clientHeight,
+                scrollHeight,
+                delta,
+                outerHtmlSample: (asElement.outerHTML ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
+              };
+            };
+            let nodes: Element[] = [];
+            try {
+              nodes = Array.from(document.querySelectorAll(input.threadListSelector));
+            } catch {
+              return {
+                selectedIndex: -1,
+                selectedScore: 0,
+                selectedProbe: null,
+                totalCount: 0,
+                probes: []
+              };
+            }
+            let selectedIndex = -1;
+            let selectedScore = 0;
+            let selectedProbe: LinkedInResolverNodeProbe | null = null;
+            const probes: LinkedInResolverNodeProbe[] = [];
+            for (let index = 0; index < nodes.length; index += 1) {
+              const node = nodes[index];
+              if (!node) {
+                continue;
+              }
+              const probe = toProbe(node);
+              probes.push(probe);
+              let threadItemCount = 0;
+              try {
+                threadItemCount = node.querySelectorAll(input.threadItemSelector).length;
+              } catch {
+                threadItemCount = 0;
+              }
+              const rowSignalCount = node.querySelectorAll(input.rowSignalSelector).length;
+              if (threadItemCount <= 0 && rowSignalCount <= 0) {
+                continue;
+              }
+              const score = threadItemCount * 5 + rowSignalCount * 2 + (probe.tag === "ul" ? 2 : 0);
+              if (score <= selectedScore) {
+                continue;
+              }
+              selectedScore = score;
+              selectedIndex = index;
+              selectedProbe = probe;
+            }
+            return {
+              selectedIndex,
+              selectedScore,
+              selectedProbe,
+              totalCount: nodes.length,
+              probes
+            };
+          }, {
+            threadListSelector: selectors.thread_list,
+            threadItemSelector: selectors.thread_item,
+            rowSignalSelector: linkedInStreamingListRootValidationSelector
+          })
+          .catch(() => null);
+
+    if (!resolution || resolution.selectedIndex < 0) {
+      return null;
+    }
+
+    const handle = scope
+      ? await scope
+          .evaluateHandle(
+            (shellNode, input: { selector: string; index: number }) =>
+              (Array.from(shellNode.querySelectorAll(input.selector))[input.index] as Element | undefined) ?? null,
+            {
+              selector: selectors.thread_list,
+              index: resolution.selectedIndex
+            }
+          )
+          .then((value) => value.asElement())
+          .catch(() => null)
+      : await page.locator(selectors.thread_list).nth(resolution.selectedIndex).elementHandle().catch(() => null);
+    if (!handle) {
+      return null;
+    }
+
+    return {
+      handle,
+      selector: selectors.thread_list,
+      index: resolution.selectedIndex,
+      score: resolution.selectedScore,
+      mode: "selector",
+      triedSelectorCounts: {
+        [selectors.thread_list]: resolution.totalCount
+      },
+      topCandidates: this.dedupeResolverNodeProbes(
+        ((resolution.probes ?? []) as LinkedInResolverNodeProbe[]).concat(
+          resolution.selectedProbe ? [resolution.selectedProbe as LinkedInResolverNodeProbe] : []
+        )
+      )
+    };
+  }
+
+  private async findLowestCommonAncestor(
+    listRootHandle: ElementHandle<Element>,
+    messagePaneHandle: ElementHandle<Element>
+  ): Promise<ElementHandle<Element> | null> {
+    const handle = await listRootHandle.evaluateHandle((listRootNode, messagePaneNode) => {
+      if (!(messagePaneNode instanceof Element)) {
+        return null;
+      }
+      const listAncestors = new Set<Element>();
+      let listCursor: Element | null = listRootNode;
+      while (listCursor) {
+        listAncestors.add(listCursor);
+        listCursor = listCursor.parentElement;
+      }
+      let paneCursor: Element | null = messagePaneNode;
+      while (paneCursor) {
+        if (listAncestors.has(paneCursor)) {
+          return paneCursor;
+        }
+        paneCursor = paneCursor.parentElement;
+      }
+      return null;
+    }, messagePaneHandle);
+    const element = handle.asElement();
+    if (!element) {
+      return null;
+    }
+    const tag = await element.evaluate((node) => node.tagName.toLowerCase()).catch(() => "");
+    if (tag === "body" || tag === "html") {
+      return null;
+    }
+    return element;
+  }
+
+  private async tryRevealConversationListFromNarrowLayout(input: {
+    page: Page;
+    selectors: SelectorRegistry;
+    shell?: ElementHandle<Element> | null;
+  }): Promise<{
+    attempted: boolean;
+    revealed: boolean;
+    selector?: string;
+    globalRowSignals: Record<string, number>;
+    shellRowSignalCount: number | null;
+  }> {
+    const globalRowSignals: Record<string, number> = {};
+    for (const selector of linkedInStreamingListRootValidationSelectors) {
+      globalRowSignals[selector] = await input.page.locator(selector).count().catch(() => 0);
+    }
+    const globalSignalCount = Object.values(globalRowSignals).reduce((acc, count) => acc + count, 0);
+    const shellRowSignalCount = input.shell
+      ? await input.shell
+          .evaluate((shellNode, rowSignalSelector) => shellNode.querySelectorAll(rowSignalSelector).length, linkedInStreamingListRootValidationSelector)
+          .catch(() => 0)
+      : null;
+
+    const messagePaneCount = await input.page.locator(input.selectors.message_container).count().catch(() => 0);
+    const listAbsentGlobal = globalSignalCount <= 0;
+    const listAbsentShell = shellRowSignalCount === null ? true : shellRowSignalCount <= 0;
+    if (!(listAbsentGlobal && listAbsentShell && messagePaneCount > 0)) {
+      return {
+        attempted: false,
+        revealed: false,
+        globalRowSignals,
+        shellRowSignalCount
+      };
+    }
+
+    for (const selector of linkedInStreamingBackControlSelectors) {
+      const locator = input.page.locator(selector).first();
+      const count = await locator.count().catch(() => 0);
+      if (count <= 0) {
+        continue;
+      }
+      const visible = await locator.isVisible().catch(() => false);
+      if (!visible) {
+        continue;
+      }
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        await locator
+          .click({
+            timeout: 2_000
+          })
+          .catch(() => undefined);
+        await input.page.waitForTimeout(220).catch(() => undefined);
+        const revealedCount = await input.page.locator(linkedInStreamingListRootValidationSelector).count().catch(() => 0);
+        if (revealedCount > 0) {
+          return {
+            attempted: true,
+            revealed: true,
+            selector,
+            globalRowSignals,
+            shellRowSignalCount
+          };
+        }
+      }
+      return {
+        attempted: true,
+        revealed: false,
+        selector,
+        globalRowSignals,
+        shellRowSignalCount
+      };
+    }
+
+    return {
+      attempted: false,
+      revealed: false,
+      globalRowSignals,
+      shellRowSignalCount
+    };
+  }
+
+  private async describeResolverHandle(handle: ElementHandle<Element>): Promise<LinkedInResolverNodeProbe | null> {
+    return this.probeResolverNodeHandle(handle).catch(() => null);
+  }
+
+  private async waitForMessagingShellReady(
+    page: Page,
+    timeoutMs = 4_000
+  ): Promise<{ ready: boolean; signal?: string | null }> {
+    type MessagingShellReadyEvalInput = {
+      selectors: string[];
+      rowSignalSelector: string;
+      rowClickSelector: string;
+    };
+    const deadline = Date.now() + Math.max(500, timeoutMs);
+    while (Date.now() < deadline) {
+      const signal = await page
+        .evaluate((input: MessagingShellReadyEvalInput) => {
+          const { selectors, rowSignalSelector, rowClickSelector } = input;
+          for (const selector of selectors) {
+            const nodes = Array.from(document.querySelectorAll(selector));
+            for (const node of nodes) {
+              const hasRows =
+                node.querySelector(rowSignalSelector) !== null || node.querySelector(rowClickSelector) !== null;
+              if (hasRows) {
+                return selector;
+              }
+            }
+          }
+
+          const main = document.querySelector("main[role='main'], #main, main");
+          if (main && (main.textContent ?? "").toLowerCase().includes("messaging")) {
+            return "main_text_messaging";
+          }
+
+          return null;
+        }, {
+          selectors: linkedInStreamingShellReadySelectors,
+          rowSignalSelector: linkedInStreamingListRootValidationSelector,
+          rowClickSelector: linkedInStreamingRowClickTargetSelector
+        })
+        .catch(() => null);
+      if (signal) {
+        return {
+          ready: true,
+          signal
+        };
+      }
+      await page.waitForTimeout(140).catch(() => undefined);
+    }
+
+    return {
+      ready: false
+    };
+  }
+
+  private async waitForThreadListHydratedOrEmptyOrBlocked(
+    page: Page,
+    selectors: SelectorRegistry,
+    timeoutMs = 10_000
+  ): Promise<
+    | {
+        status: "rows_ready";
+        rowSignalCounts: Record<string, number>;
+      }
+    | {
+        status: "empty_inbox";
+        rowSignalCounts: Record<string, number>;
+      }
+    | {
+        status: "blocked_by_modal";
+        rowSignalCounts: Record<string, number>;
+        blocker: LinkedInStreamingBlockerSignal;
+      }
+    | {
+        status: "list_hydration_timeout";
+        rowSignalCounts: Record<string, number>;
+      }
+  > {
+    const deadline = Date.now() + Math.max(2_000, timeoutMs);
+    while (Date.now() < deadline) {
+      const blocker = await this.detectStreamingBlocker(page);
+      const rowSignalCounts: Record<string, number> = {};
+      for (const selector of linkedInStreamingHydrationRowSignalSelectors) {
+        rowSignalCounts[selector] = await page.locator(selector).count().catch(() => 0);
+      }
+      const hasRows = Object.values(rowSignalCounts).some((count) => count > 0);
+      if (blocker) {
+        return {
+          status: "blocked_by_modal",
+          rowSignalCounts,
+          blocker
+        };
+      }
+      if (hasRows) {
+        return {
+          status: "rows_ready",
+          rowSignalCounts
+        };
+      }
+
+      const emptyStateCount = await page.locator(linkedInStreamingEmptyStateSelector).count().catch(() => 0);
+      if (emptyStateCount > 0) {
+        return {
+          status: "empty_inbox",
+          rowSignalCounts
+        };
+      }
+
+      const revealResult = await this.tryRevealConversationListFromNarrowLayout({
+        page,
+        selectors
+      });
+      if (revealResult.attempted) {
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Narrow layout reveal attempt during hydration gate",
+          details: {
+            revealed: revealResult.revealed,
+            selector: revealResult.selector ?? null,
+            globalRowSignals: revealResult.globalRowSignals,
+            shellRowSignalCount: revealResult.shellRowSignalCount
+          }
+        });
+      }
+      if (revealResult.revealed) {
+        continue;
+      }
+
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "wait_for_timeout",
+        note: "stream_list_hydration_poll_wait",
+        details: {
+          delayMs: 250
+        },
+        run: async () => {
+          await page.waitForTimeout(250);
+        }
+      });
+    }
+
+    const rowSignalCounts: Record<string, number> = {};
+    for (const selector of linkedInStreamingHydrationRowSignalSelectors) {
+      rowSignalCounts[selector] = await page.locator(selector).count().catch(() => 0);
+    }
+    return {
+      status: "list_hydration_timeout",
+      rowSignalCounts
+    };
+  }
+
+  private async getFirstVisibleMessageFingerprint(
+    page: Page,
+    selectors: SelectorRegistry
+  ): Promise<{ key: string; textSample: string } | null> {
+    const node = page.locator(selectors.message_item).first();
+    const exists = (await node.count().catch(() => 0)) > 0;
+    if (!exists) {
+      return null;
+    }
+    const key =
+      (await node.getAttribute("data-event-urn").catch(() => null)) ??
+      (await node.getAttribute("data-id").catch(() => null)) ??
+      (await node.getAttribute("id").catch(() => null)) ??
+      "";
+    const textSample = cleanText(await node.innerText({ timeout: 0 }).catch(() => "")).slice(0, 240);
+    return {
+      key: key || "",
+      textSample
+    };
+  }
+
+  private async waitForStreamingThreadHydration(input: {
+    page: Page;
+    selectors: SelectorRegistry;
+    beforeFingerprint: { key: string; textSample: string } | null;
+    beforeDescriptor: ActiveThreadDescriptor;
+    expectedUrlToken: string | null;
+    alreadyActiveCandidate: boolean;
+    candidateThreadToken: string | null;
+    candidateDisplayName: string;
+    timeoutMs?: number;
+    rowKey: string;
+  }): Promise<boolean> {
+    const {
+      page,
+      selectors,
+      beforeFingerprint,
+      beforeDescriptor,
+      expectedUrlToken,
+      alreadyActiveCandidate,
+      candidateThreadToken,
+      candidateDisplayName,
+      rowKey
+    } = input;
+    const deadline = Date.now() + Math.max(1_500, input.timeoutMs ?? 6_000);
+    while (Date.now() < deadline) {
+      const descriptor = await this.getActiveThreadDescriptor(page, selectors);
+      const activeUrlToken = this.resolveCurrentActiveThreadToken(page);
+      const changedDescriptor =
+        this.normalizeIdentity(beforeDescriptor.activeKey) !== this.normalizeIdentity(descriptor.activeKey) ||
+        this.normalizeIdentity(beforeDescriptor.displayName) !== this.normalizeIdentity(descriptor.displayName) ||
+        this.normalizeThreadUrl(beforeDescriptor.threadUrl) !== this.normalizeThreadUrl(descriptor.threadUrl);
+      const urlAligned =
+        Boolean(activeUrlToken) &&
+        (!expectedUrlToken || activeUrlToken === expectedUrlToken) &&
+        this.normalizeIdentity(activeUrlToken ?? undefined) !== this.normalizeIdentity(this.resolveThreadUrlToken(beforeDescriptor.threadUrl));
+      const activated = changedDescriptor || urlAligned;
+      const tokenAligned =
+        Boolean(candidateThreadToken) && Boolean(activeUrlToken) && candidateThreadToken === activeUrlToken;
+      const tokenConflicts =
+        Boolean(candidateThreadToken) && Boolean(activeUrlToken) && candidateThreadToken !== activeUrlToken;
+      const nameAligned =
+        this.normalizeIdentity(candidateDisplayName) &&
+        this.normalizeIdentity(descriptor.displayName) &&
+        (this.normalizeIdentity(descriptor.displayName).includes(this.normalizeIdentity(candidateDisplayName)) ||
+          this.normalizeIdentity(candidateDisplayName).includes(this.normalizeIdentity(descriptor.displayName)));
+      const correctThread =
+        tokenAligned || (!activeUrlToken && Boolean(nameAligned)) || (!candidateThreadToken && Boolean(nameAligned));
+
+      const containerVisible = await page
+        .locator(selectors.message_container)
+        .first()
+        .isVisible({ timeout: 0 })
+        .catch(() => false);
+      if (!containerVisible) {
+        await page.waitForTimeout(120).catch(() => undefined);
+        continue;
+      }
+
+      const spinnerCount = await page
+        .locator(selectors.message_container)
+        .first()
+        .locator(linkedInLoadingSpinnerSelector)
+        .count()
+        .catch(() => 0);
+      const messageCount = await page.locator(selectors.message_item).count().catch(() => 0);
+      const currentFingerprint = await this.getFirstVisibleMessageFingerprint(page, selectors);
+      const fingerprintChanged =
+        (beforeFingerprint?.key || "") !== (currentFingerprint?.key || "") ||
+        (beforeFingerprint?.textSample || "") !== (currentFingerprint?.textSample || "");
+      const emptyStateCount = await page
+        .locator(
+          `${selectors.message_container} [data-test-empty-state], ${selectors.message_container} .msg-s-message-list__empty-state, ${selectors.message_container} .msg-thread-empty-state`
+        )
+        .count()
+        .catch(() => 0);
+
+      const messageHydrated = spinnerCount <= 0 && messageCount > 0 && (fingerprintChanged || !beforeFingerprint);
+      const emptyHydrated = spinnerCount <= 0 && emptyStateCount > 0;
+      const hydrated = messageHydrated || emptyHydrated;
+
+      if (alreadyActiveCandidate && correctThread && spinnerCount <= 0 && (messageCount > 0 || emptyStateCount > 0)) {
+        return true;
+      }
+
+      // Some LinkedIn and fixture layouts do not immediately expose URL/active-row changes.
+      // Accept message-driven hydration when data actually changed, while keeping descriptor/url alignment preferred.
+      if (hydrated && (activated || fingerprintChanged || !beforeFingerprint) && !tokenConflicts) {
+        return true;
+      }
+
+      await this.runTracedPageAction({
+        page,
+        stage: "open_thread",
+        action: "wait_for_timeout",
+        note: "stream_message_hydration_wait",
+        details: {
+          rowKey,
+          alreadyActiveCandidate,
+          tokenAligned,
+          tokenConflicts,
+          nameAligned: Boolean(nameAligned),
+          correctThread,
+          activated,
+          spinnerCount,
+          messageCount,
+          emptyStateCount,
+          fingerprintChanged
+        },
+        run: async () => {
+          await page.waitForTimeout(180);
+        }
+      });
+    }
+
+    return false;
+  }
+
+  private async resolveMessagingShell(page: Page): Promise<LinkedInResolverNodeResolution | null> {
+    type MessagingShellEvalInput = {
+      selectorCandidates: string[];
+      rowClickSelector: string;
+      rowSignalSelector: string;
+      filterPillSelector: string;
+    };
+    type MessagingShellEvalResult = {
+      triedSelectorCounts: Record<string, number>;
+      selected: { selector: string; index: number; score: number } | null;
+      topCandidates: LinkedInResolverNodeProbe[];
+    };
+    const resolution = await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "resolve_messaging_shell",
+      details: {
+        selectors: linkedInStreamingShellSelectors
+      },
+      run: async () =>
+        page.evaluate((input: MessagingShellEvalInput): MessagingShellEvalResult => {
+          const { selectorCandidates, rowClickSelector, rowSignalSelector, filterPillSelector } = input;
+          const triedSelectorCounts: Record<string, number> = {};
+          const probes: Array<{
+            selector: string;
+            index: number;
+            score: number;
+            rowLinkCount: number;
+            tag: string;
+            class: string;
+            id: string;
+            overflowY: string;
+            clientHeight: number;
+            scrollHeight: number;
+            delta: number;
+            outerHtmlSample: string;
+          }> = [];
+          const seen = new Set<Element>();
+          const allCandidates: Array<{ selector: string; node: Element }> = [];
+          for (const selector of selectorCandidates) {
+            const nodes = Array.from(document.querySelectorAll(selector));
+            triedSelectorCounts[selector] = nodes.length;
+            for (const node of nodes) {
+              if (seen.has(node)) {
+                continue;
+              }
+              seen.add(node);
+              allCandidates.push({
+                selector,
+                node
+              });
+            }
+          }
+          for (const candidate of allCandidates) {
+            const node = candidate.node as HTMLElement;
+            const style = window.getComputedStyle(node);
+            const clientHeight = Math.max(0, Math.floor(node.clientHeight || 0));
+            const scrollHeight = Math.max(clientHeight, Math.floor(node.scrollHeight || 0));
+            const delta = Math.max(0, scrollHeight - clientHeight);
+            const rowLinkCount = node.querySelectorAll(rowClickSelector).length;
+            const rowSignalCount = node.querySelectorAll(rowSignalSelector).length;
+            const filterPillCount = node.querySelectorAll(filterPillSelector).length;
+            const listRoleCount = node.querySelectorAll("[role='list'], [role='listbox']").length;
+            const messagePaneCount = node.querySelectorAll(".msg-s-message-list, [class*='msg-s-message']").length;
+            const score =
+              (filterPillCount > 0 ? 4 : 0) +
+              (rowLinkCount > 0 ? 4 : 0) +
+              (rowSignalCount > 0 ? 4 : 0) +
+              (listRoleCount > 0 ? 2 : 0) +
+              (messagePaneCount > 0 ? 1 : 0) +
+              Math.min(3, Math.max(rowLinkCount, rowSignalCount));
+            probes.push({
+              selector: candidate.selector,
+              index: Array.from(document.querySelectorAll(candidate.selector)).indexOf(candidate.node),
+              score,
+              rowLinkCount,
+              tag: node.tagName.toLowerCase(),
+              class: (node.className ?? "").toString().replace(/\s+/g, " ").trim(),
+              id: (node.id ?? "").trim(),
+              overflowY: (style.overflowY ?? "").toLowerCase(),
+              clientHeight,
+              scrollHeight,
+              delta,
+              outerHtmlSample: (node.outerHTML ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
+            });
+          }
+
+          probes.sort(
+            (left, right) =>
+              right.score - left.score ||
+              right.rowLinkCount - left.rowLinkCount ||
+              right.delta - left.delta ||
+              right.scrollHeight - left.scrollHeight
+          );
+          const selected = probes.find((probe) => probe.score > 0 && probe.index >= 0) ?? null;
+          return {
+            triedSelectorCounts,
+            selected: selected
+              ? {
+                  selector: selected.selector,
+                  index: selected.index,
+                  score: selected.score
+                }
+              : null,
+            topCandidates: probes.slice(0, 12).map((probe) => ({
+              tag: probe.tag,
+              class: probe.class,
+              id: probe.id,
+              overflowY: probe.overflowY,
+              clientHeight: probe.clientHeight,
+              scrollHeight: probe.scrollHeight,
+              delta: probe.delta,
+              outerHtmlSample: probe.outerHtmlSample
+            }))
+          };
+        }, {
+          selectorCandidates: linkedInStreamingShellSelectors,
+          rowClickSelector: linkedInStreamingRowClickTargetSelector,
+          rowSignalSelector: linkedInStreamingListRootValidationSelector,
+          filterPillSelector: linkedInSmokeFilterPillSelector
+        })
+    }).catch(() => null);
+
+    if (!resolution?.selected?.selector || !Number.isFinite(resolution.selected.index)) {
+      return null;
+    }
+
+    const locator = page.locator(resolution.selected.selector).nth(resolution.selected.index);
+    const handle = await locator.elementHandle().catch(() => null);
+    if (!handle) {
+      return null;
+    }
+
+    return {
+      handle,
+      selector: resolution.selected.selector,
+      index: resolution.selected.index,
+      score: resolution.selected.score ?? 0,
+      mode: "selector",
+      triedSelectorCounts: resolution.triedSelectorCounts ?? {},
+      topCandidates: this.dedupeResolverNodeProbes((resolution.topCandidates ?? []) as LinkedInResolverNodeProbe[])
+    };
+  }
+
+  private async resolveConversationListRoot(
+    page: Page,
+    shell: ElementHandle<Element>
+  ): Promise<LinkedInResolverNodeResolution | null> {
+    type ListRootEvalInput = {
+      selectorCandidates: string[];
+      rowClickSelector: string;
+      rowSignalSelector: string;
+    };
+    type ListRootEvalResult = {
+      selected: { mode: "selector" | "fallback"; selector: string; index: number; score: number } | null;
+      triedSelectorCounts: Record<string, number>;
+      topCandidates: LinkedInResolverNodeProbe[];
+    };
+    const resolution = await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "resolve_list_root",
+      details: {
+        selectors: linkedInStreamingListRootSelectors
+      },
+      run: async () =>
+        shell.evaluate((shellNode: Element, input: ListRootEvalInput): ListRootEvalResult => {
+          const { selectorCandidates, rowClickSelector, rowSignalSelector } = input;
+          const toProbe = (node: Element) => {
+            const asElement = node as HTMLElement;
+            const style = window.getComputedStyle(asElement);
+            const clientHeight = Math.max(0, Math.floor(asElement.clientHeight || 0));
+            const scrollHeight = Math.max(clientHeight, Math.floor(asElement.scrollHeight || 0));
+            const delta = Math.max(0, scrollHeight - clientHeight);
+            return {
+              tag: asElement.tagName.toLowerCase(),
+              class: (asElement.className ?? "").toString().replace(/\s+/g, " ").trim(),
+              id: (asElement.id ?? "").trim(),
+              overflowY: (style.overflowY ?? "").toLowerCase(),
+              clientHeight,
+              scrollHeight,
+              delta,
+              outerHtmlSample: (asElement.outerHTML ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
+            };
+          };
+          const triedSelectorCounts: Record<string, number> = {};
+          const probes: Array<{
+            selector: string;
+            index: number;
+            score: number;
+            rowSignalCount: number;
+            probe: ReturnType<typeof toProbe>;
+          }> = [];
+
+          for (const selector of selectorCandidates) {
+            const nodes = Array.from(shellNode.querySelectorAll(selector));
+            triedSelectorCounts[selector] = nodes.length;
+            for (let index = 0; index < nodes.length; index += 1) {
+              const node = nodes[index];
+              if (!node) {
+                continue;
+              }
+              const rowSignalCount = node.querySelectorAll(rowSignalSelector).length;
+              if (rowSignalCount <= 0) {
+                continue;
+              }
+              const rowClickCount = node.querySelectorAll(rowClickSelector).length;
+              const role = (node.getAttribute("role") ?? "").toLowerCase();
+              const tag = node.tagName.toLowerCase();
+              const score =
+                (selector.includes("conversations-list") ? 5 : 0) +
+                (tag === "ul" ? 2 : 0) +
+                (role === "list" || role === "listbox" ? 2 : 0) +
+                (rowClickCount > 0 ? 2 : 0) +
+                Math.min(5, rowSignalCount);
+              probes.push({
+                selector,
+                index,
+                score,
+                rowSignalCount,
+                probe: toProbe(node)
+              });
+            }
+          }
+
+          probes.sort(
+            (left, right) =>
+              right.score - left.score ||
+              right.rowSignalCount - left.rowSignalCount ||
+              right.probe.delta - left.probe.delta
+          );
+          if (probes.length > 0) {
+            const selected = probes[0];
+            if (!selected) {
+              return {
+                selected: null,
+                triedSelectorCounts,
+                topCandidates: []
+              };
+            }
+            return {
+              selected: {
+                mode: "selector",
+                selector: selected.selector,
+                index: selected.index,
+                score: selected.score
+              },
+              triedSelectorCounts,
+              topCandidates: probes.slice(0, 12).map((entry) => entry.probe)
+            };
+          }
+
+          const fallbackSignal = shellNode.querySelector(rowSignalSelector) ?? shellNode.querySelector(rowClickSelector);
+          if (!fallbackSignal) {
+            return {
+              selected: null,
+              triedSelectorCounts,
+              topCandidates: []
+            };
+          }
+
+          const fallbackRoot =
+            fallbackSignal.closest(
+              "ul.msg-conversations-container__conversations-list, [class*='msg-conversations-container__conversations-list'], .msg-conversations-container, [data-test*='conversations'], [role='list'], [role='listbox']"
+            ) ??
+            fallbackSignal.parentElement ??
+            shellNode;
+          return {
+            selected: {
+              mode: "fallback",
+              selector: "__fallback__",
+              index: 0,
+              score: 1
+            },
+            triedSelectorCounts,
+            topCandidates: [toProbe(fallbackRoot)]
+          };
+        }, {
+          selectorCandidates: linkedInStreamingListRootSelectors,
+          rowClickSelector: linkedInStreamingRowClickTargetSelector,
+          rowSignalSelector: linkedInStreamingListRootValidationSelector
+        })
+    }).catch(() => null);
+
+    if (!resolution?.selected) {
+      return null;
+    }
+
+    let handle: ElementHandle<Element> | null = null;
+    if (resolution.selected.mode === "fallback") {
+      const fallbackHandle = await shell.evaluateHandle(
+        (
+          shellNode,
+          input: {
+            rowSignalSelector: string;
+            rowClickSelector: string;
+          }
+        ) => {
+          const fallbackSignal =
+            shellNode.querySelector(input.rowSignalSelector) ?? shellNode.querySelector(input.rowClickSelector);
+          if (!fallbackSignal) {
+            return null;
+          }
+          return (
+            fallbackSignal.closest(
+              "ul.msg-conversations-container__conversations-list, [class*='msg-conversations-container__conversations-list'], .msg-conversations-container, [data-test*='conversations'], [role='list'], [role='listbox']"
+            ) ??
+            fallbackSignal.parentElement ??
+            null
+          );
+        },
+        {
+          rowSignalSelector: linkedInStreamingListRootValidationSelector,
+          rowClickSelector: linkedInStreamingRowClickTargetSelector
+        }
+      );
+      handle = fallbackHandle.asElement();
+    } else {
+      const scopedHandle = await shell.evaluateHandle((shellNode, selected) => {
+        const nodes = Array.from(shellNode.querySelectorAll(selected.selector));
+        return (nodes[selected.index] as Element | undefined) ?? null;
+      }, resolution.selected);
+      handle = scopedHandle.asElement();
+    }
+
+    if (!handle) {
+      return null;
+    }
+
+    return {
+      handle,
+      selector: resolution.selected.selector,
+      index: resolution.selected.index,
+      score: resolution.selected.score ?? 0,
+      mode: resolution.selected.mode === "fallback" ? "fallback" : "selector",
+      triedSelectorCounts: resolution.triedSelectorCounts ?? {},
+      topCandidates: this.dedupeResolverNodeProbes((resolution.topCandidates ?? []) as LinkedInResolverNodeProbe[])
+    };
+  }
+
+  private async resolveScrollContainer(
+    listRoot: ElementHandle<Element>,
+    shell: ElementHandle<Element>
+  ): Promise<LinkedInScrollContainerResolution | null> {
+    type ScrollHeuristicInput = {
+      rowClickSelector: string;
+      rowSignalSelector: string;
+      wrapperHints: string[];
+    };
+    type ScrollHeuristicResult = {
+      selectedPath: string | null;
+      topCandidates: LinkedInResolverNodeProbe[];
+    };
+    const ancestorHandles: Array<ElementHandle<Element>> = [];
+    let cursor: ElementHandle<Element> | null = listRoot;
+    for (let depth = 0; depth < 16 && cursor; depth += 1) {
+      ancestorHandles.push(cursor);
+      cursor = (await cursor.evaluateHandle((node: Element) => node.parentElement as Element | null)).asElement();
+    }
+
+    const ancestorProbes: Array<{ handle: ElementHandle<Element>; probe: LinkedInResolverNodeProbe }> = [];
+    for (const handle of ancestorHandles) {
+      const probe = await this.probeResolverNodeHandle(handle).catch(() => null);
+      if (!probe) {
+        continue;
+      }
+      ancestorProbes.push({
+        handle,
+        probe
+      });
+    }
+
+    const withStandardOverflow = ancestorProbes.find(
+      (entry) => entry.probe.delta > 8 && /(auto|scroll)/i.test(entry.probe.overflowY)
+    );
+    if (withStandardOverflow) {
+      return {
+        handle: withStandardOverflow.handle,
+        mode: "ancestor_scrollable",
+        topCandidates: this.dedupeResolverNodeProbes(ancestorProbes.map((entry) => entry.probe))
+      };
+    }
+
+    const wrapperAncestor = ancestorProbes.find((entry) => {
+      const className = entry.probe.class.toLowerCase();
+      return linkedInStreamingWrapperClassHints.some((hint) => className.includes(hint)) && entry.probe.delta > 8;
+    });
+    if (wrapperAncestor) {
+      return {
+        handle: wrapperAncestor.handle,
+        mode: "wrapper_ancestor",
+        topCandidates: this.dedupeResolverNodeProbes(ancestorProbes.map((entry) => entry.probe))
+      };
+    }
+
+    const shellHeuristic = await shell
+      .evaluate((shellNode: Element, input: ScrollHeuristicInput): ScrollHeuristicResult => {
+        const { rowClickSelector, rowSignalSelector, wrapperHints } = input;
+        const toProbe = (node: Element) => {
+          const asElement = node as HTMLElement;
+          const style = window.getComputedStyle(asElement);
+          const clientHeight = Math.max(0, Math.floor(asElement.clientHeight || 0));
+          const scrollHeight = Math.max(clientHeight, Math.floor(asElement.scrollHeight || 0));
+          const delta = Math.max(0, scrollHeight - clientHeight);
+          return {
+            tag: asElement.tagName.toLowerCase(),
+            class: (asElement.className ?? "").toString().replace(/\s+/g, " ").trim(),
+            id: (asElement.id ?? "").trim(),
+            overflowY: (style.overflowY ?? "").toLowerCase(),
+            clientHeight,
+            scrollHeight,
+            delta,
+            outerHtmlSample: (asElement.outerHTML ?? "").replace(/\s+/g, " ").trim().slice(0, 200)
+          };
+        };
+        const toPath = (node: Element, scopeRoot: Element): string | null => {
+          const parts: string[] = [];
+          let cursor: Element | null = node;
+          while (cursor && cursor !== scopeRoot) {
+            const parent = cursor.parentElement as Element | null;
+            if (!parent) {
+              return null;
+            }
+            const index = Array.from(parent.children).indexOf(cursor);
+            if (index < 0) {
+              return null;
+            }
+            parts.push(`*:nth-child(${index + 1})`);
+            cursor = parent;
+          }
+          if (cursor !== scopeRoot) {
+            return null;
+          }
+          return parts.reverse().join(" > ");
+        };
+        const candidates = [shellNode, ...Array.from(shellNode.querySelectorAll("*"))];
+        const ranked: Array<{ path: string; score: number; probe: ReturnType<typeof toProbe> }> = [];
+        for (const node of candidates) {
+          const probe = toProbe(node);
+          const className = probe.class.toLowerCase();
+          const wrapperMatch = wrapperHints.some((hint) => className.includes(hint));
+          const hasRows =
+            node.querySelector(rowSignalSelector) !== null || node.querySelector(rowClickSelector) !== null;
+          const overflowMatch = /(auto|scroll)/i.test(probe.overflowY);
+          if (probe.delta <= 8) {
+            continue;
+          }
+          if (!(overflowMatch || wrapperMatch)) {
+            continue;
+          }
+          if (!hasRows) {
+            continue;
+          }
+          const path = toPath(node, shellNode);
+          if (!path) {
+            continue;
+          }
+          const score = probe.delta + (overflowMatch ? 50 : 0) + (wrapperMatch ? 10 : 0);
+          ranked.push({
+            path,
+            score,
+            probe
+          });
+        }
+        ranked.sort((left, right) => right.score - left.score);
+        return {
+          selectedPath: ranked[0]?.path ?? null,
+          topCandidates: ranked.slice(0, 12).map((entry) => entry.probe)
+        };
+      }, {
+        rowClickSelector: linkedInStreamingRowClickTargetSelector,
+        rowSignalSelector: linkedInStreamingListRootValidationSelector,
+        wrapperHints: linkedInStreamingWrapperClassHints
+      })
+      .catch(() => null);
+
+    if (shellHeuristic?.selectedPath) {
+      const heuristicHandle = await this.resolveElementByScopedPath(shell, shellHeuristic.selectedPath);
+      if (heuristicHandle) {
+        return {
+          handle: heuristicHandle,
+          mode: "shell_heuristic",
+          topCandidates: this.dedupeResolverNodeProbes(
+            ancestorProbes.map((entry) => entry.probe).concat(shellHeuristic.topCandidates as LinkedInResolverNodeProbe[])
+          )
+        };
+      }
+    }
+
+    const permissiveFallback = ancestorProbes.find((entry) => entry.probe.delta > 8);
+    if (permissiveFallback) {
+      return {
+        handle: permissiveFallback.handle,
+        mode: "nonstandard_overflow_fallback",
+        topCandidates: this.dedupeResolverNodeProbes(ancestorProbes.map((entry) => entry.probe))
+      };
+    }
+
+    return null;
+  }
+
+  private async detectStreamingBlocker(page: Page): Promise<LinkedInStreamingBlockerSignal | null> {
+    const selectorCandidates = [
+      ...linkedInSmokeBlockedModalSelectors,
+      ".artdeco-modal",
+      ".artdeco-modal-overlay",
+      "[role='dialog']",
+      "[aria-modal='true']",
+      ".msg-overlay-list-bubble--is-open"
+    ];
+    for (const selector of selectorCandidates) {
+      const locator = page.locator(selector);
+      const count = await locator.count().catch(() => 0);
+      for (let index = 0; index < Math.min(5, count); index += 1) {
+        const node = locator.nth(index);
+        const visible = await node.isVisible().catch(() => false);
+        if (!visible) {
+          continue;
+        }
+        const box = await node.boundingBox().catch(() => null);
+        if (!box || box.width < 180 || box.height < 120) {
+          continue;
+        }
+        const modalTextSnippet = cleanText(await node.innerText({ timeout: 0 }).catch(() => "")).slice(0, 200);
+        return {
+          reason: "blocked_by_modal",
+          signal: selector,
+          modalTextSnippet: modalTextSnippet || undefined
+        };
+      }
+    }
+
+    const bodyText = cleanText(await page.locator("body").innerText().catch(() => "")).toLowerCase();
+    const interstitialPatterns = [
+      "verify your identity",
+      "checkpoint",
+      "upgrade to premium",
+      "start free trial",
+      "continue to linkedin premium",
+      "confirm your account"
+    ];
+    const match = interstitialPatterns.find((pattern) => bodyText.includes(pattern));
+    if (!match) {
+      return null;
+    }
+
+    const dismissCount = await page
+      .locator("button:has-text('Dismiss'), button:has-text('Close'), button:has-text('Not now'), [aria-label='Dismiss']")
+      .count()
+      .catch(() => 0);
+    if (dismissCount <= 0) {
+      return null;
+    }
+    return {
+      reason: "blocked_by_modal",
+      signal: "interstitial_text_match",
+      modalTextSnippet: bodyText.slice(0, 200)
+    };
+  }
+
+  private async captureVisibleRowsForStreaming(
+    page: Page,
+    listRoot: ElementHandle<Element>
+  ): Promise<LinkedInVisibleRowSnapshot[]> {
+    const rawRows = await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "visible_rows_snapshot",
+      run: async () => this.snapshotStreamingRows(listRoot)
+    }).catch(() => [] as LinkedInStreamingRowRawSnapshot[]);
+
+    return this.mapStreamingRawRowsToSnapshots(rawRows, page.url());
+  }
+
+  private async snapshotStreamingRows(listRoot: ElementHandle<Element>): Promise<LinkedInStreamingRowRawSnapshot[]> {
+    type StreamingSnapshotEvalInput = {
+      rowRootSelector: string;
+      rowClickSelector: string;
+    };
+    return listRoot.evaluate((root: Element, input: StreamingSnapshotEvalInput) => {
+      const { rowRootSelector, rowClickSelector } = input;
+      const clean = (value: string | null | undefined): string =>
+        (value ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
+      const toPath = (node: Element, scopeRoot: Element): string | null => {
+        const parts: string[] = [];
+        let cursor: Element | null = node;
+        while (cursor && cursor !== scopeRoot) {
+          const parent = cursor.parentElement as Element | null;
+          if (!parent) {
+            return null;
+          }
+          const index = Array.from(parent.children).indexOf(cursor);
+          if (index < 0) {
+            return null;
+          }
+          parts.push(`*:nth-child(${index + 1})`);
+          cursor = parent;
+        }
+        if (cursor !== scopeRoot) {
+          return null;
+        }
+        return parts.reverse().join(" > ");
+      };
+      const rootRect = (root as HTMLElement).getBoundingClientRect();
+      const rowNodesFromListItems = Array.from(root.querySelectorAll("li.msg-conversation-listitem"));
+      const rowNodes = rowNodesFromListItems.length > 0 ? rowNodesFromListItems : Array.from(root.querySelectorAll(rowRootSelector));
+      const resolvedRows =
+        rowNodes.length > 0
+          ? rowNodes
+          : Array.from(root.querySelectorAll(rowClickSelector))
+              .map((entry) =>
+                entry.closest(
+                  "li.msg-conversation-listitem, div.msg-conversation-listitem, [data-control-name*='conversation_item'], [role='option'], [role='listitem']"
+                ) ?? entry
+              )
+              .filter((entry, index, all) => all.indexOf(entry) === index);
+
+      return resolvedRows
+        .map((row) => {
+          const rect = (row as HTMLElement).getBoundingClientRect();
+          const visible = rect.height > 1 && rect.bottom > rootRect.top && rect.top < rootRect.bottom;
+          if (!visible) {
+            return null;
+          }
+          const locatorPath = toPath(row, root);
+          if (!locatorPath) {
+            return null;
+          }
+          const readText = (selector: string): string => clean(row.querySelector(selector)?.textContent ?? "");
+          const readAttr = (name: string): string => clean((row as HTMLElement).getAttribute(name));
+          const linkNode = (row.querySelector(
+            "a.msg-conversation-card__conversation-link, div.msg-conversation-listitem__link a[href*='/messaging/'], a[href*='/messaging/thread/'], a[href*='/messaging/']"
+          ) ?? row.querySelector("a[href*='/messaging/']")) as HTMLAnchorElement | null;
+
+          return {
+            locatorPath,
+            id: readAttr("id"),
+            conversationUrn: readAttr("data-conversation-urn"),
+            urn: readAttr("data-urn"),
+            conversationId: readAttr("data-conversation-id"),
+            dataId: readAttr("data-id"),
+            controlId: readAttr("data-control-id"),
+            displayName:
+              readText(".msg-conversation-listitem__participant-names span.truncate") ||
+              readText(".msg-conversation-listitem__participant-names") ||
+              readText("h3 span.truncate") ||
+              readText("h3"),
+            previewSnippet:
+              readText(".msg-conversation-card__message-snippet") || readText("p.msg-conversation-card__message-snippet"),
+            listTimestamp: readText("time.msg-conversation-listitem__time-stamp") || readText("time"),
+            unreadText:
+              readText(".msg-conversation-card__unread-count .notification-badge__count") ||
+              readText(".msg-conversation-card__unread-count"),
+            unreadContainerPresent: row.querySelector(".msg-conversation-card__unread-count") !== null,
+            pillText: readText(".msg-conversation-card__pill"),
+            href: clean(linkNode?.getAttribute("href")),
+            activeKey:
+              readAttr("data-conversation-urn") ||
+              readAttr("data-urn") ||
+              readAttr("data-conversation-id") ||
+              readAttr("data-id") ||
+              readAttr("id")
+          };
+        })
+        .filter((entry) => Boolean(entry)) as LinkedInStreamingRowRawSnapshot[];
+    }, {
+      rowRootSelector: linkedInStreamingRowRootSelector,
+      rowClickSelector: linkedInStreamingRowClickTargetSelector
+    });
+  }
+
+  private mapStreamingRawRowsToSnapshots(
+    rawRows: LinkedInStreamingRowRawSnapshot[],
+    pageUrl: string
+  ): LinkedInVisibleRowSnapshot[] {
+    const snapshots: LinkedInVisibleRowSnapshot[] = [];
+    for (const row of rawRows) {
+      const unreadMatch = row.unreadText.match(/\d+/);
+      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : row.unreadContainerPresent ? 1 : 0;
+      const threadUrl = resolveSmokeThreadUrl(row.href ?? "", pageUrl);
+      const rowKey = resolveLinkedInRowKey({
+        id: row.id,
+        conversationUrn: row.conversationUrn,
+        urn: row.urn,
+        conversationId: row.conversationId,
+        dataId: row.dataId,
+        controlId: row.controlId,
+        displayName: row.displayName,
+        previewSnippet: row.previewSnippet,
+        listTimestamp: row.listTimestamp
+      });
+      snapshots.push({
+        rowKey,
+        displayName: cleanText(row.displayName),
+        previewSnippet: cleanText(row.previewSnippet),
+        listTimestamp: cleanText(row.listTimestamp),
+        unreadCount,
+        sponsored: isSponsoredPillText(row.pillText),
+        needsReplyFromList: needsReplyFromPreview(row.previewSnippet),
+        locatorPath: row.locatorPath,
+        href: row.href || undefined,
+        activeKey: row.activeKey || undefined,
+        threadUrl
+      });
+    }
+    return snapshots.filter((row) => Boolean(row.displayName));
+  }
+
+  private async findStreamingRowByKey(
+    listRoot: ElementHandle<Element>,
+    rowKey: string
+  ): Promise<{ locatorPath: string } | null> {
+    const rawRows = await this.snapshotStreamingRows(listRoot).catch(() => []);
+    for (const row of rawRows) {
+      const candidateRowKey = resolveLinkedInRowKey({
+        id: row.id,
+        conversationUrn: row.conversationUrn,
+        urn: row.urn,
+        conversationId: row.conversationId,
+        dataId: row.dataId,
+        controlId: row.controlId,
+        displayName: row.displayName,
+        previewSnippet: row.previewSnippet,
+        listTimestamp: row.listTimestamp
+      });
+      if (candidateRowKey !== rowKey) {
+        continue;
+      }
+      return {
+        locatorPath: row.locatorPath
+      };
+    }
+    return null;
+  }
+
+  private async triggerStreamingPointerFallback(target: ElementHandle<Element>): Promise<boolean> {
+    return target
+      .evaluate((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+        const dispatchMouse = (type: string, buttons: number) =>
+          node.dispatchEvent(
+            new MouseEvent(type, {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              button: 0,
+              buttons
+            })
+          );
+        if (typeof PointerEvent !== "undefined") {
+          node.dispatchEvent(
+            new PointerEvent("pointerdown", {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              button: 0,
+              buttons: 1,
+              pointerType: "mouse",
+              isPrimary: true
+            })
+          );
+        }
+        dispatchMouse("mousedown", 1);
+        if (typeof PointerEvent !== "undefined") {
+          node.dispatchEvent(
+            new PointerEvent("pointerup", {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              button: 0,
+              buttons: 0,
+              pointerType: "mouse",
+              isPrimary: true
+            })
+          );
+        }
+        dispatchMouse("mouseup", 0);
+        dispatchMouse("click", 0);
+        return true;
+      })
+      .catch(() => false);
+  }
+
+  private async triggerStreamingEnterFallback(target: ElementHandle<Element>): Promise<boolean> {
+    return target
+      .evaluate((node) => {
+        if (!(node instanceof HTMLElement)) {
+          return false;
+        }
+        const isFocusable =
+          node.tabIndex >= 0 ||
+          node.hasAttribute("tabindex") ||
+          /^(a|button|input|textarea|select)$/i.test(node.tagName);
+        if (!isFocusable) {
+          return false;
+        }
+        node.focus();
+        const events = ["keydown", "keypress", "keyup"] as const;
+        for (const eventName of events) {
+          node.dispatchEvent(
+            new KeyboardEvent(eventName, {
+              bubbles: true,
+              cancelable: true,
+              composed: true,
+              key: "Enter",
+              code: "Enter"
+            })
+          );
+        }
+        return true;
+      })
+      .catch(() => false);
+  }
+
+  private async tryClickStreamingTarget(target: ElementHandle<Element>): Promise<boolean> {
+    await target.scrollIntoViewIfNeeded().catch(() => undefined);
+    try {
+      await target.click({
+        timeout: 1_500,
+        trial: true
+      });
+      await target.click({
+        timeout: 2_500,
+        force: true
+      });
+      return true;
+    } catch {
+      // fall through to pointer/keyboard fallback
+    }
+
+    const pointerDispatched = await this.triggerStreamingPointerFallback(target);
+    if (pointerDispatched) {
+      return true;
+    }
+
+    return this.triggerStreamingEnterFallback(target);
+  }
+
+  private async openVisibleRowForStreaming(
+    page: Page,
+    selectors: SelectorRegistry,
+    listRoot: ElementHandle<Element>,
+    row: LinkedInVisibleRowSnapshot
+  ): Promise<{ ok: true; descriptor: ActiveThreadDescriptor } | { ok: false; reason: LinkedInStreamFailureReason }> {
+    const before = await this.getActiveThreadDescriptor(page, selectors);
+    const beforeMessageFingerprint = await this.getFirstVisibleMessageFingerprint(page, selectors);
+    const expectedRowUrlToken = this.extractThreadTokenFromUrlLike(row.threadUrl ?? row.href);
+    let missingAttempts = 0;
+    let clickAttempts = 0;
+    let clickFailures = 0;
+    let waitedForContainer = false;
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const pathCandidate =
+        attempt === 0 && row.locatorPath
+          ? {
+              locatorPath: row.locatorPath
+            }
+          : await this.findStreamingRowByKey(listRoot, row.rowKey);
+      if (!pathCandidate?.locatorPath) {
+        missingAttempts += 1;
+        await this.runTracedPageAction({
+          page,
+          stage: "open_thread",
+          action: "wait_for_timeout",
+          note: "row_not_mounted_wait",
+          details: {
+            rowKey: row.rowKey,
+            attempt: attempt + 1
+          },
+          run: async () => {
+            await page.waitForTimeout(160);
+          }
+        });
+        continue;
+      }
+
+      const rowHandle = await this.resolveElementByScopedPath(listRoot, pathCandidate.locatorPath);
+      if (!rowHandle) {
+        missingAttempts += 1;
+        await page.waitForTimeout(140).catch(() => undefined);
+        continue;
+      }
+
+      const candidateThreadToken = await this.extractCandidateRowToken(rowHandle, row);
+      const currentThreadToken = this.resolveCurrentActiveThreadToken(page);
+      const activeMarker = await this.isRowMarkedActive(rowHandle);
+      const tokenMatch =
+        Boolean(currentThreadToken) && Boolean(candidateThreadToken) && currentThreadToken === candidateThreadToken;
+      const allowActiveMarkerFallback = !currentThreadToken && !candidateThreadToken;
+      const alreadyActiveCandidate =
+        tokenMatch ||
+        (allowActiveMarkerFallback
+          ? activeMarker
+          : false);
+
+      if (alreadyActiveCandidate) {
+        const alreadyActiveHydrated = await this.waitForStreamingThreadHydration({
+          page,
+          selectors,
+          beforeFingerprint: beforeMessageFingerprint,
+          beforeDescriptor: before,
+          expectedUrlToken: expectedRowUrlToken,
+          alreadyActiveCandidate: true,
+          candidateThreadToken,
+          candidateDisplayName: row.displayName,
+          timeoutMs: 1_500,
+          rowKey: row.rowKey
+        });
+        if (alreadyActiveHydrated) {
+          this.logTraceDecision({
+            stage: "open_thread",
+            decision: "Streaming row already active and hydrated; skipping click",
+            details: {
+              rowKey: row.rowKey,
+              displayName: row.displayName,
+              tokenMatch,
+              allowActiveMarkerFallback,
+              activeMarker,
+              candidateThreadToken,
+              currentThreadToken
+            }
+          });
+          return {
+            ok: true,
+            descriptor: await this.getActiveThreadDescriptor(page, selectors)
+          };
+        }
+      }
+
+      const clickTargets: Array<ElementHandle<Element>> = [];
+      const pushClickTarget = (target: ElementHandle<Element> | null | undefined): void => {
+        if (!target) {
+          return;
+        }
+        if (clickTargets.includes(target)) {
+          return;
+        }
+        clickTargets.push(target);
+      };
+      pushClickTarget(await rowHandle.$("div.msg-conversation-listitem__link"));
+      pushClickTarget(await rowHandle.$("a.msg-conversation-card__conversation-link"));
+      pushClickTarget(await rowHandle.$("[data-control-name*='conversation_item']"));
+      const rowListItemHandle = await rowHandle
+        .evaluateHandle((node) =>
+          node.matches("li.msg-conversation-listitem")
+            ? node
+            : node.closest("li.msg-conversation-listitem")
+        )
+        .then((handle) => handle.asElement())
+        .catch(() => null);
+      pushClickTarget(rowListItemHandle ?? rowHandle);
+
+      clickAttempts += 1;
+      const clicked = await this.runTracedPageAction({
+        page,
+        stage: "open_thread",
+        action: "click",
+        selector: linkedInStreamingRowClickTargetSelector,
+        note: "stream_open_visible_row",
+        details: {
+          rowKey: row.rowKey,
+          displayName: row.displayName,
+          attempt: attempt + 1,
+          clickTargetCount: clickTargets.length
+        },
+        run: async (): Promise<boolean> => {
+          for (const clickTarget of clickTargets) {
+            const clickedTarget = await this.tryClickStreamingTarget(clickTarget);
+            if (clickedTarget) {
+              return true;
+            }
+          }
+          return false;
+        }
+      }).catch(() => false);
+      if (!clicked) {
+        clickFailures += 1;
+        await this.runTracedPageAction({
+          page,
+          stage: "open_thread",
+          action: "wait_for_timeout",
+          note: "row_click_failed_wait",
+          details: {
+            rowKey: row.rowKey,
+            attempt: attempt + 1
+          },
+          run: async () => {
+            await page.waitForTimeout(140);
+          }
+        });
+        continue;
+      }
+
+      waitedForContainer = true;
+      const containerReady = await page
+        .waitForSelector(selectors.message_container, {
+          state: "visible",
+          timeout: 8_000
+        })
+        .then(() => true)
+        .catch(() => false);
+      if (!containerReady) {
+        continue;
+      }
+
+      const hydrated = await this.waitForStreamingThreadHydration({
+        page,
+        selectors,
+        beforeFingerprint: beforeMessageFingerprint,
+        beforeDescriptor: before,
+        expectedUrlToken: expectedRowUrlToken,
+        alreadyActiveCandidate: false,
+        candidateThreadToken,
+        candidateDisplayName: row.displayName,
+        timeoutMs: 3_000,
+        rowKey: row.rowKey
+      });
+      if (!hydrated) {
+        await this.runTracedPageAction({
+          page,
+          stage: "open_thread",
+          action: "wait_for_timeout",
+          note: "stream_activation_retry_wait",
+          details: {
+            rowKey: row.rowKey,
+            attempt: attempt + 1
+          },
+          run: async () => {
+            await page.waitForTimeout(180);
+          }
+        });
+        continue;
+      }
+
+      return {
+        ok: true,
+        descriptor: await this.getActiveThreadDescriptor(page, selectors)
+      };
+    }
+
+    if (clickAttempts <= 0 && missingAttempts > 0) {
+      return {
+        ok: false,
+        reason: missingAttempts === 1 ? "row_not_mounted" : "row_not_found_after_scroll"
+      };
+    }
+    if (clickFailures > 0 && clickFailures === clickAttempts) {
+      return {
+        ok: false,
+        reason: "open_click_failed"
+      };
+    }
+    if (waitedForContainer) {
+      return {
+        ok: false,
+        reason: "message_container_not_ready"
+      };
+    }
+    return {
+      ok: false,
+      reason: "activation_mismatch"
+    };
+  }
+
+  private async collectVisibleThreadMessages(
+    page: Page,
+    selectors: SelectorRegistry,
+    limit: number
+  ): Promise<LinkedInMessageSnapshot[]> {
+    const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+    const readText = async (locator: Locator): Promise<string | null> => {
+      const first = locator.first();
+      if ((await first.count().catch(() => 0)) <= 0) {
+        return null;
+      }
+      return first.innerText({ timeout: 0 }).catch(() => null);
+    };
+    const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
+      const first = locator.first();
+      if ((await first.count().catch(() => 0)) <= 0) {
+        return null;
+      }
+      return first.getAttribute(name, { timeout: 0 }).catch(() => null);
+    };
+    const readMessageKey = async (root: Locator, index: number): Promise<string> =>
+      (await readAttr(root, "data-event-urn")) ??
+      (await readAttr(root, "data-id")) ??
+      (await readAttr(root, "id")) ??
+      `li-msg-${index}`;
+
+    const messageNodes = page.locator(selectors.message_item);
+    const count = await messageNodes.count().catch(() => 0);
+    const parsed: LinkedInMessageSnapshot[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const root = messageNodes.nth(index);
+      const bubbleCount = await root.locator(".msg-s-event-listitem__message-bubble").count().catch(() => 0);
+      if (bubbleCount <= 0) {
+        continue;
+      }
+      const className = (await readAttr(root, "class")) ?? "";
+      const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
+      const attachmentCount = await root
+        .locator("img, video, svg, a[download], a[href*='attachment']")
+        .count()
+        .catch(() => 0);
+      const rawBodyText = clean((await readText(root.locator(selectors.message_text).first())) ?? "");
+      const text = rawBodyText || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
+      const senderName = clean(
+        (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??
+          (await readText(root.locator(".msg-s-message-group__name").first())) ??
+          ""
+      );
+      const timeLocator = root.locator("time").first();
+      const timestamp = clean((await readAttr(timeLocator, "datetime")) ?? (await readText(timeLocator)) ?? "");
+      const platformMessageKey = await readMessageKey(root, index);
+      parsed.push({
+        platformMessageKey,
+        direction: inbound ? "IN" : "OUT",
+        timestamp,
+        text,
+        senderName: senderName || undefined,
+        raw: {
+          className,
+          hasTime: Boolean(timestamp),
+          attachmentCount
+        },
+        attachments: attachmentCount
+          ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
+          : []
+      });
+    }
+
+    if (parsed.length <= limit) {
+      return parsed;
+    }
+    return parsed.slice(parsed.length - limit);
+  }
+
+  private async scrollStreamingListContainer(
+    page: Page,
+    scrollContainer: ElementHandle<Element>,
+    mode: LinkedInScrollContainerResolution["mode"]
+  ): Promise<{ before: number; after: number; clientHeight: number; scrollHeight: number; moved: boolean }> {
+    const result = await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "scroll_container",
+      selector: "stream_scroll_container",
+      note: "stream_scroll",
+      details: {
+        ratio: 0.78,
+        mode
+      },
+      run: async () =>
+        scrollContainer.evaluate((root) => {
+          const node = root as HTMLElement;
+          const before = node.scrollTop;
+          const clientHeight = Math.max(1, Math.floor(node.clientHeight));
+          const scrollHeight = Math.max(clientHeight, Math.floor(node.scrollHeight));
+          const delta = Math.max(1, Math.floor(clientHeight * 0.78));
+          node.scrollTop = before + delta;
+          return {
+            before,
+            after: node.scrollTop,
+            clientHeight,
+            scrollHeight,
+            moved: node.scrollTop !== before
+          };
+        })
+    });
+    return result;
+  }
+
+  private async writeStreamingResolverFailureArtifacts(input: {
+    page: Page;
+    requestId: string;
+    reason: string;
+    listRootFound: boolean;
+    scrollContainerFound: boolean;
+    shellTriedSelectors: Record<string, number>;
+    listRootTriedSelectors: Record<string, number>;
+    topCandidates: LinkedInResolverNodeProbe[];
+    selectedPath?: Record<string, unknown>;
+    blocker?: LinkedInStreamingBlockerSignal | null;
+    rowSignalCounts?: Record<string, number>;
+    effectiveSelectors?: Pick<SelectorRegistry, "thread_list" | "thread_item">;
+    shellSummary?: LinkedInResolverNodeProbe | null;
+    listRootSource?: "heuristic_shell" | "selector_shell" | "selector_global" | null;
+    selectorScopeCounts?: {
+      global: LinkedInSelectorScopeCounts;
+      shell: LinkedInSelectorScopeCounts | null;
+    } | null;
+  }): Promise<{ diagnosticsJsonPath?: string; screenshotPath?: string; domPath?: string }> {
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const diagnosticsJsonPath = join(
+      this.runLogger?.enabled && this.runLogger.runDir ? this.runLogger.runDir : this.deps.domDumpDir,
+      `linkedin-streaming-resolver-${stamp}.json`
+    );
+    const screenshotPath = join(this.deps.screenshotDir, `linkedin-streaming-resolver-${stamp}.png`);
+    const domPath = join(this.deps.domDumpDir, `linkedin-streaming-resolver-${stamp}.html`);
+
+    const payload = {
+      generatedAt: new Date().toISOString(),
+      requestId: input.requestId,
+      reason: input.reason,
+      url: input.page.url(),
+      title: cleanText(await input.page.title().catch(() => "")),
+      listRootFound: input.listRootFound,
+      scrollContainerFound: input.scrollContainerFound,
+      blocker: input.blocker
+        ? {
+            reason: input.blocker.reason,
+            signal: input.blocker.signal,
+            modalTextSnippet: input.blocker.modalTextSnippet ?? null
+          }
+        : null,
+      triedSelectors: {
+        shell: input.shellTriedSelectors,
+        listRoot: input.listRootTriedSelectors,
+        rowRoots: linkedInStreamingRowRootSelectors,
+        rowClickTargets: linkedInStreamingRowClickTargetSelectors
+      },
+      rowSignalCounts: input.rowSignalCounts ?? null,
+      effectiveSelectors: input.effectiveSelectors ?? null,
+      shellSummary: input.shellSummary ?? null,
+      listRootSource: input.listRootSource ?? null,
+      selectorScopeCounts: input.selectorScopeCounts ?? null,
+      routeContext: input.page.url().includes("/messaging/thread/")
+        ? "thread_route"
+        : input.page.url().includes("/messaging/")
+          ? "messaging_route"
+          : "other",
+      selectedPath: input.selectedPath ?? null,
+      topCandidates: this.dedupeResolverNodeProbes(input.topCandidates)
+    };
+
+    let savedDiagnostics: string | undefined;
+    try {
+      await writeFile(diagnosticsJsonPath, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+      savedDiagnostics = diagnosticsJsonPath;
+    } catch {
+      savedDiagnostics = undefined;
+    }
+
+    let savedScreenshot: string | undefined;
+    try {
+      await this.tracedScreenshot(input.page, screenshotPath, {
+        stage: "collect_threads",
+        note: "streaming_resolver_failure"
+      });
+      savedScreenshot = screenshotPath;
+    } catch {
+      savedScreenshot = undefined;
+    }
+
+    let savedDom: string | undefined;
+    try {
+      await this.tracedDomDump(input.page, domPath, {
+        stage: "collect_threads",
+        note: "streaming_resolver_failure"
+      });
+      savedDom = domPath;
+    } catch {
+      savedDom = undefined;
+    }
+
+    if (this.runLogger?.enabled) {
+      this.runLogger.copyFailureArtifacts({
+        screenshotPath: savedScreenshot,
+        domDumpPath: savedDom
+      });
+    }
+
+    return {
+      diagnosticsJsonPath: savedDiagnostics,
+      screenshotPath: savedScreenshot,
+      domPath: savedDom
+    };
+  }
+
+  async scanInboxThreadsStream(options: LinkedInStreamScanOptions): Promise<LinkedInStreamScanMetrics> {
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.navigateInbox(selectors);
+      const stopRunTracing = await this.startRunTracing(page);
+      const metrics: LinkedInStreamScanMetrics = {
+        stopReason: "max_iterations",
+        iterations: 0,
+        scrollIterations: 0,
+        processedRows: 0,
+        actionableRows: 0,
+        openedRows: 0,
+        skippedRows: 0,
+        failures: 0
+      };
+
+      const maxThreads = Math.max(1, options.maxThreads ?? this.deps.scanMaxThreads);
+      const maxOpens = Math.max(1, options.maxOpens ?? maxThreads);
+      const maxIterations = Math.max(20, Math.min(140, maxThreads * 4));
+      const maxDurationMs = 60_000;
+      const processedRowKeys = new Set<string>();
+      const startedAt = Date.now();
+
+      let noNewRowKeysStreak = 0;
+      let scrollTopStagnantStreak = 0;
+      let shellResolution: LinkedInResolverNodeResolution | null = null;
+      let listRootResolution: LinkedInResolverNodeResolution | null = null;
+      let scrollResolution: LinkedInScrollContainerResolution | null = null;
+      let listRootSource: "heuristic_shell" | "selector_shell" | "selector_global" | null = null;
+      let shellRebased = false;
+      let rebaseMode: "lca" | "skipped" | null = null;
+      const resolverCandidateProbes: LinkedInResolverNodeProbe[] = [];
+
+      this.activeStage = "collect_threads";
+      try {
+        await this.throwIfAuthRequired(page, "scanInboxThreadsStream:navigation");
+        let readiness:
+          | { ready: boolean; empty: boolean; reason?: LinkedInScanFailureReason | LinkedInCollectionStopReason }
+          | null = null;
+        try {
+          readiness = await this.waitForThreadListReadyOrClassified(page, selectors, 3_500);
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error);
+          if (/Timed out waiting for LinkedIn thread list container to become ready/i.test(message)) {
+            this.logTraceDecision({
+              stage: "collect_threads",
+              level: "warn",
+              decision: "Legacy thread-list readiness timed out; continuing with streaming hydration gate",
+              details: {
+                reason: "thread_list_not_ready",
+                message
+              }
+            });
+          } else {
+            throw error;
+          }
+        }
+        if (readiness && !readiness.ready) {
+          if (readiness.reason === "blocked_by_modal") {
+            const blocker = await this.detectStreamingBlocker(page);
+            const artifacts = await this.writeStreamingResolverFailureArtifacts({
+              page,
+              requestId: options.requestId,
+              reason: "blocked_by_modal",
+              listRootFound: false,
+              scrollContainerFound: false,
+              shellTriedSelectors: {},
+              listRootTriedSelectors: {},
+              topCandidates: [],
+              blocker
+            });
+            throw await toStageFailure({
+              platform: this.platform,
+              stage: "collect_threads",
+              message: "LinkedIn streaming scan blocked by modal/interstitial.",
+              action: "streaming-resolver",
+              error: new Error("blocked_by_modal"),
+              kind: "SELECTOR_MISMATCH",
+              page,
+              screenshotDir: this.deps.screenshotDir,
+              domDumpDir: this.deps.domDumpDir,
+              details: {
+                reason: "blocked_by_modal",
+                diagnosticsJsonPath: artifacts.diagnosticsJsonPath ?? null
+              }
+            });
+          }
+          throw new Error(`LinkedIn thread list is not ready for stream scan (${readiness.reason ?? "unknown"}).`);
+        }
+        await this.ensureAllFilterActive(page);
+        const shellReadiness = await this.waitForMessagingShellReady(page);
+        if (!shellReadiness.ready || shellReadiness.signal === "main_text_messaging") {
+          this.logTraceDecision({
+            stage: "collect_threads",
+            level: "warn",
+            decision: "Messaging shell guard is weak/not-ready; hydration gate will decide resolver readiness",
+            details: {
+              timeoutMs: 4_000,
+              signal: shellReadiness.signal ?? null
+            }
+          });
+        } else {
+          this.logTraceDecision({
+            stage: "collect_threads",
+            decision: "Messaging shell guard ready before resolver",
+            details: {
+              signal: shellReadiness.signal ?? null
+            }
+          });
+        }
+
+        const hydration = await this.waitForThreadListHydratedOrEmptyOrBlocked(page, selectors, 10_000);
+        if (hydration.status === "blocked_by_modal") {
+          const artifacts = await this.writeStreamingResolverFailureArtifacts({
+            page,
+            requestId: options.requestId,
+            reason: "blocked_by_modal",
+            listRootFound: false,
+            scrollContainerFound: false,
+            shellTriedSelectors: {},
+            listRootTriedSelectors: {},
+            topCandidates: [],
+            blocker: hydration.blocker,
+            rowSignalCounts: hydration.rowSignalCounts,
+            effectiveSelectors: {
+              thread_list: selectors.thread_list,
+              thread_item: selectors.thread_item
+            }
+          });
+          throw await toStageFailure({
+            platform: this.platform,
+            stage: "collect_threads",
+            message: "LinkedIn streaming scan blocked by modal/interstitial.",
+            action: "streaming-resolver",
+            error: new Error("blocked_by_modal"),
+            kind: "SELECTOR_MISMATCH",
+            page,
+            screenshotDir: this.deps.screenshotDir,
+            domDumpDir: this.deps.domDumpDir,
+            details: {
+              reason: "blocked_by_modal",
+              diagnosticsJsonPath: artifacts.diagnosticsJsonPath ?? null
+            }
+          });
+        }
+        if (hydration.status === "empty_inbox") {
+          metrics.stopReason = "zero_threads_found";
+          this.lastCollectionMetrics = {
+            totalFound: 0,
+            unreadFound: 0,
+            iterations: 0,
+            stopReason: metrics.stopReason
+          };
+          this.logTraceDecision({
+            stage: "collect_threads",
+            decision: "LinkedIn streaming collection ended with empty inbox before resolver",
+            details: {
+              stopReason: metrics.stopReason,
+              rowSignalCounts: hydration.rowSignalCounts
+            }
+          });
+          return metrics;
+        }
+        if (hydration.status === "list_hydration_timeout") {
+          const artifacts = await this.writeStreamingResolverFailureArtifacts({
+            page,
+            requestId: options.requestId,
+            reason: "list_hydration_timeout",
+            listRootFound: false,
+            scrollContainerFound: false,
+            shellTriedSelectors: {},
+            listRootTriedSelectors: {},
+            topCandidates: [],
+            rowSignalCounts: hydration.rowSignalCounts,
+            effectiveSelectors: {
+              thread_list: selectors.thread_list,
+              thread_item: selectors.thread_item
+            }
+          });
+          throw await toStageFailure({
+            platform: this.platform,
+            stage: "collect_threads",
+            message: "LinkedIn streaming scan timed out waiting for list hydration.",
+            action: "streaming-resolver",
+            error: new Error("list_hydration_timeout"),
+            kind: "SELECTOR_MISMATCH",
+            page,
+            screenshotDir: this.deps.screenshotDir,
+            domDumpDir: this.deps.domDumpDir,
+            details: {
+              reason: "list_hydration_timeout",
+              diagnosticsJsonPath: artifacts.diagnosticsJsonPath ?? null
+            }
+          });
+        }
+
+        const blocker = await this.detectStreamingBlocker(page);
+        if (blocker) {
+          const artifacts = await this.writeStreamingResolverFailureArtifacts({
+            page,
+            requestId: options.requestId,
+            reason: "blocked_by_modal",
+            listRootFound: false,
+            scrollContainerFound: false,
+            shellTriedSelectors: {},
+            listRootTriedSelectors: {},
+            topCandidates: [],
+            blocker,
+            rowSignalCounts: hydration.rowSignalCounts,
+            effectiveSelectors: {
+              thread_list: selectors.thread_list,
+              thread_item: selectors.thread_item
+            }
+          });
+          const line = `[LI][SCAN][req=${options.requestId}][collect_threads] listRootFound=false scrollContainerFound=false reason=blocked_by_modal url=${page.url()} title=${cleanText(await page.title().catch(() => ""))}`;
+          options.runLogger?.headline({
+            platform: "LI",
+            requestId: options.requestId,
+            stage: "collect_threads",
+            message: line
+          });
+          this.logTraceDecision({
+            stage: "collect_threads",
+            level: "error",
+            decision: line,
+            details: {
+              reason: blocker.reason,
+              signal: blocker.signal,
+              modalTextSnippet: blocker.modalTextSnippet ?? null,
+              artifacts
+            }
+          });
+          throw await toStageFailure({
+            platform: this.platform,
+            stage: "collect_threads",
+            message: "LinkedIn streaming scan blocked by modal/interstitial.",
+            action: "streaming-resolver",
+            error: new Error("blocked_by_modal"),
+            kind: "SELECTOR_MISMATCH",
+            page,
+            screenshotDir: this.deps.screenshotDir,
+            domDumpDir: this.deps.domDumpDir,
+            details: {
+              reason: blocker.reason,
+              signal: blocker.signal,
+              modalTextSnippet: blocker.modalTextSnippet ?? null,
+              diagnosticsJsonPath: artifacts.diagnosticsJsonPath ?? null
+            }
+          });
+        }
+
+        shellResolution = await this.resolveMessagingShell(page);
+        if (shellResolution) {
+          resolverCandidateProbes.push(...shellResolution.topCandidates);
+        }
+
+        listRootResolution = shellResolution ? await this.resolveConversationListRoot(page, shellResolution.handle) : null;
+        if (listRootResolution) {
+          listRootSource = "heuristic_shell";
+          resolverCandidateProbes.push(...listRootResolution.topCandidates);
+        } else if (shellResolution) {
+          for (let retry = 0; retry < 3; retry += 1) {
+            await page.waitForTimeout(180).catch(() => undefined);
+            const retriedResolution = await this.resolveConversationListRoot(page, shellResolution.handle).catch(() => null);
+            if (!retriedResolution) {
+              continue;
+            }
+            listRootResolution = retriedResolution;
+            listRootSource = "heuristic_shell";
+            resolverCandidateProbes.push(...retriedResolution.topCandidates);
+            this.logTraceDecision({
+              stage: "collect_threads",
+              decision: "Resolved list root after bounded retry",
+              details: {
+                retryAttempt: retry + 1,
+                selector: retriedResolution.selector
+              }
+            });
+            break;
+          }
+        }
+
+        if (!listRootResolution && shellResolution) {
+          const selectorShellResolution = await this.resolveConversationListRootFromConfiguredSelector(
+            page,
+            selectors,
+            shellResolution.handle
+          );
+          if (selectorShellResolution) {
+            listRootResolution = selectorShellResolution;
+            listRootSource = "selector_shell";
+            resolverCandidateProbes.push(...selectorShellResolution.topCandidates);
+          }
+        }
+
+        if (!listRootResolution) {
+          const selectorGlobalResolution = await this.resolveConversationListRootFromConfiguredSelector(page, selectors, null);
+          if (selectorGlobalResolution) {
+            listRootResolution = selectorGlobalResolution;
+            listRootSource = "selector_global";
+            resolverCandidateProbes.push(...selectorGlobalResolution.topCandidates);
+
+            const messagePaneHandle = await page.locator(selectors.message_container).first().elementHandle().catch(() => null);
+            if (messagePaneHandle) {
+              const lcaShell = await this.findLowestCommonAncestor(selectorGlobalResolution.handle, messagePaneHandle);
+              if (lcaShell) {
+                const lcaSummary = await this.describeResolverHandle(lcaShell);
+                shellResolution = {
+                  handle: lcaShell,
+                  selector: "__lca__",
+                  index: 0,
+                  score: lcaSummary?.delta ?? 0,
+                  mode: "fallback",
+                  triedSelectorCounts: shellResolution?.triedSelectorCounts ?? {},
+                  topCandidates: this.dedupeResolverNodeProbes(
+                    (shellResolution?.topCandidates ?? []).concat(lcaSummary ? [lcaSummary] : [])
+                  )
+                };
+                shellRebased = true;
+                rebaseMode = "lca";
+              } else {
+                rebaseMode = "skipped";
+              }
+            } else {
+              rebaseMode = "skipped";
+            }
+          }
+        }
+
+        if (!listRootResolution) {
+          const revealResult = await this.tryRevealConversationListFromNarrowLayout({
+            page,
+            selectors,
+            shell: shellResolution?.handle ?? null
+          });
+          if (revealResult.attempted) {
+            this.logTraceDecision({
+              stage: "collect_threads",
+              decision: "Narrow layout reveal attempt before resolver failure",
+              details: {
+                revealed: revealResult.revealed,
+                selector: revealResult.selector ?? null,
+                globalRowSignals: revealResult.globalRowSignals,
+                shellRowSignalCount: revealResult.shellRowSignalCount
+              }
+            });
+          }
+          if (revealResult.revealed) {
+            if (shellResolution) {
+              listRootResolution = await this.resolveConversationListRoot(page, shellResolution.handle);
+              if (listRootResolution) {
+                listRootSource = "heuristic_shell";
+                resolverCandidateProbes.push(...listRootResolution.topCandidates);
+              }
+            }
+            if (!listRootResolution) {
+              const selectorRetryResolution = await this.resolveConversationListRootFromConfiguredSelector(
+                page,
+                selectors,
+                shellResolution?.handle ?? null
+              );
+              if (selectorRetryResolution) {
+                listRootResolution = selectorRetryResolution;
+                listRootSource = shellResolution ? "selector_shell" : "selector_global";
+                resolverCandidateProbes.push(...selectorRetryResolution.topCandidates);
+              }
+            }
+            if (!listRootResolution) {
+              const selectorRetryGlobal = await this.resolveConversationListRootFromConfiguredSelector(page, selectors, null);
+              if (selectorRetryGlobal) {
+                listRootResolution = selectorRetryGlobal;
+                listRootSource = "selector_global";
+                resolverCandidateProbes.push(...selectorRetryGlobal.topCandidates);
+              }
+            }
+          }
+        }
+
+        const shellForScroll = shellResolution?.handle ?? listRootResolution?.handle ?? null;
+        scrollResolution =
+          listRootResolution && shellForScroll
+            ? await this.resolveScrollContainer(listRootResolution.handle, shellForScroll)
+            : null;
+        if (scrollResolution) {
+          resolverCandidateProbes.push(...scrollResolution.topCandidates);
+        }
+
+        const selectorScopeCounts = await this.collectScopeCounts({
+          page,
+          selectors,
+          shell: shellResolution?.handle ?? null
+        });
+        const shellSummary = shellResolution ? await this.describeResolverHandle(shellResolution.handle) : null;
+
+        const resolverReason = !listRootResolution
+          ? "list_root_not_found"
+          : !scrollResolution
+            ? "no_scroll_container"
+            : "ok";
+        const resolverLine = `[LI][SCAN][req=${options.requestId}][collect_threads] listRootFound=${Boolean(listRootResolution)} scrollContainerFound=${Boolean(scrollResolution)} reason=${resolverReason} listRootSource=${listRootSource ?? "none"} shellRebased=${shellRebased} rebaseMode=${rebaseMode ?? "none"} url=${page.url()} title=${cleanText(await page.title().catch(() => ""))}`;
+        options.runLogger?.headline({
+          platform: "LI",
+          requestId: options.requestId,
+          stage: "collect_threads",
+          message: resolverLine
+        });
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: resolverLine,
+          details: {
+            shellSelector: shellResolution?.selector ?? null,
+            listRootSelector: listRootResolution?.selector ?? null,
+            scrollResolutionMode: scrollResolution?.mode ?? null,
+            listRootSource,
+            shellRebased,
+            rebaseMode,
+            selectorScopeCounts,
+            shellSummary
+          }
+        });
+
+        if (!listRootResolution) {
+          const artifacts = await this.writeStreamingResolverFailureArtifacts({
+            page,
+            requestId: options.requestId,
+            reason: "list_root_not_found",
+            listRootFound: false,
+            scrollContainerFound: Boolean(scrollResolution),
+            shellTriedSelectors: shellResolution?.triedSelectorCounts ?? {},
+            listRootTriedSelectors: {},
+            topCandidates: resolverCandidateProbes,
+            rowSignalCounts: hydration.rowSignalCounts,
+            effectiveSelectors: {
+              thread_list: selectors.thread_list,
+              thread_item: selectors.thread_item
+            },
+            shellSummary,
+            listRootSource,
+            selectorScopeCounts,
+            selectedPath: {
+              shellSelector: shellResolution?.selector ?? null,
+              listRootSelector: null,
+              scrollMode: scrollResolution?.mode ?? null,
+              shellRebased,
+              rebaseMode
+            }
+          });
+          throw await toStageFailure({
+            platform: this.platform,
+            stage: "collect_threads",
+            message: "LinkedIn streaming scan could not resolve a conversation list root.",
+            action: "streaming-resolver",
+            error: new Error("list_root_not_found"),
+            kind: "SELECTOR_MISMATCH",
+            page,
+            screenshotDir: this.deps.screenshotDir,
+            domDumpDir: this.deps.domDumpDir,
+            details: {
+              reason: "list_root_not_found",
+              diagnosticsJsonPath: artifacts.diagnosticsJsonPath ?? null,
+              shellSelector: shellResolution?.selector ?? null
+            }
+          });
+        }
+
+        const processVisibleRowsOnce = async (): Promise<{
+          visibleRowCount: number;
+          newRowsSeen: number;
+          bottomRowKey: string | null;
+        }> => {
+          const visibleRows = await this.captureVisibleRowsForStreaming(page, listRootResolution!.handle).catch(() => []);
+          const currentBottomRowKey = visibleRows.at(-1)?.rowKey ?? null;
+          let newRowsSeen = 0;
+
+          for (const row of visibleRows) {
+            if (processedRowKeys.has(row.rowKey)) {
+              continue;
+            }
+            processedRowKeys.add(row.rowKey);
+            newRowsSeen += 1;
+            metrics.processedRows += 1;
+
+            const candidateSignals: LinkedInStreamCandidateSignals = {
+              rowKey: row.rowKey,
+              displayName: row.displayName,
+              unreadCount: row.unreadCount,
+              needsReplyFromList: row.needsReplyFromList,
+              sponsored: row.sponsored
+            };
+            this.logTraceEvent({
+              stage: "collect_threads",
+              action: "stream_row_seen",
+              details: {
+                ...candidateSignals
+              },
+              page
+            });
+
+            if (row.sponsored) {
+              metrics.skippedRows += 1;
+              continue;
+            }
+
+            const actionable = row.unreadCount > 0 || row.needsReplyFromList;
+            if (!actionable) {
+              continue;
+            }
+            metrics.actionableRows += 1;
+
+            if (metrics.openedRows >= maxOpens) {
+              metrics.stopReason = "max_threads";
+              break;
+            }
+
+            const openResult = await this.openVisibleRowForStreaming(page, selectors, listRootResolution!.handle, row);
+            if (!openResult.ok) {
+              metrics.failures += 1;
+              metrics.skippedRows += 1;
+              this.logTraceDecision({
+                stage: "open_thread",
+                level: "warn",
+                decision: "Skipping stream candidate after open failure",
+                details: {
+                  rowKey: row.rowKey,
+                  displayName: row.displayName,
+                  reason: openResult.reason
+                }
+              });
+              continue;
+            }
+
+            const canonicalFromUrl = normalizeCanonicalLinkedInThreadId({
+              threadUrl: openResult.descriptor.threadUrl ?? page.url()
+            });
+            const canonicalFromActiveKey = normalizeCanonicalLinkedInThreadId({
+              activeKey: openResult.descriptor.activeKey ?? row.activeKey
+            });
+            const canonicalPlatformThreadId = canonicalFromUrl ?? canonicalFromActiveKey;
+            const identitySource = canonicalFromUrl ? "thread_url" : canonicalFromActiveKey ? "active_key" : "none";
+            if (!canonicalPlatformThreadId) {
+              metrics.failures += 1;
+              metrics.skippedRows += 1;
+              this.logTraceDecision({
+                stage: "persist",
+                level: "warn",
+                decision: "Skipping stream candidate due to unresolved canonical identity after open",
+                details: {
+                  rowKey: row.rowKey,
+                  displayName: row.displayName,
+                  reason: "unresolved_thread_id_after_open",
+                  identitySource
+                }
+              });
+              continue;
+            }
+
+            const parsedMessages = await this.collectVisibleThreadMessages(page, selectors, 120);
+            const baseTimestamp = Date.now() - parsedMessages.length * 1_000;
+            const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message, index) => ({
+              ...message,
+              direction: message.direction === "IN" ? "IN" : "OUT",
+              timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+              text: cleanText(message.text),
+              senderName: message.senderName,
+              raw: message.raw
+            }));
+
+            const thread: ThreadStub = {
+              platformThreadId: canonicalPlatformThreadId,
+              displayName: openResult.descriptor.displayName ?? row.displayName,
+              unreadCount: row.unreadCount,
+              lastMessagePreview: row.previewSnippet || cleanText(normalizedMessages.at(-1)?.text ?? ""),
+              lastMessageAt: row.listTimestamp || undefined,
+              threadUrl: openResult.descriptor.threadUrl ?? page.url(),
+              needsReplyFromList: row.needsReplyFromList,
+              isUnreadCandidate: true
+            };
+
+            this.logTraceEvent({
+              stage: "read_thread",
+              action: "stream_candidate_opened",
+              details: {
+                rowKey: row.rowKey,
+                displayName: row.displayName,
+                canonicalPlatformThreadId,
+                identitySource,
+                parsedMessages: normalizedMessages.length
+              },
+              page
+            });
+
+            await options.onThreadCandidate({
+              rowKey: row.rowKey,
+              thread,
+              messages: normalizedMessages
+            });
+            metrics.openedRows += 1;
+          }
+
+          return {
+            visibleRowCount: visibleRows.length,
+            newRowsSeen,
+            bottomRowKey: currentBottomRowKey
+          };
+        };
+
+        while (metrics.iterations < maxIterations) {
+          if (Date.now() - startedAt >= maxDurationMs) {
+            metrics.stopReason = "max_duration";
+            break;
+          }
+
+          metrics.iterations += 1;
+          const rowPass = await processVisibleRowsOnce();
+
+          if (metrics.stopReason === "max_threads") {
+            break;
+          }
+          if (metrics.processedRows >= maxThreads) {
+            metrics.stopReason = "max_threads";
+            break;
+          }
+
+          noNewRowKeysStreak = rowPass.newRowsSeen > 0 ? 0 : noNewRowKeysStreak + 1;
+          if (!scrollResolution) {
+            metrics.stopReason = "no_scroll_container";
+            this.logTraceEvent({
+              stage: "collect_threads",
+              action: "stream_scroll_iteration",
+              details: {
+                iteration: metrics.iterations,
+                scrollTopBefore: null,
+                scrollTopAfter: null,
+                visibleRowCount: rowPass.visibleRowCount,
+                newRowsSeen: rowPass.newRowsSeen,
+                noNewRowKeysStreak,
+                scrollTopStagnantStreak,
+                stopReason: metrics.stopReason
+              },
+              page
+            });
+            break;
+          }
+
+          const scrollMetrics = await this.scrollStreamingListContainer(page, scrollResolution.handle, scrollResolution.mode)
+            .then((result) => result)
+            .catch(() => null);
+          metrics.scrollIterations += 1;
+
+          const moved = Boolean(scrollMetrics?.moved);
+          scrollTopStagnantStreak = moved ? 0 : scrollTopStagnantStreak + 1;
+          const shouldAttemptReresolve = !moved || metrics.scrollIterations % 5 === 0;
+          if (shouldAttemptReresolve && shellResolution && listRootResolution) {
+            const refreshedScroll = await this.resolveScrollContainer(listRootResolution.handle, shellResolution.handle).catch(
+              () => null
+            );
+            if (refreshedScroll) {
+              scrollResolution = refreshedScroll;
+              resolverCandidateProbes.push(...refreshedScroll.topCandidates);
+              this.logTraceDecision({
+                stage: "collect_threads",
+                decision: "Re-resolved streaming scroll container",
+                details: {
+                  iteration: metrics.iterations,
+                  reason: moved ? "periodic_refresh" : "scroll_stall",
+                  mode: refreshedScroll.mode
+                }
+              });
+            }
+          }
+
+          this.logTraceEvent({
+            stage: "collect_threads",
+            action: "stream_scroll_iteration",
+            details: {
+              iteration: metrics.iterations,
+              scrollTopBefore: scrollMetrics?.before ?? null,
+              scrollTopAfter: scrollMetrics?.after ?? null,
+              clientHeight: scrollMetrics?.clientHeight ?? null,
+              scrollHeight: scrollMetrics?.scrollHeight ?? null,
+              visibleRowCount: rowPass.visibleRowCount,
+              newRowsSeen: rowPass.newRowsSeen,
+              noNewRowKeysStreak,
+              scrollTopStagnantStreak,
+              bottomRowKey: rowPass.bottomRowKey,
+              scrollResolutionMode: scrollResolution.mode
+            },
+            page
+          });
+
+          if (noNewRowKeysStreak >= 3 || scrollTopStagnantStreak >= 2) {
+            metrics.stopReason = "end_of_list_no_progress";
+            break;
+          }
+
+          await this.runTracedPageAction({
+            page,
+            stage: "collect_threads",
+            action: "wait_for_timeout",
+            note: "stream_post_scroll_wait",
+            details: {
+              delayMs: Math.max(80, this.deps.scanScrollWaitMs)
+            },
+            run: async () => {
+              await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
+            }
+          });
+        }
+
+        if (metrics.processedRows <= 0 && metrics.stopReason === "max_iterations") {
+          metrics.stopReason = "zero_threads_found";
+        }
+
+        this.lastCollectionMetrics = {
+          totalFound: metrics.processedRows,
+          unreadFound: metrics.actionableRows,
+          iterations: metrics.iterations,
+          stopReason: metrics.stopReason
+        };
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Completed LinkedIn streaming collection",
+          details: {
+            ...metrics
+          }
+        });
+        return metrics;
+      } finally {
+        this.activeStage = null;
+        await stopRunTracing();
+      }
+    });
+  }
+
   private async getActiveThreadDescriptor(page: Page, selectors: SelectorRegistry): Promise<ActiveThreadDescriptor> {
     const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
     const readText = async (locator: Locator): Promise<string | null> => {
@@ -3251,18 +6396,20 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
 
     const primaryActive = page
-      .locator("li.msg-conversation-listitem .msg-conversations-container__convo-item-link--active")
+      .locator(".msg-conversation-listitem .msg-conversations-container__convo-item-link--active")
       .first();
     const fallbackActive = page
-      .locator("li.msg-conversation-listitem .msg-conversation-listitem__link--active")
+      .locator(".msg-conversation-listitem .msg-conversation-listitem__link--active")
       .first();
     const activeNode = ((await primaryActive.count().catch(() => 0)) > 0 ? primaryActive : fallbackActive).first();
 
-    const activeRowCandidate = activeNode.locator("xpath=ancestor::li[contains(@class,'msg-conversation-listitem')]").first();
+    const activeRowCandidate = activeNode
+      .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-conversation-listitem ')][1]")
+      .first();
     const activeRow =
       (await activeRowCandidate.count().catch(() => 0)) > 0
         ? activeRowCandidate
-        : page.locator("li.msg-conversation-listitem").first();
+        : page.locator(".msg-conversation-listitem").first();
     const activeRowExists = (await activeRow.count().catch(() => 0)) > 0;
     const scope = activeRowExists ? activeRow : activeNode;
 

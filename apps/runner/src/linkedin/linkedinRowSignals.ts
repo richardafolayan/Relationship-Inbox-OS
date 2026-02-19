@@ -15,5 +15,10 @@ export function needsReplyFromPreview(preview: string): boolean {
   if (!normalized || normalized === "-") {
     return false;
   }
-  return !isPreviewFromMe(normalized);
+  if (isPreviewFromMe(normalized)) {
+    return false;
+  }
+
+  // LinkedIn list snippets usually include "<Name>:" when last message is inbound.
+  return /^[^:]{1,120}:\s*\S/.test(normalized);
 }

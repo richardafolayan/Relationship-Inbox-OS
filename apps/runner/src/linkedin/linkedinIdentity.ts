@@ -154,13 +154,19 @@ export function buildTemporaryCandidateId(input: {
   displayName: string;
   preview: string;
   listTimestamp: string;
-  rowIndex: number;
+  rowIndex?: number;
 }): string {
-  const signature = [
-    clean(input.displayName).toLowerCase(),
-    clean(input.preview).toLowerCase(),
-    clean(input.listTimestamp).toLowerCase(),
-    String(input.rowIndex)
-  ].join("|");
-  return `linkedin-temp:${input.rowIndex}:${hashText(signature)}`;
+  const displayName = clean(input.displayName).toLowerCase();
+  const preview = clean(input.preview).toLowerCase();
+  const timestampSalt = clean(input.listTimestamp).toLowerCase();
+  const baseParts = [displayName, preview].filter((entry) => entry.length > 0);
+  let signature = baseParts.join("|");
+  if (!signature && timestampSalt) {
+    signature = `ts:${timestampSalt}`;
+  } else if (baseParts.length === 1 && timestampSalt) {
+    signature = `${baseParts[0]}|ts:${timestampSalt}`;
+  } else if (!signature) {
+    signature = "missing-temp-candidate";
+  }
+  return `linkedin-temp:${hashText(signature)}`;
 }

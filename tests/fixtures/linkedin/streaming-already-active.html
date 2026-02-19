@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming already active fixture</title>
+    <style>
+      body { margin: 12px; font-family: Arial, sans-serif; }
+      .layout { display: grid; grid-template-columns: 420px 1fr; gap: 12px; }
+      .msg-conversations-container { border: 1px solid #cbd5e1; padding: 8px; }
+      .msg-conversations-container__conversations-list { list-style: none; margin: 0; padding: 0; }
+      .msg-conversation-listitem { border-bottom: 1px solid #e2e8f0; }
+      .msg-conversation-listitem__link { display: block; min-height: 72px; padding: 8px; }
+      .msg-s-message-list { min-height: 180px; border: 1px solid #d1d5db; padding: 8px; }
+    </style>
+  </head>
+  <body>
+    <div style="display:flex; gap:8px; margin-bottom:8px;">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+    </div>
+
+    <main class="scaffold-layout__main">
+      <div class="layout">
+        <section class="msg-conversations-container msg__messaging-container">
+          <ul class="msg-conversations-container__conversations-list" role="list">
+            <li class="msg-conversation-listitem" id="ember-active-one" data-conversation-urn="urn:li:msg_thread:active-one">
+              <div class="msg-conversation-listitem__link msg-conversation-listitem__link--active msg-conversations-container__convo-item-link--active" tabindex="0" aria-current="true">
+                <a href="https://www.linkedin.com/messaging/thread/active-one/">open</a>
+                <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Already Active</span></h3>
+                <p class="msg-conversation-card__message-snippet">You: already replied</p>
+                <time class="msg-conversation-listitem__time-stamp">6:10 AM</time>
+                <div class="msg-conversation-card__unread-count"><span class="notification-badge__count">1</span></div>
+              </div>
+            </li>
+            <li class="msg-conversation-listitem" id="ember-active-two" data-conversation-urn="urn:li:msg_thread:active-two">
+              <div class="msg-conversation-listitem__link" tabindex="0">
+                <a href="https://www.linkedin.com/messaging/thread/active-two/">open</a>
+                <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">Second Thread</span></h3>
+                <p class="msg-conversation-card__message-snippet">You: follow up done</p>
+                <time class="msg-conversation-listitem__time-stamp">6:14 AM</time>
+              </div>
+            </li>
+          </ul>
+        </section>
+        <section>
+          <h3 id="active-title">Already Active</h3>
+          <div id="message-container" class="msg-s-message-list">
+            <div class="msg-s-event-listitem msg-s-event-listitem--other" data-event-urn="active-one-msg-1">
+              <div class="msg-s-event-listitem__message-bubble">
+                <p class="msg-s-event-listitem__body">already active thread message</p>
+              </div>
+              <time datetime="2026-02-18T09:10:00.000Z">2026-02-18T09:10:00.000Z</time>
+            </div>
+          </div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      (() => {
+        window.__alreadyActiveFixtureMetrics = { activeClickCount: 0 };
+        try {
+          history.replaceState({}, "", "/messaging/thread/active-one/");
+        } catch {
+          window.location.hash = "#/messaging/thread/active-one/";
+        }
+        const firstLink = document.querySelector("#ember-active-one .msg-conversation-listitem__link");
+        if (firstLink) {
+          firstLink.addEventListener("click", (event) => {
+            event.preventDefault();
+            window.__alreadyActiveFixtureMetrics.activeClickCount += 1;
+          });
+        }
+      })();
+    </script>
+  </body>
+</html>
