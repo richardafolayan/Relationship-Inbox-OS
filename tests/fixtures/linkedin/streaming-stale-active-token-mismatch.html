@@ -3,6 +3,9 @@
   <head>
     <meta charset="utf-8" />
     <title>LinkedIn streaming stale active token mismatch fixture</title>
+    <script>
+      window.location.hash = "#/messaging/thread/live-two/";
+    </script>
     <style>
       body { margin: 12px; font-family: Arial, sans-serif; }
       .layout { display: grid; grid-template-columns: 420px 1fr; gap: 12px; }
@@ -58,11 +61,6 @@
     <script>
       (() => {
         window.__staleActiveFixtureMetrics = { staleRowClickCount: 0 };
-        try {
-          history.replaceState({}, "", "/messaging/thread/live-two/");
-        } catch {
-          window.location.hash = "#/messaging/thread/live-two/";
-        }
         const staleRow = document.getElementById("ember-stale-one");
         const staleLink = staleRow?.querySelector(".msg-conversation-listitem__link");
         const liveRow = document.getElementById("ember-live-two");

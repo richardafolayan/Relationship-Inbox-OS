@@ -4505,8 +4505,9 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async resolveConversationListRoot(
     page: Page,
-    shell: ElementHandle<Element>
-  ): Promise<LinkedInResolverNodeResolution | null> {
+    shell: ElementHandle<Element>,
+    selectors: SelectorRegistry
+  ): Promise<{ resolution: LinkedInResolverNodeResolution; usedGlobalFallback: boolean } | null> {
     type ListRootEvalInput = {
       selectorCandidates: string[];
       rowClickSelector: string;
@@ -4644,6 +4645,45 @@ export class LinkedInAdapter implements PlatformAdapter {
     }).catch(() => null);
 
     if (!resolution?.selected) {
+      const globalFallback = await page
+        .evaluate(
+          (input: {
+            threadListSel: string;
+            threadItemSel: string;
+            rowSignalSel: string;
+          }) => {
+            const list = document.querySelector(input.threadListSel);
+            if (!list) return null;
+            const itemCount = list.querySelectorAll(input.threadItemSel).length;
+            const signalCount = list.querySelectorAll(input.rowSignalSel).length;
+            if (itemCount <= 0 && signalCount <= 0) return null;
+            return { found: true };
+          },
+          {
+            threadListSel: selectors.thread_list,
+            threadItemSel: selectors.thread_item,
+            rowSignalSel: linkedInStreamingListRootValidationSelector
+          }
+        )
+        .catch(() => null);
+      if (globalFallback?.found) {
+        const handle = await page.locator(selectors.thread_list).first().elementHandle().catch(() => null);
+        if (handle) {
+          const probe = await this.describeResolverHandle(handle).catch(() => null);
+          return {
+            resolution: {
+              handle,
+              selector: selectors.thread_list,
+              index: 0,
+              score: probe?.delta ?? 0,
+              mode: "selector",
+              triedSelectorCounts: { [selectors.thread_list]: 1 },
+              topCandidates: probe ? this.dedupeResolverNodeProbes([probe]) : []
+            },
+            usedGlobalFallback: true
+          };
+        }
+      }
       return null;
     }
 
@@ -4689,13 +4729,16 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
 
     return {
-      handle,
-      selector: resolution.selected.selector,
-      index: resolution.selected.index,
-      score: resolution.selected.score ?? 0,
-      mode: resolution.selected.mode === "fallback" ? "fallback" : "selector",
-      triedSelectorCounts: resolution.triedSelectorCounts ?? {},
-      topCandidates: this.dedupeResolverNodeProbes((resolution.topCandidates ?? []) as LinkedInResolverNodeProbe[])
+      resolution: {
+        handle,
+        selector: resolution.selected.selector,
+        index: resolution.selected.index,
+        score: resolution.selected.score ?? 0,
+        mode: resolution.selected.mode === "fallback" ? "fallback" : "selector",
+        triedSelectorCounts: resolution.triedSelectorCounts ?? {},
+        topCandidates: this.dedupeResolverNodeProbes((resolution.topCandidates ?? []) as LinkedInResolverNodeProbe[])
+      },
+      usedGlobalFallback: false
     };
   }
 
@@ -5551,7 +5594,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     rowSignalCounts?: Record<string, number>;
     effectiveSelectors?: Pick<SelectorRegistry, "thread_list" | "thread_item">;
     shellSummary?: LinkedInResolverNodeProbe | null;
-    listRootSource?: "heuristic_shell" | "selector_shell" | "selector_global" | null;
+    listRootSource?: "heuristic_shell" | "heuristic_global" | "selector_shell" | "selector_global" | null;
     selectorScopeCounts?: {
       global: LinkedInSelectorScopeCounts;
       shell: LinkedInSelectorScopeCounts | null;
@@ -5591,6 +5634,10 @@ export class LinkedInAdapter implements PlatformAdapter {
       shellSummary: input.shellSummary ?? null,
       listRootSource: input.listRootSource ?? null,
       selectorScopeCounts: input.selectorScopeCounts ?? null,
+      thread_list_count_global: input.selectorScopeCounts?.global?.threadList ?? null,
+      thread_list_count_in_shell: input.selectorScopeCounts?.shell?.threadList ?? null,
+      thread_item_count_global: input.selectorScopeCounts?.global?.threadItem ?? null,
+      thread_item_count_in_shell: input.selectorScopeCounts?.shell?.threadItem ?? null,
       routeContext: input.page.url().includes("/messaging/thread/")
         ? "thread_route"
         : input.page.url().includes("/messaging/")
@@ -5672,7 +5719,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       let shellResolution: LinkedInResolverNodeResolution | null = null;
       let listRootResolution: LinkedInResolverNodeResolution | null = null;
       let scrollResolution: LinkedInScrollContainerResolution | null = null;
-      let listRootSource: "heuristic_shell" | "selector_shell" | "selector_global" | null = null;
+      let listRootSource: "heuristic_shell" | "heuristic_global" | "selector_shell" | "selector_global" | null = null;
       let shellRebased = false;
       let rebaseMode: "lca" | "skipped" | null = null;
       const resolverCandidateProbes: LinkedInResolverNodeProbe[] = [];
@@ -5900,26 +5947,75 @@ export class LinkedInAdapter implements PlatformAdapter {
           resolverCandidateProbes.push(...shellResolution.topCandidates);
         }
 
-        listRootResolution = shellResolution ? await this.resolveConversationListRoot(page, shellResolution.handle) : null;
+        const listRootResult = shellResolution
+          ? await this.resolveConversationListRoot(page, shellResolution.handle, selectors)
+          : null;
+        listRootResolution = listRootResult?.resolution ?? null;
         if (listRootResolution) {
-          listRootSource = "heuristic_shell";
+          listRootSource = listRootResult?.usedGlobalFallback ? "heuristic_global" : "heuristic_shell";
           resolverCandidateProbes.push(...listRootResolution.topCandidates);
+          if (listRootResult?.usedGlobalFallback) {
+            const messagePaneHandle = await page.locator(selectors.message_container).first().elementHandle().catch(() => null);
+            if (messagePaneHandle && listRootResolution) {
+              const lcaShell = await this.findLowestCommonAncestor(listRootResolution.handle, messagePaneHandle);
+              if (lcaShell) {
+                const lcaSummary = await this.describeResolverHandle(lcaShell);
+                shellResolution = {
+                  handle: lcaShell,
+                  selector: "__lca__",
+                  index: 0,
+                  score: lcaSummary?.delta ?? 0,
+                  mode: "fallback",
+                  triedSelectorCounts: shellResolution?.triedSelectorCounts ?? {},
+                  topCandidates: this.dedupeResolverNodeProbes(
+                    (shellResolution?.topCandidates ?? []).concat(lcaSummary ? [lcaSummary] : [])
+                  )
+                };
+                shellRebased = true;
+                rebaseMode = "lca";
+              }
+            }
+          }
         } else if (shellResolution) {
           for (let retry = 0; retry < 3; retry += 1) {
             await page.waitForTimeout(180).catch(() => undefined);
-            const retriedResolution = await this.resolveConversationListRoot(page, shellResolution.handle).catch(() => null);
-            if (!retriedResolution) {
+            const retriedResult = await this.resolveConversationListRoot(page, shellResolution.handle, selectors).catch(
+              () => null
+            );
+            if (!retriedResult?.resolution) {
               continue;
             }
-            listRootResolution = retriedResolution;
-            listRootSource = "heuristic_shell";
-            resolverCandidateProbes.push(...retriedResolution.topCandidates);
+            listRootResolution = retriedResult.resolution;
+            listRootSource = retriedResult.usedGlobalFallback ? "heuristic_global" : "heuristic_shell";
+            resolverCandidateProbes.push(...listRootResolution.topCandidates);
+            if (retriedResult.usedGlobalFallback) {
+              const messagePaneHandle = await page.locator(selectors.message_container).first().elementHandle().catch(() => null);
+              if (messagePaneHandle && listRootResolution) {
+                const lcaShell = await this.findLowestCommonAncestor(listRootResolution.handle, messagePaneHandle);
+                if (lcaShell) {
+                  const lcaSummary = await this.describeResolverHandle(lcaShell);
+                  shellResolution = {
+                    handle: lcaShell,
+                    selector: "__lca__",
+                    index: 0,
+                    score: lcaSummary?.delta ?? 0,
+                    mode: "fallback",
+                    triedSelectorCounts: shellResolution?.triedSelectorCounts ?? {},
+                    topCandidates: this.dedupeResolverNodeProbes(
+                      (shellResolution?.topCandidates ?? []).concat(lcaSummary ? [lcaSummary] : [])
+                    )
+                  };
+                  shellRebased = true;
+                  rebaseMode = "lca";
+                }
+              }
+            }
             this.logTraceDecision({
               stage: "collect_threads",
               decision: "Resolved list root after bounded retry",
               details: {
                 retryAttempt: retry + 1,
-                selector: retriedResolution.selector
+                selector: listRootResolution.selector
               }
             });
             break;
@@ -5993,10 +6089,44 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
           if (revealResult.revealed) {
             if (shellResolution) {
-              listRootResolution = await this.resolveConversationListRoot(page, shellResolution.handle);
+              const revealListResult = await this.resolveConversationListRoot(
+                page,
+                shellResolution.handle,
+                selectors
+              );
+              listRootResolution = revealListResult?.resolution ?? null;
               if (listRootResolution) {
-                listRootSource = "heuristic_shell";
+                listRootSource = revealListResult?.usedGlobalFallback ? "heuristic_global" : "heuristic_shell";
                 resolverCandidateProbes.push(...listRootResolution.topCandidates);
+                if (revealListResult?.usedGlobalFallback) {
+                  const messagePaneHandle = await page
+                    .locator(selectors.message_container)
+                    .first()
+                    .elementHandle()
+                    .catch(() => null);
+                  if (messagePaneHandle && listRootResolution) {
+                    const lcaShell = await this.findLowestCommonAncestor(
+                      listRootResolution.handle,
+                      messagePaneHandle
+                    );
+                    if (lcaShell) {
+                      const lcaSummary = await this.describeResolverHandle(lcaShell);
+                      shellResolution = {
+                        handle: lcaShell,
+                        selector: "__lca__",
+                        index: 0,
+                        score: lcaSummary?.delta ?? 0,
+                        mode: "fallback",
+                        triedSelectorCounts: shellResolution?.triedSelectorCounts ?? {},
+                        topCandidates: this.dedupeResolverNodeProbes(
+                          (shellResolution?.topCandidates ?? []).concat(lcaSummary ? [lcaSummary] : [])
+                        )
+                      };
+                      shellRebased = true;
+                      rebaseMode = "lca";
+                    }
+                  }
+                }
               }
             }
             if (!listRootResolution) {

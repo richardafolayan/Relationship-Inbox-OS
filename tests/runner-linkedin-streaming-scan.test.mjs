@@ -23,6 +23,7 @@ function selectorsForInbox(inboxUrl) {
 async function createFixture(options = {}) {
   const fixtureName = options.fixtureName ?? "streaming-virtualized.html";
   const selectorOverrides = options.selectorOverrides ?? {};
+  const urlHash = options.urlHash ?? "";
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
@@ -39,7 +40,7 @@ async function createFixture(options = {}) {
   const domDumpDir = await mkdtemp(join(tmpdir(), "linkedin-stream-dom-"));
   const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", fixtureName);
   const html = await readFile(fixturePath, "utf8");
-  const inboxUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
+  const inboxUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}${urlHash ? (urlHash.startsWith("#") ? urlHash : `#${urlHash}`) : ""}`;
 
   const adapter = new LinkedInAdapter({
     screenshotDir,
@@ -376,7 +377,8 @@ test("LinkedIn streaming scan classifies blocked modal failures and emits resolv
 
 test("LinkedIn streaming scan treats token-matched already-active row as hydrated success without activation mismatch", async (t) => {
   const fixture = await createFixture({
-    fixtureName: "streaming-already-active.html"
+    fixtureName: "streaming-already-active.html",
+    urlHash: "#/messaging/thread/active-one/"
   });
   if (fixture.skipped) {
     t.skip(fixture.reason);
@@ -402,7 +404,8 @@ test("LinkedIn streaming scan treats token-matched already-active row as hydrate
 
 test("LinkedIn streaming scan does not trust stale active class when token mismatches", async (t) => {
   const fixture = await createFixture({
-    fixtureName: "streaming-stale-active-token-mismatch.html"
+    fixtureName: "streaming-stale-active-token-mismatch.html",
+    urlHash: "#/messaging/thread/live-two/"
   });
   if (fixture.skipped) {
     t.skip(fixture.reason);
@@ -423,9 +426,15 @@ test("LinkedIn streaming scan does not trust stale active class when token misma
   });
 
   const staleEntry = collected.find((entry) => entry.thread.displayName === "Stale Active");
+  const fixtureMetrics = await fixture.page.evaluate(() => window.__staleActiveFixtureMetrics ?? null);
+  if (!staleEntry || (fixtureMetrics?.staleRowClickCount ?? 0) < 1) {
+    console.error("stale test debug:", {
+      collected: collected.map((c) => c.thread.displayName),
+      staleRowClickCount: fixtureMetrics?.staleRowClickCount
+    });
+  }
   assert.equal(Boolean(staleEntry), true);
   assert.equal(staleEntry?.thread.platformThreadId, "stale-one");
-  const fixtureMetrics = await fixture.page.evaluate(() => window.__staleActiveFixtureMetrics ?? null);
   assert.equal((fixtureMetrics?.staleRowClickCount ?? 0) >= 1, true);
 });
 
