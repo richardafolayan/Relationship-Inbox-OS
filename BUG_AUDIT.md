@@ -371,6 +371,35 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
 6. `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
 
+### BUG-019: LinkedIn smoke navigate failed early with `messaging_shell_not_ready` when LinkedIn landed on thread URL
+- Symptom:
+1. `npm run linkedin:smoke` failed in stage `navigate` with reason `messaging_shell_not_ready`.
+2. Live sessions often landed on `/messaging/thread/<id>/?filter=unread` with messaging UI visible, but smoke still failed before unread activation.
+- Repro steps:
+1. Open LinkedIn messaging where URL resolves to `/messaging/thread/<id>/?filter=unread`.
+2. Run `npm run linkedin:smoke`.
+3. Observe early navigate failure before unread/list ingest flow.
+- Root cause:
+1. Navigate readiness was a one-shot selector check and included redirect-correction behavior that treated thread-route landing as problematic.
+2. Readiness criteria were too brittle for SPA hydration timing and route variants.
+- Fix:
+1. Added DOM-based shell readiness helper (`isLinkedInMessagingShellReady`) that accepts either root messaging or thread messaging route when left panel/list row signals are present.
+2. Removed hard corrective redirect behavior and switched to bounded multi-phase navigate wait (15s, polling).
+3. Added explicit navigate-state classifier (`login_required`, `checkpoint_required`, `blocked_by_modal`) for early, specific failures.
+4. Added navigate diagnostics artifacts on navigate failure:
+   - `navigate-probe.json`
+   - `navigate-failure.png`
+   - `dom.html`
+5. Added high-signal terminal/pretty log line:
+   - `[LI][SMOKE][req=...][navigate] url=... title=... ready=false counts={...} reason=...`
+6. Added fixture/tests for thread-route shell readiness and navigate-state classification paths.
+- Files changed:
+1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
+2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
+3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`
+4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`
+5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
+
 ## Final Changed Files by Bug ID
 
 - BUG-001: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/utils.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
@@ -391,3 +420,4 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 - BUG-016: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-retry-controller.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-collect-threads-no-name-error.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-deep-scroll-terminates.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-no-string-evaluate.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-scan-retry-circuit-breaker.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-page-closed-mid-stage-reason.test.mjs`
 - BUG-017: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/run-logger.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-logger.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/cli.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/.env.example`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
 - BUG-018: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
+- BUG-019: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`

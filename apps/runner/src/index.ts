@@ -1478,6 +1478,7 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
         message: string;
         details?: Record<string, unknown>;
       }) => void | Promise<void>;
+      logLine?: (line: string) => Promise<void>;
       maxMessages?: number;
     }) => Promise<LinkedInSmokeIngestResult>;
   };
@@ -1490,6 +1491,7 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
         requestId,
         logDir,
         maxMessages: settings.maxMessagesPerThread,
+        logLine: (line) => smokeLogger.logLine(line),
         logStep: (stepInput) => smokeLogger.logStep(stepInput),
         persist: async (persistInput) =>
           scanQueue.syncThreadForIngest({

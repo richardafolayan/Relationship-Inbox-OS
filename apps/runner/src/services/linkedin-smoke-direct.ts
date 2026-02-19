@@ -156,6 +156,7 @@ export async function runLinkedInSmokeDirect(): Promise<LinkedInSmokeResponse> {
         message: string;
         details?: Record<string, unknown>;
       }) => void | Promise<void>;
+      logLine?: (line: string) => Promise<void>;
       maxMessages?: number;
     }) => Promise<LinkedInSmokeIngestResult>;
   };
@@ -168,6 +169,7 @@ export async function runLinkedInSmokeDirect(): Promise<LinkedInSmokeResponse> {
         requestId,
         logDir,
         maxMessages: settings.maxMessagesPerThread,
+        logLine: (line) => smokeLogger.logLine(line),
         logStep: (stepInput) => smokeLogger.logStep(stepInput),
         persist: async (persistInput) =>
           scanQueue.syncThreadForIngest({

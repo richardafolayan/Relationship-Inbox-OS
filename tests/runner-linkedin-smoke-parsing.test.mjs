@@ -4,10 +4,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
 import {
+  classifyLinkedInSmokeNavigateState,
   classifyLinkedInSmokeUnreadOutcome,
   discoverLinkedInUnreadRows,
   extractLinkedInSmokeFirstThreadRow,
-  extractLinkedInSmokeMessages
+  extractLinkedInSmokeMessages,
+  isLinkedInMessagingShellReady
 } from "../apps/runner/dist/platforms/linkedin-adapter.js";
 
 async function withPlaywrightPage(t, run) {
@@ -125,4 +127,78 @@ test("LinkedIn smoke classifier handles empty, mismatch, and ingest states", () 
     }).outcome,
     "INGEST"
   );
+});
+
+test("LinkedIn smoke shell readiness accepts messaging thread URL when DOM shell is present", async (t) => {
+  await withPlaywrightPage(t, async (page) => {
+    const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", "smoke-thread-shell.html");
+    const fixture = await readFile(fixturePath, "utf8");
+    await page.route("**/messaging/thread/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: fixture
+      })
+    );
+    await page.goto("https://www.linkedin.com/messaging/thread/test-thread/?filter=unread", {
+      waitUntil: "domcontentloaded"
+    });
+
+    const readiness = await isLinkedInMessagingShellReady(page);
+    assert.equal(readiness.ok, true);
+    assert.equal(readiness.details.url.includes("/messaging/thread/"), true);
+  });
+});
+
+test("LinkedIn smoke shell readiness returns false without messaging shell signals", async (t) => {
+  await withPlaywrightPage(t, async (page) => {
+    await page.setContent("<!doctype html><html><body><h1>Plain page</h1></body></html>", {
+      waitUntil: "domcontentloaded"
+    });
+    const readiness = await isLinkedInMessagingShellReady(page);
+    assert.equal(readiness.ok, false);
+  });
+});
+
+test("LinkedIn smoke navigate classifier detects login, checkpoint, and blocked modal states", async (t) => {
+  await withPlaywrightPage(t, async (page) => {
+    await page.route("**/uas/login**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><html><body><input id='username' /></body></html>"
+      })
+    );
+    await page.goto("https://www.linkedin.com/uas/login", { waitUntil: "domcontentloaded" });
+    const loginProbe = (await isLinkedInMessagingShellReady(page)).details;
+    const loginState = await classifyLinkedInSmokeNavigateState(page, loginProbe);
+    assert.equal(loginState.blocked, true);
+    assert.equal(loginState.reason, "login_required");
+
+    await page.route("**/checkpoint/**", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><html><body>Action required. Verify your identity checkpoint.</body></html>"
+      })
+    );
+    await page.goto("https://www.linkedin.com/checkpoint/challenge", { waitUntil: "domcontentloaded" });
+    const checkpointProbe = (await isLinkedInMessagingShellReady(page)).details;
+    const checkpointState = await classifyLinkedInSmokeNavigateState(page, checkpointProbe);
+    assert.equal(checkpointState.blocked, true);
+    assert.equal(checkpointState.reason, "checkpoint_required");
+
+    await page.route("**/messaging/?filter=unread", (route) =>
+      route.fulfill({
+        status: 200,
+        contentType: "text/html",
+        body: "<!doctype html><html><body><div id='onetrust-banner-sdk'>Cookie banner</div></body></html>"
+      })
+    );
+    await page.goto("https://www.linkedin.com/messaging/?filter=unread", { waitUntil: "domcontentloaded" });
+    const modalProbe = (await isLinkedInMessagingShellReady(page)).details;
+    const modalState = await classifyLinkedInSmokeNavigateState(page, modalProbe);
+    assert.equal(modalState.blocked, true);
+    assert.equal(modalState.reason, "blocked_by_modal");
+  });
 });

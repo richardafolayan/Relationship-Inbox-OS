@@ -116,11 +116,23 @@ const linkedInSmokeMessageRowSelector = ".msg-s-message-list__event, .msg-s-even
 const linkedInSmokeMessageTextSelector = ".msg-s-event-listitem__body";
 const linkedInSmokeMessageSenderSelector = ".msg-s-message-group__name";
 const linkedInSmokeMessageTimestampSelector = "time.msg-s-message-group__timestamp";
-const linkedInSmokeMessagingShellSelectors = [
+const linkedInSmokeSearchInputSelectors = [
+  "input[placeholder*='Search messages' i]",
+  "input[aria-label*='Search messages' i]",
+  "input[aria-label*='Search' i]"
+];
+const linkedInSmokeListContainerSelectors = [
   "ul.msg-conversations-container__conversations-list",
-  ".msg-conversations-container",
-  "input[placeholder*='Search messages']",
-  "input[aria-label*='Search messages']"
+  "[class*='msg-conversations-container__conversations-list']"
+];
+const linkedInSmokeBlockedModalSelectors = [
+  "#onetrust-banner-sdk",
+  ".artdeco-modal[role='dialog']",
+  "[aria-modal='true']",
+  "[data-test-modal]",
+  ".msg-overlay-conversations-container--expanded",
+  ".artdeco-global-alert",
+  "#artdeco-global-alert-container"
 ];
 const linkedInSmokeEmptyStatePatterns = [/no unread/i, /you're all caught up/i, /no messages match/i];
 const linkedInSmokeSelectorMismatchError =
@@ -207,6 +219,23 @@ export type LinkedInSmokeStepLog = (input: {
   details?: Record<string, unknown>;
 }) => void | Promise<void>;
 
+export interface LinkedInMessagingShellProbe {
+  url: string;
+  title: string;
+  searchInputCounts: Record<string, number>;
+  listContainerCounts: Record<string, number>;
+  participantNamesCount: number;
+  convoItemLinkCount: number;
+  conversationListItemCount: number;
+  bodyTextSnippet: string;
+}
+
+export type LinkedInSmokeNavigateBlockedReason = "login_required" | "checkpoint_required" | "blocked_by_modal";
+
+export type LinkedInSmokeNavigateState =
+  | { blocked: false }
+  | { blocked: true; reason: LinkedInSmokeNavigateBlockedReason; signal: string };
+
 function cleanLocatorText(value: string | null | undefined): string {
   return cleanText(value ?? "");
 }
@@ -262,6 +291,34 @@ function escapeHtml(value: string): string {
     .replaceAll(">", "&gt;")
     .replaceAll("\"", "&quot;")
     .replaceAll("'", "&#39;");
+}
+
+function isTruthyEnvFlag(value: string | undefined): boolean {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return normalized === "1" || normalized === "true" || normalized === "yes";
+}
+
+function shouldAllowSmokePii(): boolean {
+  return isTruthyEnvFlag(process.env.DEV_LOG_PII);
+}
+
+function redactSmokeBodySnippet(value: string): string {
+  if (shouldAllowSmokePii()) {
+    return value;
+  }
+  return `[redacted:${value.length}]`;
+}
+
+async function collectSelectorCounts(page: Page, selectors: string[]): Promise<Record<string, number>> {
+  const counts: Record<string, number> = {};
+  for (const selector of selectors) {
+    counts[selector] = await page.locator(selector).count().catch(() => 0);
+  }
+  return counts;
+}
+
+function hasAnySelectorMatch(counts: Record<string, number>): boolean {
+  return Object.values(counts).some((count) => count > 0);
 }
 
 async function readText(locator: Locator): Promise<string> {
@@ -537,6 +594,137 @@ export function classifyLinkedInSmokeUnreadOutcome(input: {
   }
   return {
     outcome: "EMPTY"
+  };
+}
+
+export async function isLinkedInMessagingShellReady(
+  page: Page
+): Promise<{ ok: boolean; details: LinkedInMessagingShellProbe }> {
+  const searchInputCounts = await collectSelectorCounts(page, linkedInSmokeSearchInputSelectors);
+  const listContainerCounts = await collectSelectorCounts(page, linkedInSmokeListContainerSelectors);
+  const participantNamesCount = await page.locator(linkedInSmokeParticipantSelector).count().catch(() => 0);
+  const convoItemLinkCount = await page
+    .locator("[class*='msg-conversations-container__convo-item-link']")
+    .count()
+    .catch(() => 0);
+  const conversationListItemCount = await page.locator(".msg-conversation-listitem").count().catch(() => 0);
+  const title = cleanText(await page.title().catch(() => ""));
+  const rawBodyText = cleanText(await page.locator("body").innerText().catch(() => ""));
+  const bodySnippet = rawBodyText.slice(0, 500);
+
+  const details: LinkedInMessagingShellProbe = {
+    url: page.url(),
+    title,
+    searchInputCounts,
+    listContainerCounts,
+    participantNamesCount,
+    convoItemLinkCount,
+    conversationListItemCount,
+    bodyTextSnippet: redactSmokeBodySnippet(bodySnippet)
+  };
+
+  const searchPresent = hasAnySelectorMatch(searchInputCounts);
+  const listPresent = hasAnySelectorMatch(listContainerCounts);
+  const rowSignalPresent = participantNamesCount > 0 || convoItemLinkCount > 0 || conversationListItemCount > 0;
+
+  return {
+    ok: searchPresent && listPresent && rowSignalPresent,
+    details
+  };
+}
+
+export async function classifyLinkedInSmokeNavigateState(
+  page: Page,
+  probe: LinkedInMessagingShellProbe
+): Promise<LinkedInSmokeNavigateState> {
+  const currentUrl = probe.url.toLowerCase();
+  if (currentUrl.includes("/login") || currentUrl.includes("/uas/login")) {
+    return {
+      blocked: true,
+      reason: "login_required",
+      signal: "url_login"
+    };
+  }
+
+  const usernameCount = await page.locator("#username").count().catch(() => 0);
+  if (usernameCount > 0) {
+    return {
+      blocked: true,
+      reason: "login_required",
+      signal: "username_input"
+    };
+  }
+
+  const rawBodyText = cleanText(await page.locator("body").innerText().catch(() => "")).toLowerCase();
+  if (currentUrl.includes("/checkpoint") || /checkpoint|verify|action required/i.test(rawBodyText)) {
+    return {
+      blocked: true,
+      reason: "checkpoint_required",
+      signal: currentUrl.includes("/checkpoint") ? "url_checkpoint" : "body_checkpoint"
+    };
+  }
+
+  const modalCounts = await collectSelectorCounts(page, linkedInSmokeBlockedModalSelectors);
+  const firstModalMatch = Object.entries(modalCounts).find(([, count]) => count > 0)?.[0];
+  if (firstModalMatch) {
+    return {
+      blocked: true,
+      reason: "blocked_by_modal",
+      signal: firstModalMatch
+    };
+  }
+
+  return {
+    blocked: false
+  };
+}
+
+async function dumpLinkedInSmokeNavigateProbe(input: {
+  page: Page;
+  logDir: string;
+  probe: LinkedInMessagingShellProbe;
+  reason: string;
+}): Promise<{ navigateProbeJson: string; domHtml?: string; navigateFailurePng?: string }> {
+  const navigateProbeJson = join(input.logDir, "navigate-probe.json");
+  const navigateFailurePng = join(input.logDir, "navigate-failure.png");
+  const domHtml = join(input.logDir, "dom.html");
+  const payload = {
+    generatedAt: new Date().toISOString(),
+    reason: input.reason,
+    url: input.probe.url,
+    title: input.probe.title,
+    searchInputCounts: input.probe.searchInputCounts,
+    listContainerCounts: input.probe.listContainerCounts,
+    participantNamesCount: input.probe.participantNamesCount,
+    convoItemLinkCount: input.probe.convoItemLinkCount,
+    conversationListItemCount: input.probe.conversationListItemCount,
+    bodyTextSnippet: input.probe.bodyTextSnippet
+  };
+  await writeFile(navigateProbeJson, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+
+  let savedDom: string | undefined;
+  try {
+    await writeFile(domHtml, await input.page.content(), "utf8");
+    savedDom = domHtml;
+  } catch {
+    // best effort
+  }
+
+  let savedScreenshot: string | undefined;
+  try {
+    await input.page.screenshot({
+      path: navigateFailurePng,
+      fullPage: true
+    });
+    savedScreenshot = navigateFailurePng;
+  } catch {
+    // best effort
+  }
+
+  return {
+    navigateProbeJson,
+    domHtml: savedDom,
+    navigateFailurePng: savedScreenshot
   };
 }
 
@@ -3176,6 +3364,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     logDir: string;
     persist: (input: LinkedInSmokePersistInput) => Promise<{ updatedThreads: number; parsedMessages: number }>;
     logStep?: LinkedInSmokeStepLog;
+    logLine?: (line: string) => Promise<void>;
     maxMessages?: number;
   }): Promise<LinkedInSmokeIngestResult> {
     const totalSteps = 8;
@@ -3228,48 +3417,95 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       try {
         const urlBefore = page.url();
-        await page.goto(linkedInSmokeEntryUrl, { waitUntil: "domcontentloaded" }).catch((error: unknown) => {
+        await page.goto(linkedInSmokeEntryUrl, { waitUntil: "domcontentloaded" }).catch(async (error: unknown) => {
+          const readiness = await isLinkedInMessagingShellReady(page);
+          const navigateArtifacts = await dumpLinkedInSmokeNavigateProbe({
+            page,
+            logDir: input.logDir,
+            probe: readiness.details,
+            reason: "smoke_entry_navigation_failed"
+          });
+          const counts = {
+            searchInputCounts: readiness.details.searchInputCounts,
+            listContainerCounts: readiness.details.listContainerCounts,
+            participantNamesCount: readiness.details.participantNamesCount,
+            convoItemLinkCount: readiness.details.convoItemLinkCount,
+            conversationListItemCount: readiness.details.conversationListItemCount
+          };
+          await input.logLine?.(
+            `[LI][SMOKE][req=${input.requestId}][navigate] url=${readiness.details.url} ` +
+              `title=${readiness.details.title || "(untitled)"} ready=false ` +
+              `counts=${JSON.stringify(counts)} reason=smoke_entry_navigation_failed`
+          );
           fail("navigate", "smoke_entry_navigation_failed", "Unable to open LinkedIn messaging unread entry URL.", {
-            error: error instanceof Error ? error.message : String(error)
+            error: error instanceof Error ? error.message : String(error),
+            urlBefore,
+            probe: readiness.details,
+            signal: "goto_error",
+            navigateProbeArtifacts: navigateArtifacts
           });
         });
-        let urlAfter = page.url();
-        const redirectedToThread = /\/messaging\/thread\//i.test(urlAfter);
-        let correctiveNavApplied = false;
-        if (redirectedToThread) {
-          await page.goto(linkedInSmokeEntryUrl, { waitUntil: "domcontentloaded" }).catch((error: unknown) => {
-            fail(
-              "navigate",
-              "smoke_entry_navigation_redirect_thread",
-              "LinkedIn redirected smoke run to a thread view and corrective navigation failed.",
-              {
-                error: error instanceof Error ? error.message : String(error)
-              }
-            );
-          });
-          correctiveNavApplied = true;
-          urlAfter = page.url();
+        const urlAfterGoto = page.url();
+        await page.waitForTimeout(1_000);
+        const urlAfter1s = page.url();
+        const navigateDeadline = Date.now() + 15_000;
+        let shellReadiness = await isLinkedInMessagingShellReady(page);
+        let navigateState = await classifyLinkedInSmokeNavigateState(page, shellReadiness.details);
+        while (Date.now() < navigateDeadline && !shellReadiness.ok && !navigateState.blocked) {
+          await page.waitForTimeout(250);
+          shellReadiness = await isLinkedInMessagingShellReady(page);
+          navigateState = await classifyLinkedInSmokeNavigateState(page, shellReadiness.details);
         }
 
-        const shellSignals: Array<{ selector: string; count: number }> = [];
-        for (const selector of linkedInSmokeMessagingShellSelectors) {
-          shellSignals.push({
-            selector,
-            count: await page.locator(selector).count().catch(() => 0)
+        if (!shellReadiness.ok) {
+          const reason = navigateState.blocked ? navigateState.reason : "messaging_shell_not_ready";
+          const navigateArtifacts = await dumpLinkedInSmokeNavigateProbe({
+            page,
+            logDir: input.logDir,
+            probe: shellReadiness.details,
+            reason
           });
-        }
-        if (!shellSignals.some((entry) => entry.count > 0)) {
-          fail("navigate", "messaging_shell_not_ready", "LinkedIn messaging shell did not become ready for smoke run.", {
+          const counts = {
+            searchInputCounts: shellReadiness.details.searchInputCounts,
+            listContainerCounts: shellReadiness.details.listContainerCounts,
+            participantNamesCount: shellReadiness.details.participantNamesCount,
+            convoItemLinkCount: shellReadiness.details.convoItemLinkCount,
+            conversationListItemCount: shellReadiness.details.conversationListItemCount
+          };
+          await input.logLine?.(
+            `[LI][SMOKE][req=${input.requestId}][navigate] url=${shellReadiness.details.url} ` +
+              `title=${shellReadiness.details.title || "(untitled)"} ready=false ` +
+              `counts=${JSON.stringify(counts)} reason=${reason}`
+          );
+          const failureMessage =
+            reason === "login_required"
+              ? "LinkedIn smoke navigate requires login."
+              : reason === "checkpoint_required"
+                ? "LinkedIn smoke navigate is blocked by a checkpoint/verification gate."
+                : reason === "blocked_by_modal"
+                  ? "LinkedIn smoke navigate is blocked by a modal or interstitial."
+                  : "LinkedIn messaging shell did not become ready for smoke run.";
+          fail("navigate", reason, failureMessage, {
             urlBefore,
-            urlAfter,
-            shellSignals
+            urlAfterGoto,
+            urlAfter1s,
+            probe: shellReadiness.details,
+            signal: navigateState.blocked ? navigateState.signal : "timeout_waiting_for_shell",
+            navigateProbeArtifacts: navigateArtifacts
           });
         }
+
         await logStep(1, "entry_url", "forced unread entry", {
           URL_BEFORE: urlBefore,
-          URL_AFTER: urlAfter,
-          redirectedToThread,
-          correctiveNavApplied
+          URL_AFTER_GOTO: urlAfterGoto,
+          URL_AFTER_1S: urlAfter1s,
+          shellReady: shellReadiness.ok,
+          title: shellReadiness.details.title,
+          searchInputCounts: shellReadiness.details.searchInputCounts,
+          listContainerCounts: shellReadiness.details.listContainerCounts,
+          participantNamesCount: shellReadiness.details.participantNamesCount,
+          convoItemLinkCount: shellReadiness.details.convoItemLinkCount,
+          conversationListItemCount: shellReadiness.details.conversationListItemCount
         });
 
         await logStep(2, "unread_filter", "activating Unread filter");
