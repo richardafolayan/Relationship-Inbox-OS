@@ -1,0 +1,3 @@
+[LI][SMOKE][req=9e3e73e4-5d02-4d7f-a271-cb640f51d21d] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/9e3e73e4-5d02-4d7f-a271-cb640f51d21d
+[LI][SMOKE][req=9e3e73e4-5d02-4d7f-a271-cb640f51d21d] SMOKE_FAIL stage=navigate reason=messaging_shell_not_ready error=LinkedIn messaging shell did not become ready for smoke run.
+[LI][SMOKE][req=9e3e73e4-5d02-4d7f-a271-cb640f51d21d] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/9e3e73e4-5d02-4d7f-a271-cb640f51d21d

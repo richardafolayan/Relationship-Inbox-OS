@@ -42,3 +42,36 @@ test("selector test failure contract always includes minimum error shape", async
     }
   );
 });
+
+test("selector test classifies target-closed connect failures", async () => {
+  const service = createSelectorTestService({
+    resolveSelectors: async () => ({
+      inbox_url: "https://www.linkedin.com/messaging/",
+      thread_list: ".thread-list",
+      thread_item: ".thread-item",
+      unread_badge: ".unread",
+      message_container: ".message-container",
+      message_item: ".message-item",
+      message_text: ".message-text",
+      composer_input: ".composer",
+      send_button: ".send"
+    }),
+    sessionManager: {
+      getManagedPage: async () => {
+        throw new Error("browserContext.newPage: Target page, context or browser has been closed");
+      }
+    },
+    screenshotDir: "/tmp",
+    domDumpDir: "/tmp"
+  });
+
+  await assert.rejects(
+    async () => service.run({ platform: "LINKEDIN" }),
+    (error) => {
+      assert.equal(isSelectorTestServiceError(error), true);
+      assert.equal(error.payload.stage, "connect");
+      assert.equal(error.payload.reason, "page_closed_mid_stage");
+      return true;
+    }
+  );
+});

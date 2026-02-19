@@ -11,3 +11,6 @@
 9. Open managed browser context and confirm no stray initial `about:blank` tab remains when the page is eligible for reuse.
 10. Confirm per-platform tab determinism: opening a second platform does not steal the mapped tab from the first platform.
 11. If a forced collect failure is triggered, confirm reason classification is specific (`evaluate_helper_missing`, `evaluate_reference_error`, `timeout`) instead of `unknown`.
+12. Trigger repeated LinkedIn scan failures and confirm queue cooldown escalates (`30s -> 60s -> 120s`) with no immediate tight retry loop.
+13. Click manual `Run scan` during cooldown and confirm response is non-error blocked status: `Cooling down — next retry in Xs` (not a generic failure).
+14. Force a target-closed condition and confirm reason surfaces as `page_closed_mid_stage`, not `thread_list_not_ready` or `unknown`.

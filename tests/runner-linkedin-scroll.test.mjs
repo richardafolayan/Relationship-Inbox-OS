@@ -125,7 +125,7 @@ test("LinkedIn collector emits deterministic stop reason for audit metrics", () 
     reachedBottom: true
   });
 
-  assert.equal(stopReason, "no_growth");
+  assert.equal(stopReason, "end_of_list_no_progress");
 });
 
 test("LinkedIn scan failure reason classifies __name helper leakage explicitly", () => {

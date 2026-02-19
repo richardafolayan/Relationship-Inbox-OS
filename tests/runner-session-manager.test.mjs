@@ -57,6 +57,8 @@ function createFakePage(initialUrl = "about:blank") {
 function createFakeContext(input = {}) {
   const pages = input.initialPages ? [...input.initialPages] : [];
   let closed = false;
+  let remainingNewPageFailures = Number.isFinite(input.failNewPageCount) ? Math.max(0, input.failNewPageCount) : 0;
+  const closeListeners = [];
 
   return {
     pages: () => {
@@ -69,15 +71,27 @@ function createFakeContext(input = {}) {
       if (closed) {
         throw new Error("context closed");
       }
+      if (remainingNewPageFailures > 0) {
+        remainingNewPageFailures -= 1;
+        throw new Error(input.failNewPageMessage ?? "browserContext.newPage: Target page, context or browser has been closed");
+      }
       const page = createFakePage("about:blank");
       pages.push(page);
       return page;
     },
     pageCount: () => pages.length,
+    on: (event, listener) => {
+      if (event === "close") {
+        closeListeners.push(listener);
+      }
+    },
     close: async () => {
       closed = true;
       for (const page of pages) {
         await page.close();
+      }
+      for (const listener of closeListeners) {
+        listener();
       }
     }
   };
@@ -90,6 +104,14 @@ function createManager(launchPersistentContext) {
     getSettings: async () => defaultSettings,
     launchPersistentContext
   });
+}
+
+function createDeferred() {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 test("SessionManager recreates closed platform pages in the same context", async () => {
@@ -132,6 +154,25 @@ test("SessionManager reset closes context and clears platform page references", 
   assert.equal(contextClosed, 1);
 });
 
+test("SessionManager relaunches context if newPage fails with target-closed error", async () => {
+  const firstContext = createFakeContext({
+    failNewPageCount: 1,
+    failNewPageMessage: "browserContext.newPage: Target page, context or browser has been closed"
+  });
+  const secondContext = createFakeContext();
+  let launchCount = 0;
+
+  const manager = createManager(async () => {
+    launchCount += 1;
+    return launchCount === 1 ? firstContext : secondContext;
+  });
+
+  const page = await manager.getManagedPage({ platform: "LINKEDIN", personKey: "default" });
+  assert.ok(page);
+  assert.equal(launchCount, 2);
+  assert.equal(secondContext.pageCount(), 1);
+});
+
 test("SessionManager reuses an unassigned default about:blank page", async () => {
   const defaultBlankPage = createFakePage("about:blank");
   const context = createFakeContext({ initialPages: [defaultBlankPage] });
@@ -158,4 +199,29 @@ test("SessionManager does not reuse blank page already mapped to another platfor
 
   const linkedInPageAgain = await manager.getManagedPage({ platform: "LINKEDIN" });
   assert.equal(linkedInPageAgain, linkedInPage);
+});
+
+test("SessionManager closePlatformPage waits for active platform lease to drain", async () => {
+  const context = createFakeContext();
+  const manager = createManager(async () => context);
+  await manager.getManagedPage({ platform: "LINKEDIN", personKey: "default" });
+
+  const lease = createDeferred();
+  const leaseWork = manager.withPlatformLease({ platform: "LINKEDIN", personKey: "default" }, async () => {
+    await lease.promise;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 40));
+  let closeFinished = false;
+  const closePromise = manager.closePlatformPage({ platform: "LINKEDIN", personKey: "default" }).then(() => {
+    closeFinished = true;
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 60));
+  assert.equal(closeFinished, false);
+
+  lease.resolve();
+  await leaseWork;
+  await closePromise;
+  assert.equal(closeFinished, true);
 });

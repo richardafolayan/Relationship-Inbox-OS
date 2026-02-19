@@ -1,0 +1,19 @@
+{
+  "requestId": "bc1dee25-cbfa-4a19-8991-6efe547168ef",
+  "platform": "LINKEDIN",
+  "runType": "linkedin-smoke",
+  "startedAt": "2026-02-19T00:08:31.595Z",
+  "completedAt": "2026-02-19T00:08:39.749Z",
+  "success": false,
+  "stopReason": "unread_view_empty_or_not_applied",
+  "runDir": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/bc1dee25-cbfa-4a19-8991-6efe547168ef",
+  "eventsPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/bc1dee25-cbfa-4a19-8991-6efe547168ef/events.ndjson",
+  "actionsPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/bc1dee25-cbfa-4a19-8991-6efe547168ef/actions.csv",
+  "counters": {},
+  "error": {
+    "name": "AdapterFailure",
+    "message": "Unread view returned zer…[redacted]:44",
+    "stack": "AdapterFailure: Unread v…[redacted]:580",
+    "reason": "unknown"
+  }
+}

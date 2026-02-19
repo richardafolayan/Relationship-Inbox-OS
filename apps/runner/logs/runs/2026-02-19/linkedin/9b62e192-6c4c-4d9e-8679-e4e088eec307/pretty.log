@@ -1,0 +1,8 @@
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/9b62e192-6c4c-4d9e-8679-e4e088eec307
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307][step=1/8] connect: ensureConnected complete details={"url":"https://www.linkedin.com/messaging/thread/2-OTg5OGU3OWUtNmVlZi00NzQzLWE2YmMtZjdkMGRiZTZhYjMyXzEwMA==/","isClosed":false,"threadListVisible":true}
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307][step=2/8] unread_filter: activating Unread filter
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307][step=2/8] unread_filter: Unread pill state details={"pillFound":true,"activeBefore":false,"clicked":true,"activeAfter":true}
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307][step=3/8] list_ready: waiting for thread list
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307][step=3/8] list_ready: thread list ready details={"threadRowCount":0}
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307] SMOKE_FAIL stage=collect_threads reason=unread_view_empty_or_not_applied error=Unread view returned zero conversation rows.
+[LI][SMOKE][req=9b62e192-6c4c-4d9e-8679-e4e088eec307] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/9b62e192-6c4c-4d9e-8679-e4e088eec307

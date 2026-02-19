@@ -1,0 +1,100 @@
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=SCAN_START] scan run started details={"LOG_DIR":"/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b2a2892c-f035-4ed6-b930-cef272576ead","caps":{"disableDeepScroll":false}}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=SCAN_START] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b2a2892c-f035-4ed6-b930-cef272576ead
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=CONNECT_START] connecting to platform details={"platform":"LINKEDIN"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=CONNECT_OK] connection ready details={"platform":"LINKEDIN"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=COLLECT_UNREAD_START] collecting unread and recent candidates details={"disableDeepScroll":false,"maxThreads":null,"maxOpens":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=collect_threads] LinkedIn adapter collection complete details={"candidatesBeforeCap":57,"candidatesAfterCap":31,"disableDeepScroll":false,"stopReason":"end_of_list_reached"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=COLLECT_UNREAD_OK] candidate collection complete details={"rows":61,"candidates":61,"stopReason":"end_of_list_reached"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":1,"total":61,"name":"Stephanie Gillies","listTimestamp":"Jan 13","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":2,"total":61,"name":"Bupa Business UK","listTimestamp":"Jan 6","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":3,"total":61,"name":"José Manuel Félix Serôdio","listTimestamp":"Dec 28, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":4,"total":61,"name":"Salesforce","listTimestamp":"Dec 27, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":5,"total":61,"name":"Lola Peattie","listTimestamp":"Dec 5, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":6,"total":61,"name":"Shubhangi Solanki","listTimestamp":"Dec 3, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":7,"total":61,"name":"Ceri Jones","listTimestamp":"Dec 2, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":8,"total":61,"name":"Gidon Grayeff","listTimestamp":"Dec 2, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":9,"total":61,"name":"LinkedIn for Sales","listTimestamp":"Oct 31, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":10,"total":61,"name":"Jaseem Kapoor","listTimestamp":"Oct 23, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":11,"total":61,"name":"Alexander Oechsner","listTimestamp":"Oct 13, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":12,"total":61,"name":"PagerDuty","listTimestamp":"Jul 14, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":13,"total":61,"name":"Amani Williams","listTimestamp":"Jun 30, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":14,"total":61,"name":"Lenovo","listTimestamp":"Jun 29, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":15,"total":61,"name":"Jemima Orakwue","listTimestamp":"Jun 28, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":16,"total":61,"name":"David Obembe","listTimestamp":"Jun 27, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":17,"total":61,"name":"Ben Watson","listTimestamp":"Jun 19, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":18,"total":61,"name":"Phoebe R.","listTimestamp":"Jun 6, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":19,"total":61,"name":"Enrico Micheli","listTimestamp":"May 30, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":20,"total":61,"name":"Emma Grewal","listTimestamp":"May 23, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":21,"total":61,"name":"LinkedIn for Sales","listTimestamp":"May 13, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":22,"total":61,"name":"NHS Blood and Transplant","listTimestamp":"Jan 9, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":23,"total":61,"name":"Kolawole Afonja","listTimestamp":"Jan 1, 2025","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":24,"total":61,"name":"Atlassian","listTimestamp":"Dec 31, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":25,"total":61,"name":"Lucas Botzen 🌍","listTimestamp":"Dec 22, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":26,"total":61,"name":"Peking University HSBC Business School","listTimestamp":"Dec 15, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":27,"total":61,"name":"LinkedIn","listTimestamp":"Dec 11, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":28,"total":61,"name":"Navraj Mann","listTimestamp":"Dec 10, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":29,"total":61,"name":"NHS Blood and Transplant","listTimestamp":"Dec 8, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":30,"total":61,"name":"Becky Burridge","listTimestamp":"Nov 29, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":31,"total":61,"name":"Vincent Nims","listTimestamp":"Nov 21, 2024","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":32,"total":61,"name":"Daniel Muratov","listTimestamp":"Feb 18","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":32,"total":61,"name":"Daniel Muratov"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Daniel Muratov","messagesParsed":5}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Daniel Muratov","threadsUpserted":1,"messagesUpserted":5}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":33,"total":61,"name":"Dimetri West-Howard","listTimestamp":"Feb 18","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":33,"total":61,"name":"Dimetri West-Howard"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Dimetri West-Howard","messagesParsed":4}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Dimetri West-Howard","threadsUpserted":1,"messagesUpserted":4}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":34,"total":61,"name":"Rolanda Bleoue","listTimestamp":"Feb 18","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":34,"total":61,"name":"Rolanda Bleoue"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Rolanda Bleoue","messagesParsed":15}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Rolanda Bleoue","threadsUpserted":1,"messagesUpserted":15}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":35,"total":61,"name":"Lubosi Kongwa","listTimestamp":"Feb 18","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":35,"total":61,"name":"Lubosi Kongwa"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Lubosi Kongwa","messagesParsed":12}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Lubosi Kongwa","threadsUpserted":1,"messagesUpserted":12}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":36,"total":61,"name":"Elizabeth Whan","listTimestamp":"Feb 18","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":36,"total":61,"name":"Elizabeth Whan"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Elizabeth Whan","messagesParsed":11}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Elizabeth Whan","threadsUpserted":1,"messagesUpserted":11}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":37,"total":61,"name":"Laxmi P","listTimestamp":"Feb 18","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":37,"total":61,"name":"Laxmi P"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Laxmi P","messagesParsed":3}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Laxmi P","threadsUpserted":1,"messagesUpserted":3}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":38,"total":61,"name":"Nnenna Nwabuisi","listTimestamp":"Feb 11","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":38,"total":61,"name":"Nnenna Nwabuisi"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Nnenna Nwabuisi","messagesParsed":15}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Nnenna Nwabuisi","threadsUpserted":1,"messagesUpserted":15}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":39,"total":61,"name":"Suhail Malik","listTimestamp":"Jan 28","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":39,"total":61,"name":"Suhail Malik"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Suhail Malik","messagesParsed":3}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Suhail Malik","threadsUpserted":1,"messagesUpserted":3}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":40,"total":61,"name":"Jessica Essien","listTimestamp":"Jan 27","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":40,"total":61,"name":"Jessica Essien"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"Jessica Essien","messagesParsed":7}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"Jessica Essien","threadsUpserted":1,"messagesUpserted":7}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":41,"total":61,"name":"MIRACLE OJIEH","listTimestamp":"Jan 27","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_OK] thread opened and synced details={"index":41,"total":61,"name":"MIRACLE OJIEH"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PARSE_MESSAGES_OK] thread messages parsed details={"name":"MIRACLE OJIEH","messagesParsed":8}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=PERSIST_OK] thread persisted details={"name":"MIRACLE OJIEH","threadsUpserted":1,"messagesUpserted":8}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":42,"total":61,"name":"Uriel Omozusi","listTimestamp":"Jan 27","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":43,"total":61,"name":"LinkedIn Thread 12","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":44,"total":61,"name":"LinkedIn Thread 13","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":45,"total":61,"name":"LinkedIn Thread 14","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":46,"total":61,"name":"LinkedIn Thread 15","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":47,"total":61,"name":"LinkedIn Thread 16","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":48,"total":61,"name":"LinkedIn Thread 17","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":49,"total":61,"name":"LinkedIn Thread 18","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":50,"total":61,"name":"Harrison Ndugba BCS","listTimestamp":"Jan 16","url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":51,"total":61,"name":"LinkedIn Thread 20","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":52,"total":61,"name":"LinkedIn Thread 21","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":53,"total":61,"name":"LinkedIn Thread 22","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":54,"total":61,"name":"LinkedIn Thread 23","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":55,"total":61,"name":"LinkedIn Thread 24","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":56,"total":61,"name":"LinkedIn Thread 25","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":57,"total":61,"name":"LinkedIn Thread 26","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":58,"total":61,"name":"LinkedIn Thread 27","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":59,"total":61,"name":"LinkedIn Thread 28","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":60,"total":61,"name":"LinkedIn Thread 29","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=OPEN_THREAD_START] opening candidate thread details={"index":61,"total":61,"name":"LinkedIn Thread 30","listTimestamp":null,"url":null}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=SCAN_END_OK] scan completed details={"stopReason":"end_of_list_reached","updatedThreads":10,"LOG_DIR":"/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b2a2892c-f035-4ed6-b930-cef272576ead"}
+[LI][SCAN][req=b2a2892c-f035-4ed6-b930-cef272576ead][stage=SCAN_END_OK] LOG_DIR: /Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b2a2892c-f035-4ed6-b930-cef272576ead

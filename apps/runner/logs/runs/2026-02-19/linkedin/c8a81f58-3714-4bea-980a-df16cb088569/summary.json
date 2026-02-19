@@ -1,0 +1,16 @@
+{
+  "requestId": "c8a81f58-3714-4bea-980a-df16cb088569",
+  "platform": "LINKEDIN",
+  "runType": "linkedin-smoke",
+  "startedAt": "2026-02-19T01:45:08.471Z",
+  "completedAt": "2026-02-19T01:45:57.925Z",
+  "success": true,
+  "stopReason": "smoke_ok",
+  "runDir": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/c8a81f58-3714-4bea-980a-df16cb088569",
+  "eventsPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/c8a81f58-3714-4bea-980a-df16cb088569/events.ndjson",
+  "actionsPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/c8a81f58-3714-4bea-980a-df16cb088569/actions.csv",
+  "counters": {
+    "messagesParsedCount": 2,
+    "updatedThreads": 1
+  }
+}

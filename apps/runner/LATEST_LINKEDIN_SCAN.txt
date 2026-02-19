@@ -1,0 +1,2 @@
+LOG_DIR=/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b2a2892c-f035-4ed6-b930-cef272576ead
+requestId=b2a2892c-f035-4ed6-b930-cef272576ead

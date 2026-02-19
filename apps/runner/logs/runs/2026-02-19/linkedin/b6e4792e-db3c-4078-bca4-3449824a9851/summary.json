@@ -1,0 +1,21 @@
+{
+  "requestId": "b6e4792e-db3c-4078-bca4-3449824a9851",
+  "platform": "LINKEDIN",
+  "runType": "linkedin-smoke",
+  "startedAt": "2026-02-19T01:39:45.616Z",
+  "completedAt": "2026-02-19T01:40:10.282Z",
+  "success": false,
+  "stopReason": "selector_mismatch_thread_rows",
+  "runDir": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b6e4792e-db3c-4078-bca4-3449824a9851",
+  "eventsPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b6e4792e-db3c-4078-bca4-3449824a9851/events.ndjson",
+  "actionsPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b6e4792e-db3c-4078-bca4-3449824a9851/actions.csv",
+  "failureScreenshotPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b6e4792e-db3c-4078-bca4-3449824a9851/failure.png",
+  "failureDomDumpPath": "/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/logs/runs/2026-02-19/linkedin/b6e4792e-db3c-4078-bca4-3449824a9851/dom.html",
+  "counters": {},
+  "error": {
+    "name": "AdapterFailure",
+    "message": "Selector mismatch: list …[redacted]:88",
+    "stack": "AdapterFailure: Selector…[redacted]:625",
+    "reason": "unknown"
+  }
+}

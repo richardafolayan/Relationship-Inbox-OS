@@ -1,0 +1,63 @@
+ts,requestId,platform,stage,action,selector,url,result,elapsedMs,counts_json,note
+2026-02-18T22:10:37.943Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,navigate,goto,,https://www.linkedin.com/messaging/,ok,299,{},navigate_inbox
+2026-02-18T22:10:38.640Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,navigate,wait_for_domcontentloaded,,,ok,696,{},post_goto_domcontentloaded
+2026-02-18T22:10:38.992Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,navigate,wait_for_timeout,,,ok,352,{},post_navigation_settle
+2026-02-18T22:10:42.487Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,connect,wait_for_visible,ul.msg-conversations-container__conversations-list,,ok,3453,{},wait_thread_list_connected
+2026-02-18T22:10:42.788Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,connect,ensure_connected,,,ok,,{},
+2026-02-18T22:10:43.307Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,navigate,goto,,https://www.linkedin.com/messaging/,ok,485,{},navigate_inbox
+2026-02-18T22:10:43.903Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,navigate,wait_for_domcontentloaded,,,ok,596,{},post_goto_domcontentloaded
+2026-02-18T22:10:44.256Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,navigate,wait_for_timeout,,,ok,352,{},post_navigation_settle
+2026-02-18T22:10:44.363Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,2,{},read_thread_item_count
+2026-02-18T22:10:44.365Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]",,ok,2,{},read_empty_state_count
+2026-02-18T22:10:44.508Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,143,{},thread_list_poll_wait
+2026-02-18T22:10:44.518Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,3,{},read_thread_item_count
+2026-02-18T22:10:44.520Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]",,ok,2,{},read_empty_state_count
+2026-02-18T22:10:44.665Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,144,{},thread_list_poll_wait
+2026-02-18T22:10:44.677Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,4,{},read_thread_item_count
+2026-02-18T22:10:44.681Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]",,ok,4,{},read_empty_state_count
+2026-02-18T22:10:44.826Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,145,{},thread_list_poll_wait
+2026-02-18T22:10:44.836Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,2,{},read_thread_item_count
+2026-02-18T22:10:44.838Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,".msg-conversations-container__no-results, .msg-conversations-container__empty-state, .msg-conversations-container__empty-convos, [data-test-empty-state]",,ok,2,{},read_empty_state_count
+2026-02-18T22:10:45.181Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,343,{},thread_list_poll_wait
+2026-02-18T22:10:48.590Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,18,{},read_thread_item_count
+2026-02-18T22:10:49.112Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,click,button[data-test-messaging-inbox-filters__filter-pill='UNREAD'],,ok,265,{},activate_unread_pill
+2026-02-18T22:10:49.254Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,8,{},settle_thread_count
+2026-02-18T22:10:49.291Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,37,{},settle_unread_badge_count
+2026-02-18T22:10:49.297Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,6,{},settle_spinner_count
+2026-02-18T22:10:49.473Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,wait_for_timeout,,,ok,169,{},settle_poll_wait
+2026-02-18T22:10:49.494Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,21,{},settle_thread_count
+2026-02-18T22:10:49.500Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,6,{},settle_unread_badge_count
+2026-02-18T22:10:49.511Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,11,{},settle_spinner_count
+2026-02-18T22:10:49.673Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,wait_for_timeout,,,ok,149,{},settle_poll_wait
+2026-02-18T22:10:49.680Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,7,{},settle_thread_count
+2026-02-18T22:10:49.686Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,6,{},settle_unread_badge_count
+2026-02-18T22:10:49.693Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,7,{},settle_spinner_count
+2026-02-18T22:10:49.847Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,wait_for_timeout,,,ok,149,{},settle_poll_wait
+2026-02-18T22:10:49.859Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,12,{},settle_thread_count
+2026-02-18T22:10:49.866Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,7,{},settle_unread_badge_count
+2026-02-18T22:10:49.875Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,9,{},settle_spinner_count
+2026-02-18T22:10:50.033Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,wait_for_timeout,,,ok,148,{},settle_poll_wait
+2026-02-18T22:10:50.041Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,8,{},settle_thread_count
+2026-02-18T22:10:50.055Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,14,{},settle_unread_badge_count
+2026-02-18T22:10:50.064Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,9,{},settle_spinner_count
+2026-02-18T22:10:50.218Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,wait_for_timeout,,,ok,148,{},settle_poll_wait
+2026-02-18T22:10:50.228Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,9,{},settle_thread_count
+2026-02-18T22:10:50.235Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,7,{},settle_unread_badge_count
+2026-02-18T22:10:50.245Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,10,{},settle_spinner_count
+2026-02-18T22:10:50.459Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,wait_for_timeout,,,ok,195,{},settle_poll_wait
+2026-02-18T22:10:50.475Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,15,{},settle_thread_count
+2026-02-18T22:10:50.482Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,.msg-conversation-card__unread-count .notification-badge__count,,ok,7,{},settle_unread_badge_count
+2026-02-18T22:10:50.493Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,unread_filter,locator_count,".artdeco-loader, .artdeco-spinner, .msg-conversations-container__conversations-list-loader, .msg-conversations-container__loading, [aria-label*='Loading']",,ok,11,{},settle_spinner_count
+2026-02-18T22:10:50.539Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,locator_count,li.msg-conversation-listitem .msg-conversation-listitem__link,,ok,11,{},read_thread_item_count
+2026-02-18T22:10:54.236Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,scroll_into_view,,,ok,36,{},row_tail_scroll
+2026-02-18T22:10:54.412Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,scroll_container,ul.msg-conversations-container__conversations-list,,ok,176,{},primary_scroll
+2026-02-18T22:10:55.143Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,726,{},after_primary_scroll
+2026-02-18T22:11:00.427Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,scroll_container,ul.msg-conversations-container__conversations-list,,ok,86,{},secondary_scroll
+2026-02-18T22:11:01.167Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,739,{},after_secondary_scroll
+2026-02-18T22:11:14.896Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,737,{},post_scroll_wait
+2026-02-18T22:11:28.804Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,scroll_into_view,,,ok,52,{},row_tail_scroll
+2026-02-18T22:11:29.053Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,scroll_container,ul.msg-conversations-container__conversations-list,,ok,248,{},primary_scroll
+2026-02-18T22:11:29.773Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,720,{},after_primary_scroll
+2026-02-18T22:11:44.897Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,scroll_container,ul.msg-conversations-container__conversations-list,,ok,311,{},secondary_scroll
+2026-02-18T22:11:45.807Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,ok,909,{},after_secondary_scroll
+2026-02-18T22:12:06.886Z,8d0c6020-6132-4cc6-b8f2-09ca959131fc,LINKEDIN,collect_threads,wait_for_timeout,,,error,3,{},post_scroll_wait

@@ -194,6 +194,26 @@ function summarizeError(error: unknown): Record<string, unknown> {
   };
 }
 
+function classifySelectorFailureReason(error: unknown): string | undefined {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/target page, context or browser has been closed/i.test(message)) {
+    return "page_closed_mid_stage";
+  }
+  if (/failed to open a new tab|target\.createtarget/i.test(message)) {
+    return "page_closed_mid_stage";
+  }
+  if (/timeouterror|timeout/i.test(message)) {
+    return "timeout";
+  }
+  if (/detached/i.test(message)) {
+    return "element_detached";
+  }
+  if (/execution context was destroyed/i.test(message)) {
+    return "transient_context_destroyed";
+  }
+  return undefined;
+}
+
 function selectorTestFailureStatus(error: unknown): number {
   const message = error instanceof Error ? error.message : String(error);
   if (error instanceof SelectorAuthRequiredError) {
@@ -299,13 +319,14 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
         });
 
         const authReason = error instanceof SelectorAuthRequiredError ? error.reason : undefined;
+        const classifiedReason = classifySelectorFailureReason(error);
         const payload: SelectorTestFailurePayload = {
           ok: false,
           platform: input.platform,
           stage,
           error: error instanceof Error ? error.message : String(error),
           requestId,
-          reason: authReason,
+          reason: authReason ?? classifiedReason,
           receipts: receipts.concat([
             {
               stage,
