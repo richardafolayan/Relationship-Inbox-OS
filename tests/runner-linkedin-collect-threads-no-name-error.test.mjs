@@ -93,4 +93,16 @@ test("LinkedIn collect_threads production path parses rows without __name evalua
     collected.rows.some((row) => (row.threadUrl ?? "").includes("/messaging/thread/")),
     true
   );
+  assert.equal(
+    collected.rows.some((row) => row.displayName === "Sponsored Row"),
+    false
+  );
+  assert.equal(
+    collected.rows.some((row) => row.displayName === "Alpha One" && row.unreadCount === 0 && row.needsReplyFromList === true),
+    true
+  );
+  assert.equal(
+    collected.rows.some((row) => row.displayName === "Juliet Ten"),
+    false
+  );
 });

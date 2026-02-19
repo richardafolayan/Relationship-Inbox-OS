@@ -1,5 +1,6 @@
 export interface InboxRow {
   id: string;
+  personId?: string;
   personName: string;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
   preview: string;
@@ -11,6 +12,8 @@ export interface InboxRow {
   lastOutboundAt: string | null;
   riskReason?: string | null;
   slaCountdown: string;
+  identityWarning?: "unresolved_id" | null;
+  messageCount?: number;
 }
 
 export interface InboxResponse {
@@ -22,6 +25,18 @@ export interface InboxResponse {
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
+}
+
+export interface PeopleRow {
+  id: string;
+  name: string;
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  notes?: string | null;
+  tags: string[];
+  lastInteractionAt?: string | null;
+  risk: "GREEN" | "AMBER" | "RED";
+  hasUnresolvedIdentityWarning?: boolean;
+  unresolvedThreadCount?: number;
 }
 
 export interface PlatformCard {

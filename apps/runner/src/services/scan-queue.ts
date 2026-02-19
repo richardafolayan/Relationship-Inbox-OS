@@ -24,6 +24,11 @@ import {
   getLinkedInDevScanCaps,
   isAutoScanDisabledInDev
 } from "../dev-flags";
+import {
+  isTemporaryLinkedInId,
+  normalizeCanonicalLinkedInThreadId
+} from "../linkedin/linkedinIdentity.js";
+import { parseLinkedInListTimestamp } from "../linkedin/linkedinTime.js";
 
 interface ScanQueueDeps {
   adapters: Record<PlatformName, PlatformAdapter>;
@@ -824,7 +829,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             platform,
             stage: "Collecting candidates"
           });
-          headline("COLLECT_UNREAD_START", "collecting unread and recent candidates", {
+          headline("COLLECT_UNREAD_START", "collecting unread + needs-reply candidates", {
             disableDeepScroll: linkedInDevCaps.disableDeepScroll,
             maxThreads: linkedInDevCaps.maxThreads ?? null,
             maxOpens: linkedInDevCaps.maxOpens ?? null
@@ -1348,6 +1353,89 @@ export function createScanQueue(deps: ScanQueueDeps) {
     };
   }
 
+  const minValidTimestampMs = Date.UTC(2005, 0, 1, 0, 0, 0, 0);
+  const maxFutureSkewMs = 5 * 60 * 1_000;
+
+  function isPlausibleTimestamp(date: Date): boolean {
+    const value = date.getTime();
+    if (Number.isNaN(value)) {
+      return false;
+    }
+    if (value < minValidTimestampMs) {
+      return false;
+    }
+    if (value > Date.now() + maxFutureSkewMs) {
+      return false;
+    }
+    return true;
+  }
+
+  function parseCandidateListTimestamp(raw: string | undefined): Date | null {
+    if (!raw) {
+      return null;
+    }
+    const parsedList = parseLinkedInListTimestamp(raw, new Date());
+    if (parsedList && isPlausibleTimestamp(parsedList)) {
+      return parsedList;
+    }
+    const parsed = new Date(raw);
+    if (!isPlausibleTimestamp(parsed)) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function normalizeMessageTimestamp(raw: string | undefined, fallback: Date): Date {
+    const normalized = (raw ?? "").trim();
+    if (!normalized) {
+      return fallback;
+    }
+
+    if (/^-?\d+(\.\d+)?$/.test(normalized)) {
+      const numeric = Number(normalized);
+      if (Number.isFinite(numeric)) {
+        const asMs = numeric < 1_000_000_000_000 ? numeric * 1_000 : numeric;
+        const parsedNumeric = new Date(asMs);
+        if (isPlausibleTimestamp(parsedNumeric)) {
+          return parsedNumeric;
+        }
+      }
+    }
+
+    const parsed = new Date(normalized);
+    if (isPlausibleTimestamp(parsed)) {
+      return parsed;
+    }
+
+    const parsedList = parseLinkedInListTimestamp(normalized, new Date());
+    if (parsedList && isPlausibleTimestamp(parsedList)) {
+      return parsedList;
+    }
+
+    return fallback;
+  }
+
+  function resolvePlatformThreadId(platform: PlatformName, candidate: ThreadStub): string | null {
+    const rawCandidateId = cleanText(candidate.platformThreadId);
+    if (!rawCandidateId) {
+      return null;
+    }
+
+    if (platform !== "LINKEDIN") {
+      return rawCandidateId;
+    }
+
+    const canonical = normalizeCanonicalLinkedInThreadId({
+      platformThreadId: rawCandidateId,
+      threadUrl: candidate.threadUrl,
+      activeKey: rawCandidateId
+    });
+    if (!canonical || isTemporaryLinkedInId(canonical)) {
+      return null;
+    }
+    return canonical;
+  }
+
   async function syncThread(
     platform: PlatformName,
     candidate: ThreadStub,
@@ -1356,16 +1444,68 @@ export function createScanQueue(deps: ScanQueueDeps) {
     runLogger?: RunLogger,
     preParsedMessages?: NormalizedMessage[]
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
-    const candidateListTimestamp = (() => {
-      if (!candidate.lastMessageAt) {
-        return null;
+    const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
+    const adapter = deps.adapters[platform];
+
+    await deps.auditLog({
+      platform,
+      stage: "Parse",
+      action: "THREAD_PARSE_START",
+      status: "OK",
+      details: {
+        requestId: jobId,
+        jobId,
+        stage: "parse",
+        candidatePlatformThreadId: candidate.platformThreadId,
+        candidateThreadUrl: candidate.threadUrl ?? null,
+        candidateDisplayName: candidate.displayName
       }
-      const parsed = new Date(candidate.lastMessageAt);
-      if (Number.isNaN(parsed.getTime())) {
-        return null;
-      }
-      return parsed;
-    })();
+    });
+    runLogger?.logAction({
+      stage: "read_thread",
+      action: "thread_parse_start",
+      result: "ok",
+      note: `${candidate.displayName} (${candidate.platformThreadId})`
+    });
+
+    const messages = preParsedMessages ?? (await adapter.fetchThreadMessages(candidate, maxMessages));
+    const canonicalPlatformThreadId = resolvePlatformThreadId(platform, candidate);
+
+    if (platform === "LINKEDIN" && !canonicalPlatformThreadId) {
+      await deps.auditLog({
+        platform,
+        stage: "Persist",
+        action: "THREAD_SKIPPED",
+        status: "FAIL",
+        details: {
+          requestId: jobId,
+          jobId,
+          stage: "persist",
+          reason: "unresolved_thread_id_after_open",
+          candidatePlatformThreadId: candidate.platformThreadId,
+          candidateThreadUrl: candidate.threadUrl ?? null,
+          candidateDisplayName: candidate.displayName
+        }
+      });
+      runLogger?.logDecision({
+        stage: "persist",
+        level: "warn",
+        decision: "Skipped LinkedIn persistence due to unresolved canonical thread ID after open",
+        details: {
+          reason: "unresolved_thread_id_after_open",
+          candidatePlatformThreadId: candidate.platformThreadId,
+          candidateThreadUrl: candidate.threadUrl ?? null
+        }
+      });
+      return {
+        updatedThreads: 0,
+        parsedMessages: 0
+      };
+    }
+
+    if (canonicalPlatformThreadId) {
+      candidate.platformThreadId = canonicalPlatformThreadId;
+    }
 
     const person =
       (await prisma.person.findFirst({ where: { displayName: candidate.displayName, platform } })) ??
@@ -1395,31 +1535,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
           threadUrl: candidate.threadUrl,
           unreadCount: candidate.unreadCount ?? 0,
           lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
-          lastMessageAt: candidateListTimestamp ?? undefined
+          lastMessageAt: candidateListTimestamp ?? undefined,
+          needsReply: Boolean(candidate.needsReplyFromList)
         }
       }));
 
-    const adapter = deps.adapters[platform];
-    await deps.auditLog({
-      platform,
-      stage: "Parse",
-      action: "THREAD_PARSE_START",
-      status: "OK",
-      details: {
-        requestId: jobId,
-        jobId,
-        stage: "parse",
-        threadId: thread.id,
-        platformThreadId: candidate.platformThreadId
-      }
-    });
-    runLogger?.logAction({
-      stage: "read_thread",
-      action: "thread_parse_start",
-      result: "ok",
-      note: `${candidate.displayName} (${candidate.platformThreadId})`
-    });
-    const messages = preParsedMessages ?? (await adapter.fetchThreadMessages(candidate, maxMessages));
     await deps.auditLog({
       platform,
       stage: "Parse",
@@ -1444,12 +1564,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
       note: candidate.displayName
     });
 
+    const timestampFallback = candidateListTimestamp ?? new Date();
     for (const message of messages) {
-      const parsedTimestamp = new Date(message.timestamp);
-      const safeTimestamp = Number.isNaN(parsedTimestamp.getTime()) ? new Date() : parsedTimestamp;
+      const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
       const key =
         message.platformMessageKey ??
-        stableHash(`${thread.id}|${message.timestamp}|${message.direction}|${cleanText(message.text)}`);
+        stableHash(`${thread.id}|${safeTimestamp.toISOString()}|${message.direction}|${cleanText(message.text)}`);
 
       await prisma.message.upsert({
         where: {
@@ -1479,30 +1599,54 @@ export function createScanQueue(deps: ScanQueueDeps) {
       });
     }
 
-    const latestMessages = await prisma.message.findMany({
-      where: { threadId: thread.id },
-      orderBy: { timestamp: "asc" },
-      take: maxMessages
-    });
+    const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage] = await Promise.all([
+      prisma.message.findMany({
+        where: { threadId: thread.id },
+        orderBy: { timestamp: "desc" },
+        take: maxMessages
+      }),
+      prisma.message.aggregate({
+        where: { threadId: thread.id },
+        _max: { timestamp: true }
+      }),
+      prisma.message.aggregate({
+        where: { threadId: thread.id, direction: "IN" },
+        _max: { timestamp: true }
+      }),
+      prisma.message.aggregate({
+        where: { threadId: thread.id, direction: "OUT" },
+        _max: { timestamp: true }
+      }),
+      prisma.message.findFirst({
+        where: { threadId: thread.id, direction: "IN" },
+        orderBy: { timestamp: "desc" }
+      })
+    ]);
 
-    const lastMessage = latestMessages[latestMessages.length - 1];
-    const resolvedLastMessageAt = candidateListTimestamp ?? lastMessage?.timestamp;
-    const lastInbound = [...latestMessages].reverse().find((msg) => msg.direction === "IN");
-    const lastOutbound = [...latestMessages].reverse().find((msg) => msg.direction === "OUT");
+    const latestMessages = [...latestMessagesDesc].reverse();
+    const resolvedLastMessageAt = aggregateAny._max.timestamp ?? candidateListTimestamp;
+    const resolvedLastInboundAt = aggregateInbound._max.timestamp ?? null;
+    const resolvedLastOutboundAt = aggregateOutbound._max.timestamp ?? null;
+    const hasPersistedMessages = Boolean(aggregateAny._max.timestamp);
+    const messageDerivedNeedsReply = Boolean(
+      resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
+    );
+    const resolvedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
+    const lastMessage = latestMessagesDesc[0];
     const resolvedLastMessagePreview = cleanText(
       candidate.lastMessagePreview ?? lastMessage?.text ?? thread.lastMessagePreview ?? ""
     );
 
     const settings = await deps.settingsStore.getSettings();
     const risk = calculateRisk({
-      lastInboundAt: lastInbound?.timestamp,
-      lastOutboundAt: lastOutbound?.timestamp,
+      lastInboundAt: resolvedLastInboundAt,
+      lastOutboundAt: resolvedLastOutboundAt,
       amberHours: settings.amberHours,
       redHours: settings.redHours
     });
 
-    const lastInboundHash = lastInbound
-      ? stableHash(`${lastInbound.timestamp.toISOString()}|${cleanText(lastInbound.text)}`)
+    const lastInboundHash = lastInboundMessage
+      ? stableHash(`${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`)
       : null;
 
     const shouldRefreshSummary = !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
@@ -1538,13 +1682,17 @@ export function createScanQueue(deps: ScanQueueDeps) {
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
         lastMessagePreview: resolvedLastMessagePreview || null,
         lastMessageAt: resolvedLastMessageAt,
-        lastInboundAt: lastInbound?.timestamp,
-        lastOutboundAt: lastOutbound?.timestamp,
+        lastInboundAt: resolvedLastInboundAt,
+        lastOutboundAt: resolvedLastOutboundAt,
         lastInboundHash,
         riskLevel: risk.level,
         slaDueAt: risk.slaDueAt,
-        riskReason: risk.riskReason,
-        needsReply: risk.needsReply,
+        riskReason: hasPersistedMessages
+          ? risk.riskReason
+          : resolvedNeedsReply
+            ? "Awaiting reply (list preview signal)"
+            : risk.riskReason,
+        needsReply: resolvedNeedsReply,
         rollingSummary: summary,
         whatTheyWant,
         openLoopsJson,
@@ -1570,7 +1718,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         threadId: thread.id,
         platformThreadId: candidate.platformThreadId,
         messageCount: latestMessages.length,
-        needsReply: risk.needsReply
+        needsReply: resolvedNeedsReply
       }
     });
     runLogger?.logAction({
@@ -1579,7 +1727,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       result: "ok",
       counts: {
         messageCount: latestMessages.length,
-        needsReply: risk.needsReply
+        needsReply: resolvedNeedsReply
       },
       note: candidate.displayName
     });

@@ -14,6 +14,7 @@ export interface ThreadStub {
   lastMessagePreview: string;
   lastMessageAt?: string;
   threadUrl?: string;
+  needsReplyFromList?: boolean;
   isUnreadCandidate?: boolean;
   isRecentCandidate?: boolean;
 }

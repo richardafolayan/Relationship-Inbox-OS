@@ -5,7 +5,6 @@ import express from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformName, SelectorRegistry, ThreadStub } from "@inbox-os/core";
-import { formatSlaCountdown } from "@inbox-os/core";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -28,6 +27,11 @@ import {
 } from "./services/linkedin-smoke-logger";
 import { AdapterFailure } from "./platforms/utils";
 import type { LinkedInSmokeIngestResult, LinkedInSmokePersistInput } from "./platforms/linkedin-adapter";
+import {
+  shapeThreadRows,
+  toInboxRow,
+  type ThreadRowSource
+} from "./services/thread-row-shaping";
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
@@ -400,6 +404,21 @@ async function getThreadStub(threadId: string): Promise<{
     threadUrl: thread.threadUrl ?? undefined,
     displayName: thread.person.displayName
   };
+}
+
+async function loadVisibleThreadRows(): Promise<ReturnType<typeof shapeThreadRows>> {
+  const threads = await prisma.thread.findMany({
+    include: {
+      person: true,
+      _count: {
+        select: {
+          messages: true
+        }
+      }
+    }
+  });
+
+  return shapeThreadRows(threads as ThreadRowSource[]);
 }
 
 app.use("/control", (req, res, next) => {
@@ -1106,50 +1125,30 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const unreadOnly = req.query.unread === "true";
   const needsReplyOnly = req.query.needsReply === "true";
 
-  const threads = await prisma.thread.findMany({
-    include: {
-      person: true
-    }
-  });
+  const dedupedRows = (await loadVisibleThreadRows()).map((row) => toInboxRow(row));
 
-  const filtered = threads.filter((thread) => {
-    if (platform && thread.platform !== platform) {
-      return false;
-    }
-    if (risk && thread.riskLevel !== risk) {
-      return false;
-    }
-    if (unreadOnly && thread.unreadCount <= 0) {
-      return false;
-    }
-    if (needsReplyOnly && !thread.needsReply) {
-      return false;
-    }
-    if (search) {
-      const haystack =
-        `${thread.person.displayName} ${thread.lastMessagePreview ?? ""} ${thread.rollingSummary ?? ""}`.toLowerCase();
-      if (!haystack.includes(search.toLowerCase())) {
+  const rows = dedupedRows
+    .filter((row) => {
+      if (platform && row.platform !== platform) {
         return false;
       }
-    }
-    return true;
-  });
-
-  const rows = filtered
-    .map((thread) => ({
-      id: thread.id,
-      personName: thread.person.displayName,
-      platform: thread.platform,
-      preview: thread.lastMessagePreview ?? thread.whatTheyWant ?? thread.rollingSummary ?? "No summary yet",
-      unreadCount: thread.unreadCount,
-      riskLevel: thread.riskLevel,
-      needsReply: thread.needsReply,
-      lastMessageAt: thread.lastMessageAt?.toISOString() ?? null,
-      lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
-      lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
-      riskReason: thread.riskReason,
-      slaCountdown: formatSlaCountdown(thread.slaDueAt)
-    }))
+      if (risk && row.riskLevel !== risk) {
+        return false;
+      }
+      if (unreadOnly && row.unreadCount <= 0) {
+        return false;
+      }
+      if (needsReplyOnly && !row.needsReply) {
+        return false;
+      }
+      if (search) {
+        const haystack = `${row.personName} ${row.preview}`.toLowerCase();
+        if (!haystack.includes(search.toLowerCase())) {
+          return false;
+        }
+      }
+      return true;
+    })
     .sort((a, b) => {
       if (rankRisk(a.riskLevel) !== rankRisk(b.riskLevel)) {
         return rankRisk(b.riskLevel) - rankRisk(a.riskLevel);
@@ -1159,8 +1158,8 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
         return b.unreadCount - a.unreadCount;
       }
 
-      const aTime = a.lastInboundAt ? Date.parse(a.lastInboundAt) : 0;
-      const bTime = b.lastInboundAt ? Date.parse(b.lastInboundAt) : 0;
+      const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+      const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
       return bTime - aTime;
     });
 
@@ -1396,37 +1395,54 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
 }));
 
 app.get("/data/people", asyncRoute(async (_req, res) => {
-  const people = await prisma.person.findMany({
-    include: {
-      threads: true
-    },
-    orderBy: {
-      updatedAt: "desc"
-    }
-  });
+  const [people, visibleThreadGroups] = await Promise.all([
+    prisma.person.findMany({
+      orderBy: {
+        updatedAt: "desc"
+      }
+    }),
+    loadVisibleThreadRows()
+  ]);
+
+  const groupedByPerson = new Map<string, ReturnType<typeof toInboxRow>[]>();
+  for (const group of visibleThreadGroups) {
+    const shaped = toInboxRow(group);
+    const bucket = groupedByPerson.get(shaped.personId) ?? [];
+    bucket.push(shaped);
+    groupedByPerson.set(shaped.personId, bucket);
+  }
 
   res.json(
-    people.map((person) => ({
-      id: person.id,
-      name: person.displayName,
-      platform: person.platform,
-      notes: person.notes,
-      tags: person.tagsJson ? JSON.parse(person.tagsJson) : [],
-      lastInteractionAt: person.threads
-        .map((thread) => thread.lastMessageAt)
-        .filter(Boolean)
-        .sort((a, b) => (a!.getTime() > b!.getTime() ? -1 : 1))[0]
-        ?.toISOString(),
-      risk: person.threads.reduce((highest, thread) => {
-        if (thread.riskLevel === "RED") {
+    people.map((person) => {
+      const rows = groupedByPerson.get(person.id) ?? [];
+      const latest = rows
+        .map((row) => row.lastMessageAt)
+        .filter((value): value is string => Boolean(value))
+        .sort((a, b) => Date.parse(b) - Date.parse(a))[0] ?? null;
+      const risk = rows.reduce<"GREEN" | "AMBER" | "RED">((highest, row) => {
+        if (row.riskLevel === "RED") {
           return "RED";
         }
-        if (thread.riskLevel === "AMBER" && highest !== "RED") {
+        if (row.riskLevel === "AMBER" && highest !== "RED") {
           return "AMBER";
         }
         return highest;
-      }, "GREEN")
-    }))
+      }, "GREEN");
+
+      const unresolvedThreadCount = rows.filter((row) => row.identityWarning === "unresolved_id").length;
+
+      return {
+        id: person.id,
+        name: person.displayName,
+        platform: person.platform,
+        notes: person.notes,
+        tags: person.tagsJson ? JSON.parse(person.tagsJson) : [],
+        lastInteractionAt: latest,
+        risk,
+        hasUnresolvedIdentityWarning: unresolvedThreadCount > 0 || undefined,
+        unresolvedThreadCount: unresolvedThreadCount || undefined
+      };
+    })
   );
 }));
 

@@ -12,7 +12,8 @@
     "scan": "tsx src/cli.ts scan",
     "connect:linkedin": "tsx src/cli.ts connect LINKEDIN",
     "test:selectors:linkedin": "tsx src/cli.ts test-selectors LINKEDIN",
-    "linkedin:smoke": "tsx src/cli.ts linkedin-smoke"
+    "linkedin:smoke": "tsx src/cli.ts linkedin-smoke",
+    "repair:linkedin-threads": "tsx src/scripts/repair-linkedin-threads.ts"
   },
   "dependencies": {
     "@inbox-os/core": "0.1.0",

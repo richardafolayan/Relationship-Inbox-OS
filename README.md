@@ -12,6 +12,7 @@ This guide is for:
 - [Feature Inventory (Current, Shipped)](#feature-inventory-current-shipped)
 - [Quick Start (Step-by-Step, First Run)](#quick-start-step-by-step-first-run)
 - [Daily Usage Workflow (Operator Runbook)](#daily-usage-workflow-operator-runbook)
+- [LinkedIn Repair CLI](#linkedin-repair-cli)
 - [Configuration Reference](#configuration-reference)
 - [Profiles and Browser Session Model](#profiles-and-browser-session-model)
 - [API Surface (Practical Reference)](#api-surface-practical-reference)
@@ -102,6 +103,31 @@ Stack:
 - `connect <PLATFORM>`: connect a platform.
 - `test-selectors <PLATFORM>`: run selector tests.
 - `linkedin-smoke`: run one-thread LinkedIn unread smoke ingest.
+- `repair:linkedin-threads`: plan/apply conservative LinkedIn dedupe + recency repair.
+
+### LinkedIn Repair CLI
+
+The LinkedIn repair command is conservative and defaults to dry-run.
+
+Dry-run (safe default):
+
+```bash
+npm run repair:linkedin-threads
+```
+
+Apply planned merges/recompute timestamps:
+
+```bash
+npm run repair:linkedin-threads -- --apply
+```
+
+Optional explicit cleanup for unresolved zero-message placeholders:
+
+```bash
+npm run repair:linkedin-threads -- --apply --delete-zero-message-unresolved
+```
+
+Every run writes an NDJSON report under `/Users/richard/IdeaProjects/relationship-inbox-os/data/repair` unless `--report <path>` is provided.
 
 ## Quick Start (Step-by-Step, First Run)
 

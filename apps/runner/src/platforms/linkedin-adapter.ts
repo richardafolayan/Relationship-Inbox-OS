@@ -24,6 +24,15 @@ import {
   executeTracedOperation,
   type RunLogger
 } from "../services/run-logger.js";
+import {
+  buildTemporaryCandidateId,
+  normalizeCanonicalLinkedInThreadId
+} from "../linkedin/linkedinIdentity.js";
+import { parseLinkedInListTimestamp } from "../linkedin/linkedinTime.js";
+import {
+  isSponsoredPillText,
+  needsReplyFromPreview
+} from "../linkedin/linkedinRowSignals.js";
 
 interface LinkedInAdapterDependencies {
   screenshotDir: string;
@@ -39,12 +48,15 @@ interface LinkedInAdapterDependencies {
 
 interface LinkedInThreadSnapshot {
   stableKey: string;
+  platformThreadId?: string;
+  isTemporaryId: boolean;
   displayName: string;
   unreadCount: number;
   lastMessagePreview: string;
   lastMessageAt?: string;
   threadUrl?: string;
   avatarUrl?: string;
+  needsReplyFromList: boolean;
 }
 
 interface LinkedInThreadCollectionIteration {
@@ -155,11 +167,14 @@ const linkedInLoadingSpinnerSelector = [
 
 export interface LinkedInSmokeThreadRowMetadata {
   stableKey: string;
+  platformThreadId?: string;
+  isTemporaryId?: boolean;
   participantName: string;
   listTimestamp?: string;
   previewSnippet?: string;
   unreadCount?: number;
   threadUrl?: string;
+  needsReplyFromList?: boolean;
 }
 
 export interface LinkedInSmokeParsedMessage {
@@ -248,10 +263,13 @@ export type LinkedInSmokeNavigateState =
 export interface LinkedInConversationRowCandidate {
   liIndex: number;
   stableKey: string;
+  platformThreadId?: string;
+  isTemporaryId: boolean;
   participantName: string;
   listTimestamp?: string;
   previewSnippet?: string;
   threadUrl?: string;
+  needsReplyFromList: boolean;
   clickSelector: string;
 }
 
@@ -550,6 +568,7 @@ async function getConversationRowCandidatesWithContainer(
         listTimestamp: string | null;
         previewSnippet: string | null;
         href: string | null;
+        pillText: string | null;
         clickSelector: string;
       }> = [];
       let liWithParticipantCount = 0;
@@ -586,6 +605,9 @@ async function getConversationRowCandidatesWithContainer(
         const previewSnippet = (node.querySelector(".msg-conversation-card__message-snippet")?.textContent ?? "")
           .replace(/\s+/g, " ")
           .trim();
+        const pillText = (node.querySelector(".msg-conversation-card__pill")?.textContent ?? "")
+          .replace(/\s+/g, " ")
+          .trim();
         const anchor = link.tagName.toLowerCase() === "a" ? link : node.querySelector("a[href*='/messaging/']");
         const href = (anchor?.getAttribute("href") ?? "").replace(/\s+/g, " ").trim();
         rows.push({
@@ -594,6 +616,7 @@ async function getConversationRowCandidatesWithContainer(
           listTimestamp: listTimestamp || null,
           previewSnippet: previewSnippet || null,
           href: href || null,
+          pillText: pillText || null,
           clickSelector: ".msg-conversation-listitem__link"
         });
       }
@@ -616,20 +639,34 @@ async function getConversationRowCandidatesWithContainer(
       };
     });
 
-  const candidates = raw.rows.map((entry) => {
-    const threadUrl = resolveSmokeThreadUrl(entry.href ?? "", page.url());
-    const stableToken = resolveSmokeThreadToken(threadUrl);
-    const fallback = `linkedin-smoke:${entry.participantName.toLowerCase()}|${(entry.previewSnippet ?? "").toLowerCase()}|${(entry.listTimestamp ?? "").toLowerCase()}`;
-    return {
-      liIndex: entry.liIndex,
-      stableKey: stableToken || fallback,
-      participantName: entry.participantName,
-      listTimestamp: entry.listTimestamp ?? undefined,
-      previewSnippet: entry.previewSnippet ?? undefined,
-      threadUrl,
-      clickSelector: entry.clickSelector
-    };
-  });
+  const candidates = raw.rows
+    .filter((entry) => !isSponsoredPillText(entry.pillText ?? ""))
+    .map((entry) => {
+      const threadUrl = resolveSmokeThreadUrl(entry.href ?? "", page.url());
+      const canonicalId = normalizeCanonicalLinkedInThreadId({
+        threadUrl
+      });
+      const stableKey =
+        canonicalId ??
+        buildTemporaryCandidateId({
+          displayName: entry.participantName,
+          preview: entry.previewSnippet ?? "",
+          listTimestamp: entry.listTimestamp ?? "",
+          rowIndex: entry.liIndex
+        });
+      return {
+        liIndex: entry.liIndex,
+        stableKey,
+        platformThreadId: canonicalId ?? undefined,
+        isTemporaryId: !canonicalId,
+        participantName: entry.participantName,
+        listTimestamp: entry.listTimestamp ?? undefined,
+        previewSnippet: entry.previewSnippet ?? undefined,
+        threadUrl,
+        needsReplyFromList: needsReplyFromPreview(entry.previewSnippet ?? ""),
+        clickSelector: entry.clickSelector
+      };
+    });
 
   return {
     containerSelector: container.selector,
@@ -675,11 +712,14 @@ async function discoverLinkedInUnreadRowsWithHandles(page: Page): Promise<Linked
       rows.push({
         metadata: {
           stableKey: candidate.stableKey,
+          platformThreadId: candidate.platformThreadId,
+          isTemporaryId: candidate.isTemporaryId,
           participantName: candidate.participantName,
           listTimestamp: candidate.listTimestamp,
           previewSnippet: candidate.previewSnippet,
           unreadCount: await readUnreadCountFromScope(scope),
-          threadUrl: candidate.threadUrl
+          threadUrl: candidate.threadUrl,
+          needsReplyFromList: candidate.needsReplyFromList
         },
         clickTarget,
         scope
@@ -2239,9 +2279,25 @@ export class LinkedInAdapter implements PlatformAdapter {
       return fallbackIso;
     }
 
+    if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
+      const numeric = Number(trimmed);
+      if (Number.isFinite(numeric)) {
+        const normalizedMs = numeric < 1_000_000_000_000 ? numeric * 1_000 : numeric;
+        const parsedNumeric = new Date(normalizedMs);
+        if (!Number.isNaN(parsedNumeric.getTime())) {
+          return parsedNumeric.toISOString();
+        }
+      }
+    }
+
     const parsed = Date.parse(trimmed);
     if (!Number.isNaN(parsed)) {
       return new Date(parsed).toISOString();
+    }
+
+    const parsedListTimestamp = parseLinkedInListTimestamp(trimmed, new Date());
+    if (parsedListTimestamp) {
+      return parsedListTimestamp.toISOString();
     }
 
     return fallbackIso;
@@ -2611,6 +2667,14 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(scope.locator("p.msg-conversation-card__message-snippet"))) ??
           ""
       ).slice(0, 220);
+      const pillText = cleanText(
+        (await readText(scope.locator(".msg-conversation-card__pill"))) ??
+          (await readText(scope.locator("span.msg-conversation-card__pill"))) ??
+          ""
+      );
+      if (isSponsoredPillText(pillText)) {
+        continue;
+      }
       const lastMessageAt = cleanText(
         (await readText(scope.locator("time.msg-conversation-listitem__time-stamp"))) ??
           (await readText(scope.locator("time"))) ??
@@ -2635,22 +2699,36 @@ export class LinkedInAdapter implements PlatformAdapter {
         (await readAttr(scope, "data-id")) ??
         (await readAttr(scope, "id")) ??
         "";
-      const hrefToken = this.resolveThreadUrlToken(href);
-      const fallbackKey = `linkedin-fallback:${displayName.toLowerCase()}|${preview.toLowerCase()}|${unreadCount}`;
+      const canonicalId = normalizeCanonicalLinkedInThreadId({
+        threadUrl: href || undefined,
+        activeKey: urnToken || undefined
+      });
       const stableKey =
-        (hrefToken && `linkedin-href:${hrefToken}`) ||
-        (urnToken && `linkedin-urn:${urnToken.toLowerCase()}`) ||
-        fallbackKey;
+        canonicalId ??
+        buildTemporaryCandidateId({
+          displayName,
+          preview,
+          listTimestamp: lastMessageAt,
+          rowIndex: index
+        });
+      const needsReplyFromList = needsReplyFromPreview(preview);
+      const includeCandidate = unreadCount > 0 || needsReplyFromList;
+      if (!displayName || !includeCandidate) {
+        continue;
+      }
       const avatarUrl = (await readAttr(scope.locator("img"), "src")) ?? undefined;
 
       rows.push({
         stableKey,
-        displayName: displayName || `LinkedIn Thread ${index + 1}`,
+        platformThreadId: canonicalId ?? undefined,
+        isTemporaryId: !canonicalId,
+        displayName,
         unreadCount,
         lastMessagePreview: preview,
         lastMessageAt: lastMessageAt || undefined,
         threadUrl: href || undefined,
-        avatarUrl
+        avatarUrl,
+        needsReplyFromList
       });
     }
 
@@ -2982,13 +3060,14 @@ export class LinkedInAdapter implements PlatformAdapter {
           continue;
         }
         merged.set(row.stableKey, {
-          platformThreadId: row.stableKey,
+          platformThreadId: row.platformThreadId ?? row.stableKey,
           displayName: row.displayName,
           unreadCount: row.unreadCount,
           lastMessagePreview: row.lastMessagePreview,
           lastMessageAt: row.lastMessageAt,
           threadUrl: row.threadUrl,
-          avatarUrl: row.avatarUrl
+          avatarUrl: row.avatarUrl,
+          needsReplyFromList: row.needsReplyFromList
         });
       }
       const nextCount = merged.size;
@@ -3943,6 +4022,26 @@ export class LinkedInAdapter implements PlatformAdapter {
         await logStep(5, "open_thread", "thread opened", {
           messageContainerSelector
         });
+        const activeDescriptor = await this.getActiveThreadDescriptor(page, selectors);
+        const canonicalPlatformThreadId = normalizeCanonicalLinkedInThreadId({
+          platformThreadId: threadMeta.platformThreadId ?? threadMeta.stableKey,
+          threadUrl: activeDescriptor.threadUrl ?? page.url(),
+          activeKey: activeDescriptor.activeKey
+        });
+        if (!canonicalPlatformThreadId) {
+          fail(
+            "persist",
+            "unresolved_thread_id_after_open",
+            "LinkedIn smoke row did not resolve a canonical thread identity after open.",
+            {
+              participantName: threadMeta.participantName,
+              candidateKey: threadMeta.stableKey,
+              activeThreadUrl: activeDescriptor.threadUrl ?? page.url(),
+              activeKey: activeDescriptor.activeKey ?? null
+            }
+          );
+        }
+        const resolvedThreadUrl = activeDescriptor.threadUrl ?? page.url();
 
         await logStep(6, "parse_messages", "parsing visible messages");
         const rawMessages = await extractLinkedInSmokeMessages(page, maxMessages);
@@ -3968,12 +4067,13 @@ export class LinkedInAdapter implements PlatformAdapter {
         await logStep(7, "persist", "persisting thread and messages");
         const unreadCount = threadMeta.unreadCount ?? 1;
         const thread: ThreadStub = {
-          platformThreadId: threadMeta.stableKey,
+          platformThreadId: canonicalPlatformThreadId!,
           displayName: threadMeta.participantName,
           lastMessagePreview: threadMeta.previewSnippet ?? cleanText(messages.at(-1)?.text ?? ""),
           lastMessageAt: threadMeta.listTimestamp,
-          threadUrl: threadMeta.threadUrl,
+          threadUrl: resolvedThreadUrl,
           unreadCount,
+          needsReplyFromList: threadMeta.needsReplyFromList,
           isUnreadCandidate: true
         };
         const persisted = await input.persist({
@@ -4174,15 +4274,10 @@ export class LinkedInAdapter implements PlatformAdapter {
               await this.throwIfAuthRequired(page, "scanUnreadThreads:thread_list");
             });
 
-            const unreadFilterResult = await runStage("unread_filter", async () => {
-              return this.ensureUnreadFilterActive(page, selectors);
-            });
-
             const collected = await runStage(
               "collect_threads",
               async () => this.collectThreadRowsWithScroll(page, selectors, this.deps.scanMaxThreads, options),
               {
-                unreadFilterResult: { ...unreadFilterResult },
                 attempt: attempt + 1,
                 recoveryAttempts
               }
@@ -4201,14 +4296,16 @@ export class LinkedInAdapter implements PlatformAdapter {
               };
             }
 
-            const unreadCandidates = collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0);
-            const unreadCandidatesBeforeCap = collected.rowsBeforeCapCount;
-            const unreadCandidatesAfterCap = unreadCandidates.length;
-            runCounters.unreadViewActive = unreadFilterResult.pillPresent && unreadFilterResult.waitReason !== "pill_missing";
+            const actionCandidates = collected.rows.filter(
+              (thread) => (thread.unreadCount ?? 0) > 0 || Boolean(thread.needsReplyFromList)
+            );
+            const candidatesBeforeCap = collected.rowsBeforeCapCount;
+            const candidatesAfterCap = actionCandidates.length;
+            runCounters.unreadViewActive = false;
             runCounters.threadsVisibleCount = collected.rows.length;
             runCounters.threadsCollectedTotal = collected.rowsBeforeCapCount;
-            runCounters.threadsWithUnreadBadgeCount = unreadCandidatesAfterCap;
-            runCounters.candidatesToOpenCount = unreadCandidatesAfterCap;
+            runCounters.threadsWithUnreadBadgeCount = collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length;
+            runCounters.candidatesToOpenCount = candidatesAfterCap;
             runCounters.scrollIterations = collected.scrollIterations;
             runCounters.noProgressStreak = collected.noProgressStreak;
             runCounters.stopReason = collected.stopReason;
@@ -4221,8 +4318,8 @@ export class LinkedInAdapter implements PlatformAdapter {
                 stage: "collect_threads",
                 message: "LinkedIn adapter collection complete",
                 details: {
-                  candidatesBeforeCap: unreadCandidatesBeforeCap,
-                  candidatesAfterCap: unreadCandidatesAfterCap,
+                  candidatesBeforeCap,
+                  candidatesAfterCap,
                   disableDeepScroll: options.disableDeepScroll ?? false,
                   stopReason: collected.stopReason
                 }
@@ -4231,34 +4328,21 @@ export class LinkedInAdapter implements PlatformAdapter {
 
             this.logTraceDecision({
               stage: "collect_threads",
-              decision: runCounters.unreadViewActive
-                ? "Unread pill active => unread badge filtering used"
-                : "Unread badge filtering used",
+              decision: "Candidate selection uses unread badge or preview-inbound signal",
               details: {
                 threadsCollectedTotal: runCounters.threadsCollectedTotal,
-                unreadCandidatesCount: runCounters.candidatesToOpenCount
+                candidatesToOpenCount: runCounters.candidatesToOpenCount,
+                unreadCount: runCounters.threadsWithUnreadBadgeCount
               }
             });
 
-            if (runCounters.candidatesToOpenCount === 0 && runCounters.unreadViewActive) {
-              this.logTraceDecision({
-                stage: "collect_threads",
-                level: "warn",
-                decision: "Candidate selection empty => failing with reason unread_candidates_empty_in_unread_view",
-                details: {
-                  reason: "unread_candidates_empty_in_unread_view",
-                  threadsVisibleCount: runCounters.threadsVisibleCount
-                }
-              });
-            }
-
             this.lastCollectionMetrics = {
               totalFound: collected.rowsBeforeCapCount,
-              unreadFound: unreadCandidatesAfterCap,
+              unreadFound: runCounters.threadsWithUnreadBadgeCount,
               iterations: collected.iterations,
               stopReason: collected.stopReason
             };
-            return unreadCandidates.map((thread) => ({ ...thread, isUnreadCandidate: true }));
+            return actionCandidates.map((thread) => ({ ...thread, isUnreadCandidate: true }));
           } catch (error) {
             if (attempt === 0 && isRetryableLinkedInCollectError(error)) {
               this.logTraceDecision({
@@ -4508,6 +4592,21 @@ export class LinkedInAdapter implements PlatformAdapter {
         await this.throwIfAuthRequired(page, "fetchThreadMessages:navigation");
         await this.openThreadAndWaitForActivation(page, selectors, thread);
         await this.throwIfAuthRequired(page, "fetchThreadMessages:after_activation");
+        const activeDescriptor = await this.getActiveThreadDescriptor(page, selectors);
+        const canonicalPlatformThreadId = normalizeCanonicalLinkedInThreadId({
+          platformThreadId: thread.platformThreadId,
+          threadUrl: activeDescriptor.threadUrl ?? page.url(),
+          activeKey: activeDescriptor.activeKey
+        });
+        if (canonicalPlatformThreadId) {
+          thread.platformThreadId = canonicalPlatformThreadId;
+        }
+        if (activeDescriptor.threadUrl ?? page.url()) {
+          thread.threadUrl = activeDescriptor.threadUrl ?? page.url();
+        }
+        if (activeDescriptor.displayName) {
+          thread.displayName = activeDescriptor.displayName;
+        }
         await this.tracedWaitForVisible(page, selectors.message_container, 15_000, {
           stage: "read_thread",
           note: "wait_message_container"

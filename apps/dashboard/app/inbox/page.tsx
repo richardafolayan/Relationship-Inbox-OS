@@ -179,6 +179,9 @@ export default function InboxPage() {
             <div>
               <p className="font-medium text-slate-900">{row.personName}</p>
               <p className="text-xs text-slate-500">Inbound • {formatRelative(row.lastInboundAt)}</p>
+              {row.identityWarning === "unresolved_id" ? (
+                <p className="text-[11px] text-amber-700">Identity warning: unresolved thread ID</p>
+              ) : null}
             </div>
             <div>
               <Badge tone="blue">{row.platform}</Badge>
@@ -194,6 +197,7 @@ export default function InboxPage() {
               <div className="flex items-center gap-2">
                 <Badge tone={riskTone(row.riskLevel)}>{row.riskLevel}</Badge>
                 {row.unreadCount > 0 ? <Badge>{row.unreadCount} unread</Badge> : null}
+                {row.identityWarning === "unresolved_id" ? <Badge tone="amber">Unresolved ID</Badge> : null}
               </div>
               <p className="text-xs text-slate-500">{row.slaCountdown}</p>
               {row.needsReply ? <Badge tone="amber">Needs reply</Badge> : null}

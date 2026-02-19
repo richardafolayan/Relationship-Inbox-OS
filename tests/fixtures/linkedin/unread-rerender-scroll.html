@@ -75,7 +75,9 @@
         const allRows = [
           { id: "alpha", name: "Alpha One", snippet: "Intro message", unread: 0, time: "8:01 AM" },
           { id: "bravo", name: "Bravo Two", snippet: "Warm follow up", unread: 1, time: "8:05 AM" },
+          { id: "sponsor", name: "Sponsored Row", snippet: "Limited time offer", unread: 4, time: "8:07 AM", sponsored: true },
           { id: "charlie", name: "Charlie Three", snippet: "Checking in", unread: 0, time: "8:09 AM" },
+          { id: "juliet", name: "Juliet Ten", snippet: "You: Already replied", unread: 0, time: "8:11 AM" },
           { id: "delta", name: "Delta Four", snippet: "Long time no see", unread: 0, time: "8:14 AM" },
           { id: "echo", name: "Echo Five", snippet: "Can we reconnect?", unread: 0, time: "8:18 AM" },
           { id: "foxtrot", name: "Foxtrot Six", snippet: "Are you available?", unread: 0, time: "8:22 AM" },
@@ -98,6 +100,7 @@
                 <span class="truncate">${row.name}</span>
               </h3>
               <p class="msg-conversation-card__message-snippet">${row.snippet}</p>
+              ${row.sponsored ? '<span class="msg-conversation-card__pill">Sponsored</span>' : ""}
               <time>${row.time}</time>
               ${
                 row.unread > 0

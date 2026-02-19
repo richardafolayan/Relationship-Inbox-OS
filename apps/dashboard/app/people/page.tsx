@@ -3,19 +3,10 @@
 import { useEffect, useMemo, useState } from "react";
 import { apiGet } from "@/lib/api";
 import { formatRelative } from "@/lib/time";
+import type { PeopleRow } from "@/lib/types";
 import { Card } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Textarea } from "@/components/ui/textarea";
-
-interface PersonRow {
-  id: string;
-  name: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
-  notes?: string | null;
-  tags: string[];
-  lastInteractionAt?: string;
-  risk: "GREEN" | "AMBER" | "RED";
-}
 
 function riskTone(level: string): "green" | "amber" | "red" {
   if (level === "RED") {
@@ -28,11 +19,11 @@ function riskTone(level: string): "green" | "amber" | "red" {
 }
 
 export default function PeoplePage() {
-  const [people, setPeople] = useState<PersonRow[]>([]);
+  const [people, setPeople] = useState<PeopleRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   useEffect(() => {
-    void apiGet<PersonRow[]>("/runner/data/people").then((data) => {
+    void apiGet<PeopleRow[]>("/runner/data/people").then((data) => {
       setPeople(data);
       setSelectedId(data[0]?.id ?? null);
     });
@@ -68,9 +59,12 @@ export default function PeoplePage() {
                   <Badge tone="blue">{person.platform}</Badge>
                 </span>
                 <span className="text-slate-600">{formatRelative(person.lastInteractionAt)}</span>
-                <span>
-                  <Badge tone={riskTone(person.risk)}>{person.risk}</Badge>
-                </span>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <Badge tone={riskTone(person.risk)}>{person.risk}</Badge>
+                    {person.hasUnresolvedIdentityWarning ? <Badge tone="amber">Unresolved ID</Badge> : null}
+                  </div>
+                </div>
               </button>
             ))}
           </div>
@@ -83,6 +77,11 @@ export default function PeoplePage() {
               <div className="flex items-center gap-2">
                 <Badge tone="blue">{selected.platform}</Badge>
                 <Badge tone={riskTone(selected.risk)}>{selected.risk}</Badge>
+                {selected.hasUnresolvedIdentityWarning ? (
+                  <Badge tone="amber">
+                    {selected.unresolvedThreadCount ? `${selected.unresolvedThreadCount} unresolved` : "Unresolved ID"}
+                  </Badge>
+                ) : null}
               </div>
               <p className="text-sm text-slate-600">Last interaction {formatRelative(selected.lastInteractionAt)}</p>
 
