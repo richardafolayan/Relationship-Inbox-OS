@@ -97,6 +97,12 @@ interface LinkedInScanAdapter extends PlatformAdapter {
     runLogger?: RunLogger;
     maxThreads?: number;
     maxOpens?: number;
+    disableDeepScroll?: boolean;
+    onThreadCandidate?: (input: {
+      rowKey: string;
+      thread: ThreadStub;
+      messages: NormalizedMessage[];
+    }) => Promise<void>;
   }): Promise<{
     stopReason: string;
     threadsScanned: number;
@@ -1031,11 +1037,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 return false;
               }
 
+              const fallbackStreamedCandidates: Array<{
+                rowKey: string;
+                thread: ThreadStub;
+                messages: NormalizedMessage[];
+              }> = [];
               const fallbackResult = await linkedInAdapter.scanInboxThreadsDirectFallback({
                 requestId: job.jobId,
                 runLogger,
                 maxThreads: effectiveMaxThreads,
-                maxOpens: effectiveMaxOpens
+                maxOpens: effectiveMaxOpens,
+                disableDeepScroll: linkedInDevCaps.disableDeepScroll,
+                onThreadCandidate: async (input) => {
+                  fallbackStreamedCandidates.push({
+                    rowKey: input.rowKey,
+                    thread: input.thread,
+                    messages: input.messages
+                  });
+                }
               });
 
               if (await markAborted("after_scan_fallback_direct", platform)) {
@@ -1051,9 +1070,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
               threadsScannedCount = fallbackResult.threadsScanned;
               unreadCandidatesCount = fallbackResult.unreadRows;
               needsReplyCandidatesCount = fallbackResult.needsReplyRows;
-              const cappedFallbackThreads = applyThreadCap(fallbackResult.threads);
+              const fallbackCandidates =
+                fallbackStreamedCandidates.length > 0
+                  ? fallbackStreamedCandidates.map((candidate) => ({
+                      thread: candidate.thread,
+                      messages: candidate.messages
+                    }))
+                  : fallbackResult.threads.map((thread) => ({ thread }));
+              const cappedFallbackThreads = applyThreadCap(fallbackCandidates);
               candidatesBeforeCap = rawThreadCount;
-              candidatesToSync = cappedFallbackThreads.map((thread) => ({ thread }));
+              candidatesToSync = cappedFallbackThreads;
               collectionMetrics = {
                 totalFound: fallbackResult.threadsScanned,
                 unreadFound: fallbackResult.unreadRows,
@@ -1080,6 +1106,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   selectorThreadSnippetCount,
                   candidatesBeforeCap: rawThreadCount,
                   candidatesAfterCap: candidatesToSync.length,
+                  streamedCandidatesCount: fallbackStreamedCandidates.length,
                   stopReason: fallbackResult.stopReason
                 }
               });

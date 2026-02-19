@@ -12,9 +12,9 @@ function selectorsForInbox(inboxUrl) {
     thread_list: "ul.msg-conversations-container__conversations-list",
     thread_item: "li.msg-conversation-listitem",
     unread_badge: "div.msg-conversation-card__unread-count .notification-badge__count",
-    message_container: ".message-container",
-    message_item: ".message-item",
-    message_text: ".message-text",
+    message_container: ".msg-s-message-list",
+    message_item: ".msg-s-event-listitem",
+    message_text: ".msg-s-event-listitem__body",
     composer_input: ".composer-input",
     send_button: ".send-button"
   };
@@ -33,8 +33,8 @@ async function createFixture() {
 
   const context = await browser.newContext();
   const page = await context.newPage();
-  const screenshotDir = await mkdtemp(join(tmpdir(), "linkedin-scroll-screens-"));
-  const domDumpDir = await mkdtemp(join(tmpdir(), "linkedin-scroll-dom-"));
+  const screenshotDir = await mkdtemp(join(tmpdir(), "linkedin-fallback-scroll-screens-"));
+  const domDumpDir = await mkdtemp(join(tmpdir(), "linkedin-fallback-scroll-dom-"));
   const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", "unread-rerender-scroll.html");
   const html = await readFile(fixturePath, "utf8");
   const inboxUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}`;
@@ -47,9 +47,9 @@ async function createFixture() {
       getManagedPage: async () => page
     },
     personKey: "default",
-    scanMaxThreads: 60,
+    scanMaxThreads: 80,
     scanStableIterations: 3,
-    scanScrollWaitMs: 100,
+    scanScrollWaitMs: 80,
     messageBackfillAttempts: 1
   });
 
@@ -61,7 +61,7 @@ async function createFixture() {
   };
 }
 
-test("LinkedIn deep scroll terminates with bounded iterations and deterministic stop reason", async (t) => {
+test("LinkedIn direct fallback deep-scrolls beyond first viewport and exhausts with deep-scroll stop reason", async (t) => {
   const fixture = await createFixture();
   if (fixture.skipped) {
     t.skip(fixture.reason);
@@ -73,23 +73,16 @@ test("LinkedIn deep scroll terminates with bounded iterations and deterministic 
     await fixture.browser.close();
   });
 
-  const threads = await fixture.adapter.scanUnreadThreads();
-  const metrics = fixture.adapter.getLastCollectionMetrics();
+  const result = await fixture.adapter.scanInboxThreadsDirectFallback({
+    requestId: "fallback-scroll-test",
+    disableDeepScroll: false,
+    maxThreads: 80,
+    maxOpens: 80
+  });
 
-  assert.equal(threads.length > 0, true);
-  assert.equal(metrics !== null, true);
-  assert.equal((metrics?.iterations ?? 0) > 0, true);
-  assert.equal((metrics?.iterations ?? 0) <= 60, true);
-  assert.equal(
-    [
-      "deep_scroll_exhausted",
-      "end_of_list_no_progress",
-      "end_of_list_reached",
-      "max_threads",
-      "max_iterations",
-      "max_duration",
-      "zero_threads_found"
-    ].includes(metrics?.stopReason ?? ""),
-    true
-  );
+  const names = result.threads.map((thread) => thread.displayName);
+  assert.equal(names.includes("Hotel Eight"), true);
+  assert.equal(names.includes("India Nine"), true);
+  assert.equal(result.threadsScanned > 3, true);
+  assert.equal(result.stopReason === "fallback_direct_complete", false);
 });

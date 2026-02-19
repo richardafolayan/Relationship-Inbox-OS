@@ -64,6 +64,19 @@ test("LinkedIn collector stop conditions respect balanced depth policy", () => {
     shouldStopLinkedInCollection({
       uniqueCount: 44,
       maxThreads: 200,
+      noGrowthIterations: 3,
+      trailingRepeatIterations: 0,
+      stableIterations: 3,
+      didScroll: true,
+      reachedBottom: false
+    }),
+    false
+  );
+
+  assert.equal(
+    shouldStopLinkedInCollection({
+      uniqueCount: 44,
+      maxThreads: 200,
       noGrowthIterations: 0,
       trailingRepeatIterations: 0,
       stableIterations: 3,
@@ -125,7 +138,7 @@ test("LinkedIn collector emits deterministic stop reason for audit metrics", () 
     reachedBottom: true
   });
 
-  assert.equal(stopReason, "end_of_list_no_progress");
+  assert.equal(stopReason, "deep_scroll_exhausted");
 });
 
 test("LinkedIn scan failure reason classifies __name helper leakage explicitly", () => {

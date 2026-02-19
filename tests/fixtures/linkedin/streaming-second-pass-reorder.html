@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>LinkedIn streaming second pass reorder fixture</title>
+    <style>
+      body {
+        margin: 14px;
+        font-family: Arial, sans-serif;
+      }
+
+      .pill-row {
+        display: flex;
+        gap: 8px;
+        margin-bottom: 10px;
+      }
+
+      .layout {
+        display: grid;
+        grid-template-columns: 420px 1fr;
+        gap: 14px;
+      }
+
+      #thread-pane {
+        height: 220px;
+        overflow-y: auto;
+        border: 1px solid #cbd5e1;
+      }
+
+      ul.msg-conversations-container__conversations-list {
+        list-style: none;
+        margin: 0;
+        padding: 0;
+      }
+
+      li.msg-conversation-listitem {
+        border-bottom: 1px solid #e2e8f0;
+      }
+
+      .msg-conversation-listitem__link {
+        display: block;
+        min-height: 88px;
+        padding: 8px;
+      }
+
+      .msg-conversation-listitem__link--active {
+        background: #dbeafe;
+      }
+
+      .msg-conversation-card__message-snippet {
+        margin: 4px 0;
+      }
+
+      .msg-conversation-card__unread-count {
+        display: inline-block;
+        background: #2563eb;
+        color: #fff;
+        border-radius: 999px;
+        padding: 1px 8px;
+        font-size: 12px;
+      }
+
+      .msg-s-message-list {
+        min-height: 200px;
+        border: 1px solid #d1d5db;
+        padding: 8px;
+      }
+
+      .msg-s-event-listitem {
+        margin-bottom: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="pill-row">
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="UNREAD" aria-pressed="false">Unread</button>
+      <button type="button" data-test-messaging-inbox-filters__filter-pill="ALL" aria-pressed="true">All</button>
+    </div>
+
+    <main role="main">
+      <div class="layout">
+        <section class="msg-conversations-container">
+          <div id="thread-pane" class="scaffold-finite-scroll__content">
+            <ul id="thread-list" class="msg-conversations-container__conversations-list"></ul>
+          </div>
+        </section>
+        <section>
+          <h3 id="active-title">No thread selected</h3>
+          <div id="message-container" class="msg-s-message-list" hidden></div>
+        </section>
+      </div>
+    </main>
+
+    <script>
+      (() => {
+        const rows = [
+          { id: "alpha", name: "Alpha One", snippet: "You: done", unread: 0, time: "7:01 AM" },
+          { id: "bravo", name: "Bravo Two", snippet: "Can you reply?", unread: 1, time: "7:03 AM" },
+          { id: "charlie", name: "Charlie Three", snippet: "You: ack", unread: 0, time: "7:08 AM" },
+          { id: "delta", name: "Delta Four", snippet: "Need your input", unread: 1, time: "7:12 AM" },
+          { id: "echo", name: "Echo Five", snippet: "Following up", unread: 1, time: "7:15 AM" },
+          { id: "foxtrot", name: "Foxtrot Six", snippet: "You: thanks", unread: 0, time: "7:18 AM" }
+        ];
+        const surfaced = {
+          id: "omega",
+          name: "Omega Surfaced",
+          snippet: "Could you review this?",
+          unread: 1,
+          time: "7:19 AM"
+        };
+
+        const messageByThread = Object.fromEntries(
+          [...rows, surfaced].map((row, index) => [
+            row.id,
+            [
+              {
+                direction: row.snippet.startsWith("You:") ? "OUT" : "IN",
+                text: row.snippet,
+                timestamp: `2026-02-18T09:${String(10 + index).padStart(2, "0")}:00.000Z`
+              }
+            ]
+          ])
+        );
+
+        const pane = document.getElementById("thread-pane");
+        const list = document.getElementById("thread-list");
+        const messageContainer = document.getElementById("message-container");
+        const activeTitle = document.getElementById("active-title");
+
+        let activeId = null;
+        let omegaInserted = false;
+
+        window.__secondPassFixtureMetrics = {
+          omegaInserted: false,
+          openCounts: {}
+        };
+
+        function openThread(id) {
+          const metricCounts = window.__secondPassFixtureMetrics.openCounts;
+          metricCounts[id] = (metricCounts[id] || 0) + 1;
+
+          activeId = id;
+          const row = rows.find((entry) => entry.id === id) || surfaced;
+          if (activeTitle) {
+            activeTitle.textContent = row ? row.name : id;
+          }
+
+          if (id === "echo" && !omegaInserted) {
+            rows.unshift(surfaced);
+            omegaInserted = true;
+            window.__secondPassFixtureMetrics.omegaInserted = true;
+          }
+
+          if (messageContainer) {
+            messageContainer.innerHTML = "";
+            const messages = messageByThread[id] || [];
+            for (const [idx, message] of messages.entries()) {
+              const node = document.createElement("div");
+              node.className = `msg-s-event-listitem ${message.direction === "IN" ? "msg-s-event-listitem--other" : "msg-s-event-listitem--self"}`;
+              node.setAttribute("data-event-urn", `${id}-${idx}`);
+              node.innerHTML = `<p class="msg-s-event-listitem__body">${message.text}</p><time datetime="${message.timestamp}">${message.timestamp}</time>`;
+              messageContainer.appendChild(node);
+            }
+            messageContainer.hidden = false;
+          }
+
+          try {
+            history.replaceState({}, "", `/messaging/thread/${id}/`);
+          } catch {
+            window.location.hash = `#/messaging/thread/${id}/`;
+          }
+          renderRows();
+        }
+
+        function renderRows() {
+          if (!list) {
+            return;
+          }
+          list.innerHTML = "";
+          for (const row of rows) {
+            const item = document.createElement("li");
+            item.className = "msg-conversation-listitem";
+            item.id = `ember-${row.id}`;
+            item.setAttribute("data-conversation-urn", `urn:li:msg_thread:${row.id}`);
+            item.setAttribute("data-entity-urn", `urn:li:msg_thread:${row.id}`);
+            item.setAttribute("data-control-id", `control-${row.id}`);
+
+            const activeClass =
+              row.id === activeId
+                ? "msg-conversation-listitem__link--active msg-conversations-container__convo-item-link--active"
+                : "";
+            item.innerHTML = `
+              <div class="msg-conversation-listitem__link msg-conversations-container__convo-item-link ${activeClass}">
+                <a class="msg-conversation-card__conversation-link" href="https://www.linkedin.com/messaging/thread/${row.id}/">open</a>
+                <h3 class="msg-conversation-listitem__participant-names"><span class="truncate">${row.name}</span></h3>
+                <p class="msg-conversation-card__message-snippet">${row.snippet}</p>
+                <time class="msg-conversation-listitem__time-stamp">${row.time}</time>
+                ${row.unread > 0 ? `<div class="msg-conversation-card__unread-count"><span class="notification-badge__count">${row.unread}</span></div>` : ""}
+              </div>
+            `;
+
+            const clickTarget = item.querySelector(".msg-conversation-listitem__link");
+            if (clickTarget) {
+              clickTarget.addEventListener("click", (event) => {
+                event.preventDefault();
+                openThread(row.id);
+              });
+            }
+            list.appendChild(item);
+          }
+        }
+
+        pane.addEventListener("scroll", () => {
+          // no-op: keeps browser-native container scroll behavior
+        });
+
+        renderRows();
+      })();
+    </script>
+  </body>
+</html>

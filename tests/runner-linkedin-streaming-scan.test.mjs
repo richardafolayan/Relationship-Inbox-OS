@@ -172,7 +172,7 @@ test("LinkedIn streaming scan progresses through virtualized rows without reload
     true
   );
   assert.equal(new Set(collected.map((entry) => entry.rowKey)).size, collected.length);
-  assert.equal(["end_of_list_reached", "end_of_list_no_progress", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
+  assert.equal(["deep_scroll_exhausted", "end_of_list_reached", "end_of_list_no_progress", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
 });
 
 test("LinkedIn streaming resolver handles div-based list root and non-UL scroll container", async (t) => {
@@ -205,7 +205,7 @@ test("LinkedIn streaming resolver handles div-based list root and non-UL scroll 
   assert.equal(names.includes("Sponsored Row"), false);
   assert.equal(names.includes("India Nine"), true);
   assert.equal(names.includes("Golf Seven"), true);
-  assert.equal(["end_of_list_reached", "end_of_list_no_progress", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
+  assert.equal(["deep_scroll_exhausted", "end_of_list_reached", "end_of_list_no_progress", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
 });
 
 test("LinkedIn streaming resolver accepts UL+LI+div list layout and opens rows via div click target", async (t) => {
@@ -557,4 +557,37 @@ test("LinkedIn streaming scan reveals list from narrow layout back control only 
   const fixtureMetrics = await fixture.page.evaluate(() => window.__narrowFixtureMetrics ?? null);
   assert.equal((fixtureMetrics?.backClicks ?? 0) >= 1, true);
   assert.equal(metrics.stopReason === "list_root_not_found", false);
+});
+
+test("LinkedIn streaming scan runs a second pass and captures threads surfaced after late reorder", async (t) => {
+  const fixture = await createFixture({
+    fixtureName: "streaming-second-pass-reorder.html"
+  });
+  if (fixture.skipped) {
+    t.skip(fixture.reason);
+    return;
+  }
+
+  t.after(async () => {
+    await fixture.context.close();
+    await fixture.browser.close();
+  });
+
+  const collected = [];
+  const metrics = await fixture.adapter.scanInboxThreadsStream({
+    requestId: "stream-second-pass-reorder-test",
+    onThreadCandidate: async (input) => {
+      collected.push(input);
+    }
+  });
+
+  const names = collected.map((entry) => entry.thread.displayName);
+  assert.equal(names.includes("Echo Five"), true);
+  assert.equal(names.includes("Omega Surfaced"), true);
+  assert.equal(new Set(collected.map((entry) => entry.rowKey)).size, collected.length);
+  assert.equal(["deep_scroll_exhausted", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
+
+  const fixtureMetrics = await fixture.page.evaluate(() => window.__secondPassFixtureMetrics ?? null);
+  assert.equal(Boolean(fixtureMetrics?.omegaInserted), true);
+  assert.equal((fixtureMetrics?.openCounts?.omega ?? 0), 1);
 });
