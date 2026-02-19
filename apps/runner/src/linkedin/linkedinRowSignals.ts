@@ -7,18 +7,13 @@ export function isSponsoredPillText(text: string): boolean {
 }
 
 export function isPreviewFromMe(preview: string): boolean {
-  return clean(preview).toLowerCase().startsWith("you:");
+  return /^you\s*:/i.test(clean(preview));
 }
 
 export function needsReplyFromPreview(preview: string): boolean {
   const normalized = clean(preview);
-  if (!normalized || normalized === "-") {
+  if (!normalized) {
     return false;
   }
-  if (isPreviewFromMe(normalized)) {
-    return false;
-  }
-
-  // LinkedIn list snippets usually include "<Name>:" when last message is inbound.
-  return /^[^:]{1,120}:\s*\S/.test(normalized);
+  return !isPreviewFromMe(normalized);
 }

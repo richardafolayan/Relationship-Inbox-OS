@@ -163,6 +163,13 @@ function maybeParsePlatform(value: unknown): PlatformName | undefined {
   return value;
 }
 
+function normalizeOptionalPositiveNumber(value: number | null | undefined): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  return value;
+}
+
 function normalizeControlPath(path: string): string {
   return path.replace(/\/thread\/[^/]+/g, "/thread/:threadId");
 }
@@ -717,14 +724,24 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
 app.post("/control/scan", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional()
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional(),
+      maxThreads: z.number().nullable().optional(),
+      maxOpens: z.number().nullable().optional(),
+      forceFallback: z.boolean().nullable().optional()
     })
     .parse(req.body ?? {});
+
+  const maxThreads = normalizeOptionalPositiveNumber(payload.maxThreads);
+  const maxOpens = normalizeOptionalPositiveNumber(payload.maxOpens);
+  const forceFallback = process.env.NODE_ENV !== "production" && payload.forceFallback === true;
 
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const queued = scanQueue.enqueueScan(payload.platform, {
     requestId,
-    respectCooldown: true
+    respectCooldown: true,
+    maxThreads,
+    maxOpens,
+    forceFallback
   });
   const traceMeta = {
     runTraceEnabled: scanQueue.isRunTraceEnabled(),
@@ -939,6 +956,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
           "thread_list",
           "thread_item",
           "unread_badge",
+          "thread_snippet",
           "message_container",
           "message_item",
           "message_text",
@@ -1042,6 +1060,7 @@ app.post("/control/platform/save-selector-override", asyncRoute(async (req, res)
         "thread_list",
         "thread_item",
         "unread_badge",
+        "thread_snippet",
         "message_container",
         "message_item",
         "message_text",
@@ -1064,6 +1083,7 @@ app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res
         "thread_list",
         "thread_item",
         "unread_badge",
+        "thread_snippet",
         "message_container",
         "message_item",
         "message_text",
@@ -1371,19 +1391,33 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
   const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
+  const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
     (["LINKEDIN", "INSTAGRAM", "TIKTOK"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
-      const latestFailure = await prisma.auditLog.findFirst({
-        where: {
-          platform,
-          status: "FAIL",
-          action: { in: [...failureActions] }
-        },
-        orderBy: { timestamp: "desc" }
-      });
+      const [latestFailure, latestRecovery] = await Promise.all([
+        prisma.auditLog.findFirst({
+          where: {
+            platform,
+            status: "FAIL",
+            action: { in: [...failureActions] }
+          },
+          orderBy: { timestamp: "desc" }
+        }),
+        prisma.auditLog.findFirst({
+          where: {
+            platform,
+            status: "OK",
+            action: { in: [...recoveryActions] }
+          },
+          orderBy: { timestamp: "desc" }
+        })
+      ]);
+      const failureIsCurrent = Boolean(
+        latestFailure && (!latestRecovery || latestFailure.timestamp.getTime() > latestRecovery.timestamp.getTime())
+      );
       const failureDetails = parseJsonRecord(latestFailure?.detailsJson);
       const failureSummary = summarizeFailureDetails(failureDetails);
 
@@ -1421,7 +1455,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
             ? runnerConfig.browserProfile.personalChromeProfileResolutionStrategy
             : null,
         latestSelectorReport: selectorReports.getLatestReport(platform),
-        lastScanFailure: latestFailure
+        lastScanFailure: latestFailure && failureIsCurrent
           ? {
               requestId: failureSummary.requestId ?? latestFailure.id,
               stage: failureSummary.stage ?? latestFailure.stage ?? "collect_threads",

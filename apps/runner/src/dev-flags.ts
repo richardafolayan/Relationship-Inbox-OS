@@ -47,6 +47,10 @@ export function getLinkedInDevScanCaps(): {
   };
 }
 
+export function isScanFallbackEnabled(): boolean {
+  return envBool("ENABLE_SCAN_FALLBACK", isDev());
+}
+
 export function getDevLoggingFlags(): { stageHeadlines: boolean } {
   if (!isDev()) {
     return {

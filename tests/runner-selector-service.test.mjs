@@ -35,6 +35,7 @@ test("selector test service returns counts and screenshots on deterministic loca
               <li class="thread-item">Alice</li>
               <li class="thread-item">Bob</li>
             </ul>
+            <p class="thread-snippet">Alice: checking in</p>
           </section>
           <div class="message-container">
             <div class="message-item"><span class="message-text">Hello there</span></div>
@@ -53,6 +54,7 @@ test("selector test service returns counts and screenshots on deterministic loca
       thread_list: ".thread-list",
       thread_item: ".thread-item",
       unread_badge: ".unread",
+      thread_snippet: ".thread-snippet",
       message_container: ".message-container",
       message_item: ".message-item",
       message_text: ".message-text",
@@ -72,6 +74,9 @@ test("selector test service returns counts and screenshots on deterministic loca
   assert.equal(report.results.length >= 8, true);
   assert.equal(report.results.some((entry) => entry.key === "thread_item" && entry.count === 2), true);
   assert.equal(report.results.some((entry) => entry.key === "message_text" && entry.count === 1), true);
+  const unreadBadgeResult = report.results.find((entry) => entry.key === "unread_badge");
+  assert.equal(unreadBadgeResult?.count, 0);
+  assert.equal(unreadBadgeResult?.status, "PASS");
   const navigateReceipt = report.receipts.find((entry) => entry.stage === "navigate");
   assert.equal(typeof navigateReceipt?.details?.effectiveSelectors?.thread_list, "string");
   assert.equal(typeof navigateReceipt?.details?.effectiveSelectors?.thread_item, "string");

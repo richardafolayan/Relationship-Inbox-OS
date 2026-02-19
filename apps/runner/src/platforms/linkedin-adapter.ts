@@ -177,6 +177,7 @@ interface LinkedInRunCounters {
   threadsVisibleCount: number;
   threadsCollectedTotal: number;
   threadsWithUnreadBadgeCount: number;
+  threadsWithNeedsReplyCount: number;
   candidatesToOpenCount: number;
   openedThreadsCount: number;
   messagesParsedCount: number;
@@ -223,13 +224,32 @@ export interface LinkedInStreamScanMetrics {
   scrollIterations: number;
   processedRows: number;
   actionableRows: number;
+  unreadRows: number;
+  needsReplyRows: number;
   openedRows: number;
   skippedRows: number;
   failures: number;
+  selectorThreadItemCount: number;
+  selectorThreadSnippetCount: number;
+  collectorMode: "primary_stream" | "fallback_direct" | "none";
+  fallbackEligible: boolean;
+  fallbackTriggered: boolean;
 }
 
 export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
   onThreadCandidate: (input: LinkedInStreamThreadCandidate) => Promise<void>;
+}
+
+export interface LinkedInDirectFallbackScanResult {
+  stopReason: string;
+  threadsScanned: number;
+  actionableRows: number;
+  unreadRows: number;
+  needsReplyRows: number;
+  selectorThreadItemCount: number;
+  selectorThreadSnippetCount: number;
+  collectorMode: "fallback_direct";
+  threads: ThreadStub[];
 }
 
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
@@ -1920,6 +1940,8 @@ export class LinkedInAdapter implements PlatformAdapter {
   private lastCollectionMetrics: {
     totalFound: number;
     unreadFound: number;
+    needsReplyFound: number;
+    candidatesFound: number;
     iterations: number;
     stopReason: LinkedInCollectionStopReason;
   } | null = null;
@@ -3026,6 +3048,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
       return first.getAttribute(name, { timeout: 0 }).catch(() => null);
     };
+    const threadSnippetSelector = (selectors.thread_snippet ?? "").trim();
 
     for (let index = 0; index < selectorItemCount; index += 1) {
       const scope = rowRoots.nth(index);
@@ -3053,8 +3076,11 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(scope.locator("h3"))) ??
           ""
       );
+      const scopedSnippetText =
+        threadSnippetSelector.length > 0 ? await readText(scope.locator(threadSnippetSelector)) : null;
       const preview = cleanText(
-        (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
+        scopedSnippetText ??
+          (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
           (await readText(scope.locator("p.msg-conversation-card__message-snippet"))) ??
           ""
       ).slice(0, 220);
@@ -3618,6 +3644,8 @@ export class LinkedInAdapter implements PlatformAdapter {
   getLastCollectionMetrics(): {
     totalFound: number;
     unreadFound: number;
+    needsReplyFound: number;
+    candidatesFound: number;
     iterations: number;
     stopReason: LinkedInCollectionStopReason;
   } | null {
@@ -4964,25 +4992,30 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async captureVisibleRowsForStreaming(
     page: Page,
-    listRoot: ElementHandle<Element>
+    listRoot: ElementHandle<Element>,
+    selectors: SelectorRegistry
   ): Promise<LinkedInVisibleRowSnapshot[]> {
     const rawRows = await this.runTracedPageAction({
       page,
       stage: "collect_threads",
       action: "visible_rows_snapshot",
-      run: async () => this.snapshotStreamingRows(listRoot)
+      run: async () => this.snapshotStreamingRows(listRoot, selectors)
     }).catch(() => [] as LinkedInStreamingRowRawSnapshot[]);
 
     return this.mapStreamingRawRowsToSnapshots(rawRows, page.url());
   }
 
-  private async snapshotStreamingRows(listRoot: ElementHandle<Element>): Promise<LinkedInStreamingRowRawSnapshot[]> {
+  private async snapshotStreamingRows(
+    listRoot: ElementHandle<Element>,
+    selectors: SelectorRegistry
+  ): Promise<LinkedInStreamingRowRawSnapshot[]> {
     type StreamingSnapshotEvalInput = {
       rowRootSelector: string;
       rowClickSelector: string;
+      snippetSelectors: string[];
     };
     return listRoot.evaluate((root: Element, input: StreamingSnapshotEvalInput) => {
-      const { rowRootSelector, rowClickSelector } = input;
+      const { rowRootSelector, rowClickSelector, snippetSelectors } = input;
       const clean = (value: string | null | undefined): string =>
         (value ?? "")
           .replace(/\s+/g, " ")
@@ -5032,7 +5065,22 @@ export class LinkedInAdapter implements PlatformAdapter {
           if (!locatorPath) {
             return null;
           }
-          const readText = (selector: string): string => clean(row.querySelector(selector)?.textContent ?? "");
+          const readText = (selector: string): string => {
+            try {
+              return clean(row.querySelector(selector)?.textContent ?? "");
+            } catch {
+              return "";
+            }
+          };
+          const readTextBySelectors = (selectorList: string[]): string => {
+            for (const selector of selectorList) {
+              const value = readText(selector);
+              if (value.length > 0) {
+                return value;
+              }
+            }
+            return "";
+          };
           const readAttr = (name: string): string => clean((row as HTMLElement).getAttribute(name));
           const linkNode = (row.querySelector(
             "a.msg-conversation-card__conversation-link, div.msg-conversation-listitem__link a[href*='/messaging/'], a[href*='/messaging/thread/'], a[href*='/messaging/']"
@@ -5051,8 +5099,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               readText(".msg-conversation-listitem__participant-names") ||
               readText("h3 span.truncate") ||
               readText("h3"),
-            previewSnippet:
-              readText(".msg-conversation-card__message-snippet") || readText("p.msg-conversation-card__message-snippet"),
+            previewSnippet: readTextBySelectors(snippetSelectors),
             listTimestamp: readText("time.msg-conversation-listitem__time-stamp") || readText("time"),
             unreadText:
               readText(".msg-conversation-card__unread-count .notification-badge__count") ||
@@ -5071,7 +5118,12 @@ export class LinkedInAdapter implements PlatformAdapter {
         .filter((entry) => Boolean(entry)) as LinkedInStreamingRowRawSnapshot[];
     }, {
       rowRootSelector: linkedInStreamingRowRootSelector,
-      rowClickSelector: linkedInStreamingRowClickTargetSelector
+      rowClickSelector: linkedInStreamingRowClickTargetSelector,
+      snippetSelectors: [
+        (selectors.thread_snippet ?? "").trim(),
+        ".msg-conversation-card__message-snippet",
+        "p.msg-conversation-card__message-snippet"
+      ].filter((selector) => selector.length > 0)
     });
   }
 
@@ -5114,9 +5166,10 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async findStreamingRowByKey(
     listRoot: ElementHandle<Element>,
-    rowKey: string
+    rowKey: string,
+    selectors: SelectorRegistry
   ): Promise<{ locatorPath: string } | null> {
-    const rawRows = await this.snapshotStreamingRows(listRoot).catch(() => []);
+    const rawRows = await this.snapshotStreamingRows(listRoot, selectors).catch(() => []);
     for (const row of rawRows) {
       const candidateRowKey = resolveLinkedInRowKey({
         id: row.id,
@@ -5264,7 +5317,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           ? {
               locatorPath: row.locatorPath
             }
-          : await this.findStreamingRowByKey(listRoot, row.rowKey);
+          : await this.findStreamingRowByKey(listRoot, row.rowKey, selectors);
       if (!pathCandidate?.locatorPath) {
         missingAttempts += 1;
         await this.runTracedPageAction({
@@ -5691,6 +5744,37 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
   }
 
+  private async collectStreamSelectorDiagnostics(
+    page: Page,
+    selectors: SelectorRegistry
+  ): Promise<{ selectorThreadItemCount: number; selectorThreadSnippetCount: number }> {
+    const configuredThreadItemCount = await page.locator(selectors.thread_item).count().catch(() => 0);
+    const directThreadItemCount = await page.locator("li.msg-conversation-listitem").count().catch(() => 0);
+    const selectorThreadItemCount = Math.max(configuredThreadItemCount, directThreadItemCount);
+
+    const configuredSnippetSelector = (selectors.thread_snippet ?? "").trim();
+    const configuredSnippetCount = configuredSnippetSelector.length > 0
+      ? await page.locator(configuredSnippetSelector).count().catch(() => 0)
+      : 0;
+    const fallbackSnippetCount = await page
+      .locator("p.msg-conversation-card__message-snippet")
+      .count()
+      .catch(() => 0);
+    const selectorThreadSnippetCount = Math.max(configuredSnippetCount, fallbackSnippetCount);
+
+    return {
+      selectorThreadItemCount,
+      selectorThreadSnippetCount
+    };
+  }
+
+  private applyStreamFallbackEligibility(metrics: LinkedInStreamScanMetrics): void {
+    metrics.fallbackEligible =
+      metrics.processedRows === 0 &&
+      metrics.selectorThreadItemCount > 0 &&
+      metrics.selectorThreadSnippetCount > 0;
+  }
+
   async scanInboxThreadsStream(options: LinkedInStreamScanOptions): Promise<LinkedInStreamScanMetrics> {
     return this.runWithPlatformLease(async () => {
       const selectors = await this.deps.resolveSelectors();
@@ -5702,9 +5786,16 @@ export class LinkedInAdapter implements PlatformAdapter {
         scrollIterations: 0,
         processedRows: 0,
         actionableRows: 0,
+        unreadRows: 0,
+        needsReplyRows: 0,
         openedRows: 0,
         skippedRows: 0,
-        failures: 0
+        failures: 0,
+        selectorThreadItemCount: 0,
+        selectorThreadSnippetCount: 0,
+        collectorMode: "primary_stream",
+        fallbackEligible: false,
+        fallbackTriggered: false
       };
 
       const maxThreads = Math.max(1, options.maxThreads ?? this.deps.scanMaxThreads);
@@ -5838,9 +5929,18 @@ export class LinkedInAdapter implements PlatformAdapter {
         }
         if (hydration.status === "empty_inbox") {
           metrics.stopReason = "zero_threads_found";
+          const selectorDiagnostics = await this.collectStreamSelectorDiagnostics(page, selectors).catch(() => ({
+            selectorThreadItemCount: 0,
+            selectorThreadSnippetCount: 0
+          }));
+          metrics.selectorThreadItemCount = selectorDiagnostics.selectorThreadItemCount;
+          metrics.selectorThreadSnippetCount = selectorDiagnostics.selectorThreadSnippetCount;
+          this.applyStreamFallbackEligibility(metrics);
           this.lastCollectionMetrics = {
             totalFound: 0,
             unreadFound: 0,
+            needsReplyFound: 0,
+            candidatesFound: 0,
             iterations: 0,
             stopReason: metrics.stopReason
           };
@@ -6244,7 +6344,9 @@ export class LinkedInAdapter implements PlatformAdapter {
           newRowsSeen: number;
           bottomRowKey: string | null;
         }> => {
-          const visibleRows = await this.captureVisibleRowsForStreaming(page, listRootResolution!.handle).catch(() => []);
+          const visibleRows = await this
+            .captureVisibleRowsForStreaming(page, listRootResolution!.handle, selectors)
+            .catch(() => []);
           const currentBottomRowKey = visibleRows.at(-1)?.rowKey ?? null;
           let newRowsSeen = 0;
 
@@ -6277,6 +6379,12 @@ export class LinkedInAdapter implements PlatformAdapter {
               continue;
             }
 
+            if (row.unreadCount > 0) {
+              metrics.unreadRows += 1;
+            }
+            if (row.needsReplyFromList) {
+              metrics.needsReplyRows += 1;
+            }
             const actionable = row.unreadCount > 0 || row.needsReplyFromList;
             if (!actionable) {
               continue;
@@ -6486,10 +6594,19 @@ export class LinkedInAdapter implements PlatformAdapter {
         if (metrics.processedRows <= 0 && metrics.stopReason === "max_iterations") {
           metrics.stopReason = "zero_threads_found";
         }
+        const selectorDiagnostics = await this.collectStreamSelectorDiagnostics(page, selectors).catch(() => ({
+          selectorThreadItemCount: 0,
+          selectorThreadSnippetCount: 0
+        }));
+        metrics.selectorThreadItemCount = selectorDiagnostics.selectorThreadItemCount;
+        metrics.selectorThreadSnippetCount = selectorDiagnostics.selectorThreadSnippetCount;
+        this.applyStreamFallbackEligibility(metrics);
 
         this.lastCollectionMetrics = {
           totalFound: metrics.processedRows,
-          unreadFound: metrics.actionableRows,
+          unreadFound: metrics.unreadRows,
+          needsReplyFound: metrics.needsReplyRows,
+          candidatesFound: metrics.actionableRows,
           iterations: metrics.iterations,
           stopReason: metrics.stopReason
         };
@@ -6501,6 +6618,103 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
         });
         return metrics;
+      } finally {
+        this.activeStage = null;
+        await stopRunTracing();
+      }
+    });
+  }
+
+  async scanInboxThreadsDirectFallback(options: LinkedInFullScanOptions): Promise<LinkedInDirectFallbackScanResult> {
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.navigateInbox(selectors);
+      const stopRunTracing = await this.startRunTracing(page);
+
+      this.activeStage = "collect_threads";
+      try {
+        await this.throwIfAuthRequired(page, "scanInboxThreadsDirectFallback:navigation");
+        await this.ensureAllFilterActive(page);
+        await this.throwIfAuthRequired(page, "scanInboxThreadsDirectFallback:all_filter");
+
+        const deadline = Date.now() + 3_500;
+        while (Date.now() < deadline) {
+          const rowCount = await page.locator("li.msg-conversation-listitem").count().catch(() => 0);
+          if (rowCount > 0) {
+            break;
+          }
+          const emptyStateCount = await page.locator(linkedInStreamingEmptyStateSelector).count().catch(() => 0);
+          if (emptyStateCount > 0) {
+            break;
+          }
+          await page.waitForTimeout(120).catch(() => undefined);
+        }
+
+        const snapshot = await this.collectThreadCandidates(page, selectors);
+        const configuredItemCount = await page.locator(selectors.thread_item).count().catch(() => 0);
+        const directItemCount = await page.locator("li.msg-conversation-listitem").count().catch(() => 0);
+        const selectorThreadItemCount = Math.max(snapshot.threadItemCount, configuredItemCount, directItemCount);
+
+        const configuredSnippetSelector = (selectors.thread_snippet ?? "").trim();
+        const configuredSnippetCount = configuredSnippetSelector.length > 0
+          ? await page.locator(configuredSnippetSelector).count().catch(() => 0)
+          : 0;
+        const fallbackSnippetCount = await page.locator("p.msg-conversation-card__message-snippet").count().catch(() => 0);
+        const selectorThreadSnippetCount = Math.max(configuredSnippetCount, fallbackSnippetCount);
+
+        const uniqueThreads = new Map<string, ThreadStub>();
+        for (const row of snapshot.rows) {
+          uniqueThreads.set(row.stableKey, {
+            platformThreadId: row.platformThreadId ?? row.stableKey,
+            displayName: row.displayName,
+            avatarUrl: row.avatarUrl,
+            unreadCount: row.unreadCount,
+            lastMessagePreview: row.lastMessagePreview,
+            lastMessageAt: row.lastMessageAt,
+            threadUrl: row.threadUrl,
+            needsReplyFromList: row.needsReplyFromList,
+            isUnreadCandidate: true
+          });
+        }
+        const threads = Array.from(uniqueThreads.values());
+        const unreadRows = snapshot.rows.filter((row) => row.unreadCount > 0).length;
+        const needsReplyRows = snapshot.rows.filter((row) => row.needsReplyFromList).length;
+        const stopReason = selectorThreadItemCount > 0 ? "fallback_direct_complete" : "zero_threads_found";
+
+        this.lastCollectionMetrics = {
+          totalFound: selectorThreadItemCount,
+          unreadFound: unreadRows,
+          needsReplyFound: needsReplyRows,
+          candidatesFound: threads.length,
+          iterations: 1,
+          stopReason: selectorThreadItemCount > 0 ? "end_of_list_no_progress" : "zero_threads_found"
+        };
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Completed LinkedIn direct fallback collection",
+          details: {
+            collectorMode: "fallback_direct",
+            stopReason,
+            threadsScanned: selectorThreadItemCount,
+            unreadRows,
+            needsReplyRows,
+            actionableRows: threads.length,
+            selectorThreadItemCount,
+            selectorThreadSnippetCount
+          }
+        });
+
+        return {
+          stopReason,
+          threadsScanned: selectorThreadItemCount,
+          actionableRows: threads.length,
+          unreadRows,
+          needsReplyRows,
+          selectorThreadItemCount,
+          selectorThreadSnippetCount,
+          collectorMode: "fallback_direct",
+          threads
+        };
       } finally {
         this.activeStage = null;
         await stopRunTracing();
@@ -7441,6 +7655,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         threadsVisibleCount: 0,
         threadsCollectedTotal: 0,
         threadsWithUnreadBadgeCount: 0,
+        threadsWithNeedsReplyCount: 0,
         candidatesToOpenCount: 0,
         openedThreadsCount: 0,
         messagesParsedCount: 0,
@@ -7582,6 +7797,7 @@ export class LinkedInAdapter implements PlatformAdapter {
             runCounters.threadsVisibleCount = collected.rows.length;
             runCounters.threadsCollectedTotal = collected.rowsBeforeCapCount;
             runCounters.threadsWithUnreadBadgeCount = collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length;
+            runCounters.threadsWithNeedsReplyCount = collected.rows.filter((thread) => Boolean(thread.needsReplyFromList)).length;
             runCounters.candidatesToOpenCount = candidatesAfterCap;
             runCounters.scrollIterations = collected.scrollIterations;
             runCounters.noProgressStreak = collected.noProgressStreak;
@@ -7595,6 +7811,10 @@ export class LinkedInAdapter implements PlatformAdapter {
                 stage: "collect_threads",
                 message: "LinkedIn adapter collection complete",
                 details: {
+                  threadsScanned: runCounters.threadsCollectedTotal,
+                  unreadCount: runCounters.threadsWithUnreadBadgeCount,
+                  needsReplyCount: runCounters.threadsWithNeedsReplyCount,
+                  candidatesCount: runCounters.candidatesToOpenCount,
                   candidatesBeforeCap,
                   candidatesAfterCap,
                   disableDeepScroll: options.disableDeepScroll ?? false,
@@ -7609,13 +7829,16 @@ export class LinkedInAdapter implements PlatformAdapter {
               details: {
                 threadsCollectedTotal: runCounters.threadsCollectedTotal,
                 candidatesToOpenCount: runCounters.candidatesToOpenCount,
-                unreadCount: runCounters.threadsWithUnreadBadgeCount
+                unreadCount: runCounters.threadsWithUnreadBadgeCount,
+                needsReplyCount: runCounters.threadsWithNeedsReplyCount
               }
             });
 
             this.lastCollectionMetrics = {
               totalFound: collected.rowsBeforeCapCount,
               unreadFound: runCounters.threadsWithUnreadBadgeCount,
+              needsReplyFound: runCounters.threadsWithNeedsReplyCount,
+              candidatesFound: runCounters.candidatesToOpenCount,
               iterations: collected.iterations,
               stopReason: collected.stopReason
             };
@@ -7753,6 +7976,8 @@ export class LinkedInAdapter implements PlatformAdapter {
         this.lastCollectionMetrics = {
           totalFound: collected.rowsBeforeCapCount,
           unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
+          needsReplyFound: collected.rows.filter((thread) => Boolean(thread.needsReplyFromList)).length,
+          candidatesFound: collected.rows.length,
           iterations: collected.iterations,
           stopReason: collected.stopReason
         };

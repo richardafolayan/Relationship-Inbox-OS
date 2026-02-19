@@ -12,7 +12,7 @@ interface SelectorTestServiceDeps {
   domDumpDir: string;
 }
 
-const selectorKeys: Array<keyof SelectorRegistry> = [
+const baseSelectorKeys: Array<keyof SelectorRegistry> = [
   "thread_list",
   "thread_item",
   "unread_badge",
@@ -22,6 +22,11 @@ const selectorKeys: Array<keyof SelectorRegistry> = [
   "composer_input",
   "send_button"
 ];
+const linkedInSelectorKeys: Array<keyof SelectorRegistry> = [...baseSelectorKeys, "thread_snippet"];
+const selectorMinCounts: Partial<Record<keyof SelectorRegistry, number>> = {
+  unread_badge: 0
+};
+const defaultSelectorMinCount = 1;
 
 const conversationKeys = new Set<keyof SelectorRegistry>([
   "message_item",
@@ -42,6 +47,14 @@ const linkedInShellProbeSelectors = [
 ];
 
 type SelectorTestStage = "connect" | "navigate" | "auth_check" | "open_thread" | "evaluate" | "screenshot" | "persist";
+
+function selectorKeysForPlatform(platform: PlatformName): Array<keyof SelectorRegistry> {
+  return platform === "LINKEDIN" ? linkedInSelectorKeys : baseSelectorKeys;
+}
+
+function selectorMinCountForKey(key: keyof SelectorRegistry): number {
+  return selectorMinCounts[key] ?? defaultSelectorMinCount;
+}
 
 export interface SelectorTestReceipt {
   stage: SelectorTestStage;
@@ -484,7 +497,7 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
       }
     });
 
-    const keys = input.key ? [input.key] : selectorKeys;
+    const keys = input.key ? [input.key] : selectorKeysForPlatform(input.platform);
     const results: SelectorTestResult[] = [];
     let conversationOpened = false;
     let adaptiveProbeAttempted = false;
@@ -602,10 +615,17 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
     }
 
     for (const key of keys) {
-      const selector = selectors[key];
+      const selectorRaw = selectors[key];
+      const selector =
+        typeof selectorRaw === "string" && selectorRaw.trim().length > 0
+          ? selectorRaw.trim()
+          : key === "thread_snippet"
+            ? "p.msg-conversation-card__message-snippet"
+            : "";
       let count = 0;
       let status: "PASS" | "FAIL" = "FAIL";
       let screenshotFile: string | undefined;
+      const minCount = selectorMinCountForKey(key);
 
       if (conversationKeys.has(key)) {
         const started = Date.now();
@@ -638,8 +658,13 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
       const evalStarted = Date.now();
       const evalStartedAt = new Date(evalStarted).toISOString();
       try {
-        count = await countWithRetry(selector);
-        status = count > 0 ? "PASS" : "FAIL";
+        if (!selector) {
+          count = 0;
+          status = minCount <= 0 ? "PASS" : "FAIL";
+        } else {
+          count = await countWithRetry(selector);
+          status = count >= minCount ? "PASS" : "FAIL";
+        }
 
         if (status === "FAIL" && key === "message_item") {
           const composerCount = await countWithRetry(selectors.composer_input, 2, 200);
@@ -661,7 +686,7 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
           startedAt: evalStartedAt,
           completedAt: new Date().toISOString(),
           durationMs: Date.now() - evalStarted,
-          details: { key, selector, count }
+          details: { key, selector, count, minCount }
         });
       } catch (error) {
         receipts.push({

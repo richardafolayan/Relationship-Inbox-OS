@@ -22,7 +22,8 @@ import {
 import {
   getDevLoggingFlags,
   getLinkedInDevScanCaps,
-  isAutoScanDisabledInDev
+  isAutoScanDisabledInDev,
+  isScanFallbackEnabled
 } from "../dev-flags";
 import {
   isTemporaryLinkedInId,
@@ -53,6 +54,9 @@ interface ScanQueueDeps {
 type ScanJob = {
   jobId: string;
   platform?: PlatformName;
+  maxThreads?: number;
+  maxOpens?: number;
+  forceFallback?: boolean;
 };
 
 interface TraceAwareAdapter {
@@ -77,9 +81,32 @@ interface LinkedInScanAdapter extends PlatformAdapter {
     scrollIterations: number;
     processedRows: number;
     actionableRows: number;
+    unreadRows: number;
+    needsReplyRows: number;
     openedRows: number;
     skippedRows: number;
     failures: number;
+    selectorThreadItemCount: number;
+    selectorThreadSnippetCount: number;
+    collectorMode: "primary_stream" | "fallback_direct" | "none";
+    fallbackEligible: boolean;
+    fallbackTriggered: boolean;
+  }>;
+  scanInboxThreadsDirectFallback(options: {
+    requestId: string;
+    runLogger?: RunLogger;
+    maxThreads?: number;
+    maxOpens?: number;
+  }): Promise<{
+    stopReason: string;
+    threadsScanned: number;
+    actionableRows: number;
+    unreadRows: number;
+    needsReplyRows: number;
+    selectorThreadItemCount: number;
+    selectorThreadSnippetCount: number;
+    collectorMode: "fallback_direct";
+    threads: ThreadStub[];
   }>;
   scanUnreadThreads(options?: {
     maxThreads?: number;
@@ -98,6 +125,85 @@ interface LinkedInScanAdapter extends PlatformAdapter {
 }
 
 const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+
+type EnqueueScanOptions = {
+  respectCooldown?: boolean;
+  requestId?: string;
+  maxThreads?: number;
+  maxOpens?: number;
+  forceFallback?: boolean;
+};
+
+type LinkedInFallbackDecision = {
+  fallbackEligible: boolean;
+  fallbackTriggered: boolean;
+  triggerReason?: "force_fallback" | "zero_primary_rows_with_selector_signals";
+};
+
+export function normalizePositiveScanCap(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
+    return undefined;
+  }
+  const normalized = Math.floor(value);
+  return normalized > 0 ? normalized : undefined;
+}
+
+export function sliceByPositiveCap<T>(values: T[], max?: number): T[] {
+  const cap = normalizePositiveScanCap(max);
+  if (typeof cap !== "number") {
+    return values;
+  }
+  return values.slice(0, cap);
+}
+
+export function resolveEffectiveCount(rawCount: number, max?: number): number {
+  const safeRawCount =
+    Number.isFinite(rawCount) && rawCount > 0
+      ? Math.floor(rawCount)
+      : 0;
+  const cap = normalizePositiveScanCap(max);
+  if (typeof cap !== "number") {
+    return safeRawCount;
+  }
+  return Math.min(safeRawCount, cap);
+}
+
+export function shouldUseForceFallback(value: unknown, nodeEnv = process.env.NODE_ENV): boolean {
+  return value === true && nodeEnv !== "production";
+}
+
+export function evaluateLinkedInFallbackDecision(input: {
+  fallbackEnabled: boolean;
+  forceFallback: boolean;
+  primaryThreadsScanned: number;
+  selectorThreadItemCount: number;
+  selectorThreadSnippetCount: number;
+  maxThreads?: number;
+}): LinkedInFallbackDecision {
+  if (input.forceFallback) {
+    return {
+      fallbackEligible: true,
+      fallbackTriggered: true,
+      triggerReason: "force_fallback"
+    };
+  }
+
+  const cappedToZero = typeof input.maxThreads === "number" && normalizePositiveScanCap(input.maxThreads) === undefined;
+  const fallbackEligible =
+    !cappedToZero &&
+    input.primaryThreadsScanned === 0 &&
+    input.selectorThreadItemCount > 0 &&
+    input.selectorThreadSnippetCount > 0;
+
+  return {
+    fallbackEligible,
+    fallbackTriggered: input.fallbackEnabled && fallbackEligible,
+    triggerReason:
+      input.fallbackEnabled && fallbackEligible
+        ? "zero_primary_rows_with_selector_signals"
+        : undefined
+  };
+}
 
 export type EnqueueScanResult =
   | {
@@ -496,7 +602,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
   function enqueueScan(
     platform?: PlatformName,
-    options?: { respectCooldown?: boolean; requestId?: string }
+    options?: EnqueueScanOptions
   ): EnqueueScanResult {
     const requestId = options?.requestId ?? uuid();
     if (isLinkedInInFlight({
@@ -554,7 +660,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
     const job: ScanJob = {
       jobId: requestId,
-      platform
+      platform,
+      maxThreads: normalizePositiveScanCap(options?.maxThreads),
+      maxOpens: normalizePositiveScanCap(options?.maxOpens),
+      forceFallback: shouldUseForceFallback(options?.forceFallback)
     };
 
     queue.push(job);
@@ -713,6 +822,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         activeRunLoggerByPlatform.set(platform, runLogger);
 
         const linkedInDevCaps = platform === "LINKEDIN" ? getLinkedInDevScanCaps() : { disableDeepScroll: false };
+        const requestedMaxThreads = normalizePositiveScanCap(job.maxThreads);
+        const requestedMaxOpens = normalizePositiveScanCap(job.maxOpens);
+        const effectiveMaxThreads = requestedMaxThreads ?? linkedInDevCaps.maxThreads;
+        const effectiveMaxOpens = requestedMaxOpens ?? linkedInDevCaps.maxOpens;
+        const fallbackEnabled = platform === "LINKEDIN" ? isScanFallbackEnabled() : false;
+        const forceFallback = platform === "LINKEDIN" ? shouldUseForceFallback(job.forceFallback) : false;
         const stageHeadlinesEnabled = platform === "LINKEDIN" && getDevLoggingFlags().stageHeadlines;
         const logDir = runLogger.runDir ?? null;
         const headline = (stage: string, message: string, details?: Record<string, unknown>): void => {
@@ -740,7 +855,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let openedThreadsCount = 0;
         let messagesParsedCount = 0;
         let candidatesCount = 0;
+        let threadsScannedCount = 0;
         let unreadCandidatesCount = 0;
+        let needsReplyCandidatesCount = 0;
+        let rawThreadCount = 0;
+        let effectiveThreadCount = 0;
+        let rawCandidateCount = 0;
+        let effectiveOpenCount = 0;
+        let selectorThreadItemCount = 0;
+        let selectorThreadSnippetCount = 0;
+        let collectorMode: "primary_stream" | "fallback_direct" | "none" = linkedInAdapter ? "primary_stream" : "none";
+        let fallbackEligible = false;
+        let fallbackTriggered = false;
+        let fallbackTriggerReason: string | undefined;
         let runSuccess = false;
         let runStopReason: string | undefined;
         let runError: unknown;
@@ -765,7 +892,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         }
         headline("SCAN_START", "scan run started", {
           LOG_DIR: logDir,
-          caps: linkedInDevCaps
+          caps: linkedInDevCaps,
+          requestedMaxThreads: requestedMaxThreads ?? null,
+          requestedMaxOpens: requestedMaxOpens ?? null,
+          maxThreads: effectiveMaxThreads ?? null,
+          maxOpens: effectiveMaxOpens ?? null,
+          fallbackEnabled,
+          forceFallback
         });
         if (logDir) {
           headline("SCAN_START", `LOG_DIR: ${logDir}`);
@@ -855,8 +988,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
           });
           headline("COLLECT_UNREAD_START", "collecting unread + needs-reply candidates", {
             disableDeepScroll: linkedInDevCaps.disableDeepScroll,
-            maxThreads: linkedInDevCaps.maxThreads ?? null,
-            maxOpens: linkedInDevCaps.maxOpens ?? null
+            requestedMaxThreads: requestedMaxThreads ?? null,
+            requestedMaxOpens: requestedMaxOpens ?? null,
+            maxThreads: effectiveMaxThreads ?? null,
+            maxOpens: effectiveMaxOpens ?? null,
+            fallbackEnabled,
+            forceFallback
           });
 
           let candidatesBeforeCap = 0;
@@ -864,74 +1001,294 @@ export function createScanQueue(deps: ScanQueueDeps) {
           let candidatesToSync: Array<{ thread: ThreadStub; messages?: NormalizedMessage[] }> = [];
 
           if (linkedInAdapter) {
-            if (await markAborted("before_scan_stream", platform)) {
-              runStopReason = "aborted";
-              return;
-            }
-
-            const streamedCandidates: Array<{ rowKey: string; thread: ThreadStub; messages: NormalizedMessage[] }> = [];
-            const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
-              maxThreads: linkedInDevCaps.maxThreads,
-              maxOpens: linkedInDevCaps.maxOpens,
-              disableDeepScroll: linkedInDevCaps.disableDeepScroll,
-              requestId: job.jobId,
-              runLogger,
-              onThreadCandidate: async (input) => {
-                streamedCandidates.push({
-                  rowKey: input.rowKey,
-                  thread: input.thread,
-                  messages: input.messages
-                });
-              }
-            });
-
-            runLogger.logAction({
-              stage: "collect_threads",
-              action: "scan_inbox_stream",
-              result: "ok",
-              counts: {
-                processedRows: streamMetrics.processedRows,
-                actionableRows: streamMetrics.actionableRows,
-                openedRows: streamMetrics.openedRows,
-                streamFailures: streamMetrics.failures
-              }
-            });
-
-            if (await markAborted("after_scan_stream", platform)) {
-              runStopReason = "aborted";
-              return;
-            }
-
-            const cappedStreamedCandidates =
-              typeof linkedInDevCaps.maxThreads === "number" && linkedInDevCaps.maxThreads > 0
-                ? streamedCandidates.slice(0, linkedInDevCaps.maxThreads)
-                : streamedCandidates;
-
-            unreadCandidatesCount = streamMetrics.actionableRows;
-            candidatesBeforeCap = streamedCandidates.length;
-            candidatesToSync = cappedStreamedCandidates.map((candidate) => ({
-              thread: candidate.thread,
-              messages: candidate.messages
-            }));
-            collectionMetrics = {
-              totalFound: streamMetrics.processedRows,
-              unreadFound: streamMetrics.actionableRows,
-              iterations: streamMetrics.iterations,
-              stopReason: streamMetrics.stopReason
+            const applyThreadCap = <T>(values: T[]): T[] => {
+              rawThreadCount = values.length;
+              effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Applied thread cap to collected candidates",
+                details: {
+                  collectorMode,
+                  rawThreadCount,
+                  maxThreads: effectiveMaxThreads ?? null,
+                  effectiveThreadCount
+                }
+              });
+              return sliceByPositiveCap(values, effectiveMaxThreads);
             };
-            runLogger.logDecision({
-              stage: "collect_threads",
-              decision: "Collected LinkedIn stream candidates",
-              details: {
-                processedRows: streamMetrics.processedRows,
-                actionableRows: streamMetrics.actionableRows,
-                openedRows: streamMetrics.openedRows,
-                streamFailures: streamMetrics.failures,
-                mergedCandidatesCount: candidatesBeforeCap,
-                cappedCandidatesCount: candidatesToSync.length,
-                stopReason: streamMetrics.stopReason
+
+            const runDirectFallbackCollection = async (
+              triggerReason: "force_fallback" | "zero_primary_rows_with_selector_signals",
+              primary?: {
+                threadsScanned: number;
+                unreadCount: number;
+                needsReplyCount: number;
+                candidatesCount: number;
               }
-            });
+            ): Promise<boolean> => {
+              if (await markAborted("before_scan_fallback_direct", platform)) {
+                runStopReason = "aborted";
+                return false;
+              }
+
+              const fallbackResult = await linkedInAdapter.scanInboxThreadsDirectFallback({
+                requestId: job.jobId,
+                runLogger,
+                maxThreads: effectiveMaxThreads,
+                maxOpens: effectiveMaxOpens
+              });
+
+              if (await markAborted("after_scan_fallback_direct", platform)) {
+                runStopReason = "aborted";
+                return false;
+              }
+
+              fallbackTriggered = true;
+              fallbackTriggerReason = triggerReason;
+              collectorMode = fallbackResult.collectorMode;
+              selectorThreadItemCount = fallbackResult.selectorThreadItemCount;
+              selectorThreadSnippetCount = fallbackResult.selectorThreadSnippetCount;
+              threadsScannedCount = fallbackResult.threadsScanned;
+              unreadCandidatesCount = fallbackResult.unreadRows;
+              needsReplyCandidatesCount = fallbackResult.needsReplyRows;
+              const cappedFallbackThreads = applyThreadCap(fallbackResult.threads);
+              candidatesBeforeCap = rawThreadCount;
+              candidatesToSync = cappedFallbackThreads.map((thread) => ({ thread }));
+              collectionMetrics = {
+                totalFound: fallbackResult.threadsScanned,
+                unreadFound: fallbackResult.unreadRows,
+                needsReplyFound: fallbackResult.needsReplyRows,
+                candidatesFound: fallbackResult.actionableRows,
+                stopReason: fallbackResult.stopReason,
+                collectorMode,
+                selectorThreadItemCount,
+                selectorThreadSnippetCount,
+                fallbackEligible,
+                fallbackTriggered,
+                fallbackTriggerReason
+              };
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Collected LinkedIn direct fallback candidates",
+                details: {
+                  triggerReason,
+                  collectorMode,
+                  threadsScanned: fallbackResult.threadsScanned,
+                  unreadRows: fallbackResult.unreadRows,
+                  needsReplyRows: fallbackResult.needsReplyRows,
+                  selectorThreadItemCount,
+                  selectorThreadSnippetCount,
+                  candidatesBeforeCap: rawThreadCount,
+                  candidatesAfterCap: candidatesToSync.length,
+                  stopReason: fallbackResult.stopReason
+                }
+              });
+              await deps.auditLog({
+                platform,
+                stage: "Scan",
+                action: "LINKEDIN_FALLBACK_TRIGGERED",
+                status: "OK",
+                details: {
+                  jobId: job.jobId,
+                  requestId: job.jobId,
+                  fallbackEnabled,
+                  fallbackTriggered: true,
+                  triggerReason,
+                  collectorMode,
+                  primary: {
+                    threadsScanned: primary?.threadsScanned ?? null,
+                    unreadCount: primary?.unreadCount ?? null,
+                    needsReplyCount: primary?.needsReplyCount ?? null,
+                    candidatesCount: primary?.candidatesCount ?? null
+                  },
+                  secondary: {
+                    threadsScanned: fallbackResult.threadsScanned,
+                    unreadCount: fallbackResult.unreadRows,
+                    needsReplyCount: fallbackResult.needsReplyRows,
+                    candidatesCount: fallbackResult.actionableRows
+                  },
+                  caps: {
+                    maxThreads: effectiveMaxThreads ?? null,
+                    maxOpens: effectiveMaxOpens ?? null,
+                    rawThreadCount,
+                    effectiveThreadCount
+                  }
+                }
+              });
+              return true;
+            };
+
+            if (forceFallback) {
+              fallbackEligible = true;
+              runLogger.logDecision({
+                stage: "collect_threads",
+                level: "warn",
+                decision: "Bypassing primary stream collector due to forceFallback override",
+                details: {
+                  fallbackEnabled,
+                  forceFallback,
+                  maxThreads: effectiveMaxThreads ?? null,
+                  maxOpens: effectiveMaxOpens ?? null
+                }
+              });
+              headline("COLLECT_UNREAD_WARN", "fallback collector forced", {
+                fallbackEnabled,
+                forceFallback,
+                maxThreads: effectiveMaxThreads ?? null,
+                maxOpens: effectiveMaxOpens ?? null
+              });
+              const fallbackRan = await runDirectFallbackCollection("force_fallback");
+              if (!fallbackRan) {
+                return;
+              }
+            } else {
+              if (await markAborted("before_scan_stream", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+
+              const streamedCandidates: Array<{ rowKey: string; thread: ThreadStub; messages: NormalizedMessage[] }> = [];
+              const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
+                maxThreads: effectiveMaxThreads,
+                maxOpens: effectiveMaxOpens,
+                disableDeepScroll: linkedInDevCaps.disableDeepScroll,
+                requestId: job.jobId,
+                runLogger,
+                onThreadCandidate: async (input) => {
+                  streamedCandidates.push({
+                    rowKey: input.rowKey,
+                    thread: input.thread,
+                    messages: input.messages
+                  });
+                }
+              });
+
+              runLogger.logAction({
+                stage: "collect_threads",
+                action: "scan_inbox_stream",
+                result: "ok",
+                counts: {
+                  processedRows: streamMetrics.processedRows,
+                  actionableRows: streamMetrics.actionableRows,
+                  unreadRows: streamMetrics.unreadRows,
+                  needsReplyRows: streamMetrics.needsReplyRows,
+                  openedRows: streamMetrics.openedRows,
+                  streamFailures: streamMetrics.failures,
+                  selectorThreadItemCount: streamMetrics.selectorThreadItemCount,
+                  selectorThreadSnippetCount: streamMetrics.selectorThreadSnippetCount,
+                  fallbackEligible: streamMetrics.fallbackEligible,
+                  fallbackTriggered: streamMetrics.fallbackTriggered
+                }
+              });
+
+              if (await markAborted("after_scan_stream", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+
+              selectorThreadItemCount = streamMetrics.selectorThreadItemCount;
+              selectorThreadSnippetCount = streamMetrics.selectorThreadSnippetCount;
+              collectorMode = streamMetrics.collectorMode;
+              threadsScannedCount = streamMetrics.processedRows;
+              unreadCandidatesCount = streamMetrics.unreadRows;
+              needsReplyCandidatesCount = streamMetrics.needsReplyRows;
+              const cappedStreamedCandidates = applyThreadCap(streamedCandidates);
+              candidatesBeforeCap = rawThreadCount;
+              candidatesToSync = cappedStreamedCandidates.map((candidate) => ({
+                thread: candidate.thread,
+                messages: candidate.messages
+              }));
+              collectionMetrics = {
+                totalFound: streamMetrics.processedRows,
+                unreadFound: streamMetrics.unreadRows,
+                needsReplyFound: streamMetrics.needsReplyRows,
+                candidatesFound: streamMetrics.actionableRows,
+                iterations: streamMetrics.iterations,
+                stopReason: streamMetrics.stopReason,
+                collectorMode,
+                selectorThreadItemCount,
+                selectorThreadSnippetCount,
+                fallbackEligible: streamMetrics.fallbackEligible,
+                fallbackTriggered: streamMetrics.fallbackTriggered
+              };
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Collected LinkedIn stream candidates",
+                details: {
+                  processedRows: streamMetrics.processedRows,
+                  actionableRows: streamMetrics.actionableRows,
+                  unreadRows: streamMetrics.unreadRows,
+                  needsReplyRows: streamMetrics.needsReplyRows,
+                  openedRows: streamMetrics.openedRows,
+                  streamFailures: streamMetrics.failures,
+                  selectorThreadItemCount,
+                  selectorThreadSnippetCount,
+                  fallbackEligible: streamMetrics.fallbackEligible,
+                  fallbackTriggered: streamMetrics.fallbackTriggered,
+                  rawThreadCount,
+                  maxThreads: effectiveMaxThreads ?? null,
+                  effectiveThreadCount,
+                  stopReason: streamMetrics.stopReason
+                }
+              });
+
+              const fallbackDecision = evaluateLinkedInFallbackDecision({
+                fallbackEnabled,
+                forceFallback: false,
+                primaryThreadsScanned: streamMetrics.processedRows,
+                selectorThreadItemCount,
+                selectorThreadSnippetCount,
+                maxThreads: effectiveMaxThreads
+              });
+              fallbackEligible = fallbackDecision.fallbackEligible;
+
+              if (fallbackDecision.fallbackTriggered && fallbackDecision.triggerReason) {
+                runLogger.logDecision({
+                  stage: "collect_threads",
+                  level: "warn",
+                  decision: "Triggering LinkedIn direct fallback collector",
+                  details: {
+                    fallbackEnabled,
+                    fallbackTriggered: true,
+                    triggerReason: fallbackDecision.triggerReason,
+                    primary: {
+                      threadsScanned: streamMetrics.processedRows,
+                      unreadCount: streamMetrics.unreadRows,
+                      needsReplyCount: streamMetrics.needsReplyRows,
+                      candidatesCount: streamMetrics.actionableRows
+                    },
+                    caps: {
+                      maxThreads: effectiveMaxThreads ?? null,
+                      maxOpens: effectiveMaxOpens ?? null,
+                      rawThreadCount,
+                      effectiveThreadCount
+                    },
+                    selectorThreadItemCount,
+                    selectorThreadSnippetCount
+                  }
+                });
+                headline("COLLECT_UNREAD_WARN", "fallback collector triggered", {
+                  fallbackEnabled,
+                  fallbackTriggered: true,
+                  triggerReason: fallbackDecision.triggerReason,
+                  selectorThreadItemCount,
+                  selectorThreadSnippetCount
+                });
+
+                const fallbackRan = await runDirectFallbackCollection(
+                  fallbackDecision.triggerReason,
+                  {
+                    threadsScanned: streamMetrics.processedRows,
+                    unreadCount: streamMetrics.unreadRows,
+                    needsReplyCount: streamMetrics.needsReplyRows,
+                    candidatesCount: streamMetrics.actionableRows
+                  }
+                );
+                if (!fallbackRan) {
+                  return;
+                }
+              }
+            }
           } else {
             if (await markAborted("before_scan_unread", platform)) {
               runStopReason = "aborted";
@@ -979,11 +1336,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
               }
             }
             const mergedCandidates = Array.from(merged.values());
-            const cappedCandidates =
-              typeof linkedInDevCaps.maxThreads === "number" && linkedInDevCaps.maxThreads > 0
-                ? mergedCandidates.slice(0, linkedInDevCaps.maxThreads)
-                : mergedCandidates;
+            rawThreadCount = mergedCandidates.length;
+            effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
+            const cappedCandidates = sliceByPositiveCap(mergedCandidates, effectiveMaxThreads);
             candidatesBeforeCap = merged.size;
+            threadsScannedCount = merged.size;
+            needsReplyCandidatesCount = mergedCandidates.filter((thread) => Boolean(thread.needsReplyFromList)).length;
             candidatesToSync = cappedCandidates.map((thread) => ({ thread }));
             runLogger.logDecision({
               stage: "collect_threads",
@@ -991,6 +1349,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
               details: {
                 unreadCandidatesCount,
                 recentCandidatesCount: recent.length,
+                rawThreadCount,
+                maxThreads: effectiveMaxThreads ?? null,
+                effectiveThreadCount,
                 mergedCandidatesCount: candidatesBeforeCap,
                 cappedCandidatesCount: candidatesToSync.length
               }
@@ -1005,6 +1366,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 : null;
           }
           candidatesCount = candidatesToSync.length;
+          if (threadsScannedCount <= 0) {
+            threadsScannedCount =
+              typeof collectionMetrics?.totalFound === "number"
+                ? (collectionMetrics.totalFound as number)
+                : candidatesBeforeCap;
+          }
+          if (unreadCandidatesCount <= 0 && typeof collectionMetrics?.unreadFound === "number") {
+            unreadCandidatesCount = collectionMetrics.unreadFound as number;
+          }
+          if (needsReplyCandidatesCount <= 0 && typeof collectionMetrics?.needsReplyFound === "number") {
+            needsReplyCandidatesCount = collectionMetrics.needsReplyFound as number;
+          }
 
           deps.eventBus.emit({
             type: "SCAN_PROGRESS",
@@ -1013,14 +1386,38 @@ export function createScanQueue(deps: ScanQueueDeps) {
             stage: `Syncing ${candidatesCount} thread(s)`
           });
           headline("COLLECT_UNREAD_OK", "candidate collection complete", {
+            threadsScanned: threadsScannedCount,
+            unreadCount: unreadCandidatesCount,
+            needsReplyCount: needsReplyCandidatesCount,
+            candidatesCount,
+            collectorMode,
+            fallbackEnabled,
+            fallbackEligible,
+            fallbackTriggered,
+            fallbackTriggerReason,
+            selectorThreadItemCount,
+            selectorThreadSnippetCount,
+            rawThreadCount,
+            maxThreads: effectiveMaxThreads ?? null,
+            effectiveThreadCount,
             rows: candidatesBeforeCap,
             candidates: candidatesCount,
             stopReason:
               typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined
           });
 
-          const maxOpens = linkedInDevCaps.maxOpens;
-          const maxOpenCount = typeof maxOpens === "number" && maxOpens > 0 ? maxOpens : candidatesToSync.length;
+          rawCandidateCount = candidatesToSync.length;
+          effectiveOpenCount = resolveEffectiveCount(rawCandidateCount, effectiveMaxOpens);
+          runLogger.logDecision({
+            stage: "collect_threads",
+            decision: "Applied open cap to candidate queue",
+            details: {
+              rawCandidateCount,
+              maxOpens: effectiveMaxOpens ?? null,
+              effectiveOpenCount
+            }
+          });
+          const maxOpenCount = effectiveOpenCount;
 
           for (const candidateToSync of candidatesToSync) {
             const thread = candidateToSync.thread;
@@ -1255,16 +1652,37 @@ export function createScanQueue(deps: ScanQueueDeps) {
               totalFound:
                 typeof collectionMetrics?.totalFound === "number"
                   ? (collectionMetrics.totalFound as number)
-                  : candidatesBeforeCap,
+                  : threadsScannedCount,
               unreadFound:
                 typeof collectionMetrics?.unreadFound === "number"
                   ? (collectionMetrics.unreadFound as number)
-                  : candidatesCount,
+                  : unreadCandidatesCount,
+              needsReplyFound:
+                typeof collectionMetrics?.needsReplyFound === "number"
+                  ? (collectionMetrics.needsReplyFound as number)
+                  : needsReplyCandidatesCount,
               iterations:
                 typeof collectionMetrics?.iterations === "number" ? (collectionMetrics.iterations as number) : undefined,
               stopReason:
                 typeof collectionMetrics?.stopReason === "string" ? (collectionMetrics.stopReason as string) : undefined,
+              threadsScanned: threadsScannedCount,
+              unreadCount: unreadCandidatesCount,
+              needsReplyCount: needsReplyCandidatesCount,
+              candidatesCount,
               candidates: candidatesCount,
+              collectorMode,
+              fallbackEnabled,
+              fallbackEligible,
+              fallbackTriggered,
+              fallbackTriggerReason,
+              selectorThreadItemCount,
+              selectorThreadSnippetCount,
+              maxThreads: effectiveMaxThreads ?? null,
+              maxOpens: effectiveMaxOpens ?? null,
+              rawThreadCount,
+              effectiveThreadCount,
+              rawCandidateCount,
+              effectiveOpenCount,
               threadFailures,
               threadFailureKinds
             }
@@ -1404,13 +1822,28 @@ export function createScanQueue(deps: ScanQueueDeps) {
           traceAwareAdapter.setRunLogger?.(null);
           activeRunLoggerByPlatform.delete(platform);
           runLogger.mergeCounters({
+            threadsScannedCount,
             candidatesToOpenCount: candidatesCount,
             openedThreadsCount,
             messagesParsedCount,
             threadFailures,
             threadFailureKinds,
             updatedThreads: platformUpdatedThreads,
-            unreadCandidatesCount
+            unreadCandidatesCount,
+            needsReplyCandidatesCount,
+            collectorMode,
+            fallbackEnabled,
+            fallbackEligible,
+            fallbackTriggered,
+            fallbackTriggerReason,
+            selectorThreadItemCount,
+            selectorThreadSnippetCount,
+            maxThreads: effectiveMaxThreads ?? null,
+            maxOpens: effectiveMaxOpens ?? null,
+            rawThreadCount,
+            effectiveThreadCount,
+            rawCandidateCount,
+            effectiveOpenCount
           });
           if (runStopReason) {
             runLogger.setStopReason(runStopReason);

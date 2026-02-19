@@ -11,6 +11,7 @@ interface TopbarProps {
   health: HealthResponse | null;
   autoScanEnabled: boolean;
   autoScanDisabled: boolean;
+  scanFallbackEnabled: boolean;
   onToggleHeadless: () => Promise<void>;
   onToggleAutoScan: () => void;
   onOpenCommandPalette: () => void;
@@ -21,6 +22,7 @@ export function Topbar({
   health,
   autoScanEnabled,
   autoScanDisabled,
+  scanFallbackEnabled,
   onToggleHeadless,
   onToggleAutoScan,
   onOpenCommandPalette
@@ -54,6 +56,9 @@ export function Topbar({
               Auto-scan disabled in dev (set NEXT_PUBLIC_DISABLE_AUTOSCAN=0 to enable).
             </span>
           ) : null}
+          <span className="text-xs text-slate-600">
+            Scan fallback UI flag: {scanFallbackEnabled ? "On" : "Off"} (runner env is source of truth).
+          </span>
           {settings?.demoMode ? <Badge tone="amber">Demo Mode Active</Badge> : null}
           <Badge tone="neutral">Connected: {health?.connectedPlatforms ?? 0}/3</Badge>
           <Button variant="ghost" onClick={onOpenCommandPalette}>

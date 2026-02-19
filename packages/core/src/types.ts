@@ -46,6 +46,7 @@ export interface SelectorRegistry {
   thread_list: string;
   thread_item: string;
   unread_badge: string;
+  thread_snippet?: string;
   message_container: string;
   message_item: string;
   message_text: string;

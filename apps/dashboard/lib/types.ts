@@ -104,6 +104,13 @@ export interface ScanControlBlockedResponse {
   platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
 }
 
+export interface ScanControlRequest {
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  maxThreads?: number | null;
+  maxOpens?: number | null;
+  forceFallback?: boolean | null;
+}
+
 export type ScanControlResponse = ScanControlQueuedResponse | ScanControlBlockedResponse;
 
 export interface AuditLogRow {
