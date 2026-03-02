@@ -72,13 +72,11 @@ interface LinkedInVisibleRowSnapshot {
   href?: string;
   activeKey?: string;
   threadUrl?: string;
-  avatarUrl?: string;
 }
 
 interface LinkedInStreamingRowRawSnapshot {
   locatorPath: string;
   id: string;
-  dataEntityUrn: string;
   conversationUrn: string;
   urn: string;
   conversationId: string;
@@ -91,36 +89,7 @@ interface LinkedInStreamingRowRawSnapshot {
   unreadContainerPresent: boolean;
   pillText: string;
   href: string;
-  profileUrl: string;
-  avatarUrl: string;
   activeKey: string;
-}
-
-interface LinkedInDeepScrollContainerMetrics {
-  scrollTop: number;
-  clientHeight: number;
-  scrollHeight: number;
-  atBottom: boolean;
-}
-
-interface LinkedInDeepScrollStepMetrics extends LinkedInDeepScrollContainerMetrics {
-  beforeScrollTop: number;
-  afterScrollTop: number;
-  moved: boolean;
-}
-
-interface LinkedInDeepScrollRowProcessResult {
-  newCandidateCount: number;
-  stopReason?: LinkedInCollectionStopReason;
-}
-
-interface LinkedInDeepScrollLoopResult {
-  stopReason: LinkedInCollectionStopReason;
-  iterations: number;
-  scrollIterations: number;
-  noNewRowsStreak: number;
-  stagnantScrollStreak: number;
-  passesExecuted: number;
 }
 
 interface LinkedInResolverNodeProbe {
@@ -208,7 +177,6 @@ interface LinkedInRunCounters {
   threadsVisibleCount: number;
   threadsCollectedTotal: number;
   threadsWithUnreadBadgeCount: number;
-  threadsWithNeedsReplyCount: number;
   candidatesToOpenCount: number;
   openedThreadsCount: number;
   messagesParsedCount: number;
@@ -255,36 +223,13 @@ export interface LinkedInStreamScanMetrics {
   scrollIterations: number;
   processedRows: number;
   actionableRows: number;
-  unreadRows: number;
-  needsReplyRows: number;
   openedRows: number;
   skippedRows: number;
   failures: number;
-  selectorThreadItemCount: number;
-  selectorThreadSnippetCount: number;
-  collectorMode: "primary_stream" | "fallback_direct" | "none";
-  fallbackEligible: boolean;
-  fallbackTriggered: boolean;
 }
 
 export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
   onThreadCandidate: (input: LinkedInStreamThreadCandidate) => Promise<void>;
-}
-
-export interface LinkedInDirectFallbackScanOptions extends LinkedInFullScanOptions {
-  onThreadCandidate?: (input: LinkedInStreamThreadCandidate) => Promise<void>;
-}
-
-export interface LinkedInDirectFallbackScanResult {
-  stopReason: LinkedInCollectionStopReason;
-  threadsScanned: number;
-  actionableRows: number;
-  unreadRows: number;
-  needsReplyRows: number;
-  selectorThreadItemCount: number;
-  selectorThreadSnippetCount: number;
-  collectorMode: "fallback_direct";
-  threads: ThreadStub[];
 }
 
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
@@ -525,10 +470,27 @@ function normalizeLinkedInRowKeyInput(value: string | null | undefined): string 
   return cleanText(value ?? "").toLowerCase();
 }
 
+function buildLinkedInRowFallbackKey(input: {
+  displayName: string;
+  previewSnippet: string;
+  listTimestamp: string;
+}): string {
+  const displayName = normalizeLinkedInRowKeyInput(input.displayName);
+  const previewSnippet = normalizeLinkedInRowKeyInput(input.previewSnippet);
+  const timestampSalt = normalizeLinkedInRowKeyInput(input.listTimestamp);
+  const baseParts = [displayName, previewSnippet].filter((entry) => entry.length > 0);
+  let signature = baseParts.join("|");
+  if (!signature && timestampSalt) {
+    signature = `ts:${timestampSalt}`;
+  } else if (baseParts.length === 1 && timestampSalt) {
+    signature = `${baseParts[0]}|ts:${timestampSalt}`;
+  } else if (!signature) {
+    signature = "missing-row-identity";
+  }
+  return `li-row:${stableHash(signature)}`;
+}
+
 function resolveLinkedInRowKey(input: {
-  threadUrl?: string | null;
-  href?: string | null;
-  dataEntityUrn?: string | null;
   id?: string | null;
   conversationUrn?: string | null;
   urn?: string | null;
@@ -538,39 +500,27 @@ function resolveLinkedInRowKey(input: {
   displayName: string;
   previewSnippet: string;
   listTimestamp: string;
-  profileUrl?: string | null;
-  avatarUrl?: string | null;
 }): string {
-  const canonicalFromHref = normalizeCanonicalLinkedInThreadId({
-    threadUrl: cleanText(input.threadUrl ?? input.href ?? "")
-  });
-  if (canonicalFromHref) {
-    return `href:${canonicalFromHref}`;
-  }
-
-  const entityCandidates = [
-    input.dataEntityUrn,
+  const directCandidates = [
+    input.id,
     input.conversationUrn,
     input.urn,
     input.conversationId,
     input.dataId,
-    input.controlId,
-    input.id
+    input.controlId
   ]
     .map((value) => cleanText(value ?? ""))
     .filter((value) => value.length > 0);
-  if (entityCandidates[0]) {
-    return `urn:${entityCandidates[0]}`;
+
+  if (directCandidates[0]) {
+    return directCandidates[0];
   }
 
-  const displayName = normalizeLinkedInRowKeyInput(input.displayName);
-  const timestamp = normalizeLinkedInRowKeyInput(input.listTimestamp);
-  const snippet = normalizeLinkedInRowKeyInput(input.previewSnippet);
-  const profile = normalizeLinkedInRowKeyInput(input.profileUrl);
-  const avatar = normalizeLinkedInRowKeyInput(input.avatarUrl);
-  const profileHint = profile || avatar;
-  const composite = `${displayName}||${timestamp}||${snippet}${profileHint ? `||${profileHint}` : ""}`;
-  return `composite:${stableHash(composite || "missing-row-identity")}`;
+  return buildLinkedInRowFallbackKey({
+    displayName: input.displayName,
+    previewSnippet: input.previewSnippet,
+    listTimestamp: input.listTimestamp
+  });
 }
 
 function resolveSmokeThreadUrl(rawHref: string, baseUrl: string): string | undefined {
@@ -1878,7 +1828,6 @@ async function activateLinkedInUnreadFilterWithHooks(
 
 export type LinkedInCollectionStopReason =
   | "max_threads"
-  | "deep_scroll_exhausted"
   | "end_of_list_no_progress"
   | "end_of_list_reached"
   | "no_scroll_container"
@@ -1920,7 +1869,7 @@ export function shouldStopLinkedInCollection(input: {
   if (input.uniqueCount >= input.maxThreads) {
     return true;
   }
-  if (input.reachedBottom && input.noGrowthIterations >= input.stableIterations) {
+  if (input.noGrowthIterations >= input.stableIterations) {
     return true;
   }
   if (input.trailingRepeatIterations >= input.stableIterations) {
@@ -1944,8 +1893,8 @@ export function resolveLinkedInCollectionStopReason(input: {
   if (input.uniqueCount >= input.maxThreads) {
     return "max_threads";
   }
-  if (input.reachedBottom && input.noGrowthIterations >= input.stableIterations) {
-    return "deep_scroll_exhausted";
+  if (input.noGrowthIterations >= input.stableIterations) {
+    return "end_of_list_no_progress";
   }
   if (input.trailingRepeatIterations >= input.stableIterations) {
     return "end_of_list_reached";
@@ -1971,8 +1920,6 @@ export class LinkedInAdapter implements PlatformAdapter {
   private lastCollectionMetrics: {
     totalFound: number;
     unreadFound: number;
-    needsReplyFound: number;
-    candidatesFound: number;
     iterations: number;
     stopReason: LinkedInCollectionStopReason;
   } | null = null;
@@ -3079,7 +3026,6 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
       return first.getAttribute(name, { timeout: 0 }).catch(() => null);
     };
-    const threadSnippetSelector = (selectors.thread_snippet ?? "").trim();
 
     for (let index = 0; index < selectorItemCount; index += 1) {
       const scope = rowRoots.nth(index);
@@ -3107,11 +3053,8 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(scope.locator("h3"))) ??
           ""
       );
-      const scopedSnippetText =
-        threadSnippetSelector.length > 0 ? await readText(scope.locator(threadSnippetSelector)) : null;
       const preview = cleanText(
-        scopedSnippetText ??
-          (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
+        (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
           (await readText(scope.locator("p.msg-conversation-card__message-snippet"))) ??
           ""
       ).slice(0, 220);
@@ -3139,53 +3082,32 @@ export class LinkedInAdapter implements PlatformAdapter {
       const unreadMatch = unreadText.match(/\d+/);
       const unreadCount = unreadMatch ? Number(unreadMatch[0]) : unreadContainerExists ? 1 : 0;
 
-      const dataEntityUrn = (await readAttr(scope, "data-entity-urn")) ?? "";
-      const conversationUrn = (await readAttr(scope, "data-conversation-urn")) ?? "";
-      const urn = (await readAttr(scope, "data-urn")) ?? "";
-      const conversationId = (await readAttr(scope, "data-conversation-id")) ?? "";
-      const dataId = (await readAttr(scope, "data-id")) ?? "";
-      const controlId = (await readAttr(scope, "data-control-id")) ?? "";
-      const rowId = (await readAttr(scope, "id")) ?? "";
-      const urnToken = [dataEntityUrn, conversationUrn, urn, conversationId, dataId, rowId].find(
-        (value) => value.trim().length > 0
-      ) ?? "";
-      const profileUrlRaw =
-        (await readAttr(scope.locator("a[href*='/in/'], a[href*='/company/']"), "href")) ??
+      const urnToken =
+        (await readAttr(scope, "data-conversation-urn")) ??
+        (await readAttr(scope, "data-urn")) ??
+        (await readAttr(scope, "data-event-urn")) ??
+        (await readAttr(scope, "data-conversation-id")) ??
+        (await readAttr(scope, "data-id")) ??
+        (await readAttr(scope, "id")) ??
         "";
-      let profileUrl = profileUrlRaw.trim();
-      if (profileUrl) {
-        try {
-          profileUrl = new URL(profileUrl, page.url()).toString();
-        } catch {
-          profileUrl = profileUrl.trim();
-        }
-      }
-      const avatarUrl = (await readAttr(scope.locator("img"), "src")) ?? undefined;
       const canonicalId = normalizeCanonicalLinkedInThreadId({
         threadUrl: href || undefined,
         activeKey: urnToken || undefined
       });
-      const stableKey = resolveLinkedInRowKey({
-        threadUrl: href || undefined,
-        href,
-        dataEntityUrn,
-        id: rowId,
-        conversationUrn,
-        urn,
-        conversationId,
-        dataId,
-        controlId,
-        displayName,
-        previewSnippet: preview,
-        listTimestamp: lastMessageAt,
-        profileUrl: profileUrl || undefined,
-        avatarUrl
-      });
+      const stableKey =
+        canonicalId ??
+        buildTemporaryCandidateId({
+          displayName,
+          preview,
+          listTimestamp: lastMessageAt,
+          rowIndex: index
+        });
       const needsReplyFromList = needsReplyFromPreview(preview);
       const includeCandidate = unreadCount > 0 || needsReplyFromList;
       if (!displayName || !includeCandidate) {
         continue;
       }
+      const avatarUrl = (await readAttr(scope.locator("img"), "src")) ?? undefined;
 
       rows.push({
         stableKey,
@@ -3371,31 +3293,21 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
 
     const cappedMaxThreads = Math.max(1, options?.maxThreads ?? maxThreads);
+    const stableIterationsTarget = Math.max(1, this.deps.scanStableIterations);
+    const maxIterations = Math.max(20, Math.min(60, this.deps.scanMaxThreads * 3));
     const maxDurationMs = 45_000;
-    const maxIterationsPerPass = 200;
     const merged = new Map<string, ThreadStub>();
-    const seenThreadKeys = new Set<string>();
+    const startedAt = Date.now();
+    let scrollIterations = 0;
+
+    let iterations = 0;
     let loadingWindowIterations = 0;
     let missingListIterations = 0;
-    let scrollResolution: LinkedInScrollContainerResolution | null = null;
-
-    const resolveSelectorScrollResolution = async (): Promise<LinkedInScrollContainerResolution | null> => {
-      const listRootHandle = await page.locator(selectors.thread_list).first().elementHandle().catch(() => null);
-      if (!listRootHandle) {
-        return null;
-      }
-      const shellResolution = await this.resolveMessagingShell(page).catch(() => null);
-      const shellHandle = shellResolution?.handle ?? listRootHandle;
-      const resolved = await this.resolveScrollContainer(listRootHandle, shellHandle).catch(() => null);
-      if (resolved) {
-        return resolved;
-      }
-      return {
-        handle: listRootHandle,
-        mode: "nonstandard_overflow_fallback",
-        topCandidates: []
-      };
-    };
+    let noProgressStreak = 0;
+    let bottomRepeatStreak = 0;
+    let scrollNoMoveStreak = 0;
+    let previousBottomKey: string | null = null;
+    let stopReason: LinkedInCollectionStopReason = "max_iterations";
 
     this.logTraceEvent({
       stage: "collect_threads",
@@ -3403,92 +3315,141 @@ export class LinkedInAdapter implements PlatformAdapter {
       details: {
         maxThreads: cappedMaxThreads,
         disableDeepScroll: options?.disableDeepScroll ?? false,
-        maxIterationsPerPass,
+        stableIterationsTarget,
+        maxIterations,
         maxDurationMs
       },
       page
     });
 
-    const loopResult = await this.runLinkedInDeepScrollLoop<LinkedInThreadSnapshot>({
-      page,
-      seenThreadKeys,
-      disableDeepScroll: options?.disableDeepScroll ?? false,
-      maxDurationMs,
-      maxPasses: 2,
-      maxIterationsPerPass,
-      noNewThreshold: 3,
-      stagnationThreshold: 2,
-      getVisibleRows: async () => {
-        const snapshot = await retryWithBackoff({
-          attempts: 3,
-          baseDelayMs: 250,
-          isRetryable: (error) => isRetryableLinkedInCollectError(error),
-          run: async () => this.captureThreadRowsSnapshot(page, selectors)
-        });
-
-        this.logTraceEvent({
+    while (iterations < maxIterations) {
+      if (Date.now() - startedAt >= maxDurationMs) {
+        stopReason = "max_duration";
+        this.logTraceDecision({
           stage: "collect_threads",
-          action: "collection_iteration_snapshot",
+          decision: "Stopped collection due to max duration",
           details: {
-            iteration: seenThreadKeys.size + 1,
-            threadListCount: snapshot.threadListCount,
-            threadItemCount: snapshot.threadItemCount,
-            spinnerCount: snapshot.spinnerCount,
-            visibleCount: snapshot.rows.length
+            maxDurationMs,
+            elapsedMs: Date.now() - startedAt
           },
-          page
+          level: "warn"
         });
+        break;
+      }
 
-        if (snapshot.threadItemCount === 0 && snapshot.spinnerCount > 0) {
-          loadingWindowIterations += 1;
-          if (loadingWindowIterations >= 12) {
-            throw new Error("LinkedIn thread list is still loading after unread filter activation.");
-          }
-          await page.waitForTimeout(this.deps.scanScrollWaitMs);
-          return [];
+      iterations += 1;
+      const snapshot = await retryWithBackoff({
+        attempts: 3,
+        baseDelayMs: 250,
+        isRetryable: (error) => isRetryableLinkedInCollectError(error),
+        run: async () => this.captureThreadRowsSnapshot(page, selectors)
+      });
+      this.logTraceEvent({
+        stage: "collect_threads",
+        action: "collection_iteration_snapshot",
+        details: {
+          iteration: iterations,
+          threadListCount: snapshot.threadListCount,
+          threadItemCount: snapshot.threadItemCount,
+          spinnerCount: snapshot.spinnerCount,
+          visibleCount: snapshot.rows.length
+        },
+        attempt: iterations,
+        page
+      });
+
+      if (snapshot.threadItemCount === 0 && snapshot.spinnerCount > 0) {
+        loadingWindowIterations += 1;
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Thread list still loading after unread filter",
+          details: {
+            loadingWindowIterations,
+            spinnerCount: snapshot.spinnerCount
+          },
+          attempt: iterations
+        });
+        if (loadingWindowIterations >= 12) {
+          throw new Error("LinkedIn thread list is still loading after unread filter activation.");
         }
-        loadingWindowIterations = 0;
-
-        if (snapshot.threadListCount <= 0) {
-          missingListIterations += 1;
-          if (missingListIterations >= 6) {
-            throw new Error("LinkedIn thread list container is missing while collecting unread threads.");
+        await this.runTracedPageAction({
+          page,
+          stage: "collect_threads",
+          action: "wait_for_timeout",
+          note: "loading_window_wait",
+          details: {
+            delayMs: this.deps.scanScrollWaitMs
+          },
+          attempt: iterations,
+          run: async () => {
+            await page.waitForTimeout(this.deps.scanScrollWaitMs);
           }
-          await page.waitForTimeout(this.deps.scanScrollWaitMs);
-          return [];
+        });
+        continue;
+      }
+
+      loadingWindowIterations = 0;
+      if (snapshot.threadListCount <= 0) {
+        missingListIterations += 1;
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Thread list container missing during collection",
+          details: {
+            missingListIterations
+          },
+          attempt: iterations
+        });
+        if (missingListIterations >= 6) {
+          throw new Error("LinkedIn thread list container is missing while collecting unread threads.");
         }
-        missingListIterations = 0;
+        await this.runTracedPageAction({
+          page,
+          stage: "collect_threads",
+          action: "wait_for_timeout",
+          note: "missing_list_wait",
+          details: {
+            delayMs: this.deps.scanScrollWaitMs
+          },
+          attempt: iterations,
+          run: async () => {
+            await page.waitForTimeout(this.deps.scanScrollWaitMs);
+          }
+        });
+        continue;
+      }
+      missingListIterations = 0;
 
-        if (snapshot.threadItemCount === 0) {
-          const overlayReason = await this.detectLinkedInOverlayReason(page);
-          if (overlayReason === "login_required" || overlayReason === "checkpoint_required") {
-            throw new AdapterFailure("LinkedIn auth required in personal profile. Open browser and sign in.", {
-              kind: "AUTH_REQUIRED",
-              stage: "collect_threads",
-              platform: this.platform,
-              details: {
-                reason: overlayReason,
-                url: page.url()
-              }
-            });
-          }
-          if (overlayReason === "rate_limited" || overlayReason === "linkedin_error_overlay") {
-            throw new AdapterFailure("LinkedIn unread thread list is blocked by an overlay.", {
-              kind: "SELECTOR_MISMATCH",
-              stage: "collect_threads",
-              platform: this.platform,
-              details: {
-                reason: overlayReason,
-                url: page.url()
-              }
-            });
-          }
+      if (snapshot.threadItemCount === 0) {
+        const overlayReason = await this.detectLinkedInOverlayReason(page);
+        if (overlayReason === "login_required" || overlayReason === "checkpoint_required") {
+          throw new AdapterFailure("LinkedIn auth required in personal profile. Open browser and sign in.", {
+            kind: "AUTH_REQUIRED",
+            stage: "collect_threads",
+            platform: this.platform,
+            details: {
+              reason: overlayReason,
+              url: page.url()
+            }
+          });
         }
+        if (overlayReason === "rate_limited" || overlayReason === "linkedin_error_overlay") {
+          throw new AdapterFailure("LinkedIn unread thread list is blocked by an overlay.", {
+            kind: "SELECTOR_MISMATCH",
+            stage: "collect_threads",
+            platform: this.platform,
+            details: {
+              reason: overlayReason,
+              url: page.url()
+            }
+          });
+        }
+      }
 
-        return snapshot.rows;
-      },
-      getRowKey: (row) => row.stableKey,
-      processRow: async (row) => {
+      const previousCount = merged.size;
+      for (const row of snapshot.rows) {
+        if (merged.has(row.stableKey)) {
+          continue;
+        }
         merged.set(row.stableKey, {
           platformThreadId: row.platformThreadId ?? row.stableKey,
           displayName: row.displayName,
@@ -3499,141 +3460,145 @@ export class LinkedInAdapter implements PlatformAdapter {
           avatarUrl: row.avatarUrl,
           needsReplyFromList: row.needsReplyFromList
         });
+      }
+      const nextCount = merged.size;
+      const grew = nextCount > previousCount;
+      const bottomRepeated = Boolean(snapshot.bottomKey && snapshot.bottomKey === previousBottomKey);
 
-        if (merged.size >= cappedMaxThreads) {
-          return {
-            newCandidateCount: 1,
-            stopReason: "max_threads"
-          };
-        }
-        return {
-          newCandidateCount: 1
-        };
-      },
-      readScrollMetrics: async () => {
-        if (!scrollResolution) {
-          scrollResolution = await resolveSelectorScrollResolution();
-        }
-        if (!scrollResolution) {
-          return null;
-        }
-        const metrics = await this.readListScrollMetrics(
-          page,
-          scrollResolution.handle,
-          "selector_read_scroll_metrics",
-          scrollResolution.mode
-        ).catch(() => null);
-        if (metrics) {
-          return metrics;
-        }
-        scrollResolution = await resolveSelectorScrollResolution();
-        if (!scrollResolution) {
-          return null;
-        }
-        return this.readListScrollMetrics(
-          page,
-          scrollResolution.handle,
-          "selector_read_scroll_metrics_reresolved",
-          scrollResolution.mode
-        ).catch(() => null);
-      },
-      scrollStep: async () => {
-        if (!scrollResolution) {
-          scrollResolution = await resolveSelectorScrollResolution();
-        }
-        if (!scrollResolution) {
-          return null;
-        }
-        const metrics = await this.scrollListContainerBy(
-          page,
-          scrollResolution.handle,
-          0.85,
-          "selector_scroll_step",
-          scrollResolution.mode
-        ).catch(() => null);
-        if (metrics?.moved) {
-          return metrics;
-        }
-        scrollResolution = await resolveSelectorScrollResolution();
-        if (!scrollResolution) {
-          return null;
-        }
-        return this.scrollListContainerBy(
-          page,
-          scrollResolution.handle,
-          0.85,
-          "selector_scroll_step_reresolved",
-          scrollResolution.mode
-        ).catch(() => null);
-      },
-      scrollToTop: async () => {
-        if (!scrollResolution) {
-          scrollResolution = await resolveSelectorScrollResolution();
-        }
-        if (!scrollResolution) {
-          return null;
-        }
-        return this.scrollListContainerToTop(
-          page,
-          scrollResolution.handle,
-          "selector_scroll_to_top",
-          scrollResolution.mode
-        ).catch(() => null);
-      },
-      waitAfterScroll: async () => {
-        await this.runTracedPageAction({
-          page,
-          stage: "collect_threads",
-          action: "wait_for_timeout",
-          note: "post_scroll_wait",
-          details: {
-            delayMs: this.deps.scanScrollWaitMs
-          },
-          run: async () => {
-            await page.waitForTimeout(this.deps.scanScrollWaitMs);
-          }
-        });
-      },
-      onIteration: async (iteration) => {
-        const line = `[LI][SCAN][req=${options?.requestId ?? "unknown"}][collect_threads] deepScroll pass=${iteration.pass} iter=${iteration.iteration} scrollTop=${iteration.scrollTop ?? "null"} clientHeight=${iteration.clientHeight ?? "null"} scrollHeight=${iteration.scrollHeight ?? "null"} atBottom=${iteration.atBottom ?? "null"} newRows=${iteration.newRows} newCandidates=${iteration.newCandidates}`;
-        if (options?.runLogger && options.requestId) {
-          options.runLogger.headline({
-            platform: "LI",
-            requestId: options.requestId,
-            stage: "collect_threads",
-            message: line
-          });
-        }
+      if (grew) {
+        noProgressStreak = 0;
+      } else {
+        noProgressStreak += 1;
+      }
+      bottomRepeatStreak = bottomRepeated ? bottomRepeatStreak + 1 : 0;
+
+      previousBottomKey = snapshot.bottomKey;
+
+      if (nextCount >= cappedMaxThreads) {
+        stopReason = "max_threads";
         this.logTraceDecision({
           stage: "collect_threads",
-          decision: line,
+          decision: "Stopped collection after hitting max thread cap",
           details: {
-            pass: iteration.pass,
-            iteration: iteration.iteration,
-            visibleRows: iteration.visibleRows,
-            newRows: iteration.newRows,
-            newCandidates: iteration.newCandidates,
-            scrollTop: iteration.scrollTop,
-            clientHeight: iteration.clientHeight,
-            scrollHeight: iteration.scrollHeight,
-            atBottom: iteration.atBottom
+            nextCount,
+            cappedMaxThreads
           }
         });
+        break;
       }
-    });
+      if (noProgressStreak >= stableIterationsTarget) {
+        stopReason = "end_of_list_no_progress";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to no growth streak",
+          details: {
+            noProgressStreak,
+            stableIterationsTarget
+          }
+        });
+        break;
+      }
+      if (bottomRepeatStreak >= stableIterationsTarget) {
+        stopReason = "end_of_list_reached";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to repeated bottom key",
+          details: {
+            bottomRepeatStreak,
+            stableIterationsTarget
+          }
+        });
+        break;
+      }
+      if (scrollNoMoveStreak >= stableIterationsTarget) {
+        stopReason = "end_of_list_no_progress";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection due to repeated scroll no-move streak",
+          details: {
+            scrollNoMoveStreak,
+            stableIterationsTarget
+          }
+        });
+        break;
+      }
+      if (options?.disableDeepScroll) {
+        stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection because deep scroll is disabled for this run",
+          details: {
+            mergedCount: merged.size,
+            stopReason
+          }
+        });
+        break;
+      }
+
+      const scrollOutcome = await this.deepScrollThreadList(page, selectors, {
+        bottomKey: snapshot.bottomKey,
+        visibleSetHash: snapshot.visibleSetHash
+      });
+      scrollIterations += 1;
+      this.logTraceEvent({
+        stage: "collect_threads",
+        action: "scroll_iteration",
+        details: {
+          scrollIterations,
+          moved: scrollOutcome.moved,
+          reachedBottom: scrollOutcome.reachedBottom,
+          didScroll: scrollOutcome.didScroll
+        },
+        attempt: iterations,
+        page
+      });
+      if (!scrollOutcome.moved) {
+        scrollNoMoveStreak += 1;
+      } else {
+        scrollNoMoveStreak = 0;
+      }
+      if (!scrollOutcome.didScroll || scrollOutcome.reachedBottom) {
+        stopReason = merged.size > 0 ? "end_of_list_reached" : "zero_threads_found";
+        this.logTraceDecision({
+          stage: "collect_threads",
+          decision: "Stopped collection because list reached bottom",
+          details: {
+            mergedCount: merged.size,
+            stopReason
+          }
+        });
+        break;
+      }
+
+      await this.runTracedPageAction({
+        page,
+        stage: "collect_threads",
+        action: "wait_for_timeout",
+        note: "post_scroll_wait",
+        details: {
+          delayMs: this.deps.scanScrollWaitMs
+        },
+        run: async () => {
+          await page.waitForTimeout(this.deps.scanScrollWaitMs);
+        }
+      });
+    }
+
+    if (merged.size <= 0 && stopReason !== "max_threads") {
+      stopReason = "zero_threads_found";
+    }
 
     this.logTraceEvent({
       stage: "collect_threads",
       action: "collection_complete",
       details: {
-        iterations: loopResult.iterations,
-        stopReason: loopResult.stopReason,
+        iterations,
+        stopReason,
         threadsCollectedTotal: merged.size,
-        noProgressStreak: loopResult.noNewRowsStreak,
-        bottomRepeatStreak: 0,
-        scrollNoMoveStreak: loopResult.stagnantScrollStreak,
-        scrollIterations: loopResult.scrollIterations,
-        passesExecuted: loopResult.passesExecuted
+        noProgressStreak,
+        bottomRepeatStreak,
+        scrollNoMoveStreak,
+        scrollIterations
       },
       page
     });
@@ -3641,20 +3606,18 @@ export class LinkedInAdapter implements PlatformAdapter {
     return {
       rows: Array.from(merged.values()).slice(0, cappedMaxThreads),
       rowsBeforeCapCount: merged.size,
-      iterations: loopResult.iterations,
-      stopReason: loopResult.stopReason,
-      noProgressStreak: loopResult.noNewRowsStreak,
-      bottomRepeatStreak: 0,
-      scrollNoMoveStreak: loopResult.stagnantScrollStreak,
-      scrollIterations: loopResult.scrollIterations
+      iterations,
+      stopReason,
+      noProgressStreak,
+      bottomRepeatStreak,
+      scrollNoMoveStreak,
+      scrollIterations
     };
   }
 
   getLastCollectionMetrics(): {
     totalFound: number;
     unreadFound: number;
-    needsReplyFound: number;
-    candidatesFound: number;
     iterations: number;
     stopReason: LinkedInCollectionStopReason;
   } | null {
@@ -5001,30 +4964,25 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async captureVisibleRowsForStreaming(
     page: Page,
-    listRoot: ElementHandle<Element>,
-    selectors: SelectorRegistry
+    listRoot: ElementHandle<Element>
   ): Promise<LinkedInVisibleRowSnapshot[]> {
     const rawRows = await this.runTracedPageAction({
       page,
       stage: "collect_threads",
       action: "visible_rows_snapshot",
-      run: async () => this.snapshotStreamingRows(listRoot, selectors)
+      run: async () => this.snapshotStreamingRows(listRoot)
     }).catch(() => [] as LinkedInStreamingRowRawSnapshot[]);
 
     return this.mapStreamingRawRowsToSnapshots(rawRows, page.url());
   }
 
-  private async snapshotStreamingRows(
-    listRoot: ElementHandle<Element>,
-    selectors: SelectorRegistry
-  ): Promise<LinkedInStreamingRowRawSnapshot[]> {
+  private async snapshotStreamingRows(listRoot: ElementHandle<Element>): Promise<LinkedInStreamingRowRawSnapshot[]> {
     type StreamingSnapshotEvalInput = {
       rowRootSelector: string;
       rowClickSelector: string;
-      snippetSelectors: string[];
     };
     return listRoot.evaluate((root: Element, input: StreamingSnapshotEvalInput) => {
-      const { rowRootSelector, rowClickSelector, snippetSelectors } = input;
+      const { rowRootSelector, rowClickSelector } = input;
       const clean = (value: string | null | undefined): string =>
         (value ?? "")
           .replace(/\s+/g, " ")
@@ -5074,33 +5032,15 @@ export class LinkedInAdapter implements PlatformAdapter {
           if (!locatorPath) {
             return null;
           }
-          const readText = (selector: string): string => {
-            try {
-              return clean(row.querySelector(selector)?.textContent ?? "");
-            } catch {
-              return "";
-            }
-          };
-          const readTextBySelectors = (selectorList: string[]): string => {
-            for (const selector of selectorList) {
-              const value = readText(selector);
-              if (value.length > 0) {
-                return value;
-              }
-            }
-            return "";
-          };
+          const readText = (selector: string): string => clean(row.querySelector(selector)?.textContent ?? "");
           const readAttr = (name: string): string => clean((row as HTMLElement).getAttribute(name));
           const linkNode = (row.querySelector(
             "a.msg-conversation-card__conversation-link, div.msg-conversation-listitem__link a[href*='/messaging/'], a[href*='/messaging/thread/'], a[href*='/messaging/']"
           ) ?? row.querySelector("a[href*='/messaging/']")) as HTMLAnchorElement | null;
-          const profileLinkNode = row.querySelector("a[href*='/in/'], a[href*='/company/']") as HTMLAnchorElement | null;
-          const avatarNode = row.querySelector("img") as HTMLImageElement | null;
 
           return {
             locatorPath,
             id: readAttr("id"),
-            dataEntityUrn: readAttr("data-entity-urn"),
             conversationUrn: readAttr("data-conversation-urn"),
             urn: readAttr("data-urn"),
             conversationId: readAttr("data-conversation-id"),
@@ -5111,7 +5051,8 @@ export class LinkedInAdapter implements PlatformAdapter {
               readText(".msg-conversation-listitem__participant-names") ||
               readText("h3 span.truncate") ||
               readText("h3"),
-            previewSnippet: readTextBySelectors(snippetSelectors),
+            previewSnippet:
+              readText(".msg-conversation-card__message-snippet") || readText("p.msg-conversation-card__message-snippet"),
             listTimestamp: readText("time.msg-conversation-listitem__time-stamp") || readText("time"),
             unreadText:
               readText(".msg-conversation-card__unread-count .notification-badge__count") ||
@@ -5119,8 +5060,6 @@ export class LinkedInAdapter implements PlatformAdapter {
             unreadContainerPresent: row.querySelector(".msg-conversation-card__unread-count") !== null,
             pillText: readText(".msg-conversation-card__pill"),
             href: clean(linkNode?.getAttribute("href")),
-            profileUrl: clean(profileLinkNode?.getAttribute("href")),
-            avatarUrl: clean(avatarNode?.getAttribute("src")),
             activeKey:
               readAttr("data-conversation-urn") ||
               readAttr("data-urn") ||
@@ -5132,12 +5071,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         .filter((entry) => Boolean(entry)) as LinkedInStreamingRowRawSnapshot[];
     }, {
       rowRootSelector: linkedInStreamingRowRootSelector,
-      rowClickSelector: linkedInStreamingRowClickTargetSelector,
-      snippetSelectors: [
-        (selectors.thread_snippet ?? "").trim(),
-        ".msg-conversation-card__message-snippet",
-        "p.msg-conversation-card__message-snippet"
-      ].filter((selector) => selector.length > 0)
+      rowClickSelector: linkedInStreamingRowClickTargetSelector
     });
   }
 
@@ -5151,9 +5085,6 @@ export class LinkedInAdapter implements PlatformAdapter {
       const unreadCount = unreadMatch ? Number(unreadMatch[0]) : row.unreadContainerPresent ? 1 : 0;
       const threadUrl = resolveSmokeThreadUrl(row.href ?? "", pageUrl);
       const rowKey = resolveLinkedInRowKey({
-        threadUrl: threadUrl ?? row.href,
-        href: row.href,
-        dataEntityUrn: row.dataEntityUrn,
         id: row.id,
         conversationUrn: row.conversationUrn,
         urn: row.urn,
@@ -5162,9 +5093,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         controlId: row.controlId,
         displayName: row.displayName,
         previewSnippet: row.previewSnippet,
-        listTimestamp: row.listTimestamp,
-        profileUrl: row.profileUrl,
-        avatarUrl: row.avatarUrl
+        listTimestamp: row.listTimestamp
       });
       snapshots.push({
         rowKey,
@@ -5177,8 +5106,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         locatorPath: row.locatorPath,
         href: row.href || undefined,
         activeKey: row.activeKey || undefined,
-        threadUrl,
-        avatarUrl: row.avatarUrl || undefined
+        threadUrl
       });
     }
     return snapshots.filter((row) => Boolean(row.displayName));
@@ -5186,15 +5114,11 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async findStreamingRowByKey(
     listRoot: ElementHandle<Element>,
-    rowKey: string,
-    selectors: SelectorRegistry
+    rowKey: string
   ): Promise<{ locatorPath: string } | null> {
-    const rawRows = await this.snapshotStreamingRows(listRoot, selectors).catch(() => []);
+    const rawRows = await this.snapshotStreamingRows(listRoot).catch(() => []);
     for (const row of rawRows) {
       const candidateRowKey = resolveLinkedInRowKey({
-        threadUrl: row.href,
-        href: row.href,
-        dataEntityUrn: row.dataEntityUrn,
         id: row.id,
         conversationUrn: row.conversationUrn,
         urn: row.urn,
@@ -5203,9 +5127,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         controlId: row.controlId,
         displayName: row.displayName,
         previewSnippet: row.previewSnippet,
-        listTimestamp: row.listTimestamp,
-        profileUrl: row.profileUrl,
-        avatarUrl: row.avatarUrl
+        listTimestamp: row.listTimestamp
       });
       if (candidateRowKey !== rowKey) {
         continue;
@@ -5342,7 +5264,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           ? {
               locatorPath: row.locatorPath
             }
-          : await this.findStreamingRowByKey(listRoot, row.rowKey, selectors);
+          : await this.findStreamingRowByKey(listRoot, row.rowKey);
       if (!pathCandidate?.locatorPath) {
         missingAttempts += 1;
         await this.runTracedPageAction({
@@ -5623,364 +5545,39 @@ export class LinkedInAdapter implements PlatformAdapter {
     return parsed.slice(parsed.length - limit);
   }
 
-  private isScrollContainerAtBottom(input: {
-    scrollTop: number;
-    clientHeight: number;
-    scrollHeight: number;
-    tolerancePx?: number;
-  }): boolean {
-    const tolerancePx = Math.max(0, input.tolerancePx ?? 8);
-    return input.scrollTop + input.clientHeight >= input.scrollHeight - tolerancePx;
-  }
-
-  private async readListScrollMetrics(
-    page: Page,
-    scrollContainer: ElementHandle<Element>,
-    note: string,
-    mode?: LinkedInScrollContainerResolution["mode"]
-  ): Promise<LinkedInDeepScrollContainerMetrics> {
-    const metrics = await this.runTracedPageAction({
-      page,
-      stage: "collect_threads",
-      action: "read_scroll_metrics",
-      selector: "thread_list_scroll_container",
-      note,
-      details: {
-        mode: mode ?? "unknown"
-      },
-      run: async () =>
-        scrollContainer.evaluate((root) => {
-          const node = root as HTMLElement;
-          const scrollTop = Math.max(0, Math.floor(node.scrollTop));
-          const clientHeight = Math.max(1, Math.floor(node.clientHeight));
-          const scrollHeight = Math.max(clientHeight, Math.floor(node.scrollHeight));
-          return {
-            scrollTop,
-            clientHeight,
-            scrollHeight
-          };
-        })
-    });
-    return {
-      ...metrics,
-      atBottom: this.isScrollContainerAtBottom(metrics)
-    };
-  }
-
-  private async scrollListContainerBy(
-    page: Page,
-    scrollContainer: ElementHandle<Element>,
-    ratio: number,
-    note: string,
-    mode?: LinkedInScrollContainerResolution["mode"]
-  ): Promise<LinkedInDeepScrollStepMetrics> {
-    const safeRatio = Math.max(0.1, Math.min(0.95, ratio));
-    const result = await this.runTracedPageAction({
-      page,
-      stage: "collect_threads",
-      action: "scroll_container",
-      selector: "thread_list_scroll_container",
-      note,
-      details: {
-        ratio: safeRatio,
-        mode: mode ?? "unknown"
-      },
-      run: async () =>
-        scrollContainer.evaluate((root, input: { ratio: number }) => {
-          const node = root as HTMLElement;
-          const beforeScrollTop = Math.max(0, Math.floor(node.scrollTop));
-          const clientHeight = Math.max(1, Math.floor(node.clientHeight));
-          const scrollHeight = Math.max(clientHeight, Math.floor(node.scrollHeight));
-          const delta = Math.max(1, Math.floor(clientHeight * input.ratio));
-          node.scrollTop = beforeScrollTop + delta;
-          const afterScrollTop = Math.max(0, Math.floor(node.scrollTop));
-          return {
-            beforeScrollTop,
-            afterScrollTop,
-            clientHeight,
-            scrollHeight,
-            moved: afterScrollTop !== beforeScrollTop
-          };
-        }, {
-          ratio: safeRatio
-        })
-    });
-    return {
-      ...result,
-      scrollTop: result.afterScrollTop,
-      atBottom: this.isScrollContainerAtBottom({
-        scrollTop: result.afterScrollTop,
-        clientHeight: result.clientHeight,
-        scrollHeight: result.scrollHeight
-      })
-    };
-  }
-
-  private async scrollListContainerToTop(
-    page: Page,
-    scrollContainer: ElementHandle<Element>,
-    note: string,
-    mode?: LinkedInScrollContainerResolution["mode"]
-  ): Promise<LinkedInDeepScrollStepMetrics> {
-    const result = await this.runTracedPageAction({
-      page,
-      stage: "collect_threads",
-      action: "scroll_container_to_top",
-      selector: "thread_list_scroll_container",
-      note,
-      details: {
-        mode: mode ?? "unknown"
-      },
-      run: async () =>
-        scrollContainer.evaluate((root) => {
-          const node = root as HTMLElement;
-          const beforeScrollTop = Math.max(0, Math.floor(node.scrollTop));
-          const clientHeight = Math.max(1, Math.floor(node.clientHeight));
-          const scrollHeight = Math.max(clientHeight, Math.floor(node.scrollHeight));
-          node.scrollTop = 0;
-          const afterScrollTop = Math.max(0, Math.floor(node.scrollTop));
-          return {
-            beforeScrollTop,
-            afterScrollTop,
-            clientHeight,
-            scrollHeight,
-            moved: afterScrollTop !== beforeScrollTop
-          };
-        })
-    });
-    return {
-      ...result,
-      scrollTop: result.afterScrollTop,
-      atBottom: this.isScrollContainerAtBottom({
-        scrollTop: result.afterScrollTop,
-        clientHeight: result.clientHeight,
-        scrollHeight: result.scrollHeight
-      })
-    };
-  }
-
-  private async runLinkedInDeepScrollLoop<Row>(input: {
-    page: Page;
-    seenThreadKeys: Set<string>;
-    disableDeepScroll: boolean;
-    maxDurationMs: number;
-    maxPasses?: number;
-    maxIterationsPerPass?: number;
-    noNewThreshold?: number;
-    stagnationThreshold?: number;
-    getVisibleRows: () => Promise<Row[]>;
-    getRowKey: (row: Row) => string;
-    processRow: (row: Row) => Promise<LinkedInDeepScrollRowProcessResult>;
-    readScrollMetrics: () => Promise<LinkedInDeepScrollContainerMetrics | null>;
-    scrollStep: () => Promise<LinkedInDeepScrollStepMetrics | null>;
-    scrollToTop: () => Promise<LinkedInDeepScrollStepMetrics | null>;
-    waitAfterScroll: () => Promise<void>;
-    onIteration?: (input: {
-      pass: number;
-      iteration: number;
-      visibleRows: number;
-      newRows: number;
-      newCandidates: number;
-      scrollTop: number | null;
-      clientHeight: number | null;
-      scrollHeight: number | null;
-      atBottom: boolean | null;
-    }) => Promise<void> | void;
-  }): Promise<LinkedInDeepScrollLoopResult> {
-    const startedAt = Date.now();
-    const maxPasses = input.disableDeepScroll ? 1 : Math.max(1, input.maxPasses ?? 2);
-    const maxIterationsPerPass = Math.max(1, input.maxIterationsPerPass ?? 200);
-    const noNewThreshold = Math.max(1, input.noNewThreshold ?? 3);
-    const stagnationThreshold = Math.max(1, input.stagnationThreshold ?? 2);
-
-    let stopReason: LinkedInCollectionStopReason = "max_iterations";
-    let iterations = 0;
-    let scrollIterations = 0;
-    let noNewRowsStreak = 0;
-    let stagnantScrollStreak = 0;
-    let passesExecuted = 0;
-
-    outer: for (let pass = 1; pass <= maxPasses; pass += 1) {
-      passesExecuted = pass;
-      let passNewRows = 0;
-      let passEndedByExhaustion = false;
-      noNewRowsStreak = 0;
-      stagnantScrollStreak = 0;
-
-      if (pass > 1) {
-        await input.scrollToTop().catch(() => null);
-        await input.waitAfterScroll();
-      }
-
-      for (let iteration = 1; iteration <= maxIterationsPerPass; iteration += 1) {
-        if (Date.now() - startedAt >= input.maxDurationMs) {
-          stopReason = "max_duration";
-          break outer;
-        }
-
-        iterations += 1;
-        const visibleRows = await input.getVisibleRows();
-        let newRows = 0;
-        let newCandidates = 0;
-
-        for (const row of visibleRows) {
-          const rowKey = cleanText(input.getRowKey(row));
-          if (!rowKey || input.seenThreadKeys.has(rowKey)) {
-            continue;
-          }
-          input.seenThreadKeys.add(rowKey);
-          newRows += 1;
-          passNewRows += 1;
-
-          const processResult = await input.processRow(row);
-          newCandidates += Math.max(0, processResult.newCandidateCount);
-          if (processResult.stopReason) {
-            stopReason = processResult.stopReason;
-            break outer;
-          }
-        }
-
-        noNewRowsStreak = newRows > 0 ? 0 : noNewRowsStreak + 1;
-        const beforeMetrics = await input.readScrollMetrics();
-        const iterationScrollTop = beforeMetrics?.scrollTop ?? null;
-        const iterationClientHeight = beforeMetrics?.clientHeight ?? null;
-        const iterationScrollHeight = beforeMetrics?.scrollHeight ?? null;
-        const iterationAtBottom = beforeMetrics?.atBottom ?? null;
-
-        if (input.disableDeepScroll) {
-          stopReason = input.seenThreadKeys.size > 0 ? "end_of_list_reached" : "zero_threads_found";
-          await input.onIteration?.({
-            pass,
-            iteration,
-            visibleRows: visibleRows.length,
-            newRows,
-            newCandidates,
-            scrollTop: iterationScrollTop,
-            clientHeight: iterationClientHeight,
-            scrollHeight: iterationScrollHeight,
-            atBottom: iterationAtBottom
-          });
-          break outer;
-        }
-
-        if (!beforeMetrics) {
-          stopReason = "no_scroll_container";
-          await input.onIteration?.({
-            pass,
-            iteration,
-            visibleRows: visibleRows.length,
-            newRows,
-            newCandidates,
-            scrollTop: null,
-            clientHeight: null,
-            scrollHeight: null,
-            atBottom: null
-          });
-          break outer;
-        }
-
-        if (beforeMetrics.atBottom && noNewRowsStreak >= noNewThreshold) {
-          passEndedByExhaustion = true;
-          stopReason = "deep_scroll_exhausted";
-          await input.onIteration?.({
-            pass,
-            iteration,
-            visibleRows: visibleRows.length,
-            newRows,
-            newCandidates,
-            scrollTop: beforeMetrics.scrollTop,
-            clientHeight: beforeMetrics.clientHeight,
-            scrollHeight: beforeMetrics.scrollHeight,
-            atBottom: beforeMetrics.atBottom
-          });
-          break;
-        }
-
-        const scrollMetrics = await input.scrollStep();
-        if (!scrollMetrics) {
-          stopReason = "no_scroll_container";
-          await input.onIteration?.({
-            pass,
-            iteration,
-            visibleRows: visibleRows.length,
-            newRows,
-            newCandidates,
-            scrollTop: null,
-            clientHeight: null,
-            scrollHeight: null,
-            atBottom: null
-          });
-          break outer;
-        }
-        scrollIterations += 1;
-        stagnantScrollStreak = scrollMetrics.moved ? 0 : stagnantScrollStreak + 1;
-
-        await input.onIteration?.({
-          pass,
-          iteration,
-          visibleRows: visibleRows.length,
-          newRows,
-          newCandidates,
-          scrollTop: scrollMetrics.afterScrollTop,
-          clientHeight: scrollMetrics.clientHeight,
-          scrollHeight: scrollMetrics.scrollHeight,
-          atBottom: scrollMetrics.atBottom
-        });
-
-        if ((scrollMetrics.atBottom && noNewRowsStreak >= noNewThreshold) || stagnantScrollStreak >= stagnationThreshold) {
-          passEndedByExhaustion = true;
-          stopReason = "deep_scroll_exhausted";
-          break;
-        }
-
-        await input.waitAfterScroll();
-      }
-
-      if (stopReason === "max_iterations") {
-        break;
-      }
-
-      if (input.disableDeepScroll) {
-        break;
-      }
-
-      if (passEndedByExhaustion) {
-        if (pass >= maxPasses) {
-          break;
-        }
-        if (passNewRows <= 0) {
-          break;
-        }
-        stopReason = "max_iterations";
-        continue;
-      }
-
-      if (passNewRows <= 0) {
-        stopReason = input.seenThreadKeys.size > 0 ? "deep_scroll_exhausted" : "zero_threads_found";
-        break;
-      }
-    }
-
-    if (input.seenThreadKeys.size <= 0 && stopReason !== "max_threads" && stopReason !== "max_duration") {
-      stopReason = "zero_threads_found";
-    }
-
-    return {
-      stopReason,
-      iterations,
-      scrollIterations,
-      noNewRowsStreak,
-      stagnantScrollStreak,
-      passesExecuted
-    };
-  }
-
   private async scrollStreamingListContainer(
     page: Page,
     scrollContainer: ElementHandle<Element>,
     mode: LinkedInScrollContainerResolution["mode"]
-  ): Promise<LinkedInDeepScrollStepMetrics> {
-    return this.scrollListContainerBy(page, scrollContainer, 0.85, "stream_scroll", mode);
+  ): Promise<{ before: number; after: number; clientHeight: number; scrollHeight: number; moved: boolean }> {
+    const result = await this.runTracedPageAction({
+      page,
+      stage: "collect_threads",
+      action: "scroll_container",
+      selector: "stream_scroll_container",
+      note: "stream_scroll",
+      details: {
+        ratio: 0.78,
+        mode
+      },
+      run: async () =>
+        scrollContainer.evaluate((root) => {
+          const node = root as HTMLElement;
+          const before = node.scrollTop;
+          const clientHeight = Math.max(1, Math.floor(node.clientHeight));
+          const scrollHeight = Math.max(clientHeight, Math.floor(node.scrollHeight));
+          const delta = Math.max(1, Math.floor(clientHeight * 0.78));
+          node.scrollTop = before + delta;
+          return {
+            before,
+            after: node.scrollTop,
+            clientHeight,
+            scrollHeight,
+            moved: node.scrollTop !== before
+          };
+        })
+    });
+    return result;
   }
 
   private async writeStreamingResolverFailureArtifacts(input: {
@@ -6094,37 +5691,6 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
   }
 
-  private async collectStreamSelectorDiagnostics(
-    page: Page,
-    selectors: SelectorRegistry
-  ): Promise<{ selectorThreadItemCount: number; selectorThreadSnippetCount: number }> {
-    const configuredThreadItemCount = await page.locator(selectors.thread_item).count().catch(() => 0);
-    const directThreadItemCount = await page.locator("li.msg-conversation-listitem").count().catch(() => 0);
-    const selectorThreadItemCount = Math.max(configuredThreadItemCount, directThreadItemCount);
-
-    const configuredSnippetSelector = (selectors.thread_snippet ?? "").trim();
-    const configuredSnippetCount = configuredSnippetSelector.length > 0
-      ? await page.locator(configuredSnippetSelector).count().catch(() => 0)
-      : 0;
-    const fallbackSnippetCount = await page
-      .locator("p.msg-conversation-card__message-snippet")
-      .count()
-      .catch(() => 0);
-    const selectorThreadSnippetCount = Math.max(configuredSnippetCount, fallbackSnippetCount);
-
-    return {
-      selectorThreadItemCount,
-      selectorThreadSnippetCount
-    };
-  }
-
-  private applyStreamFallbackEligibility(metrics: LinkedInStreamScanMetrics): void {
-    metrics.fallbackEligible =
-      metrics.processedRows === 0 &&
-      metrics.selectorThreadItemCount > 0 &&
-      metrics.selectorThreadSnippetCount > 0;
-  }
-
   async scanInboxThreadsStream(options: LinkedInStreamScanOptions): Promise<LinkedInStreamScanMetrics> {
     return this.runWithPlatformLease(async () => {
       const selectors = await this.deps.resolveSelectors();
@@ -6136,24 +5702,20 @@ export class LinkedInAdapter implements PlatformAdapter {
         scrollIterations: 0,
         processedRows: 0,
         actionableRows: 0,
-        unreadRows: 0,
-        needsReplyRows: 0,
         openedRows: 0,
         skippedRows: 0,
-        failures: 0,
-        selectorThreadItemCount: 0,
-        selectorThreadSnippetCount: 0,
-        collectorMode: "primary_stream",
-        fallbackEligible: false,
-        fallbackTriggered: false
+        failures: 0
       };
 
       const maxThreads = Math.max(1, options.maxThreads ?? this.deps.scanMaxThreads);
       const maxOpens = Math.max(1, options.maxOpens ?? maxThreads);
+      const maxIterations = Math.max(20, Math.min(140, maxThreads * 4));
       const maxDurationMs = 60_000;
-      const maxIterationsPerPass = 200;
-      const seenThreadKeys = new Set<string>();
+      const processedRowKeys = new Set<string>();
+      const startedAt = Date.now();
 
+      let noNewRowKeysStreak = 0;
+      let scrollTopStagnantStreak = 0;
       let shellResolution: LinkedInResolverNodeResolution | null = null;
       let listRootResolution: LinkedInResolverNodeResolution | null = null;
       let scrollResolution: LinkedInScrollContainerResolution | null = null;
@@ -6276,18 +5838,9 @@ export class LinkedInAdapter implements PlatformAdapter {
         }
         if (hydration.status === "empty_inbox") {
           metrics.stopReason = "zero_threads_found";
-          const selectorDiagnostics = await this.collectStreamSelectorDiagnostics(page, selectors).catch(() => ({
-            selectorThreadItemCount: 0,
-            selectorThreadSnippetCount: 0
-          }));
-          metrics.selectorThreadItemCount = selectorDiagnostics.selectorThreadItemCount;
-          metrics.selectorThreadSnippetCount = selectorDiagnostics.selectorThreadSnippetCount;
-          this.applyStreamFallbackEligibility(metrics);
           this.lastCollectionMetrics = {
             totalFound: 0,
             unreadFound: 0,
-            needsReplyFound: 0,
-            candidatesFound: 0,
             iterations: 0,
             stopReason: metrics.stopReason
           };
@@ -6686,61 +6239,23 @@ export class LinkedInAdapter implements PlatformAdapter {
           });
         }
 
-        const refreshStreamingScrollResolution = async (reason: string): Promise<void> => {
-          if (!shellResolution || !listRootResolution) {
-            return;
-          }
-          const refreshedScroll = await this.resolveScrollContainer(listRootResolution.handle, shellResolution.handle).catch(
-            () => null
-          );
-          if (!refreshedScroll) {
-            return;
-          }
-          scrollResolution = refreshedScroll;
-          resolverCandidateProbes.push(...refreshedScroll.topCandidates);
-          this.logTraceDecision({
-            stage: "collect_threads",
-            decision: "Re-resolved streaming scroll container",
-            details: {
-              reason,
-              mode: refreshedScroll.mode
-            }
-          });
-        };
+        const processVisibleRowsOnce = async (): Promise<{
+          visibleRowCount: number;
+          newRowsSeen: number;
+          bottomRowKey: string | null;
+        }> => {
+          const visibleRows = await this.captureVisibleRowsForStreaming(page, listRootResolution!.handle).catch(() => []);
+          const currentBottomRowKey = visibleRows.at(-1)?.rowKey ?? null;
+          let newRowsSeen = 0;
 
-        const loopResult = await this.runLinkedInDeepScrollLoop<LinkedInVisibleRowSnapshot>({
-          page,
-          seenThreadKeys,
-          disableDeepScroll: options.disableDeepScroll ?? false,
-          maxDurationMs,
-          maxPasses: 2,
-          maxIterationsPerPass,
-          noNewThreshold: 3,
-          stagnationThreshold: 2,
-          getVisibleRows: async () => {
-            const refreshedListResult = shellResolution
-              ? await this.resolveConversationListRoot(page, shellResolution.handle, selectors).catch(() => null)
-              : null;
-            if (refreshedListResult?.resolution) {
-              listRootResolution = refreshedListResult.resolution;
-            } else if (!listRootResolution) {
-              const selectorFallback = await this.resolveConversationListRootFromConfiguredSelector(
-                page,
-                selectors,
-                shellResolution?.handle ?? null
-              ).catch(() => null);
-              if (selectorFallback) {
-                listRootResolution = selectorFallback;
-              }
+          for (const row of visibleRows) {
+            if (processedRowKeys.has(row.rowKey)) {
+              continue;
             }
-            if (!listRootResolution) {
-              return [];
-            }
-            return this.captureVisibleRowsForStreaming(page, listRootResolution.handle, selectors).catch(() => []);
-          },
-          getRowKey: (row) => row.rowKey,
-          processRow: async (row) => {
+            processedRowKeys.add(row.rowKey);
+            newRowsSeen += 1;
             metrics.processedRows += 1;
+
             const candidateSignals: LinkedInStreamCandidateSignals = {
               rowKey: row.rowKey,
               displayName: row.displayName,
@@ -6757,47 +6272,23 @@ export class LinkedInAdapter implements PlatformAdapter {
               page
             });
 
-            if (metrics.processedRows >= maxThreads) {
-              return {
-                newCandidateCount: 0,
-                stopReason: "max_threads"
-              };
-            }
-
             if (row.sponsored) {
               metrics.skippedRows += 1;
-              return {
-                newCandidateCount: 0
-              };
+              continue;
             }
 
-            if (row.unreadCount > 0) {
-              metrics.unreadRows += 1;
-            }
-            if (row.needsReplyFromList) {
-              metrics.needsReplyRows += 1;
-            }
             const actionable = row.unreadCount > 0 || row.needsReplyFromList;
             if (!actionable) {
-              return {
-                newCandidateCount: 0
-              };
+              continue;
             }
             metrics.actionableRows += 1;
 
             if (metrics.openedRows >= maxOpens) {
-              return {
-                newCandidateCount: 1,
-                stopReason: "max_threads"
-              };
-            }
-            if (!listRootResolution) {
-              return {
-                newCandidateCount: 1
-              };
+              metrics.stopReason = "max_threads";
+              break;
             }
 
-            const openResult = await this.openVisibleRowForStreaming(page, selectors, listRootResolution.handle, row);
+            const openResult = await this.openVisibleRowForStreaming(page, selectors, listRootResolution!.handle, row);
             if (!openResult.ok) {
               metrics.failures += 1;
               metrics.skippedRows += 1;
@@ -6811,9 +6302,7 @@ export class LinkedInAdapter implements PlatformAdapter {
                   reason: openResult.reason
                 }
               });
-              return {
-                newCandidateCount: 1
-              };
+              continue;
             }
 
             const canonicalFromUrl = normalizeCanonicalLinkedInThreadId({
@@ -6838,9 +6327,7 @@ export class LinkedInAdapter implements PlatformAdapter {
                   identitySource
                 }
               });
-              return {
-                newCandidateCount: 1
-              };
+              continue;
             }
 
             const parsedMessages = await this.collectVisibleThreadMessages(page, selectors, 120);
@@ -6861,7 +6348,6 @@ export class LinkedInAdapter implements PlatformAdapter {
               lastMessagePreview: row.previewSnippet || cleanText(normalizedMessages.at(-1)?.text ?? ""),
               lastMessageAt: row.listTimestamp || undefined,
               threadUrl: openResult.descriptor.threadUrl ?? page.url(),
-              avatarUrl: row.avatarUrl,
               needsReplyFromList: row.needsReplyFromList,
               isUnreadCandidate: true
             };
@@ -6885,133 +6371,125 @@ export class LinkedInAdapter implements PlatformAdapter {
               messages: normalizedMessages
             });
             metrics.openedRows += 1;
-            return {
-              newCandidateCount: 1
-            };
-          },
-          readScrollMetrics: async () => {
-            if (!scrollResolution) {
-              await refreshStreamingScrollResolution("missing_scroll_resolution");
-            }
-            if (!scrollResolution) {
-              return null;
-            }
-            const metricsResult = await this.readListScrollMetrics(
-              page,
-              scrollResolution.handle,
-              "stream_read_scroll_metrics",
-              scrollResolution.mode
-            ).catch(() => null);
-            if (metricsResult) {
-              return metricsResult;
-            }
-            await refreshStreamingScrollResolution("read_metrics_failed");
-            if (!scrollResolution) {
-              return null;
-            }
-            return this.readListScrollMetrics(
-              page,
-              scrollResolution.handle,
-              "stream_read_scroll_metrics_reresolved",
-              scrollResolution.mode
-            ).catch(() => null);
-          },
-          scrollStep: async () => {
-            if (!scrollResolution) {
-              await refreshStreamingScrollResolution("before_scroll");
-            }
-            if (!scrollResolution) {
-              return null;
-            }
-            const metricsResult = await this.scrollStreamingListContainer(page, scrollResolution.handle, scrollResolution.mode).catch(
-              () => null
-            );
-            if (metricsResult?.moved) {
-              return metricsResult;
-            }
-            await refreshStreamingScrollResolution(metricsResult ? "scroll_stall" : "scroll_failed");
-            if (!scrollResolution) {
-              return null;
-            }
-            return this.scrollStreamingListContainer(page, scrollResolution.handle, scrollResolution.mode).catch(() => null);
-          },
-          scrollToTop: async () => {
-            if (!scrollResolution) {
-              await refreshStreamingScrollResolution("scroll_to_top_missing_resolution");
-            }
-            if (!scrollResolution) {
-              return null;
-            }
-            return this.scrollListContainerToTop(
-              page,
-              scrollResolution.handle,
-              "stream_scroll_to_top",
-              scrollResolution.mode
-            ).catch(() => null);
-          },
-          waitAfterScroll: async () => {
-            await this.runTracedPageAction({
-              page,
-              stage: "collect_threads",
-              action: "wait_for_timeout",
-              note: "stream_post_scroll_wait",
-              details: {
-                delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-              },
-              run: async () => {
-                await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
-              }
-            });
-          },
-          onIteration: async (iteration) => {
-            const line = `[LI][SCAN][req=${options.requestId}][collect_threads] deepScroll pass=${iteration.pass} iter=${iteration.iteration} scrollTop=${iteration.scrollTop ?? "null"} clientHeight=${iteration.clientHeight ?? "null"} scrollHeight=${iteration.scrollHeight ?? "null"} atBottom=${iteration.atBottom ?? "null"} newRows=${iteration.newRows} newCandidates=${iteration.newCandidates}`;
-            options.runLogger?.headline({
-              platform: "LI",
-              requestId: options.requestId,
-              stage: "collect_threads",
-              message: line
-            });
+          }
+
+          return {
+            visibleRowCount: visibleRows.length,
+            newRowsSeen,
+            bottomRowKey: currentBottomRowKey
+          };
+        };
+
+        while (metrics.iterations < maxIterations) {
+          if (Date.now() - startedAt >= maxDurationMs) {
+            metrics.stopReason = "max_duration";
+            break;
+          }
+
+          metrics.iterations += 1;
+          const rowPass = await processVisibleRowsOnce();
+
+          if (metrics.stopReason === "max_threads") {
+            break;
+          }
+          if (metrics.processedRows >= maxThreads) {
+            metrics.stopReason = "max_threads";
+            break;
+          }
+
+          noNewRowKeysStreak = rowPass.newRowsSeen > 0 ? 0 : noNewRowKeysStreak + 1;
+          if (!scrollResolution) {
+            metrics.stopReason = "no_scroll_container";
             this.logTraceEvent({
               stage: "collect_threads",
               action: "stream_scroll_iteration",
               details: {
-                pass: iteration.pass,
-                iteration: iteration.iteration,
-                scrollTopAfter: iteration.scrollTop,
-                clientHeight: iteration.clientHeight,
-                scrollHeight: iteration.scrollHeight,
-                atBottom: iteration.atBottom,
-                visibleRowCount: iteration.visibleRows,
-                newRowsSeen: iteration.newRows,
-                newCandidates: iteration.newCandidates,
-                scrollResolutionMode: scrollResolution?.mode ?? null
+                iteration: metrics.iterations,
+                scrollTopBefore: null,
+                scrollTopAfter: null,
+                visibleRowCount: rowPass.visibleRowCount,
+                newRowsSeen: rowPass.newRowsSeen,
+                noNewRowKeysStreak,
+                scrollTopStagnantStreak,
+                stopReason: metrics.stopReason
               },
               page
             });
-            this.logTraceDecision({
-              stage: "collect_threads",
-              decision: line
-            });
+            break;
           }
-        });
 
-        metrics.iterations = loopResult.iterations;
-        metrics.scrollIterations = loopResult.scrollIterations;
-        metrics.stopReason = loopResult.stopReason;
+          const scrollMetrics = await this.scrollStreamingListContainer(page, scrollResolution.handle, scrollResolution.mode)
+            .then((result) => result)
+            .catch(() => null);
+          metrics.scrollIterations += 1;
 
-        const selectorDiagnostics = await this.collectStreamSelectorDiagnostics(page, selectors).catch(() => ({
-          selectorThreadItemCount: 0,
-          selectorThreadSnippetCount: 0
-        }));
-        metrics.selectorThreadItemCount = selectorDiagnostics.selectorThreadItemCount;
-        metrics.selectorThreadSnippetCount = selectorDiagnostics.selectorThreadSnippetCount;
-        this.applyStreamFallbackEligibility(metrics);
+          const moved = Boolean(scrollMetrics?.moved);
+          scrollTopStagnantStreak = moved ? 0 : scrollTopStagnantStreak + 1;
+          const shouldAttemptReresolve = !moved || metrics.scrollIterations % 5 === 0;
+          if (shouldAttemptReresolve && shellResolution && listRootResolution) {
+            const refreshedScroll = await this.resolveScrollContainer(listRootResolution.handle, shellResolution.handle).catch(
+              () => null
+            );
+            if (refreshedScroll) {
+              scrollResolution = refreshedScroll;
+              resolverCandidateProbes.push(...refreshedScroll.topCandidates);
+              this.logTraceDecision({
+                stage: "collect_threads",
+                decision: "Re-resolved streaming scroll container",
+                details: {
+                  iteration: metrics.iterations,
+                  reason: moved ? "periodic_refresh" : "scroll_stall",
+                  mode: refreshedScroll.mode
+                }
+              });
+            }
+          }
+
+          this.logTraceEvent({
+            stage: "collect_threads",
+            action: "stream_scroll_iteration",
+            details: {
+              iteration: metrics.iterations,
+              scrollTopBefore: scrollMetrics?.before ?? null,
+              scrollTopAfter: scrollMetrics?.after ?? null,
+              clientHeight: scrollMetrics?.clientHeight ?? null,
+              scrollHeight: scrollMetrics?.scrollHeight ?? null,
+              visibleRowCount: rowPass.visibleRowCount,
+              newRowsSeen: rowPass.newRowsSeen,
+              noNewRowKeysStreak,
+              scrollTopStagnantStreak,
+              bottomRowKey: rowPass.bottomRowKey,
+              scrollResolutionMode: scrollResolution.mode
+            },
+            page
+          });
+
+          if (noNewRowKeysStreak >= 3 || scrollTopStagnantStreak >= 2) {
+            metrics.stopReason = "end_of_list_no_progress";
+            break;
+          }
+
+          await this.runTracedPageAction({
+            page,
+            stage: "collect_threads",
+            action: "wait_for_timeout",
+            note: "stream_post_scroll_wait",
+            details: {
+              delayMs: Math.max(80, this.deps.scanScrollWaitMs)
+            },
+            run: async () => {
+              await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
+            }
+          });
+        }
+
+        if (metrics.processedRows <= 0 && metrics.stopReason === "max_iterations") {
+          metrics.stopReason = "zero_threads_found";
+        }
 
         this.lastCollectionMetrics = {
           totalFound: metrics.processedRows,
-          unreadFound: metrics.unreadRows,
-          needsReplyFound: metrics.needsReplyRows,
-          candidatesFound: metrics.actionableRows,
+          unreadFound: metrics.actionableRows,
           iterations: metrics.iterations,
           stopReason: metrics.stopReason
         };
@@ -7023,311 +6501,6 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
         });
         return metrics;
-      } finally {
-        this.activeStage = null;
-        await stopRunTracing();
-      }
-    });
-  }
-
-  async scanInboxThreadsDirectFallback(options: LinkedInDirectFallbackScanOptions): Promise<LinkedInDirectFallbackScanResult> {
-    return this.runWithPlatformLease(async () => {
-      const selectors = await this.deps.resolveSelectors();
-      const page = await this.navigateInbox(selectors);
-      const stopRunTracing = await this.startRunTracing(page);
-
-      this.activeStage = "collect_threads";
-      try {
-        await this.throwIfAuthRequired(page, "scanInboxThreadsDirectFallback:navigation");
-        await this.ensureAllFilterActive(page);
-        await this.throwIfAuthRequired(page, "scanInboxThreadsDirectFallback:all_filter");
-
-        const deadline = Date.now() + 3_500;
-        while (Date.now() < deadline) {
-          const rowCount = await page.locator("li.msg-conversation-listitem").count().catch(() => 0);
-          if (rowCount > 0) {
-            break;
-          }
-          const emptyStateCount = await page.locator(linkedInStreamingEmptyStateSelector).count().catch(() => 0);
-          if (emptyStateCount > 0) {
-            break;
-          }
-          await page.waitForTimeout(120).catch(() => undefined);
-        }
-
-        const uniqueThreads = new Map<string, ThreadStub>();
-        const seenThreadKeys = new Set<string>();
-        const cappedMaxThreads = Math.max(1, options.maxThreads ?? this.deps.scanMaxThreads);
-        const maxOpens = Math.max(1, options.maxOpens ?? cappedMaxThreads);
-        const maxDurationMs = 60_000;
-        let threadsScanned = 0;
-        let unreadRows = 0;
-        let needsReplyRows = 0;
-        let openedRows = 0;
-        let scrollResolution: LinkedInScrollContainerResolution | null = null;
-
-        const resolveFallbackScrollResolution = async (): Promise<LinkedInScrollContainerResolution | null> => {
-          const listRootHandle = await page.locator(selectors.thread_list).first().elementHandle().catch(() => null);
-          if (!listRootHandle) {
-            return null;
-          }
-          const shellResolution = await this.resolveMessagingShell(page).catch(() => null);
-          const shellHandle = shellResolution?.handle ?? listRootHandle;
-          const resolved = await this.resolveScrollContainer(listRootHandle, shellHandle).catch(() => null);
-          if (resolved) {
-            return resolved;
-          }
-          return {
-            handle: listRootHandle,
-            mode: "nonstandard_overflow_fallback",
-            topCandidates: []
-          };
-        };
-
-        const loopResult = await this.runLinkedInDeepScrollLoop<LinkedInThreadSnapshot>({
-          page,
-          seenThreadKeys,
-          disableDeepScroll: options.disableDeepScroll ?? false,
-          maxDurationMs,
-          maxPasses: 2,
-          maxIterationsPerPass: 200,
-          noNewThreshold: 3,
-          stagnationThreshold: 2,
-          getVisibleRows: async () => {
-            const snapshot = await this.collectThreadCandidates(page, selectors);
-            return snapshot.rows;
-          },
-          getRowKey: (row) => row.stableKey,
-          processRow: async (row) => {
-            threadsScanned += 1;
-            if (row.unreadCount > 0) {
-              unreadRows += 1;
-            }
-            if (row.needsReplyFromList) {
-              needsReplyRows += 1;
-            }
-
-            const thread: ThreadStub = {
-              platformThreadId: row.platformThreadId ?? row.stableKey,
-              displayName: row.displayName,
-              avatarUrl: row.avatarUrl,
-              unreadCount: row.unreadCount,
-              lastMessagePreview: row.lastMessagePreview,
-              lastMessageAt: row.lastMessageAt,
-              threadUrl: row.threadUrl,
-              needsReplyFromList: row.needsReplyFromList,
-              isUnreadCandidate: true
-            };
-            uniqueThreads.set(row.stableKey, thread);
-
-            if (uniqueThreads.size >= cappedMaxThreads) {
-              return {
-                newCandidateCount: 1,
-                stopReason: "max_threads"
-              };
-            }
-
-            if (!options.onThreadCandidate) {
-              return {
-                newCandidateCount: 1
-              };
-            }
-
-            if (openedRows >= maxOpens) {
-              return {
-                newCandidateCount: 1,
-                stopReason: "max_threads"
-              };
-            }
-
-            try {
-              await this.openThreadAndWaitForActivation(page, selectors, thread);
-            } catch {
-              return {
-                newCandidateCount: 1
-              };
-            }
-
-            const descriptor = await this.getActiveThreadDescriptor(page, selectors);
-            const canonicalFromUrl = normalizeCanonicalLinkedInThreadId({
-              threadUrl: descriptor.threadUrl ?? page.url()
-            });
-            const canonicalFromActiveKey = normalizeCanonicalLinkedInThreadId({
-              activeKey: descriptor.activeKey
-            });
-            const canonicalPlatformThreadId = canonicalFromUrl ?? canonicalFromActiveKey;
-            if (!canonicalPlatformThreadId) {
-              return {
-                newCandidateCount: 1
-              };
-            }
-
-            const parsedMessages = await this.collectVisibleThreadMessages(page, selectors, 120);
-            const baseTimestamp = Date.now() - parsedMessages.length * 1_000;
-            const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message, index) => ({
-              ...message,
-              direction: message.direction === "IN" ? "IN" : "OUT",
-              timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
-              text: cleanText(message.text),
-              senderName: message.senderName,
-              raw: message.raw
-            }));
-
-            const canonicalThread: ThreadStub = {
-              ...thread,
-              platformThreadId: canonicalPlatformThreadId,
-              displayName: descriptor.displayName ?? thread.displayName,
-              threadUrl: descriptor.threadUrl ?? page.url(),
-              lastMessagePreview: thread.lastMessagePreview || cleanText(normalizedMessages.at(-1)?.text ?? "")
-            };
-
-            await options.onThreadCandidate({
-              rowKey: row.stableKey,
-              thread: canonicalThread,
-              messages: normalizedMessages
-            });
-            openedRows += 1;
-            return {
-              newCandidateCount: 1
-            };
-          },
-          readScrollMetrics: async () => {
-            if (!scrollResolution) {
-              scrollResolution = await resolveFallbackScrollResolution();
-            }
-            if (!scrollResolution) {
-              return null;
-            }
-            const metrics = await this.readListScrollMetrics(
-              page,
-              scrollResolution.handle,
-              "fallback_read_scroll_metrics",
-              scrollResolution.mode
-            ).catch(() => null);
-            if (metrics) {
-              return metrics;
-            }
-            scrollResolution = await resolveFallbackScrollResolution();
-            if (!scrollResolution) {
-              return null;
-            }
-            return this.readListScrollMetrics(
-              page,
-              scrollResolution.handle,
-              "fallback_read_scroll_metrics_reresolved",
-              scrollResolution.mode
-            ).catch(() => null);
-          },
-          scrollStep: async () => {
-            if (!scrollResolution) {
-              scrollResolution = await resolveFallbackScrollResolution();
-            }
-            if (!scrollResolution) {
-              return null;
-            }
-            const metrics = await this.scrollListContainerBy(
-              page,
-              scrollResolution.handle,
-              0.85,
-              "fallback_scroll_step",
-              scrollResolution.mode
-            ).catch(() => null);
-            if (metrics?.moved) {
-              return metrics;
-            }
-            scrollResolution = await resolveFallbackScrollResolution();
-            if (!scrollResolution) {
-              return null;
-            }
-            return this.scrollListContainerBy(
-              page,
-              scrollResolution.handle,
-              0.85,
-              "fallback_scroll_step_reresolved",
-              scrollResolution.mode
-            ).catch(() => null);
-          },
-          scrollToTop: async () => {
-            if (!scrollResolution) {
-              scrollResolution = await resolveFallbackScrollResolution();
-            }
-            if (!scrollResolution) {
-              return null;
-            }
-            return this.scrollListContainerToTop(
-              page,
-              scrollResolution.handle,
-              "fallback_scroll_to_top",
-              scrollResolution.mode
-            ).catch(() => null);
-          },
-          waitAfterScroll: async () => {
-            await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs)).catch(() => undefined);
-          },
-          onIteration: async (iteration) => {
-            const line = `[LI][SCAN][req=${options.requestId}][collect_threads] deepScroll pass=${iteration.pass} iter=${iteration.iteration} scrollTop=${iteration.scrollTop ?? "null"} clientHeight=${iteration.clientHeight ?? "null"} scrollHeight=${iteration.scrollHeight ?? "null"} atBottom=${iteration.atBottom ?? "null"} newRows=${iteration.newRows} newCandidates=${iteration.newCandidates}`;
-            options.runLogger?.headline({
-              platform: "LI",
-              requestId: options.requestId,
-              stage: "collect_threads",
-              message: line
-            });
-            this.logTraceDecision({
-              stage: "collect_threads",
-              decision: line,
-              details: {
-                collectorMode: "fallback_direct"
-              }
-            });
-          }
-        });
-
-        const selectorDiagnostics = await this.collectStreamSelectorDiagnostics(page, selectors).catch(() => ({
-          selectorThreadItemCount: 0,
-          selectorThreadSnippetCount: 0
-        }));
-        const selectorThreadItemCount = selectorDiagnostics.selectorThreadItemCount;
-        const selectorThreadSnippetCount = selectorDiagnostics.selectorThreadSnippetCount;
-        const threads = Array.from(uniqueThreads.values()).slice(0, cappedMaxThreads);
-        const stopReason = loopResult.stopReason;
-
-        this.lastCollectionMetrics = {
-          totalFound: threadsScanned,
-          unreadFound: unreadRows,
-          needsReplyFound: needsReplyRows,
-          candidatesFound: threads.length,
-          iterations: loopResult.iterations,
-          stopReason
-        };
-        this.logTraceDecision({
-          stage: "collect_threads",
-          decision: "Completed LinkedIn direct fallback collection",
-          details: {
-            collectorMode: "fallback_direct",
-            stopReason,
-            threadsScanned,
-            unreadRows,
-            needsReplyRows,
-            actionableRows: threads.length,
-            selectorThreadItemCount,
-            selectorThreadSnippetCount,
-            iterations: loopResult.iterations,
-            scrollIterations: loopResult.scrollIterations,
-            passesExecuted: loopResult.passesExecuted
-          }
-        });
-
-        return {
-          stopReason,
-          threadsScanned,
-          actionableRows: threads.length,
-          unreadRows,
-          needsReplyRows,
-          selectorThreadItemCount,
-          selectorThreadSnippetCount,
-          collectorMode: "fallback_direct",
-          threads
-        };
       } finally {
         this.activeStage = null;
         await stopRunTracing();
@@ -8268,7 +7441,6 @@ export class LinkedInAdapter implements PlatformAdapter {
         threadsVisibleCount: 0,
         threadsCollectedTotal: 0,
         threadsWithUnreadBadgeCount: 0,
-        threadsWithNeedsReplyCount: 0,
         candidatesToOpenCount: 0,
         openedThreadsCount: 0,
         messagesParsedCount: 0,
@@ -8410,7 +7582,6 @@ export class LinkedInAdapter implements PlatformAdapter {
             runCounters.threadsVisibleCount = collected.rows.length;
             runCounters.threadsCollectedTotal = collected.rowsBeforeCapCount;
             runCounters.threadsWithUnreadBadgeCount = collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length;
-            runCounters.threadsWithNeedsReplyCount = collected.rows.filter((thread) => Boolean(thread.needsReplyFromList)).length;
             runCounters.candidatesToOpenCount = candidatesAfterCap;
             runCounters.scrollIterations = collected.scrollIterations;
             runCounters.noProgressStreak = collected.noProgressStreak;
@@ -8424,10 +7595,6 @@ export class LinkedInAdapter implements PlatformAdapter {
                 stage: "collect_threads",
                 message: "LinkedIn adapter collection complete",
                 details: {
-                  threadsScanned: runCounters.threadsCollectedTotal,
-                  unreadCount: runCounters.threadsWithUnreadBadgeCount,
-                  needsReplyCount: runCounters.threadsWithNeedsReplyCount,
-                  candidatesCount: runCounters.candidatesToOpenCount,
                   candidatesBeforeCap,
                   candidatesAfterCap,
                   disableDeepScroll: options.disableDeepScroll ?? false,
@@ -8442,16 +7609,13 @@ export class LinkedInAdapter implements PlatformAdapter {
               details: {
                 threadsCollectedTotal: runCounters.threadsCollectedTotal,
                 candidatesToOpenCount: runCounters.candidatesToOpenCount,
-                unreadCount: runCounters.threadsWithUnreadBadgeCount,
-                needsReplyCount: runCounters.threadsWithNeedsReplyCount
+                unreadCount: runCounters.threadsWithUnreadBadgeCount
               }
             });
 
             this.lastCollectionMetrics = {
               totalFound: collected.rowsBeforeCapCount,
               unreadFound: runCounters.threadsWithUnreadBadgeCount,
-              needsReplyFound: runCounters.threadsWithNeedsReplyCount,
-              candidatesFound: runCounters.candidatesToOpenCount,
               iterations: collected.iterations,
               stopReason: collected.stopReason
             };
@@ -8589,8 +7753,6 @@ export class LinkedInAdapter implements PlatformAdapter {
         this.lastCollectionMetrics = {
           totalFound: collected.rowsBeforeCapCount,
           unreadFound: collected.rows.filter((thread) => (thread.unreadCount ?? 0) > 0).length,
-          needsReplyFound: collected.rows.filter((thread) => Boolean(thread.needsReplyFromList)).length,
-          candidatesFound: collected.rows.length,
           iterations: collected.iterations,
           stopReason: collected.stopReason
         };
