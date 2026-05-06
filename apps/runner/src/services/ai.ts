@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import type { SummaryOutput, SuggestedRepliesOutput } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig } from "../config";
+import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
 import type { AiService } from "../types/runtime";
 
 const summarySchema = z.object({
@@ -82,7 +83,11 @@ export function createAiService(): AiService {
 
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
-      what_they_want: lastInbound?.text.slice(0, 140) ?? "No clear ask yet.",
+      // safeTruncate splits on Unicode code points so a 140-char cut won't
+      // bisect an emoji's surrogate pair. Without it, a message ending in
+      // an emoji at the boundary corrupts every subsequent prisma.thread
+      // .update — see Sarah Nwisi sync-fail bug.
+      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 140) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",

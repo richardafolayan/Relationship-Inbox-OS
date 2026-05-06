@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
-import { AdapterFailure, cleanText, humanDelay } from "../platforms/utils";
+import { AdapterFailure, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
@@ -1207,6 +1207,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   // delta mode" — the post-open canonicalisation step will
                   // still dedupe on platformThreadId.
                   if (!signals.candidatePlatformThreadId) {
+                    runLogger.logDecision({
+                      stage: "open_thread",
+                      decision: "shouldOpenCandidate: delta (no candidate id)",
+                      details: {
+                        rowKey: signals.rowKey,
+                        displayName: signals.displayName,
+                        listTimestamp: signals.listTimestamp,
+                        threadUrl: signals.threadUrl
+                      }
+                    });
                     return { open: true, mode: "delta" };
                   }
                   const existing = await prisma.thread.findUnique({
@@ -1226,6 +1236,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
                   // First encounter — request a full backfill so we walk the
                   // message list to the top and persist the entire history.
+                  // Also pre-record the candidate ID so the persistence step
+                  // can stamp firstFullBackfillAt; the post-open canonical ID
+                  // should match this URL-derived one (LinkedIn doesn't
+                  // rewrite thread URLs across click navigation).
                   if (!existing || !existing.firstFullBackfillAt) {
                     if (signals.candidatePlatformThreadId) {
                       fullBackfillThreadIds.add(signals.candidatePlatformThreadId);
@@ -1240,12 +1254,51 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   //     what we already have (so no new message arrived);
                   //   • the unread count matches DB state (so no
                   //     read/unread state flip we should record).
-                  // Otherwise default to a delta open.
+                  //
+                  // Comparison precision depends on the row text. When
+                  // LinkedIn shows a TIME ("8:01 AM" / "19:16"), it's today's
+                  // message — we have minute precision and can do an exact
+                  // compare. When it shows a date ("May 2"), weekday ("Wed"),
+                  // or "Yesterday", we only have day precision; the parser
+                  // fills in noon, which would otherwise be > the precise
+                  // db.lastMessageAt of the same day's message and falsely
+                  // mark the thread as "newer than db". Use a calendar-day
+                  // comparison in that case.
                   const rowAt = signals.listTimestampIso ? Date.parse(signals.listTimestampIso) : NaN;
                   const dbAt = existing.lastMessageAt ? existing.lastMessageAt.getTime() : 0;
-                  const timestampUnchanged =
-                    !Number.isNaN(rowAt) && rowAt <= dbAt;
+                  const rowTextIsTime = /\d{1,2}:\d{2}/.test(signals.listTimestamp ?? "");
+                  let timestampUnchanged = false;
+                  if (!Number.isNaN(rowAt)) {
+                    if (rowTextIsTime) {
+                      timestampUnchanged = rowAt <= dbAt;
+                    } else {
+                      const startOfDay = (ms: number): number => {
+                        const d = new Date(ms);
+                        d.setHours(0, 0, 0, 0);
+                        return d.getTime();
+                      };
+                      timestampUnchanged = startOfDay(rowAt) <= startOfDay(dbAt);
+                    }
+                  }
                   const unreadUnchanged = existing.unreadCount === signals.unreadCount;
+                  runLogger.logDecision({
+                    stage: "open_thread",
+                    decision: "shouldOpenCandidate evaluated",
+                    details: {
+                      rowKey: signals.rowKey,
+                      displayName: signals.displayName,
+                      listTimestamp: signals.listTimestamp,
+                      listTimestampIso: signals.listTimestampIso,
+                      candidatePlatformThreadId: signals.candidatePlatformThreadId,
+                      dbLastMessageAt: existing.lastMessageAt?.toISOString() ?? null,
+                      dbUnreadCount: existing.unreadCount,
+                      rowUnreadCount: signals.unreadCount,
+                      rowTextIsTime,
+                      timestampUnchanged,
+                      unreadUnchanged,
+                      decision: timestampUnchanged && unreadUnchanged ? "skip" : "delta"
+                    }
+                  });
                   if (timestampUnchanged && unreadUnchanged) {
                     return { open: false, mode: "delta", reason: "unchanged" };
                   }
@@ -2298,10 +2351,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         }))
       });
 
-      summary = aiSummary.summary;
-      whatTheyWant = aiSummary.what_they_want;
-      openLoopsJson = JSON.stringify(aiSummary.open_loops);
-      toneNotesJson = JSON.stringify(aiSummary.tone_notes);
+      // Defensive sanitiser: AI output (or its fallback path) can contain
+      // unpaired surrogates if a slice landed mid-emoji. Strip them before
+      // writing — the SQLite driver rejects the resulting JSON otherwise.
+      summary = stripUnpairedSurrogates(aiSummary.summary);
+      whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
+      openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
+      toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
     }
 
     await prisma.thread.update({
@@ -2327,12 +2383,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
         whatTheyWant,
         openLoopsJson,
         toneNotesJson,
-        // Stamp the first-full-backfill marker once we successfully walked
-        // the entire message history. Subsequent scans can skip the
-        // scroll-to-top step and only fetch deltas. Idempotent: only set it
-        // if it isn't already set, so a one-off re-scan doesn't re-mark.
+        // Stamp the first-full-backfill marker on the FIRST successful
+        // persistence of any thread that has at least one message. We don't
+        // gate on the pre-click `markedFullBackfill` flag because the URL
+        // token isn't always extractable from the row anchor — that would
+        // leave the column null forever and break skip-if-unchanged on every
+        // subsequent scan. Once stamped (idempotent), future scans use the
+        // skip-if-unchanged path. The `markedFullBackfill` flag still drives
+        // the scroll-to-top behaviour upstream in the adapter.
         firstFullBackfillAt:
-          markedFullBackfill && !thread.firstFullBackfillAt
+          !thread.firstFullBackfillAt && hasPersistedMessages
             ? new Date()
             : (thread.firstFullBackfillAt ?? undefined)
       }

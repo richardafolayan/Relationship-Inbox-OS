@@ -223,5 +223,39 @@ export async function humanDelay(minMs = 250, maxMs = 900): Promise<void> {
 }
 
 export function cleanText(value: string): string {
-  return value.replace(/\s+/g, " ").trim();
+  return stripUnpairedSurrogates(value).replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Truncate `text` to at most `maxCodePoints` Unicode code points, splitting
+ * on grapheme/surrogate-pair boundaries rather than UTF-16 code units. Plain
+ * `string.slice(0, n)` cuts a surrogate pair in half when `n` lands between
+ * the high and low surrogate of an emoji, producing an unpaired surrogate.
+ * Prisma's SQLite driver then rejects the resulting string with
+ * `unexpected end of hex escape`, which silently breaks `thread.update` and
+ * leaves stale row metadata in the DB.
+ */
+export function safeTruncate(text: string, maxCodePoints: number): string {
+  if (typeof text !== "string" || text.length <= maxCodePoints) {
+    return text ?? "";
+  }
+  const codePoints = Array.from(text);
+  if (codePoints.length <= maxCodePoints) {
+    return text;
+  }
+  return codePoints.slice(0, maxCodePoints).join("");
+}
+
+/**
+ * Drop any unpaired UTF-16 surrogates that sneak through from page
+ * scraping or AI output. The defensive last line for every string we write
+ * to Prisma — see `safeTruncate` for the full motivation.
+ */
+export function stripUnpairedSurrogates(value: string): string {
+  if (typeof value !== "string" || value.length === 0) {
+    return value ?? "";
+  }
+  // High surrogate (0xD800–0xDBFF) not followed by a low surrogate, OR
+  // a low surrogate (0xDC00–0xDFFF) not preceded by a high surrogate.
+  return value.replace(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g, "");
 }
