@@ -1237,17 +1237,21 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
       return true;
     })
     .sort((a, b) => {
+      // Match LinkedIn's own inbox ordering: most-recent-message first.
+      // Risk and unread count are secondary tiebreakers when timestamps are
+      // identical (e.g. seed data or simultaneous messages).
+      const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+      const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+      if (aTime !== bTime) {
+        return bTime - aTime;
+      }
       if (rankRisk(a.riskLevel) !== rankRisk(b.riskLevel)) {
         return rankRisk(b.riskLevel) - rankRisk(a.riskLevel);
       }
-
       if (a.unreadCount !== b.unreadCount) {
         return b.unreadCount - a.unreadCount;
       }
-
-      const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
-      const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
-      return bTime - aTime;
+      return 0;
     });
 
   const today = new Date();

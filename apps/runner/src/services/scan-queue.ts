@@ -70,6 +70,20 @@ interface LinkedInScanAdapter extends PlatformAdapter {
     disableDeepScroll?: boolean;
     requestId: string;
     runLogger?: RunLogger;
+    /**
+     * Pre-open hook used for skip-if-unchanged + first-encounter full
+     * backfill. See LinkedInStreamPreOpenSignals for the input shape.
+     */
+    shouldOpenCandidate?: (signals: {
+      rowKey: string;
+      displayName: string;
+      unreadCount: number;
+      needsReplyFromList: boolean;
+      listTimestamp: string;
+      listTimestampIso: string | null;
+      threadUrl?: string;
+      candidatePlatformThreadId?: string;
+    }) => Promise<{ open: boolean; mode: "full" | "delta"; reason?: string }>;
     onThreadCandidate: (input: {
       rowKey: string;
       thread: ThreadStub;
@@ -85,6 +99,8 @@ interface LinkedInScanAdapter extends PlatformAdapter {
     needsReplyRows: number;
     openedRows: number;
     skippedRows: number;
+    skippedUnchangedRows: number;
+    fullBackfillRows: number;
     failures: number;
     selectorThreadItemCount: number;
     selectorThreadSnippetCount: number;
@@ -1005,6 +1021,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
           let candidatesBeforeCap = 0;
           let collectionMetrics: Record<string, unknown> | null = null;
           let candidatesToSync: Array<{ thread: ThreadStub; messages?: NormalizedMessage[] }> = [];
+          // Lifted to the outer scope so the per-candidate persistence loop
+          // (further down) can read it. Populated by the streaming-scan
+          // pre-open hook when it requests a first-encounter full backfill.
+          const fullBackfillThreadIds = new Set<string>();
 
           if (linkedInAdapter) {
             const applyThreadCap = <T>(values: T[]): T[] => {
@@ -1181,6 +1201,56 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 disableDeepScroll: linkedInDevCaps.disableDeepScroll,
                 requestId: job.jobId,
                 runLogger,
+                shouldOpenCandidate: async (signals) => {
+                  // We can only consult the DB if the row anchor gave us a
+                  // canonical thread ID. Without one, fall back to "open in
+                  // delta mode" — the post-open canonicalisation step will
+                  // still dedupe on platformThreadId.
+                  if (!signals.candidatePlatformThreadId) {
+                    return { open: true, mode: "delta" };
+                  }
+                  const existing = await prisma.thread.findUnique({
+                    where: {
+                      platform_platformThreadId: {
+                        platform,
+                        platformThreadId: signals.candidatePlatformThreadId
+                      }
+                    },
+                    select: {
+                      id: true,
+                      lastMessageAt: true,
+                      unreadCount: true,
+                      firstFullBackfillAt: true
+                    }
+                  }).catch(() => null);
+
+                  // First encounter — request a full backfill so we walk the
+                  // message list to the top and persist the entire history.
+                  if (!existing || !existing.firstFullBackfillAt) {
+                    if (signals.candidatePlatformThreadId) {
+                      fullBackfillThreadIds.add(signals.candidatePlatformThreadId);
+                    }
+                    return { open: true, mode: "full", reason: existing ? "first_full_backfill" : "new_thread" };
+                  }
+
+                  // Skip-if-unchanged: open ONLY when the row's list-side
+                  // signals indicate something actually moved. Both clauses
+                  // must hold:
+                  //   • the row's last-message timestamp is no newer than
+                  //     what we already have (so no new message arrived);
+                  //   • the unread count matches DB state (so no
+                  //     read/unread state flip we should record).
+                  // Otherwise default to a delta open.
+                  const rowAt = signals.listTimestampIso ? Date.parse(signals.listTimestampIso) : NaN;
+                  const dbAt = existing.lastMessageAt ? existing.lastMessageAt.getTime() : 0;
+                  const timestampUnchanged =
+                    !Number.isNaN(rowAt) && rowAt <= dbAt;
+                  const unreadUnchanged = existing.unreadCount === signals.unreadCount;
+                  if (timestampUnchanged && unreadUnchanged) {
+                    return { open: false, mode: "delta", reason: "unchanged" };
+                  }
+                  return { open: true, mode: "delta" };
+                },
                 onThreadCandidate: async (input) => {
                   streamedCandidates.push({
                     rowKey: input.rowKey,
@@ -1475,13 +1545,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
             });
 
             try {
+              const markedFullBackfill = fullBackfillThreadIds.has(thread.platformThreadId);
+              const preParsedMessageCount = candidateToSync.messages?.length ?? 0;
+              const effectiveMaxMessages = markedFullBackfill
+                ? Math.max(settings.maxMessagesPerThread, preParsedMessageCount, 1000)
+                : settings.maxMessagesPerThread;
               const syncResult = await syncThread(
                 platform,
                 thread,
-                settings.maxMessagesPerThread,
+                effectiveMaxMessages,
                 job.jobId,
                 runLogger,
-                candidateToSync.messages
+                candidateToSync.messages,
+                markedFullBackfill
               );
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
@@ -1995,7 +2071,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     maxMessages: number,
     jobId: string,
     runLogger?: RunLogger,
-    preParsedMessages?: NormalizedMessage[]
+    preParsedMessages?: NormalizedMessage[],
+    markedFullBackfill = false
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
@@ -2249,7 +2326,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
         rollingSummary: summary,
         whatTheyWant,
         openLoopsJson,
-        toneNotesJson
+        toneNotesJson,
+        // Stamp the first-full-backfill marker once we successfully walked
+        // the entire message history. Subsequent scans can skip the
+        // scroll-to-top step and only fetch deltas. Idempotent: only set it
+        // if it isn't already set, so a one-off re-scan doesn't re-mark.
+        firstFullBackfillAt:
+          markedFullBackfill && !thread.firstFullBackfillAt
+            ? new Date()
+            : (thread.firstFullBackfillAt ?? undefined)
       }
     });
 

@@ -392,16 +392,22 @@ export class SessionManager {
       // identity function that swallows the helper call. Safe in production
       // dist (where `__name` isn't injected) — the script just defines a
       // global the code never uses.
+      //
+      // The `as ...` casts are because Playwright's BrowserContext type isn't
+      // fully captured in the test fakes; we feature-detect the methods so
+      // unit tests with minimal mock contexts don't have to implement them.
       const NAME_POLYFILL_SOURCE =
         "if (typeof globalThis.__name === 'undefined') { globalThis.__name = function (fn) { return fn; }; }";
-      await context
-        .addInitScript({ content: NAME_POLYFILL_SOURCE })
-        .catch(() => undefined);
-      // Apply to any pages already attached to this context (e.g. the persistent
-      // tab the user just signed into). addInitScript only runs on subsequent
-      // navigations, so this catches the current document too.
-      for (const existingPage of context.pages()) {
-        await existingPage.evaluate(NAME_POLYFILL_SOURCE).catch(() => undefined);
+      const ctxAny = context as { addInitScript?: (input: { content: string }) => Promise<void>; pages?: () => Array<{ evaluate?: (script: string) => Promise<unknown> }> };
+      if (typeof ctxAny.addInitScript === "function") {
+        await ctxAny.addInitScript({ content: NAME_POLYFILL_SOURCE }).catch(() => undefined);
+      }
+      if (typeof ctxAny.pages === "function") {
+        for (const existingPage of ctxAny.pages()) {
+          if (typeof existingPage.evaluate === "function") {
+            await existingPage.evaluate(NAME_POLYFILL_SOURCE).catch(() => undefined);
+          }
+        }
       }
       this.logTrace(input.runLogger, {
         action: "launch_context_ok",

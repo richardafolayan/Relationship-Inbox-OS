@@ -91,6 +91,11 @@ model Thread {
   whatTheyWant      String?
   openLoopsJson     String?
   toneNotesJson     String?
+  // Set the first time we walk the thread's message list to the top and
+  // persist every historical message. Subsequent scans only fetch the delta
+  // (messages newer than `lastMessageAt`). Null means full-history backfill
+  // hasn't run yet for this thread.
+  firstFullBackfillAt DateTime?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 

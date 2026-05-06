@@ -29,7 +29,7 @@ import {
   buildTemporaryCandidateId,
   normalizeCanonicalLinkedInThreadId
 } from "../linkedin/linkedinIdentity.js";
-import { parseLinkedInListTimestamp } from "../linkedin/linkedinTime.js";
+import { parseLinkedInListTimestamp, parseLinkedInMessageTimestamp } from "../linkedin/linkedinTime.js";
 import {
   isSponsoredPillText,
   needsReplyFromPreview
@@ -227,12 +227,59 @@ export interface LinkedInStreamScanMetrics {
   actionableRows: number;
   openedRows: number;
   skippedRows: number;
+  /** Rows skipped because the pre-open hook decided they were unchanged. */
+  skippedUnchangedRows: number;
+  /** Rows opened with a full-history backfill (first encounter). */
+  fullBackfillRows: number;
   failures: number;
   secondPassRan: boolean;
 }
 
+/**
+ * Pre-open signals for a streaming row, used by the scan queue to decide
+ * whether to skip the click entirely (thread unchanged since last scan) or
+ * walk the message list to the top for a first-encounter full backfill.
+ */
+export interface LinkedInStreamPreOpenSignals {
+  rowKey: string;
+  displayName: string;
+  unreadCount: number;
+  needsReplyFromList: boolean;
+  /** Raw text from the row's `<time>` element ("8:01 AM", "Feb 19", "Wed"). */
+  listTimestamp: string;
+  /** Resolved ISO timestamp of `listTimestamp` (best-effort). */
+  listTimestampIso: string | null;
+  /** Thread URL captured from the row anchor, if available. */
+  threadUrl?: string;
+  /**
+   * Canonical platform thread ID extracted from the row's URL. May be null
+   * when LinkedIn omits the conversation token from the row anchor — in
+   * that case the scan queue can't perform a DB lookup pre-click.
+   */
+  candidatePlatformThreadId?: string;
+}
+
+export interface LinkedInStreamPreOpenDecision {
+  /** When false, the adapter skips the click and emits stream_candidate_skipped_unchanged. */
+  open: boolean;
+  /**
+   * "full" → walk the message list to the top before reading messages
+   * (first encounter; backfills the entire history).
+   * "delta" → read whatever's currently visible (subsequent scans).
+   */
+  mode: "full" | "delta";
+  /** Optional human-readable reason for skipping; logged into the audit trace. */
+  reason?: string;
+}
+
 export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
   onThreadCandidate: (input: LinkedInStreamThreadCandidate) => Promise<void>;
+  /**
+   * Optional pre-open hook. When omitted, every actionable row is opened in
+   * delta mode (legacy behaviour). When provided, the adapter awaits this
+   * before clicking each row and respects the returned decision.
+   */
+  shouldOpenCandidate?: (signals: LinkedInStreamPreOpenSignals) => Promise<LinkedInStreamPreOpenDecision>;
 }
 
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
@@ -5519,73 +5566,252 @@ export class LinkedInAdapter implements PlatformAdapter {
     };
   }
 
+  /**
+   * Scroll the message list inside the active thread up to its very top so
+   * LinkedIn lazily loads every historical message. Used on first encounter
+   * with a thread (full-history backfill). Stops when scrollTop is 0 OR no
+   * new messages render across two consecutive scroll attempts OR a hard cap
+   * (60 iterations / 30s) is reached.
+   */
+  private async scrollMessageListToTop(page: Page, selectors: SelectorRegistry): Promise<void> {
+    const containerSelector = selectors.message_container;
+    const itemSelector = selectors.message_item;
+    const startedAt = Date.now();
+    const maxDurationMs = 30_000;
+    const maxIterations = 60;
+    let stagnantStreak = 0;
+    let lastMessageCount = await page.locator(itemSelector).count().catch(() => 0);
+    for (let i = 0; i < maxIterations; i += 1) {
+      if (Date.now() - startedAt > maxDurationMs) {
+        return;
+      }
+      const scrolled = await page
+        .locator(containerSelector)
+        .first()
+        .evaluate((node) => {
+          const el = node as HTMLElement;
+          // Walk up to the closest scrollable ancestor — the message list's
+          // own UL isn't always the scroll container; LinkedIn often delegates
+          // it to a wrapper div.
+          let target: HTMLElement | null = el;
+          while (target) {
+            const style = window.getComputedStyle(target);
+            const overflowY = (style.overflowY ?? "").toLowerCase();
+            if ((overflowY === "auto" || overflowY === "scroll") && target.scrollHeight > target.clientHeight) {
+              break;
+            }
+            target = target.parentElement;
+          }
+          if (!target) {
+            return { atTop: true, scrollTop: 0 };
+          }
+          const before = target.scrollTop;
+          target.scrollTop = 0;
+          // Many SPAs ignore an instant jump and rely on incremental scrolls
+          // to fire pagination — fall back to a step if the jump didn't take.
+          if (target.scrollTop === before && before > 0) {
+            target.scrollTop = Math.max(0, before - Math.max(400, Math.floor(target.clientHeight * 0.9)));
+          }
+          return { atTop: target.scrollTop <= 0, scrollTop: target.scrollTop };
+        })
+        .catch(() => null);
+      // Allow LinkedIn to fetch the previous page of messages.
+      await page.waitForTimeout(450).catch(() => undefined);
+      const currentMessageCount = await page.locator(itemSelector).count().catch(() => 0);
+      const grew = currentMessageCount > lastMessageCount;
+      lastMessageCount = currentMessageCount;
+      if (!grew) {
+        stagnantStreak += 1;
+      } else {
+        stagnantStreak = 0;
+      }
+      if (scrolled?.atTop && stagnantStreak >= 2) {
+        return;
+      }
+      if (stagnantStreak >= 4) {
+        // No more pagination is forthcoming; bail.
+        return;
+      }
+    }
+  }
+
   private async collectVisibleThreadMessages(
     page: Page,
     selectors: SelectorRegistry,
     limit: number
   ): Promise<LinkedInMessageSnapshot[]> {
-    const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
-    const readText = async (locator: Locator): Promise<string | null> => {
-      const first = locator.first();
-      if ((await first.count().catch(() => 0)) <= 0) {
-        return null;
-      }
-      return first.innerText({ timeout: 0 }).catch(() => null);
+    type RawSnapshot = {
+      platformMessageKey: string;
+      className: string;
+      direction: "IN" | "OUT";
+      // The bubble's per-message <time> text — almost always just the time of
+      // day, e.g. "4:52 PM" or "19:16". Sometimes a full ISO string in the
+      // datetime attribute (rare; LinkedIn drops it on most prod renders).
+      timeText: string;
+      timeDatetimeAttr: string | null;
+      // The date heading from the parent <li.msg-s-message-list__event>
+      // group — "Feb 20", "Mar 28", "Saturday", "Today", "Yesterday". Empty
+      // if this group has no date heading (i.e. it's a continuation of the
+      // previous group's date).
+      dateHeadingText: string;
+      text: string;
+      senderName: string;
+      attachmentCount: number;
     };
-    const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
-      const first = locator.first();
-      if ((await first.count().catch(() => 0)) <= 0) {
-        return null;
-      }
-      return first.getAttribute(name, { timeout: 0 }).catch(() => null);
-    };
-    const readMessageKey = async (root: Locator, index: number): Promise<string> =>
-      (await readAttr(root, "data-event-urn")) ??
-      (await readAttr(root, "data-id")) ??
-      (await readAttr(root, "id")) ??
-      `li-msg-${index}`;
 
-    const messageNodes = page.locator(selectors.message_item);
-    const count = await messageNodes.count().catch(() => 0);
+    // Single-pass DOM walk: collect every visible message bubble (selectors
+    // .message_item) along with its parent group LI's date heading. Done
+    // inside the page so we don't pay per-bubble round-trip cost.
+    const rawSnapshots = await page
+      .evaluate(
+        ({ messageItemSelector, messageTextSelector }) => {
+          const clean = (value: string | null | undefined): string =>
+            (value ?? "").replace(/\s+/g, " ").trim();
+          const bubbles = Array.from(document.querySelectorAll(messageItemSelector));
+          const out: Array<{
+            platformMessageKey: string;
+            className: string;
+            direction: "IN" | "OUT";
+            timeText: string;
+            timeDatetimeAttr: string | null;
+            dateHeadingText: string;
+            text: string;
+            senderName: string;
+            attachmentCount: number;
+          }> = [];
+          bubbles.forEach((node, index) => {
+            const bubbleEl = node as HTMLElement;
+            const className = (bubbleEl.className ?? "").toString();
+            // Skip nodes that aren't actually message bubbles.
+            const hasBubble =
+              bubbleEl.querySelector(".msg-s-event-listitem__message-bubble") !== null ||
+              bubbleEl.querySelector(messageTextSelector) !== null;
+            if (!hasBubble) {
+              return;
+            }
+            const direction: "IN" | "OUT" =
+              className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className)
+                ? "IN"
+                : "OUT";
+            // Walk up to the enclosing message-group LI to find its date heading.
+            const groupLi = bubbleEl.closest("li.msg-s-message-list__event");
+            const heading = groupLi?.querySelector("time.msg-s-message-list__time-heading");
+            const dateHeadingText = clean(heading?.textContent ?? "");
+            // Per-message <time>: explicitly skip the time-heading element so
+            // we don't pull the date heading instead of the bubble's time.
+            const bubbleTimes = Array.from(bubbleEl.querySelectorAll("time")).filter(
+              (t) => !t.matches("time.msg-s-message-list__time-heading")
+            );
+            const timeEl = bubbleTimes[0] ?? null;
+            const timeText = clean(timeEl?.textContent ?? "");
+            const timeDatetimeAttr = timeEl?.getAttribute("datetime") || null;
+            const bodyEl = bubbleEl.querySelector(messageTextSelector);
+            const rawBody = clean(bodyEl?.textContent ?? "");
+            const attachmentCount = bubbleEl.querySelectorAll("img, video, svg, a[download], a[href*='attachment']").length;
+            const text = rawBody || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
+            const senderEl =
+              bubbleEl.querySelector(".msg-s-message-group__profile-link") ??
+              bubbleEl.querySelector(".msg-s-message-group__name");
+            const senderName = clean(senderEl?.textContent ?? "");
+            const platformMessageKey =
+              bubbleEl.getAttribute("data-event-urn") ??
+              bubbleEl.getAttribute("data-id") ??
+              bubbleEl.id ??
+              `li-msg-${index}`;
+            out.push({
+              platformMessageKey,
+              className,
+              direction,
+              timeText,
+              timeDatetimeAttr,
+              dateHeadingText,
+              text,
+              senderName,
+              attachmentCount
+            });
+          });
+          return out;
+        },
+        {
+          messageItemSelector: selectors.message_item,
+          messageTextSelector: selectors.message_text
+        }
+      )
+      .catch(() => [] as RawSnapshot[]);
+
+    // Resolve each bubble's time-of-day + its group's date heading into a
+    // full ISO timestamp. The date heading carries the calendar day; the
+    // bubble's <time> carries the hour/minute; we combine them.
+    //
+    // Because date headings only appear on the FIRST group in a date run,
+    // walk forward and inherit the most-recent heading we've seen for any
+    // bubble whose own group LI lacked one. (LinkedIn's groups are date-
+    // contiguous, so this matches the visual rendering.)
+    const now = new Date();
     const parsed: LinkedInMessageSnapshot[] = [];
-    for (let index = 0; index < count; index += 1) {
-      const root = messageNodes.nth(index);
-      const bubbleCount = await root.locator(".msg-s-event-listitem__message-bubble").count().catch(() => 0);
-      if (bubbleCount <= 0) {
+    let inheritedDateHeading = "";
+    for (const raw of rawSnapshots) {
+      const headingForBubble = raw.dateHeadingText || inheritedDateHeading;
+      if (raw.dateHeadingText) {
+        inheritedDateHeading = raw.dateHeadingText;
+      }
+
+      // Prefer an explicit ISO datetime attribute when present (rare), then
+      // fall back to date-heading + time-of-day, then to time-of-day alone.
+      let isoTimestamp = "";
+      if (raw.timeDatetimeAttr) {
+        const parsedIso = Date.parse(raw.timeDatetimeAttr);
+        if (!Number.isNaN(parsedIso)) {
+          isoTimestamp = new Date(parsedIso).toISOString();
+        }
+      }
+      if (!isoTimestamp) {
+        const combined = parseLinkedInMessageTimestamp(raw.timeText, headingForBubble, now);
+        if (combined) {
+          isoTimestamp = combined.toISOString();
+        }
+      }
+      if (!isoTimestamp && raw.timeText) {
+        // Last-ditch: keep the raw time text so downstream normalizeTimestamp
+        // can still try (logs a fallback warning rather than silently using
+        // garbage).
+        isoTimestamp = raw.timeText;
+      }
+      if (!isoTimestamp) {
+        // No date AND no time — skip this snapshot rather than fabricating a
+        // value.
         continue;
       }
-      const className = (await readAttr(root, "class")) ?? "";
-      const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
-      const attachmentCount = await root
-        .locator("img, video, svg, a[download], a[href*='attachment']")
-        .count()
-        .catch(() => 0);
-      const rawBodyText = clean((await readText(root.locator(selectors.message_text).first())) ?? "");
-      const text = rawBodyText || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
-      const senderName = clean(
-        (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??
-          (await readText(root.locator(".msg-s-message-group__name").first())) ??
-          ""
-      );
-      const timeLocator = root.locator("time").first();
-      const timestamp = clean((await readAttr(timeLocator, "datetime")) ?? (await readText(timeLocator)) ?? "");
-      const platformMessageKey = await readMessageKey(root, index);
+
       parsed.push({
-        platformMessageKey,
-        direction: inbound ? "IN" : "OUT",
-        timestamp,
-        text,
-        senderName: senderName || undefined,
+        platformMessageKey: raw.platformMessageKey,
+        direction: raw.direction,
+        timestamp: isoTimestamp,
+        text: raw.text,
+        senderName: raw.senderName || undefined,
         raw: {
-          className,
-          hasTime: Boolean(timestamp),
-          attachmentCount
+          className: raw.className,
+          hasTime: Boolean(raw.timeText) || Boolean(raw.timeDatetimeAttr),
+          dateHeading: headingForBubble || null,
+          attachmentCount: raw.attachmentCount
         },
-        attachments: attachmentCount
-          ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
+        attachments: raw.attachmentCount
+          ? [{ type: "attachment", manualReview: true, rawLabel: `${raw.attachmentCount} attachment(s)` }]
           : []
       });
     }
+
+    // Defensive sort: messages should already be in DOM order (oldest first)
+    // but a stable sort by timestamp ASC guards against parser ambiguity and
+    // ensures the dashboard's timeline renders chronologically.
+    parsed.sort((a, b) => {
+      const ta = Date.parse(a.timestamp);
+      const tb = Date.parse(b.timestamp);
+      if (Number.isNaN(ta) || Number.isNaN(tb)) {
+        return 0;
+      }
+      return ta - tb;
+    });
 
     if (parsed.length <= limit) {
       return parsed;
@@ -5754,6 +5980,8 @@ export class LinkedInAdapter implements PlatformAdapter {
         actionableRows: 0,
         openedRows: 0,
         skippedRows: 0,
+        skippedUnchangedRows: 0,
+        fullBackfillRows: 0,
         failures: 0,
         secondPassRan: false
       };
@@ -6346,6 +6574,59 @@ export class LinkedInAdapter implements PlatformAdapter {
               break;
             }
 
+            // Pre-open hook (Issue 4: skip-if-unchanged + Issue 5: full-history
+            // first-encounter). Default decision is "open in delta mode".
+            let openMode: "full" | "delta" = "delta";
+            if (options.shouldOpenCandidate) {
+              const candidateThreadIdFromUrl = normalizeCanonicalLinkedInThreadId({
+                threadUrl: row.threadUrl ?? row.href
+              });
+              const listTimestampIso = (() => {
+                if (!row.listTimestamp) return null;
+                const parsed = parseLinkedInListTimestamp(row.listTimestamp, new Date());
+                return parsed ? parsed.toISOString() : null;
+              })();
+              const decision: LinkedInStreamPreOpenDecision = await options
+                .shouldOpenCandidate({
+                  rowKey: row.rowKey,
+                  displayName: row.displayName,
+                  unreadCount: row.unreadCount,
+                  needsReplyFromList: row.needsReplyFromList,
+                  listTimestamp: row.listTimestamp,
+                  listTimestampIso,
+                  threadUrl: row.threadUrl ?? row.href,
+                  candidatePlatformThreadId: candidateThreadIdFromUrl ?? undefined
+                })
+                .catch<LinkedInStreamPreOpenDecision>(() => ({ open: true, mode: "delta" }));
+              if (!decision.open) {
+                metrics.skippedUnchangedRows += 1;
+                this.logTraceDecision({
+                  stage: "open_thread",
+                  decision: "Skipping stream candidate — unchanged since last scan",
+                  details: {
+                    rowKey: row.rowKey,
+                    displayName: row.displayName,
+                    candidatePlatformThreadId: candidateThreadIdFromUrl,
+                    reason: decision.reason ?? "unchanged"
+                  }
+                });
+                this.logTraceEvent({
+                  stage: "open_thread",
+                  action: "stream_candidate_skipped_unchanged",
+                  details: {
+                    rowKey: row.rowKey,
+                    displayName: row.displayName,
+                    candidatePlatformThreadId: candidateThreadIdFromUrl,
+                    listTimestampIso,
+                    reason: decision.reason ?? "unchanged"
+                  },
+                  page
+                });
+                continue;
+              }
+              openMode = decision.mode;
+            }
+
             const openResult = await this.openVisibleRowForStreaming(page, selectors, listRootResolution!.handle, row);
             if (!openResult.ok) {
               metrics.failures += 1;
@@ -6388,7 +6669,20 @@ export class LinkedInAdapter implements PlatformAdapter {
               continue;
             }
 
-            const parsedMessages = await this.collectVisibleThreadMessages(page, selectors, 120);
+            // First-encounter full-history backfill (Issue 5): scroll the
+            // message list to the top so all historical messages render in the
+            // DOM, then collect everything. The cap is generous (`limit: 1000`)
+            // because we want every message; LinkedIn's UI will stop loading
+            // once it reaches the start of the conversation.
+            if (openMode === "full") {
+              await this.scrollMessageListToTop(page, selectors).catch(() => undefined);
+              metrics.fullBackfillRows += 1;
+            }
+            const parsedMessages = await this.collectVisibleThreadMessages(
+              page,
+              selectors,
+              openMode === "full" ? 1000 : 120
+            );
             const baseTimestamp = Date.now() - parsedMessages.length * 1_000;
             const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message, index) => ({
               ...message,
