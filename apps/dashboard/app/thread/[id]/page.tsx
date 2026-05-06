@@ -39,6 +39,20 @@ export default function ThreadPage() {
   const [sending, setSending] = useState(false);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Optimistic-UI bubbles: when the user clicks Send, we immediately push
+  // a temporary OUT message into the timeline so they see feedback even
+  // when the runner's send is queued behind a scan (which can take 30s+).
+  // Once the runner persists the real message, refresh() pulls it into
+  // `thread.messages` and we drop the matching pending bubble.
+  const [pendingSends, setPendingSends] = useState<
+    Array<{
+      clientSendId: string;
+      text: string;
+      sentAt: string;
+      failed?: boolean;
+      errorMessage?: string;
+    }>
+  >([]);
 
   const refresh = useCallback(async () => {
     const [threadData, inbox, platformRows, logRows] = await Promise.all([
@@ -117,20 +131,53 @@ export default function ThreadPage() {
       return;
     }
 
+    const clientSendId = uuid();
+    const text = composer;
+    const sentAt = new Date().toISOString();
+
+    // Push optimistic bubble before awaiting the runner so the user sees
+    // immediate feedback. The runner may sit on this for 30s+ if a scan
+    // is currently holding the platform lease.
+    setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
+    setComposer("");
     setSending(true);
     setError(null);
     try {
       await apiPost(`/runner/control/thread/${thread.id}/send`, {
-        text: composer,
-        clientSendId: uuid()
+        text,
+        clientSendId
       });
-      setComposer("");
+      // Refresh first — the persisted OUT message will be in thread.messages
+      // — THEN drop the optimistic stand-in. Doing them in this order avoids
+      // a flash of "no bubble" between the drop and the persisted re-render.
       await refresh();
+      setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
     } catch (sendError) {
-      setError(sendError instanceof Error ? sendError.message : "Failed to send");
+      const message = sendError instanceof Error ? sendError.message : "Failed to send";
+      setPendingSends((prev) =>
+        prev.map((p) =>
+          p.clientSendId === clientSendId ? { ...p, failed: true, errorMessage: message } : p
+        )
+      );
+      setError(message);
+      // Restore the composer so the user can edit + retry without retyping.
+      setComposer(text);
     } finally {
       setSending(false);
     }
+  };
+
+  const retryPendingSend = async (clientSendId: string) => {
+    const target = pendingSends.find((p) => p.clientSendId === clientSendId);
+    if (!target || !thread) return;
+    // Fire a NEW clientSendId — the previous one is permanently linked to
+    // the FAILED SendRequest row in the runner. Drop the failed bubble so
+    // the new attempt's optimistic bubble takes its place.
+    setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
+    setComposer(target.text);
+    // Defer to next tick so React applies the composer update before onSend
+    // reads it.
+    setTimeout(() => void onSend(), 0);
   };
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
@@ -153,7 +200,45 @@ export default function ThreadPage() {
   };
 
   if (loading || !thread) {
-    return <Skeleton className="h-[640px] w-full" />;
+    // Layout-shaped skeleton so the page doesn't visually jump when the
+    // real content arrives. Three columns (threads / conversation / context)
+    // matching the live layout's grid below.
+    return (
+      <div className="flex h-[calc(100vh-3rem)] flex-col gap-3 overflow-hidden">
+        <div className="grid min-h-0 flex-1 grid-cols-12 gap-4">
+          <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-3">
+            <Skeleton className="mb-3 h-4 w-20" />
+            <div className="space-y-2">
+              {Array.from({ length: 8 }).map((_, i) => (
+                <Skeleton key={i} className="h-12 w-full" />
+              ))}
+            </div>
+          </Card>
+          <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-6">
+            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-3">
+              <Skeleton className="h-6 w-48" />
+              <div className="flex gap-2">
+                <Skeleton className="h-8 w-28" />
+                <Skeleton className="h-8 w-28" />
+              </div>
+            </div>
+            <div className="flex-1 space-y-3">
+              <Skeleton className="ml-0 h-16 w-3/4" />
+              <Skeleton className="ml-auto h-16 w-2/3" />
+              <Skeleton className="ml-0 h-12 w-1/2" />
+            </div>
+          </Card>
+          <Card className="col-span-12 flex min-h-0 flex-col space-y-3 overflow-y-auto lg:col-span-3">
+            <Skeleton className="h-4 w-24" />
+            <Skeleton className="h-16 w-full" />
+            <Skeleton className="h-4 w-32" />
+            <Skeleton className="h-20 w-full" />
+            <Skeleton className="h-4 w-28" />
+            <Skeleton className="h-24 w-full" />
+          </Card>
+        </div>
+      </div>
+    );
   }
 
   const threadList = inboxRows.slice(0, 20);
@@ -252,6 +337,45 @@ export default function ThreadPage() {
                         <Badge tone="amber">Attachment: image (manual review)</Badge>
                       </div>
                     ) : null}
+                  </div>
+                </div>
+              </div>
+            ))}
+            {/* Optimistic-UI bubbles: bubbles that exist client-side only,
+                rendered after all persisted messages so they appear at the
+                bottom (== "most recent"). They flip to a Failed state with a
+                retry button if the runner reported a send failure. */}
+            {pendingSends.map((pending) => (
+              <div key={`pending-${pending.clientSendId}`}>
+                <div className="flex justify-end">
+                  <div
+                    className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm ${
+                      pending.failed
+                        ? "border border-rose-200 bg-rose-50 text-rose-900"
+                        : "border border-blue-200 bg-blue-50 text-blue-900 opacity-80"
+                    }`}
+                  >
+                    <p>{pending.text}</p>
+                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px]">
+                      <span className="text-slate-500">{formatClock(pending.sentAt)}</span>
+                      {pending.failed ? (
+                        <span className="flex items-center gap-2 text-rose-600">
+                          <span>Failed: {pending.errorMessage ?? "send error"}</span>
+                          <button
+                            type="button"
+                            onClick={() => void retryPendingSend(pending.clientSendId)}
+                            className="font-medium underline hover:no-underline"
+                          >
+                            Retry
+                          </button>
+                        </span>
+                      ) : (
+                        <span className="flex items-center gap-1 text-slate-500">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          Sending…
+                        </span>
+                      )}
+                    </div>
                   </div>
                 </div>
               </div>

@@ -6,6 +6,7 @@ import type { ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
 import { Topbar } from "@/components/layout/topbar";
+import { SystemStatusBar } from "@/components/layout/system-status-bar";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AppSettings, HealthResponse } from "@/lib/types";
@@ -195,6 +196,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           onToggleAutoScan={toggleAutoScan}
           onOpenCommandPalette={() => setPaletteOpen(true)}
         />
+        <SystemStatusBar />
         <main className="p-6">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />

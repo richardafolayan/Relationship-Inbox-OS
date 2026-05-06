@@ -1668,6 +1668,77 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
   );
 }));
 
+// Surface the persisted send queue so the dashboard can render a status bar
+// instead of failing silently when the user clicks Send during a scan. The
+// existing SendRequest model already persists every send through PENDING →
+// SENT/FAILED, and the platform lease serializes sends against scans, so a
+// click during a scan sits in PENDING until the lease frees up. This endpoint
+// just exposes that state to the UI.
+app.get("/data/send-queue", asyncRoute(async (_req, res) => {
+  const [activeRows, recentDoneRows] = await Promise.all([
+    prisma.sendRequest.findMany({
+      where: { status: "PENDING" },
+      include: {
+        thread: {
+          include: { person: true }
+        }
+      },
+      orderBy: { createdAt: "asc" }
+    }),
+    // Show the last 5 completed sends so the bar can briefly say "Sent to X"
+    // before fading out, and so a failed send is visible even if the user
+    // misses the live transition.
+    prisma.sendRequest.findMany({
+      where: { status: { in: ["SENT", "FAILED"] } },
+      include: {
+        thread: {
+          include: { person: true }
+        }
+      },
+      orderBy: { updatedAt: "desc" },
+      take: 5
+    })
+  ]);
+
+  res.json({
+    activeCount: activeRows.length,
+    active: activeRows.map((row, index) => ({
+      clientSendId: row.clientSendId,
+      threadId: row.threadId,
+      personName: row.thread.person.displayName,
+      platform: row.thread.platform,
+      status: row.status,
+      requestText: row.requestText,
+      enqueuedAt: row.createdAt.toISOString(),
+      // 0 = currently being processed (the head of the queue); 1+ = queued
+      // behind another send. The runner serializes sends through the platform
+      // lease, so only one send can be IN_FLIGHT at a time.
+      queuePosition: index
+    })),
+    recent: recentDoneRows.map((row) => {
+      let errorPayload: unknown = null;
+      if (row.errorJson) {
+        try {
+          errorPayload = JSON.parse(row.errorJson);
+        } catch {
+          errorPayload = null;
+        }
+      }
+      return {
+        clientSendId: row.clientSendId,
+        threadId: row.threadId,
+        personName: row.thread.person.displayName,
+        platform: row.thread.platform,
+        status: row.status,
+        completedAt: row.updatedAt.toISOString(),
+        errorMessage: errorPayload && typeof errorPayload === "object" && "message" in errorPayload
+          ? (errorPayload as { message?: string }).message
+          : undefined
+      };
+    })
+  });
+}));
+
 app.get("/data/people", asyncRoute(async (_req, res) => {
   const [people, visibleThreadGroups] = await Promise.all([
     prisma.person.findMany({
