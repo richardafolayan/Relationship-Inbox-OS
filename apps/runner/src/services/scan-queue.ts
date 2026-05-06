@@ -162,6 +162,75 @@ type LinkedInFallbackDecision = {
   triggerReason?: "force_fallback" | "zero_primary_rows_with_selector_signals";
 };
 
+/**
+ * Send-time persistence (`services/send.ts`) keys outbound messages by
+ * `stableHash(threadId|sentAt|OUT|text)`. When the next scan parses the same
+ * outbound from LinkedIn's list view, it gets either:
+ *   - LinkedIn's real `data-event-urn` (different key entirely)
+ *   - A stableHash with the list-view timestamp (rounded to the minute, so
+ *     also different from the exact-second send timestamp)
+ *
+ * Both produce a different `platformMessageKey` from the send-time row, so
+ * the upsert misses and inserts a duplicate. The user reported this for
+ * Joshua Martin's thread: two identical 18:56 bubbles, one keyed by
+ * stableHash with `17:56:07`, one keyed by stableHash with `17:56:00`.
+ *
+ * Pure decision function so the dedup rule is unit-testable without Prisma.
+ * Callers execute the returned action via prisma.
+ */
+export interface ExistingOutboundMessageRow {
+  id: string;
+  platformMessageKey: string;
+  text: string;
+  timestamp: Date;
+}
+
+export type OutboundDedupAction =
+  | { kind: "no_op" }
+  | { kind: "migrate_twin_key"; twinId: string }
+  | { kind: "delete_twin"; twinId: string };
+
+export function decideOutboundDedup(input: {
+  newKey: string;
+  newTimestamp: Date;
+  newText: string;
+  existingTwins: ExistingOutboundMessageRow[];
+  /**
+   * The row (if any) already keyed by `newKey` in the same thread. When this
+   * exists we know the new key isn't a fresh insert — there's already a row
+   * holding it — so any twin we find is a true duplicate to remove rather
+   * than rekey.
+   */
+  existingCanonical: ExistingOutboundMessageRow | null;
+  /**
+   * Tolerance around the parsed timestamp. Send.ts records the exact send
+   * second; LinkedIn's list view rounds to the minute, and clocks can drift
+   * across sends. 5 minutes is generous but keeps the false-positive rate
+   * effectively zero — two distinct outbound messages with the same exact
+   * text in the same thread within 5 minutes is not a real workflow.
+   */
+  windowMs?: number;
+}): OutboundDedupAction {
+  const windowMs = input.windowMs ?? 5 * 60 * 1000;
+  const twin = input.existingTwins.find((row) => {
+    if (row.platformMessageKey === input.newKey) {
+      return false;
+    }
+    if (row.text !== input.newText) {
+      return false;
+    }
+    const dtMs = Math.abs(row.timestamp.getTime() - input.newTimestamp.getTime());
+    return dtMs <= windowMs;
+  });
+  if (!twin) {
+    return { kind: "no_op" };
+  }
+  if (input.existingCanonical) {
+    return { kind: "delete_twin", twinId: twin.id };
+  }
+  return { kind: "migrate_twin_key", twinId: twin.id };
+}
+
 export function normalizePositiveScanCap(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
@@ -2250,9 +2319,52 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const timestampFallback = candidateListTimestamp ?? new Date();
     for (const message of messages) {
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
+      const messageText = cleanText(message.text);
       const key =
         message.platformMessageKey ??
-        stableHash(`${thread.id}|${safeTimestamp.toISOString()}|${message.direction}|${cleanText(message.text)}`);
+        stableHash(`${thread.id}|${safeTimestamp.toISOString()}|${message.direction}|${messageText}`);
+
+      // Reconcile send-time persistence vs scan-time parse for OUT messages.
+      // See decideOutboundDedup for why this is needed (different keys for the
+      // same physical message). Inbound messages don't have this problem —
+      // they're only ever recorded by the scan parser.
+      if (message.direction === "OUT") {
+        const windowMs = 5 * 60 * 1000;
+        const [twins, canonical] = await Promise.all([
+          prisma.message.findMany({
+            where: {
+              threadId: thread.id,
+              direction: "OUT",
+              text: messageText,
+              timestamp: {
+                gte: new Date(safeTimestamp.getTime() - windowMs),
+                lte: new Date(safeTimestamp.getTime() + windowMs)
+              },
+              platformMessageKey: { not: key }
+            },
+            select: { id: true, platformMessageKey: true, text: true, timestamp: true }
+          }),
+          prisma.message.findUnique({
+            where: { threadId_platformMessageKey: { threadId: thread.id, platformMessageKey: key } },
+            select: { id: true, platformMessageKey: true, text: true, timestamp: true }
+          })
+        ]);
+        const decision = decideOutboundDedup({
+          newKey: key,
+          newTimestamp: safeTimestamp,
+          newText: messageText,
+          existingTwins: twins,
+          existingCanonical: canonical
+        });
+        if (decision.kind === "delete_twin") {
+          await prisma.message.delete({ where: { id: decision.twinId } });
+        } else if (decision.kind === "migrate_twin_key") {
+          await prisma.message.update({
+            where: { id: decision.twinId },
+            data: { platformMessageKey: key, timestamp: safeTimestamp }
+          });
+        }
+      }
 
       await prisma.message.upsert({
         where: {
@@ -2262,7 +2374,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           }
         },
         update: {
-          text: cleanText(message.text),
+          text: messageText,
           direction: message.direction,
           timestamp: safeTimestamp,
           attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
@@ -2274,7 +2386,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           platformMessageKey: key,
           direction: message.direction,
           timestamp: safeTimestamp,
-          text: cleanText(message.text),
+          text: messageText,
           attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
           senderName: message.senderName ?? null,
           rawJson: message.raw ? JSON.stringify(message.raw) : null
