@@ -8904,6 +8904,18 @@ export class LinkedInAdapter implements PlatformAdapter {
     page: Page,
     selectors: SelectorRegistry
   ): Promise<{ direction: "IN" | "OUT"; timestamp: number; text: string } | null> {
+    // CRITICAL: Playwright's `{ timeout: 0 }` doesn't mean "fail fast" — it
+    // disables the timeout entirely (wait forever). When LinkedIn's React
+    // re-renders the message list mid-call (e.g. right after the auto-login
+    // redirect settles), `nth(count-1)` resolves to a node that becomes
+    // detached before getAttribute completes — and the call hangs forever.
+    // That manifested as Send hanging silently after "pre-send snapshot"
+    // with no further log output. Bounded 1s per element read keeps the
+    // whole snapshot under ~5s in the worst case; on timeout we fall through
+    // with whatever data we got, since the verify loop downstream only uses
+    // this as a baseline reference (null preSend just makes any new bubble
+    // count as "advanced").
+    const ELEMENT_TIMEOUT_MS = 1_000;
     const nodes = page.locator(selectors.message_item);
     const count = await nodes.count().catch(() => 0);
     if (count <= 0) {
@@ -8911,17 +8923,17 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
 
     const last = nodes.nth(count - 1);
-    const className = (await last.getAttribute("class", { timeout: 0 }).catch(() => null)) ?? "";
+    const className = (await last.getAttribute("class", { timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ?? "";
     const inbound = /other|received|incoming/i.test(className);
     const timeNode = last.locator("time").first();
     const timestampRaw =
-      (await timeNode.getAttribute("datetime", { timeout: 0 }).catch(() => null)) ??
-      (await timeNode.innerText({ timeout: 0 }).catch(() => null)) ??
+      (await timeNode.getAttribute("datetime", { timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
+      (await timeNode.innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
       "";
     const parsed = Date.parse(timestampRaw);
     const text =
-      (await last.locator(selectors.message_text).first().innerText({ timeout: 0 }).catch(() => null)) ??
-      (await last.innerText({ timeout: 0 }).catch(() => null)) ??
+      (await last.locator(selectors.message_text).first().innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
+      (await last.innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
       "";
 
     return {
@@ -8932,13 +8944,21 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+    // Stdout-visible breadcrumbs for the send flow. The send-queue worker
+    // doesn't have a runLogger attached so logTraceDecision is a no-op for
+    // this path; without these console.warns a hung send shows up as silence
+    // in the runner stdout (the user-reported "stuck on Sending..." case).
+    const tag = `[send:${thread.displayName}]`;
     return this.runWithPlatformLease(async () => {
+      console.warn(`${tag} acquired platform lease`);
       const selectors = await this.deps.resolveSelectors();
       const page = await this.getPage();
 
       try {
         if (thread.threadUrl) {
+          console.warn(`${tag} goto threadUrl=${thread.threadUrl}`);
           await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
+          console.warn(`${tag} goto end url=${page.url()}`);
         } else {
           await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
           const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
@@ -8953,41 +8973,42 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
         }
 
-        // Auth-recovery #1: if LinkedIn redirected the goto to /login, fire
-        // throwIfAuthRequired now so the password auto-login (when creds are
-        // configured) can complete before we waste 12s on a doomed
-        // wait_for_message_container. Without this hook the Send flow simply
-        // hangs on the login page until the selector wait times out — exactly
-        // the user-reported failure.
+        console.warn(`${tag} auth check #1 url=${page.url()}`);
         await this.throwIfAuthRequired(page, "sendMessage:navigation");
+        console.warn(`${tag} auth check #1 passed url=${page.url()}`);
 
-        // Auth-recovery #2: a goto can succeed initially and then LinkedIn
-        // client-side-redirects to /login mid-load, so the message container
-        // never renders. On timeout, re-check auth — if it's an auth wall,
-        // throwIfAuthRequired triggers auto-login and we retry the wait once.
         try {
+          console.warn(`${tag} waitForSelector message_container start`);
           await page.waitForSelector(selectors.message_container, { timeout: 12_000 });
+          console.warn(`${tag} waitForSelector message_container end`);
         } catch (waitError) {
+          console.warn(`${tag} message_container timed out — retrying via auth check #2`);
           await this.throwIfAuthRequired(page, "sendMessage:message_container_timeout");
-          // Auth check passed (or auto-login resolved). Retry the wait once
-          // — the post-login DOM may still be hydrating.
           await page.waitForSelector(selectors.message_container, { timeout: 12_000 }).catch(() => {
             throw waitError;
           });
         }
+
+        console.warn(`${tag} pre-send snapshot`);
         const preSend = await this.getLatestMessageSnapshot(page, selectors);
 
+        console.warn(`${tag} click composer (selector=${selectors.composer_input})`);
         const composer = page.locator(selectors.composer_input).first();
         await composer.click({ timeout: 10_000 });
+        console.warn(`${tag} composer clicked, filling text`);
         try {
           await composer.fill(text);
         } catch {
+          console.warn(`${tag} composer.fill failed, falling back to keyboard.type`);
           await page.keyboard.press("Meta+A").catch(() => undefined);
           await page.keyboard.type(text, { delay: 12 });
         }
+        console.warn(`${tag} text filled`);
 
         await humanDelay(100, 300);
+        console.warn(`${tag} click send_button (selector=${selectors.send_button})`);
         await page.locator(selectors.send_button).first().click({ timeout: 10_000 });
+        console.warn(`${tag} send_button clicked, entering verify loop`);
 
         const start = Date.now();
         let verifiedBy: VerificationMethod = "best_effort";
@@ -9015,11 +9036,13 @@ export class LinkedInAdapter implements PlatformAdapter {
           await page.waitForTimeout(400);
         }
 
+        console.warn(`${tag} send complete verifiedBy=${verifiedBy}`);
         return {
           sentAt: new Date().toISOString(),
           verifiedBy
         };
       } catch (error) {
+        console.warn(`${tag} send FAILED: ${error instanceof Error ? error.message : String(error)}`);
         throw await toStageFailure({
           platform: this.platform,
           stage: "persist",

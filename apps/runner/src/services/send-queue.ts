@@ -54,9 +54,11 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
 
   async function tick(): Promise<void> {
     if (running) {
+      console.warn("[send-queue] tick called but already running — skipping (this is normal)");
       return;
     }
     running = true;
+    console.warn("[send-queue] tick started");
     try {
       while (true) {
         const next = await prisma.sendRequest.findFirst({
@@ -64,10 +66,13 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
           orderBy: { createdAt: "asc" }
         });
         if (!next) {
+          console.warn("[send-queue] no PENDING rows — tick exiting");
           break;
         }
+        console.warn(`[send-queue] processing ${next.id} clientSendId=${next.clientSendId}`);
         try {
           await deps.sendService.processSendRequest(next.id);
+          console.warn(`[send-queue] processed ${next.id}`);
         } catch (error) {
           // processSendRequest is supposed to record FAILED status on the row
           // before throwing only for programmer-error cases (missing thread,
