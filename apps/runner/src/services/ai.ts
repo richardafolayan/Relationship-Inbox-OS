@@ -56,6 +56,29 @@ const repliesSchema = z.object({
   needs_user_input: z.array(z.string()).default([])
 });
 
+/**
+ * GPT-5 family parameters that aren't (yet) typed in the OpenAI SDK we ship.
+ * `reasoning_effort: "none"` and `verbosity` are valid at the API layer but
+ * the npm SDK type catalog hasn't caught up — we cast at the call site rather
+ * than hard-pin a newer SDK in the same change. `none` skips reasoning tokens
+ * entirely, which is the right pick for our two short-form generations
+ * (summary / 3 reply drafts) and one-shot rewrites (shorten / make warmer);
+ * none of those benefit from chain-of-thought.
+ *
+ * Configuration mirrors the values the operator picked in the OpenAI dashboard:
+ *   Top P 0.98, Reasoning effort none, Verbosity medium.
+ * Override per-call by passing overrides into the spread.
+ */
+const gpt5DefaultOptions = {
+  top_p: 0.98,
+  reasoning_effort: "none" as const,
+  verbosity: "medium" as const
+};
+
+// Cast helper so the SDK type-checker doesn't reject the GPT-5 options it
+// doesn't yet know about. Localised here so a future SDK upgrade can drop it.
+type Gpt5RequestOverrides = Record<string, unknown>;
+
 export function createAiService(): AiService {
   const client = runnerConfig.openAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.openAiApiKey })
@@ -80,7 +103,10 @@ export function createAiService(): AiService {
             role: "user",
             content: prompt
           }
-        ]
+        ],
+        // GPT-5 family knobs. JSON-mode response_format above forces strict
+        // JSON output; gpt-5.4 honours both response_format and verbosity.
+        ...(gpt5DefaultOptions as Gpt5RequestOverrides)
       });
 
       const content = response.choices[0]?.message?.content;
@@ -191,7 +217,10 @@ Create 3 short replies A/B/C + needs_user_input list.`;
             role: "user",
             content: `${instruction}\n\n${input.text}`
           }
-        ]
+        ],
+        // No response_format: this returns plain text, matching the operator's
+        // "Response: text" config in the OpenAI dashboard.
+        ...(gpt5DefaultOptions as Gpt5RequestOverrides)
       });
 
       return response.choices[0]?.message?.content?.trim() || input.text;
