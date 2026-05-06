@@ -45,6 +45,18 @@ interface LinkedInAdapterDependencies {
   scanStableIterations: number;
   scanScrollWaitMs: number;
   messageBackfillAttempts: number;
+  /**
+   * Optional fallback credentials. When set, the adapter attempts a
+   * password-based login if the persistent profile session has expired.
+   * The persistent Chrome profile remains the primary auth path; this is
+   * a recovery hatch so a 12-hour scan loop doesn't get stuck on AUTH_REQUIRED
+   * just because LinkedIn rotated cookies overnight. Throttled to one attempt
+   * per minute, falls through to AUTH_REQUIRED on captcha/2FA/wrong creds.
+   */
+  linkedInCredentials?: {
+    username: string;
+    password: string;
+  };
 }
 
 interface LinkedInThreadSnapshot {
@@ -1975,6 +1987,38 @@ export function buildLinkedInPreviewMap(
   return previewByThread;
 }
 
+/**
+ * Classify the URL the page lands on after submitting LinkedIn's email/password
+ * form. Used by `attemptPasswordLogin` to decide whether to claim success,
+ * report wrong creds, or surface a CAPTCHA / 2FA gate that needs human
+ * intervention.
+ *
+ * - "verification" → LinkedIn pushed us into a checkpoint, authwall, or
+ *   CAPTCHA flow. We can't auto-resolve this; surface AUTH_REQUIRED.
+ * - "still_on_login" → form was rejected and we're back on the login form.
+ *   The caller probes the error text to distinguish wrong-creds.
+ * - "ok" → URL moved off any login surface; treat as success and let the
+ *   detector double-check.
+ *
+ * Order matters: the verification regex must run first because
+ * `/uas/login-submit` matches both classifiers and the verification verdict
+ * is more conservative.
+ */
+export function classifyPostLoginUrl(url: string): "verification" | "still_on_login" | "ok" {
+  if (typeof url !== "string" || url.length === 0) {
+    return "ok";
+  }
+  const verification = /\/checkpoint\/|\/uas\/login-submit|\/authwall|\/captcha/i;
+  const stillOnLogin = /\/login|\/uas\//i;
+  if (verification.test(url)) {
+    return "verification";
+  }
+  if (stillOnLogin.test(url)) {
+    return "still_on_login";
+  }
+  return "ok";
+}
+
 export class LinkedInAdapter implements PlatformAdapter {
   platform = "LINKEDIN" as const;
   private lastCollectionMetrics: {
@@ -1990,6 +2034,13 @@ export class LinkedInAdapter implements PlatformAdapter {
   private activeStage: string | null = null;
   private readonly pageTraceIds = new WeakMap<Page, string>();
   private pageTraceSequence = 0;
+  /**
+   * Epoch-ms timestamp of the most recent password auto-login attempt.
+   * Read by `throwIfAuthRequired` to enforce a 60s minimum gap between
+   * attempts so we don't infinite-loop against a CAPTCHA or wrong creds.
+   * `null` until the first attempt.
+   */
+  private lastAutoLoginAttemptAt: number | null = null;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
 
@@ -2789,6 +2840,57 @@ export class LinkedInAdapter implements PlatformAdapter {
       return;
     }
 
+    // Try a password-based auto-login as a fallback before giving up. The
+    // persistent profile is the primary auth path; this only kicks in when
+    // its session has expired AND the operator has provided fallback creds
+    // via env (LINKEDIN_USERNAME / LINKEDIN_PASSWORD). Bounded to one
+    // attempt per minute to prevent infinite-relogin loops if LinkedIn
+    // keeps rejecting us (wrong creds, CAPTCHA, 2FA, etc.).
+    if (this.deps.linkedInCredentials?.username && this.deps.linkedInCredentials?.password) {
+      const lastAttempt = this.lastAutoLoginAttemptAt ?? 0;
+      const sinceLast = Date.now() - lastAttempt;
+      if (sinceLast > 60_000) {
+        this.lastAutoLoginAttemptAt = Date.now();
+        const loginResult = await this.attemptPasswordLogin(page).catch(
+          (error): { ok: false; reason: string; details?: Record<string, unknown> } => ({
+            ok: false,
+            reason: "auto_login_threw",
+            details: { message: error instanceof Error ? error.message : String(error) }
+          })
+        );
+        if (loginResult.ok) {
+          this.logTraceDecision({
+            stage: "navigate",
+            decision: "Password auto-login succeeded; resuming flow",
+            details: { context }
+          });
+          return;
+        }
+        // Login failed — fall through to throw, but tag the reason so the
+        // caller can distinguish "you need to sign in by hand" from
+        // "credentials are wrong".
+        throw new AdapterFailure(
+          loginResult.reason === "captcha_or_verification"
+            ? "LinkedIn auto-login blocked by verification (CAPTCHA / 2FA / device check). Open browser and sign in manually."
+            : loginResult.reason === "wrong_credentials"
+              ? "LinkedIn auto-login rejected: wrong username or password. Update LINKEDIN_USERNAME / LINKEDIN_PASSWORD in .env."
+              : "LinkedIn auth required and auto-login failed. Open browser and sign in.",
+          {
+            kind: "AUTH_REQUIRED",
+            platform: this.platform,
+            stage: "navigate",
+            details: {
+              context,
+              url: authState.url,
+              detection: authState.source ?? "unknown",
+              autoLoginReason: loginResult.reason,
+              ...(loginResult.details ?? {})
+            }
+          }
+        );
+      }
+    }
+
     throw new AdapterFailure("LinkedIn auth required in personal profile. Open browser and sign in.", {
       kind: "AUTH_REQUIRED",
       platform: this.platform,
@@ -2799,6 +2901,121 @@ export class LinkedInAdapter implements PlatformAdapter {
         detection: authState.source ?? "unknown"
       }
     });
+  }
+
+  /**
+   * Fill LinkedIn's email/password form and submit it. Returns a tagged
+   * result so the caller can distinguish:
+   *   - ok: navigated off /login successfully → carry on
+   *   - "wrong_credentials": LinkedIn re-rendered the form with an error
+   *   - "captcha_or_verification": redirected to a check-it's-you / 2FA
+   *     page that we can't auto-resolve
+   *   - "navigation_timeout": submit fired but the page didn't settle
+   *
+   * Bounded by an outer per-minute throttle in `throwIfAuthRequired`.
+   */
+  private async attemptPasswordLogin(
+    page: Page
+  ): Promise<
+    | { ok: true }
+    | { ok: false; reason: "wrong_credentials" | "captcha_or_verification" | "navigation_timeout" | "form_not_found"; details?: Record<string, unknown> }
+  > {
+    const creds = this.deps.linkedInCredentials;
+    if (!creds?.username || !creds?.password) {
+      return { ok: false, reason: "form_not_found", details: { reason: "no_credentials" } };
+    }
+    const usernameField = page.locator("#username");
+    const passwordField = page.locator("#password");
+    const usernameVisible = await usernameField.first().isVisible({ timeout: 2_000 }).catch(() => false);
+    const passwordVisible = await passwordField.first().isVisible({ timeout: 2_000 }).catch(() => false);
+    if (!usernameVisible || !passwordVisible) {
+      return { ok: false, reason: "form_not_found" };
+    }
+
+    this.logTraceDecision({
+      stage: "navigate",
+      decision: "Attempting LinkedIn password auto-login (persistent session expired)",
+      details: { username: creds.username }
+    });
+
+    const targetUrl = page.url();
+    try {
+      await usernameField.first().fill(creds.username, { timeout: 5_000 });
+      await passwordField.first().fill(creds.password, { timeout: 5_000 });
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "form_not_found",
+        details: { message: error instanceof Error ? error.message : String(error) }
+      };
+    }
+
+    // Click submit. LinkedIn uses different button selectors across A/B
+    // variants; try a couple before giving up.
+    const submitButton = page
+      .locator("button[aria-label='Sign in']")
+      .or(page.locator("button[data-litms-control-urn*='login-submit']"))
+      .or(page.locator("form[action*='login-submit'] button[type='submit']"))
+      .or(page.locator("button[type='submit']"))
+      .first();
+    if ((await submitButton.count().catch(() => 0)) <= 0) {
+      return { ok: false, reason: "form_not_found", details: { reason: "no_submit_button" } };
+    }
+
+    try {
+      await Promise.all([
+        page.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => undefined),
+        submitButton.click({ timeout: 5_000 })
+      ]);
+    } catch (error) {
+      return {
+        ok: false,
+        reason: "navigation_timeout",
+        details: { message: error instanceof Error ? error.message : String(error) }
+      };
+    }
+
+    // Give the SPA a moment to settle (redirect off /login or render an
+    // error / verification page).
+    await page.waitForTimeout(1_500).catch(() => undefined);
+
+    const currentUrl = page.url();
+    const urlClass = classifyPostLoginUrl(currentUrl);
+    // Verification gates: LinkedIn's "let's do a quick security check"
+    // pages redirect to URLs containing /checkpoint/, /uas/login-submit,
+    // or /authwall etc. — none of which we can complete without manual
+    // intervention.
+    if (urlClass === "verification") {
+      return { ok: false, reason: "captcha_or_verification", details: { url: currentUrl } };
+    }
+    // Still on a login URL → form rejected. Try to read the error text so
+    // we can distinguish wrong creds vs other.
+    if (urlClass === "still_on_login") {
+      const errorText = await page
+        .locator("[role='alert'], .alert-content, #error-for-username, #error-for-password")
+        .first()
+        .innerText({ timeout: 1_000 })
+        .catch(() => "");
+      return {
+        ok: false,
+        reason: "wrong_credentials",
+        details: { url: currentUrl, errorText: errorText || undefined }
+      };
+    }
+
+    // Re-check our auth detector. If we're STILL flagged as needing auth
+    // even though the URL moved, something else is going on.
+    const recheck = await this.detectAuthRequired(page);
+    if (recheck.authRequired) {
+      return { ok: false, reason: "captcha_or_verification", details: { url: currentUrl, recheck: recheck.source } };
+    }
+
+    // Successful login — re-navigate to the page the caller wanted if
+    // LinkedIn dropped us on the feed instead.
+    if (!currentUrl.includes("/messaging") && targetUrl.includes("/messaging")) {
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15_000 }).catch(() => undefined);
+    }
+    return { ok: true };
   }
 
   private summarizeError(error: unknown): Record<string, unknown> {

@@ -47,6 +47,17 @@ export interface RunnerConfig {
   domDumpDir: string;
   selectorDir: string;
   browserProfile: BrowserProfileConfig;
+  /**
+   * Optional LinkedIn auto-login credentials. When both are set, the runner
+   * attempts a password-based login if the persistent profile session has
+   * expired (AUTH_REQUIRED detected on a scan/connect). Treated as a
+   * fallback only — the persistent Chrome profile remains the primary
+   * auth path. Captcha / 2FA / verification gates surface a
+   * MANUAL_LOGIN_REQUIRED failure rather than getting silently retried.
+   * Read from env LINKEDIN_USERNAME / LINKEDIN_PASSWORD.
+   */
+  linkedInUsername?: string;
+  linkedInPassword?: string;
   linkedInScan: {
     maxThreads: number;
     stableIterations: number;
@@ -207,6 +218,8 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     port: Number(env.RUNNER_PORT ?? 4001),
     openAiApiKey: env.OPENAI_API_KEY,
     openAiModel: env.OPENAI_MODEL ?? "gpt-5",
+    linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
+    linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
     dbFile: resolve(dataDir, "inbox-os.sqlite"),
     profileDirs: {
       LINKEDIN: resolve(dataDir, "profiles", "linkedin"),

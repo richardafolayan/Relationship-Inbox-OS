@@ -40,7 +40,16 @@ export function createAdapters(input: {
       scanScrollWaitMs: runnerConfig.linkedInScan.scrollWaitMs,
       messageBackfillAttempts: runnerConfig.linkedInScan.messageBackfillAttempts,
       resolveSelectors: () => resolveSelectorsForPlatform("LINKEDIN"),
-      sessionManager
+      sessionManager,
+      // Optional fallback creds. Both must be set or we don't pass anything,
+      // which keeps the auto-login codepath inert in dev / CI / first-run.
+      linkedInCredentials:
+        runnerConfig.linkedInUsername && runnerConfig.linkedInPassword
+          ? {
+              username: runnerConfig.linkedInUsername,
+              password: runnerConfig.linkedInPassword
+            }
+          : undefined
     }),
     INSTAGRAM: new BetaAdapter({
       platform: "INSTAGRAM",
