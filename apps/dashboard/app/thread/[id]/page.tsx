@@ -74,6 +74,42 @@ export default function ThreadPage() {
     void refresh();
   }, [refresh]);
 
+  // Optimistic-UI reconciliation: when the runner finishes processing a
+  // SendRequest in the background, it emits MESSAGE_SENT or
+  // MESSAGE_SEND_FAILED with the same clientSendId we used for the
+  // optimistic bubble. Match by clientSendId so the right bubble flips —
+  // important when the user fires multiple sends in a row.
+  useEffect(() => {
+    const onRunnerEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{
+        type?: string;
+        threadId?: string;
+        clientSendId?: string;
+        errorMessage?: string;
+      }>).detail;
+      if (!detail || !threadId) return;
+      if (detail.threadId !== threadId) return;
+      if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
+        // Refresh first so the persisted OUT message is in thread.messages
+        // before we drop the optimistic stand-in (no flash).
+        void refresh().finally(() => {
+          setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
+        });
+      } else if (detail.type === "MESSAGE_SEND_FAILED" && detail.clientSendId) {
+        const message = detail.errorMessage ?? "Send failed";
+        setPendingSends((prev) =>
+          prev.map((p) =>
+            p.clientSendId === detail.clientSendId
+              ? { ...p, failed: true, errorMessage: message }
+              : p
+          )
+        );
+      }
+    };
+    window.addEventListener("runner-event", onRunnerEvent as EventListener);
+    return () => window.removeEventListener("runner-event", onRunnerEvent as EventListener);
+  }, [threadId, refresh]);
+
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
@@ -136,8 +172,10 @@ export default function ThreadPage() {
     const sentAt = new Date().toISOString();
 
     // Push optimistic bubble before awaiting the runner so the user sees
-    // immediate feedback. The runner may sit on this for 30s+ if a scan
-    // is currently holding the platform lease.
+    // immediate feedback. The runner now returns within ~50ms (just inserts
+    // a SendRequest PENDING row); the actual adapter call happens
+    // asynchronously and notifies us via MESSAGE_SENT / MESSAGE_SEND_FAILED
+    // events keyed by clientSendId.
     setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
     setComposer("");
     setSending(true);
@@ -147,20 +185,21 @@ export default function ThreadPage() {
         text,
         clientSendId
       });
-      // Refresh first — the persisted OUT message will be in thread.messages
-      // — THEN drop the optimistic stand-in. Doing them in this order avoids
-      // a flash of "no bubble" between the drop and the persisted re-render.
-      await refresh();
-      setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
+      // The POST has returned with the queued state. The optimistic bubble
+      // stays on screen with its "Sending…" badge. The /events SSE listener
+      // (effect below) will replace it with the persisted OUT message when
+      // MESSAGE_SENT for this clientSendId arrives, or flip it to a failed
+      // state if MESSAGE_SEND_FAILED arrives.
     } catch (sendError) {
-      const message = sendError instanceof Error ? sendError.message : "Failed to send";
+      // Enqueue itself failed — usually a validation error or runner offline.
+      // The send never made it to the queue, so we surface it inline.
+      const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
       setPendingSends((prev) =>
         prev.map((p) =>
           p.clientSendId === clientSendId ? { ...p, failed: true, errorMessage: message } : p
         )
       );
       setError(message);
-      // Restore the composer so the user can edit + retry without retyping.
       setComposer(text);
     } finally {
       setSending(false);

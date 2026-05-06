@@ -81,12 +81,30 @@ export type RunnerEvent =
   | (RunnerEventBase & { type: "SCAN_PROGRESS"; platform: PlatformName; stage: string })
   | (RunnerEventBase & { type: "SCAN_FINISHED"; platform?: PlatformName; updatedThreads: number })
   | (RunnerEventBase & { type: "THREAD_UPDATED"; threadId: string })
-  | (RunnerEventBase & { type: "MESSAGE_SENT"; threadId: string; platform: PlatformName })
+  | (RunnerEventBase & {
+      type: "MESSAGE_SENT";
+      threadId: string;
+      platform: PlatformName;
+      // The client-supplied id from the dashboard's POST. Lets the optimistic
+      // UI match this event to a specific pending bubble in the timeline so
+      // the right one gets cleared when the runner confirms delivery.
+      clientSendId?: string;
+    })
   | (RunnerEventBase & {
       type: "MESSAGE_SEND_FAILED";
       threadId: string;
       platform: PlatformName;
       logId: string;
+      clientSendId?: string;
+      errorMessage?: string;
+    })
+  | (RunnerEventBase & {
+      // Fired when an async send is queued, started, or its position changes.
+      // The dashboard's SystemStatusBar reacts to this in addition to its
+      // 3-second poll, giving sub-second feedback when sends transition
+      // PENDING -> in-flight -> SENT/FAILED.
+      type: "SEND_QUEUE_UPDATED";
+      activeCount: number;
     })
   | (RunnerEventBase & { type: "PLATFORM_STATUS_CHANGED"; platform: PlatformName; status: PlatformStatus })
   | (RunnerEventBase & { type: "SELECTOR_TEST_RESULT"; platform: PlatformName; reportId: string })

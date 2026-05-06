@@ -19,6 +19,7 @@ import { extractFailureUrl, resolveConnectFailureResponse } from "./services/fai
 import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
 import { createSendService } from "./services/send";
+import { createSendQueue } from "./services/send-queue";
 import {
   AdminResetGuardError,
   resetPlatformInboxGraph,
@@ -125,6 +126,21 @@ const sendService = createSendService({
   settingsStore,
   auditLog: (input) => auditService.log(input)
 });
+
+// Async send worker. The /control/thread/:id/send endpoint inserts a PENDING
+// SendRequest and kicks the worker; the worker drains the queue serially in
+// the background. This decouples the dashboard's request (must return in
+// <30s due to Next.js's rewrite proxy timeout) from the runner's actual
+// send (can take 30s+ when an auto-login is needed first).
+const sendQueue = createSendQueue({
+  sendService,
+  eventBus
+});
+// Pick up any SendRequests left in PENDING from a previous runner process
+// (e.g. crashed mid-send, or restarted while a send was queued behind a
+// scan). The queue's `running` guard prevents duplicate processing.
+sendQueue.resume();
+
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 
 function platformLockKey(platform: PlatformName): string {
@@ -1106,33 +1122,35 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
       clientSendId: z.string().uuid()
     })
     .parse(req.body);
-  const target = await getThreadStub(threadId);
 
-  await withPlatformControlLock(target.platform, async () => {
-    try {
-      const receipt = await sendService.sendMessage({
+  // Enqueue + kick. Returns in ~50ms (just inserting/checking a SendRequest
+  // row) regardless of whether a scan is currently holding the platform
+  // lease. The worker drains the row in the background and emits
+  // MESSAGE_SENT / MESSAGE_SEND_FAILED events with the matching clientSendId
+  // so the dashboard's optimistic UI can update without polling. Closing
+  // the dashboard tab does not lose the send — the row is in the DB and
+  // the worker keeps draining.
+  try {
+    const queueResult = await sendQueue.enqueueAndKick({
+      threadId,
+      text: payload.text,
+      clientSendId: payload.clientSendId
+    });
+    res.json(queueResult);
+  } catch (error) {
+    await auditService.log({
+      platform: "LINKEDIN",
+      stage: "Send",
+      action: "SEND_ENQUEUE_FAIL",
+      status: "FAIL",
+      details: {
         threadId,
-        text: payload.text,
-        clientSendId: payload.clientSendId
-      });
-
-      res.json(receipt);
-    } catch (error) {
-      await auditService.log({
-        platform: target.platform,
-        stage: "Send",
-        action: "SEND_FAIL",
-        status: "FAIL",
-        details: {
-          threadId,
-          platformThreadId: target.platformThreadId,
-          stage: "persist",
-          ...summarizeError(error)
-        }
-      });
-      throw error;
-    }
-  });
+        stage: "enqueue",
+        ...summarizeError(error)
+      }
+    });
+    throw error;
+  }
 }));
 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {

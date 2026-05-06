@@ -82,17 +82,33 @@ async function waitForSendRequestResolution(input: {
   throw new Error("Send request is already in progress. Retry in a moment.");
 }
 
+export interface EnqueueSendResult {
+  clientSendId: string;
+  status: "PENDING" | "SENT" | "FAILED";
+  replayed: boolean;
+  result?: SendResult;
+  errorMessage?: string;
+}
+
 export function createSendService(deps: SendServiceDeps) {
-  async function sendMessage(input: {
+  /**
+   * Insert a SendRequest in PENDING state and return immediately. The actual
+   * adapter call happens in the background, driven by the send-queue worker
+   * which calls processSendRequest below. This decouples the dashboard's
+   * fetch (which times out after 30s on Next.js's rewrite proxy) from the
+   * runner's send (which can take 30s+ when an auto-login is needed first).
+   *
+   * Idempotent on `clientSendId` — repeated calls return the existing row's
+   * current state instead of failing.
+   */
+  async function enqueueSend(input: {
     threadId: string;
     text: string;
     clientSendId: string;
-  }): Promise<SendResult> {
+  }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
-      where: { id: input.threadId },
-      include: { person: true }
+      where: { id: input.threadId }
     });
-
     if (!thread) {
       throw new Error("Thread not found");
     }
@@ -100,27 +116,27 @@ export function createSendService(deps: SendServiceDeps) {
     const existing = await prisma.sendRequest.findUnique({
       where: { clientSendId: input.clientSendId }
     });
-
     if (existing) {
       if (existing.threadId !== input.threadId) {
         throw new Error("clientSendId is already linked to another thread");
       }
-
       if (existing.status === "SENT" && existing.receiptJson) {
         return {
-          ...parseReceipt(existing.receiptJson),
-          replayed: true
+          clientSendId: input.clientSendId,
+          status: "SENT",
+          replayed: true,
+          result: { ...parseReceipt(existing.receiptJson), replayed: true }
         };
       }
-
       if (existing.status === "FAILED") {
-        throw new Error(parseFailedSendMessage(existing.errorJson));
+        return {
+          clientSendId: input.clientSendId,
+          status: "FAILED",
+          replayed: true,
+          errorMessage: parseFailedSendMessage(existing.errorJson)
+        };
       }
-
-      return waitForSendRequestResolution({
-        clientSendId: input.clientSendId,
-        threadId: input.threadId
-      });
+      return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
     }
 
     try {
@@ -136,11 +152,42 @@ export function createSendService(deps: SendServiceDeps) {
       if (!isUniqueConstraintError(error)) {
         throw error;
       }
+      // Concurrent insert beat us; treat as replay of the existing row.
+      return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+    }
 
-      return waitForSendRequestResolution({
-        clientSendId: input.clientSendId,
-        threadId: input.threadId
-      });
+    return { clientSendId: input.clientSendId, status: "PENDING", replayed: false };
+  }
+
+  /**
+   * Drive a single PENDING SendRequest through the adapter call to its
+   * terminal SENT or FAILED state. Called by the send-queue worker, never
+   * the API handler directly. Updates the SendRequest row, persists the
+   * outbound message, updates thread risk state, and emits the
+   * MESSAGE_SENT / MESSAGE_SEND_FAILED event so the dashboard's optimistic
+   * UI can match by clientSendId.
+   *
+   * Throws only on programmer-error situations (missing thread row); adapter
+   * errors are caught and recorded as FAILED on the SendRequest.
+   */
+  async function processSendRequest(sendRequestId: string): Promise<void> {
+    const sendRequest = await prisma.sendRequest.findUnique({
+      where: { id: sendRequestId }
+    });
+    if (!sendRequest) {
+      throw new Error(`SendRequest ${sendRequestId} not found`);
+    }
+    if (sendRequest.status !== "PENDING") {
+      // Already processed — nothing to do. Defensive against double-kicks.
+      return;
+    }
+
+    const thread = await prisma.thread.findUnique({
+      where: { id: sendRequest.threadId },
+      include: { person: true }
+    });
+    if (!thread) {
+      throw new Error(`Thread ${sendRequest.threadId} not found for SendRequest ${sendRequestId}`);
     }
 
     const adapter = deps.adapters[thread.platform as PlatformName];
@@ -153,6 +200,7 @@ export function createSendService(deps: SendServiceDeps) {
     };
 
     const jobId = uuid();
+    const input = { threadId: thread.id, text: sendRequest.requestText, clientSendId: sendRequest.clientSendId };
 
     try {
       await deps.auditLog({
@@ -231,15 +279,12 @@ export function createSendService(deps: SendServiceDeps) {
         type: "MESSAGE_SENT",
         jobId,
         threadId: thread.id,
-        platform: thread.platform as PlatformName
+        platform: thread.platform as PlatformName,
+        clientSendId: input.clientSendId
       });
-
-      return {
-        ...receipt,
-        replayed: false
-      };
     } catch (error) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
+      const errorMessage = error instanceof Error ? error.message : String(error);
 
       const logId = await deps.auditLog({
         platform: thread.platform as PlatformName,
@@ -248,7 +293,7 @@ export function createSendService(deps: SendServiceDeps) {
         status: "FAIL",
         details: {
           threadId: thread.id,
-          message: error instanceof Error ? error.message : String(error)
+          message: errorMessage
         },
         screenshotFile: adapterError?.screenshotFile,
         domDumpFile: adapterError?.domDumpFile
@@ -259,7 +304,7 @@ export function createSendService(deps: SendServiceDeps) {
         data: {
           status: "FAILED",
           errorJson: JSON.stringify({
-            message: error instanceof Error ? error.message : "Unknown send error",
+            message: errorMessage,
             screenshotFile: adapterError?.screenshotFile,
             domDumpFile: adapterError?.domDumpFile,
             logId
@@ -272,14 +317,22 @@ export function createSendService(deps: SendServiceDeps) {
         jobId,
         threadId: thread.id,
         platform: thread.platform as PlatformName,
-        logId
+        logId,
+        clientSendId: input.clientSendId,
+        errorMessage
       });
 
-      throw error;
+      // Don't rethrow — the worker already logged FAILED state. Rethrowing
+      // would crash the worker loop; we want it to pick up the next pending
+      // row. The dashboard learns about the failure via the event +
+      // SendRequest row, not via an exception.
     }
   }
 
   return {
-    sendMessage
+    enqueueSend,
+    processSendRequest
   };
 }
+
+export type SendService = ReturnType<typeof createSendService>;
