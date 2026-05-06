@@ -149,11 +149,23 @@ export function createAiService(): AiService {
       urgency_hint: undefined
     };
 
-    const prompt = `Return strict JSON.
+    // Explicit schema in the prompt: gpt-5.4 honours response_format json_object
+    // but interprets loose schemas creatively (returning {A,B,C} instead of
+    // {replies:[{label,intent,text}]}). Spelling out the exact shape — keys,
+    // types, and an example — keeps the zod parser at the call site happy.
+    const prompt = `Return strict JSON matching this exact shape:
+{
+  "summary": "string — 1-2 sentence rolling summary of the relationship",
+  "what_they_want": "string — what the other person is asking for, in their words",
+  "open_loops": ["string", ...],
+  "tone_notes": ["string", ...],
+  "needs_reply": true | false,
+  "urgency_hint": "string or omit if none"
+}
+
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
-Messages: ${JSON.stringify(input.messages)}
-Required keys: summary, what_they_want, open_loops, tone_notes, needs_reply, urgency_hint.`;
+Messages: ${JSON.stringify(input.messages)}`;
 
     return modelJson(prompt, fallback, (value) => summarySchema.parse(value));
   }
@@ -185,12 +197,26 @@ Required keys: summary, what_they_want, open_loops, tone_notes, needs_reply, urg
       needs_user_input: []
     };
 
-    const prompt = `Return strict JSON.
+    // Explicit schema — see the matching note in updateThreadSummary above.
+    // gpt-5.4 will otherwise return {A,B,C} as top-level keys instead of the
+    // {replies:[{label,intent,text}]} shape the zod parser expects.
+    const prompt = `Return strict JSON matching this exact shape:
+{
+  "replies": [
+    { "label": "A", "intent": "Direct + helpful", "text": "..." },
+    { "label": "B", "intent": "Warm + relationship-first", "text": "..." },
+    { "label": "C", "intent": "Clarifying question", "text": "..." }
+  ],
+  "needs_user_input": ["string", ...]
+}
+
+Each reply text must be a complete, sendable message under 280 characters,
+written in British English. Vary the three intents as suggested.
+
 Summary: ${input.summary}
 What they want: ${input.whatTheyWant}
 Open loops: ${JSON.stringify(input.openLoops)}
-Last inbound: ${input.lastInboundMessage}
-Create 3 short replies A/B/C + needs_user_input list.`;
+Last inbound: ${input.lastInboundMessage}`;
 
     return modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
   }
