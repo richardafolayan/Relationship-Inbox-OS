@@ -6035,7 +6035,31 @@ export class LinkedInAdapter implements PlatformAdapter {
             const timeDatetimeAttr = timeEl?.getAttribute("datetime") || null;
             const bodyEl = bubbleEl.querySelector(messageTextSelector);
             const rawBody = clean(bodyEl?.textContent ?? "");
-            const attachmentCount = bubbleEl.querySelectorAll("img, video, svg, a[download], a[href*='attachment']").length;
+            // Scope attachment detection to the message body wrapper. The
+            // bubble LI contains the avatar column AND the message body, and
+            // the previous selector "img, video, svg, a[download], ..." was
+            // matching the sender/recipient avatars + LinkedIn's UI icons,
+            // not real attachments. That tagged every text-only message with
+            // a false "Attachment: image (manual review)" pill in the
+            // dashboard timeline (typically 3-4 false matches per message).
+            // Match LinkedIn's actual attachment classes only, and belt-and-
+            // braces filter out anything nested inside a profile picture.
+            const attachmentScope =
+              bubbleEl.querySelector(".msg-s-event-listitem__message-bubble") ?? bubbleEl;
+            const attachmentMatches = attachmentScope.querySelectorAll(
+              ".msg-s-event-listitem__attachment, .msg-s-event-listitem__inline-image, video, a[download], a[href*='attachment']"
+            );
+            let attachmentCount = 0;
+            attachmentMatches.forEach((el) => {
+              if (
+                el.closest(
+                  ".msg-s-event-listitem__profile-picture, .presence-entity__image, .msg-s-message-group__profile-link"
+                )
+              ) {
+                return;
+              }
+              attachmentCount += 1;
+            });
             const text = rawBody || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
             const senderEl =
               bubbleEl.querySelector(".msg-s-message-group__profile-link") ??
