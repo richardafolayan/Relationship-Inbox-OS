@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import { ExternalLink, RefreshCcw, CheckCircle2, Loader2 } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, PlatformCard, ThreadResponse } from "@/lib/types";
 import { formatClock, formatRelative } from "@/lib/time";
 import { Card } from "@/components/ui/card";
@@ -138,12 +138,18 @@ export default function ThreadPage() {
       return;
     }
 
-    const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
-      mode,
-      text: composer
-    });
-
-    setComposer(output.text);
+    try {
+      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
+        mode,
+        text: composer
+      });
+      setComposer(output.text);
+      setError(null);
+    } catch (transformError) {
+      const message = transformError instanceof Error ? transformError.message : "Transform failed";
+      console.warn("[action]", message);
+      setError(message);
+    }
   };
 
   if (loading || !thread) {
@@ -153,23 +159,27 @@ export default function ThreadPage() {
   const threadList = inboxRows.slice(0, 20);
 
   return (
-    <div className="space-y-3">
+    <div className="flex h-[calc(100vh-3rem)] flex-col gap-3 overflow-hidden">
       {degradedPlatform ? (
         <DegradedBanner
           platform={degradedPlatform.platform}
           onOpenReceipts={() => setReceiptsOpen(true)}
           onRunSelectorTests={() =>
-            void apiPost("/runner/control/platform/test-selectors", { platform: degradedPlatform.platform }).then(refresh)
+            runAction(
+              apiPost("/runner/control/platform/test-selectors", { platform: degradedPlatform.platform }),
+              setError,
+              refresh
+            )
           }
           domDumpFile={degradedDomDump}
         />
       ) : null}
       {error ? <p className="text-sm text-rose-600">{error}</p> : null}
 
-      <div className="grid grid-cols-12 gap-4">
-        <Card className="col-span-12 lg:col-span-3">
+      <div className="grid min-h-0 flex-1 grid-cols-12 gap-4">
+        <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-3">
           <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Threads</h3>
-          <div className="space-y-2">
+          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
             {threadList.map((row) => (
               <button
                 key={row.id}
@@ -183,7 +193,7 @@ export default function ThreadPage() {
           </div>
         </Card>
 
-        <Card className="col-span-12 flex min-h-[680px] flex-col lg:col-span-6">
+        <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-6">
           <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-3">
             <div>
               <h2 className="text-xl font-semibold">{thread.personName}</h2>
@@ -194,11 +204,17 @@ export default function ThreadPage() {
             </div>
 
             <div className="flex items-center gap-2">
-              <Button variant="secondary" onClick={() => void apiPost(`/runner/control/thread/${thread.id}/open`, {})}>
+              <Button
+                variant="secondary"
+                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)}
+              >
                 <ExternalLink className="mr-2 h-4 w-4" />
                 Open in platform
               </Button>
-              <Button variant="secondary" onClick={() => void apiPost(`/runner/control/thread/${thread.id}/rescan`, {}).then(refresh)}>
+              <Button
+                variant="secondary"
+                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
+              >
                 <RefreshCcw className="mr-2 h-4 w-4" />
                 Rescan thread
               </Button>
@@ -259,9 +275,10 @@ export default function ThreadPage() {
                 <Button
                   variant="secondary"
                   onClick={() =>
-                    void apiPost(`/runner/control/thread/${thread.id}/draft`, {
-                      text: composer
-                    })
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+                      setError
+                    )
                   }
                 >
                   Save draft
@@ -269,9 +286,11 @@ export default function ThreadPage() {
                 <Button
                   variant="secondary"
                   onClick={() =>
-                    void apiPost(`/runner/control/thread/${thread.id}/snooze`, {
-                      hours: 6
-                    }).then(refresh)
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
+                      setError,
+                      refresh
+                    )
                   }
                 >
                   Snooze
@@ -279,7 +298,11 @@ export default function ThreadPage() {
                 <Button
                   variant="secondary"
                   onClick={() =>
-                    void apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}).then(refresh)
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
+                      setError,
+                      refresh
+                    )
                   }
                 >
                   Mark done
@@ -293,7 +316,7 @@ export default function ThreadPage() {
           </div>
         </Card>
 
-        <Card className="col-span-12 space-y-3 lg:col-span-3">
+        <Card className="col-span-12 flex min-h-0 flex-col space-y-3 overflow-y-auto lg:col-span-3">
           <Card className="bg-slate-50">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Summary</h3>
             <p className="mt-2 text-sm text-slate-700">{thread.summary || "No summary yet."}</p>

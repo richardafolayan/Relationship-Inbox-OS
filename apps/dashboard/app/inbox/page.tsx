@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, FolderOpen } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, PlatformCard } from "@/lib/types";
 import { formatRelative, formatClock } from "@/lib/time";
 import { Card } from "@/components/ui/card";
@@ -114,7 +114,7 @@ export default function InboxPage() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="flex h-[calc(100vh-3rem)] flex-col gap-4 overflow-hidden">
       {error ? (
         <Card className="border-amber-200 bg-amber-50/60">
           <p className="text-sm font-semibold text-amber-900">Runner connection issue</p>
@@ -127,7 +127,11 @@ export default function InboxPage() {
           platform={degradedPlatform.platform}
           domDumpFile={logs.find((log) => log.platform === degradedPlatform.platform && log.domDumpFile)?.domDumpFile}
           onRunSelectorTests={() => {
-            void apiPost("/runner/control/platform/test-selectors", { platform: degradedPlatform.platform }).then(refresh);
+            runAction(
+              apiPost("/runner/control/platform/test-selectors", { platform: degradedPlatform.platform }),
+              setError,
+              refresh
+            );
           }}
           onOpenReceipts={() => setReceiptsOpen(true)}
         />
@@ -153,7 +157,7 @@ export default function InboxPage() {
         </Card>
       </div>
 
-      <div className="rounded-2xl border border-slate-200 bg-white shadow-soft">
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-soft">
         <div className="grid grid-cols-[2fr_1fr_1fr_1fr_1fr_1fr] gap-3 border-b border-slate-200 px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">
           <span>Person</span>
           <span>Platform</span>
@@ -163,6 +167,7 @@ export default function InboxPage() {
           <span className="text-right">Actions</span>
         </div>
 
+        <div className="min-h-0 flex-1 overflow-y-auto">
         {filteredRows.map((row) => (
           <div
             key={row.id}
@@ -201,7 +206,9 @@ export default function InboxPage() {
               <Button
                 variant="ghost"
                 title="Mark done"
-                onClick={() => void apiPost(`/runner/control/thread/${row.id}/mark-done`, {}).then(refresh)}
+                onClick={() =>
+                  runAction(apiPost(`/runner/control/thread/${row.id}/mark-done`, {}), setError, refresh)
+                }
               >
                 <CheckCircle2 className="h-4 w-4" />
               </Button>
@@ -212,6 +219,7 @@ export default function InboxPage() {
         {!filteredRows.length ? (
           <div className="px-4 py-10 text-center text-sm text-slate-500">Inbox is clear. No relationship leaks right now.</div>
         ) : null}
+        </div>
       </div>
 
       <ReceiptsDrawer open={receiptsOpen} onClose={() => setReceiptsOpen(false)} rows={logs} title="Receipts" />

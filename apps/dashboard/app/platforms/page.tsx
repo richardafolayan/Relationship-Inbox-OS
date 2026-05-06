@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ApiRequestError, apiGet, apiPost } from "@/lib/api";
+import { ApiRequestError, apiGet, apiPost, runAction } from "@/lib/api";
 import type {
   AuditLogRow,
   PlatformCard,
@@ -38,6 +38,7 @@ export default function PlatformsPage() {
   const [editingSelector, setEditingSelector] = useState<Record<string, string>>({});
   const [selectorErrors, setSelectorErrors] = useState<Record<string, SelectorTestFailurePayload | undefined>>({});
   const [scanBlocks, setScanBlocks] = useState<Record<string, ScanControlBlockedResponse | undefined>>({});
+  const [actionError, setActionError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     const [platforms, logRows] = await Promise.all([
@@ -137,6 +138,13 @@ export default function PlatformsPage() {
         <p className="text-sm text-slate-500">Transparent platform control, selector checks, and session trust signals.</p>
       </div>
 
+      {actionError ? (
+        <Card className="border-rose-200 bg-rose-50/60">
+          <p className="text-sm font-semibold text-rose-900">Action failed</p>
+          <p className="mt-1 text-sm text-rose-800">{actionError}</p>
+        </Card>
+      ) : null}
+
       {rows
         .filter((row) => row.status === "DEGRADED")
         .map((row) => (
@@ -204,7 +212,13 @@ export default function PlatformsPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   variant="primary"
-                  onClick={() => void apiPost("/runner/control/platform/connect", { platform: row.platform }).then(refresh)}
+                  onClick={() =>
+                    runAction(
+                      apiPost("/runner/control/platform/connect", { platform: row.platform }),
+                      setActionError,
+                      refresh
+                    )
+                  }
                 >
                   {row.status === "CONNECTED" ? "Reconnect" : "Connect"}
                 </Button>
@@ -213,7 +227,12 @@ export default function PlatformsPage() {
                 </Button>
                 <Button
                   variant="secondary"
-                  onClick={() => void apiPost("/runner/control/platform/open-browser", { platform: row.platform })}
+                  onClick={() =>
+                    runAction(
+                      apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+                      setActionError
+                    )
+                  }
                 >
                   Open browser window
                 </Button>
@@ -229,7 +248,11 @@ export default function PlatformsPage() {
                     if (!confirm("Reset shared session context for all platforms? This wipes managed profile state.")) {
                       return;
                     }
-                    void apiPost("/runner/control/platform/reset-session", { platform: row.platform }).then(refresh);
+                    runAction(
+                      apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
+                      setActionError,
+                      refresh
+                    );
                   }}
                 >
                   Reset shared session
@@ -302,11 +325,15 @@ export default function PlatformsPage() {
                         <Button
                           variant="ghost"
                           onClick={() =>
-                            void apiPost("/runner/control/platform/save-selector-override", {
-                              platform: row.platform,
-                              key: result.key,
-                              selector: edited
-                            }).then(refresh)
+                            runAction(
+                              apiPost("/runner/control/platform/save-selector-override", {
+                                platform: row.platform,
+                                key: result.key,
+                                selector: edited
+                              }),
+                              setActionError,
+                              refresh
+                            )
                           }
                         >
                           Save override
@@ -314,10 +341,14 @@ export default function PlatformsPage() {
                         <Button
                           variant="ghost"
                           onClick={() =>
-                            void apiPost("/runner/control/platform/reset-selector-override", {
-                              platform: row.platform,
-                              key: result.key
-                            }).then(refresh)
+                            runAction(
+                              apiPost("/runner/control/platform/reset-selector-override", {
+                                platform: row.platform,
+                                key: result.key
+                              }),
+                              setActionError,
+                              refresh
+                            )
                           }
                         >
                           Reset to default

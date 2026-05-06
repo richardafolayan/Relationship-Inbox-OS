@@ -13,7 +13,7 @@
     "build": "turbo run build",
     "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
     "test": "npm run test:all",
-    "test:all": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && node --test tests/*.test.mjs",
+    "test:all": "npm run build --workspace @inbox-os/core && npm run build --workspace @inbox-os/runner && node --import tsx --test tests/*.test.mjs",
     "move-on": "npm run test:all",
     "db:generate": "prisma generate --schema packages/core/prisma/schema.prisma",
     "db:push": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma db push --schema packages/core/prisma/schema.prisma",

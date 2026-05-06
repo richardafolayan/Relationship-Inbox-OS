@@ -137,6 +137,23 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKeydown);
   }, []);
 
+  // Defense in depth: any rejection that escapes a callsite-level handler
+  // would otherwise bubble to Next.js's dev error overlay and pile up in the
+  // floating "N errors" badge. Action callsites already capture their own
+  // errors via `runAction`; this listener is the safety net for ones that
+  // don't (third-party libs, transient EventSource hiccups). We log the
+  // reason cleanly and stop the default counter from incrementing.
+  useEffect(() => {
+    const onRejection = (event: PromiseRejectionEvent) => {
+      const reason = event.reason;
+      const message = reason instanceof Error ? reason.message : String(reason);
+      console.warn("[unhandledRejection]", message, reason);
+      event.preventDefault();
+    };
+    window.addEventListener("unhandledrejection", onRejection);
+    return () => window.removeEventListener("unhandledrejection", onRejection);
+  }, []);
+
   const lastScanAt = useMemo(() => health?.lastScanAt ?? null, [health]);
 
   const runScanNow = async () => {

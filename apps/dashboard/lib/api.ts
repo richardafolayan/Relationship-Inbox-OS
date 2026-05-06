@@ -41,6 +41,45 @@ export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   return (await response.json()) as T;
 }
 
+/**
+ * Wrap a fire-and-forget action call so that:
+ *  - On success, the local error state is cleared and an optional follow-up
+ *    (e.g. `refresh()`) runs.
+ *  - On failure, the error message is captured into the caller's `setError`
+ *    state and logged with a `[action]` tag — instead of bubbling out as an
+ *    unhandled promise rejection that Next.js's dev overlay counts toward
+ *    the "X errors" badge.
+ *
+ * Use this anywhere a button onClick would otherwise look like
+ * `void apiPost(...)` or `void apiPost(...).then(refresh)`. If callers want
+ * to handle their own errors, they can pass `setError` as a no-op and read
+ * the returned promise directly.
+ */
+export function runAction<T>(
+  promise: Promise<T>,
+  setError: (message: string | null) => void,
+  onDone?: () => void | Promise<void>
+): void {
+  // The chained `.catch` (rather than the two-arg form of `.then`) is
+  // load-bearing: it catches BOTH the primary action's rejection AND any
+  // error thrown inside the success branch (e.g. a refresh() call that
+  // explodes). Without it, a throwing onDone would leak as an unhandled
+  // rejection and re-trigger the bug this helper exists to prevent.
+  promise
+    .then(async () => {
+      setError(null);
+      if (onDone) {
+        await onDone();
+      }
+    })
+    .catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      // Surface in DevTools without polluting the user-visible error badge.
+      console.warn("[action]", message);
+      setError(message);
+    });
+}
+
 export async function apiPost<T>(path: string, body: unknown, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
   if (!headers.has("Content-Type")) {
