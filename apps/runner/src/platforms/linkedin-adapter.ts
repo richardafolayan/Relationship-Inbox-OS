@@ -2926,17 +2926,40 @@ export class LinkedInAdapter implements PlatformAdapter {
       return;
     }
 
+    // Stdout-visible breadcrumbs so the auth recovery flow is debuggable
+    // even from non-scan codepaths (sendMessage / openThread). These don't
+    // have a runLogger attached so logTraceDecision is a no-op for them.
+    console.warn(
+      `[auth-recovery] auth wall detected context=${context} url=${authState.url} source=${authState.source ?? "unknown"}`
+    );
+
     // Try a password-based auto-login as a fallback before giving up. The
     // persistent profile is the primary auth path; this only kicks in when
     // its session has expired AND the operator has provided fallback creds
     // via env (LINKEDIN_USERNAME / LINKEDIN_PASSWORD). Bounded to one
     // attempt per minute to prevent infinite-relogin loops if LinkedIn
     // keeps rejecting us (wrong creds, CAPTCHA, 2FA, etc.).
+    const credsConfigured = Boolean(
+      this.deps.linkedInCredentials?.username && this.deps.linkedInCredentials?.password
+    );
+    if (!credsConfigured) {
+      console.warn(
+        `[auth-recovery] no LINKEDIN_USERNAME/LINKEDIN_PASSWORD configured — surfacing AUTH_REQUIRED context=${context}`
+      );
+    }
     if (this.deps.linkedInCredentials?.username && this.deps.linkedInCredentials?.password) {
       const lastAttempt = this.lastAutoLoginAttemptAt ?? 0;
       const sinceLast = Date.now() - lastAttempt;
+      if (sinceLast <= 60_000) {
+        console.warn(
+          `[auth-recovery] throttled — last attempt ${sinceLast}ms ago, need >60000ms — surfacing AUTH_REQUIRED context=${context}`
+        );
+      }
       if (sinceLast > 60_000) {
         this.lastAutoLoginAttemptAt = Date.now();
+        console.warn(
+          `[auth-recovery] attempting password auto-login context=${context} username=${this.deps.linkedInCredentials.username}`
+        );
         const loginResult = await this.attemptPasswordLogin(page).catch(
           (error): { ok: false; reason: string; details?: Record<string, unknown> } => ({
             ok: false,
@@ -2945,6 +2968,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           })
         );
         if (loginResult.ok) {
+          console.warn(`[auth-recovery] auto-login succeeded context=${context}`);
           this.logTraceDecision({
             stage: "navigate",
             decision: "Password auto-login succeeded; resuming flow",
@@ -2952,6 +2976,9 @@ export class LinkedInAdapter implements PlatformAdapter {
           });
           return;
         }
+        console.warn(
+          `[auth-recovery] auto-login FAILED reason=${loginResult.reason} context=${context} details=${JSON.stringify(loginResult.details ?? {})}`
+        );
         // Login failed — fall through to throw, but tag the reason so the
         // caller can distinguish "you need to sign in by hand" from
         // "credentials are wrong".
@@ -3010,30 +3037,49 @@ export class LinkedInAdapter implements PlatformAdapter {
     if (!creds?.username || !creds?.password) {
       return { ok: false, reason: "form_not_found", details: { reason: "no_credentials" } };
     }
-    // LinkedIn rotated their login page in early 2026 to React-generated IDs
-    // like :r0: / :r1:, so the old #username / #password selectors no longer
-    // match. The stable identifiers across both old and new shells are:
-    //   - autocomplete="username" (or webauthn variant) on the email input
-    //   - autocomplete="current-password" on the password input
-    //   - type="email" / type="password" as a final fallback
-    // The page renders TWO copies of each input (legacy + redesigned form),
-    // so we filter to visible and take the first match. Using .or chains
-    // gives Playwright a single resolved locator that retries selectors in
-    // order each time we touch it.
-    const usernameField = page
-      .locator('input[autocomplete*="username"]')
-      .or(page.locator('input[type="email"]'))
-      .filter({ visible: true })
-      .first();
-    const passwordField = page
-      .locator('input[autocomplete="current-password"]')
-      .or(page.locator('input[type="password"]'))
-      .filter({ visible: true })
-      .first();
-    const usernameVisible = await usernameField.isVisible({ timeout: 2_000 }).catch(() => false);
-    const passwordVisible = await passwordField.isVisible({ timeout: 2_000 }).catch(() => false);
-    if (!usernameVisible || !passwordVisible) {
-      return { ok: false, reason: "form_not_found" };
+
+    // First wait for ANY username-shaped input to actually render and BE
+    // VISIBLE. LinkedIn's /login/ page renders TWO copies of the form (one
+    // hidden behind a tab/SSO chooser, one visible) — both share the same
+    // selectors. page.waitForSelector(state:"visible") only waits for the
+    // FIRST matched element, so if :r0: is permanently hidden it spins for
+    // 8s and never finds the visible :r3: copy. Using
+    // `.filter({ visible: true }).first().waitFor()` waits for the first
+    // VISIBLE match, which is the one we can actually interact with.
+    const usernameSelector =
+      'input[autocomplete*="username"], input[type="email"], input[name="session_key"], input#username';
+    const passwordSelector =
+      'input[autocomplete="current-password"], input[type="password"], input[name="session_password"], input#password';
+
+    const usernameField = page.locator(usernameSelector).filter({ visible: true }).first();
+    const passwordField = page.locator(passwordSelector).filter({ visible: true }).first();
+
+    try {
+      await usernameField.waitFor({ state: "visible", timeout: 8_000 });
+      await passwordField.waitFor({ state: "visible", timeout: 8_000 });
+    } catch (waitError) {
+      const [usernameAny, passwordAny, usernameVisible, passwordVisible, currentUrl] = await Promise.all([
+        page.locator(usernameSelector).count().catch(() => 0),
+        page.locator(passwordSelector).count().catch(() => 0),
+        page.locator(usernameSelector).filter({ visible: true }).count().catch(() => 0),
+        page.locator(passwordSelector).filter({ visible: true }).count().catch(() => 0),
+        Promise.resolve(page.url())
+      ]);
+      console.warn(
+        `[auth-recovery] form_not_found details: usernameTotal=${usernameAny} usernameVisible=${usernameVisible} passwordTotal=${passwordAny} passwordVisible=${passwordVisible} url=${currentUrl} waitError=${waitError instanceof Error ? waitError.message : String(waitError)}`
+      );
+      return {
+        ok: false,
+        reason: "form_not_found",
+        details: {
+          usernameCandidates: usernameAny,
+          usernameVisible,
+          passwordCandidates: passwordAny,
+          passwordVisible,
+          url: currentUrl,
+          waitError: waitError instanceof Error ? waitError.message : String(waitError)
+        }
+      };
     }
 
     this.logTraceDecision({
