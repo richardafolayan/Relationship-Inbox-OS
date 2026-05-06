@@ -14,6 +14,37 @@ const summarySchema = z.object({
   urgency_hint: z.string().optional()
 });
 
+/**
+ * Classify an OpenAI SDK error into a human-readable hint. The OpenAI SDK
+ * surfaces structured `code`/`status` fields on its error objects; using them
+ * lets the operator distinguish the three common dead-ends — out of credits,
+ * unknown model, missing key — without having to grep the message verbatim.
+ *
+ * Returns a single string ready to splice into a `console.warn` line.
+ */
+export function classifyOpenAiError(error: unknown): string {
+  // Defensive duck-typing against `OpenAI.APIError`. We deliberately don't
+  // import the type so a future SDK upgrade that renames the class doesn't
+  // silently bypass this branch.
+  const err = error as { code?: string; status?: number; message?: string } | undefined;
+  const message = err?.message ?? String(error);
+  const code = err?.code;
+  const status = err?.status;
+  if (code === "insufficient_quota" || status === 429) {
+    return (
+      "Reason: OpenAI account is out of credits (insufficient_quota / 429). " +
+      "Top up at https://platform.openai.com/settings/organization/billing/overview, then retry."
+    );
+  }
+  if (code === "model_not_found" || /model.*(not found|does not exist)/i.test(message)) {
+    return `Reason: model not available to this account (${message}). Set OPENAI_MODEL to one your account has access to (e.g. gpt-4o-mini, gpt-4o, o1, o3-mini).`;
+  }
+  if (status === 401 || code === "invalid_api_key") {
+    return "Reason: OPENAI_API_KEY is missing or invalid. Set it in .env and restart the runner.";
+  }
+  return `Reason: ${message}.`;
+}
+
 const repliesSchema = z.object({
   replies: z.array(
     z.object({
@@ -63,10 +94,8 @@ export function createAiService(): AiService {
 
       return parser(JSON.parse(content));
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `[ai] OpenAI call failed (model=${runnerConfig.openAiModel}); using fallback. Reason: ${message}. ` +
-          `If "model not found" or "does not exist", set OPENAI_MODEL to a model your account has access to (e.g. gpt-4o-mini).`
+        `[ai] OpenAI call failed (model=${runnerConfig.openAiModel}); using fallback. ${classifyOpenAiError(error)}`
       );
       return fallback;
     }
@@ -167,10 +196,8 @@ Create 3 short replies A/B/C + needs_user_input list.`;
 
       return response.choices[0]?.message?.content?.trim() || input.text;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
       console.warn(
-        `[ai] transformReply failed (model=${runnerConfig.openAiModel}, mode=${input.mode}); returning original text. Reason: ${message}. ` +
-          `If "model not found" or "does not exist", set OPENAI_MODEL to a model your account has access to (e.g. gpt-4o-mini).`
+        `[ai] transformReply failed (model=${runnerConfig.openAiModel}, mode=${input.mode}); returning original text. ${classifyOpenAiError(error)}`
       );
       return input.text;
     }

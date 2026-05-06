@@ -217,7 +217,12 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
   return {
     port: Number(env.RUNNER_PORT ?? 4001),
     openAiApiKey: env.OPENAI_API_KEY,
-    openAiModel: env.OPENAI_MODEL ?? "gpt-5",
+    // Default to gpt-4o-mini: cheap, fast, and present in every active OpenAI
+    // account's model catalog. The previous default ("gpt-5") was aspirational
+    // — it isn't an OpenAI model, so the AI service silently fell back on
+    // every request even when credits were available. Override via OPENAI_MODEL
+    // for accounts that want a different one (gpt-4o, o1, etc.).
+    openAiModel: env.OPENAI_MODEL ?? "gpt-4o-mini",
     linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
     linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
     dbFile: resolve(dataDir, "inbox-os.sqlite"),
