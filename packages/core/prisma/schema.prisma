@@ -96,6 +96,15 @@ model Thread {
   // (messages newer than `lastMessageAt`). Null means full-history backfill
   // hasn't run yet for this thread.
   firstFullBackfillAt DateTime?
+
+  // Cached AI-generated suggested replies. Regenerated only when the cache
+  // key (a hash of the AI inputs: last-inbound text + timestamp + summary +
+  // whatTheyWant + openLoops) no longer matches what's stored. Without this
+  // every /data/thread fetch hits OpenAI even when the conversation hasn't
+  // changed — a costly side effect of the dashboard's refresh-after-action
+  // pattern (Mark done / Snooze / Save draft each call refresh()).
+  suggestedRepliesJson      String?
+  suggestedRepliesCacheKey  String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 

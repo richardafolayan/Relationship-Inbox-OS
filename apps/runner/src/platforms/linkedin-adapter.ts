@@ -2004,6 +2004,28 @@ export function buildLinkedInPreviewMap(
  * `/uas/login-submit` matches both classifiers and the verification verdict
  * is more conservative.
  */
+/**
+ * Returns true when the URL is one of LinkedIn's auth/redirect surfaces:
+ *   - /login (with or without /?session_redirect=…)
+ *   - /uas/login or any other /uas/ flow
+ *   - /checkpoint/* (verification gates)
+ *   - /authwall, /captcha
+ *
+ * Used by detectAuthRequired to decide whether to trigger password
+ * auto-login. Previously detectAuthRequired only recognised /uas/login,
+ * so a current /login/?session_redirect=… redirect slipped through and
+ * the runner blamed a "selector mismatch" instead of an auth wall.
+ *
+ * Exported so the URL-pattern set has one source of truth and a unit test
+ * can pin the surfaces LinkedIn rotates through.
+ */
+export function isLinkedInAuthRequiredUrl(url: string): boolean {
+  if (typeof url !== "string" || url.length === 0) {
+    return false;
+  }
+  return /\/login(\?|\/|$)|\/uas\/|\/checkpoint\/|\/authwall|\/captcha/i.test(url);
+}
+
 export function classifyPostLoginUrl(url: string): "verification" | "still_on_login" | "ok" {
   if (typeof url !== "string" || url.length === 0) {
     return "ok";
@@ -2815,7 +2837,10 @@ export class LinkedInAdapter implements PlatformAdapter {
     page: Page
   ): Promise<{ authRequired: boolean; url: string; source?: "url" | "dom" }> {
     const url = page.url();
-    if (/\/uas\/login/i.test(url)) {
+    // Single source of truth lives in isLinkedInAuthRequiredUrl. The unit
+    // test for that helper pins the surfaces; if LinkedIn rotates a URL
+    // shape we update one regex.
+    if (isLinkedInAuthRequiredUrl(url)) {
       return { authRequired: true, url, source: "url" };
     }
 
@@ -2924,10 +2949,28 @@ export class LinkedInAdapter implements PlatformAdapter {
     if (!creds?.username || !creds?.password) {
       return { ok: false, reason: "form_not_found", details: { reason: "no_credentials" } };
     }
-    const usernameField = page.locator("#username");
-    const passwordField = page.locator("#password");
-    const usernameVisible = await usernameField.first().isVisible({ timeout: 2_000 }).catch(() => false);
-    const passwordVisible = await passwordField.first().isVisible({ timeout: 2_000 }).catch(() => false);
+    // LinkedIn rotated their login page in early 2026 to React-generated IDs
+    // like :r0: / :r1:, so the old #username / #password selectors no longer
+    // match. The stable identifiers across both old and new shells are:
+    //   - autocomplete="username" (or webauthn variant) on the email input
+    //   - autocomplete="current-password" on the password input
+    //   - type="email" / type="password" as a final fallback
+    // The page renders TWO copies of each input (legacy + redesigned form),
+    // so we filter to visible and take the first match. Using .or chains
+    // gives Playwright a single resolved locator that retries selectors in
+    // order each time we touch it.
+    const usernameField = page
+      .locator('input[autocomplete*="username"]')
+      .or(page.locator('input[type="email"]'))
+      .filter({ visible: true })
+      .first();
+    const passwordField = page
+      .locator('input[autocomplete="current-password"]')
+      .or(page.locator('input[type="password"]'))
+      .filter({ visible: true })
+      .first();
+    const usernameVisible = await usernameField.isVisible({ timeout: 2_000 }).catch(() => false);
+    const passwordVisible = await passwordField.isVisible({ timeout: 2_000 }).catch(() => false);
     if (!usernameVisible || !passwordVisible) {
       return { ok: false, reason: "form_not_found" };
     }
@@ -2940,8 +2983,8 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     const targetUrl = page.url();
     try {
-      await usernameField.first().fill(creds.username, { timeout: 5_000 });
-      await passwordField.first().fill(creds.password, { timeout: 5_000 });
+      await usernameField.fill(creds.username, { timeout: 5_000 });
+      await passwordField.fill(creds.password, { timeout: 5_000 });
     } catch (error) {
       return {
         ok: false,
@@ -2950,13 +2993,17 @@ export class LinkedInAdapter implements PlatformAdapter {
       };
     }
 
-    // Click submit. LinkedIn uses different button selectors across A/B
-    // variants; try a couple before giving up.
+    // Click the Sign in button. The redesigned page uses a plain
+    // <button type="button">Sign in</button> (no aria-label, no submit
+    // type) — so we match by accessible name first. Legacy fallbacks kept
+    // for older A/B variants.
     const submitButton = page
-      .locator("button[aria-label='Sign in']")
+      .getByRole("button", { name: /^(sign in|log in|continue)$/i })
+      .or(page.locator("button[aria-label='Sign in']"))
       .or(page.locator("button[data-litms-control-urn*='login-submit']"))
       .or(page.locator("form[action*='login-submit'] button[type='submit']"))
       .or(page.locator("button[type='submit']"))
+      .filter({ visible: true })
       .first();
     if ((await submitButton.count().catch(() => 0)) <= 0) {
       return { ok: false, reason: "form_not_found", details: { reason: "no_submit_button" } };
@@ -7627,10 +7674,30 @@ export class LinkedInAdapter implements PlatformAdapter {
         });
         page = await this.navigateInbox(selectors);
         await this.throwIfAuthRequired(page, "ensureConnected:navigation");
-        await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
-          stage: "connect",
-          note: "wait_thread_list_connected"
-        });
+        try {
+          await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
+            stage: "connect",
+            note: "wait_thread_list_connected"
+          });
+        } catch (waitError) {
+          // The thread-list selector timed out. Most common cause: LinkedIn
+          // client-side-redirected to /login while we were waiting, so the
+          // first throwIfAuthRequired (above) saw the messaging shell and
+          // returned cleanly, but the DOM has since become a login form.
+          // Re-check auth NOW — if it's a real auth wall, throwIfAuthRequired
+          // will trigger password auto-login (when creds are configured) and
+          // resolve cleanly; we then retry the wait once. If auth check
+          // doesn't match (genuine selector mismatch), rethrow the original.
+          await this.throwIfAuthRequired(page, "ensureConnected:thread_list_timeout");
+          await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
+            stage: "connect",
+            note: "wait_thread_list_after_auth_recovery"
+          }).catch(() => {
+            // Both passes failed. Surface the ORIGINAL error so existing
+            // selector-mismatch diagnostics (screenshot, DOM dump) still fire.
+            throw waitError;
+          });
+        }
         await this.throwIfAuthRequired(page, "ensureConnected:thread_list");
         this.runLogger?.logStage({
           stage: "connect",

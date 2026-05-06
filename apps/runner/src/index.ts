@@ -1,5 +1,6 @@
 import { createReadStream, existsSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import express from "express";
 import { z } from "zod";
@@ -1359,12 +1360,44 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   }
 
   const lastInbound = [...thread.messages].reverse().find((msg) => msg.direction === "IN");
-  const suggested = await aiService.generateSuggestedReplies({
+  const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
     lastInboundMessage: lastInbound?.text ?? ""
-  });
+  };
+  // Cache key over the four AI inputs. Hashing keeps the column short and
+  // doesn't leak content into the audit log if anyone ever inspects it. As
+  // long as none of these inputs change, replies stay valid — refresh()
+  // calls on Save draft / Snooze / Mark done won't trigger a fresh OpenAI
+  // hit, only a real conversation change does.
+  const cacheKey = createHash("sha256")
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}`)
+    .digest("hex");
+
+  let suggested;
+  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+    try {
+      suggested = JSON.parse(thread.suggestedRepliesJson);
+    } catch {
+      // Corrupt cache row — fall through and regenerate.
+      suggested = undefined;
+    }
+  }
+  if (!suggested) {
+    suggested = await aiService.generateSuggestedReplies(aiInputs);
+    // Persist the cache. Best-effort — if the write fails, we still serve
+    // the freshly-generated replies and just won't cache for next time.
+    await prisma.thread
+      .update({
+        where: { id: thread.id },
+        data: {
+          suggestedRepliesJson: JSON.stringify(suggested),
+          suggestedRepliesCacheKey: cacheKey
+        }
+      })
+      .catch(() => undefined);
+  }
 
   const receipts = await prisma.auditLog.findMany({
     where: {
