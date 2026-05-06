@@ -4333,10 +4333,16 @@ export class LinkedInAdapter implements PlatformAdapter {
         continue;
       }
 
+      // Count only VISIBLE spinners — the message_container can also wrap the
+      // composer area, "load earlier messages" pagination, and pre-mounted
+      // hidden loading placeholders. Counting hidden ones produced false
+      // positives that gated hydration to permanent failure on a fully-loaded
+      // thread (deterministic 100% open-failure rate).
       const spinnerCount = await page
         .locator(selectors.message_container)
         .first()
         .locator(linkedInLoadingSpinnerSelector)
+        .filter({ visible: true })
         .count()
         .catch(() => 0);
       const messageCount = await page.locator(selectors.message_item).count().catch(() => 0);
@@ -4348,14 +4354,20 @@ export class LinkedInAdapter implements PlatformAdapter {
         .locator(
           `${selectors.message_container} [data-test-empty-state], ${selectors.message_container} .msg-s-message-list__empty-state, ${selectors.message_container} .msg-thread-empty-state`
         )
+        .filter({ visible: true })
         .count()
         .catch(() => 0);
 
-      const messageHydrated = spinnerCount <= 0 && messageCount > 0 && (fingerprintChanged || !beforeFingerprint);
-      const emptyHydrated = spinnerCount <= 0 && emptyStateCount > 0;
+      // If messages are visibly rendered with the right content, the thread
+      // is hydrated — don't gate on ambient spinners (e.g. LinkedIn keeps a
+      // "load earlier messages" loader visible while pagination spins, and
+      // pre-mounts other loading indicators that are never used). Spinner-only
+      // blocking applies when there are NO messages yet.
+      const messageHydrated = messageCount > 0 && (fingerprintChanged || !beforeFingerprint);
+      const emptyHydrated = messageCount === 0 && spinnerCount <= 0 && emptyStateCount > 0;
       const hydrated = messageHydrated || emptyHydrated;
 
-      if (alreadyActiveCandidate && correctThread && spinnerCount <= 0 && (messageCount > 0 || emptyStateCount > 0)) {
+      if (alreadyActiveCandidate && correctThread && (messageCount > 0 || (spinnerCount <= 0 && emptyStateCount > 0))) {
         return true;
       }
 
