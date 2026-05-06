@@ -29,6 +29,10 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
+  const scanFallbackEnabled = useMemo(
+    () => process.env.NEXT_PUBLIC_ENABLE_SCAN_FALLBACK === "1",
+    []
+  );
 
   const refreshMeta = useCallback(async () => {
     const [healthData, settingsData] = await Promise.all([
@@ -169,6 +173,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           health={health}
           autoScanEnabled={autoScanEnabled}
           autoScanDisabled={autoScanDisabled}
+          scanFallbackEnabled={scanFallbackEnabled}
           onToggleHeadless={toggleHeadless}
           onToggleAutoScan={toggleAutoScan}
           onOpenCommandPalette={() => setPaletteOpen(true)}

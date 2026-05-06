@@ -1,6 +1,6 @@
 "use client";
 
-import { Search, SlidersHorizontal, Command } from "lucide-react";
+import { Search } from "lucide-react";
 import type { AppSettings, HealthResponse } from "@/lib/types";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -22,10 +22,8 @@ export function Topbar({
   health,
   autoScanEnabled,
   autoScanDisabled,
-  scanFallbackEnabled,
   onToggleHeadless,
-  onToggleAutoScan,
-  onOpenCommandPalette
+  onToggleAutoScan
 }: TopbarProps) {
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
@@ -36,10 +34,6 @@ export function Topbar({
         </div>
 
         <div className="flex items-center gap-2">
-          <Button variant="secondary">
-            <SlidersHorizontal className="mr-2 h-4 w-4" />
-            Filters
-          </Button>
           <Button variant="secondary" onClick={onToggleHeadless}>
             Headless: {settings?.headless ? "On" : "Off"}
           </Button>
@@ -49,22 +43,10 @@ export function Topbar({
             disabled={autoScanDisabled}
             title={autoScanDisabled ? "Auto-scan disabled in dev" : undefined}
           >
-            Auto-scan: {autoScanEnabled ? "On" : "Off"} (600s)
+            Auto-scan: {autoScanEnabled ? "On" : "Off"}
           </Button>
-          {autoScanDisabled ? (
-            <span className="text-xs text-amber-700">
-              Auto-scan disabled in dev (set NEXT_PUBLIC_DISABLE_AUTOSCAN=0 to enable).
-            </span>
-          ) : null}
-          <span className="text-xs text-slate-600">
-            Scan fallback UI flag: {scanFallbackEnabled ? "On" : "Off"} (runner env is source of truth).
-          </span>
-          {settings?.demoMode ? <Badge tone="amber">Demo Mode Active</Badge> : null}
-          <Badge tone="neutral">Connected: {health?.connectedPlatforms ?? 0}/3</Badge>
-          <Button variant="ghost" onClick={onOpenCommandPalette}>
-            <Command className="mr-2 h-4 w-4" />
-            Cmd+K
-          </Button>
+          {settings?.demoMode ? <Badge tone="amber">Demo Mode</Badge> : null}
+          <Badge tone="neutral">{health?.connectedPlatforms ?? 0}/3 connected</Badge>
         </div>
       </div>
     </header>

@@ -167,66 +167,38 @@ export default function PlatformsPage() {
                   <Badge tone={statusTone(row.status)}>{row.status}</Badge>
                   <span className="text-sm text-slate-500">Last scan {formatRelative(row.lastScanAt)}</span>
                 </div>
-                {row.lastError ? <p className="mt-2 text-sm text-rose-600">{row.lastError}</p> : null}
+                {row.lastError && row.status !== "DEGRADED" ? (
+                  <p className="mt-2 text-sm text-rose-600">{row.lastError}</p>
+                ) : null}
                 {scanBlocks[row.platform] ? (
                   <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
                     {scanBlocks[row.platform]?.reason === "in_flight"
                       ? `Scan already in flight - retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`
-                      : `Cooling down - next retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`}{" "}
-                    (request {scanBlocks[row.platform]?.requestId})
+                      : `Cooling down - next retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`}
                   </p>
                 ) : null}
-                {row.lastScanFailure ? (
-                  <div className="mt-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-900">
-                    <p className="font-medium">{row.lastScanFailure.errorSummary}</p>
-                    <p className="mt-1">
-                      Stage: {row.lastScanFailure.stage}
-                      {row.lastScanFailure.reason ? ` · Reason: ${row.lastScanFailure.reason}` : ""}
+                <details className="mt-2">
+                  <summary className="cursor-pointer text-xs text-slate-500 marker:text-slate-400">
+                    Profile details
+                  </summary>
+                  <div className="mt-2 space-y-1 text-xs text-slate-500">
+                    <p>Profile: {row.profileDir}</p>
+                    <p>
+                      Browser mode:{" "}
+                      {row.browserProfileMode === "personal"
+                        ? `Personal (${row.browserProfileDirectory ?? "Person 1"}${row.browserProfileName ? `, ${row.browserProfileName}` : ""})`
+                        : "Isolated automation profile"}
                     </p>
-                    <p className="mt-1">Request ID: {row.lastScanFailure.requestId}</p>
-                    <div className="mt-1 flex gap-2">
-                      {row.lastScanFailure.screenshotFile ? (
-                        <a
-                          className="text-blue-700 underline"
-                          href={`/artifacts/screenshots/${row.lastScanFailure.screenshotFile}`}
-                          target="_blank"
-                        >
-                          Failure screenshot
-                        </a>
-                      ) : null}
-                      {row.lastScanFailure.domDumpFile ? (
-                        <a
-                          className="text-blue-700 underline"
-                          href={`/artifacts/dom_dumps/${row.lastScanFailure.domDumpFile}`}
-                          target="_blank"
-                        >
-                          Failure DOM dump
-                        </a>
-                      ) : null}
-                    </div>
+                    {row.browserProfileMode === "personal" ? (
+                      <>
+                        <p>Sync mode: {row.browserProfileSyncMode ?? "smart"}</p>
+                        <p>Source user-data dir: {row.browserProfileSourceUserDataDir ?? "n/a"}</p>
+                        <p>Launch user-data dir: {row.browserProfileLaunchUserDataDir ?? "n/a"}</p>
+                        <p>Profile resolution: {row.browserProfileResolutionStrategy ?? "n/a"}</p>
+                      </>
+                    ) : null}
                   </div>
-                ) : null}
-                <p className="mt-2 text-xs text-slate-500">Profile: {row.profileDir}</p>
-                <p className="mt-1 text-xs text-slate-500">
-                  Browser mode:{" "}
-                  {row.browserProfileMode === "personal"
-                    ? `Personal (${row.browserProfileDirectory ?? "Person 1"}${row.browserProfileName ? `, ${row.browserProfileName}` : ""})`
-                    : "Isolated automation profile"}
-                </p>
-                {row.browserProfileMode === "personal" ? (
-                  <>
-                    <p className="mt-1 text-xs text-slate-500">Sync mode: {row.browserProfileSyncMode ?? "smart"}</p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      Source user-data dir: {row.browserProfileSourceUserDataDir ?? "n/a"}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      Launch user-data dir: {row.browserProfileLaunchUserDataDir ?? "n/a"}
-                    </p>
-                    <p className="mt-1 text-xs text-slate-500">
-                      Profile resolution: {row.browserProfileResolutionStrategy ?? "n/a"}
-                    </p>
-                  </>
-                ) : null}
+                </details>
               </div>
 
               <div className="flex flex-wrap items-center gap-2">

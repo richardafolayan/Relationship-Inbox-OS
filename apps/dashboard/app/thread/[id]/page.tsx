@@ -249,25 +249,8 @@ export default function ThreadPage() {
               onChange={(event) => setComposer(event.target.value)}
               placeholder="Write a reply..."
             />
-            <div className="mt-3 flex items-center justify-between gap-2">
+            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
               <div className="flex items-center gap-2">
-                <select
-                  className="rounded-lg border border-slate-300 bg-white px-2 py-2 text-sm"
-                  defaultValue=""
-                  onChange={(event) => {
-                    const choice = thread.suggestedReplies.replies.find((reply) => reply.label === event.target.value);
-                    if (choice) {
-                      setComposer(choice.text);
-                    }
-                  }}
-                >
-                  <option value="">Insert suggestion</option>
-                  {thread.suggestedReplies.replies.map((reply) => (
-                    <option key={reply.label} value={reply.label}>
-                      Reply {reply.label}
-                    </option>
-                  ))}
-                </select>
                 <Button variant="ghost" onClick={() => void transform("SHORTEN")}>Shorten</Button>
                 <Button variant="ghost" onClick={() => void transform("MAKE_WARMER")}>Make warmer</Button>
               </div>
@@ -299,11 +282,11 @@ export default function ThreadPage() {
                     void apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}).then(refresh)
                   }
                 >
-                  Mark manual review
+                  Mark done
                 </Button>
                 <Button variant="primary" onClick={() => void onSend()} disabled={sending || !composer.trim()}>
                   {sending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Send (Cmd+Enter)
+                  Send
                 </Button>
               </div>
             </div>

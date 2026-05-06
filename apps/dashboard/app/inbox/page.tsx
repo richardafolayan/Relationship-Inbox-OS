@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ExternalLink, PauseCircle, CheckCircle2, FolderOpen } from "lucide-react";
+import { CheckCircle2, FolderOpen } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, PlatformCard } from "@/lib/types";
 import { formatRelative, formatClock } from "@/lib/time";
@@ -138,26 +138,18 @@ export default function InboxPage() {
         <p className="text-sm text-slate-500">Keep conversations moving without re-reading everything.</p>
       </div>
 
-      <div className="grid grid-cols-1 gap-3 md:grid-cols-5">
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <Card className="cursor-pointer" onClick={() => setFilter("unread")}>
-          <p className="text-xs text-slate-500">Unread threads</p>
+          <p className="text-xs text-slate-500">Unread</p>
           <p className="mt-2 text-2xl font-semibold">{data.summary.unreadThreads}</p>
         </Card>
         <Card className="cursor-pointer" onClick={() => setFilter("risk")}>
-          <p className="text-xs text-slate-500">At-risk threads</p>
+          <p className="text-xs text-slate-500">At risk</p>
           <p className="mt-2 text-2xl font-semibold">{data.summary.atRiskThreads}</p>
-        </Card>
-        <Card>
-          <p className="text-xs text-slate-500">Average reply time (7d)</p>
-          <p className="mt-2 text-2xl font-semibold">{data.summary.averageReplyTimeHours.toFixed(1)}h</p>
         </Card>
         <Card>
           <p className="text-xs text-slate-500">Oldest pending inbound</p>
           <p className="mt-2 text-lg font-semibold">{formatRelative(data.summary.oldestPendingInboundAt)}</p>
-        </Card>
-        <Card>
-          <p className="text-xs text-slate-500">Messages sent today</p>
-          <p className="mt-2 text-2xl font-semibold">{data.summary.messagesSentToday}</p>
         </Card>
       </div>
 
@@ -186,7 +178,7 @@ export default function InboxPage() {
             <div>
               <Badge tone="blue">{row.platform}</Badge>
             </div>
-            <div>
+            <div className="min-w-0">
               <p className="truncate text-sm text-slate-700">{row.preview}</p>
             </div>
             <div>
@@ -202,8 +194,8 @@ export default function InboxPage() {
               <p className="text-xs text-slate-500">{row.slaCountdown}</p>
               {row.needsReply ? <Badge tone="amber">Needs reply</Badge> : null}
             </div>
-            <div className="flex items-center justify-end gap-2 opacity-0 transition duration-calm group-hover:opacity-100">
-              <Button variant="ghost" onClick={() => router.push(`/thread/${row.id}`)} title="Open">
+            <div className="flex items-center justify-end gap-1 opacity-0 transition duration-calm group-hover:opacity-100">
+              <Button variant="ghost" onClick={() => router.push(`/thread/${row.id}`)} title="Open thread">
                 <FolderOpen className="h-4 w-4" />
               </Button>
               <Button
@@ -212,22 +204,6 @@ export default function InboxPage() {
                 onClick={() => void apiPost(`/runner/control/thread/${row.id}/mark-done`, {}).then(refresh)}
               >
                 <CheckCircle2 className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                title="Snooze 6h"
-                onClick={() => void apiPost(`/runner/control/thread/${row.id}/snooze`, { hours: 6 }).then(refresh)}
-              >
-                <PauseCircle className="h-4 w-4" />
-              </Button>
-              <Button
-                variant="ghost"
-                title="Open in platform"
-                onClick={() => {
-                  void apiPost(`/runner/control/thread/${row.id}/open`, {});
-                }}
-              >
-                <ExternalLink className="h-4 w-4" />
               </Button>
             </div>
           </div>

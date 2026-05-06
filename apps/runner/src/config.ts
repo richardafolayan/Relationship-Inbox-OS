@@ -220,7 +220,7 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     linkedInScan: {
       maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 200),
       stableIterations: parseIntOrDefault(env.LINKEDIN_SCAN_STABLE_ITERATIONS, 3),
-      scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 700),
+      scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 1000),
       messageBackfillAttempts: parseIntOrDefault(env.LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS, 8)
     }
   };

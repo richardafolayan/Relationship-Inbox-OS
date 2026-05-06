@@ -43,7 +43,7 @@ export default function LogsPage() {
       </div>
 
       <Card>
-        <div className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr_1fr] border-b border-slate-200 pb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
+        <div className="grid grid-cols-[200px_110px_120px_1fr_90px_140px] gap-3 border-b border-slate-200 px-3 pb-2 text-xs font-medium uppercase tracking-wide text-slate-500">
           <span>Timestamp</span>
           <span>Platform</span>
           <span>Stage</span>
@@ -54,7 +54,7 @@ export default function LogsPage() {
 
         <div className="mt-2 space-y-2">
           {logs.map((log) => (
-            <div key={log.id} className="grid grid-cols-[1fr_1fr_1fr_1fr_1fr_1fr] items-center rounded-lg border border-slate-100 px-3 py-2 text-sm">
+            <div key={log.id} className="grid grid-cols-[200px_110px_120px_1fr_90px_140px] gap-3 items-center rounded-lg border border-slate-100 px-3 py-2 text-sm">
               <span className="text-slate-700">{new Date(log.timestamp).toLocaleString("en-GB")}</span>
               <span className="text-slate-600">{log.platform ?? "-"}</span>
               <span className="text-slate-600">{log.stage ?? "-"}</span>

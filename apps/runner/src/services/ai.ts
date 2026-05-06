@@ -53,11 +53,20 @@ export function createAiService(): AiService {
 
       const content = response.choices[0]?.message?.content;
       if (!content) {
+        console.warn(
+          `[ai] OpenAI returned empty content (model=${runnerConfig.openAiModel}); using fallback. ` +
+            `Set OPENAI_MODEL to a model your account has access to (e.g. gpt-4o-mini).`
+        );
         return fallback;
       }
 
       return parser(JSON.parse(content));
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[ai] OpenAI call failed (model=${runnerConfig.openAiModel}); using fallback. Reason: ${message}. ` +
+          `If "model not found" or "does not exist", set OPENAI_MODEL to a model your account has access to (e.g. gpt-4o-mini).`
+      );
       return fallback;
     }
   }
@@ -152,7 +161,12 @@ Create 3 short replies A/B/C + needs_user_input list.`;
       });
 
       return response.choices[0]?.message?.content?.trim() || input.text;
-    } catch {
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(
+        `[ai] transformReply failed (model=${runnerConfig.openAiModel}, mode=${input.mode}); returning original text. Reason: ${message}. ` +
+          `If "model not found" or "does not exist", set OPENAI_MODEL to a model your account has access to (e.g. gpt-4o-mini).`
+      );
       return input.text;
     }
   }

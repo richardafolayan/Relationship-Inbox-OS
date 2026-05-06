@@ -384,6 +384,25 @@ export class SessionManager {
       const context = await input.state.contextPromise;
       input.state.context = context;
       this.attachContextCloseListener(input.state, context);
+      // Polyfill esbuild/tsx-injected `__name` helper in the page context.
+      // tsx 4.x hardcodes `keepNames: true` in its esbuild config, which wraps
+      // every function with `__name(fn, "name")`. When such a function is
+      // passed to `page.evaluate(...)`, the browser has no `__name` and throws
+      // `ReferenceError: __name is not defined`. The polyfill is a no-op
+      // identity function that swallows the helper call. Safe in production
+      // dist (where `__name` isn't injected) — the script just defines a
+      // global the code never uses.
+      const NAME_POLYFILL_SOURCE =
+        "if (typeof globalThis.__name === 'undefined') { globalThis.__name = function (fn) { return fn; }; }";
+      await context
+        .addInitScript({ content: NAME_POLYFILL_SOURCE })
+        .catch(() => undefined);
+      // Apply to any pages already attached to this context (e.g. the persistent
+      // tab the user just signed into). addInitScript only runs on subsequent
+      // navigations, so this catches the current document too.
+      for (const existingPage of context.pages()) {
+        await existingPage.evaluate(NAME_POLYFILL_SOURCE).catch(() => undefined);
+      }
       this.logTrace(input.runLogger, {
         action: "launch_context_ok",
         details: {

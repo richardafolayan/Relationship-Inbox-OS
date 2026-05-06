@@ -222,10 +222,13 @@ export interface LinkedInStreamScanMetrics {
   iterations: number;
   scrollIterations: number;
   processedRows: number;
+  unreadRows: number;
+  needsReplyRows: number;
   actionableRows: number;
   openedRows: number;
   skippedRows: number;
   failures: number;
+  secondPassRan: boolean;
 }
 
 export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
@@ -276,8 +279,12 @@ const linkedInStreamingListRootSelectors = [
   "[role='listbox']"
 ];
 const linkedInStreamingRowClickTargetSelectors = [
-  "div.msg-conversation-listitem__link",
+  // Real <a> with an href first — clicking this is guaranteed to navigate.
+  // The <div>-based "link" wrappers below are LinkedIn's analytics shells;
+  // clicking them sometimes only fires a tracking event and never navigates.
   "a.msg-conversation-card__conversation-link",
+  "a[href*='/messaging/thread/']",
+  "div.msg-conversation-listitem__link",
   "a.msg-conversation-card__conversation-link *",
   "[data-control-name*='conversation_item']"
 ];
@@ -1830,6 +1837,7 @@ export type LinkedInCollectionStopReason =
   | "max_threads"
   | "end_of_list_no_progress"
   | "end_of_list_reached"
+  | "deep_scroll_exhausted"
   | "no_scroll_container"
   | "max_iterations"
   | "max_duration"
@@ -1869,10 +1877,13 @@ export function shouldStopLinkedInCollection(input: {
   if (input.uniqueCount >= input.maxThreads) {
     return true;
   }
-  if (input.noGrowthIterations >= input.stableIterations) {
+  // Balanced depth policy: don't give up on no-growth alone — keep scrolling
+  // until we have actually reached the bottom of the list. This prevents the
+  // collector from bailing while LinkedIn is still virtualizing in more rows.
+  if (input.noGrowthIterations >= input.stableIterations && input.reachedBottom) {
     return true;
   }
-  if (input.trailingRepeatIterations >= input.stableIterations) {
+  if (input.trailingRepeatIterations >= input.stableIterations && input.reachedBottom) {
     return true;
   }
   if (!input.didScroll && input.reachedBottom) {
@@ -1893,10 +1904,12 @@ export function resolveLinkedInCollectionStopReason(input: {
   if (input.uniqueCount >= input.maxThreads) {
     return "max_threads";
   }
-  if (input.noGrowthIterations >= input.stableIterations) {
-    return "end_of_list_no_progress";
+  // We only treat "no growth" as terminal once we've also reached the bottom
+  // of the list — that's the genuine deep-scroll exhaustion signal.
+  if (input.noGrowthIterations >= input.stableIterations && input.reachedBottom) {
+    return "deep_scroll_exhausted";
   }
-  if (input.trailingRepeatIterations >= input.stableIterations) {
+  if (input.trailingRepeatIterations >= input.stableIterations && input.reachedBottom) {
     return "end_of_list_reached";
   }
   if (!input.didScroll && input.reachedBottom) {
@@ -2481,6 +2494,26 @@ export class LinkedInAdapter implements PlatformAdapter {
         },
         run: async () => {
           await target.waitForTimeout(350);
+        }
+      });
+      // LinkedIn is a heavy SPA — wait for either a conversation row OR the
+      // composer to appear before probing. This handles inbox-only and
+      // thread-already-open landing states. Up to 8s, falls through silently
+      // so downstream readiness checks still apply.
+      await this.runTracedPageAction({
+        page: target,
+        stage: "navigate",
+        action: "wait_for_selector",
+        note: "post_navigation_hydrate",
+        details: {
+          selectors: ["li.msg-conversation-listitem", "div.msg-form__contenteditable"],
+          timeoutMs: 8000
+        },
+        run: async () => {
+          await Promise.race([
+            target.locator("li.msg-conversation-listitem").first().waitFor({ state: "attached", timeout: 8000 }),
+            target.locator("div.msg-form__contenteditable").first().waitFor({ state: "attached", timeout: 8000 })
+          ]).catch(() => undefined);
         }
       });
     };
@@ -5401,10 +5434,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       waitedForContainer = true;
+      // `state: "attached"` — check the element is in DOM, not full visual
+      // visibility. LinkedIn's message list mounts ~immediately after click
+      // but may briefly have zero dimensions during the layout transition.
       const containerReady = await page
         .waitForSelector(selectors.message_container, {
-          state: "visible",
-          timeout: 8_000
+          state: "attached",
+          timeout: 18_000
         })
         .then(() => true)
         .catch(() => false);
@@ -5701,16 +5737,19 @@ export class LinkedInAdapter implements PlatformAdapter {
         iterations: 0,
         scrollIterations: 0,
         processedRows: 0,
+        unreadRows: 0,
+        needsReplyRows: 0,
         actionableRows: 0,
         openedRows: 0,
         skippedRows: 0,
-        failures: 0
+        failures: 0,
+        secondPassRan: false
       };
 
       const maxThreads = Math.max(1, options.maxThreads ?? this.deps.scanMaxThreads);
       const maxOpens = Math.max(1, options.maxOpens ?? maxThreads);
       const maxIterations = Math.max(20, Math.min(140, maxThreads * 4));
-      const maxDurationMs = 60_000;
+      const maxDurationMs = 240_000;
       const processedRowKeys = new Set<string>();
       const startedAt = Date.now();
 
@@ -6277,6 +6316,13 @@ export class LinkedInAdapter implements PlatformAdapter {
               continue;
             }
 
+            if (row.unreadCount > 0) {
+              metrics.unreadRows += 1;
+            }
+            if (row.needsReplyFromList) {
+              metrics.needsReplyRows += 1;
+            }
+
             const actionable = row.unreadCount > 0 || row.needsReplyFromList;
             if (!actionable) {
               continue;
@@ -6445,6 +6491,12 @@ export class LinkedInAdapter implements PlatformAdapter {
             }
           }
 
+          const reachedBottom = Boolean(
+            scrollMetrics &&
+              scrollMetrics.scrollHeight > 0 &&
+              scrollMetrics.after + scrollMetrics.clientHeight >= scrollMetrics.scrollHeight - 4
+          );
+
           this.logTraceEvent({
             stage: "collect_threads",
             action: "stream_scroll_iteration",
@@ -6458,29 +6510,135 @@ export class LinkedInAdapter implements PlatformAdapter {
               newRowsSeen: rowPass.newRowsSeen,
               noNewRowKeysStreak,
               scrollTopStagnantStreak,
+              reachedBottom,
               bottomRowKey: rowPass.bottomRowKey,
               scrollResolutionMode: scrollResolution.mode
             },
             page
           });
 
-          if (noNewRowKeysStreak >= 3 || scrollTopStagnantStreak >= 2) {
-            metrics.stopReason = "end_of_list_no_progress";
-            break;
-          }
-
+          // LinkedIn's inbox lazy-loads more conversations after each scroll —
+          // there's a network round-trip before new rows hydrate. Wait the
+          // configured base interval, then poll for new rows up to ~2.5s before
+          // deciding whether progress stalled. Without this, we declare "no
+          // progress" while LinkedIn is still fetching the next batch.
+          const baseWaitMs = Math.max(120, this.deps.scanScrollWaitMs);
           await this.runTracedPageAction({
             page,
             stage: "collect_threads",
             action: "wait_for_timeout",
             note: "stream_post_scroll_wait",
-            details: {
-              delayMs: Math.max(80, this.deps.scanScrollWaitMs)
-            },
+            details: { delayMs: baseWaitMs },
             run: async () => {
-              await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs));
+              await page.waitForTimeout(baseWaitMs);
             }
           });
+
+          // Poll for newly-rendered rows up to an additional 2500ms when the
+          // current iteration didn't see any new rows. Bail out as soon as the
+          // visible-row count grows, so we keep the loop snappy when scrolling
+          // is healthy.
+          if (rowPass.newRowsSeen <= 0 && !reachedBottom) {
+            const maxPollMs = 2500;
+            const pollStep = 250;
+            let waited = 0;
+            const seenKeys = new Set(processedRowKeys);
+            while (waited < maxPollMs) {
+              const visibleNow = await this.captureVisibleRowsForStreaming(page, listRootResolution!.handle).catch(
+                () => []
+              );
+              const grew = visibleNow.some((row) => !seenKeys.has(row.rowKey));
+              if (grew) {
+                noNewRowKeysStreak = 0;
+                this.logTraceDecision({
+                  stage: "collect_threads",
+                  decision: "Lazy-loaded rows appeared after scroll wait",
+                  details: { iteration: metrics.iterations, waitedMs: waited }
+                });
+                break;
+              }
+              await page.waitForTimeout(pollStep).catch(() => undefined);
+              waited += pollStep;
+            }
+          }
+
+          // Balanced depth policy: only treat no-progress / scroll stagnation
+          // as terminal once we've actually reached the bottom of the list AND
+          // the lazy-load poll above didn't surface any fresh rows.
+          if ((noNewRowKeysStreak >= 3 || scrollTopStagnantStreak >= 2) && reachedBottom) {
+            metrics.stopReason = "deep_scroll_exhausted";
+            break;
+          }
+        }
+
+        // Second pass: after deep-scroll exhaustion, scroll back to top once and
+        // run a bounded re-scan so we capture rows that were reordered to the top
+        // mid-scan (e.g. brand-new unread surfaced after we passed it the first time).
+        if (
+          metrics.stopReason === "deep_scroll_exhausted" &&
+          metrics.openedRows < maxOpens &&
+          metrics.processedRows < maxThreads &&
+          scrollResolution
+        ) {
+          metrics.secondPassRan = true;
+          await scrollResolution.handle
+            .evaluate((node) => {
+              (node as HTMLElement).scrollTop = 0;
+            })
+            .catch(() => undefined);
+          await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs)).catch(() => undefined);
+
+          let secondPassStagnant = 0;
+          let secondPassScrollStagnant = 0;
+          let secondPassTerminated: LinkedInCollectionStopReason | null = null;
+          const maxSecondPassIterations = 8;
+          for (let i = 0; i < maxSecondPassIterations; i += 1) {
+            if (Date.now() - startedAt >= maxDurationMs) {
+              secondPassTerminated = "max_duration";
+              break;
+            }
+            metrics.iterations += 1;
+            const rowPass2 = await processVisibleRowsOnce();
+            if (metrics.openedRows >= maxOpens) {
+              secondPassTerminated = "max_threads";
+              break;
+            }
+            if (metrics.processedRows >= maxThreads) {
+              secondPassTerminated = "max_threads";
+              break;
+            }
+
+            secondPassStagnant = rowPass2.newRowsSeen > 0 ? 0 : secondPassStagnant + 1;
+
+            const scrollMetrics2 = await this.scrollStreamingListContainer(
+              page,
+              scrollResolution.handle,
+              scrollResolution.mode
+            ).catch(() => null);
+            metrics.scrollIterations += 1;
+
+            const moved2 = Boolean(scrollMetrics2?.moved);
+            secondPassScrollStagnant = moved2 ? 0 : secondPassScrollStagnant + 1;
+            const reachedBottom2 = Boolean(
+              scrollMetrics2 &&
+                scrollMetrics2.scrollHeight > 0 &&
+                scrollMetrics2.after + scrollMetrics2.clientHeight >= scrollMetrics2.scrollHeight - 4
+            );
+
+            if ((secondPassStagnant >= 2 || secondPassScrollStagnant >= 2) && reachedBottom2) {
+              break;
+            }
+
+            await page.waitForTimeout(Math.max(80, this.deps.scanScrollWaitMs)).catch(() => undefined);
+          }
+
+          // Restore deep_scroll_exhausted unless a hard limit fired during the
+          // second pass (max_threads / max_duration take precedence).
+          if (secondPassTerminated) {
+            metrics.stopReason = secondPassTerminated;
+          } else {
+            metrics.stopReason = "deep_scroll_exhausted";
+          }
         }
 
         if (metrics.processedRows <= 0 && metrics.stopReason === "max_iterations") {
@@ -6504,6 +6662,42 @@ export class LinkedInAdapter implements PlatformAdapter {
       } finally {
         this.activeStage = null;
         await stopRunTracing();
+      }
+    });
+  }
+
+  /**
+   * Direct (non-streaming) fallback inbox scan. Wraps the existing deep-scroll
+   * collector and exposes a public surface so callers can request a flat list of
+   * thread stubs without the streaming candidate callback. Used when the
+   * streaming path is disabled or short-circuits early.
+   */
+  async scanInboxThreadsDirectFallback(
+    options: LinkedInFullScanOptions
+  ): Promise<{
+    threads: ThreadStub[];
+    threadsScanned: number;
+    stopReason: LinkedInCollectionStopReason;
+  }> {
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.navigateInbox(selectors);
+      this.activeStage = "collect_threads";
+      try {
+        await this.throwIfAuthRequired(page, "scanInboxThreadsDirectFallback:navigation");
+        const result = await this.collectThreadRowsWithScroll(
+          page,
+          selectors,
+          options.maxThreads ?? this.deps.scanMaxThreads,
+          options
+        );
+        return {
+          threads: result.rows,
+          threadsScanned: result.rowsBeforeCapCount,
+          stopReason: result.stopReason
+        };
+      } finally {
+        this.activeStage = null;
       }
     });
   }

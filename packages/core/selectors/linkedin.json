@@ -4,8 +4,8 @@
   "thread_item": "li.msg-conversation-listitem .msg-conversation-listitem__link",
   "unread_badge": ".msg-conversation-card__unread-count .notification-badge__count",
   "thread_snippet": "p.msg-conversation-card__message-snippet",
-  "message_container": ".msg-s-message-list",
-  "message_item": ".msg-s-event-listitem[data-event-urn]",
+  "message_container": ".msg-s-message-list-content, .msg-s-message-list, div.msg-thread",
+  "message_item": ".msg-s-event-listitem",
   "message_text": ".msg-s-event-listitem__body",
   "composer_input": "div.msg-form__contenteditable[contenteditable='true']",
   "send_button": "button.msg-form__send-button"

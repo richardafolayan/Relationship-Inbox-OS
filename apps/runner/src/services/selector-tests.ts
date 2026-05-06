@@ -459,6 +459,13 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
       await page!.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
       await page!.waitForTimeout(400);
       if (input.platform === "LINKEDIN") {
+        // Wait for the SPA to actually hydrate — a thread row OR composer.
+        await Promise.race([
+          page!.locator("li.msg-conversation-listitem").first().waitFor({ state: "attached", timeout: 8000 }),
+          page!.locator("div.msg-form__contenteditable").first().waitFor({ state: "attached", timeout: 8000 })
+        ]).catch(() => undefined);
+      }
+      if (input.platform === "LINKEDIN") {
         const globalThreadListCount = await page!.locator(selectors.thread_list).count().catch(() => 0);
         const globalThreadItemCount = await page!.locator(selectors.thread_item).count().catch(() => 0);
         const shellResolution = await resolveLinkedInShellForSelectorDiagnostics(page!);

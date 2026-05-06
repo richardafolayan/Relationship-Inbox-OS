@@ -118,34 +118,6 @@ export default function SettingsPage() {
           </div>
         </div>
 
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Max messages per thread</label>
-            <Input
-              type="number"
-              value={settings.maxMessagesPerThread}
-              onChange={(event) => setSettings({ ...settings, maxMessagesPerThread: Number(event.target.value) })}
-            />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">Recent thread sweep count</label>
-            <Input
-              type="number"
-              value={settings.recentThreadSweepCount}
-              onChange={(event) => setSettings({ ...settings, recentThreadSweepCount: Number(event.target.value) })}
-            />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap gap-2">
-          <Button variant={settings.headless ? "primary" : "secondary"} onClick={() => setSettings({ ...settings, headless: !settings.headless })}>
-            Headless: {settings.headless ? "On" : "Off"}
-          </Button>
-          <Button variant={settings.demoMode ? "primary" : "secondary"} onClick={() => setSettings({ ...settings, demoMode: !settings.demoMode })}>
-            Demo Mode: {settings.demoMode ? "On" : "Off"}
-          </Button>
-        </div>
-
         <div>
           <p className="mb-2 text-sm font-medium">Enabled platforms</p>
           <div className="flex flex-wrap gap-2">
@@ -169,6 +141,38 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        <details className="group rounded-lg border border-slate-200 bg-slate-50 p-3">
+          <summary className="cursor-pointer text-sm font-medium text-slate-700 marker:text-slate-400">
+            Advanced
+          </summary>
+          <div className="mt-3 space-y-3">
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+              <div>
+                <label className="mb-1 block text-sm font-medium">Max messages per thread</label>
+                <Input
+                  type="number"
+                  value={settings.maxMessagesPerThread}
+                  onChange={(event) => setSettings({ ...settings, maxMessagesPerThread: Number(event.target.value) })}
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-sm font-medium">Recent thread sweep count</label>
+                <Input
+                  type="number"
+                  value={settings.recentThreadSweepCount}
+                  onChange={(event) => setSettings({ ...settings, recentThreadSweepCount: Number(event.target.value) })}
+                />
+              </div>
+            </div>
+            <Button
+              variant={settings.demoMode ? "primary" : "secondary"}
+              onClick={() => setSettings({ ...settings, demoMode: !settings.demoMode })}
+            >
+              Demo mode: {settings.demoMode ? "On" : "Off"}
+            </Button>
+          </div>
+        </details>
+
         <Button
           variant="primary"
           disabled={saving}
@@ -190,7 +194,12 @@ export default function SettingsPage() {
       </Card>
 
       <Card className="space-y-3 border-rose-200 bg-rose-50">
-        <h3 className="text-lg font-semibold text-rose-900">Danger zone</h3>
+        <div>
+          <h3 className="text-lg font-semibold text-rose-900">Danger zone</h3>
+          <p className="mt-1 text-sm text-rose-800/80">
+            Per-platform session resets live on the Platforms page. This wipes LinkedIn data locally.
+          </p>
+        </div>
         {resetStatus ? (
           <div
             className={
@@ -202,22 +211,6 @@ export default function SettingsPage() {
             {resetStatus.message}
           </div>
         ) : null}
-        <div className="flex flex-wrap gap-2">
-          {platforms.map((platform) => (
-            <Button
-              key={platform}
-              variant="danger"
-              onClick={() => {
-                if (!confirm(`Reset ${platform} session?`)) {
-                  return;
-                }
-                void apiPost("/runner/control/platform/reset-session", { platform });
-              }}
-            >
-              Reset {platform} session
-            </Button>
-          ))}
-        </div>
         <Button
           variant="danger"
           onClick={() => {
