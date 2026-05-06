@@ -2019,6 +2019,67 @@ export function buildLinkedInPreviewMap(
  * Exported so the URL-pattern set has one source of truth and a unit test
  * can pin the surfaces LinkedIn rotates through.
  */
+/**
+ * Decides whether the LinkedIn messaging panel is ready to be scraped after
+ * clicking a thread row. Extracted as a pure function so the gate's truth
+ * table is unit-testable — getting it wrong means either (a) we wait forever
+ * on a hydrated thread and miss new inbound messages (the Joshua-thread
+ * regression: rescan saw activated:true, correctThread:true, messageCount:5
+ * but blocked on fingerprintChanged:false), or (b) we scrape too early and
+ * miss bubbles that haven't rendered yet.
+ *
+ * Returns true when ANY of these prove the panel is hydrated:
+ *   - The candidate was already active before the click and the panel still
+ *     shows messages (or an empty-state).
+ *   - The "fully hydrated" path: messages rendered AND the fingerprint
+ *     changed (or there was no prior fingerprint to compare against).
+ *   - The "structurally ready" path: descriptor/url alignment confirms we're
+ *     on the right thread, messages are rendered, no spinner, no token
+ *     conflict — even if fingerprint didn't change because the first visible
+ *     bubble happens to look identical to the previous thread's.
+ */
+export interface LinkedInThreadHydrationSignals {
+  activated: boolean;
+  correctThread: boolean;
+  alreadyActiveCandidate: boolean;
+  fingerprintChanged: boolean;
+  hadBeforeFingerprint: boolean;
+  tokenConflicts: boolean;
+  messageCount: number;
+  spinnerCount: number;
+  emptyStateCount: number;
+}
+
+export function isLinkedInThreadHydrated(input: LinkedInThreadHydrationSignals): boolean {
+  if (input.tokenConflicts) {
+    return false;
+  }
+  if (
+    input.alreadyActiveCandidate &&
+    input.correctThread &&
+    (input.messageCount > 0 || (input.spinnerCount <= 0 && input.emptyStateCount > 0))
+  ) {
+    return true;
+  }
+  const messageHydrated =
+    input.messageCount > 0 && (input.fingerprintChanged || !input.hadBeforeFingerprint);
+  const emptyHydrated =
+    input.messageCount === 0 && input.spinnerCount <= 0 && input.emptyStateCount > 0;
+  if ((messageHydrated || emptyHydrated) && (input.activated || input.fingerprintChanged || !input.hadBeforeFingerprint)) {
+    return true;
+  }
+  // Structurally-ready path. See the function-level comment.
+  if (
+    input.activated &&
+    input.correctThread &&
+    input.messageCount > 0 &&
+    input.spinnerCount <= 0
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function isLinkedInAuthRequiredUrl(url: string): boolean {
   if (typeof url !== "string" || url.length === 0) {
     return false;
@@ -4669,22 +4730,25 @@ export class LinkedInAdapter implements PlatformAdapter {
         .count()
         .catch(() => 0);
 
-      // If messages are visibly rendered with the right content, the thread
-      // is hydrated — don't gate on ambient spinners (e.g. LinkedIn keeps a
-      // "load earlier messages" loader visible while pagination spins, and
-      // pre-mounts other loading indicators that are never used). Spinner-only
-      // blocking applies when there are NO messages yet.
-      const messageHydrated = messageCount > 0 && (fingerprintChanged || !beforeFingerprint);
-      const emptyHydrated = messageCount === 0 && spinnerCount <= 0 && emptyStateCount > 0;
-      const hydrated = messageHydrated || emptyHydrated;
-
-      if (alreadyActiveCandidate && correctThread && (messageCount > 0 || (spinnerCount <= 0 && emptyStateCount > 0))) {
-        return true;
-      }
-
-      // Some LinkedIn and fixture layouts do not immediately expose URL/active-row changes.
-      // Accept message-driven hydration when data actually changed, while keeping descriptor/url alignment preferred.
-      if (hydrated && (activated || fingerprintChanged || !beforeFingerprint) && !tokenConflicts) {
+      // Single source of truth — see isLinkedInThreadHydrated. Previously the
+      // inline ladder of conditions blocked when activated=true,
+      // correctThread=true, messageCount>0, spinnerCount=0 but
+      // fingerprintChanged=false (the Joshua-thread bug: rescan saw all
+      // positive signals but waited forever on the fingerprint check, so a
+      // freshly-arrived inbound message never made it into the DB).
+      if (
+        isLinkedInThreadHydrated({
+          activated,
+          correctThread,
+          alreadyActiveCandidate,
+          fingerprintChanged,
+          hadBeforeFingerprint: Boolean(beforeFingerprint),
+          tokenConflicts,
+          messageCount,
+          spinnerCount,
+          emptyStateCount
+        })
+      ) {
         return true;
       }
 
