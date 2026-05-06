@@ -7475,10 +7475,25 @@ export class LinkedInAdapter implements PlatformAdapter {
         stage: "open_thread",
         note: "open_by_inbox_navigation"
       });
-      await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
-        stage: "open_thread",
-        note: "wait_thread_list_before_click"
-      });
+      // Same auth-recovery pattern as ensureConnected/sendMessage: if goto
+      // dropped us on /login, fire throwIfAuthRequired now so password
+      // auto-login can complete before the thread_list wait inevitably
+      // times out.
+      await this.throwIfAuthRequired(page, "openThreadAndWaitForActivation:navigation");
+      try {
+        await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
+          stage: "open_thread",
+          note: "wait_thread_list_before_click"
+        });
+      } catch (waitError) {
+        await this.throwIfAuthRequired(page, "openThreadAndWaitForActivation:thread_list_timeout");
+        await this.tracedWaitForVisible(page, selectors.thread_list, LinkedInAdapter.inboxReadyTimeoutMs, {
+          stage: "open_thread",
+          note: "wait_thread_list_after_auth_recovery"
+        }).catch(() => {
+          throw waitError;
+        });
+      }
 
       const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
       const fallbackRow = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
@@ -7517,10 +7532,23 @@ export class LinkedInAdapter implements PlatformAdapter {
       });
     }
 
-    await this.tracedWaitForVisible(page, selectors.message_container, 15_000, {
-      stage: "open_thread",
-      note: "wait_message_container_after_open"
-    });
+    // After click (or after threadUrl goto). LinkedIn may client-side-redirect
+    // to /login mid-load — the same auth-recovery pattern catches that case.
+    await this.throwIfAuthRequired(page, "openThreadAndWaitForActivation:after_click");
+    try {
+      await this.tracedWaitForVisible(page, selectors.message_container, 15_000, {
+        stage: "open_thread",
+        note: "wait_message_container_after_open"
+      });
+    } catch (waitError) {
+      await this.throwIfAuthRequired(page, "openThreadAndWaitForActivation:message_container_timeout");
+      await this.tracedWaitForVisible(page, selectors.message_container, 15_000, {
+        stage: "open_thread",
+        note: "wait_message_container_after_auth_recovery"
+      }).catch(() => {
+        throw waitError;
+      });
+    }
 
     const startedAt = Date.now();
     let lastDescriptor: ActiveThreadDescriptor | undefined;
@@ -8879,7 +8907,28 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
         }
 
-        await page.waitForSelector(selectors.message_container, { timeout: 12_000 });
+        // Auth-recovery #1: if LinkedIn redirected the goto to /login, fire
+        // throwIfAuthRequired now so the password auto-login (when creds are
+        // configured) can complete before we waste 12s on a doomed
+        // wait_for_message_container. Without this hook the Send flow simply
+        // hangs on the login page until the selector wait times out — exactly
+        // the user-reported failure.
+        await this.throwIfAuthRequired(page, "sendMessage:navigation");
+
+        // Auth-recovery #2: a goto can succeed initially and then LinkedIn
+        // client-side-redirects to /login mid-load, so the message container
+        // never renders. On timeout, re-check auth — if it's an auth wall,
+        // throwIfAuthRequired triggers auto-login and we retry the wait once.
+        try {
+          await page.waitForSelector(selectors.message_container, { timeout: 12_000 });
+        } catch (waitError) {
+          await this.throwIfAuthRequired(page, "sendMessage:message_container_timeout");
+          // Auth check passed (or auto-login resolved). Retry the wait once
+          // — the post-login DOM may still be hydrating.
+          await page.waitForSelector(selectors.message_container, { timeout: 12_000 }).catch(() => {
+            throw waitError;
+          });
+        }
         const preSend = await this.getLatestMessageSnapshot(page, selectors);
 
         const composer = page.locator(selectors.composer_input).first();
