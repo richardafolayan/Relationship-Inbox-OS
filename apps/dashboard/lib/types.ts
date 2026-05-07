@@ -211,6 +211,26 @@ export interface ThreadResponse {
       text: string;
     }>;
     needs_user_input: string[];
+    /**
+     * Provenance of the most recent generation. Set when fallback was
+     * needed (e.g. Z.AI overloaded → fell back to OpenAI). Absent on
+     * legacy cached rows.
+     */
+    source?: {
+      providerId: "openai" | "glm" | null;
+      providerDisplayName: string | null;
+      fellBackFromProviderId: "openai" | "glm" | null;
+      fellBackReason:
+        | "balance"
+        | "rate_limit"
+        | "service_overloaded"
+        | "auth"
+        | "model_not_found"
+        | "empty_content"
+        | "unknown"
+        | null;
+      fellBackMessage: string | null;
+    } | null;
   };
   suggestedRepliesStatus?: "ready" | "generating";
   receipts: AuditLogRow[];

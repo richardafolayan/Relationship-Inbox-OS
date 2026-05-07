@@ -127,12 +127,43 @@ export interface SuggestedReply {
   text: string;
 }
 
+/**
+ * Provenance for an AI-generated payload. When the active provider
+ * (operator's choice) failed and the runner walked the fallback chain to
+ * produce the result, `fellBackFromProviderId` is set so the dashboard
+ * can show a small notice ("via OpenAI — Z.AI was overloaded") without
+ * the operator having to dig through runner logs to figure out why their
+ * selected provider didn't run.
+ */
+export interface AiSource {
+  /** Provider that actually produced the output. `null` if every provider in the chain failed. */
+  providerId: AiProvider | null;
+  providerDisplayName: string | null;
+  /** When non-null, generation fell back from this provider. */
+  fellBackFromProviderId: AiProvider | null;
+  /** Stable error-kind tag from the active provider's failure. */
+  fellBackReason: AiErrorKind | null;
+  /** One-line human explanation for logs / tooltip. */
+  fellBackMessage: string | null;
+}
+
 export interface SuggestedRepliesOutput {
   replies: SuggestedReply[];
   needs_user_input: string[];
+  /** Set on freshly-generated outputs; absent on legacy cached rows. */
+  source?: AiSource | null;
 }
 
 export type AiProvider = "openai" | "glm";
+
+export type AiErrorKind =
+  | "balance"
+  | "rate_limit"
+  | "service_overloaded"
+  | "auth"
+  | "model_not_found"
+  | "empty_content"
+  | "unknown";
 
 export interface AppSettings {
   scanIntervalSeconds: number;

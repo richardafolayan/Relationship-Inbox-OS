@@ -834,12 +834,26 @@ export default function ThreadPage() {
 
           <Card className="bg-slate-50">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Suggested replies</h3>
+            {thread.suggestedReplies.source?.fellBackFromProviderId ? (
+              <div
+                className="mt-2 rounded-lg border border-slate-200 bg-white p-2 text-xs text-slate-500"
+                title={thread.suggestedReplies.source.fellBackMessage ?? undefined}
+              >
+                Generated with {thread.suggestedReplies.source.providerDisplayName ?? "fallback provider"} —{" "}
+                {thread.suggestedReplies.source.fellBackFromProviderId === "glm" ? "Z.AI GLM" : "OpenAI"}{" "}
+                was unavailable
+                {thread.suggestedReplies.source.fellBackReason
+                  ? ` (${thread.suggestedReplies.source.fellBackReason.replace(/_/g, " ")})`
+                  : ""}
+                .
+              </div>
+            ) : null}
             {thread.suggestedRepliesStatus === "generating" && !thread.suggestedReplies.replies.length ? (
               <div className="mt-2 flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-500">
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Generating suggestions…
               </div>
-            ) : (
+            ) : thread.suggestedReplies.replies.length ? (
               <div className="mt-2 space-y-2">
                 {thread.suggestedReplies.replies.map((reply) => (
                   <div key={reply.label} className="rounded-lg border border-slate-200 bg-white p-2">
@@ -856,8 +870,12 @@ export default function ThreadPage() {
                   </div>
                 ))}
               </div>
+            ) : (
+              <div className="mt-2 rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-500">
+                {thread.suggestedReplies.needs_user_input[0] ?? "No suggestions available."}
+              </div>
             )}
-            {thread.suggestedReplies.needs_user_input.length ? (
+            {thread.suggestedReplies.replies.length && thread.suggestedReplies.needs_user_input.length ? (
               <div className="mt-3 rounded-lg border border-amber-200 bg-warningSoft p-2 text-sm text-amber-900">
                 <p className="font-medium">Before replying, we need:</p>
                 <ul className="mt-1 list-disc pl-4">

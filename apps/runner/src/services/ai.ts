@@ -1,5 +1,5 @@
 import OpenAI from "openai";
-import type { SummaryOutput, SuggestedRepliesOutput } from "@inbox-os/core";
+import type { SummaryOutput, SuggestedRepliesOutput, AiSource } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
@@ -10,6 +10,15 @@ import type {
   ConversationStarterCitedField,
   SettingsStore
 } from "../types/runtime";
+import {
+  providerRegistry,
+  fallbackChain,
+  classifyLlmError as classifyLlmErrorImpl,
+  type AiErrorClassification
+} from "./ai-providers";
+
+// Re-exported so existing tests + callers continue to import from ai.ts.
+export const classifyLlmError = classifyLlmErrorImpl;
 
 const summarySchema = z.object({
   summary: z.string(),
@@ -20,56 +29,10 @@ const summarySchema = z.object({
   urgency_hint: z.string().optional()
 });
 
-/**
- * Classify an LLM provider error into a human-readable hint. Both
- * OpenAI and Z.AI's BigModel-compatible API surface structured
- * `code`/`status` on their SDK error objects; the function branches on
- * provider so the operator gets the right env-var name + the right
- * billing URL in the hint message.
- *
- * Returns a single string ready to splice into a `console.warn` line.
- */
-export function classifyLlmError(error: unknown, provider: AiProvider): string {
-  // Defensive duck-typing against `OpenAI.APIError`. We deliberately don't
-  // import the type so a future SDK upgrade that renames the class doesn't
-  // silently bypass this branch.
-  const err = error as { code?: string; status?: number; message?: string } | undefined;
-  const message = err?.message ?? String(error);
-  const code = err?.code;
-  const status = err?.status;
-  if (provider === "glm") {
-    // Z.AI's BigModel returns code 1113 for "insufficient balance" — surfaces
-    // through the SDK as a 429 status with the body code stringified into the
-    // message. Free-tier flash models bypass this; paid SKUs need a balance.
-    if (status === 429 || code === "insufficient_quota" || /1113|insufficient.*balance|余额不足/i.test(message)) {
-      return (
-        "Reason: Z.AI account has no balance / no resource package (code 1113 / 429). " +
-        "Free-tier flash models (e.g. glm-4.7-flash) bypass this. For paid SKUs, top up at " +
-        "https://open.bigmodel.cn or https://api.z.ai, then retry."
-      );
-    }
-    if (code === "model_not_found" || /model.*(not found|does not exist|invalid)/i.test(message)) {
-      return `Reason: GLM model not available (${message}). Set Z_AI_MODEL to a valid id (e.g. glm-4.7-flash, glm-4.5-flash) and confirm against the pricing page — flash variants are free-tier and not always shown in /v4/models.`;
-    }
-    if (status === 401 || code === "invalid_api_key") {
-      return "Reason: Z_AI_API_KEY is missing or invalid. Set it in .env and restart the runner, or recheck the dashboard provider toggle.";
-    }
-    return `Reason: ${message}.`;
-  }
-  if (code === "insufficient_quota" || status === 429) {
-    return (
-      "Reason: OpenAI account is out of credits (insufficient_quota / 429). " +
-      "Top up at https://platform.openai.com/settings/organization/billing/overview, then retry."
-    );
-  }
-  if (code === "model_not_found" || /model.*(not found|does not exist)/i.test(message)) {
-    return `Reason: model not available to this account (${message}). Set OPENAI_MODEL to one your account has access to (e.g. gpt-4o-mini, gpt-4o, o1, o3-mini).`;
-  }
-  if (status === 401 || code === "invalid_api_key") {
-    return "Reason: OPENAI_API_KEY is missing or invalid. Set it in .env and restart the runner.";
-  }
-  return `Reason: ${message}.`;
-}
+// Provider error classification + retry/fallback configuration lives in
+// ./ai-providers. Adding a new AI provider: extend the `AiProvider` union
+// in ../config and add an entry to `providerRegistry`. See the file
+// header in ai-providers.ts for details.
 
 const repliesSchema = z.object({
   replies: z.array(
@@ -233,51 +196,145 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl })
     : null;
 
+  // Per-provider client + model resolution. The set of clients is built
+  // once at startup; any new provider added here also needs an entry in
+  // `providerRegistry` (see ./ai-providers).
+  function resolveProvider(providerId: AiProvider): { client: OpenAI | null; model: string } {
+    if (providerId === "glm") {
+      return { client: glmClient, model: runnerConfig.glmModel };
+    }
+    return { client: openAiClient, model: runnerConfig.openAiModel };
+  }
+
   async function resolveActive(): Promise<{ client: OpenAI | null; model: string; provider: AiProvider }> {
     // Settings.aiProvider is the live override; runnerConfig.aiProvider is
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
-    const provider: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
-    if (provider === "glm") {
+    const providerId: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
-      return { client: glmClient, model, provider };
+      return { client: glmClient, model, provider: providerId };
     }
-    return { client: openAiClient, model: runnerConfig.openAiModel, provider };
+    return { client: openAiClient, model: runnerConfig.openAiModel, provider: providerId };
   }
 
-  async function modelJson<T>(prompt: string, fallback: T, parser: (value: unknown) => T): Promise<T> {
-    const { client, model, provider } = await resolveActive();
+  /**
+   * One JSON-mode call against a specific provider, with bounded retries
+   * for retriable error kinds (1302/1305 on GLM, 5xx on OpenAI). Returns
+   * `ok: false` on any non-retriable failure or once attempts are
+   * exhausted — the caller is expected to walk the fallback chain.
+   */
+  async function tryProvider<T>(
+    providerId: AiProvider,
+    model: string,
+    prompt: string,
+    parser: (value: unknown) => T
+  ): Promise<{ ok: true; result: T } | { ok: false; classification: AiErrorClassification | null }> {
+    const entry = providerRegistry[providerId];
+    const { client } = resolveProvider(providerId);
     if (!client) {
-      return fallback;
+      return { ok: false, classification: null };
     }
 
-    try {
-      const response = await client.chat.completions.create({
-        model,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt }
-        ],
-        ...gpt5OptionsForModel(model)
-      });
-
-      const content = response.choices[0]?.message?.content;
-      if (!content) {
+    let lastClass: AiErrorClassification | null = null;
+    for (let attempt = 1; attempt <= entry.maxAttempts; attempt++) {
+      try {
+        const response = await client.chat.completions.create({
+          model,
+          response_format: { type: "json_object" },
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: prompt }
+          ],
+          ...gpt5OptionsForModel(model)
+        });
+        const content = response.choices[0]?.message?.content;
+        if (!content) {
+          lastClass = {
+            kind: "empty_content",
+            message: `${providerId} returned empty content (model=${model}, attempt ${attempt}/${entry.maxAttempts})`,
+            retriable: true
+          };
+          console.warn(`[ai] ${lastClass.message}`);
+          if (attempt < entry.maxAttempts) {
+            await sleep(entry.baseBackoffMs * attempt + Math.random() * 1500);
+            continue;
+          }
+          break;
+        }
+        return { ok: true, result: parser(JSON.parse(content)) };
+      } catch (error) {
+        lastClass = entry.classifyError(error);
         console.warn(
-          `[ai] ${provider} returned empty content (model=${model}); using fallback.`
+          `[ai] ${providerId} call failed (model=${model}, attempt ${attempt}/${entry.maxAttempts}). Reason: ${lastClass.message}`
         );
-        return fallback;
+        if (lastClass.retriable && attempt < entry.maxAttempts) {
+          await sleep(entry.baseBackoffMs * attempt + Math.random() * 1500);
+          continue;
+        }
+        break;
       }
-
-      return parser(JSON.parse(content));
-    } catch (error) {
-      console.warn(
-        `[ai] ${provider} call failed (model=${model}); using fallback. ${classifyLlmError(error, provider)}`
-      );
-      return fallback;
     }
+    return { ok: false, classification: lastClass };
+  }
+
+  /**
+   * JSON-mode call with retry + fallback chain.
+   *
+   * Walks the active provider first (with its `maxAttempts` retry budget),
+   * then each entry in `fallbackChain` (skipping the active provider). The
+   * returned `source` field tells the caller which provider actually
+   * produced the result and, when fallback was used, why the active
+   * provider was skipped — surfaced to the dashboard for suggested
+   * replies so the operator knows their selection didn't run.
+   */
+  async function modelJson<T>(
+    prompt: string,
+    fallback: T,
+    parser: (value: unknown) => T
+  ): Promise<{ result: T; source: AiSource | null }> {
+    const { provider: activeId, model: activeModel } = await resolveActive();
+    const chain: AiProvider[] = [activeId, ...fallbackChain.filter((id) => id !== activeId)];
+
+    let activeFailure: AiErrorClassification | null = null;
+
+    for (let i = 0; i < chain.length; i++) {
+      const providerId = chain[i]!;
+      const isActive = i === 0;
+      // Active provider honours the user's model override from settings;
+      // fallback providers use the runtime config default.
+      const model = isActive ? activeModel : resolveProvider(providerId).model;
+      const outcome = await tryProvider(providerId, model, prompt, parser);
+      if (outcome.ok) {
+        const entry = providerRegistry[providerId];
+        const source: AiSource = {
+          providerId,
+          providerDisplayName: entry.displayName,
+          fellBackFromProviderId: isActive ? null : activeId,
+          fellBackReason: isActive ? null : activeFailure?.kind ?? null,
+          fellBackMessage: isActive ? null : activeFailure?.message ?? null
+        };
+        return { result: outcome.result, source };
+      }
+      if (isActive) {
+        activeFailure = outcome.classification;
+      }
+    }
+
+    // All providers exhausted — caller's fallback value is returned.
+    const source: AiSource = {
+      providerId: null,
+      providerDisplayName: null,
+      fellBackFromProviderId: activeId,
+      fellBackReason: activeFailure?.kind ?? null,
+      fellBackMessage: activeFailure?.message ?? null
+    };
+    return { result: fallback, source };
+  }
+
+  function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   async function updateThreadSummary(input: {
@@ -329,7 +386,8 @@ Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
 Messages: ${JSON.stringify(input.messages)}`;
 
-    return modelJson(prompt, fallback, (value) => summarySchema.parse(value));
+    const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
+    return result;
   }
 
   async function generateSuggestedReplies(input: {
@@ -359,7 +417,6 @@ Messages: ${JSON.stringify(input.messages)}`;
     lastOutboundAt?: string | null;
   }): Promise<SuggestedRepliesOutput> {
     const isOutreach = input.category === "outreach";
-    const thirdIntent = isOutreach ? "Polite decline" : "Clarifying question";
 
     // Late-reply detection: only acknowledge a gap when the inbound is
     // more recent than the outbound (otherwise the operator already
@@ -384,35 +441,25 @@ Messages: ${JSON.stringify(input.messages)}`;
             : "It's been a couple of weeks since they wrote. Add a light acknowledgement of the gap to reply A (e.g. 'Sorry for the slow reply') — replies B and C can omit it.";
       return `\nLate-reply context: ${phrase}\n`;
     })();
+    // Empty fallback — when the model fails (timeout, empty content, parse
+    // error) we surface that to the dashboard via `needs_user_input` instead
+    // of inventing canned replies. Generic "Thanks for the note. To be
+    // honest, that works for us."-style placeholders look like AI output
+    // but aren't, which leads to operators sending nonsense in the worst
+    // case. Empty replies + a plain explanation is the honest signal.
     const fallback: SuggestedRepliesOutput = {
-      replies: [
-        {
-          label: "A",
-          intent: "Direct + helpful",
-          text: "Thanks for the note. To be honest, that works for us."
-        },
-        {
-          label: "B",
-          intent: "Warm + relationship-first",
-          text: "Appreciate you reaching out. Happy to keep this moving this week."
-        },
-        {
-          label: "C",
-          intent: thirdIntent,
-          text: isOutreach
-            ? "Thanks for reaching out, but it isn't something I'm looking at right now."
-            : "Before we confirm, could you share the preferred timeline?"
-        }
-      ],
-      needs_user_input: []
+      replies: [],
+      needs_user_input: [
+        "Couldn't generate suggestions for this thread — write your reply or click rescan to try again."
+      ]
     };
 
     const prompt = `Return strict JSON matching this exact shape:
 {
   "replies": [
-    { "label": "A", "intent": "Direct + helpful", "text": "..." },
-    { "label": "B", "intent": "Warm + relationship-first", "text": "..." },
-    { "label": "C", "intent": "${thirdIntent}", "text": "..." }
+    { "label": "A", "intent": "<short noun phrase>", "text": "..." },
+    { "label": "B", "intent": "<short noun phrase>", "text": "..." },
+    { "label": "C", "intent": "<short noun phrase>", "text": "..." }
   ],
   "needs_user_input": ["string", ...]
 }
@@ -422,9 +469,32 @@ Each reply text must be a complete, sendable message under 280 characters,
 colons. Match the inbound message's register: warm if they're warm,
 formal if they're formal.
 
+INTENT LABELS — pick three intents that genuinely fit THIS conversation.
+Each intent is a 2-4 word noun phrase describing the angle of that reply.
+The three intents must be meaningfully different from each other and must
+be CHOSEN FROM THE THREAD CONTENT, not from any default list.
+
+Hard rules:
+- Never use the literal phrases "Direct + helpful",
+  "Warm + relationship-first", or "Clarifying question". They are banned —
+  pick wording that describes what THIS reply is doing in THIS thread.
+- For a brief greeting only ("hi", "hello", "👋", "good morning"), do NOT
+  include a clarifying-question slot. The three replies should be three
+  ways to warmly continue the conversation (e.g. mirror, open a topic,
+  share something brief). A greeting needs no clarification.
+- When the inbound is short and ambiguous about substance, only include a
+  question slot if the question is genuinely useful to the operator's
+  next move. Otherwise pick three different forward-moving angles.
+- Each intent describes WHAT THIS REPLY DOES, in this thread's context —
+  e.g. "Acknowledge their move", "Suggest a time", "Match their warmth",
+  "Offer a small update", "Decline gently", "Ask about timeline". Make
+  them specific to what was actually said.${
+    isOutreach ? "" : ""
+  }
+
 ${
   isOutreach
-    ? "This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C must be a friendly Polite decline (~1 sentence, no commitment, no follow-up question)."
+    ? `This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C MUST be a friendly Polite decline (~1 sentence, no commitment, no follow-up question), labelled with intent "Polite decline". Replies A and B can still pick intents that fit.`
     : ""
 }${lateReplyHint}
 
@@ -433,14 +503,15 @@ What they want: ${input.whatTheyWant}
 Open loops: ${JSON.stringify(input.openLoops)}
 Last inbound: ${input.lastInboundMessage}`;
 
-    const parsed = await modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
+    const { result: parsed, source } = await modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
     // Defensive scrub of em-dashes, semicolons, colons — see applyVoiceRules.
     return {
       ...parsed,
       replies: parsed.replies.map((r) => ({
         ...r,
         text: applyVoiceRules(r.text)
-      }))
+      })),
+      source
     };
   }
 
