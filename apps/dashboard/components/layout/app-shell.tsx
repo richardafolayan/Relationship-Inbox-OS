@@ -173,7 +173,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   void settings;
 
   return (
-    <div className="grid h-screen grid-cols-[72px_1fr] overflow-hidden bg-paper text-ink">
+    <div className="grid h-screen grid-cols-[200px_1fr] overflow-hidden bg-paper text-ink">
       <Sidebar
         health={health}
         attentionCount={sidebarAttention}
