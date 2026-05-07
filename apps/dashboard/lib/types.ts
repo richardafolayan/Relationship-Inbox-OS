@@ -182,6 +182,14 @@ export interface ThreadMessage {
   timestamp: string;
   text: string;
   senderName?: string | null;
+  /**
+   * Provenance of an OUT message. "automation" when this runner sent it
+   * via the send service. Null on inbound messages and on OUT messages
+   * that were only observed via scan (could have been sent from the
+   * platform's web UI, another device, etc.) — those should not surface
+   * a "Sent via automation" claim.
+   */
+  sentVia?: "automation" | string | null;
   raw?: Record<string, unknown> | null;
   attachments: Array<{ type: string; manualReview: boolean; rawLabel?: string }>;
 }
