@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import { ChevronDown, ChevronLeft, Loader2, Send, Sparkles } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { AuditLogRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
+import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
@@ -96,6 +97,7 @@ export default function ThreadPage() {
   const threadId = params.id;
 
   const [thread, setThread] = useState<ThreadResponse | null>(null);
+  const [siblings, setSiblings] = useState<InboxRow[]>([]);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
@@ -144,8 +146,9 @@ export default function ThreadPage() {
   const prevThreadIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [threadResult, platformsResult, logsResult] = await Promise.allSettled([
+    const [threadResult, inboxResult, platformsResult, logsResult] = await Promise.allSettled([
       apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
+      apiGet<InboxResponse>("/runner/data/inbox"),
       apiGet<PlatformCard[]>("/runner/data/platforms"),
       apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
     ]);
@@ -176,6 +179,7 @@ export default function ThreadPage() {
           : "Failed to load thread";
       setError(message);
     }
+    if (inboxResult.status === "fulfilled") setSiblings(inboxResult.value.rows);
     if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
     if (logsResult.status === "fulfilled") setLogs(logsResult.value);
     setLoading(false);
@@ -534,6 +538,46 @@ export default function ThreadPage() {
   const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
+  // Annotate each message with a date-divider flag/label so consecutive
+  // messages crossing a date boundary get a centered hairline label
+  // (e.g. "Tuesday, Jan 12") rendered above the bubble.
+  const dateLabelFormatter = useMemo(
+    () =>
+      new Intl.DateTimeFormat(undefined, {
+        weekday: "long",
+        month: "short",
+        day: "numeric"
+      }),
+    []
+  );
+  const timelineRows = useMemo(() => {
+    let lastDate = "";
+    return visibleMessages.map((message) => {
+      const dateKey = new Date(message.timestamp).toDateString();
+      const showDivider = dateKey !== lastDate;
+      lastDate = dateKey;
+      return {
+        message,
+        showDivider,
+        dividerLabel: showDivider ? dateLabelFormatter.format(new Date(message.timestamp)) : ""
+      };
+    });
+  }, [visibleMessages, dateLabelFormatter]);
+
+  // Sibling-thread list: surface the operator's other open conversations
+  // alongside the current thread so they can jump between them without
+  // bouncing to /today. Sort RED → AMBER → GREEN, then by recency.
+  const siblingRows = useMemo(() => {
+    const order: Record<"RED" | "AMBER" | "GREEN", number> = { RED: 0, AMBER: 1, GREEN: 2 };
+    return [...siblings].sort((a, b) => {
+      const riskDiff = (order[a.riskLevel] ?? 3) - (order[b.riskLevel] ?? 3);
+      if (riskDiff !== 0) return riskDiff;
+      const aAt = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+      const bAt = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+      return bAt - aAt;
+    });
+  }, [siblings]);
+
   // Force-scroll-to-bottom when switching threads.
   useEffect(() => {
     if (thread && prevThreadIdRef.current !== thread.id) {
@@ -630,9 +674,64 @@ export default function ThreadPage() {
   return (
     <div
       className={`grid h-full min-h-0 grid-cols-1 ${
-        aiOpen ? "lg:grid-cols-[minmax(0,1fr)_360px]" : "lg:grid-cols-1"
+        aiOpen
+          ? "lg:grid-cols-[240px_minmax(0,1fr)_360px]"
+          : "lg:grid-cols-[240px_minmax(0,1fr)]"
       }`}
     >
+      {/* ───── Sibling-thread list ───── */}
+      <aside className="hidden h-full min-h-0 flex-col overflow-y-auto border-r border-hairline bg-paper-2/30 lg:flex">
+        <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-4 py-4">
+          <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+            Threads
+          </p>
+        </div>
+        <ul className="m-0 list-none space-y-[2px] p-2">
+          {siblingRows.map((row) => {
+            const active = row.id === thread.id;
+            const dotClass =
+              row.riskLevel === "RED"
+                ? "bg-risk-overdue"
+                : row.riskLevel === "AMBER"
+                  ? "bg-risk-waiting"
+                  : "bg-risk-fresh";
+            return (
+              <li key={row.id}>
+                <Link
+                  href={`/thread/${row.id}`}
+                  className={`flex items-start gap-2 rounded-row px-2 py-2 transition-colors duration-calm ${
+                    active ? "bg-paper-2" : "hover:bg-paper-2/60"
+                  }`}
+                >
+                  <span
+                    className={`mt-[6px] inline-block h-[6px] w-[6px] flex-shrink-0 rounded-full ${dotClass}`}
+                    aria-hidden
+                  />
+                  <span className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-full bg-paper-2 font-mono text-[10px] text-ink-2">
+                    {initials(row.personName)}
+                  </span>
+                  <span className="min-w-0 flex-1">
+                    <span
+                      className={`block truncate text-[12.5px] leading-[1.3] ${
+                        active ? "font-semibold text-ink" : "font-medium text-ink-2"
+                      }`}
+                    >
+                      {row.personName}
+                    </span>
+                    <span className="block truncate font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                      {PLATFORM_LABEL[row.platform]}
+                    </span>
+                  </span>
+                </Link>
+              </li>
+            );
+          })}
+          {siblingRows.length === 0 ? (
+            <li className="px-3 py-3 font-mono text-[11px] text-ink-3">no other threads</li>
+          ) : null}
+        </ul>
+      </aside>
+
       {/* ───── Chat column ───── */}
       <div className="flex h-full min-h-0 flex-col border-r border-hairline">
         {degraded ? (
@@ -797,7 +896,7 @@ export default function ThreadPage() {
                 );
               }
               const senderLabel =
-                message.direction === "OUT" ? "You" : firstName;
+                message.senderName ?? (message.direction === "OUT" ? "You" : firstName);
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? <DayDivider label={dayLabel} /> : null}
@@ -924,6 +1023,15 @@ export default function ThreadPage() {
                   setComposer(event.target.value);
                   if (composerSource === "predraft" || composerSource === "empty") {
                     setComposerSource("user");
+                  }
+                }}
+                onKeyDown={(event) => {
+                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                    event.preventDefault();
+                    // Stop the native window-level keydown listener (also
+                    // bound for Cmd/Ctrl-Enter) from firing onSend twice.
+                    event.nativeEvent.stopImmediatePropagation();
+                    void onSend();
                   }
                 }}
                 rows={3}
