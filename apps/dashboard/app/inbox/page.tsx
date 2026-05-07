@@ -182,14 +182,26 @@ export default function InboxPage() {
       </div>
 
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
-        <Card className="cursor-pointer" onClick={() => setFilter("unread")}>
+        <button
+          type="button"
+          aria-pressed={filter === "unread"}
+          aria-label={`Filter inbox by unread threads (currently ${data.summary.unreadThreads})`}
+          className="rounded-2xl border border-border bg-surface p-4 text-left shadow-soft transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          onClick={() => setFilter("unread")}
+        >
           <p className="text-xs text-slate-500">Unread</p>
           <p className="mt-2 text-2xl font-semibold">{data.summary.unreadThreads}</p>
-        </Card>
-        <Card className="cursor-pointer" onClick={() => setFilter("risk")}>
+        </button>
+        <button
+          type="button"
+          aria-pressed={filter === "risk"}
+          aria-label={`Filter inbox by at-risk threads (currently ${data.summary.atRiskThreads})`}
+          className="rounded-2xl border border-border bg-surface p-4 text-left shadow-soft transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
+          onClick={() => setFilter("risk")}
+        >
           <p className="text-xs text-slate-500">At risk</p>
           <p className="mt-2 text-2xl font-semibold">{data.summary.atRiskThreads}</p>
-        </Card>
+        </button>
         <Card>
           <p className="text-xs text-slate-500">Oldest pending inbound</p>
           <p className="mt-2 text-lg font-semibold">{formatRelative(data.summary.oldestPendingInboundAt)}</p>
@@ -286,6 +298,7 @@ export default function InboxPage() {
                     <button
                       type="button"
                       title={`Click to mark as ${row.category === "outreach" ? "genuine" : "outreach"}`}
+                      aria-label={`Currently classified as ${row.category}. Click to reclassify as ${row.category === "outreach" ? "genuine" : "outreach"}.`}
                       onClick={(event) => {
                         event.stopPropagation();
                         const next = row.category === "outreach" ? "genuine" : "outreach";

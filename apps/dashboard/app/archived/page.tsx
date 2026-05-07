@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArchiveRestore, FolderOpen } from "lucide-react";
+import { ArchiveRestore } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative, formatClock } from "@/lib/time";
@@ -82,7 +82,17 @@ export default function ArchivedPage() {
             return (
               <div
                 key={row.id}
-                className="group grid grid-cols-[2fr_1fr_2fr_1fr_1fr] gap-3 border-b border-slate-100 px-4 py-3 transition duration-calm hover:bg-slate-50"
+                role="button"
+                tabIndex={0}
+                aria-label={`Open archived thread with ${row.personName}`}
+                className="grid cursor-pointer grid-cols-[2fr_1fr_2fr_1fr_1fr] gap-3 border-b border-slate-100 px-4 py-3 transition duration-calm hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
+                onClick={() => router.push(`/thread/${row.id}`)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    router.push(`/thread/${row.id}`);
+                  }
+                }}
               >
                 <div className="min-w-0">
                   <p className="font-medium text-slate-900">{row.personName}</p>
@@ -98,22 +108,22 @@ export default function ArchivedPage() {
                   <p className="text-sm text-slate-700">{formatClock(row.lastMessageAt)}</p>
                   <p className="text-xs text-slate-500">{formatRelative(row.lastMessageAt)}</p>
                 </div>
-                <div className="flex items-center justify-end gap-1 opacity-0 transition duration-calm group-hover:opacity-100">
-                  <Button variant="ghost" onClick={() => router.push(`/thread/${row.id}`)} title="Open thread">
-                    <FolderOpen className="h-4 w-4" />
-                  </Button>
+                <div className="flex items-center justify-end gap-1">
                   <Button
                     variant="ghost"
                     title="Unarchive"
-                    onClick={() =>
+                    aria-label={`Unarchive thread with ${row.personName}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
                       runAction(
                         apiPost(`/runner/control/thread/${row.id}/unarchive`, {}),
                         setError,
                         refresh
-                      )
-                    }
+                      );
+                    }}
                   >
-                    <ArchiveRestore className="h-4 w-4" />
+                    <ArchiveRestore className="mr-1 h-4 w-4" />
+                    Unarchive
                   </Button>
                 </div>
               </div>
