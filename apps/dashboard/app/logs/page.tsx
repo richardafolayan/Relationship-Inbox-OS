@@ -64,12 +64,12 @@ export default function LogsPage() {
               </span>
               <span className="flex items-center gap-2 text-xs">
                 {log.screenshotFile ? (
-                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${log.screenshotFile}`} target="_blank">
+                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${log.screenshotFile}`} target="_blank" rel="noopener noreferrer">
                     Screenshot
                   </a>
                 ) : null}
                 {log.domDumpFile ? (
-                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/dom_dumps/${log.domDumpFile}`} target="_blank">
+                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/dom_dumps/${log.domDumpFile}`} target="_blank" rel="noopener noreferrer">
                     DOM
                   </a>
                 ) : null}

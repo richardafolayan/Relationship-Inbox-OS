@@ -48,12 +48,12 @@ export function DegradedBanner({
           Open receipts
         </Button>
         {screenshotFile ? (
-          <a className="text-sm font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${screenshotFile}`} target="_blank">
+          <a className="text-sm font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${screenshotFile}`} target="_blank" rel="noopener noreferrer">
             Open screenshot
           </a>
         ) : null}
         {domDumpFile ? (
-          <a className="text-sm font-medium text-blue-700 hover:underline" href={`/artifacts/dom_dumps/${domDumpFile}`} target="_blank">
+          <a className="text-sm font-medium text-blue-700 hover:underline" href={`/artifacts/dom_dumps/${domDumpFile}`} target="_blank" rel="noopener noreferrer">
             Open DOM dump
           </a>
         ) : null}

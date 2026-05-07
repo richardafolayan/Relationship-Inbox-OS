@@ -276,7 +276,7 @@ export default function PlatformsPage() {
                     <a
                       className="text-rose-700 underline"
                       href={`/artifacts/screenshots/${selectorErrors[row.platform]?.artifacts?.screenshot}`}
-                      target="_blank"
+                      target="_blank" rel="noopener noreferrer"
                     >
                       Failure screenshot
                     </a>
@@ -285,7 +285,7 @@ export default function PlatformsPage() {
                     <a
                       className="text-rose-700 underline"
                       href={`/artifacts/dom_dumps/${selectorErrors[row.platform]?.artifacts?.domDump}`}
-                      target="_blank"
+                      target="_blank" rel="noopener noreferrer"
                     >
                       Failure DOM dump
                     </a>
@@ -354,7 +354,7 @@ export default function PlatformsPage() {
                           Reset to default
                         </Button>
                         {result.screenshotFile ? (
-                          <a className="text-xs font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${result.screenshotFile}`} target="_blank">
+                          <a className="text-xs font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${result.screenshotFile}`} target="_blank" rel="noopener noreferrer">
                             Screenshot
                           </a>
                         ) : null}
