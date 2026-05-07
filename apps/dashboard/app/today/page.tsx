@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { HealthResponse, InboxResponse, PlatformCard, ThreadResponse } from "@/lib/types";
@@ -21,6 +21,12 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 // or hasn't loaded yet, we fall back to the actual preview text — never
 // the technical riskReason ("Inbound waiting Xh"), which is operator-
 // facing telemetry, not the human ask.
+
+interface RunnerEventDetail {
+  type?: string;
+  threadId?: string;
+}
+
 export default function TodayPage() {
   const router = useRouter();
   const [data, setData] = useState<InboxResponse | null>(null);
@@ -29,6 +35,13 @@ export default function TodayPage() {
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // IDs we've optimistically removed from the local view because the
+  // operator just acted on them (sent / handled / snoozed) — server
+  // hasn't necessarily caught up yet. Cleared on every refetch.
+  const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
+  // Brief "Sent — next up" overlay for the outgoing hero.
+  const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
+  const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const refresh = useCallback(async () => {
     const [inbox, platformRows, healthData] = await Promise.all([
@@ -36,7 +49,25 @@ export default function TodayPage() {
       apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => [] as PlatformCard[]),
       apiGet<HealthResponse>("/runner/health").catch(() => null)
     ]);
-    if (inbox) setData(inbox);
+    if (inbox) {
+      setData(inbox);
+      // Drop only the optimistic IDs the server has caught up on. A row
+      // counts as "still pending" when it's both present AND still needs
+      // a reply — so a mark-done / snooze that flips needsReply=false
+      // counts as confirmed even though the row itself lingers in the
+      // inbox view (the existing /data/inbox sort returns marked-done
+      // rows for archive context).
+      const stillPending = new Set(
+        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+      );
+      setRemovedIds((prev) => {
+        const next = new Set<string>();
+        prev.forEach((id) => {
+          if (stillPending.has(id)) next.add(id);
+        });
+        return next;
+      });
+    }
     setPlatforms(platformRows ?? []);
     if (healthData) setHealth(healthData);
     setLoaded(true);
@@ -49,7 +80,51 @@ export default function TodayPage() {
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refresh]);
 
-  const rows = data?.rows ?? [];
+  const advanceHero = useCallback((id: string, label: string) => {
+    setTransitioning({ id, label });
+    if (transitionTimer.current) clearTimeout(transitionTimer.current);
+    transitionTimer.current = setTimeout(() => {
+      setRemovedIds((prev) => {
+        const next = new Set(prev);
+        next.add(id);
+        return next;
+      });
+      setTransitioning(null);
+      // Refetch in the background so server truth catches up. If the
+      // runner hasn't yet confirmed (e.g. mark-done in flight), the
+      // refetch may briefly bring the row back — that's correct
+      // behaviour and matches receipts-first design.
+      void refresh();
+    }, 700);
+  }, [refresh]);
+
+  // Listen for runner-side confirmations. MESSAGE_SENT means the platform
+  // accepted the reply; that thread is no longer "first up". THREAD_UPDATED
+  // covers snooze/mark-done that other clients trigger.
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<RunnerEventDetail>).detail;
+      if (!detail || !detail.threadId) return;
+      if (detail.type === "MESSAGE_SENT") {
+        advanceHero(detail.threadId, "Sent — next up");
+      }
+    };
+    window.addEventListener("runner-event", handler);
+    return () => window.removeEventListener("runner-event", handler);
+  }, [advanceHero]);
+
+  useEffect(() => () => {
+    if (transitionTimer.current) clearTimeout(transitionTimer.current);
+  }, []);
+
+  const allRows = data?.rows ?? [];
+  // /today is the "first up" page; rows that no longer need a reply
+  // (mark-done, send-confirmed) shouldn't be the hero even if the runner
+  // keeps them in /data/inbox for archive context.
+  const rows = useMemo(
+    () => allRows.filter((row) => row.needsReply !== false && !removedIds.has(row.id)),
+    [allRows, removedIds]
+  );
   const overdueCount = rows.filter((row) => row.riskLevel === "RED").length;
   const waitingCount = rows.filter((row) => row.riskLevel === "AMBER").length;
 
@@ -112,6 +187,8 @@ export default function TodayPage() {
     return `${(lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim()}…`;
   })();
 
+  const heroIsTransitioning = transitioning && hero && transitioning.id === hero.id;
+
   return (
     <Canvas>
       <PageHead
@@ -152,7 +229,8 @@ export default function TodayPage() {
 
       {hero ? (
         <article
-          className="relative mb-12 cursor-pointer overflow-hidden rounded-card border border-hairline bg-paper px-9 pb-7 pt-9 shadow-card"
+          data-testid="today-hero"
+          className={`relative mb-12 cursor-pointer overflow-hidden rounded-card border border-hairline bg-paper px-9 pb-7 pt-9 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
           onClick={() => router.push(`/thread/${hero.id}`)}
         >
           <div
@@ -166,7 +244,7 @@ export default function TodayPage() {
           <div className="relative">
             <p className="mb-[22px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
-              First up
+              {heroIsTransitioning ? transitioning?.label ?? "First up" : "First up"}
             </p>
             <h2 className="m-0 mb-[14px] max-w-[22ch] text-balance font-display text-[36px] font-semibold leading-[1.15] tracking-[-0.025em]">
               {heroHeadline || "Catching up with someone"}
@@ -192,25 +270,29 @@ export default function TodayPage() {
               </Button>
               <Button
                 variant="ghost"
-                onClick={() =>
+                onClick={() => {
+                  const id = hero.id;
                   runAction(
-                    apiPost(`/runner/control/thread/${hero.id}/snooze`, { hours: 16 }),
+                    apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }),
                     setError,
                     refresh
-                  )
-                }
+                  );
+                  advanceHero(id, "Snoozed — next up");
+                }}
               >
                 Snooze ’til tomorrow
               </Button>
               <Button
                 variant="ghost"
-                onClick={() =>
+                onClick={() => {
+                  const id = hero.id;
                   runAction(
-                    apiPost(`/runner/control/thread/${hero.id}/mark-done`, {}),
+                    apiPost(`/runner/control/thread/${id}/mark-done`, {}),
                     setError,
                     refresh
-                  )
-                }
+                  );
+                  advanceHero(id, "Handled — next up");
+                }}
               >
                 Mark as handled
               </Button>
