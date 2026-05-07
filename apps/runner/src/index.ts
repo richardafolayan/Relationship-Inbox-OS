@@ -20,6 +20,9 @@ import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { createEnrichmentQueue } from "./services/enrichment-queue";
+import { createSelfProfileService } from "./services/self-profile";
+import { createConversationStartersService } from "./services/conversation-starters";
 import {
   AdminResetGuardError,
   resetPlatformInboxGraph,
@@ -108,6 +111,32 @@ type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   }) => Promise<{ updatedThreads: number; parsedMessages: number }>;
 };
 
+// Lock-key helpers used both by control endpoints and the enrichment
+// queue's defer-when-busy logic. Defined here (instead of further down)
+// so the enrichment queue can be constructed alongside scan/send and
+// share the same lock vocabulary.
+function platformLockKey(platform: PlatformName): string {
+  return `${defaultPersonKey}:${platform}`;
+}
+function sendLockKeyFor(platform: PlatformName): string {
+  return `${defaultPersonKey}:${platform}:SEND`;
+}
+function enrichLockKeyFor(): string {
+  return `${defaultPersonKey}:LINKEDIN:ENRICH`;
+}
+function globalResetLockKey(): string {
+  return `${defaultPersonKey}:GLOBAL_RESET`;
+}
+
+// Forward reference: the scan-queue's `onNewPerson` hook needs to call
+// the enrichment queue's `enqueue`, but the enrichment queue is built
+// AFTER scan-queue (it depends on sessionManager + lock vocabulary that
+// exists at this point). Use a settable holder so the wire-up order
+// works without a refactor.
+let enqueueEnrichmentForScan:
+  | ((input: { personId: string; trigger: "first_seen" }) => void)
+  | null = null;
+
 const scanQueue = createScanQueue({
   adapters,
   eventBus,
@@ -117,7 +146,8 @@ const scanQueue = createScanQueue({
   personKey: defaultPersonKey,
   screenshotDir: runnerConfig.screenshotDir,
   domDumpDir: runnerConfig.domDumpDir,
-  auditLog: (input) => auditService.log(input)
+  auditLog: (input) => auditService.log(input),
+  onNewPerson: (input) => enqueueEnrichmentForScan?.(input)
 }) as ScanQueueWithSmokeIngest;
 
 const sendService = createSendService({
@@ -143,13 +173,26 @@ sendQueue.resume();
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 
-function platformLockKey(platform: PlatformName): string {
-  return `${defaultPersonKey}:${platform}`;
-}
-
-function globalResetLockKey(): string {
-  return `${defaultPersonKey}:GLOBAL_RESET`;
-}
+const selfProfileService = createSelfProfileService({ sessionManager, personKey: defaultPersonKey });
+const conversationStartersService = createConversationStartersService({
+  aiService,
+  selfProfile: selfProfileService
+});
+const enrichmentQueue = createEnrichmentQueue({
+  sessionManager,
+  operationMutex,
+  personKey: defaultPersonKey,
+  paceMs: runnerConfig.enrichPaceMs,
+  batchMax: runnerConfig.enrichBatchMax,
+  refreshDays: runnerConfig.enrichRefreshDays,
+  scanLockKey: platformLockKey,
+  sendLockKey: sendLockKeyFor,
+  enrichLockKey: enrichLockKeyFor()
+});
+enqueueEnrichmentForScan = (input) => {
+  void enrichmentQueue.enqueue(input.personId, input.trigger);
+};
+enrichmentQueue.start();
 
 async function withPlatformControlLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(platformLockKey(platform), work);
@@ -1943,14 +1986,29 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/data/people", asyncRoute(async (_req, res) => {
-  const [people, visibleThreadGroups] = await Promise.all([
+  const [people, visibleThreadGroups, enrichments] = await Promise.all([
     prisma.person.findMany({
       orderBy: {
         updatedAt: "desc"
       }
     }),
-    loadVisibleThreadRows()
+    loadVisibleThreadRows(),
+    // Pull only the lightweight fields used in the list view; the full
+    // contact pane fetches via /data/person/:id when a row is selected.
+    prisma.personEnrichment.findMany({
+      select: { personId: true, headline: true, currentRole: true, currentCompany: true, location: true }
+    })
   ]);
+
+  const enrichmentByPerson = new Map<string, { headline: string | null; currentRole: string | null; currentCompany: string | null; location: string | null }>();
+  for (const e of enrichments) {
+    enrichmentByPerson.set(e.personId, {
+      headline: e.headline,
+      currentRole: e.currentRole,
+      currentCompany: e.currentCompany,
+      location: e.location
+    });
+  }
 
   const groupedByPerson = new Map<string, ReturnType<typeof toInboxRow>[]>();
   for (const group of visibleThreadGroups) {
@@ -1978,6 +2036,7 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
       }, "GREEN");
 
       const unresolvedThreadCount = rows.filter((row) => row.identityWarning === "unresolved_id").length;
+      const enrichment = enrichmentByPerson.get(person.id) ?? null;
 
       return {
         id: person.id,
@@ -1988,10 +2047,124 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
         lastInteractionAt: latest,
         risk,
         hasUnresolvedIdentityWarning: unresolvedThreadCount > 0 || undefined,
-        unresolvedThreadCount: unresolvedThreadCount || undefined
+        unresolvedThreadCount: unresolvedThreadCount || undefined,
+        enrichedAt: person.enrichedAt ? person.enrichedAt.toISOString() : null,
+        enrichmentFailedReason: person.enrichmentFailedReason ?? null,
+        headline: enrichment?.headline ?? null,
+        currentRole: enrichment?.currentRole ?? null,
+        currentCompany: enrichment?.currentCompany ?? null,
+        location: enrichment?.location ?? null
       };
     })
   );
+}));
+
+app.get("/data/person/:personId", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  const enrichment = await prisma.personEnrichment.findUnique({ where: { personId } });
+
+  // Generate (or read cached) summary + starters lazily on read. Both
+  // calls are no-ops when the AI client is unconfigured (return null).
+  // We deliberately do NOT await starters by default — they're only
+  // generated when the user clicks "Start a conversation".
+  const summary = enrichment ? await conversationStartersService.getOrGenerateSummary(personId, person.displayName) : null;
+  const starters = req.query.includeStarters === "1" && enrichment
+    ? await conversationStartersService.getOrGenerateStarters(personId, person.displayName)
+    : enrichment?.startersJson
+    ? JSON.parse(enrichment.startersJson)
+    : null;
+
+  res.json({
+    person: {
+      id: person.id,
+      name: person.displayName,
+      platform: person.platform,
+      profileUrl: person.profileUrl,
+      enrichedAt: person.enrichedAt ? person.enrichedAt.toISOString() : null,
+      enrichmentFailedReason: person.enrichmentFailedReason ?? null,
+      tags: person.tagsJson ? JSON.parse(person.tagsJson) : [],
+      notes: person.notes
+    },
+    enrichment: enrichment
+      ? {
+          headline: enrichment.headline,
+          about: enrichment.about,
+          location: enrichment.location,
+          currentCompany: enrichment.currentCompany,
+          currentRole: enrichment.currentRole,
+          mutualCount: enrichment.mutualCount,
+          experience: enrichment.experienceJson ? JSON.parse(enrichment.experienceJson) : [],
+          education: enrichment.educationJson ? JSON.parse(enrichment.educationJson) : [],
+          skills: enrichment.skillsJson ? JSON.parse(enrichment.skillsJson) : [],
+          services: enrichment.servicesJson ? JSON.parse(enrichment.servicesJson) : [],
+          recentPosts: enrichment.recentPostsJson ? JSON.parse(enrichment.recentPostsJson) : [],
+          mutualNames: enrichment.mutualNamesJson ? JSON.parse(enrichment.mutualNamesJson) : []
+        }
+      : null,
+    summary,
+    starters
+  });
+}));
+
+app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const wait = req.query.wait === "1" || req.query.wait === "true";
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  if (!wait) {
+    await enrichmentQueue.enqueue(personId, "manual");
+    res.json({ status: "queued" });
+    return;
+  }
+  const result = await enrichmentQueue.runOnce(personId);
+  if ("ok" in result) {
+    res.json({ status: "ok" });
+    return;
+  }
+  if ("deferred" in result) {
+    await enrichmentQueue.enqueue(personId, "manual");
+    res.json({ status: "deferred", reason: "scan or send is currently active; enqueued" });
+    return;
+  }
+  res.status(502).json({ status: "failed", reason: result.reason });
+}));
+
+app.post("/control/self/enrich", asyncRoute(async (req, res) => {
+  const payload = z.object({ profileUrl: z.string().url() }).parse(req.body);
+  try {
+    const record = await selfProfileService.refresh({ profileUrl: payload.profileUrl });
+    res.json({
+      status: "ok",
+      profileUrl: record.profileUrl,
+      headline: record.headline,
+      currentRole: record.currentRole,
+      currentCompany: record.currentCompany,
+      location: record.location,
+      fetchedAt: record.fetchedAt
+    });
+  } catch (error) {
+    res.status(502).json({
+      status: "failed",
+      reason: error instanceof Error ? error.message : String(error)
+    });
+  }
+}));
+
+app.get("/data/self", asyncRoute(async (_req, res) => {
+  const record = await selfProfileService.load();
+  if (!record) {
+    res.json({ self: null });
+    return;
+  }
+  res.json({ self: record });
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {

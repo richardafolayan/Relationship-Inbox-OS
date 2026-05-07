@@ -42,6 +42,14 @@ enum SendRequestStatus {
   FAILED
 }
 
+enum EnrichmentJobStatus {
+  PENDING
+  RUNNING
+  DONE
+  FAILED
+  DEFERRED
+}
+
 model Platform {
   id          String         @id @default(cuid())
   name        PlatformName   @unique
@@ -62,13 +70,84 @@ model Person {
   profileUrl  String?
   notes       String?
   tagsJson    String?
+  // Set by the enrichment queue when a profile-extraction job completes
+  // successfully. Drives the periodic-refresh selector (re-enrich anything
+  // older than ENRICH_REFRESH_DAYS that has had recent thread activity).
+  enrichedAt              DateTime?
+  // Last failure reason from the enrichment adapter (e.g. "private",
+  // "not_found", "timeout", "auth_required"). Cleared on the next successful
+  // run. Surfaced in the dashboard footer when present.
+  enrichmentFailedReason  String?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
-  threads Thread[]
+  threads     Thread[]
+  enrichment  PersonEnrichment?
+  enrichmentJobs EnrichmentJob[]
 
   @@index([displayName])
   @@map("people")
+}
+
+model PersonEnrichment {
+  id              String   @id @default(cuid())
+  personId        String   @unique
+  // Structured queryable fields. Nullable because LinkedIn profiles vary in
+  // completeness and our parser fails sections soft.
+  headline        String?
+  about           String?
+  location        String?
+  currentCompany  String?
+  currentRole     String?
+  mutualCount     Int?
+  // JSON columns (SQLite stores JSON as String). All optional. Keep a single
+  // JSON blob per list rather than normalised tables: the lists are read as
+  // a unit by the AI prompts and never queried by inner field.
+  experienceJson    String?
+  educationJson     String?
+  skillsJson        String?
+  servicesJson      String?
+  recentPostsJson   String?
+  mutualNamesJson   String?
+  // Cached AI output, regenerated when the cache key (a hash over the
+  // enrichment payload + Richard's self-profile hash) no longer matches.
+  // Including the self-profile hash means a one-off self-refresh
+  // automatically invalidates every dependent summary and starter set.
+  summary           String?
+  summaryCacheKey   String?
+  startersJson      String?
+  startersCacheKey  String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@map("person_enrichments")
+}
+
+model EnrichmentJob {
+  id            String              @id @default(cuid())
+  personId      String
+  status        EnrichmentJobStatus @default(PENDING)
+  attempts      Int                 @default(0)
+  // Earliest time the picker may run this job. Set when a failure schedules
+  // an exponential retry, or when the queue defers because scan/send hold
+  // the browser session.
+  nextAttemptAt DateTime?
+  lastError     String?
+  // Why the job exists, for diagnostics + telemetry. Not used for routing.
+  // "first_seen" — created from scan-queue when a Person row was first
+  //   inserted. "manual" — operator clicked Refresh in the dashboard.
+  //   "periodic" — background tick re-enriching a stale active contact.
+  trigger       String
+  createdAt     DateTime            @default(now())
+  updatedAt     DateTime            @updatedAt
+
+  person Person @relation(fields: [personId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextAttemptAt])
+  @@index([personId])
+  @@map("enrichment_jobs")
 }
 
 model Thread {
