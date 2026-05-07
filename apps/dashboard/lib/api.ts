@@ -95,13 +95,21 @@ export async function apiPost<T>(path: string, body: unknown, init?: RequestInit
 
   if (!response.ok) {
     const parsed = await parseErrorPayload(response);
+    // Runner errors are inconsistent: some endpoints return `{ error }`,
+    // others `{ reason }` (e.g. enrich's `{status:"failed",reason:"..."}`),
+    // and some send back `{ message }`. Prefer the most descriptive shape
+    // before falling back to the raw body so the dashboard never surfaces
+    // a JSON blob to the operator.
+    const payload =
+      typeof parsed.payload === "object" && parsed.payload
+        ? (parsed.payload as Record<string, unknown>)
+        : null;
+    const stringField = (key: string): string | undefined =>
+      payload && typeof payload[key] === "string" ? (payload[key] as string) : undefined;
     const message =
-      (typeof parsed.payload === "object" &&
-      parsed.payload &&
-      "error" in parsed.payload &&
-      typeof (parsed.payload as { error?: unknown }).error === "string"
-        ? (parsed.payload as { error: string }).error
-        : undefined) ??
+      stringField("error") ??
+      stringField("message") ??
+      stringField("reason") ??
       parsed.rawText ??
       `Request failed: ${response.status}`;
     throw new ApiRequestError(message, response.status, parsed.payload, parsed.rawText);

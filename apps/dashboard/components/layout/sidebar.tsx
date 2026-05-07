@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Zap, Inbox, Users, Cable, ListChecks, Settings as SettingsIcon } from "lucide-react";
+import { Zap, Inbox, Users, Cable, ListChecks, Search, Settings as SettingsIcon } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,7 @@ interface SidebarProps {
   health: HealthResponse | null;
   attentionCount: number;
   userInitials: string;
+  onOpenSearch: () => void;
 }
 
 interface NavItem {
@@ -30,9 +31,10 @@ const nav: NavItem[] = [
 
 // 72px icon rail. Tooltips on hover, attention dot on Today when there
 // are overdue/waiting threads, and a tiny health dot + user avatar in the
-// footer. The whole topbar is gone — search lives in ⌘K, headless &
-// auto-scan toggles live in Settings.
-export function Sidebar({ health, attentionCount, userInitials }: SidebarProps) {
+// footer. Search is a discoverable rail icon that opens the ⌘K palette
+// (the redesign removed the topbar; this gives operators a visible
+// affordance instead of a hidden keyboard-only shortcut).
+export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: SidebarProps) {
   const pathname = usePathname();
   const healthy = health?.runnerStatus === "ONLINE";
 
@@ -45,6 +47,22 @@ export function Sidebar({ health, attentionCount, userInitials }: SidebarProps) 
       >
         R
       </Link>
+
+      <button
+        type="button"
+        onClick={onOpenSearch}
+        aria-label="Search (⌘K)"
+        className="group relative mb-2 grid h-11 w-11 place-items-center rounded-[12px] text-ink-3 transition-[color,background-color] duration-calm hover:bg-paper-2 hover:text-ink"
+      >
+        <Search className="h-[18px] w-[18px]" strokeWidth={1.6} />
+        <span
+          className="pointer-events-none absolute left-[calc(100%+12px)] top-1/2 -translate-y-1/2 flex items-center gap-[6px] whitespace-nowrap rounded-lg bg-ink px-[10px] py-[6px] text-[12px] tracking-[-0.01em] text-paper opacity-0 transition-opacity duration-150 group-hover:opacity-100"
+          role="tooltip"
+        >
+          Search
+          <span className="font-mono text-[10px] text-paper/70">⌘K</span>
+        </span>
+      </button>
 
       <nav className="flex w-full flex-col items-center gap-[2px]">
         {nav.map((item) => {
