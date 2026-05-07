@@ -13,11 +13,19 @@ function isTruthy(value: string | undefined): boolean {
 }
 
 export function resolveAutoScanDisabled(input: AutoScanEnvInput): boolean {
-  const isProd = input.nodeEnv === "production";
+  // Order:
+  //   1. Legacy LINKEDIN_DEV_DISABLE_AUTOSCAN — kept for back-compat,
+  //      forces disabled when truthy.
+  //   2. Explicit NEXT_PUBLIC_DISABLE_AUTOSCAN — "0" enables, anything
+  //      truthy disables.
+  //   3. Default: ENABLED. The previous "default-disabled-in-dev" gate
+  //      created friction (operators set =0 then have to restart Next.js
+  //      for the bundled value to update). Auto-scan is harmless when
+  //      OFF in localStorage; let the topbar toggle govern it directly.
+  void input.nodeEnv;
   if (isTruthy(input.legacyDisableAutoScan)) {
     return true;
   }
-
   if (input.disableAutoScan !== undefined) {
     if (input.disableAutoScan.trim() === "0") {
       return false;
@@ -26,11 +34,7 @@ export function resolveAutoScanDisabled(input: AutoScanEnvInput): boolean {
       return true;
     }
   }
-
-  if (isProd) {
-    return false;
-  }
-  return true;
+  return false;
 }
 
 export function resolveAutoScanInitialEnabled(input: {

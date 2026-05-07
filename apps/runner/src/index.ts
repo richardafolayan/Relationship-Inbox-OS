@@ -1,13 +1,14 @@
-import { createReadStream, existsSync } from "node:fs";
+import { createReadStream, existsSync, openSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { spawn } from "node:child_process";
 import express from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformName, SelectorRegistry, ThreadStub } from "@inbox-os/core";
 import { prisma } from "./db";
-import { resolveConnectTimeoutMs, runnerConfig } from "./config";
+import { resolveConnectTimeoutMs, runnerConfig, projectRoot } from "./config";
 import { ensurePathInside } from "./utils/fs";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
@@ -2442,59 +2443,87 @@ app.post("/control/system/clear-db", asyncRoute(async (_req, res) => {
   });
 }));
 
-// Restart the runner process. Triggered from the dashboard topbar so the
-// operator doesn't have to drop into a terminal to bounce the runner
-// (e.g. after editing .env, when Playwright gets stuck, or after a code
-// hot-reload that didn't take). Sends 202 immediately so the dashboard
-// can flip into "restarting…" state, then schedules process.exit(0)
-// after a short delay so the response can flush before the socket dies.
+// Restart the runner process — full self-bootstrap so the operator
+// never needs to drop into a terminal. Spawns a detached shell that:
+//   1. Waits 1s for THIS process to exit (so port 4001 frees up)
+//   2. Rebuilds @inbox-os/core then @inbox-os/runner (catches any
+//      uncommitted source-level changes, matches what `npm run build`
+//      produces on a fresh checkout)
+//   3. Starts a fresh `node apps/runner/dist/index.js`
+// Output is appended to /tmp/runner-restart.log so the operator can
+// `tail -f` it if the relaunch errors out.
 //
-// Restart behaviour depends on how the runner was started:
-//   - dev (`npm run dev:runner` / `npm run dev`): tsx watch supervises
-//     the process and restarts on exit. Auto-recovery in <2s.
-//   - prod (`node dist/index.js`): no supervisor by default. Pair with
-//     systemd / pm2 / launchd / forever to get the same behaviour.
-// The endpoint logs the supervisor-mode hint so the operator knows what
-// to expect.
+// The detached child becomes a session leader (`detached: true`) and
+// we `unref()` it so the parent can exit cleanly without waiting on
+// the helper. Stdio is redirected to a log fd, not the parent — that
+// way nothing the helper writes blocks the parent's exit either.
+//
+// Why a shell wrapper instead of spawning npm directly: chaining
+// build → start needs sequencing, and a shell `&&` chain is the
+// least surprising way to express that. The script also `cd`s to
+// projectRoot so it works no matter what cwd the runner was launched
+// from.
 app.post("/control/system/restart", asyncRoute(async (_req, res) => {
-  const supervisorMode = (() => {
-    // tsx watch sets TSX_WATCH=1 on the spawned child since v4. Best-
-    // effort: if it isn't there, fall back to checking npm_lifecycle_event,
-    // which equals "dev" when started via `npm run dev`.
-    if (process.env.TSX_WATCH === "1") return "tsx_watch";
-    if (process.env.npm_lifecycle_event === "dev") return "tsx_watch_likely";
-    return "no_supervisor";
-  })();
-
   await auditService.log({
     stage: "System",
     action: "RUNNER_RESTART_REQUESTED",
     status: "OK",
     details: {
       requestedBy: "dashboard",
-      supervisorMode,
-      pid: process.pid
+      pid: process.pid,
+      restartLog: "/tmp/runner-restart.log"
     }
   });
 
   res.status(202).json({
     ok: true,
-    supervisorMode,
     message:
-      supervisorMode === "no_supervisor"
-        ? "Runner exit scheduled. Without an external supervisor (tsx watch / pm2 / systemd) the runner will stay down until restarted manually."
-        : "Runner restart scheduled. Supervisor will relaunch the process within a few seconds."
+      "Runner restart scheduled — rebuilding @inbox-os/core + @inbox-os/runner and relaunching. " +
+      "Tail /tmp/runner-restart.log if the dashboard times out waiting."
   });
 
-  // Defer the exit so the response flushes to the dashboard. Drains
-  // pending audit writes via setImmediate so the audit row above lands
-  // on disk before we kill the process.
+  // Defer the exit so the response flushes + the audit row lands on
+  // disk before we kill the process.
   setTimeout(() => {
     setImmediate(() => {
-      // eslint-disable-next-line no-console
-      console.log(
-        `[runner] Restart requested via /control/system/restart — exiting (supervisor=${supervisorMode}, pid=${process.pid})`
-      );
+      try {
+        const restartLogPath = "/tmp/runner-restart.log";
+        // openSync with 'a' creates the file if absent, then appends.
+        // Reuse a single fd for both stdout and stderr so interleaved
+        // output is monotonic in the file.
+        const fd = openSync(restartLogPath, "a");
+        const script = [
+          `echo "=== restart at $(date) (parent pid ${process.pid}) ==="`,
+          // 1s grace so the parent's listen socket actually closes
+          // before the new runner tries to bind 4001.
+          `sleep 1`,
+          // npm build commands need to run from projectRoot regardless
+          // of where the parent was launched.
+          `cd "${projectRoot}"`,
+          `npm run build --workspace @inbox-os/core`,
+          `npm run build --workspace @inbox-os/runner`,
+          `echo "=== launching dist ==="`,
+          `exec node apps/runner/dist/index.js`
+        ].join(" && ");
+
+        const child = spawn("/bin/sh", ["-c", script], {
+          detached: true,
+          stdio: ["ignore", fd, fd],
+          cwd: projectRoot,
+          env: process.env
+        });
+        child.unref();
+
+        // eslint-disable-next-line no-console
+        console.log(
+          `[runner] Restart requested — spawned bootstrap helper pid=${child.pid}, log=${restartLogPath}; exiting pid=${process.pid}`
+        );
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error(
+          `[runner] Failed to spawn restart bootstrap; exiting anyway. ${error instanceof Error ? error.message : String(error)}`
+        );
+      }
       process.exit(0);
     });
   }, 250);
