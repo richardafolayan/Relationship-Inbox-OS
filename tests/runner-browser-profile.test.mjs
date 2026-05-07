@@ -2,8 +2,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { resolveBrowserProfileConfig, resolveConnectTimeoutMs } from "../apps/runner/dist/config.js";
+import { join, resolve } from "node:path";
+// Pull `dataDir` from the same module so the "default mirror root"
+// assertion below uses the runtime-derived path (config.ts walks up from
+// import.meta.url to the project root). Hardcoding "/Users/richard/
+// IdeaProjects/relationship-inbox-os/data/profiles" silently breaks any
+// time the suite runs from a git worktree, a CI checkout under a
+// different parent, or a contributor's machine.
+import {
+  resolveBrowserProfileConfig,
+  resolveConnectTimeoutMs,
+  dataDir
+} from "../apps/runner/dist/config.js";
 import { launchPersistentContextForPlatform } from "../apps/runner/dist/platforms/browser-launch.js";
 import { preparePersonalProfileMirror } from "../apps/runner/dist/platforms/personal-profile-mirror.js";
 
@@ -34,7 +44,10 @@ test("resolveBrowserProfileConfig defaults to isolated mode and Person 1 profile
   assert.equal(config.mode, "isolated");
   assert.equal(config.fallbackBehavior, "allow_isolated");
   assert.equal(config.personalProfileSyncMode, "smart");
-  assert.equal(config.personalProfileMirrorRoot, "/Users/richard/IdeaProjects/relationship-inbox-os/data/profiles");
+  // Computed the same way config.ts does (resolve(dataDir, "profiles"))
+  // so the assertion holds inside worktrees / CI / other dev machines,
+  // not just the maintainer's exact path.
+  assert.equal(config.personalProfileMirrorRoot, resolve(dataDir, "profiles"));
   assert.equal(config.personalChromeUserDataDir, "/tmp/chrome-user-data-default");
   assert.equal(config.personalChromeProfileDirectory, "Person 1");
   assert.equal(config.personalChromeProfileName, "Richard Afolayan");
