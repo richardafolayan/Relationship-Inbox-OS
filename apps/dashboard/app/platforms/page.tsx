@@ -7,7 +7,7 @@ import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
-import { Canvas, PageHead, QuietRow } from "@/components/common/canvas";
+import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
@@ -91,39 +91,51 @@ export default function PlatformsPage() {
       {rows
         .filter((row) => VISIBLE_PLATFORMS.includes(row.platform))
         .map((row) => {
-        const dot =
+        const statusClass =
           row.status === "CONNECTED"
-            ? "bg-risk-fresh"
+            ? "bg-risk-fresh/15 text-risk-fresh"
             : row.status === "DEGRADED"
-              ? "bg-risk-waiting"
+              ? "bg-risk-waiting/15 text-risk-waiting"
               : row.status === "ERROR"
-                ? "bg-risk-overdue"
-                : "bg-ink-4";
+                ? "bg-risk-overdue/15 text-risk-overdue"
+                : "bg-paper-2 text-ink-3";
         const label =
           row.status === "CONNECTED"
-            ? "connected"
+            ? "Connected"
             : row.status === "DEGRADED"
-              ? "needs a look"
+              ? "Needs a look"
               : row.status === "ERROR"
-                ? "error"
-                : "not connected";
+                ? "Error"
+                : "Not connected";
+        const report = row.latestSelectorReport;
+        const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
+        const total = report?.results.length ?? 0;
         return (
-          <QuietRow
+          <details
             key={row.platform}
-            name={PLATFORM_DISPLAY[row.platform]}
-            stat={
-              row.lastScanAt
-                ? `last scan ${formatRelative(row.lastScanAt)}`
-                : row.lastError ?? "sign in to enable"
-            }
-            status={
-              <span className="inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.04em] text-ink-2">
-                <span className={`h-[6px] w-[6px] rounded-full ${dot}`} />
-                {label}
-              </span>
-            }
-            action={
-              <div className="flex items-center gap-2">
+            className="group border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
+          >
+            <summary className="grid cursor-pointer list-none grid-cols-[1fr_auto_auto] items-center gap-6">
+              <div>
+                <div className="flex items-center gap-3">
+                  <p className="m-0 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">
+                    {PLATFORM_DISPLAY[row.platform]}
+                  </p>
+                  <span
+                    className={`inline-flex items-center rounded-[6px] px-[8px] py-[2px] text-[11px] font-medium uppercase tracking-[0.04em] ${statusClass}`}
+                  >
+                    {label}
+                  </span>
+                </div>
+                <p className="mt-1 font-mono text-[12px] text-ink-3">
+                  {row.lastScanAt ? `last scan ${formatRelative(row.lastScanAt)}` : row.lastError ?? "sign in to enable"}
+                  {report ? ` · selectors ${passes}/${total} passing` : ""}
+                </p>
+              </div>
+              <div className="flex items-center gap-1 text-[12px] text-ink-3 group-open:text-ink">
+                <span className="hover:text-ink">Profile details ▾</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.preventDefault()}>
                 <Button
                   variant="quiet"
                   onClick={() =>
@@ -140,6 +152,20 @@ export default function PlatformsPage() {
                 >
                   {row.status === "CONNECTED" ? "Open browser" : "Connect"}
                 </Button>
+                {row.status === "CONNECTED" ? (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      runAction(
+                        apiPost("/runner/control/platform/connect", { platform: row.platform }),
+                        setActionError,
+                        refresh
+                      )
+                    }
+                  >
+                    Reconnect
+                  </Button>
+                ) : null}
                 <Button
                   variant="ghost"
                   onClick={() =>
@@ -157,9 +183,75 @@ export default function PlatformsPage() {
                 >
                   Scan now
                 </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    runAction(
+                      apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
+                      setActionError,
+                      refresh
+                    )
+                  }
+                >
+                  Run selector tests
+                </Button>
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    if (!window.confirm(`Reset the ${PLATFORM_DISPLAY[row.platform]} session? You'll need to sign in again.`)) {
+                      return;
+                    }
+                    runAction(
+                      apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
+                      setActionError,
+                      refresh
+                    );
+                  }}
+                >
+                  Reset session
+                </Button>
               </div>
-            }
-          />
+            </summary>
+
+            <div className="mt-4 grid grid-cols-2 gap-x-8 gap-y-1 font-mono text-[12px] text-ink-2">
+              <p className="m-0">profile dir <span className="text-ink-3">·</span> <span className="text-ink-3">{row.profileDir}</span></p>
+              {row.browserProfileMode ? (
+                <p className="m-0">browser mode <span className="text-ink-3">·</span> <span className="text-ink-3">{row.browserProfileMode}</span></p>
+              ) : null}
+              {row.browserProfileName ? (
+                <p className="m-0">profile <span className="text-ink-3">·</span> <span className="text-ink-3">{row.browserProfileName}</span></p>
+              ) : null}
+              {row.connectedAt ? (
+                <p className="m-0">connected <span className="text-ink-3">·</span> <span className="text-ink-3">{formatRelative(row.connectedAt)}</span></p>
+              ) : null}
+            </div>
+
+            {report ? (
+              <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/50 p-4">
+                <p className="m-0 mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                  Latest selector report · {formatRelative(report.completedAt)}
+                </p>
+                <ul className="m-0 space-y-1 text-[12px]">
+                  {report.results.map((r) => (
+                    <li key={r.key} className="flex items-center gap-2">
+                      <span
+                        className={`h-[6px] w-[6px] rounded-full ${
+                          r.status === "PASS" ? "bg-risk-fresh" : "bg-risk-overdue"
+                        }`}
+                      />
+                      <span className="text-ink-2">{r.key}</span>
+                      <span className="text-ink-3">·</span>
+                      <span className="text-ink-3">{r.count} hits</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : (
+              <p className="mt-4 font-mono text-[12px] text-ink-3">
+                No selector report yet. Run selector tests to generate one.
+              </p>
+            )}
+          </details>
         );
       })}
 
