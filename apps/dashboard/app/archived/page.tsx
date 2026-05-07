@@ -40,6 +40,7 @@ export default function ArchivedPage() {
       <PageHead
         eyebrow="Handled"
         title="Archived"
+        subtitle="Conversations you’ve marked done. Unarchive to bring one back into the queue."
         meta={rows && rows.length > 0 ? <span>{rows.length} threads</span> : null}
       />
 

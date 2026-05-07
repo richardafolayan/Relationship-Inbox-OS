@@ -194,6 +194,7 @@ export default function TodayPage() {
       <PageHead
         eyebrow={dayLabel}
         title={`${greeting}, Richard`}
+        subtitle="One thing at a time. Reply, snooze, or handle — and Today moves on to the next."
         meta={
           <>
             <span className="text-ink">{overdueCount}</span> overdue ·{" "}
