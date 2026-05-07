@@ -8,6 +8,27 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
+// Render an audit-log action key as something an operator can scan.
+// Action keys come from the runner as raw enums (e.g.
+// `POST_PERSON_:PERSONID_PROFILE_URL_END`, `CONNECT_BROWSER_LAUNCH_OK`,
+// `SCAN_END`). Without this they read like internal tokens.
+function prettyAction(action: string): string {
+  // Drop the `POST_` / `GET_` HTTP-method prefix on control-route audits.
+  let label = action.replace(/^(POST|GET|PUT|DELETE|PATCH)_/, "");
+  // Strip the parameter-placeholder tokens the runner inserts to keep
+  // the action constant across IDs. `:personId` survives the audit
+  // build's non-alphanumeric scrub as a bare uppercase `PERSONID` token,
+  // so we drop those known names directly.
+  label = label.replace(/_(PERSONID|THREADID|JOBID|REQUESTID)(?=_|$)/g, "");
+  // Title-case each underscore-segment so the result looks like
+  // "Person Profile Url End" instead of "PERSON_PROFILE_URL_END".
+  return label
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0) + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -58,7 +79,9 @@ export default function LogsPage() {
               <span className="text-slate-700">{new Date(log.timestamp).toLocaleString("en-GB")}</span>
               <span className="text-slate-600">{log.platform ?? "-"}</span>
               <span className="text-slate-600">{log.stage ?? "-"}</span>
-              <span className="font-medium text-slate-800">{log.action}</span>
+              <span className="font-medium text-slate-800" title={log.action}>
+                {prettyAction(log.action)}
+              </span>
               <span>
                 <Badge tone={log.status === "OK" ? "green" : "red"}>{log.status}</Badge>
               </span>
