@@ -227,6 +227,12 @@ model Message {
   senderName         String?
   rawJson            String?
   attachmentsJson    String?
+  // Provenance for OUT messages. "automation" when send.ts (this runner)
+  // wrote it. Null on inbound messages and on OUT messages that were only
+  // observed via scan — those could have been sent from the LinkedIn web
+  // UI directly, from another device, or from a previous version of this
+  // system, so we cannot honestly claim "Sent via automation" for them.
+  sentVia            String?
   createdAt          DateTime  @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
