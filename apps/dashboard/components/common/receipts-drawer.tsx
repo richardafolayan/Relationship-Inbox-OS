@@ -61,12 +61,12 @@ export function ReceiptsDrawer({ open, title = "Receipts", rows, onClose }: Rece
               ) : null}
               <div className="flex gap-3 text-xs">
                 {row.screenshotFile ? (
-                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${row.screenshotFile}`} target="_blank">
+                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${row.screenshotFile}`} target="_blank" rel="noopener noreferrer">
                     Screenshot
                   </a>
                 ) : null}
                 {row.domDumpFile ? (
-                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/dom_dumps/${row.domDumpFile}`} target="_blank">
+                  <a className="font-medium text-blue-700 hover:underline" href={`/artifacts/dom_dumps/${row.domDumpFile}`} target="_blank" rel="noopener noreferrer">
                     DOM dump
                   </a>
                 ) : null}
