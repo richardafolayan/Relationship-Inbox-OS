@@ -124,6 +124,9 @@ export default function ThreadPage() {
     null | { loading: boolean; items: Array<{ label: string; hours: number; reason: string }> }
   >(null);
   const [snoozeMenuOpen, setSnoozeMenuOpen] = useState(false);
+  // Inspectable popover for the memory chip — opens a quick list of
+  // the other threads/notes the AI prompts can pull from.
+  const [memoryOpen, setMemoryOpen] = useState(false);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
@@ -1009,6 +1012,59 @@ export default function ThreadPage() {
           <div className="mx-auto w-full max-w-[820px] px-12 pb-5 pt-4">
             {error ? (
               <p className="mb-2 font-mono text-[11px] text-risk-overdue">{error}</p>
+            ) : null}
+            {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
+              <div data-testid="memory-chip" className="relative mb-2">
+                <button
+                  type="button"
+                  onClick={() => setMemoryOpen((prev) => !prev)}
+                  className="inline-flex items-center gap-2 rounded-full border border-hairline bg-paper-2 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 hover:bg-paper"
+                  aria-expanded={memoryOpen}
+                >
+                  <Sparkles className="h-[11px] w-[11px]" />
+                  Memory · {thread.relationshipMemory.otherThreadCount} prior conversation
+                  {thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}
+                  {thread.relationshipMemory.tags.length > 0
+                    ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}`
+                    : ""}
+                </button>
+                {memoryOpen ? (
+                  <div className="absolute bottom-full left-0 mb-2 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
+                    <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                      What the AI can lean on
+                    </div>
+                    {thread.relationshipMemory.tags.length > 0 ? (
+                      <div className="mb-2 flex flex-wrap gap-1">
+                        {thread.relationshipMemory.tags.map((tag) => (
+                          <span
+                            key={tag}
+                            className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
+                          >
+                            {tag}
+                          </span>
+                        ))}
+                      </div>
+                    ) : null}
+                    {thread.relationshipMemory.notes ? (
+                      <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
+                    ) : null}
+                    <ul className="space-y-1">
+                      {thread.relationshipMemory.recentExchanges.map((ex) => (
+                        <li key={ex.threadId} className="text-ink-2">
+                          <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
+                            {ex.platform.toLowerCase()}
+                            {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
+                          </span>
+                          <br />
+                          <span className="text-ink-2">
+                            {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                ) : null}
+              </div>
             ) : null}
             <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
               {composerSource === "predraft" ? (
