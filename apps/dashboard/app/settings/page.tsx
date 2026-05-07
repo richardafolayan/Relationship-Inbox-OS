@@ -8,6 +8,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 
 const platforms = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
+const aiProviders = ["openai", "glm"] as const;
+const aiProviderLabels: Record<(typeof aiProviders)[number], string> = {
+  openai: "OpenAI",
+  glm: "GLM (Z.AI)"
+};
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -141,6 +146,41 @@ export default function SettingsPage() {
           </div>
         </div>
 
+        <div>
+          <p className="mb-2 text-sm font-medium">AI provider</p>
+          <div className="flex flex-wrap gap-2">
+            {aiProviders.map((provider) => {
+              const active = (settings.aiProvider ?? "openai") === provider;
+              return (
+                <Button
+                  key={provider}
+                  variant={active ? "primary" : "secondary"}
+                  onClick={() => setSettings({ ...settings, aiProvider: provider })}
+                >
+                  {aiProviderLabels[provider]}
+                </Button>
+              );
+            })}
+          </div>
+          <p className="mt-1 text-xs text-slate-500">
+            Active provider for summaries, suggested replies, and the outreach/genuine classifier. The runner default is seeded by AI_PROVIDER in .env; this overrides it without a restart.
+          </p>
+          {(settings.aiProvider ?? "openai") === "glm" ? (
+            <div className="mt-3">
+              <label className="mb-1 block text-sm font-medium">GLM model (optional)</label>
+              <Input
+                type="text"
+                placeholder="glm-4.7-flash"
+                value={settings.glmModel ?? ""}
+                onChange={(event) => setSettings({ ...settings, glmModel: event.target.value })}
+              />
+              <p className="mt-1 text-xs text-slate-500">
+                Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.
+              </p>
+            </div>
+          ) : null}
+        </div>
+
         <details className="group rounded-lg border border-slate-200 bg-slate-50 p-3">
           <summary className="cursor-pointer text-sm font-medium text-slate-700 marker:text-slate-400">
             Advanced
@@ -185,7 +225,11 @@ export default function SettingsPage() {
               maxMessagesPerThread: settings.maxMessagesPerThread,
               enabledPlatforms: settings.enabledPlatforms,
               demoMode: settings.demoMode,
-              recentThreadSweepCount: settings.recentThreadSweepCount
+              recentThreadSweepCount: settings.recentThreadSweepCount,
+              aiProvider: settings.aiProvider,
+              // Send empty string as undefined so the runner falls back to
+              // the env default rather than persisting "" as a model id.
+              glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined
             })
           }
         >
