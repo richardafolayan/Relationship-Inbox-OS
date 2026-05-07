@@ -21,12 +21,6 @@ interface ArchivedResponse {
   rows: InboxRow[];
 }
 
-function riskTone(level: string): "green" | "amber" | "red" {
-  if (level === "RED") return "red";
-  if (level === "AMBER") return "amber";
-  return "green";
-}
-
 export default function ArchivedPage() {
   const router = useRouter();
   const [rows, setRows] = useState<InboxRow[] | null>(null);
@@ -130,9 +124,6 @@ export default function ArchivedPage() {
           ) : null}
         </div>
       </div>
-      {/* Suppress "riskTone unused" warning when the badge isn't rendered;
-          left in scope so future row-status work can wire it back in. */}
-      <span className="hidden">{riskTone("GREEN")}</span>
     </div>
   );
 }

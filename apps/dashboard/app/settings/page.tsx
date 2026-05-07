@@ -243,7 +243,7 @@ export default function SettingsPage() {
                 <p className="mt-1 text-amber-900/80">
                   Every AI call will fall back to the canned default reply until you set{" "}
                   <code>{aiStatus.activeProvider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"}</code>{" "}
-                  in <code>.env</code> and click <strong>Restart runner</strong> in the topbar.
+                  in <code>.env</code>, then restart the runner so it picks up the new key.
                 </p>
               </div>
             </div>
