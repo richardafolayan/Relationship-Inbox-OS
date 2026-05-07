@@ -32,7 +32,9 @@ if (envPath) loadDotenv({ path: envPath });
 console.log(`[smoke] loaded env from ${envPath}`);
 
 const { createAiService } = await import("../services/ai");
-type AppSettings = import("../types/runtime").AppSettings;
+// `AppSettings` lives in @inbox-os/core (it's the public type); `runtime.ts`
+// imports it for internal use but doesn't re-export, so TS2694'd here.
+type AppSettings = import("@inbox-os/core").AppSettings;
 type SettingsStore = import("../types/runtime").SettingsStore;
 
 // Stub settings store so we don't need a DB. createAiService only reads
