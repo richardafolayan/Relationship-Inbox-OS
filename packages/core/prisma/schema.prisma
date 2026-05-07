@@ -169,6 +169,11 @@ model Thread {
   rollingSummary    String?
   whatTheyWant      String?
   openLoopsJson     String?
+  // List of open-loop strings the operator has dismissed via the thread-pane
+  // checkbox. Filtered out of the visible openLoops surface in the dashboard
+  // so re-summarisation can still recompute openLoopsJson without re-showing
+  // loops the operator has already handled.
+  dismissedOpenLoopsJson String?
   toneNotesJson     String?
   // Set the first time we walk the thread's message list to the top and
   // persist every historical message. Subsequent scans only fetch the delta

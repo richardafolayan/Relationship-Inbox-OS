@@ -416,6 +416,38 @@ export default function ThreadPage() {
     }
   };
 
+  const toggleOpenLoop = async (loop: string, dismissed: boolean) => {
+    if (!thread) return;
+    // Optimistic local update so the checkbox flips immediately. The
+    // refresh that follows will reconcile against the runner.
+    setThread((current) => {
+      if (!current || current.id !== thread.id) return current;
+      const dismissedSet = new Set(current.dismissedOpenLoops);
+      const activeSet = new Set(current.openLoops);
+      if (dismissed) {
+        dismissedSet.add(loop);
+        activeSet.delete(loop);
+      } else {
+        dismissedSet.delete(loop);
+        activeSet.add(loop);
+      }
+      return {
+        ...current,
+        openLoops: Array.from(activeSet),
+        dismissedOpenLoops: Array.from(dismissedSet)
+      };
+    });
+    try {
+      await apiPost(`/runner/control/thread/${thread.id}/open-loop`, { loop, dismissed });
+    } catch (loopError) {
+      // Roll back via a fresh refresh; surfacing the error inline is
+      // enough — the operator sees the box flip back.
+      const message = loopError instanceof Error ? loopError.message : "Failed to update open loop";
+      setError(message);
+      void refresh();
+    }
+  };
+
   const reassessThread = async () => {
     if (!thread || reassessing) return;
     setReassessing(true);
@@ -758,15 +790,37 @@ export default function ThreadPage() {
             <p className="mt-2 text-sm text-slate-700">{thread.whatTheyWant || "No clear ask yet."}</p>
           </Card>
 
-          {/* Open loops only when there are any — empty card was just
-              noise on threads where no loops were detected. */}
-          {thread.openLoops.length ? (
+          {/* Open loops only when there are any (active OR dismissed) —
+              empty card was just noise on threads where no loops were
+              detected. Active loops render unchecked; dismissed loops
+              render below in a muted state with the box pre-checked, so
+              the operator can untick to bring them back. */}
+          {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
             <Card className="bg-slate-50">
               <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Open loops</h3>
               <div className="mt-2 space-y-2">
                 {thread.openLoops.map((item) => (
-                  <label key={item} className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" className="rounded" />
+                  <label key={`open:${item}`} className="flex items-center gap-2 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      className="rounded"
+                      checked={false}
+                      onChange={() => void toggleOpenLoop(item, true)}
+                    />
+                    {item}
+                  </label>
+                ))}
+                {thread.dismissedOpenLoops.map((item) => (
+                  <label
+                    key={`dismissed:${item}`}
+                    className="flex items-center gap-2 text-sm text-slate-400 line-through"
+                  >
+                    <input
+                      type="checkbox"
+                      className="rounded"
+                      checked={true}
+                      onChange={() => void toggleOpenLoop(item, false)}
+                    />
                     {item}
                   </label>
                 ))}

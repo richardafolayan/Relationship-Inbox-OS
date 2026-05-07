@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import { formatRelative } from "@/lib/time";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
@@ -27,6 +27,13 @@ export default function PeoplePage() {
   const [startersLoading, setStartersLoading] = useState(false);
   const [showStarters, setShowStarters] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Local draft so the textarea is fully controlled. The Notes column on
+  // people lives off the API, but keystrokes go to local state and we
+  // debounce a PATCH-equivalent POST to /runner/control/person/:id/notes.
+  const [notesDraft, setNotesDraft] = useState<string>("");
+  const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedNotesAtRef = useRef<number>(0);
 
   async function loadList(): Promise<PeopleRow[]> {
     const data = await apiGet<PeopleRow[]>("/runner/data/people");
@@ -62,6 +69,44 @@ export default function PeoplePage() {
   }, [selectedId]);
 
   const selected = useMemo(() => people.find((person) => person.id === selectedId) ?? null, [people, selectedId]);
+
+  // Whenever the selected person changes, hydrate the notes draft from the
+  // server-side value. Cancel any in-flight debounce so we don't write the
+  // previous person's notes onto the new one.
+  useEffect(() => {
+    if (notesSaveTimer.current) {
+      clearTimeout(notesSaveTimer.current);
+      notesSaveTimer.current = null;
+    }
+    setNotesDraft(selected?.notes ?? "");
+    setNotesStatus("idle");
+  }, [selectedId, selected?.notes]);
+
+  // Tear down the timer if the page unmounts mid-debounce.
+  useEffect(() => () => {
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+  }, []);
+
+  function onNotesChange(value: string): void {
+    setNotesDraft(value);
+    setNotesStatus("saving");
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+    const personId = selectedId;
+    if (!personId) return;
+    notesSaveTimer.current = setTimeout(async () => {
+      try {
+        await apiPost(`/runner/control/person/${personId}/notes`, { notes: value });
+        savedNotesAtRef.current = Date.now();
+        setNotesStatus("saved");
+        // Refresh the people list so the next selectedId switch sees the
+        // updated notes value (selected.notes is sourced from people, not
+        // detail).
+        void loadList();
+      } catch {
+        setNotesStatus("error");
+      }
+    }, 600);
+  }
 
   function refreshEnrichment(): void {
     if (!selectedId) return;
@@ -257,8 +302,24 @@ export default function PeoplePage() {
               </Card>
 
               <Card className="bg-slate-50">
-                <h4 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Notes</h4>
-                <Textarea rows={6} defaultValue={selected.notes ?? ""} placeholder="Internal relationship notes..." />
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Notes</h4>
+                  <span className="text-xs text-slate-500" aria-live="polite">
+                    {notesStatus === "saving"
+                      ? "Saving…"
+                      : notesStatus === "saved"
+                        ? "Saved"
+                        : notesStatus === "error"
+                          ? <span className="text-rose-600">Failed to save</span>
+                          : ""}
+                  </span>
+                </div>
+                <Textarea
+                  rows={6}
+                  value={notesDraft}
+                  onChange={(event) => onNotesChange(event.target.value)}
+                  placeholder="Internal relationship notes..."
+                />
               </Card>
 
               <p className="text-xs text-slate-500">
@@ -270,10 +331,6 @@ export default function PeoplePage() {
                   <>Not enriched yet</>
                 )}
               </p>
-
-              <button className="rounded-lg border border-slate-300 px-3 py-2 text-sm font-medium text-slate-700 hover:bg-slate-100">
-                Manual merge duplicates
-              </button>
             </>
           ) : (
             <p className="text-sm text-slate-500">No people yet.</p>

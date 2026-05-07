@@ -197,6 +197,7 @@ export interface ThreadResponse {
   summary?: string;
   whatTheyWant?: string;
   openLoops: string[];
+  dismissedOpenLoops: string[];
   toneNotes: string[];
   draft: string;
   contextUpdatedAt: string;
