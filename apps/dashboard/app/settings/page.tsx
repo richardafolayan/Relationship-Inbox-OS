@@ -185,7 +185,11 @@ export default function SettingsPage() {
   if (!settings) {
     return (
       <Canvas>
-        <PageHead eyebrow="Preferences" title="Settings" />
+        <PageHead
+          eyebrow="Preferences"
+          title="Settings"
+          subtitle="Configure scan cadence, SLAs, and runtime behaviour for the local runner."
+        />
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
       </Canvas>
     );
@@ -196,6 +200,7 @@ export default function SettingsPage() {
       <PageHead
         eyebrow="Preferences"
         title="Settings"
+        subtitle="Configure scan cadence, SLAs, and runtime behaviour for the local runner."
         meta={
           savedAt && Date.now() - savedAt < 4000 ? (
             <span className="text-ink">saved</span>

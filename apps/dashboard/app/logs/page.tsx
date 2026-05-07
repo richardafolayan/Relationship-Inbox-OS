@@ -32,6 +32,7 @@ export default function LogsPage() {
       <PageHead
         eyebrow="Receipts"
         title="Activity"
+        subtitle="Every scan, send, and selector check the runner has performed. Useful for debugging."
         meta={
           <button
             type="button"
