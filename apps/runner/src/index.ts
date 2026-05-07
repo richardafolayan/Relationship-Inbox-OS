@@ -2797,6 +2797,43 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   res.json({ status: "ok" });
 }));
 
+app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: {
+      whatTheyWant: true,
+      rollingSummary: true,
+      lastInboundAt: true,
+      lastInboundHash: true,
+      person: { select: { displayName: true } },
+      messages: {
+        where: { direction: "IN" },
+        orderBy: { timestamp: "desc" },
+        take: 1,
+        select: { text: true, timestamp: true }
+      }
+    }
+  });
+
+  if (!thread) {
+    res.status(404).json({ error: "thread_not_found" });
+    return;
+  }
+
+  const lastInbound = thread.messages[0];
+  const result = await aiService.suggestSnoozeTimings({
+    displayName: thread.person.displayName,
+    lastInboundText: lastInbound?.text ?? "",
+    lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
+    summary: thread.rollingSummary,
+    whatTheyWant: thread.whatTheyWant
+  });
+
+  res.json(result);
+}));
+
 app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ hours: z.number().int().min(1).max(72) }).parse(req.body);
