@@ -12,6 +12,7 @@ import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 
 // Thread workspace — landscape layout.
 //
@@ -127,6 +128,9 @@ export default function ThreadPage() {
   // Inspectable popover for the memory chip — opens a quick list of
   // the other threads/notes the AI prompts can pull from.
   const [memoryOpen, setMemoryOpen] = useState(false);
+  // Voice-match: rebuilt only when the thread's outbound history
+  // changes. Score is debounced against the composer text below.
+  const [voiceRewritePending, setVoiceRewritePending] = useState(false);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
@@ -540,6 +544,20 @@ export default function ThreadPage() {
       thread.receipts.find((row) => row.domDumpFile)?.domDumpFile
     );
   }, [logs, thread]);
+
+  // Voice match — built from this thread's outbound history. Memos
+  // live up here (before early returns) so the React hook order is
+  // stable across the loading/loaded transition.
+  const voiceCorpus = useMemo(() => {
+    if (!thread) return buildCorpusStats([]);
+    return buildCorpusStats(
+      thread.messages.filter((m) => m.direction === "OUT").map((m) => m.text)
+    );
+  }, [thread]);
+  const voiceScore = useMemo(
+    () => scoreDraftAgainstCorpus(composer, voiceCorpus),
+    [composer, voiceCorpus]
+  );
 
   // Pagination is now driven by the runner: `thread.messages` is whatever
   // the latest fetch returned (initial slice or initial + lazily-pulled
@@ -1107,6 +1125,63 @@ export default function ThreadPage() {
                 rows={3}
                 className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.55] text-ink outline-none placeholder:text-ink-4"
               />
+              {composer.trim().length >= 20 && voiceCorpus.sampleCount >= 2 ? (
+                <div
+                  data-testid="voice-meter"
+                  className="mt-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em]"
+                  title={voiceScore.signals[0]?.signal}
+                >
+                  <span
+                    className={`inline-block h-[6px] w-[6px] rounded-full ${
+                      voiceScore.band === "green"
+                        ? "bg-risk-fresh"
+                        : voiceScore.band === "amber"
+                          ? "bg-risk-waiting"
+                          : "bg-risk-overdue"
+                    }`}
+                  />
+                  <span
+                    className={
+                      voiceScore.band === "red"
+                        ? "text-risk-overdue"
+                        : voiceScore.band === "amber"
+                          ? "text-risk-waiting"
+                          : "text-ink-3"
+                    }
+                  >
+                    Voice match {voiceScore.score}/100
+                  </span>
+                  {voiceScore.signals[0] ? (
+                    <span className="normal-case tracking-normal text-ink-3">
+                      · {voiceScore.signals[0].signal.toLowerCase()}
+                    </span>
+                  ) : null}
+                  {voiceScore.band !== "green" ? (
+                    <button
+                      type="button"
+                      disabled={voiceRewritePending}
+                      onClick={() => {
+                        setVoiceRewritePending(true);
+                        apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/voice-rewrite`, {
+                          draft: composer
+                        })
+                          .then((r) => {
+                            if (r.text) setComposer(r.text);
+                          })
+                          .catch((rewriteErr: unknown) => {
+                            const message =
+                              rewriteErr instanceof Error ? rewriteErr.message : "Rewrite failed";
+                            setError(message);
+                          })
+                          .finally(() => setVoiceRewritePending(false));
+                      }}
+                      className="ml-1 underline-offset-2 hover:underline disabled:opacity-50"
+                    >
+                      {voiceRewritePending ? "rewriting…" : "rewrite in my voice"}
+                    </button>
+                  ) : null}
+                </div>
+              ) : null}
               <div className="mt-[12px] flex flex-wrap items-center gap-3 border-t border-hairline pt-[12px]">
                 {/* Suggested-replies dropdown. Replaces the row of chips that
                     used to wrap onto multiple lines on narrower viewports;

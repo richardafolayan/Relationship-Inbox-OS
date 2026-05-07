@@ -2808,6 +2808,47 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   res.json({ status: "queued", cacheKey });
 }));
 
+/**
+ * Rewrite a draft in the operator's voice without an explicit intent.
+ * Used by the composer's voice-match indicator: when the local
+ * heuristic flags a draft as low-voice, this endpoint converts the
+ * existing text in place using composeInVoice + the thread's outbound
+ * history. Returned text is voice-rule-cleaned.
+ */
+app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ draft: z.string().min(1).max(5000) }).parse(req.body);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: {
+      person: true,
+      messages: { orderBy: { timestamp: "asc" }, take: 80 }
+    }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+
+  const voiceSamples = thread.messages
+    .filter((m) => m.direction === "OUT")
+    .map((m) => m.text);
+
+  const text = await aiService.composeInVoice({
+    intent: `Rewrite the message below in my voice, preserving the meaning. Keep it about the same length. Message: ${payload.draft}`,
+    displayName: thread.person.displayName,
+    voiceSamples,
+    threadMessages: thread.messages.map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    }))
+  });
+
+  res.json({ text });
+}));
+
 app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
