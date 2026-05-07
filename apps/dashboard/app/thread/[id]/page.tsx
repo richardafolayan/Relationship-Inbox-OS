@@ -43,12 +43,10 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
   { intent: "Ask for time", glyph: "⏱", build: (n) => `Hey ${n}, can I get back to you next week?` }
 ];
 
-// Most threads are 5–20 messages. Render the last ~15 by default so a
-// freshly-opened conversation is light, and reveal older history only
-// when the operator scrolls up. Crossing SCROLL_TOP_THRESHOLD pulls in
-// another PAGE_SIZE chunk.
-const INITIAL_VISIBLE = 15;
-const PAGE_SIZE = 20;
+// The runner paginates messages server-side and exposes `messagePage`
+// on every ThreadResponse. We only own the scroll-position thresholds:
+// crossing the top threshold triggers `loadOlderMessages`, and staying
+// near the bottom keeps the auto-scroll-on-new-message glue active.
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
 
@@ -62,6 +60,7 @@ export default function ThreadPage() {
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [reassessing, setReassessing] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
@@ -71,7 +70,6 @@ export default function ThreadPage() {
   const [composeError, setComposeError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
 
@@ -147,6 +145,8 @@ export default function ThreadPage() {
               : p
           )
         );
+      } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
+        void refresh();
       }
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
@@ -278,6 +278,49 @@ export default function ThreadPage() {
     setTimeout(() => void onSend(), 0);
   };
 
+  // Server-paginated older-message fetch. Pairs with the runner's
+  // `messagePage` field (added in #3): the runner now sends a recent
+  // slice and the dashboard requests older pages with `?beforeMessageId`
+  // when the operator scrolls near the top of the timeline.
+  const loadOlderMessages = async () => {
+    if (!thread?.messagePage.hasOlder || !thread.messagePage.olderCursor || loadingOlderMessages) {
+      return;
+    }
+    setLoadingOlderMessages(true);
+    try {
+      const olderPage = await apiGet<ThreadResponse>(
+        `/runner/data/thread/${thread.id}?beforeMessageId=${encodeURIComponent(thread.messagePage.olderCursor)}&messagesLimit=${thread.messagePage.limit}`
+      );
+      setThread((current) => {
+        if (!current || current.id !== olderPage.id) {
+          return olderPage;
+        }
+        const existingIds = new Set(current.messages.map((message) => message.id));
+        const olderMessages = olderPage.messages.filter((message) => !existingIds.has(message.id));
+        return {
+          ...current,
+          messages: [...olderMessages, ...current.messages],
+          messagePage: olderPage.messagePage,
+          receipts: olderPage.receipts,
+          suggestedReplies:
+            olderPage.suggestedRepliesStatus === "ready"
+              ? olderPage.suggestedReplies
+              : current.suggestedReplies,
+          suggestedRepliesStatus:
+            olderPage.suggestedRepliesStatus === "ready"
+              ? "ready"
+              : current.suggestedRepliesStatus
+        };
+      });
+      setError(null);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Failed to load older messages";
+      setError(message);
+    } finally {
+      setLoadingOlderMessages(false);
+    }
+  };
+
   const reassessThread = async () => {
     if (!thread || reassessing) return;
     setReassessing(true);
@@ -350,16 +393,16 @@ export default function ThreadPage() {
     );
   }, [logs, thread]);
 
-  const visibleMessages = useMemo<ThreadMessage[]>(() => {
-    if (!thread) return [];
-    return thread.messages.slice(-visibleCount);
-  }, [thread, visibleCount]);
-  const hasOlder = (thread?.messages.length ?? 0) > visibleCount;
+  // Pagination is now driven by the runner: `thread.messages` is whatever
+  // the latest fetch returned (initial slice or initial + lazily-pulled
+  // older pages). `messagePage.hasOlder` tells us whether more history
+  // exists on the server.
+  const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
+  const hasOlder = thread?.messagePage.hasOlder ?? false;
 
-  // Reset window + force-scroll-to-bottom when switching threads.
+  // Force-scroll-to-bottom when switching threads.
   useEffect(() => {
     if (thread && prevThreadIdRef.current !== thread.id) {
-      setVisibleCount(INITIAL_VISIBLE);
       stickToBottomRef.current = true;
       prevThreadIdRef.current = thread.id;
     }
@@ -387,9 +430,12 @@ export default function ThreadPage() {
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
-    if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder) {
+    // Scroll near the top + server says more exists → request the next
+    // older page. Capture scroll position so the layout effect above can
+    // restore it once the prepended messages render (no view jump).
+    if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder && !loadingOlderMessages) {
       restoreScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
-      setVisibleCount((c) => c + PAGE_SIZE);
+      void loadOlderMessages();
     }
   };
 
@@ -419,13 +465,24 @@ export default function ThreadPage() {
         ? `waiting · last reply ${formatRelative(lastInboundAt)}`
         : `fresh · last reply ${formatRelative(lastTimestamp)}`;
 
-  const chips = thread.suggestedReplies.replies.length
+  // Suggestion source: prefer runner-generated chips when present,
+  // otherwise fall back to the static prototype set so the dropdown is
+  // never empty. The runner now exposes `suggestedRepliesStatus` and a
+  // `source` describing which provider produced the chips (and whether
+  // fallback fired) — both surfaced inline below.
+  const repliesReady = thread.suggestedReplies.replies.length > 0;
+  const repliesGenerating =
+    thread.suggestedRepliesStatus === "generating" && !repliesReady;
+  const chips = repliesReady
     ? thread.suggestedReplies.replies.slice(0, 3).map((reply) => ({
         intent: reply.intent,
         glyph: "↵",
         text: reply.text
       }))
     : FALLBACK_SUGGESTIONS.map((s) => ({ intent: s.intent, glyph: s.glyph, text: s.build(firstName) }));
+  const fallbackSource = thread.suggestedReplies.source?.fellBackFromProviderId
+    ? thread.suggestedReplies.source
+    : null;
 
   const trimmedSummary = thread.summary?.trim() ?? "";
   const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
@@ -505,8 +562,21 @@ export default function ThreadPage() {
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
             {hasOlder ? (
-              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                scroll up for older messages
+              <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                {loadingOlderMessages ? (
+                  <>
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    loading older messages…
+                  </>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => void loadOlderMessages()}
+                    className="hover:text-ink"
+                  >
+                    load older messages
+                  </button>
+                )}
               </div>
             ) : (
               <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
@@ -608,17 +678,39 @@ export default function ThreadPage() {
                   <button
                     type="button"
                     onClick={() => setChipsMenuOpen((v) => !v)}
-                    className="inline-flex items-center gap-2 rounded-pill border border-hairline px-3 py-[7px] text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    disabled={repliesGenerating}
+                    className="inline-flex items-center gap-2 rounded-pill border border-hairline px-3 py-[7px] text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
                   >
-                    <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
-                    Suggested replies
-                    <ChevronDown
-                      className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
-                      strokeWidth={1.6}
-                    />
+                    {repliesGenerating ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                    ) : (
+                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                    )}
+                    {repliesGenerating ? "Generating suggestions…" : "Suggested replies"}
+                    {repliesGenerating ? null : (
+                      <ChevronDown
+                        className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
+                        strokeWidth={1.6}
+                      />
+                    )}
                   </button>
-                  {chipsMenuOpen ? (
+                  {chipsMenuOpen && !repliesGenerating ? (
                     <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[360px] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                      {fallbackSource ? (
+                        <p
+                          className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
+                          title={fallbackSource.fellBackMessage ?? undefined}
+                        >
+                          generated with{" "}
+                          {fallbackSource.providerDisplayName ?? "fallback provider"} ·{" "}
+                          {fallbackSource.fellBackFromProviderDisplayName ??
+                            fallbackSource.fellBackFromProviderId}{" "}
+                          unavailable
+                          {fallbackSource.fellBackReason
+                            ? ` (${fallbackSource.fellBackReason.replace(/_/g, " ")})`
+                            : ""}
+                        </p>
+                      ) : null}
                       {chips.map((chip) => (
                         <button
                           key={chip.intent}
