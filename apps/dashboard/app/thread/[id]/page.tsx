@@ -651,6 +651,11 @@ export default function ThreadPage() {
                     </span>
                   )}
                 </div>
+                {pending.failed && pending.errorMessage ? (
+                  <p className="mt-[6px] max-w-[420px] text-right font-mono text-[11px] leading-[1.45] text-risk-overdue">
+                    {pending.errorMessage}
+                  </p>
+                ) : null}
               </div>
             ))}
           </div>

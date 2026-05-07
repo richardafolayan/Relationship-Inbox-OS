@@ -37,6 +37,38 @@ function parseFailedSendMessage(errorJson?: string | null): string {
   }
 }
 
+// The LinkedIn adapter wraps the original Playwright/network failure with
+// a generic "Failed to send LinkedIn message for {name}" string and stashes
+// the real cause on `error.cause`. Without unwrapping, the dashboard's
+// "Failed to send" banner gives the operator nothing to act on. Walk the
+// cause chain so the most specific message we have wins.
+function describeSendError(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  const messages: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = error;
+  while (current instanceof Error && !seen.has(current)) {
+    seen.add(current);
+    if (current.message) {
+      messages.push(current.message);
+    }
+    current = (current as Error & { cause?: unknown }).cause;
+  }
+  // Deepest cause is usually the most specific (Playwright timeout / nav
+  // failure). Surface it first, then the wrapper for context.
+  const ordered = messages.reverse();
+  const seenLines = new Set<string>();
+  const deduped = ordered.filter((line) => {
+    const key = line.trim();
+    if (!key || seenLines.has(key)) return false;
+    seenLines.add(key);
+    return true;
+  });
+  return deduped.join(" — ") || error.message || "Send failed";
+}
+
 function parseReceipt(receiptJson: string): Omit<SendResult, "replayed"> {
   return JSON.parse(receiptJson) as Omit<SendResult, "replayed">;
 }
@@ -289,7 +321,7 @@ export function createSendService(deps: SendServiceDeps) {
       });
     } catch (error) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
-      const errorMessage = error instanceof Error ? error.message : String(error);
+      const errorMessage = describeSendError(error);
 
       const logId = await deps.auditLog({
         platform: thread.platform as PlatformName,
