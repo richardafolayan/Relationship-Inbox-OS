@@ -135,6 +135,33 @@ export interface AiService {
      *  drives whether the rewrite should reference / acknowledge anything. */
     threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
   }): Promise<string>;
+  /**
+   * Suggest up to 3 snooze targets grounded in the conversation. Picks
+   * up explicit time hints in the latest inbound ("let's chat next
+   * Tuesday", "I'm OOO until the 15th") and turns them into a snooze
+   * duration. Returns an empty list when no time hint is present —
+   * never fabricates a hint.
+   */
+  suggestSnoozeTimings(input: {
+    displayName: string;
+    lastInboundText: string;
+    lastInboundAt: string | null;
+    summary?: string | null;
+    whatTheyWant?: string | null;
+  }): Promise<SnoozeSuggestionsOutput>;
+}
+
+export interface SnoozeSuggestion {
+  /** Operator-friendly label for the chip, e.g. "Tue 9am" or "Mon morning". */
+  label: string;
+  /** Snooze duration in hours. Snapped to the nearest hour by the route. */
+  hours: number;
+  /** Why the AI picked this duration — surfaced in receipts + tooltip. */
+  reason: string;
+}
+
+export interface SnoozeSuggestionsOutput {
+  suggestions: SnoozeSuggestion[];
 }
 
 /**

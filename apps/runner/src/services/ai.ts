@@ -880,6 +880,77 @@ Return strict JSON: { "text": "string" }`;
     }
   }
 
+  /**
+   * Pull explicit time hints out of the latest inbound message and turn
+   * them into 1-3 snooze targets ({label, hours, reason}). When no hint
+   * is present, returns an empty list — never invents a target. This is
+   * the engine behind the snooze chips on the thread page.
+   */
+  async function suggestSnoozeTimings(input: {
+    displayName: string;
+    lastInboundText: string;
+    lastInboundAt: string | null;
+    summary?: string | null;
+    whatTheyWant?: string | null;
+  }): Promise<{ suggestions: Array<{ label: string; hours: number; reason: string }> }> {
+    const inbound = input.lastInboundText.trim();
+    if (!inbound) return { suggestions: [] };
+    const { client, model, provider } = await resolveActive();
+    if (!client) return { suggestions: [] };
+
+    const referenceIso = input.lastInboundAt ?? new Date().toISOString();
+    const prompt = `You are a calendar assistant. Read the last message from a contact and decide whether the operator should snooze the conversation. ONLY suggest a snooze when the message contains an explicit time hint ("let's chat next Tuesday", "I'm OOO until the 15th", "ping me Friday morning"). When there is no clear time hint, return an empty list. Do not invent.
+
+Reference time (the message arrived at): ${referenceIso}
+Recipient: ${input.displayName}
+Thread summary: ${safeTruncate(input.summary ?? "", 200)}
+What they want: ${safeTruncate(input.whatTheyWant ?? "", 160)}
+
+Last inbound message:
+${safeTruncate(inbound, 600)}
+
+Pick at most 3 snooze targets. Each target is:
+- label: short chip text (e.g. "Tue 9am", "Mon morning", "Next Friday")
+- hours: integer hours to snooze, between 1 and 72 (max 3 days, matches the snooze route limit)
+- reason: 1 short sentence quoting the trigger phrase from the message
+
+Return strict JSON: { "suggestions": [{ "label": "string", "hours": 1-168, "reason": "string" }] }
+If the message has no time hint, return { "suggestions": [] }.`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt }
+        ],
+        ...gpt5OptionsForModel(model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return { suggestions: [] };
+      const parsed = z
+        .object({
+          suggestions: z
+            .array(
+              z.object({
+                label: z.string().min(1).max(40),
+                hours: z.number().int().min(1).max(72),
+                reason: z.string().min(1).max(220)
+              })
+            )
+            .max(3)
+        })
+        .parse(JSON.parse(content));
+      return parsed;
+    } catch (error) {
+      console.warn(
+        `[ai] suggestSnoozeTimings failed (provider=${provider}, model=${model}); returning empty list. ${classifyLlmError(error, provider)}`
+      );
+      return { suggestions: [] };
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
@@ -887,6 +958,7 @@ Return strict JSON: { "text": "string" }`;
     classifyThreadCategory,
     generateContactSummary,
     generateConversationStarters,
-    composeInVoice
+    composeInVoice,
+    suggestSnoozeTimings
   };
 }
