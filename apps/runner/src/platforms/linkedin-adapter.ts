@@ -6093,8 +6093,8 @@ export class LinkedInAdapter implements PlatformAdapter {
             const timeEl = bubbleTimes[0] ?? null;
             const timeText = clean(timeEl?.textContent ?? "");
             const timeDatetimeAttr = timeEl?.getAttribute("datetime") || null;
-            const bodyEl = bubbleEl.querySelector(messageTextSelector);
-            const rawBody = clean(bodyEl?.textContent ?? "");
+            const bodyEls = Array.from(bubbleEl.querySelectorAll(messageTextSelector));
+            const rawBody = clean(bodyEls.map((body) => body.textContent ?? "").join(" "));
             // Scope attachment detection to the message body wrapper. The
             // bubble LI contains the avatar column AND the message body, and
             // the previous selector "img, video, svg, a[download], ..." was
@@ -7696,6 +7696,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
       return first.innerText({ timeout: 0 }).catch(() => null);
     };
+    const readAllText = async (locator: Locator): Promise<string> => {
+      const count = await locator.count().catch(() => 0);
+      if (count <= 0) {
+        return "";
+      }
+      return clean((await locator.allTextContents().catch(() => [])).join(" "));
+    };
     const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
       const first = locator.first();
       if ((await first.count().catch(() => 0)) <= 0) {
@@ -7735,7 +7742,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           .locator("img, video, svg, a[download], a[href*='attachment']")
           .count()
           .catch(() => 0);
-        const rawBodyText = clean((await readText(root.locator(selectors.message_text).first())) ?? "");
+        const rawBodyText = await readAllText(root.locator(selectors.message_text));
         const text = rawBodyText || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
         const senderName = clean(
           (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??

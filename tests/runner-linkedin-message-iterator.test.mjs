@@ -68,7 +68,7 @@ test("LinkedIn message iterator prefers data-event-urn events and handles non-te
   await context.close();
   await browser.close();
 
-  assert.equal(messages.length, 4);
+  assert.equal(messages.length, 5);
   assert.equal(messages[0].platformMessageKey, "urn:li:msg_event:1");
   assert.equal(messages[0].direction, "IN");
   assert.equal(messages[0].text, "Incoming hello");
@@ -82,4 +82,33 @@ test("LinkedIn message iterator prefers data-event-urn events and handles non-te
 
   assert.equal(messages[3].platformMessageKey, "urn:li:msg_event:4");
   assert.equal(messages[3].text, "[system event]");
+
+  assert.equal(messages[4].platformMessageKey, "urn:li:msg_event:5");
+  assert.equal(messages[4].text, "First line from one LinkedIn event. Second line from the same event.");
+});
+
+test("LinkedIn visible message parser joins multiple bodies from one event", async (t) => {
+  let browser;
+  try {
+    browser = await chromium.launch({ headless: true });
+  } catch (error) {
+    t.skip(`Playwright Chromium unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    return;
+  }
+
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", "message-events.html");
+  const fixture = await readFile(fixturePath, "utf8");
+  await page.setContent(fixture, { waitUntil: "domcontentloaded" });
+
+  const adapter = buildAdapter(page);
+  const selectors = buildSelectors();
+  const messages = await adapter.collectVisibleThreadMessages(page, selectors, 20);
+
+  await context.close();
+  await browser.close();
+
+  const grouped = messages.find((message) => message.platformMessageKey === "urn:li:msg_event:5");
+  assert.equal(grouped?.text, "First line from one LinkedIn event. Second line from the same event.");
 });
