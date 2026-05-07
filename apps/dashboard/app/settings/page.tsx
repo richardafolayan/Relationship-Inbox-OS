@@ -23,6 +23,9 @@ const QUIET_HOURS_KEY = "inbox_quiet_hours";
 // advanced surface (scan thresholds, AI provider, danger-zone reset,
 // runner restart) sits behind a quiet expander so it stays out of the
 // way until the operator asks for it.
+const PLATFORMS = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
+type Platform = (typeof PLATFORMS)[number];
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
@@ -33,6 +36,19 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Danger-zone reset modal state. Mirrors the main-branch flow: an
+  // admin token + literal "RESET" string, both required before the
+  // confirm button enables.
+  const [resetOpen, setResetOpen] = useState(false);
+  const [resetToken, setResetToken] = useState("");
+  const [resetConfirm, setResetConfirm] = useState("");
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetStatus, setResetStatus] = useState<
+    | { kind: "success"; message: string }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
 
   const refreshAll = useCallback(async () => {
     const [settingsData, aiData] = await Promise.all([
@@ -98,6 +114,48 @@ export default function SettingsPage() {
   const toggleDemo = () => {
     if (!settings) return;
     void updateRunner({ demoMode: !settings.demoMode });
+  };
+
+  const togglePlatform = (platform: Platform) => {
+    if (!settings) return;
+    const enabled = settings.enabledPlatforms.includes(platform);
+    const enabledPlatforms = enabled
+      ? settings.enabledPlatforms.filter((item) => item !== platform)
+      : [...settings.enabledPlatforms, platform];
+    setSettings({ ...settings, enabledPlatforms });
+  };
+
+  const closeResetModal = () => {
+    if (resetBusy) return;
+    setResetOpen(false);
+    setResetToken("");
+    setResetConfirm("");
+  };
+
+  const submitLinkedInReset = async () => {
+    setResetBusy(true);
+    setResetStatus(null);
+    try {
+      const result = await apiPost<unknown>(
+        "/runner/admin/reset",
+        { platform: "LINKEDIN", confirm: "RESET" },
+        { headers: { "x-admin-reset-token": resetToken } }
+      );
+      setResetStatus({
+        kind: "success",
+        message: `LinkedIn inbox cleared. ${JSON.stringify(result)}`
+      });
+      setResetOpen(false);
+      setResetToken("");
+      setResetConfirm("");
+    } catch (err) {
+      setResetStatus({
+        kind: "error",
+        message: err instanceof Error ? err.message : "Reset failed"
+      });
+    } finally {
+      setResetBusy(false);
+    }
   };
 
   const restartRunner = async () => {
@@ -284,6 +342,29 @@ export default function SettingsPage() {
           ) : null}
         </div>
 
+        <div className="mt-6">
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+            Enabled platforms
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {PLATFORMS.map((platform) => {
+              const active = settings.enabledPlatforms.includes(platform);
+              return (
+                <Button
+                  key={platform}
+                  variant={active ? "primary" : "quiet"}
+                  onClick={() => togglePlatform(platform)}
+                >
+                  {platform}
+                </Button>
+              );
+            })}
+          </div>
+          <p className="mt-2 font-mono text-[11px] text-ink-3">
+            Saved with the rest of advanced settings.
+          </p>
+        </div>
+
         <div className="mt-6 flex items-center gap-3">
           <Button
             variant="primary"
@@ -294,18 +375,124 @@ export default function SettingsPage() {
                 amberHours: settings.amberHours,
                 redHours: settings.redHours,
                 maxMessagesPerThread: settings.maxMessagesPerThread,
+                enabledPlatforms: settings.enabledPlatforms,
                 aiProvider: settings.aiProvider,
                 glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined
               })
             }
           >
-            Save advanced
+            Save settings
           </Button>
           <Button variant="quiet" onClick={() => void restartRunner()}>
             Restart runner
           </Button>
         </div>
       </details>
+
+      <section className="mt-12 border-t border-hairline pt-6">
+        <p className="mb-4 font-mono text-[11px] uppercase tracking-[0.08em] text-[oklch(45%_0.18_28)]">
+          Danger zone
+        </p>
+        <QuietRow
+          name="Clear LinkedIn inbox and rebuild"
+          stat="wipes LinkedIn threads/messages locally — next scan rebuilds"
+          action={
+            <Button
+              variant="danger"
+              onClick={() => {
+                setResetStatus(null);
+                setResetOpen(true);
+              }}
+            >
+              Reset…
+            </Button>
+          }
+        />
+        {resetStatus ? (
+          <p
+            className={
+              resetStatus.kind === "success"
+                ? "mt-3 font-mono text-[11px] text-ink-2"
+                : "mt-3 font-mono text-[11px] text-risk-overdue"
+            }
+          >
+            {resetStatus.message}
+          </p>
+        ) : null}
+      </section>
+
+      {resetOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={closeResetModal}
+        >
+          <div
+            className="w-full max-w-lg space-y-4 rounded-xl border border-hairline bg-paper p-6 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div>
+              <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-[oklch(45%_0.18_28)]">
+                Danger zone
+              </p>
+              <p className="mt-2 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">
+                Confirm LinkedIn reset
+              </p>
+              <p className="mt-2 font-mono text-[12px] text-ink-3">
+                This removes LinkedIn threads and messages from the local DB. Type{" "}
+                <code className="text-ink">RESET</code> and provide the admin token to proceed.
+              </p>
+            </div>
+
+            <label className="block">
+              <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                Admin reset token
+              </span>
+              <Input
+                type="password"
+                className="mt-2"
+                value={resetToken}
+                onChange={(event) => setResetToken(event.target.value)}
+                placeholder="ADMIN_RESET_TOKEN"
+                autoComplete="off"
+              />
+            </label>
+
+            <label className="block">
+              <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                Type RESET to confirm
+              </span>
+              <Input
+                className="mt-2"
+                value={resetConfirm}
+                onChange={(event) => setResetConfirm(event.target.value)}
+                placeholder="RESET"
+                autoComplete="off"
+              />
+            </label>
+
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button variant="quiet" onClick={closeResetModal} disabled={resetBusy}>
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                disabled={
+                  resetBusy || resetConfirm !== "RESET" || resetToken.trim().length === 0
+                }
+                onClick={() => void submitLinkedInReset()}
+              >
+                {resetBusy ? "Resetting…" : "Confirm reset"}
+              </Button>
+            </div>
+
+            {resetStatus?.kind === "error" ? (
+              <p className="font-mono text-[11px] text-risk-overdue">{resetStatus.message}</p>
+            ) : null}
+          </div>
+        </div>
+      ) : null}
     </Canvas>
   );
 }
