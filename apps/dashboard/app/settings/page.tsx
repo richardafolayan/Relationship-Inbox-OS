@@ -23,9 +23,13 @@ const QUIET_HOURS_KEY = "inbox_quiet_hours";
 // advanced surface (scan thresholds, AI provider, danger-zone reset,
 // runner restart) sits behind a quiet expander so it stays out of the
 // way until the operator asks for it.
+const ALL_PLATFORMS = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
+type PlatformKey = (typeof ALL_PLATFORMS)[number];
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
@@ -33,14 +37,18 @@ export default function SettingsPage() {
   const [saving, setSaving] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [resetBusy, setResetBusy] = useState(false);
+  const [resetMessage, setResetMessage] = useState<string | null>(null);
 
   const refreshAll = useCallback(async () => {
-    const [settingsData, aiData] = await Promise.all([
+    const [settingsData, aiData, healthData] = await Promise.all([
       apiGet<AppSettings>("/runner/data/settings").catch(() => null),
-      apiGet<AiStatus>("/runner/data/ai-status").catch(() => null)
+      apiGet<AiStatus>("/runner/data/ai-status").catch(() => null),
+      apiGet<HealthResponse>("/runner/health").catch(() => null)
     ]);
     if (settingsData) setSettings(settingsData);
     setAiStatus(aiData);
+    setHealth(healthData);
   }, []);
 
   useEffect(() => {
@@ -54,6 +62,12 @@ export default function SettingsPage() {
     );
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
+    const timer = setInterval(() => {
+      void apiGet<HealthResponse>("/runner/health")
+        .then(setHealth)
+        .catch(() => undefined);
+    }, 8000);
+    return () => clearInterval(timer);
   }, [refreshAll]);
 
   const updateRunner = async (partial: Partial<AppSettings>) => {
@@ -98,6 +112,39 @@ export default function SettingsPage() {
   const toggleDemo = () => {
     if (!settings) return;
     void updateRunner({ demoMode: !settings.demoMode });
+  };
+
+  const togglePlatform = (platform: PlatformKey) => {
+    if (!settings) return;
+    const current = new Set(settings.enabledPlatforms);
+    if (current.has(platform)) {
+      current.delete(platform);
+    } else {
+      current.add(platform);
+    }
+    const next = ALL_PLATFORMS.filter((p) => current.has(p));
+    void updateRunner({ enabledPlatforms: next });
+  };
+
+  const clearLinkedInInbox = async () => {
+    const token = window.prompt(
+      "Paste your admin reset token (ADMIN_RESET_TOKEN env on the runner) to confirm — this wipes the LinkedIn inbox locally and cannot be undone."
+    );
+    if (!token) return;
+    setResetBusy(true);
+    setResetMessage(null);
+    try {
+      await apiPost(
+        "/runner/admin/reset",
+        { platform: "LINKEDIN", confirm: "RESET" },
+        { headers: { "x-admin-reset-token": token } }
+      );
+      setResetMessage("LinkedIn inbox cleared. Run a fresh scan to rebuild.");
+    } catch (err) {
+      setResetMessage(err instanceof Error ? err.message : "Reset failed");
+    } finally {
+      setResetBusy(false);
+    }
   };
 
   const restartRunner = async () => {
@@ -149,6 +196,21 @@ export default function SettingsPage() {
         <p className="mb-4 font-mono text-[11px] text-risk-overdue">{error}</p>
       ) : null}
 
+      <QuietRow
+        name="Runner"
+        stat={
+          health
+            ? `${health.runnerStatus.toLowerCase()} · ${health.connectedPlatforms} platform${
+                health.connectedPlatforms === 1 ? "" : "s"
+              } connected`
+            : "status unknown"
+        }
+        action={
+          <Button variant="quiet" onClick={() => void restartRunner()}>
+            Restart
+          </Button>
+        }
+      />
       <QuietRow
         name="Quiet hours"
         stat="after 22:00, mute the sidebar dot"
@@ -256,6 +318,30 @@ export default function SettingsPage() {
 
         <div className="mt-6">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+            Enabled platforms
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {ALL_PLATFORMS.map((platform) => {
+              const active = settings.enabledPlatforms.includes(platform);
+              return (
+                <Button
+                  key={platform}
+                  variant={active ? "primary" : "quiet"}
+                  disabled={saving}
+                  onClick={() => togglePlatform(platform)}
+                >
+                  {platform}
+                </Button>
+              );
+            })}
+          </div>
+          <p className="mt-2 font-mono text-[11px] text-ink-3">
+            Only LinkedIn is fully tested. Toggle others on at your own risk.
+          </p>
+        </div>
+
+        <div className="mt-6">
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
             AI provider
           </p>
           <div className="flex flex-wrap items-center gap-2">
@@ -301,9 +387,26 @@ export default function SettingsPage() {
           >
             Save advanced
           </Button>
-          <Button variant="quiet" onClick={() => void restartRunner()}>
-            Restart runner
+        </div>
+
+        <div className="mt-10 border-t border-hairline pt-6">
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-risk-overdue">
+            Danger zone
+          </p>
+          <p className="mb-3 text-[13px] text-ink-3">
+            Wipes the LinkedIn inbox locally so the next scan rebuilds from scratch. Useful when
+            parser drift has corrupted threads. Cannot be undone.
+          </p>
+          <Button
+            variant="danger"
+            disabled={resetBusy}
+            onClick={() => void clearLinkedInInbox()}
+          >
+            {resetBusy ? "Clearing…" : "Clear LinkedIn inbox and rebuild"}
           </Button>
+          {resetMessage ? (
+            <p className="mt-3 font-mono text-[11px] text-ink-3">{resetMessage}</p>
+          ) : null}
         </div>
       </details>
     </Canvas>
