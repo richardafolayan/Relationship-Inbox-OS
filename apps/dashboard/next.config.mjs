@@ -1,5 +1,7 @@
 /** @type {import('next').NextConfig} */
 const useEventsProxy = process.env.USE_EVENTS_PROXY === "true";
+const runnerPort = process.env.RUNNER_PORT ?? "4001";
+const runnerBase = `http://localhost:${runnerPort}`;
 
 const nextConfig = {
   reactStrictMode: true,
@@ -7,15 +9,15 @@ const nextConfig = {
     return [
       {
         source: "/runner/:path*",
-        destination: "http://localhost:4001/:path*"
+        destination: `${runnerBase}/:path*`
       },
       {
         source: "/events",
-        destination: useEventsProxy ? "/events-proxy" : "http://localhost:4001/events"
+        destination: useEventsProxy ? "/events-proxy" : `${runnerBase}/events`
       },
       {
         source: "/artifacts/:type/:name",
-        destination: "http://localhost:4001/artifacts/:type/:name"
+        destination: `${runnerBase}/artifacts/:type/:name`
       }
     ];
   }
