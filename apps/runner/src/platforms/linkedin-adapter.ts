@@ -6043,7 +6043,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       // if this group has no date heading (i.e. it's a continuation of the
       // previous group's date).
       dateHeadingText: string;
-      text: string;
+      textParts: string[];
       senderName: string;
       attachmentCount: number;
     };
@@ -6072,7 +6072,7 @@ export class LinkedInAdapter implements PlatformAdapter {
             timeText: string;
             timeDatetimeAttr: string | null;
             dateHeadingText: string;
-            text: string;
+            textParts: string[];
             senderName: string;
             attachmentCount: number;
           }> = [];
@@ -6103,9 +6103,9 @@ export class LinkedInAdapter implements PlatformAdapter {
             const timeText = clean(timeEl?.textContent ?? "");
             const timeDatetimeAttr = timeEl?.getAttribute("datetime") || null;
             const bodyEls = Array.from(bubbleEl.querySelectorAll(messageTextSelector));
-            const rawBody = cleanMessage(
-              bodyEls.map((body) => (body as HTMLElement).innerText || body.textContent || "").join("\n\n")
-            );
+            const bodyParts = bodyEls
+              .map((body) => cleanMessage((body as HTMLElement).innerText || body.textContent || ""))
+              .filter(Boolean);
             // Scope attachment detection to the message body wrapper. The
             // bubble LI contains the avatar column AND the message body, and
             // the previous selector "img, video, svg, a[download], ..." was
@@ -6131,7 +6131,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               }
               attachmentCount += 1;
             });
-            const text = rawBody || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
+            const textParts = bodyParts.length > 0 ? bodyParts : [attachmentCount > 0 ? "[non-text message]" : "[system event]"];
             const senderEl =
               bubbleEl.querySelector(".msg-s-message-group__profile-link") ??
               bubbleEl.querySelector(".msg-s-message-group__name");
@@ -6148,7 +6148,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               timeText,
               timeDatetimeAttr,
               dateHeadingText,
-              text,
+              textParts,
               senderName,
               attachmentCount
             });
@@ -6206,21 +6206,32 @@ export class LinkedInAdapter implements PlatformAdapter {
         continue;
       }
 
-      parsed.push({
-        platformMessageKey: raw.platformMessageKey,
-        direction: raw.direction,
-        timestamp: isoTimestamp,
-        text: raw.text,
-        senderName: raw.senderName || undefined,
-        raw: {
-          className: raw.className,
-          hasTime: Boolean(raw.timeText) || Boolean(raw.timeDatetimeAttr),
-          dateHeading: headingForBubble || null,
-          attachmentCount: raw.attachmentCount
-        },
-        attachments: raw.attachmentCount
-          ? [{ type: "attachment", manualReview: true, rawLabel: `${raw.attachmentCount} attachment(s)` }]
-          : []
+      const textParts = raw.textParts.length > 0 ? raw.textParts : ["[system event]"];
+      textParts.forEach((text, partIndex) => {
+        const parsedTimestampMs = Date.parse(isoTimestamp);
+        const partTimestamp = Number.isNaN(parsedTimestampMs)
+          ? isoTimestamp
+          : new Date(parsedTimestampMs + partIndex).toISOString();
+        parsed.push({
+          platformMessageKey:
+            partIndex === 0 ? raw.platformMessageKey : `${raw.platformMessageKey}:body:${partIndex}`,
+          direction: raw.direction,
+          timestamp: partTimestamp,
+          text,
+          senderName: raw.senderName || undefined,
+          raw: {
+            className: raw.className,
+            hasTime: Boolean(raw.timeText) || Boolean(raw.timeDatetimeAttr),
+            dateHeading: headingForBubble || null,
+            attachmentCount: raw.attachmentCount,
+            bodyPartIndex: partIndex,
+            bodyPartCount: textParts.length
+          },
+          attachments:
+            partIndex === 0 && raw.attachmentCount
+              ? [{ type: "attachment", manualReview: true, rawLabel: `${raw.attachmentCount} attachment(s)` }]
+              : []
+        });
       });
     }
 
@@ -7707,19 +7718,19 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
       return first.innerText({ timeout: 0 }).catch(() => null);
     };
-    const readAllText = async (locator: Locator): Promise<string> => {
+    const readAllTextParts = async (locator: Locator): Promise<string[]> => {
       const count = await locator.count().catch(() => 0);
       if (count <= 0) {
-        return "";
+        return [];
       }
       const parts: string[] = [];
       for (let index = 0; index < count; index += 1) {
-        const text = await locator.nth(index).innerText({ timeout: 0 }).catch(() => "");
+        const text = cleanMessageText(await locator.nth(index).innerText({ timeout: 0 }).catch(() => ""));
         if (text) {
           parts.push(text);
         }
       }
-      return cleanMessageText(parts.join("\n\n"));
+      return parts;
     };
     const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
       const first = locator.first();
@@ -7760,8 +7771,8 @@ export class LinkedInAdapter implements PlatformAdapter {
           .locator("img, video, svg, a[download], a[href*='attachment']")
           .count()
           .catch(() => 0);
-        const rawBodyText = await readAllText(root.locator(selectors.message_text));
-        const text = rawBodyText || (attachmentCount > 0 ? "[non-text message]" : "[system event]");
+        const rawBodyParts = await readAllTextParts(root.locator(selectors.message_text));
+        const textParts = rawBodyParts.length > 0 ? rawBodyParts : [attachmentCount > 0 ? "[non-text message]" : "[system event]"];
         const senderName = clean(
           (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??
             (await readText(root.locator(".msg-s-message-group__name").first())) ??
@@ -7769,21 +7780,31 @@ export class LinkedInAdapter implements PlatformAdapter {
         );
         const timeLocator = root.locator("time").first();
         const timestamp = clean((await readAttr(timeLocator, "datetime")) ?? (await readText(timeLocator)) ?? "");
-        const platformMessageKey = await readMessageKey(root, index);
-        messages.push({
-          platformMessageKey,
-          direction: inbound ? "IN" : "OUT",
-          timestamp,
-          text,
-          senderName: senderName || undefined,
-          raw: {
-            className,
-            hasTime: Boolean(timestamp),
-            attachmentCount
-          },
-          attachments: attachmentCount
-            ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
-            : []
+        const basePlatformMessageKey = await readMessageKey(root, index);
+        textParts.forEach((text, partIndex) => {
+          const parsedTimestampMs = Date.parse(timestamp);
+          const partTimestamp = Number.isNaN(parsedTimestampMs)
+            ? timestamp
+            : new Date(parsedTimestampMs + partIndex).toISOString();
+          messages.push({
+            platformMessageKey:
+              partIndex === 0 ? basePlatformMessageKey : `${basePlatformMessageKey}:body:${partIndex}`,
+            direction: inbound ? "IN" : "OUT",
+            timestamp: partTimestamp,
+            text,
+            senderName: senderName || undefined,
+            raw: {
+              className,
+              hasTime: Boolean(timestamp),
+              attachmentCount,
+              bodyPartIndex: partIndex,
+              bodyPartCount: textParts.length
+            },
+            attachments:
+              partIndex === 0 && attachmentCount
+                ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
+                : []
+          });
         });
       }
 
