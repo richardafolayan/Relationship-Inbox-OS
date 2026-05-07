@@ -2425,7 +2425,38 @@ app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
     res.json({ status: "deferred", reason: "scan or send is currently active; enqueued" });
     return;
   }
-  res.status(502).json({ status: "failed", reason: result.reason });
+  // Translate the runner's terse reason codes into operator-readable
+  // messages. The `reason` field stays for telemetry; `error` is what
+  // the dashboard surfaces in the UI (apiPost prefers `error`).
+  const reasonMessages: Record<string, string> = {
+    not_found: "We don't have a LinkedIn profile URL for this person yet.",
+    unknown: "LinkedIn profile fetch failed; check the runner logs."
+  };
+  const message =
+    reasonMessages[result.reason] ?? `Enrichment failed: ${result.reason}`;
+  res.status(502).json({ status: "failed", reason: result.reason, error: message });
+}));
+
+// Manual profile-URL capture. The LinkedIn scan currently doesn't pull a
+// profile URL from the inbox sidebar, so people created from a scan land
+// without one and the enrichment queue can't visit them. This endpoint
+// lets the operator paste a known profile URL onto a person row so the
+// next enrichment run has a target. Mirrors the shape of /control/self/enrich.
+app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({ profileUrl: z.string().url() })
+    .parse(req.body);
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  await prisma.person.update({
+    where: { id: personId },
+    data: { profileUrl: payload.profileUrl, enrichmentFailedReason: null }
+  });
+  res.json({ status: "ok", profileUrl: payload.profileUrl });
 }));
 
 app.post("/control/self/enrich", asyncRoute(async (req, res) => {

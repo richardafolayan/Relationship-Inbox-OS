@@ -11,8 +11,10 @@ import { Button } from "@/components/ui/button";
 
 // People — relationship rows in the same calm pattern as ThreadRow. Click
 // any row to open a slim detail panel below with summary + enrichment +
-// starters. Heavy CRM-style controls are gone; the runner endpoints they
-// drove are still reachable from the row's quiet links.
+// starters. When the runner has no LinkedIn profile URL for the person
+// yet (the scan only captures display name + thread URL), surface that
+// explicitly with a paste-URL input instead of looping on a "Refresh
+// enrichment" button that always 502s with `reason: "not_found"`.
 export default function PeoplePage() {
   const router = useRouter();
   const [people, setPeople] = useState<PeopleRow[]>([]);
@@ -20,6 +22,8 @@ export default function PeoplePage() {
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [startersLoading, setStartersLoading] = useState(false);
+  const [profileUrlInput, setProfileUrlInput] = useState("");
+  const [savingProfileUrl, setSavingProfileUrl] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const loadList = useCallback(async () => {
@@ -52,12 +56,19 @@ export default function PeoplePage() {
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
+  // Reset the per-person input whenever the selection changes so a stale
+  // profile URL from the previous person doesn't stick around.
+  useEffect(() => {
+    setProfileUrlInput("");
+    setError(null);
+  }, [selectedId]);
+
   const selected = useMemo(
     () => people.find((person) => person.id === selectedId) ?? null,
     [people, selectedId]
   );
 
-  const refreshEnrichment = () => {
+  const refreshEnrichment = useCallback(() => {
     if (!selectedId) return;
     setRefreshing(true);
     runAction(
@@ -70,6 +81,26 @@ export default function PeoplePage() {
         if (selectedId) await loadDetail(selectedId);
       }
     );
+  }, [selectedId, loadList, loadDetail]);
+
+  const saveProfileUrlAndEnrich = async () => {
+    if (!selectedId) return;
+    const url = profileUrlInput.trim();
+    if (!url) return;
+    setSavingProfileUrl(true);
+    setError(null);
+    try {
+      await apiPost(`/runner/control/person/${selectedId}/profile-url`, { profileUrl: url });
+      setProfileUrlInput("");
+      await loadDetail(selectedId);
+      // Kick enrichment immediately so the operator sees results without
+      // an extra click.
+      refreshEnrichment();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save profile URL");
+    } finally {
+      setSavingProfileUrl(false);
+    }
   };
 
   const fetchStarters = () => {
@@ -77,6 +108,12 @@ export default function PeoplePage() {
     setStartersLoading(true);
     void loadDetail(selectedId, true).finally(() => setStartersLoading(false));
   };
+
+  // Without a profileUrl on the Person row the runner's enrichment job
+  // has nothing to visit, so "Refresh enrichment" silently fails every
+  // time. Detect the missing-URL case directly and ask the operator to
+  // paste one instead of showing "Not enriched yet" forever.
+  const profileUrlMissing = !!detail && !detail.person.profileUrl;
 
   return (
     <Canvas>
@@ -162,8 +199,29 @@ export default function PeoplePage() {
                 {detail?.summary ??
                   (detail?.enrichment
                     ? "No summary yet. Refresh to generate one."
-                    : "Not enriched yet. Refresh to fetch the LinkedIn profile.")}
+                    : profileUrlMissing
+                      ? "We don't have a LinkedIn profile URL for this person yet. Paste it below to enrich."
+                      : "Not enriched yet. Refresh to fetch the LinkedIn profile.")}
               </p>
+
+              {profileUrlMissing ? (
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <input
+                    type="url"
+                    value={profileUrlInput}
+                    onChange={(event) => setProfileUrlInput(event.target.value)}
+                    placeholder="https://www.linkedin.com/in/…"
+                    className="w-[360px] max-w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+                  />
+                  <Button
+                    variant="quiet"
+                    disabled={!profileUrlInput.trim() || savingProfileUrl || refreshing}
+                    onClick={() => void saveProfileUrlAndEnrich()}
+                  >
+                    {savingProfileUrl || refreshing ? "Saving…" : "Save & enrich"}
+                  </Button>
+                </div>
+              ) : null}
 
               {detail?.enrichment ? (
                 <ul className="mt-4 space-y-1 font-mono text-[12px] text-ink-3">
