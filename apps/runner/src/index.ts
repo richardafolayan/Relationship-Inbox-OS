@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import express from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import type { NormalizedMessage, PlatformName, SelectorRegistry, ThreadStub } from "@inbox-os/core";
+import type { NormalizedMessage, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -173,6 +173,7 @@ const sendQueue = createSendQueue({
 sendQueue.resume();
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
+const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
 
 const selfProfileService = createSelfProfileService({ sessionManager, personKey: defaultPersonKey });
 const conversationStartersService = createConversationStartersService({
@@ -487,8 +488,35 @@ async function loadVisibleThreadRows(options?: {
     where: options?.archived
       ? { archivedAt: { not: null } }
       : { archivedAt: null },
-    include: {
-      person: true,
+    select: {
+      id: true,
+      platform: true,
+      platformThreadId: true,
+      threadUrl: true,
+      personId: true,
+      unreadCount: true,
+      needsReply: true,
+      lastMessagePreview: true,
+      lastMessageAt: true,
+      lastInboundAt: true,
+      lastOutboundAt: true,
+      lastMessageDirection: true,
+      lastMessageText: true,
+      riskLevel: true,
+      riskReason: true,
+      slaDueAt: true,
+      whatTheyWant: true,
+      rollingSummary: true,
+      archivedAt: true,
+      category: true,
+      updatedAt: true,
+      person: {
+        select: {
+          id: true,
+          displayName: true,
+          platform: true
+        }
+      },
       _count: {
         select: {
           messages: true
@@ -1591,7 +1619,31 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const unreadOnly = req.query.unread === "true";
   const needsReplyOnly = req.query.needsReply === "true";
 
-  const dedupedRows = (await loadVisibleThreadRows()).map((row) => toInboxRow(row));
+  const today = new Date();
+  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
+
+  const [visibleRows, outboundLast7DaysCount, sentToday] = await Promise.all([
+    loadVisibleThreadRows(),
+    prisma.message.count({
+      where: {
+        direction: "OUT",
+        timestamp: {
+          gte: sevenDaysAgo
+        }
+      }
+    }),
+    prisma.message.count({
+      where: {
+        direction: "OUT",
+        timestamp: {
+          gte: todayStart
+        }
+      }
+    })
+  ]);
+
+  const dedupedRows = visibleRows.map((row) => toInboxRow(row));
 
   const rows = dedupedRows
     .filter((row) => {
@@ -1644,21 +1696,6 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
       return 0;
     });
 
-  const today = new Date();
-  const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
-
-  const outboundLast7Days = await prisma.message.findMany({
-    where: {
-      direction: "OUT",
-      timestamp: {
-        gte: sevenDaysAgo
-      }
-    }
-  });
-
-  const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const sentToday = outboundLast7Days.filter((msg) => msg.timestamp >= todayStart).length;
-
   const oldestPending = rows
     .filter((row) => row.needsReply && row.lastInboundAt)
     .sort((a, b) => Date.parse(a.lastInboundAt!) - Date.parse(b.lastInboundAt!))[0];
@@ -1666,7 +1703,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const summary = {
     unreadThreads: rows.filter((row) => row.unreadCount > 0).length,
     atRiskThreads: rows.filter((row) => row.riskLevel !== "GREEN").length,
-    averageReplyTimeHours: outboundLast7Days.length ? 4.2 : 0,
+    averageReplyTimeHours: outboundLast7DaysCount ? 4.2 : 0,
     oldestPendingInboundAt: oldestPending?.lastInboundAt ?? null,
     messagesSentToday: sentToday
   };
@@ -1763,7 +1800,17 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     }
   }
   if (!suggested) {
-    suggested = await aiService.generateSuggestedReplies(aiInputs);
+    const inFlightKey = `${thread.id}:${cacheKey}`;
+    let inFlight = suggestedRepliesInFlight.get(inFlightKey);
+    if (!inFlight) {
+      inFlight = aiService.generateSuggestedReplies(aiInputs).finally(() => {
+        if (suggestedRepliesInFlight.get(inFlightKey) === inFlight) {
+          suggestedRepliesInFlight.delete(inFlightKey);
+        }
+      });
+      suggestedRepliesInFlight.set(inFlightKey, inFlight);
+    }
+    suggested = await inFlight;
     // Persist the cache. Best-effort — if the write fails, we still serve
     // the freshly-generated replies and just won't cache for next time.
     await prisma.thread

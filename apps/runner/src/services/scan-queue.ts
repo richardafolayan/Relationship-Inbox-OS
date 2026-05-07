@@ -169,6 +169,13 @@ type LinkedInFallbackDecision = {
   triggerReason?: "force_fallback" | "zero_primary_rows_with_selector_signals";
 };
 
+type ExistingThreadOpenState = {
+  id: string;
+  lastMessageAt: Date | null;
+  unreadCount: number;
+  firstFullBackfillAt: Date | null;
+} | null;
+
 /**
  * Send-time persistence (`services/send.ts`) keys outbound messages by
  * `stableHash(threadId|sentAt|OUT|text)`. When the next scan parses the same
@@ -1271,6 +1278,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
               }
 
               const streamedCandidates: Array<{ rowKey: string; thread: ThreadStub; messages: NormalizedMessage[] }> = [];
+              const existingThreadOpenStateById = new Map<string, Promise<ExistingThreadOpenState>>();
+              const loadExistingThreadOpenState = (platformThreadId: string): Promise<ExistingThreadOpenState> => {
+                const cached = existingThreadOpenStateById.get(platformThreadId);
+                if (cached) {
+                  return cached;
+                }
+                const lookup = prisma.thread.findUnique({
+                  where: {
+                    platform_platformThreadId: {
+                      platform,
+                      platformThreadId
+                    }
+                  },
+                  select: {
+                    id: true,
+                    lastMessageAt: true,
+                    unreadCount: true,
+                    firstFullBackfillAt: true
+                  }
+                }).catch(() => null);
+                existingThreadOpenStateById.set(platformThreadId, lookup);
+                return lookup;
+              };
               // LinkedIn lists threads most-recent-first. Once we've seen
               // N consecutive rows where the DB content is already up-to-
               // date, we've crossed into already-scanned territory and
@@ -1315,20 +1345,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                     unchangedStreakCount = 0;
                     return { open: true, mode: "delta" };
                   }
-                  const existing = await prisma.thread.findUnique({
-                    where: {
-                      platform_platformThreadId: {
-                        platform,
-                        platformThreadId: signals.candidatePlatformThreadId
-                      }
-                    },
-                    select: {
-                      id: true,
-                      lastMessageAt: true,
-                      unreadCount: true,
-                      firstFullBackfillAt: true
-                    }
-                  }).catch(() => null);
+                  const existing = await loadExistingThreadOpenState(signals.candidatePlatformThreadId);
 
                   // First encounter — request a full backfill so we walk the
                   // message list to the top and persist the entire history.
