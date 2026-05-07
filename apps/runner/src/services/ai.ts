@@ -306,10 +306,19 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // but interprets loose schemas creatively (returning {A,B,C} instead of
     // {replies:[{label,intent,text}]}). Spelling out the exact shape — keys,
     // types, and an example — keeps the zod parser at the call site happy.
+    //
+    // The `what_they_want` framing was originally "what the other person
+    // is asking for" — that worked for outreach threads but produced an
+    // empty-feeling field on peer threads where nobody is asking for
+    // anything explicit. Reframed below as "what would help the operator
+    // continue the relationship": acknowledge a thing they shared, follow
+    // up on a hook, return warmth where warmth is offered. The label on
+    // the dashboard ("What they want") stays the same so existing rows /
+    // cache keys aren't disturbed; only the content shifts.
     const prompt = `Return strict JSON matching this exact shape:
 {
   "summary": "string — 1-2 sentence rolling summary of the relationship",
-  "what_they_want": "string — what the other person is asking for, in their words",
+  "what_they_want": "string — what would deepen this connection or make a great reply. If they made an explicit ask (book a call, share a date, answer a question), that goes here. Otherwise, name what's worth acknowledging or following up on (a thing they shared, a hook in their last message, the warmth they extended). One or two short sentences, plain prose, British English.",
   "open_loops": ["string", ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
@@ -334,9 +343,47 @@ Messages: ${JSON.stringify(input.messages)}`;
      * "not interested" wording per the operator's voice rules.
      */
     category?: "outreach" | "genuine" | null;
+    /**
+     * ISO timestamp of the most recent inbound message. When present and
+     * the gap to "now" is large, the prompt gets an instruction to open
+     * with a brief acknowledgement of the gap — the elephant-in-the-room
+     * problem when replying to a thread weeks/months late.
+     */
+    lastInboundAt?: string | null;
+    /**
+     * ISO timestamp of the most recent outbound message. Used alongside
+     * lastInboundAt to decide whether the gap is the operator's silence
+     * (we should acknowledge) or just an old thread already closed
+     * (don't apologise unprompted).
+     */
+    lastOutboundAt?: string | null;
   }): Promise<SuggestedRepliesOutput> {
     const isOutreach = input.category === "outreach";
     const thirdIntent = isOutreach ? "Polite decline" : "Clarifying question";
+
+    // Late-reply detection: only acknowledge a gap when the inbound is
+    // more recent than the outbound (otherwise the operator already
+    // replied and we'd apologise for nothing) and the gap is ≥ 14 days.
+    // Mid-range bucket (14-30d) gets a softer phrasing than long range
+    // (30d+) which is more direct about the silence.
+    const lateReplyHint = (() => {
+      if (!input.lastInboundAt) return "";
+      const inboundMs = Date.parse(input.lastInboundAt);
+      if (!Number.isFinite(inboundMs)) return "";
+      const outboundMs = input.lastOutboundAt ? Date.parse(input.lastOutboundAt) : NaN;
+      // Only acknowledge if WE haven't already replied since their last
+      // message. If outboundMs > inboundMs the operator's already on top.
+      if (Number.isFinite(outboundMs) && outboundMs >= inboundMs) return "";
+      const gapDays = (Date.now() - inboundMs) / (1000 * 60 * 60 * 24);
+      if (gapDays < 14) return "";
+      const phrase =
+        gapDays >= 60
+          ? "It's been a long time (months). Open every reply with a brief, natural apology for the silence (e.g. 'Sorry it's been ages — life got in the way') before getting to the substance."
+          : gapDays >= 30
+            ? "It's been over a month. Open every reply with a brief, natural acknowledgement of the gap (e.g. 'Sorry I'm only just getting back to this') before the substance."
+            : "It's been a couple of weeks since they wrote. Add a light acknowledgement of the gap to reply A (e.g. 'Sorry for the slow reply') — replies B and C can omit it.";
+      return `\nLate-reply context: ${phrase}\n`;
+    })();
     const fallback: SuggestedRepliesOutput = {
       replies: [
         {
@@ -379,7 +426,7 @@ ${
   isOutreach
     ? "This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C must be a friendly Polite decline (~1 sentence, no commitment, no follow-up question)."
     : ""
-}
+}${lateReplyHint}
 
 Summary: ${input.summary}
 What they want: ${input.whatTheyWant}
@@ -672,12 +719,97 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     }
   }
 
+  /**
+   * "Tell me what you want to say, I'll write it the way you'd write it."
+   * The operator types a brief intent ("ask if they're free next week",
+   * "decline politely", "follow up on the data project") and gets back
+   * a sendable draft calibrated to their own voice on this specific
+   * thread. The voice samples are recent OUTBOUND messages from the
+   * thread — calibrating against the relationship rather than against
+   * an aggregate self-profile keeps register and warmth right (formal
+   * with formal contacts, warm with friends).
+   *
+   * Fallback returns the intent verbatim — the composer never goes
+   * empty even when the AI service is unavailable.
+   */
+  async function composeInVoice(input: {
+    intent: string;
+    displayName: string;
+    voiceSamples: string[];
+    threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<string> {
+    const trimmed = input.intent.trim();
+    if (!trimmed) return "";
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return trimmed;
+    }
+
+    const cleanedSamples = input.voiceSamples
+      .map((sample) => sample.trim())
+      .filter((sample) => sample.length > 0)
+      .slice(-6); // Last 6 outbound messages — enough to learn voice without bloating the prompt.
+
+    const lastInbound = [...input.threadMessages].reverse().find((m) => m.direction === "IN");
+    const lastOutbound = [...input.threadMessages].reverse().find((m) => m.direction === "OUT");
+    // Acknowledge a long gap if the operator is replying weeks/months
+    // after the other party's last message. Threshold matches the
+    // suggested-replies prompt below for consistency.
+    const lastInboundAt = lastInbound ? Date.parse(lastInbound.timestamp) : NaN;
+    const lastOutboundAt = lastOutbound ? Date.parse(lastOutbound.timestamp) : NaN;
+    const gapDays = (() => {
+      if (!Number.isFinite(lastInboundAt)) return 0;
+      const ref = Number.isFinite(lastOutboundAt) ? Math.max(lastInboundAt, lastOutboundAt) : lastInboundAt;
+      // Gap = how long since the most recent message in the thread.
+      return Math.max(0, (Date.now() - ref) / (1000 * 60 * 60 * 24));
+    })();
+
+    const lateReplyHint =
+      gapDays >= 14 && lastInbound && (!lastOutbound || lastInbound.timestamp >= lastOutbound.timestamp)
+        ? `\nThe operator hasn't replied in ${Math.round(gapDays)} days. Open the message with a brief, natural acknowledgement of the gap (e.g. "Sorry it's been ages") — don't dwell on it, just name it once and move on.`
+        : "";
+
+    const prompt = `Rewrite the operator's intent below as a complete, sendable LinkedIn message. Keep it short (1-3 sentences), British English, conversational, peer-to-peer. Match the voice in the samples — same register, warmth, vocabulary, sentence length. Do not invent facts beyond what the intent says. Do not greet by name unless the intent does. No em dashes, en dashes, semicolons, or colons.
+
+Operator's intent: ${safeTruncate(trimmed, 600)}
+
+Recipient: ${input.displayName}
+
+Recent voice samples (operator's own past messages on this thread, oldest first):
+${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}
+
+Return strict JSON: { "text": "string" }`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt }
+        ],
+        ...gpt5OptionsForModel(model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return trimmed;
+      const parsed = z.object({ text: z.string().min(1) }).parse(JSON.parse(content));
+      return applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+    } catch (error) {
+      console.warn(
+        `[ai] composeInVoice failed (provider=${provider}, model=${model}); returning raw intent. ${classifyLlmError(error, provider)}`
+      );
+      return trimmed;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
     classifyThreadCategory,
     generateContactSummary,
-    generateConversationStarters
+    generateConversationStarters,
+    composeInVoice
   };
 }

@@ -740,6 +740,31 @@ app.get("/data/settings", asyncRoute(async (_req, res) => {
   res.json(settings);
 }));
 
+// Reflects which AI providers actually have credentials at runtime.
+// The dashboard reads this alongside /data/settings to show a "key
+// missing" warning when the operator has flipped to a provider that
+// isn't actually configured (e.g. selecting GLM with Z_AI_API_KEY
+// blank — the toggle persists in the DB but every AI call falls back
+// to the canned default reply). Separate from /data/settings because
+// AppSettings is the persisted user choice; this endpoint is the
+// runtime configuration view.
+app.get("/data/ai-status", asyncRoute(async (_req, res) => {
+  const settings = await settingsStore.getSettings();
+  const activeProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+  const configuredProviders: Array<"openai" | "glm"> = [];
+  if (runnerConfig.openAiApiKey) configuredProviders.push("openai");
+  if (runnerConfig.zAiApiKey) configuredProviders.push("glm");
+  res.json({
+    activeProvider,
+    activeModel:
+      activeProvider === "glm"
+        ? settings.glmModel?.trim() || runnerConfig.glmModel
+        : runnerConfig.openAiModel,
+    configuredProviders,
+    activeProviderConfigured: configuredProviders.includes(activeProvider)
+  });
+}));
+
 app.post("/control/settings", asyncRoute(async (req, res) => {
   const payload = z
     .object({
@@ -1448,6 +1473,117 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
   res.json({ text });
 }));
 
+// "Tell the AI what you want to say, get it back in your voice."
+// The operator types a brief intent (a sentence or two) and gets back
+// a sendable draft calibrated to how they've previously written on
+// this thread. Used by the dashboard's Compose card on the thread
+// page when the suggested replies don't fit.
+app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ intent: z.string().min(1).max(2000) }).parse(req.body);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: {
+      person: true,
+      messages: {
+        orderBy: { timestamp: "asc" },
+        take: 80
+      }
+    }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+
+  const voiceSamples = thread.messages
+    .filter((m) => m.direction === "OUT")
+    .map((m) => m.text);
+  const text = await aiService.composeInVoice({
+    intent: payload.intent,
+    displayName: thread.person.displayName,
+    voiceSamples,
+    threadMessages: thread.messages.map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    }))
+  });
+
+  res.json({ text });
+}));
+
+// One-click reassess. Burns the cached suggested replies, regenerates
+// the rolling summary + what-they-want + open loops, and reclassifies
+// the thread (outreach vs genuine). The dashboard pulls a fresh
+// /data/thread response after this returns and the user sees all four
+// fields refreshed at once. Wraps the AI calls in try/catch so a
+// transient OpenAI / GLM hiccup leaves the thread in its previous
+// state rather than blanking the fields.
+app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  // 1. Resummarise (this also refreshes whatTheyWant + openLoops via the
+  // existing helper, which already persists the result).
+  const resummarised = await resummarizeThreadById(threadId);
+  if (!resummarised.ok) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+
+  // 2. Reclassify outreach vs genuine. Uses the freshly-resummarised
+  // fields as input so the classification reflects the latest state.
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: {
+      person: true,
+      messages: {
+        orderBy: { timestamp: "asc" },
+        take: 80
+      }
+    }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+  const category = await aiService
+    .classifyThreadCategory({
+      displayName: thread.person.displayName,
+      messages: thread.messages.map((m) => ({
+        direction: m.direction as "IN" | "OUT",
+        text: m.text,
+        timestamp: m.timestamp.toISOString()
+      })),
+      summary: thread.rollingSummary,
+      whatTheyWant: thread.whatTheyWant
+    })
+    .catch(() => null);
+
+  // 3. Burn the suggested-replies cache so the next /data/thread fetch
+  // regenerates them against the new summary / what-they-want / category /
+  // late-reply bucket. Persisting null on the cache key + json columns is
+  // the cheapest way to express "stale" without touching the schema.
+  await prisma.thread.update({
+    where: { id: thread.id },
+    data: {
+      ...(category ? { category } : {}),
+      suggestedRepliesCacheKey: null,
+      suggestedRepliesJson: null
+    }
+  });
+
+  res.json({
+    ok: true,
+    threadId,
+    summary: resummarised.summary,
+    whatTheyWant: resummarised.whatTheyWant,
+    openLoops: resummarised.openLoops,
+    category: category ?? thread.category ?? null
+  });
+}));
+
 app.get("/data/inbox", asyncRoute(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
@@ -1577,21 +1713,44 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   }
 
   const lastInbound = [...thread.messages].reverse().find((msg) => msg.direction === "IN");
+  const lastOutbound = [...thread.messages].reverse().find((msg) => msg.direction === "OUT");
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
     lastInboundMessage: lastInbound?.text ?? "",
     // Drives the "Polite decline" reply variant when the thread is outreach.
-    category: (thread.category ?? null) as "outreach" | "genuine" | null
+    category: (thread.category ?? null) as "outreach" | "genuine" | null,
+    // Late-reply detection: when the last inbound is much older than the
+    // most recent outbound (or there's no outbound yet) the prompt asks
+    // the model to acknowledge the gap. Day-bucketed ISO is enough for
+    // the cache key — minute-precision would invalidate replies every
+    // few minutes for no reason.
+    lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+    lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null
   };
-  // Cache key over the four AI inputs. Hashing keeps the column short and
+  // Cache key over the AI inputs. Hashing keeps the column short and
   // doesn't leak content into the audit log if anyone ever inspects it. As
   // long as none of these inputs change, replies stay valid — refresh()
   // calls on Save draft / Snooze / Mark done won't trigger a fresh OpenAI
-  // hit, only a real conversation change does.
+  // hit, only a real conversation change does. The late-reply state is
+  // bucketed by day (UTC) so the cache holds as the gap grows hour by
+  // hour but invalidates when the gap actually crosses a 14d / 30d / 60d
+  // bucket boundary.
+  const lateBucket = (() => {
+    if (!aiInputs.lastInboundAt) return "n";
+    const inboundMs = Date.parse(aiInputs.lastInboundAt);
+    if (!Number.isFinite(inboundMs)) return "n";
+    const outboundMs = aiInputs.lastOutboundAt ? Date.parse(aiInputs.lastOutboundAt) : NaN;
+    if (Number.isFinite(outboundMs) && outboundMs >= inboundMs) return "n";
+    const gapDays = (Date.now() - inboundMs) / (1000 * 60 * 60 * 24);
+    if (gapDays >= 60) return "long";
+    if (gapDays >= 30) return "medium";
+    if (gapDays >= 14) return "short";
+    return "n";
+  })();
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}`)
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}`)
     .digest("hex");
 
   let suggested;
