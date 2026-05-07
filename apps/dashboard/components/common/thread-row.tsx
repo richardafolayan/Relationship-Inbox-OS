@@ -48,6 +48,15 @@ export function ThreadRow({ row }: ThreadRowProps) {
           <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
             {PLATFORM_LABEL[row.platform]}
           </span>
+          {row.category ? (
+            <span
+              className={`font-mono text-[10px] uppercase tracking-[0.06em] ${
+                row.category === "outreach" ? "text-risk-waiting" : "text-risk-fresh"
+              }`}
+            >
+              {row.category}
+            </span>
+          ) : null}
         </span>
         <span className="block max-w-[52ch] truncate text-[14px] text-ink-3">{previewBody}</span>
       </span>
