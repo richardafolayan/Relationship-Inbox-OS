@@ -8,11 +8,14 @@ import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
 
-// People — relationship rows in the same calm pattern as ThreadRow. Click
-// any row to open a slim detail panel below with summary + enrichment +
-// starters. Heavy CRM-style controls are gone; the runner endpoints they
-// drove are still reachable from the row's quiet links.
+const NOTES_STORAGE_PREFIX = "inbox_person_notes_";
+
+// People — list on the left, sticky detail panel on the right. Detail
+// panel houses summary + tags + notes + start-a-conversation +
+// manual-merge-duplicates so the per-person actions stop falling off the
+// bottom of a 75-row list.
 export default function PeoplePage() {
   const router = useRouter();
   const [people, setPeople] = useState<PeopleRow[]>([]);
@@ -21,6 +24,7 @@ export default function PeoplePage() {
   const [refreshing, setRefreshing] = useState(false);
   const [startersLoading, setStartersLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notes, setNotes] = useState("");
 
   const loadList = useCallback(async () => {
     const data = await apiGet<PeopleRow[]>("/runner/data/people").catch(() => [] as PeopleRow[]);
@@ -47,15 +51,28 @@ export default function PeoplePage() {
   useEffect(() => {
     if (!selectedId) {
       setDetail(null);
+      setNotes("");
       return;
     }
     void loadDetail(selectedId);
+    const stored = window.localStorage.getItem(`${NOTES_STORAGE_PREFIX}${selectedId}`);
+    setNotes(stored ?? "");
   }, [selectedId, loadDetail]);
 
   const selected = useMemo(
     () => people.find((person) => person.id === selectedId) ?? null,
     [people, selectedId]
   );
+
+  // Persist notes to localStorage as the operator types — the runner
+  // doesn't currently expose a notes endpoint, so this matches main's
+  // behaviour (visible field, no backend) but adds reload-survival.
+  const onNotesChange = (value: string) => {
+    setNotes(value);
+    if (selectedId) {
+      window.localStorage.setItem(`${NOTES_STORAGE_PREFIX}${selectedId}`, value);
+    }
+  };
 
   const refreshEnrichment = () => {
     if (!selectedId) return;
@@ -78,6 +95,15 @@ export default function PeoplePage() {
     void loadDetail(selectedId, true).finally(() => setStartersLoading(false));
   };
 
+  const manualMerge = () => {
+    if (!selectedId || !selected) return;
+    window.alert(
+      `Manual merge for ${selected.name} is not yet wired up on the runner. Use the CLI's merge-people script for now.`
+    );
+  };
+
+  const tags = selected?.tags.length ? selected.tags : ["Warm lead"];
+
   return (
     <Canvas>
       <PageHead
@@ -93,8 +119,8 @@ export default function PeoplePage() {
       {people.length === 0 ? (
         <CaughtUp title="No relationships yet." body="Connect a platform to start mapping people." />
       ) : (
-        <>
-          <div className="flex flex-col">
+        <div className="grid grid-cols-1 gap-8 lg:grid-cols-[minmax(0,1fr)_360px]">
+          <div className="flex max-h-[calc(100vh-260px)] flex-col overflow-y-auto">
             {people.map((person) => {
               const risk = toDisplayRisk(person.risk);
               const dot =
@@ -143,76 +169,122 @@ export default function PeoplePage() {
           </div>
 
           {selected ? (
-            <section className="mt-12 rounded-card border border-hairline bg-paper p-9 shadow-card">
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                {PLATFORM_LABEL[selected.platform]} · last contact{" "}
-                {formatRelative(selected.lastInteractionAt)}
-              </p>
-              <h3 className="m-0 font-display text-[26px] font-semibold tracking-[-0.02em]">
-                {selected.name}
-              </h3>
+            <aside className="lg:sticky lg:top-6 lg:self-start">
+              <div className="rounded-card border border-hairline bg-paper p-6 shadow-card">
+                <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                  {PLATFORM_LABEL[selected.platform]} · last contact{" "}
+                  {formatRelative(selected.lastInteractionAt)}
+                </p>
+                <h3 className="m-0 font-display text-[22px] font-semibold tracking-[-0.02em]">
+                  {selected.name}
+                </h3>
 
-              <p className="mt-4 max-w-[58ch] text-[15px] leading-[1.55] text-ink-2">
-                {detail?.summary ??
-                  (detail?.enrichment
-                    ? "No summary yet. Refresh to generate one."
-                    : "Not enriched yet. Refresh to fetch the LinkedIn profile.")}
-              </p>
+                <p className="mt-4 text-[14px] leading-[1.55] text-ink-2">
+                  {detail?.summary ??
+                    (detail?.enrichment
+                      ? "No summary yet. Refresh to generate one."
+                      : "Not enriched yet. Refresh to fetch the LinkedIn profile.")}
+                </p>
 
-              {detail?.enrichment ? (
-                <ul className="mt-4 space-y-1 font-mono text-[12px] text-ink-3">
-                  {detail.enrichment.headline ? <li>{detail.enrichment.headline}</li> : null}
-                  {detail.enrichment.currentRole || detail.enrichment.currentCompany ? (
-                    <li>
-                      {[detail.enrichment.currentRole, detail.enrichment.currentCompany]
-                        .filter(Boolean)
-                        .join(" at ")}
-                    </li>
-                  ) : null}
-                  {detail.enrichment.location ? <li>{detail.enrichment.location}</li> : null}
-                </ul>
-              ) : null}
+                {detail?.enrichment ? (
+                  <ul className="mt-4 space-y-1 font-mono text-[12px] text-ink-3">
+                    {detail.enrichment.headline ? <li>{detail.enrichment.headline}</li> : null}
+                    {detail.enrichment.currentRole || detail.enrichment.currentCompany ? (
+                      <li>
+                        {[detail.enrichment.currentRole, detail.enrichment.currentCompany]
+                          .filter(Boolean)
+                          .join(" at ")}
+                      </li>
+                    ) : null}
+                    {detail.enrichment.location ? <li>{detail.enrichment.location}</li> : null}
+                  </ul>
+                ) : null}
 
-              {detail?.starters && detail.starters.starters.length > 0 ? (
-                <div className="mt-6 border-t border-hairline pt-5">
-                  <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                    Suggested openers
+                {detail?.starters && detail.starters.starters.length > 0 ? (
+                  <div className="mt-5 border-t border-hairline pt-4">
+                    <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                      Suggested openers
+                    </p>
+                    <div className="space-y-2">
+                      {detail.starters.starters.map((starter, idx) => (
+                        <div key={idx} className="rounded-row border border-hairline p-3 text-[13px]">
+                          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                            {starter.angle} · cited {starter.citedField}
+                          </p>
+                          <p className="text-ink">{starter.text}</p>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                ) : null}
+
+                <div className="mt-5 border-t border-hairline pt-4">
+                  <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                    Tags
                   </p>
-                  <div className="space-y-3">
-                    {detail.starters.starters.map((starter, idx) => (
-                      <div key={idx} className="rounded-row border border-hairline p-4 text-[14px]">
-                        <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                          {starter.angle} · cited {starter.citedField}
-                        </p>
-                        <p className="text-ink">{starter.text}</p>
-                      </div>
+                  <div className="flex flex-wrap gap-2">
+                    {tags.map((tag) => (
+                      <span
+                        key={tag}
+                        className="inline-flex items-center rounded-pill border border-hairline px-3 py-1 text-[12px] text-ink-2"
+                      >
+                        {tag}
+                      </span>
                     ))}
                   </div>
                 </div>
-              ) : null}
 
-              <div className="mt-6 flex flex-wrap items-center gap-3">
-                <Button variant="quiet" disabled={refreshing} onClick={refreshEnrichment}>
-                  {refreshing ? "Refreshing…" : "Refresh enrichment"}
-                </Button>
-                <Button
-                  variant="quiet"
-                  disabled={!detail?.enrichment || startersLoading}
-                  onClick={fetchStarters}
-                >
-                  {startersLoading ? "Drafting…" : "Start a conversation"}
-                </Button>
-                <button
-                  type="button"
-                  onClick={() => router.push(`/inbox?person=${selected.id}`)}
-                  className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                >
-                  open in inbox
-                </button>
+                <div className="mt-5 border-t border-hairline pt-4">
+                  <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                    Notes
+                  </p>
+                  <Textarea
+                    rows={5}
+                    value={notes}
+                    onChange={(event) => onNotesChange(event.target.value)}
+                    placeholder="Internal relationship notes…"
+                    className="text-[13px]"
+                  />
+                </div>
+
+                <p className="mt-4 font-mono text-[11px] text-ink-3">
+                  {selected.enrichmentFailedReason ? (
+                    <span className="text-risk-overdue">
+                      Last enrichment failed: {selected.enrichmentFailedReason}
+                    </span>
+                  ) : selected.enrichedAt ? (
+                    <>Last enriched {formatRelative(selected.enrichedAt)}</>
+                  ) : (
+                    <>Not enriched yet</>
+                  )}
+                </p>
+
+                <div className="mt-5 flex flex-wrap items-center gap-2">
+                  <Button variant="quiet" disabled={refreshing} onClick={refreshEnrichment}>
+                    {refreshing ? "Refreshing…" : "Refresh enrichment"}
+                  </Button>
+                  <Button
+                    variant="quiet"
+                    disabled={!detail?.enrichment || startersLoading}
+                    onClick={fetchStarters}
+                  >
+                    {startersLoading ? "Drafting…" : "Start a conversation"}
+                  </Button>
+                  <Button variant="quiet" onClick={manualMerge}>
+                    Manual merge duplicates
+                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/inbox?person=${selected.id}`)}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    open in inbox
+                  </button>
+                </div>
               </div>
-            </section>
+            </aside>
           ) : null}
-        </>
+        </div>
       )}
     </Canvas>
   );
