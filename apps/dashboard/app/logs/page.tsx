@@ -31,7 +31,7 @@ export default function LogsPage() {
     <Canvas>
       <PageHead
         eyebrow="Receipts"
-        title="Activity."
+        title="Activity"
         meta={
           <button
             type="button"

@@ -127,7 +127,7 @@ export default function SettingsPage() {
   if (!settings) {
     return (
       <Canvas>
-        <PageHead eyebrow="Preferences" title="Settings." />
+        <PageHead eyebrow="Preferences" title="Settings" />
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
       </Canvas>
     );
@@ -137,7 +137,7 @@ export default function SettingsPage() {
     <Canvas>
       <PageHead
         eyebrow="Preferences"
-        title="Settings."
+        title="Settings"
         meta={
           savedAt && Date.now() - savedAt < 4000 ? (
             <span className="text-ink">saved</span>
