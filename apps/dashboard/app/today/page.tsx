@@ -116,7 +116,7 @@ export default function TodayPage() {
     <Canvas>
       <PageHead
         eyebrow={dayLabel}
-        title={`${greeting}, Richard.`}
+        title={`${greeting}, Richard`}
         meta={
           <>
             <span className="text-ink">{overdueCount}</span> overdue ·{" "}

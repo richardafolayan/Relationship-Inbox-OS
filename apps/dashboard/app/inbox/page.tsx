@@ -58,7 +58,7 @@ export default function InboxPage() {
     <Canvas>
       <PageHead
         eyebrow="All conversations"
-        title="Inbox."
+        title="Inbox"
         meta={<span>{rows.length} threads</span>}
       />
 

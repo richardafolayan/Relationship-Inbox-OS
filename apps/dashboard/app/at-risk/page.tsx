@@ -34,7 +34,7 @@ export default function AtRiskPage() {
     <Canvas>
       <PageHead
         eyebrow="Needs you"
-        title="At risk."
+        title="At risk"
         meta={
           <>
             <span className="text-ink">{overdue.length}</span> overdue ·{" "}
