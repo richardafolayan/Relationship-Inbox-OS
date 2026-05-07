@@ -1,29 +1,56 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
-import { ExternalLink, RefreshCcw, CheckCircle2, Loader2, RotateCcw } from "lucide-react";
+import { ChevronDown, ChevronLeft, Loader2, Send, Sparkles } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { AuditLogRow, InboxResponse, PlatformCard, ThreadResponse } from "@/lib/types";
+import type { AuditLogRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { formatClock, formatRelative } from "@/lib/time";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
-import { Textarea } from "@/components/ui/textarea";
-import { Skeleton } from "@/components/ui/skeleton";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 
-function riskTone(level: string): "green" | "amber" | "red" {
-  if (level === "RED") {
-    return "red";
-  }
-  if (level === "AMBER") {
-    return "amber";
-  }
-  return "green";
-}
+// Thread workspace — landscape layout.
+//
+//   ┌──────────── chat column (fills) ─────────┬── context rail (360) ──┐
+//   │ back link + thread header                │  WHAT THEY WANT        │
+//   │ ─── timeline (scrolls, lazy-loaded) ───  │  · summary             │
+//   │ ─── composer (sticky bottom) ───         │  · the ask             │
+//   │ meta row                                 │  OPEN LOOPS            │
+//   │                                          │  WRITE IN MY VOICE     │
+//   └──────────────────────────────────────────┴────────────────────────┘
+//
+// The chat column owns the conversation. The right rail keeps "what they
+// want", open loops, and the AI compose helper visible without crowding
+// the message stream — and scrolls independently when content overflows.
+//
+// Behaviour preserved across the rebuild:
+//   • Auto-scroll to the most recent message on open / new send.
+//   • Lazy-render the last 15 messages, expand on scroll-near-top with
+//     scroll-position restoration so older history doesn't yank the view.
+//   • SSE event reconciliation + send-queue polling fallback.
+//   • Optimistic-UI bubbles with retry on failure.
+//   • [system event] markers collapse into a centred mono caption.
+//   • Compose-in-voice (intent → AI draft) lives in the right rail.
+//   • Shorten / Make warmer transforms stay inside the composer toolbar
+//     (they need direct access to the current draft).
+
+const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (firstName: string) => string }> = [
+  { intent: "Warm yes", glyph: "↵", build: (n) => `Hey ${n}, yes — let's do it.` },
+  { intent: "Polite pass", glyph: "·", build: (n) => `Hi ${n}, appreciate it but I'll pass for now.` },
+  { intent: "Ask for time", glyph: "⏱", build: (n) => `Hey ${n}, can I get back to you next week?` }
+];
+
+// Most threads are 5–20 messages. Render the last ~15 by default so a
+// freshly-opened conversation is light, and reveal older history only
+// when the operator scrolls up. Crossing SCROLL_TOP_THRESHOLD pulls in
+// another PAGE_SIZE chunk.
+const INITIAL_VISIBLE = 15;
+const PAGE_SIZE = 20;
+const SCROLL_TOP_THRESHOLD = 120;
+const SCROLL_BOTTOM_THRESHOLD = 200;
 
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
@@ -31,32 +58,23 @@ export default function ThreadPage() {
   const threadId = params.id;
 
   const [thread, setThread] = useState<ThreadResponse | null>(null);
-  const [inboxRows, setInboxRows] = useState<InboxResponse["rows"]>([]);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [sending, setSending] = useState(false);
+  const [reassessing, setReassessing] = useState(false);
+  const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
+  const [composeIntent, setComposeIntent] = useState("");
+  const [composing, setComposing] = useState(false);
+  const [composeDraft, setComposeDraft] = useState("");
+  const [composeError, setComposeError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Compose-in-voice helper state. Replaces the old Notes+tags card so
-  // the operator can describe what they want to say in plain words and
-  // get back a draft calibrated to past outbound messages on this
-  // thread. Persists nothing — the only action that escapes this card
-  // is "Use this", which writes into the main composer.
-  const [composeIntent, setComposeIntent] = useState("");
-  const [composeDraft, setComposeDraft] = useState("");
-  const [composing, setComposing] = useState(false);
-  const [composeError, setComposeError] = useState<string | null>(null);
-  // Reassess: one click regenerates summary + what-they-want + open
-  // loops + classification, and burns the suggested-replies cache so
-  // the next refresh pulls fresh ones too.
-  const [reassessing, setReassessing] = useState(false);
-  // Optimistic-UI bubbles: when the user clicks Send, we immediately push
-  // a temporary OUT message into the timeline so they see feedback even
-  // when the runner's send is queued behind a scan (which can take 30s+).
-  // Once the runner persists the real message, refresh() pulls it into
-  // `thread.messages` and we drop the matching pending bubble.
+  const [visibleCount, setVisibleCount] = useState(INITIAL_VISIBLE);
+  const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
+  const chipsMenuRef = useRef<HTMLDivElement>(null);
+
   const [pendingSends, setPendingSends] = useState<
     Array<{
       clientSendId: string;
@@ -66,30 +84,22 @@ export default function ThreadPage() {
       errorMessage?: string;
     }>
   >([]);
-  // Mirror of pendingSends accessible from the polling effect without
-  // re-creating its interval each time a bubble is added/removed. The
-  // poll only needs to read the current list; subscribing via the
-  // useEffect deps would tear down + re-arm the timer per send.
   const pendingSendsRef = useRef(pendingSends);
   useEffect(() => {
     pendingSendsRef.current = pendingSends;
   }, [pendingSends]);
 
+  const timelineRef = useRef<HTMLDivElement>(null);
+  const stickToBottomRef = useRef(true);
+  const restoreScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  const prevThreadIdRef = useRef<string | null>(null);
+
   const refresh = useCallback(async () => {
-    // Promise.allSettled instead of Promise.all so a transient 500 on
-    // ONE endpoint (e.g. /data/thread when the runner's mid-resummarise
-    // and the AI provider just bumped a rate limit) doesn't blow up the
-    // whole refresh and leak as an unhandled rejection into Next.js's
-    // dev overlay error counter. The thread payload is the critical
-    // one; if that succeeds we render even when the side panels are
-    // stale, and we surface the failure inline via setError instead.
-    const [threadResult, inboxResult, platformsResult, logsResult] = await Promise.allSettled([
+    const [threadResult, platformsResult, logsResult] = await Promise.allSettled([
       apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
-      apiGet<InboxResponse>("/runner/data/inbox"),
       apiGet<PlatformCard[]>("/runner/data/platforms"),
       apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
     ]);
-
     if (threadResult.status === "fulfilled") {
       setThread(threadResult.value);
       setComposer((prev) => prev || threadResult.value.draft || "");
@@ -101,17 +111,12 @@ export default function ThreadPage() {
           : "Failed to load thread";
       setError(message);
     }
-    if (inboxResult.status === "fulfilled") setInboxRows(inboxResult.value.rows);
     if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
     if (logsResult.status === "fulfilled") setLogs(logsResult.value);
     setLoading(false);
   }, [threadId]);
 
   useEffect(() => {
-    // Refresh on mount. Errors are now surfaced inline by refresh()
-    // itself via setError; the .catch here is belt-and-braces so a
-    // future rejection inside the success branch (e.g. setState during
-    // unmount) can't bubble out as unhandled either.
     refresh().catch((err) => {
       const message = err instanceof Error ? err.message : "Failed to load thread";
       setError(message);
@@ -119,11 +124,7 @@ export default function ThreadPage() {
     });
   }, [refresh]);
 
-  // Optimistic-UI reconciliation: when the runner finishes processing a
-  // SendRequest in the background, it emits MESSAGE_SENT or
-  // MESSAGE_SEND_FAILED with the same clientSendId we used for the
-  // optimistic bubble. Match by clientSendId so the right bubble flips —
-  // important when the user fires multiple sends in a row.
+  // SSE reconciliation for sends.
   useEffect(() => {
     const onRunnerEvent = (event: Event) => {
       const detail = (event as CustomEvent<{
@@ -132,11 +133,8 @@ export default function ThreadPage() {
         clientSendId?: string;
         errorMessage?: string;
       }>).detail;
-      if (!detail || !threadId) return;
-      if (detail.threadId !== threadId) return;
+      if (!detail || !threadId || detail.threadId !== threadId) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
-        // Refresh first so the persisted OUT message is in thread.messages
-        // before we drop the optimistic stand-in (no flash).
         void refresh().finally(() => {
           setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
         });
@@ -155,22 +153,12 @@ export default function ThreadPage() {
     return () => window.removeEventListener("runner-event", onRunnerEvent as EventListener);
   }, [threadId, refresh]);
 
-  // Polling fallback for the optimistic-UI reconciliation above. SSE on
-  // /events is the primary path, but Next.js's HTTP rewrite proxy has
-  // historically buffered or timed out long-lived streams in dev — when
-  // that breaks, MESSAGE_SENT never arrives in the browser and the
-  // bubble sticks on "Sending…" even though the runner long since
-  // persisted the OUT message. The system status bar already polls
-  // /data/send-queue every 3s for its own banner; we ride the same
-  // endpoint and reconcile pendingSends ourselves so the thread page
-  // doesn't depend on SSE staying healthy.
+  // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
     if (!threadId) return undefined;
     let cancelled = false;
     const tick = async () => {
       if (cancelled) return;
-      // Bail out cheaply when there's nothing to reconcile — keeps the
-      // poll free in the common case (no in-flight sends on this thread).
       if (pendingSendsRef.current.length === 0) return;
       try {
         const queue = await apiGet<{
@@ -204,9 +192,6 @@ export default function ThreadPage() {
           return pending;
         });
         if (sawSent) {
-          // Refresh first so the persisted OUT message is in thread.messages
-          // before we drop the optimistic bubble (mirrors the SSE handler so
-          // the user never sees a flash of empty timeline).
           await refresh();
           if (cancelled) return;
           setPendingSends((prev) => prev.filter((p) => !sentIds.has(p.clientSendId)));
@@ -214,12 +199,10 @@ export default function ThreadPage() {
           setPendingSends(next);
         }
       } catch {
-        // Network blip — try again on the next tick.
+        // Network blip — try again next tick.
       }
     };
     const timer = setInterval(() => void tick(), 3000);
-    // Run once immediately so a freshly-loaded page reconciles without
-    // waiting 3s.
     void tick();
     return () => {
       cancelled = true;
@@ -227,89 +210,22 @@ export default function ThreadPage() {
     };
   }, [threadId, refresh]);
 
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-        event.preventDefault();
-        void onSend();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  });
-
-  const timeline = useMemo(() => {
-    if (!thread) {
-      return [];
-    }
-
-    let lastDate = "";
-    return thread.messages.map((message) => {
-      const dateKey = new Date(message.timestamp).toDateString();
-      const showDivider = dateKey !== lastDate;
-      lastDate = dateKey;
-      return {
-        ...message,
-        showDivider,
-        dividerLabel: new Intl.DateTimeFormat("en-GB", {
-          weekday: "long",
-          month: "short",
-          day: "numeric"
-        }).format(new Date(message.timestamp))
-      };
-    });
-  }, [thread]);
-
-  const degradedPlatform = useMemo(() => {
-    if (!thread) {
-      return undefined;
-    }
-    return platforms.find((platform) => platform.platform === thread.platform && platform.status === "DEGRADED");
-  }, [platforms, thread]);
-
-  const degradedDomDump = useMemo(() => {
-    if (!thread) {
-      return undefined;
-    }
-
-    return (
-      logs.find((log) => log.platform === thread.platform && log.domDumpFile)?.domDumpFile ??
-      thread.receipts.find((row) => row.domDumpFile)?.domDumpFile
-    );
-  }, [logs, thread]);
-
-  const onSend = async () => {
-    if (!thread || !composer.trim() || sending) {
-      return;
-    }
-
+  const onSend = useCallback(async () => {
+    if (!thread || !composer.trim() || sending) return;
     const clientSendId = uuid();
     const text = composer;
     const sentAt = new Date().toISOString();
-
-    // Push optimistic bubble before awaiting the runner so the user sees
-    // immediate feedback. The runner now returns within ~50ms (just inserts
-    // a SendRequest PENDING row); the actual adapter call happens
-    // asynchronously and notifies us via MESSAGE_SENT / MESSAGE_SEND_FAILED
-    // events keyed by clientSendId.
     setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
     setComposer("");
     setSending(true);
     setError(null);
+    stickToBottomRef.current = true;
     try {
       await apiPost(`/runner/control/thread/${thread.id}/send`, {
         text,
         clientSendId
       });
-      // The POST has returned with the queued state. The optimistic bubble
-      // stays on screen with its "Sending…" badge. The /events SSE listener
-      // (effect below) will replace it with the persisted OUT message when
-      // MESSAGE_SENT for this clientSendId arrives, or flip it to a failed
-      // state if MESSAGE_SEND_FAILED arrives.
     } catch (sendError) {
-      // Enqueue itself failed — usually a validation error or runner offline.
-      // The send never made it to the queue, so we surface it inline.
       const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
       setPendingSends((prev) =>
         prev.map((p) =>
@@ -321,57 +237,45 @@ export default function ThreadPage() {
     } finally {
       setSending(false);
     }
-  };
+  }, [composer, sending, thread]);
 
-  const retryPendingSend = async (clientSendId: string) => {
+  // Cmd/Ctrl-Enter sends.
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+        event.preventDefault();
+        void onSend();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onSend]);
+
+  // Click-outside / Escape closes the suggestion dropdown.
+  useEffect(() => {
+    if (!chipsMenuOpen) return undefined;
+    const onClick = (event: MouseEvent) => {
+      if (!chipsMenuRef.current?.contains(event.target as Node)) {
+        setChipsMenuOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setChipsMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [chipsMenuOpen]);
+
+  const retryPendingSend = (clientSendId: string) => {
     const target = pendingSends.find((p) => p.clientSendId === clientSendId);
     if (!target || !thread) return;
-    // Fire a NEW clientSendId — the previous one is permanently linked to
-    // the FAILED SendRequest row in the runner. Drop the failed bubble so
-    // the new attempt's optimistic bubble takes its place.
     setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
     setComposer(target.text);
-    // Defer to next tick so React applies the composer update before onSend
-    // reads it.
     setTimeout(() => void onSend(), 0);
-  };
-
-  const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
-    if (!composer.trim() || !thread) {
-      return;
-    }
-
-    try {
-      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
-        mode,
-        text: composer
-      });
-      setComposer(output.text);
-      setError(null);
-    } catch (transformError) {
-      const message = transformError instanceof Error ? transformError.message : "Transform failed";
-      console.warn("[action]", message);
-      setError(message);
-    }
-  };
-
-  const composeIntentToVoice = async () => {
-    const intent = composeIntent.trim();
-    if (!intent || !thread || composing) return;
-    setComposing(true);
-    setComposeError(null);
-    try {
-      const output = await apiPost<{ text: string }>(
-        `/runner/control/thread/${thread.id}/compose`,
-        { intent }
-      );
-      setComposeDraft(output.text);
-    } catch (composeErr) {
-      const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
-      setComposeError(message);
-    } finally {
-      setComposing(false);
-    }
   };
 
   const reassessThread = async () => {
@@ -380,9 +284,6 @@ export default function ThreadPage() {
     setError(null);
     try {
       await apiPost(`/runner/control/thread/${thread.id}/reassess`, {});
-      // Refresh pulls the new summary + what-they-want + open-loops +
-      // category, and the now-empty suggestedReplies cache will be
-      // regenerated by the /data/thread handler on the same fetch.
       await refresh();
     } catch (reassessError) {
       const message = reassessError instanceof Error ? reassessError.message : "Reassess failed";
@@ -392,421 +293,533 @@ export default function ThreadPage() {
     }
   };
 
-  if (loading || !thread) {
-    // Layout-shaped skeleton so the page doesn't visually jump when the
-    // real content arrives. Three columns (threads / conversation / context)
-    // matching the live layout's grid below.
+  const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
+    if (!thread || !composer.trim() || transforming) return;
+    setTransforming(mode);
+    setError(null);
+    try {
+      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
+        mode,
+        text: composer
+      });
+      setComposer(output.text);
+    } catch (transformError) {
+      const message = transformError instanceof Error ? transformError.message : "Transform failed";
+      setError(message);
+    } finally {
+      setTransforming(null);
+    }
+  };
+
+  const composeFromIntent = async () => {
+    if (!thread) return;
+    const intent = composeIntent.trim();
+    if (!intent || composing) return;
+    setComposing(true);
+    setComposeError(null);
+    try {
+      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/compose`, {
+        intent
+      });
+      setComposeDraft(output.text);
+    } catch (composeErr) {
+      const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
+      setComposeError(message);
+    } finally {
+      setComposing(false);
+    }
+  };
+
+  const useDraft = () => {
+    if (!composeDraft) return;
+    setComposer(composeDraft);
+    setComposeDraft("");
+    setComposeIntent("");
+  };
+
+  const degraded = useMemo(() => {
+    if (!thread) return undefined;
+    return platforms.find((p) => p.platform === thread.platform && p.status === "DEGRADED");
+  }, [platforms, thread]);
+
+  const degradedDomDump = useMemo(() => {
+    if (!thread) return undefined;
     return (
-      <div className="flex h-full flex-col gap-3 overflow-hidden">
-        <div className="grid min-h-0 flex-1 grid-cols-12 gap-4">
-          <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-3">
-            <Skeleton className="mb-3 h-4 w-20" />
-            <div className="space-y-2">
-              {Array.from({ length: 8 }).map((_, i) => (
-                <Skeleton key={i} className="h-12 w-full" />
-              ))}
-            </div>
-          </Card>
-          <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-6">
-            <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-3">
-              <Skeleton className="h-6 w-48" />
-              <div className="flex gap-2">
-                <Skeleton className="h-8 w-28" />
-                <Skeleton className="h-8 w-28" />
-              </div>
-            </div>
-            <div className="flex-1 space-y-3">
-              <Skeleton className="ml-0 h-16 w-3/4" />
-              <Skeleton className="ml-auto h-16 w-2/3" />
-              <Skeleton className="ml-0 h-12 w-1/2" />
-            </div>
-          </Card>
-          <Card className="col-span-12 flex min-h-0 flex-col space-y-3 overflow-y-auto lg:col-span-3">
-            <Skeleton className="h-4 w-24" />
-            <Skeleton className="h-16 w-full" />
-            <Skeleton className="h-4 w-32" />
-            <Skeleton className="h-20 w-full" />
-            <Skeleton className="h-4 w-28" />
-            <Skeleton className="h-24 w-full" />
-          </Card>
-        </div>
+      logs.find((log) => log.platform === thread.platform && log.domDumpFile)?.domDumpFile ??
+      thread.receipts.find((row) => row.domDumpFile)?.domDumpFile
+    );
+  }, [logs, thread]);
+
+  const visibleMessages = useMemo<ThreadMessage[]>(() => {
+    if (!thread) return [];
+    return thread.messages.slice(-visibleCount);
+  }, [thread, visibleCount]);
+  const hasOlder = (thread?.messages.length ?? 0) > visibleCount;
+
+  // Reset window + force-scroll-to-bottom when switching threads.
+  useEffect(() => {
+    if (thread && prevThreadIdRef.current !== thread.id) {
+      setVisibleCount(INITIAL_VISIBLE);
+      stickToBottomRef.current = true;
+      prevThreadIdRef.current = thread.id;
+    }
+  }, [thread]);
+
+  // After every layout pass that affects the timeline, do one of:
+  //  (a) restore scroll position (we just prepended older messages)
+  //  (b) jump to bottom (fresh thread or stickToBottomRef is true)
+  useLayoutEffect(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    if (restoreScrollRef.current) {
+      const { prevHeight, prevTop } = restoreScrollRef.current;
+      const delta = el.scrollHeight - prevHeight;
+      el.scrollTop = prevTop + delta;
+      restoreScrollRef.current = null;
+      return;
+    }
+    if (stickToBottomRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [visibleMessages, pendingSends.length, loading]);
+
+  const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    const el = event.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder) {
+      restoreScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+      setVisibleCount((c) => c + PAGE_SIZE);
+    }
+  };
+
+  if (loading || !thread) {
+    return (
+      <div className="px-12 pt-14">
+        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
       </div>
     );
   }
 
-  // Show every thread, not the first 20. The previous slice was a perf
-  // hedge but with virtualisation off it just hid threads from the user.
-  // A long list is fine — the pane is overflow-y-auto. If we see >500
-  // threads in practice we'll add virtualisation; until then keep it simple.
-  const threadList = inboxRows;
+  const firstName = thread.personName.split(/\s+/)[0] ?? thread.personName;
+  const risk = toDisplayRisk(thread.riskLevel);
+  let lastInboundAt: string | null = null;
+  for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
+    const message = thread.messages[i];
+    if (message && message.direction === "IN") {
+      lastInboundAt = message.timestamp;
+      break;
+    }
+  }
+  const lastTimestamp = thread.messages[thread.messages.length - 1]?.timestamp ?? null;
+  const riskLabel =
+    risk === "overdue"
+      ? `overdue · last reply ${formatRelative(lastInboundAt)}`
+      : risk === "waiting"
+        ? `waiting · last reply ${formatRelative(lastInboundAt)}`
+        : `fresh · last reply ${formatRelative(lastTimestamp)}`;
+
+  const chips = thread.suggestedReplies.replies.length
+    ? thread.suggestedReplies.replies.slice(0, 3).map((reply) => ({
+        intent: reply.intent,
+        glyph: "↵",
+        text: reply.text
+      }))
+    : FALLBACK_SUGGESTIONS.map((s) => ({ intent: s.intent, glyph: s.glyph, text: s.build(firstName) }));
+
+  const trimmedSummary = thread.summary?.trim() ?? "";
+  const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
+  const askDuplicatesSummary =
+    trimmedAsk && trimmedSummary &&
+    (trimmedSummary.includes(trimmedAsk) || trimmedAsk.includes(trimmedSummary));
+  const showAsk = trimmedAsk && !askDuplicatesSummary;
+
+  const platformLabel = PLATFORM_LABEL[thread.platform];
 
   return (
-    <div className="flex h-full flex-col gap-3 overflow-hidden">
-      {degradedPlatform ? (
-        <DegradedBanner
-          platform={degradedPlatform.platform}
-          onOpenReceipts={() => setReceiptsOpen(true)}
-          onRunSelectorTests={() =>
-            runAction(
-              apiPost("/runner/control/platform/test-selectors", { platform: degradedPlatform.platform }),
-              setError,
-              refresh
-            )
-          }
-          domDumpFile={degradedDomDump}
-        />
-      ) : null}
-      {error ? <p className="text-sm text-rose-600">{error}</p> : null}
+    <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+      {/* ───── Chat column ───── */}
+      <div className="flex h-full min-h-0 flex-col border-r border-hairline">
+        {degraded ? (
+          <div className="flex-shrink-0 px-12 pt-6">
+            <DegradedBanner
+              platform={degraded.platform}
+              stage={degraded.lastScanFailure?.stage}
+              reason={degraded.lastScanFailure?.reason}
+              requestId={degraded.lastScanFailure?.requestId}
+              errorSummary={degraded.lastScanFailure?.errorSummary ?? degraded.lastError ?? undefined}
+              screenshotFile={degraded.lastScanFailure?.screenshotFile}
+              domDumpFile={degradedDomDump}
+              onRunSelectorTests={() =>
+                runAction(
+                  apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
+                  setError,
+                  refresh
+                )
+              }
+              onOpenReceipts={() => setReceiptsOpen(true)}
+            />
+          </div>
+        ) : null}
 
-      <div className="grid min-h-0 flex-1 grid-cols-12 gap-4">
-        <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-3">
-          <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Threads</h3>
-          <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-            {threadList.map((row) => {
-              // Same indicator semantics as the inbox row:
-              //   emerald = operator replied last
-              //   rose    = other party awaiting reply
-              //   slate   = neither (closed / no recent activity)
-              const indicatorColor =
-                row.lastMessageDirection === "OUT"
-                  ? "bg-emerald-500"
-                  : row.needsReply
-                    ? "bg-rose-500"
-                    : "bg-slate-300";
-              const previewBody =
-                row.lastMessageDirection === "OUT" ? `You: ${row.preview}` : row.preview;
+        <div
+          ref={timelineRef}
+          onScroll={onTimelineScroll}
+          className="relative min-h-0 flex-1 overflow-y-auto"
+        >
+          {/* Glassy sticky header. Sits inside the scroll container so the
+              timeline scrolls visibly behind it — matches the iOS / Apple
+              translucent-bar aesthetic the rest of the redesign nods at. */}
+          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-12 pb-4 pt-9">
+            <button
+              type="button"
+              onClick={() => router.push("/today")}
+              className="mb-4 inline-flex items-center gap-2 font-mono text-[12px] text-ink-3 hover:text-ink"
+            >
+              <ChevronLeft className="h-[14px] w-[14px]" strokeWidth={1.6} />
+              Back to today
+            </button>
+            <header className="flex items-center gap-4">
+              <span className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[16px] font-semibold text-white">
+                {initials(thread.personName)}
+              </span>
+              <div className="min-w-0 flex-1">
+                <h2 className="m-0 font-display text-[26px] font-semibold tracking-[-0.02em]">
+                  {thread.personName}
+                </h2>
+                <p className="mt-1 font-mono text-[12px] tracking-[0.02em] text-ink-3">
+                  {platformLabel} · {riskLabel}
+                </p>
+              </div>
+              <button
+                type="button"
+                disabled={reassessing}
+                onClick={() => void reassessThread()}
+                className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-50"
+                title="Re-summarise, reclassify, and regenerate suggested replies"
+              >
+                {reassessing ? "reassessing…" : "reassess"}
+              </button>
+            </header>
+          </div>
+
+          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
+            {hasOlder ? (
+              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                scroll up for older messages
+              </div>
+            ) : (
+              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
+                start of conversation
+              </div>
+            )}
+            {visibleMessages.map((message) => {
+              if (message.text.trim() === "[system event]") {
+                return (
+                  <div
+                    key={message.id}
+                    className="self-center font-mono text-[11px] tracking-[0.02em] text-ink-3"
+                  >
+                    · automated reply at {formatClock(message.timestamp)} ·
+                  </div>
+                );
+              }
               return (
-                <button
-                  key={row.id}
-                  className={`flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left text-sm ${row.id === thread.id ? "border-blue-300 bg-blue-50" : "border-slate-200 bg-white hover:bg-slate-50"}`}
-                  onClick={() => router.push(`/thread/${row.id}`)}
+                <div
+                  key={message.id}
+                  className={`flex max-w-[72%] flex-col ${
+                    message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
+                  }`}
                 >
-                  <span
-                    className={`mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full ${indicatorColor}`}
-                    aria-hidden
-                  />
-                  <span className="min-w-0 flex-1">
-                    <span className="block font-medium text-slate-900">{row.personName}</span>
-                    <span className="block truncate text-xs text-slate-500">{previewBody}</span>
+                  <div
+                    className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
+                      message.direction === "OUT"
+                        ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+                        : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                    }`}
+                  >
+                    {message.text}
+                  </div>
+                  <span className="mt-[6px] font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                    {formatClock(message.timestamp)}
                   </span>
-                </button>
+                </div>
               );
             })}
-          </div>
-        </Card>
 
-        <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-6">
-          <div className="mb-3 flex items-center justify-between border-b border-slate-200 pb-3">
-            <div>
-              <h2 className="text-xl font-semibold">{thread.personName}</h2>
-              <div className="mt-1 flex items-center gap-2 text-sm text-slate-500">
-                <Badge tone="blue">{thread.platform}</Badge>
-                <span>Last seen {formatRelative(thread.messages[thread.messages.length - 1]?.timestamp)}</span>
-              </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <Button
-                variant="secondary"
-                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)}
-              >
-                <ExternalLink className="mr-2 h-4 w-4" />
-                Open in platform
-              </Button>
-              <Button
-                variant="secondary"
-                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
-              >
-                <RefreshCcw className="mr-2 h-4 w-4" />
-                Rescan thread
-              </Button>
-              <Button variant="ghost" onClick={() => setReceiptsOpen(true)}>
-                <CheckCircle2 className="mr-2 h-4 w-4" />
-                Receipts
-              </Button>
-            </div>
-          </div>
-
-          <div className="flex-1 space-y-3 overflow-y-auto pb-4">
-            {timeline.map((message) => (
-              <div key={message.id}>
-                {message.showDivider ? (
-                  <div className="my-3 text-center text-xs uppercase tracking-wide text-slate-400">{message.dividerLabel}</div>
-                ) : null}
-                <div className={`flex ${message.direction === "OUT" ? "justify-end" : "justify-start"}`}>
-                  <div
-                    className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm ${
-                      message.direction === "OUT"
-                        ? "border border-blue-200 bg-blue-50 text-blue-900"
-                        : "border border-slate-200 bg-slate-50 text-slate-800"
-                    }`}
-                  >
-                    {message.senderName ? (
-                      <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{message.senderName}</p>
-                    ) : null}
-                    <p className="whitespace-pre-wrap">{message.text}</p>
-                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
-                      <span>{formatClock(message.timestamp)}</span>
-                      {message.direction === "OUT" ? <span>Sent via automation ✓</span> : null}
-                    </div>
-                    {message.attachments?.length ? (
-                      <div className="mt-2">
-                        <Badge tone="amber">Attachment: image (manual review)</Badge>
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            ))}
-            {/* Optimistic-UI bubbles: bubbles that exist client-side only,
-                rendered after all persisted messages so they appear at the
-                bottom (== "most recent"). They flip to a Failed state with a
-                retry button if the runner reported a send failure. */}
             {pendingSends.map((pending) => (
-              <div key={`pending-${pending.clientSendId}`}>
-                <div className="flex justify-end">
-                  <div
-                    className={`max-w-[78%] rounded-2xl px-3 py-2 text-sm ${
-                      pending.failed
-                        ? "border border-rose-200 bg-rose-50 text-rose-900"
-                        : "border border-blue-200 bg-blue-50 text-blue-900 opacity-80"
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap">{pending.text}</p>
-                    <div className="mt-1 flex items-center justify-between gap-2 text-[11px]">
-                      <span className="text-slate-500">{formatClock(pending.sentAt)}</span>
-                      {pending.failed ? (
-                        <span className="flex items-center gap-2 text-rose-600">
-                          <span>Failed: {pending.errorMessage ?? "send error"}</span>
-                          <button
-                            type="button"
-                            onClick={() => void retryPendingSend(pending.clientSendId)}
-                            className="font-medium underline hover:no-underline"
-                          >
-                            Retry
-                          </button>
-                        </span>
-                      ) : (
-                        <span className="flex items-center gap-1 text-slate-500">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          Sending…
-                        </span>
-                      )}
-                    </div>
-                  </div>
+              <div
+                key={`pending-${pending.clientSendId}`}
+                className="flex max-w-[72%] flex-col items-end self-end"
+              >
+                <div
+                  className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
+                    pending.failed
+                      ? "rounded-2xl rounded-br-[6px] border border-risk-overdue bg-paper text-ink"
+                      : "rounded-2xl rounded-br-[6px] bg-ink text-paper opacity-80"
+                  }`}
+                >
+                  {pending.text}
+                </div>
+                <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                  <span>{formatClock(pending.sentAt)}</span>
+                  {pending.failed ? (
+                    <>
+                      <span className="text-risk-overdue">· failed</span>
+                      <button
+                        type="button"
+                        onClick={() => retryPendingSend(pending.clientSendId)}
+                        className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                      >
+                        retry
+                      </button>
+                    </>
+                  ) : (
+                    <span className="flex items-center gap-1">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      sending…
+                    </span>
+                  )}
                 </div>
               </div>
             ))}
           </div>
+        </div>
 
-          <div className="sticky bottom-0 mt-2 rounded-xl border border-slate-200 bg-white p-3">
-            <Textarea
-              rows={5}
-              value={composer}
-              onChange={(event) => setComposer(event.target.value)}
-              placeholder="Write a reply..."
-            />
-            <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
-                <Button variant="ghost" onClick={() => void transform("SHORTEN")}>Shorten</Button>
-                <Button variant="ghost" onClick={() => void transform("MAKE_WARMER")}>Make warmer</Button>
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="secondary"
-                  onClick={() =>
-                    runAction(
-                      apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                      setError
-                    )
-                  }
-                >
-                  Save draft
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() =>
-                    runAction(
-                      apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
-                      setError,
-                      refresh
-                    )
-                  }
-                >
-                  Snooze
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() =>
-                    runAction(
-                      apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                      setError,
-                      refresh
-                    )
-                  }
-                >
-                  Mark done
-                </Button>
-                <Button variant="primary" onClick={() => void onSend()} disabled={sending || !composer.trim()}>
-                  {sending ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                  Send
-                </Button>
+        <div className="flex-shrink-0 border-t border-hairline bg-paper">
+          <div className="mx-auto w-full max-w-[820px] px-12 pb-5 pt-4">
+            {error ? (
+              <p className="mb-2 font-mono text-[11px] text-risk-overdue">{error}</p>
+            ) : null}
+            <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+              <textarea
+                placeholder={`Reply to ${firstName}…`}
+                value={composer}
+                onChange={(event) => setComposer(event.target.value)}
+                rows={3}
+                className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.55] text-ink outline-none placeholder:text-ink-4"
+              />
+              <div className="mt-[12px] flex flex-wrap items-center gap-3 border-t border-hairline pt-[12px]">
+                {/* Suggested-replies dropdown. Replaces the row of chips that
+                    used to wrap onto multiple lines on narrower viewports;
+                    keeps the composer compact and previews each suggestion's
+                    text before the operator commits to it. */}
+                <div className="relative" ref={chipsMenuRef}>
+                  <button
+                    type="button"
+                    onClick={() => setChipsMenuOpen((v) => !v)}
+                    className="inline-flex items-center gap-2 rounded-pill border border-hairline px-3 py-[7px] text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                    Suggested replies
+                    <ChevronDown
+                      className={`h-[13px] w-[13px] transition-transform duration-calm ${chipsMenuOpen ? "rotate-180" : ""}`}
+                      strokeWidth={1.6}
+                    />
+                  </button>
+                  {chipsMenuOpen ? (
+                    <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[360px] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                      {chips.map((chip) => (
+                        <button
+                          key={chip.intent}
+                          type="button"
+                          onClick={() => {
+                            setComposer(chip.text);
+                            setChipsMenuOpen(false);
+                          }}
+                          className="block w-full rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2"
+                        >
+                          <p className="m-0 text-[13px] font-medium text-ink">{chip.intent}</p>
+                          <p className="m-0 mt-1 line-clamp-2 text-[12.5px] leading-[1.45] text-ink-3">
+                            {chip.text}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="flex flex-1 items-center justify-end gap-3">
+                  <button
+                    type="button"
+                    disabled={!composer.trim() || transforming !== null}
+                    onClick={() => void transform("SHORTEN")}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                  >
+                    {transforming === "SHORTEN" ? "shortening…" : "shorten"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!composer.trim() || transforming !== null}
+                    onClick={() => void transform("MAKE_WARMER")}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                  >
+                    {transforming === "MAKE_WARMER" ? "warming…" : "make warmer"}
+                  </button>
+                  <Button variant="primary" onClick={() => void onSend()} disabled={sending || !composer.trim()}>
+                    {sending ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <Send className="h-[14px] w-[14px]" strokeWidth={1.8} />}
+                    Send
+                  </Button>
+                </div>
               </div>
             </div>
-          </div>
-        </Card>
 
-        <Card className="col-span-12 flex min-h-0 flex-col space-y-3 overflow-y-auto lg:col-span-3">
-          {/* Header: risk badge + reassess button. Replaces a separate
-              Risk card at the bottom + a missing reassess affordance.
-              One row at the top of the right pane is enough. */}
-          <div className="flex items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <Badge tone={riskTone(thread.riskLevel)}>{thread.riskLevel}</Badge>
-              {thread.riskReason ? (
-                <span className="text-xs text-slate-500">{thread.riskReason}</span>
+            <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              <button
+                type="button"
+                onClick={() =>
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+                    setError
+                  )
+                }
+                className="hover:text-ink"
+              >
+                save draft
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
+                    setError,
+                    refresh
+                  )
+                }
+                className="hover:text-ink"
+              >
+                snooze 6h
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
+                    setError,
+                    refresh
+                  )
+                }
+                className="hover:text-ink"
+              >
+                mark as handled
+              </button>
+              <button
+                type="button"
+                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)}
+                className="hover:text-ink"
+              >
+                open in {platformLabel}
+              </button>
+              <button
+                type="button"
+                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
+                className="hover:text-ink"
+              >
+                rescan
+              </button>
+              <button type="button" onClick={() => setReceiptsOpen(true)} className="hover:text-ink">
+                receipts
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ───── Context rail ───── */}
+      <aside className="hidden h-full min-h-0 overflow-y-auto bg-paper-2/40 lg:block">
+        <div className="flex flex-col gap-7 px-7 py-10">
+          {trimmedSummary || trimmedAsk ? (
+            <section>
+              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                What they want
+              </p>
+              <p className="m-0 text-balance text-[14px] leading-[1.55] text-ink">
+                {trimmedSummary || trimmedAsk}
+              </p>
+              {showAsk && trimmedSummary ? (
+                <p className="mt-3 border-t border-hairline pt-3 text-[13px] leading-[1.55] text-ink-3">
+                  <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                    the ask ·{" "}
+                  </span>
+                  {trimmedAsk}
+                </p>
               ) : null}
-            </div>
-            <Button
-              variant="ghost"
-              disabled={reassessing}
-              onClick={() => void reassessThread()}
-              title="Re-summarise, reclassify, and regenerate suggested replies for this thread"
-            >
-              {reassessing ? (
-                <>
-                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  Reassessing…
-                </>
-              ) : (
-                <>
-                  <RotateCcw className="mr-1 h-4 w-4" />
-                  Reassess
-                </>
-              )}
-            </Button>
-          </div>
-
-          <Card className="bg-slate-50">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Summary</h3>
-            <p className="mt-2 text-sm text-slate-700">{thread.summary || "No summary yet."}</p>
-          </Card>
-
-          <Card className="bg-slate-50">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">What they want</h3>
-            <p className="mt-2 text-sm text-slate-700">{thread.whatTheyWant || "No clear ask yet."}</p>
-          </Card>
-
-          {/* Open loops only when there are any — empty card was just
-              noise on threads where no loops were detected. */}
-          {thread.openLoops.length ? (
-            <Card className="bg-slate-50">
-              <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Open loops</h3>
-              <div className="mt-2 space-y-2">
-                {thread.openLoops.map((item) => (
-                  <label key={item} className="flex items-center gap-2 text-sm text-slate-700">
-                    <input type="checkbox" className="rounded" />
-                    {item}
-                  </label>
-                ))}
-              </div>
-            </Card>
+            </section>
           ) : null}
 
-          {/* Compose helper — replaces the unused Notes + tags card.
-              Type a brief intent ("ask about availability next week"),
-              click Write in my voice, and the AI rewrites it calibrated
-              to past outbound messages on this thread. Use this drops
-              the result into the composer. */}
-          <Card className="bg-slate-50">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Compose in my voice</h3>
-            <p className="mt-1 text-xs text-slate-500">
-              Type what you want to say briefly. The AI rewrites it the way you'd write it on this thread.
+          {thread.openLoops.length ? (
+            <section>
+              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                Open loops
+              </p>
+              <ul className="m-0 list-none space-y-[6px] p-0">
+                {thread.openLoops.map((item) => (
+                  <li key={item} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
+                    <span className="text-ink-4">·</span>
+                    {item}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+
+          <section>
+            <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+              Write in my voice
             </p>
-            <Textarea
-              className="mt-2"
-              rows={3}
+            <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
+              Tell the AI what you want to say. It rewrites in your voice for this thread.
+            </p>
+            <textarea
               value={composeIntent}
               onChange={(event) => setComposeIntent(event.target.value)}
               placeholder="e.g. ask if free for a quick coffee next week"
+              rows={3}
+              className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
             />
             <div className="mt-2 flex items-center gap-2">
               <Button
-                variant="secondary"
+                variant="primary"
                 disabled={composing || !composeIntent.trim()}
-                onClick={() => void composeIntentToVoice()}
+                onClick={() => void composeFromIntent()}
               >
                 {composing ? (
-                  <>
-                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                    Writing…
-                  </>
+                  <Loader2 className="h-[14px] w-[14px] animate-spin" />
                 ) : (
-                  "Write in my voice"
+                  <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.8} />
                 )}
+                {composing ? "Writing…" : "Write"}
               </Button>
               {composeError ? (
-                <span className="text-xs text-rose-600">{composeError}</span>
+                <span className="font-mono text-[11px] text-risk-overdue">{composeError}</span>
               ) : null}
             </div>
             {composeDraft ? (
-              <div className="mt-3 rounded-lg border border-slate-200 bg-white p-2">
-                <p className="text-sm text-slate-700">{composeDraft}</p>
-                <div className="mt-2 flex gap-2">
-                  <Button
-                    variant="ghost"
-                    onClick={() => {
-                      setComposer(composeDraft);
-                      setComposeDraft("");
-                      setComposeIntent("");
-                    }}
-                  >
+              <div className="mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink">
+                <p className="m-0 whitespace-pre-wrap">{composeDraft}</p>
+                <div className="mt-3 flex items-center gap-3">
+                  <Button variant="quiet" onClick={useDraft}>
                     Use this
                   </Button>
-                  <Button variant="ghost" onClick={() => void composeIntentToVoice()}>
-                    Try again
-                  </Button>
+                  <button
+                    type="button"
+                    onClick={() => void composeFromIntent()}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    try again
+                  </button>
                 </div>
               </div>
             ) : null}
-          </Card>
+          </section>
+        </div>
+      </aside>
 
-          <Card className="bg-slate-50">
-            <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Suggested replies</h3>
-            <div className="mt-2 space-y-2">
-              {thread.suggestedReplies.replies.map((reply) => (
-                <div key={reply.label} className="rounded-lg border border-slate-200 bg-white p-2">
-                  <div className="mb-1 flex items-center justify-between">
-                    <Badge tone="blue">{reply.label}</Badge>
-                    <span className="text-xs text-slate-500">{reply.intent}</span>
-                  </div>
-                  <p className="text-sm text-slate-700">{reply.text}</p>
-                  <div className="mt-2">
-                    <Button variant="ghost" onClick={() => setComposer(reply.text)}>
-                      Use this
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
-            {thread.suggestedReplies.needs_user_input.length ? (
-              <div className="mt-3 rounded-lg border border-amber-200 bg-warningSoft p-2 text-sm text-amber-900">
-                <p className="font-medium">Before replying, we need:</p>
-                <ul className="mt-1 list-disc pl-4">
-                  {thread.suggestedReplies.needs_user_input.map((item) => (
-                    <li key={item}>{item}</li>
-                  ))}
-                </ul>
-              </div>
-            ) : null}
-          </Card>
-
-          <p className="text-xs text-slate-500">Context last updated {formatRelative(thread.contextUpdatedAt)}</p>
-        </Card>
-      </div>
-
-      <ReceiptsDrawer open={receiptsOpen} onClose={() => setReceiptsOpen(false)} rows={thread.receipts} title="Thread receipts" />
+      <ReceiptsDrawer
+        open={receiptsOpen}
+        onClose={() => setReceiptsOpen(false)}
+        rows={thread.receipts}
+        title="Thread receipts"
+      />
     </div>
   );
 }
