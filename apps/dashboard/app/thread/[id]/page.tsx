@@ -50,6 +50,46 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
 
+// Returns a friendly day label ("Today", "Yesterday", or "Tue 6 May") if
+// the given message starts a new day relative to the previous, otherwise
+// null. Used to inject day-dividers into the timeline.
+function dayDividerLabel(prev: string | null | undefined, curr: string | null | undefined): string | null {
+  if (!curr) return null;
+  const currDate = new Date(curr);
+  if (Number.isNaN(currDate.getTime())) return null;
+  if (!prev) return formatDayLabel(currDate);
+  const prevDate = new Date(prev);
+  if (Number.isNaN(prevDate.getTime())) return formatDayLabel(currDate);
+  const sameDay =
+    prevDate.getFullYear() === currDate.getFullYear() &&
+    prevDate.getMonth() === currDate.getMonth() &&
+    prevDate.getDate() === currDate.getDate();
+  return sameDay ? null : formatDayLabel(currDate);
+}
+
+function formatDayLabel(date: Date): string {
+  const today = new Date();
+  const yesterday = new Date();
+  yesterday.setDate(today.getDate() - 1);
+  const sameDay = (a: Date, b: Date) =>
+    a.getFullYear() === b.getFullYear() &&
+    a.getMonth() === b.getMonth() &&
+    a.getDate() === b.getDate();
+  if (sameDay(date, today)) return "Today";
+  if (sameDay(date, yesterday)) return "Yesterday";
+  return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+}
+
+function DayDivider({ label }: { label: string }) {
+  return (
+    <div className="my-3 flex items-center gap-3 self-stretch">
+      <span className="h-px flex-1 bg-hairline" />
+      <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
+      <span className="h-px flex-1 bg-hairline" />
+    </div>
+  );
+}
+
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -72,6 +112,9 @@ export default function ThreadPage() {
   const [error, setError] = useState<string | null>(null);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
+  // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
+  // of the viewport on duplicate paraphrases. Operator opens it explicitly.
+  const [aiOpen, setAiOpen] = useState(false);
 
   const [pendingSends, setPendingSends] = useState<
     Array<{
@@ -494,7 +537,11 @@ export default function ThreadPage() {
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+    <div
+      className={`grid h-full min-h-0 grid-cols-1 ${
+        aiOpen ? "lg:grid-cols-[minmax(0,1fr)_360px]" : "lg:grid-cols-1"
+      }`}
+    >
       {/* ───── Chat column ───── */}
       <div className="flex h-full min-h-0 flex-col border-r border-hairline">
         {degraded ? (
@@ -541,23 +588,85 @@ export default function ThreadPage() {
                 {initials(thread.personName)}
               </span>
               <div className="min-w-0 flex-1">
-                <h2 className="m-0 font-display text-[26px] font-semibold tracking-[-0.02em]">
+                <h2 className="m-0 font-display text-[22px] font-semibold tracking-[-0.02em]">
                   {thread.personName}
                 </h2>
-                <p className="mt-1 font-mono text-[12px] tracking-[0.02em] text-ink-3">
-                  {platformLabel} · {riskLabel}
+                <p className="mt-1 text-[12px] text-ink-2">
+                  <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em]">
+                    {platformLabel}
+                  </span>{" "}
+                  <span className="text-ink-3">· {riskLabel}</span>
                 </p>
               </div>
-              <button
-                type="button"
+              <Button
+                variant="quiet"
                 disabled={reassessing}
                 onClick={() => void reassessThread()}
-                className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-50"
                 title="Re-summarise, reclassify, and regenerate suggested replies"
               >
-                {reassessing ? "reassessing…" : "reassess"}
-              </button>
+                {reassessing ? "Reassessing…" : "Reassess"}
+              </Button>
+              <Button
+                variant={aiOpen ? "primary" : "quiet"}
+                onClick={() => setAiOpen((v) => !v)}
+                title="Toggle the AI assist sidebar"
+              >
+                <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.6} />
+                AI assist
+              </Button>
             </header>
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+                    setError
+                  )
+                }
+              >
+                Save draft
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
+                    setError,
+                    refresh
+                  )
+                }
+              >
+                Snooze 6h
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() =>
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
+                    setError,
+                    refresh
+                  )
+                }
+              >
+                Mark as handled
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)}
+              >
+                Open in {platformLabel}
+              </Button>
+              <Button
+                variant="ghost"
+                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
+              >
+                Rescan
+              </Button>
+              <Button variant="ghost" onClick={() => setReceiptsOpen(true)}>
+                Receipts
+              </Button>
+            </div>
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
@@ -583,36 +692,45 @@ export default function ThreadPage() {
                 start of conversation
               </div>
             )}
-            {visibleMessages.map((message) => {
+            {visibleMessages.map((message, idx) => {
+              const prev = visibleMessages[idx - 1];
+              const dayLabel = dayDividerLabel(prev?.timestamp, message.timestamp);
               if (message.text.trim() === "[system event]") {
                 return (
-                  <div
-                    key={message.id}
-                    className="self-center font-mono text-[11px] tracking-[0.02em] text-ink-3"
-                  >
-                    · automated reply at {formatClock(message.timestamp)} ·
+                  <div key={message.id} className="contents">
+                    {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                    <div className="self-center font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                      · automated reply at {formatClock(message.timestamp)} ·
+                    </div>
                   </div>
                 );
               }
+              const senderLabel =
+                message.direction === "OUT" ? "You" : firstName;
               return (
-                <div
-                  key={message.id}
-                  className={`flex max-w-[72%] flex-col ${
-                    message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
-                  }`}
-                >
+                <div key={message.id} className="contents">
+                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
                   <div
-                    className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
-                      message.direction === "OUT"
-                        ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
-                        : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                    className={`flex max-w-[72%] flex-col ${
+                      message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     }`}
                   >
-                    {message.text}
+                    <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
+                      {senderLabel}
+                    </span>
+                    <div
+                      className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
+                        message.direction === "OUT"
+                          ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+                          : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                      }`}
+                    >
+                      {message.text}
+                    </div>
+                    <span className="mt-[6px] text-[11px] text-ink-3">
+                      {formatClock(message.timestamp)}
+                    </span>
                   </div>
-                  <span className="mt-[6px] font-mono text-[11px] tracking-[0.02em] text-ink-3">
-                    {formatClock(message.timestamp)}
-                  </span>
                 </div>
               );
             })}
@@ -755,69 +873,12 @@ export default function ThreadPage() {
               </div>
             </div>
 
-            <div className="mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-              <button
-                type="button"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                    setError
-                  )
-                }
-                className="hover:text-ink"
-              >
-                save draft
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
-                    setError,
-                    refresh
-                  )
-                }
-                className="hover:text-ink"
-              >
-                snooze 6h
-              </button>
-              <button
-                type="button"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                    setError,
-                    refresh
-                  )
-                }
-                className="hover:text-ink"
-              >
-                mark as handled
-              </button>
-              <button
-                type="button"
-                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)}
-                className="hover:text-ink"
-              >
-                open in {platformLabel}
-              </button>
-              <button
-                type="button"
-                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
-                className="hover:text-ink"
-              >
-                rescan
-              </button>
-              <button type="button" onClick={() => setReceiptsOpen(true)} className="hover:text-ink">
-                receipts
-              </button>
-            </div>
           </div>
         </div>
       </div>
 
       {/* ───── Context rail ───── */}
-      <aside className="hidden h-full min-h-0 overflow-y-auto bg-paper-2/40 lg:block">
+      <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
         <div className="flex flex-col gap-7 px-7 py-10">
           {trimmedSummary || trimmedAsk ? (
             <section>
