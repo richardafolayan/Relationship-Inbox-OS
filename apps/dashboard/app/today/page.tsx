@@ -76,8 +76,29 @@ export default function TodayPage() {
   useEffect(() => {
     void refresh();
     const onResync = () => void refresh();
+    const onRunnerEvent = (event: Event) => {
+      // Today's "first up" hero must drop a thread the moment the operator
+      // replies to it. Without this, MESSAGE_SENT only updates the thread
+      // page; Today keeps pinning the just-replied conversation at the top
+      // until the next 8s status-bar tick coincidentally triggers a refresh
+      // through some other path.
+      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      const type = detail?.type;
+      if (
+        type === "MESSAGE_SENT" ||
+        type === "MESSAGE_SEND_FAILED" ||
+        type === "THREAD_UPDATED" ||
+        type === "SCAN_FINISHED"
+      ) {
+        void refresh();
+      }
+    };
     window.addEventListener("runner-resync", onResync);
-    return () => window.removeEventListener("runner-resync", onResync);
+    window.addEventListener("runner-event", onRunnerEvent as EventListener);
+    return () => {
+      window.removeEventListener("runner-resync", onResync);
+      window.removeEventListener("runner-event", onRunnerEvent as EventListener);
+    };
   }, [refresh]);
 
   const advanceHero = useCallback((id: string, label: string) => {
@@ -119,8 +140,10 @@ export default function TodayPage() {
 
   const allRows = data?.rows ?? [];
   // /today is the "first up" page; rows that no longer need a reply
-  // (mark-done, send-confirmed) shouldn't be the hero even if the runner
-  // keeps them in /data/inbox for archive context.
+  // (mark-done, send-confirmed, or runner-confirmed truthy=false) shouldn't
+  // be the hero even if the runner keeps them in /data/inbox for archive
+  // context. The strict `!== false` form includes legacy rows where the
+  // field is undefined; the optimistic-removal Set covers in-flight actions.
   const rows = useMemo(
     () => allRows.filter((row) => row.needsReply !== false && !removedIds.has(row.id)),
     [allRows, removedIds]
@@ -128,11 +151,23 @@ export default function TodayPage() {
   const overdueCount = rows.filter((row) => row.riskLevel === "RED").length;
   const waitingCount = rows.filter((row) => row.riskLevel === "AMBER").length;
 
-  // The runner already sorts overdue → waiting → fresh, then by
-  // lastInboundAt asc. row[0] is the first thing the operator should
-  // touch today.
-  const hero = rows[0];
-  const remaining = useMemo(() => rows.slice(1), [rows]);
+  // Within the needs-reply set, surface the most-overdue conversation
+  // first. The runner sorts the inbox by lastMessageAt-desc which would
+  // otherwise put a reply that just came in (fresh, GREEN) ahead of a
+  // months-old overdue thread.
+  const sortedRows = useMemo(() => {
+    const rank = (level: string) => (level === "RED" ? 0 : level === "AMBER" ? 1 : 2);
+    return [...rows].sort((a, b) => {
+      if (rank(a.riskLevel) !== rank(b.riskLevel)) {
+        return rank(a.riskLevel) - rank(b.riskLevel);
+      }
+      const aIn = a.lastInboundAt ? Date.parse(a.lastInboundAt) : 0;
+      const bIn = b.lastInboundAt ? Date.parse(b.lastInboundAt) : 0;
+      return aIn - bIn;
+    });
+  }, [rows]);
+  const hero = sortedRows[0];
+  const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
   const degraded = platforms.find((p) => p.status === "DEGRADED");
 
   // Prefetch the hero thread to grab its AI summary for the headline.
