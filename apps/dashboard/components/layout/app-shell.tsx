@@ -8,6 +8,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { SystemStatusBar } from "@/components/layout/system-status-bar";
 import { ToastHost } from "@/components/common/toast-host";
+import { RunnerTopStrip } from "@/components/layout/runner-top-strip";
 import { apiGet, apiPost } from "@/lib/api";
 import { initials } from "@/lib/risk";
 import type { AppSettings, HealthResponse, InboxResponse } from "@/lib/types";
@@ -181,6 +182,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         userInitials={userInitials}
       />
       <div className="flex h-screen min-h-0 flex-col">
+        <RunnerTopStrip />
         <SystemStatusBar />
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
