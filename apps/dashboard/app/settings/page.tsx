@@ -20,8 +20,16 @@ const aiProviderLabels: Record<(typeof aiProviders)[number], string> = {
 // rapid edits.
 const SAVE_FEEDBACK_MS = 4000;
 
+interface AiStatus {
+  activeProvider: "openai" | "glm";
+  activeModel: string;
+  configuredProviders: Array<"openai" | "glm">;
+  activeProviderConfigured: boolean;
+}
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [saving, setSaving] = useState(false);
   // Inline feedback for the Save button. Without this, clicking Save
   // gives no signal at all that the runner accepted (or rejected) the
@@ -39,8 +47,19 @@ export default function SettingsPage() {
   const [resetBusy, setResetBusy] = useState(false);
   const [resetStatus, setResetStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
 
-  useEffect(() => {
+  // Refetch both side by side. ai-status is needed alongside settings
+  // so the warning can flag "you've selected GLM but Z_AI_API_KEY is
+  // missing" before the operator wonders why every reply comes back as
+  // the canned default.
+  const refreshAll = () => {
     void apiGet<AppSettings>("/runner/data/settings").then(setSettings);
+    void apiGet<AiStatus>("/runner/data/ai-status")
+      .then(setAiStatus)
+      .catch(() => setAiStatus(null));
+  };
+
+  useEffect(() => {
+    refreshAll();
   }, []);
 
   // Clean up the auto-fade timer if the component unmounts mid-fade.
@@ -62,6 +81,12 @@ export default function SettingsPage() {
     try {
       const next = await apiPost<AppSettings>("/runner/control/settings", partial);
       setSettings(next);
+      // Re-fetch ai-status so the "key missing" warning reflects the
+      // newly-saved provider — the runner's config doesn't change but
+      // the active provider switching can flip the warning on/off.
+      void apiGet<AiStatus>("/runner/data/ai-status")
+        .then(setAiStatus)
+        .catch(() => undefined);
       setSaveStatus({ kind: "success", at: Date.now() });
       saveStatusTimer.current = setTimeout(() => setSaveStatus(null), SAVE_FEEDBACK_MS);
     } catch (error) {
@@ -187,13 +212,16 @@ export default function SettingsPage() {
           <div className="flex flex-wrap gap-2">
             {aiProviders.map((provider) => {
               const active = (settings.aiProvider ?? "openai") === provider;
+              const configured = aiStatus?.configuredProviders.includes(provider) ?? true;
               return (
                 <Button
                   key={provider}
                   variant={active ? "primary" : "secondary"}
                   onClick={() => setSettings({ ...settings, aiProvider: provider })}
+                  title={configured ? undefined : `${aiProviderLabels[provider]} has no API key configured. Set ${provider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"} in .env and restart the runner.`}
                 >
                   {aiProviderLabels[provider]}
+                  {configured ? null : " ⚠"}
                 </Button>
               );
             })}
@@ -201,6 +229,25 @@ export default function SettingsPage() {
           <p className="mt-1 text-xs text-slate-500">
             Active provider for summaries, suggested replies, and the outreach/genuine classifier. The runner default is seeded by AI_PROVIDER in .env; this overrides it without a restart.
           </p>
+          {/* Loud warning when the active provider has no key. Without
+              this the operator just sees canned default replies coming
+              back forever and has no clue why — a silent fallback in
+              modelJson is the failure mode. */}
+          {aiStatus && !aiStatus.activeProviderConfigured ? (
+            <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+              <div>
+                <p className="font-medium">
+                  {aiProviderLabels[aiStatus.activeProvider]} is selected but has no API key configured.
+                </p>
+                <p className="mt-1 text-amber-900/80">
+                  Every AI call will fall back to the canned default reply until you set{" "}
+                  <code>{aiStatus.activeProvider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"}</code>{" "}
+                  in <code>.env</code> and click <strong>Restart runner</strong> in the topbar.
+                </p>
+              </div>
+            </div>
+          ) : null}
           {(settings.aiProvider ?? "openai") === "glm" ? (
             <div className="mt-3">
               <label className="mb-1 block text-sm font-medium">GLM model (optional)</label>

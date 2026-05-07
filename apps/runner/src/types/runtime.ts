@@ -67,6 +67,15 @@ export interface AiService {
     lastInboundMessage: string;
     /** When "outreach", reply C is a Polite decline instead of a Clarifying question. */
     category?: "outreach" | "genuine" | null;
+    /**
+     * ISO timestamps of the most recent inbound + outbound messages.
+     * When the operator is replying late (gap ≥ 14d, inbound newer than
+     * outbound), the prompt injects an acknowledgement instruction so
+     * the suggested replies open with "Sorry it's been ages…" rather
+     * than ignoring the elephant in the room.
+     */
+    lastInboundAt?: string | null;
+    lastOutboundAt?: string | null;
   }): Promise<SuggestedRepliesOutput>;
   transformReply(input: {
     mode: "SHORTEN" | "MAKE_WARMER";
@@ -108,6 +117,24 @@ export interface AiService {
     contact: ContactProfileSnapshot;
     self: ContactProfileSnapshot | null;
   }): Promise<ConversationStartersOutput | null>;
+  /**
+   * Take a brief operator-supplied intent ("ask about availability next
+   * week", "decline politely", "say I'm interested") and rewrite it as
+   * a sendable message in the operator's voice — calibrated against the
+   * outbound history of THIS thread so register and warmth match how
+   * they've previously written to this person. The fallback returns the
+   * intent unchanged so the composer never goes empty.
+   */
+  composeInVoice(input: {
+    intent: string;
+    displayName: string;
+    /** Recent outbound messages from THIS thread, oldest first. Used as
+     *  voice samples — register, warmth, vocabulary. */
+    voiceSamples: string[];
+    /** The full thread for context. Recent inbound message in particular
+     *  drives whether the rewrite should reference / acknowledge anything. */
+    threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<string>;
 }
 
 /**
