@@ -16,16 +16,20 @@ test("openai: insufficient_quota by code (OpenAI SDK uses code)", () => {
   assert.match(result, /https:\/\/platform\.openai\.com\/settings\/organization\/billing\/overview/);
 });
 
-test("openai: insufficient_quota by HTTP status (429)", () => {
-  // Defensive: SDK might omit code but include status on the error.
+test("openai: HTTP 429 (no code) is treated as rate limit, not balance", () => {
+  // Same diagnostic correction we made for GLM: 429 alone does NOT mean
+  // "out of credits" — that's `code: "insufficient_quota"`. A bare 429 is
+  // a rate-limit signal and should be retriable.
   const result = classifyLlmError({ status: 429, message: "rate limit / quota" }, "openai");
-  assert.match(result, /out of credits/i);
+  assert.match(result, /rate limit/i);
+  assert.doesNotMatch(result, /out of credits/i);
 });
 
 test("openai: model not found by code", () => {
   const result = classifyLlmError({ code: "model_not_found", message: "The model `gpt-5` does not exist" }, "openai");
   assert.match(result, /model not available/i);
-  assert.match(result, /gpt-4o-mini/);
+  // The hint should suggest a real, currently-recommended model id.
+  assert.match(result, /gpt-5-nano/);
 });
 
 test("openai: model not found inferred from message wording", () => {
@@ -69,6 +73,42 @@ test("glm: chinese balance error matched by message", () => {
   // BigModel sometimes returns the message in Chinese — match either.
   const result = classifyLlmError({ message: "余额不足或无可用资源包,请充值。" }, "glm");
   assert.match(result, /Z\.AI account has no balance/i);
+});
+
+test("glm: 1302 rate limit is not misclassified as no balance", () => {
+  // Real production payload from Z.AI when free-tier RPM bucket is exhausted.
+  // Status is also 429 — same HTTP code as insufficient balance — so the
+  // classifier MUST read the body code, not just the status.
+  const result = classifyLlmError(
+    { status: 429, message: 'status: 429, body: {"error":{"code":"1302","message":"Rate limit reached for requests"}}' },
+    "glm"
+  );
+  assert.match(result, /rate limit reached/i);
+  assert.match(result, /1302/);
+  assert.doesNotMatch(result, /no balance/i);
+});
+
+test("glm: 1305 service overload is not misclassified as no balance", () => {
+  // Z.AI free-tier flash returns 1305 when their infra is over capacity —
+  // it's server-side, not account-side. Operator should see "retry/backoff",
+  // not a billing URL.
+  const result = classifyLlmError(
+    { status: 429, message: 'status: 429, body: {"error":{"code":"1305","message":"The service may be temporarily overloaded, please try again later"}}' },
+    "glm"
+  );
+  assert.match(result, /overload/i);
+  assert.match(result, /1305/);
+  assert.doesNotMatch(result, /no balance/i);
+});
+
+test("glm: 429 with no body code falls through to a generic 429 hint", () => {
+  // Defensive — if Z.AI ever ships a 429 without a recognised body code, we
+  // should not silently mislabel it. The fallback line must include the raw
+  // message so the operator can grep logs.
+  const result = classifyLlmError({ status: 429, message: "rate exceeded (no body code)" }, "glm");
+  assert.match(result, /429/);
+  assert.match(result, /rate exceeded/);
+  assert.doesNotMatch(result, /no balance/i);
 });
 
 test("glm: model_not_found points at flash variants", () => {
