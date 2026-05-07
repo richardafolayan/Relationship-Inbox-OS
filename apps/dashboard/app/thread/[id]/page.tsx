@@ -76,23 +76,47 @@ export default function ThreadPage() {
   }, [pendingSends]);
 
   const refresh = useCallback(async () => {
-    const [threadData, inbox, platformRows, logRows] = await Promise.all([
+    // Promise.allSettled instead of Promise.all so a transient 500 on
+    // ONE endpoint (e.g. /data/thread when the runner's mid-resummarise
+    // and the AI provider just bumped a rate limit) doesn't blow up the
+    // whole refresh and leak as an unhandled rejection into Next.js's
+    // dev overlay error counter. The thread payload is the critical
+    // one; if that succeeds we render even when the side panels are
+    // stale, and we surface the failure inline via setError instead.
+    const [threadResult, inboxResult, platformsResult, logsResult] = await Promise.allSettled([
       apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
       apiGet<InboxResponse>("/runner/data/inbox"),
       apiGet<PlatformCard[]>("/runner/data/platforms"),
       apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
     ]);
 
-    setThread(threadData);
-    setInboxRows(inbox.rows);
-    setPlatforms(platformRows);
-    setLogs(logRows);
-    setComposer((prev) => prev || threadData.draft || "");
+    if (threadResult.status === "fulfilled") {
+      setThread(threadResult.value);
+      setComposer((prev) => prev || threadResult.value.draft || "");
+      setError(null);
+    } else {
+      const message =
+        threadResult.reason instanceof Error
+          ? threadResult.reason.message
+          : "Failed to load thread";
+      setError(message);
+    }
+    if (inboxResult.status === "fulfilled") setInboxRows(inboxResult.value.rows);
+    if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
+    if (logsResult.status === "fulfilled") setLogs(logsResult.value);
     setLoading(false);
   }, [threadId]);
 
   useEffect(() => {
-    void refresh();
+    // Refresh on mount. Errors are now surfaced inline by refresh()
+    // itself via setError; the .catch here is belt-and-braces so a
+    // future rejection inside the success branch (e.g. setState during
+    // unmount) can't bubble out as unhandled either.
+    refresh().catch((err) => {
+      const message = err instanceof Error ? err.message : "Failed to load thread";
+      setError(message);
+      setLoading(false);
+    });
   }, [refresh]);
 
   // Optimistic-UI reconciliation: when the runner finishes processing a
