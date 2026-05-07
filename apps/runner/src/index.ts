@@ -237,8 +237,17 @@ function normalizeOptionalPositiveNumber(value: number | null | undefined): numb
   return value;
 }
 
+// Normalise dynamic path segments to placeholders so the audit-log
+// `action` column is the same string for every "enrich a person" call
+// rather than a unique-per-person token. Without this, /control/person/
+// <cuid>/enrich becomes POST_PERSON_<cuid>_ENRICH_END and the operator
+// can't scan the column. Drop the ids into the details payload at the
+// call site if you need them — keep them out of the action string.
 function normalizeControlPath(path: string): string {
-  return path.replace(/\/thread\/[^/]+/g, "/thread/:threadId");
+  return path
+    .replace(/\/thread\/[^/]+/g, "/thread/:threadId")
+    .replace(/\/person\/[^/]+/g, "/person/:personId")
+    .replace(/\/job\/[^/]+/g, "/job/:jobId");
 }
 
 function stageForControlPath(path: string): string {
