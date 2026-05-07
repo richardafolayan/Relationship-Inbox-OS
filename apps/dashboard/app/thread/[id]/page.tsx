@@ -5,7 +5,7 @@ import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import { ChevronDown, ChevronLeft, Loader2, Send, Sparkles } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { AuditLogRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
+import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
@@ -56,6 +56,9 @@ export default function ThreadPage() {
   const threadId = params.id;
 
   const [thread, setThread] = useState<ThreadResponse | null>(null);
+  const [siblings, setSiblings] = useState<InboxRow[]>([]);
+  const [focusQueue, setFocusQueue] = useState<string[]>([]);
+  const [openLoopChecks, setOpenLoopChecks] = useState<Record<string, boolean>>({});
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
@@ -93,10 +96,11 @@ export default function ThreadPage() {
   const prevThreadIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
-    const [threadResult, platformsResult, logsResult] = await Promise.allSettled([
+    const [threadResult, platformsResult, logsResult, inboxResult] = await Promise.allSettled([
       apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
       apiGet<PlatformCard[]>("/runner/data/platforms"),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150"),
+      apiGet<InboxResponse>("/runner/data/inbox")
     ]);
     if (threadResult.status === "fulfilled") {
       setThread(threadResult.value);
@@ -111,6 +115,7 @@ export default function ThreadPage() {
     }
     if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
     if (logsResult.status === "fulfilled") setLogs(logsResult.value);
+    if (inboxResult.status === "fulfilled") setSiblings(inboxResult.value.rows);
     setLoading(false);
   }, [threadId]);
 
@@ -121,6 +126,61 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // Reply Focus Mode handoff. /at-risk primes inbox_focus_queue with
+  // thread ids; we read it once per mount so the queue can survive a
+  // navigation but we keep state local.
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem("inbox_focus_queue");
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as unknown;
+      if (Array.isArray(parsed) && parsed.every((entry) => typeof entry === "string")) {
+        setFocusQueue(parsed as string[]);
+      }
+    } catch {
+      // bad JSON — ignore.
+    }
+  }, []);
+
+  // Per-thread Open Loops checked-state, persisted in localStorage so a
+  // user can tick boxes off without the runner needing schema changes.
+  useEffect(() => {
+    if (!threadId) return;
+    try {
+      const raw = window.localStorage.getItem(`inbox_open_loops_${threadId}`);
+      if (!raw) {
+        setOpenLoopChecks({});
+        return;
+      }
+      const parsed = JSON.parse(raw) as unknown;
+      if (parsed && typeof parsed === "object") {
+        setOpenLoopChecks(parsed as Record<string, boolean>);
+      }
+    } catch {
+      setOpenLoopChecks({});
+    }
+  }, [threadId]);
+
+  const toggleOpenLoop = (loop: string) => {
+    setOpenLoopChecks((prev) => {
+      const next = { ...prev, [loop]: !prev[loop] };
+      try {
+        window.localStorage.setItem(`inbox_open_loops_${threadId}`, JSON.stringify(next));
+      } catch {
+        // localStorage full or disabled — checked state just won't persist.
+      }
+      return next;
+    });
+  };
+
+  const focusIndex = focusQueue.indexOf(threadId);
+  const focusNext = focusQueue[focusIndex + 1] ?? null;
+  const focusRemaining = focusIndex >= 0 ? focusQueue.length - focusIndex - 1 : 0;
+  const exitFocus = () => {
+    window.localStorage.removeItem("inbox_focus_queue");
+    setFocusQueue([]);
+  };
 
   // SSE reconciliation for sends.
   useEffect(() => {
@@ -458,12 +518,23 @@ export default function ThreadPage() {
     }
   }
   const lastTimestamp = thread.messages[thread.messages.length - 1]?.timestamp ?? null;
+  const lastMessage = thread.messages[thread.messages.length - 1];
+  const replied = !thread.needsReply && lastMessage?.direction === "OUT";
   const riskLabel =
     risk === "overdue"
       ? `overdue · last reply ${formatRelative(lastInboundAt)}`
       : risk === "waiting"
         ? `waiting · last reply ${formatRelative(lastInboundAt)}`
         : `fresh · last reply ${formatRelative(lastTimestamp)}`;
+  const statusBadgeClass =
+    risk === "overdue"
+      ? "bg-risk-overdue/10 text-risk-overdue"
+      : risk === "waiting"
+        ? "bg-risk-waiting/15 text-risk-waiting"
+        : "bg-risk-fresh/15 text-risk-fresh";
+  const statusBadgeLabel =
+    (risk === "overdue" ? "RED" : risk === "waiting" ? "AMBER" : "GREEN") +
+    (replied ? " · Replied" : thread.needsReply ? " · Needs reply" : "");
 
   // Suggestion source: prefer runner-generated chips when present,
   // otherwise fall back to the static prototype set so the dropdown is
@@ -494,7 +565,49 @@ export default function ThreadPage() {
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
   return (
-    <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[minmax(0,1fr)_360px]">
+    <div className="grid h-full min-h-0 grid-cols-1 lg:grid-cols-[240px_minmax(0,1fr)_360px]">
+      {/* ───── Threads list column ───── */}
+      <aside className="hidden h-full min-h-0 overflow-y-auto border-r border-hairline bg-paper-2/30 lg:block">
+        <div className="px-3 py-4">
+          <p className="mb-2 px-2 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+            Threads
+          </p>
+          <ul className="m-0 list-none p-0">
+            {siblings.slice(0, 50).map((row) => {
+              const active = row.id === threadId;
+              const dotClass =
+                row.riskLevel === "RED"
+                  ? "bg-risk-overdue"
+                  : row.riskLevel === "AMBER"
+                    ? "bg-risk-waiting"
+                    : "bg-risk-fresh";
+              return (
+                <li key={row.id}>
+                  <button
+                    type="button"
+                    onClick={() => router.push(`/thread/${row.id}`)}
+                    className={`flex w-full items-start gap-2 rounded-lg px-2 py-2 text-left transition-colors duration-calm ${
+                      active ? "bg-paper" : "hover:bg-paper"
+                    }`}
+                  >
+                    <span className={`mt-[6px] h-[6px] w-[6px] flex-shrink-0 rounded-full ${dotClass}`} />
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-[13px] font-medium tracking-[-0.005em] text-ink">
+                        {row.personName}
+                      </span>
+                      <span className="block truncate text-[11.5px] text-ink-3">
+                        {row.lastMessageDirection === "OUT" ? "You: " : ""}
+                        {row.preview}
+                      </span>
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
+      </aside>
+
       {/* ───── Chat column ───── */}
       <div className="flex h-full min-h-0 flex-col border-r border-hairline">
         {degraded ? (
@@ -528,14 +641,35 @@ export default function ThreadPage() {
               timeline scrolls visibly behind it — matches the iOS / Apple
               translucent-bar aesthetic the rest of the redesign nods at. */}
           <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-12 pb-4 pt-9">
-            <button
-              type="button"
-              onClick={() => router.push("/today")}
-              className="mb-4 inline-flex items-center gap-2 font-mono text-[12px] text-ink-3 hover:text-ink"
-            >
-              <ChevronLeft className="h-[14px] w-[14px]" strokeWidth={1.6} />
-              Back to today
-            </button>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={() => router.push(focusIndex >= 0 ? "/at-risk" : "/today")}
+                className="inline-flex items-center gap-2 font-mono text-[12px] text-ink-3 hover:text-ink"
+              >
+                <ChevronLeft className="h-[14px] w-[14px]" strokeWidth={1.6} />
+                {focusIndex >= 0 ? "Back to at-risk" : "Back to today"}
+              </button>
+              {focusIndex >= 0 ? (
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                    Focus · {focusRemaining} left
+                  </span>
+                  {focusNext ? (
+                    <Button
+                      variant="quiet"
+                      onClick={() => router.push(`/thread/${focusNext}`)}
+                    >
+                      Next →
+                    </Button>
+                  ) : (
+                    <Button variant="quiet" onClick={exitFocus}>
+                      Done
+                    </Button>
+                  )}
+                </div>
+              ) : null}
+            </div>
             <header className="flex items-center gap-4">
               <span className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[16px] font-semibold text-white">
                 {initials(thread.personName)}
@@ -548,6 +682,11 @@ export default function ThreadPage() {
                   {platformLabel} · {riskLabel}
                 </p>
               </div>
+              <span
+                className={`whitespace-nowrap rounded-pill px-3 py-1 font-mono text-[11px] uppercase tracking-[0.06em] ${statusBadgeClass}`}
+              >
+                {statusBadgeLabel}
+              </span>
               <button
                 type="button"
                 disabled={reassessing}
@@ -844,12 +983,26 @@ export default function ThreadPage() {
                 Open loops
               </p>
               <ul className="m-0 list-none space-y-[6px] p-0">
-                {thread.openLoops.map((item) => (
-                  <li key={item} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
-                    <span className="text-ink-4">·</span>
-                    {item}
-                  </li>
-                ))}
+                {thread.openLoops.map((item) => {
+                  const checked = !!openLoopChecks[item];
+                  return (
+                    <li key={item}>
+                      <label
+                        className={`flex cursor-pointer items-baseline gap-2 text-[13px] leading-[1.5] transition-colors duration-calm ${
+                          checked ? "text-ink-3 line-through" : "text-ink-2"
+                        }`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={() => toggleOpenLoop(item)}
+                          className="mt-[3px] h-[14px] w-[14px] flex-shrink-0 cursor-pointer accent-ink"
+                        />
+                        <span>{item}</span>
+                      </label>
+                    </li>
+                  );
+                })}
               </ul>
             </section>
           ) : null}
