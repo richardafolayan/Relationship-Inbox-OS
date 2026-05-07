@@ -117,6 +117,13 @@ export default function ThreadPage() {
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
   const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
+  // AI-suggested snooze chips, populated lazily when the operator opens
+  // the snooze chip menu. Empty list = AI saw no time hint and refused
+  // to fabricate one (correct, expected behaviour for most threads).
+  const [snoozeSuggestions, setSnoozeSuggestions] = useState<
+    null | { loading: boolean; items: Array<{ label: string; hours: number; reason: string }> }
+  >(null);
+  const [snoozeMenuOpen, setSnoozeMenuOpen] = useState(false);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
@@ -819,15 +826,22 @@ export default function ThreadPage() {
               </Button>
               <Button
                 variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
-                    setError,
-                    refresh
-                  )
-                }
+                onClick={() => {
+                  // Toggle the AI snooze menu, lazily fetching once. The
+                  // popover renders above this row when `snoozeMenuOpen`.
+                  if (!snoozeMenuOpen && !snoozeSuggestions) {
+                    setSnoozeSuggestions({ loading: true, items: [] });
+                    void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
+                      `/runner/control/thread/${thread.id}/suggest-snooze`
+                    )
+                      .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
+                      .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                  }
+                  setSnoozeMenuOpen((prev) => !prev);
+                }}
+                aria-expanded={snoozeMenuOpen}
               >
-                Snooze 6h
+                Snooze
               </Button>
               <Button
                 variant="ghost"
@@ -1123,6 +1137,72 @@ export default function ThreadPage() {
               </div>
             </div>
 
+            {snoozeMenuOpen ? (
+              <div
+                data-testid="snooze-suggestions"
+                className="mt-3 flex flex-wrap items-center gap-2 rounded-md border border-hairline bg-paper-2 p-3"
+              >
+                <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                  AI snooze
+                </span>
+                {snoozeSuggestions?.loading ? (
+                  <span className="font-mono text-[11px] text-ink-3">thinking…</span>
+                ) : snoozeSuggestions && snoozeSuggestions.items.length > 0 ? (
+                  snoozeSuggestions.items.map((s) => (
+                    <button
+                      key={`${s.label}-${s.hours}`}
+                      type="button"
+                      title={s.reason}
+                      onClick={() => {
+                        runAction(
+                          apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: s.hours }),
+                          setError,
+                          refresh
+                        );
+                        setSnoozeMenuOpen(false);
+                      }}
+                      className="rounded-full border border-hairline-strong bg-paper px-3 py-1 text-[12px] text-ink hover:bg-paper-2"
+                    >
+                      {s.label} <span className="text-ink-3">· {s.hours}h</span>
+                    </button>
+                  ))
+                ) : (
+                  <span className="font-mono text-[11px] text-ink-3">
+                    No clear time hint in this thread.
+                  </span>
+                )}
+                <span className="ml-auto flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      runAction(
+                        apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
+                        setError,
+                        refresh
+                      );
+                      setSnoozeMenuOpen(false);
+                    }}
+                    className="rounded-full px-3 py-1 text-[12px] text-ink-3 hover:text-ink"
+                  >
+                    6h
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      runAction(
+                        apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 24 }),
+                        setError,
+                        refresh
+                      );
+                      setSnoozeMenuOpen(false);
+                    }}
+                    className="rounded-full px-3 py-1 text-[12px] text-ink-3 hover:text-ink"
+                  >
+                    1d
+                  </button>
+                </span>
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
