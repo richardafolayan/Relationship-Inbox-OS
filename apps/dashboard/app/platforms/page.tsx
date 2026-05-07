@@ -37,7 +37,15 @@ export default function PlatformsPage() {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [editingSelector, setEditingSelector] = useState<Record<string, string>>({});
   const [selectorErrors, setSelectorErrors] = useState<Record<string, SelectorTestFailurePayload | undefined>>({});
-  const [scanBlocks, setScanBlocks] = useState<Record<string, ScanControlBlockedResponse | undefined>>({});
+  // scanBlocks entries used to be set on /control/scan failure and cleared
+  // only on the *next* successful scan or thrown error. The "retry in 30s"
+  // toast then sat there forever long after the cooldown actually elapsed.
+  // Now we stamp each entry with an absolute `untilMs` and a 1-second tick
+  // self-clears when the wall clock passes it.
+  const [scanBlocks, setScanBlocks] = useState<
+    Record<string, { response: ScanControlBlockedResponse; untilMs: number } | undefined>
+  >({});
+  const [, setTickNow] = useState<number>(() => Date.now());
   const [actionError, setActionError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -52,6 +60,27 @@ export default function PlatformsPage() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Drive the cooldown countdown re-render and self-clear expired entries.
+  // 1s is fine — these toasts are showing seconds-precision anyway.
+  useEffect(() => {
+    const id = setInterval(() => {
+      const now = Date.now();
+      setTickNow(now);
+      setScanBlocks((prev) => {
+        let changed = false;
+        const next: typeof prev = { ...prev };
+        for (const [platform, entry] of Object.entries(prev)) {
+          if (entry && entry.untilMs <= now) {
+            next[platform] = undefined;
+            changed = true;
+          }
+        }
+        return changed ? next : prev;
+      });
+    }, 1000);
+    return () => clearInterval(id);
+  }, []);
 
   useEffect(() => {
     const onResync = () => {
@@ -111,7 +140,10 @@ export default function PlatformsPage() {
         if (!response.ok && response.blocked) {
           setScanBlocks((prev) => ({
             ...prev,
-            [platform]: response
+            [platform]: {
+              response,
+              untilMs: Date.now() + Math.max(0, response.retryAfterSeconds) * 1000
+            }
           }));
           return;
         }
@@ -178,13 +210,19 @@ export default function PlatformsPage() {
                 {row.lastError && row.status !== "DEGRADED" ? (
                   <p className="mt-2 text-sm text-rose-600">{row.lastError}</p>
                 ) : null}
-                {scanBlocks[row.platform] ? (
-                  <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
-                    {scanBlocks[row.platform]?.reason === "in_flight"
-                      ? `Scan already in flight - retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`
-                      : `Cooling down - next retry in ${scanBlocks[row.platform]?.retryAfterSeconds}s`}
-                  </p>
-                ) : null}
+                {(() => {
+                  const block = scanBlocks[row.platform];
+                  if (!block) return null;
+                  const secondsLeft = Math.max(0, Math.ceil((block.untilMs - Date.now()) / 1000));
+                  if (secondsLeft <= 0) return null;
+                  return (
+                    <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
+                      {block.response.reason === "in_flight"
+                        ? `Scan already in flight - retry in ${secondsLeft}s`
+                        : `Cooling down - next retry in ${secondsLeft}s`}
+                    </p>
+                  );
+                })()}
                 <details className="mt-2">
                   <summary className="cursor-pointer text-xs text-slate-500 marker:text-slate-400">
                     Profile details

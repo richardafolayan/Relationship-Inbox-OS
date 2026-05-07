@@ -29,9 +29,16 @@ export default function PeoplePage() {
   const [error, setError] = useState<string | null>(null);
 
   async function loadList(): Promise<PeopleRow[]> {
-    const data = await apiGet<PeopleRow[]>("/runner/data/people");
-    setPeople(data);
-    return data;
+    try {
+      const data = await apiGet<PeopleRow[]>("/runner/data/people");
+      setPeople(data);
+      setError(null);
+      return data;
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Failed to load people";
+      setError(message);
+      return [];
+    }
   }
 
   async function loadDetail(personId: string, includeStarters = false): Promise<void> {
@@ -41,6 +48,13 @@ export default function PeoplePage() {
         `/runner/data/person/${personId}${includeStarters ? "?includeStarters=1" : ""}`
       );
       setDetail(data);
+      setError(null);
+    } catch (loadError) {
+      // Clear stale detail so the right pane doesn't keep showing the
+      // previous person while we surface the error.
+      setDetail(null);
+      const message = loadError instanceof Error ? loadError.message : "Failed to load person details";
+      setError(message);
     } finally {
       setDetailLoading(false);
     }
