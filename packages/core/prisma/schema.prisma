@@ -105,6 +105,26 @@ model Thread {
   // pattern (Mark done / Snooze / Save draft each call refresh()).
   suggestedRepliesJson      String?
   suggestedRepliesCacheKey  String?
+
+  // Direction + text of the most-recent message in the thread, irrespective
+  // of who sent it. lastMessagePreview historically only tracked the latest
+  // INBOUND, so once Richard replied the inbox row preview was stale. These
+  // are written by send.ts (on outbound) and scan-queue.ts (on persist of
+  // any new message). The dashboard prefixes outbound previews with "You: "
+  // matching LinkedIn's convention.
+  lastMessageDirection Direction?
+  lastMessageText      String?
+
+  // Set when the operator archives a thread from the inbox. Archived threads
+  // disappear from the default Inbox / At Risk / People views and only show
+  // in the Archived view. Unarchive flips this back to null.
+  archivedAt DateTime?
+
+  // Coarse classification: "outreach" (cold pitches, sales, recruitment,
+  // marketing, InMails) vs "genuine" (peer chats, ongoing relationships).
+  // Set by the AI service on first scan-time persist of a thread; null until
+  // classified. Used by the Inbox filter dropdown to hide outreach noise.
+  category String?
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 

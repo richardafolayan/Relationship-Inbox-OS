@@ -2479,6 +2479,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
         lastMessagePreview: resolvedLastMessagePreview || null,
+        // Phase 2: track who sent the most recent message + its text, so the
+        // inbox-row preview reflects the latest of either party. Without
+        // these, lastMessagePreview only tracked the latest INBOUND and went
+        // stale the moment Richard replied.
+        lastMessageDirection: lastMessage?.direction ?? thread.lastMessageDirection,
+        lastMessageText: lastMessage?.text ?? thread.lastMessageText,
         lastMessageAt: resolvedLastMessageAt,
         lastInboundAt: resolvedLastInboundAt,
         lastOutboundAt: resolvedLastOutboundAt,

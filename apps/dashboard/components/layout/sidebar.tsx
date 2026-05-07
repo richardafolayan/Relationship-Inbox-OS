@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, CircleAlert, Users, Cable, ListChecks, Settings, RefreshCw, Sparkles } from "lucide-react";
+import { Archive, Bell, CircleAlert, Users, Cable, ListChecks, Settings, RefreshCw, Sparkles } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,7 @@ interface SidebarProps {
 const nav = [
   { href: "/inbox", label: "Inbox", icon: Bell },
   { href: "/at-risk", label: "At Risk", icon: CircleAlert },
+  { href: "/archived", label: "Archived", icon: Archive },
   { href: "/people", label: "People", icon: Users },
   { href: "/platforms", label: "Platforms", icon: Cable },
   { href: "/logs", label: "Activity Log", icon: ListChecks },

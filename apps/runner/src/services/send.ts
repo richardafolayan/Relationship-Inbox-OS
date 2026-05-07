@@ -251,7 +251,12 @@ export function createSendService(deps: SendServiceDeps) {
           slaDueAt: risk.slaDueAt,
           lastOutboundAt: new Date(receipt.sentAt),
           lastMessageAt: new Date(receipt.sentAt),
-          unreadCount: 0
+          unreadCount: 0,
+          // Phase 2: keep the inbox-row preview in sync with whoever sent the
+          // most recent message. Without these, the row preview stayed pinned
+          // to the last INBOUND even after Richard replied.
+          lastMessageDirection: "OUT",
+          lastMessageText: input.text
         }
       });
 

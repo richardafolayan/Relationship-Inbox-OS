@@ -280,7 +280,11 @@ export default function ThreadPage() {
     );
   }
 
-  const threadList = inboxRows.slice(0, 20);
+  // Show every thread, not the first 20. The previous slice was a perf
+  // hedge but with virtualisation off it just hid threads from the user.
+  // A long list is fine — the pane is overflow-y-auto. If we see >500
+  // threads in practice we'll add virtualisation; until then keep it simple.
+  const threadList = inboxRows;
 
   return (
     <div className="flex h-[calc(100vh-3rem)] flex-col gap-3 overflow-hidden">
@@ -304,16 +308,36 @@ export default function ThreadPage() {
         <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-3">
           <h3 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-500">Threads</h3>
           <div className="min-h-0 flex-1 space-y-2 overflow-y-auto pr-1">
-            {threadList.map((row) => (
-              <button
-                key={row.id}
-                className={`w-full rounded-lg border px-3 py-2 text-left text-sm ${row.id === thread.id ? "border-blue-300 bg-blue-50" : "border-slate-200 bg-white hover:bg-slate-50"}`}
-                onClick={() => router.push(`/thread/${row.id}`)}
-              >
-                <p className="font-medium text-slate-900">{row.personName}</p>
-                <p className="truncate text-xs text-slate-500">{row.preview}</p>
-              </button>
-            ))}
+            {threadList.map((row) => {
+              // Same indicator semantics as the inbox row:
+              //   emerald = operator replied last
+              //   rose    = other party awaiting reply
+              //   slate   = neither (closed / no recent activity)
+              const indicatorColor =
+                row.lastMessageDirection === "OUT"
+                  ? "bg-emerald-500"
+                  : row.needsReply
+                    ? "bg-rose-500"
+                    : "bg-slate-300";
+              const previewBody =
+                row.lastMessageDirection === "OUT" ? `You: ${row.preview}` : row.preview;
+              return (
+                <button
+                  key={row.id}
+                  className={`flex w-full items-start gap-2 rounded-lg border px-3 py-2 text-left text-sm ${row.id === thread.id ? "border-blue-300 bg-blue-50" : "border-slate-200 bg-white hover:bg-slate-50"}`}
+                  onClick={() => router.push(`/thread/${row.id}`)}
+                >
+                  <span
+                    className={`mt-1.5 inline-block h-2 w-2 flex-shrink-0 rounded-full ${indicatorColor}`}
+                    aria-hidden
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block font-medium text-slate-900">{row.personName}</span>
+                    <span className="block truncate text-xs text-slate-500">{previewBody}</span>
+                  </span>
+                </button>
+              );
+            })}
           </div>
         </Card>
 

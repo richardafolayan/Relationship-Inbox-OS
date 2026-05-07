@@ -435,8 +435,14 @@ async function getThreadStub(threadId: string): Promise<{
   };
 }
 
-async function loadVisibleThreadRows(): Promise<ReturnType<typeof shapeThreadRows>> {
+async function loadVisibleThreadRows(options?: {
+  /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
+  archived?: boolean;
+}): Promise<ReturnType<typeof shapeThreadRows>> {
   const threads = await prisma.thread.findMany({
+    where: options?.archived
+      ? { archivedAt: { not: null } }
+      : { archivedAt: null },
     include: {
       person: true,
       _count: {
@@ -1684,6 +1690,39 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
       domDumpFile: log.domDumpFile
     }))
   );
+}));
+
+// Archive a thread. Sets archivedAt to now; the thread disappears from the
+// default Inbox/At Risk/People views and only shows in the Archived view.
+app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const thread = await prisma.thread.update({
+    where: { id: threadId },
+    data: { archivedAt: new Date() }
+  });
+  res.json({ ok: true, threadId: thread.id, archivedAt: thread.archivedAt?.toISOString() });
+}));
+
+// Unarchive — clears archivedAt so the thread returns to the active Inbox.
+app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const thread = await prisma.thread.update({
+    where: { id: threadId },
+    data: { archivedAt: null }
+  });
+  res.json({ ok: true, threadId: thread.id });
+}));
+
+// Archived view counterpart to /data/inbox — same shape, only archived rows.
+app.get("/data/archived", asyncRoute(async (_req, res) => {
+  const rows = (await loadVisibleThreadRows({ archived: true }))
+    .map((row) => toInboxRow(row))
+    .sort((a, b) => {
+      const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+      const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+      return bTime - aTime;
+    });
+  res.json({ rows });
 }));
 
 // Surface the persisted send queue so the dashboard can render a status bar

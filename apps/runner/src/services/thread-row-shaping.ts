@@ -18,11 +18,19 @@ export interface ThreadRowSource {
   lastMessageAt: Date | null;
   lastInboundAt: Date | null;
   lastOutboundAt: Date | null;
+  // Direction + text of the most-recent message regardless of sender. Used
+  // to render "You: …" prefixes on outbound previews and the green/red
+  // replied-vs-needs-reply indicator. Both nullable for older rows that
+  // pre-date the Phase 2 schema additions.
+  lastMessageDirection: "IN" | "OUT" | null;
+  lastMessageText: string | null;
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason: string | null;
   slaDueAt: Date | null;
   whatTheyWant: string | null;
   rollingSummary: string | null;
+  archivedAt: Date | null;
+  category: string | null;
   updatedAt: Date;
   person: {
     id: string;
@@ -40,6 +48,12 @@ export interface ShapedThreadRow {
   personName: string;
   platform: PlatformName;
   preview: string;
+  /**
+   * "IN" when the latest message is from the other party, "OUT" when from
+   * the operator. Drives the dashboard's "You: …" preview prefix and the
+   * red/green replied-vs-needs-reply row indicator.
+   */
+  lastMessageDirection: "IN" | "OUT" | null;
   unreadCount: number;
   riskLevel: "GREEN" | "AMBER" | "RED";
   needsReply: boolean;
@@ -50,6 +64,8 @@ export interface ShapedThreadRow {
   slaCountdown: string;
   identityWarning?: IdentityWarning | null;
   messageCount: number;
+  category: string | null;
+  archivedAt: string | null;
 }
 
 export interface ShapedThreadGroupRow {
@@ -149,12 +165,22 @@ export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[]
 
 export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
   const source = row.source;
+  // Prefer the latest-message text (which respects direction) over the
+  // legacy lastMessagePreview field (which only tracks inbound). Falls
+  // through to AI-summary fields when neither is set, then a constant.
+  const previewText =
+    source.lastMessageText ??
+    source.lastMessagePreview ??
+    source.whatTheyWant ??
+    source.rollingSummary ??
+    "No summary yet";
   return {
     id: source.id,
     personId: source.personId,
     personName: source.person.displayName,
     platform: source.platform,
-    preview: source.lastMessagePreview ?? source.whatTheyWant ?? source.rollingSummary ?? "No summary yet",
+    preview: previewText,
+    lastMessageDirection: source.lastMessageDirection ?? null,
     unreadCount: source.unreadCount,
     riskLevel: source.riskLevel,
     needsReply: row.needsReply,
@@ -164,6 +190,8 @@ export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
     riskReason: source.riskReason,
     slaCountdown: formatSlaCountdown(source.slaDueAt),
     identityWarning: row.identityWarning,
-    messageCount: row.messageCount
+    messageCount: row.messageCount,
+    category: source.category ?? null,
+    archivedAt: source.archivedAt?.toISOString() ?? null
   };
 }

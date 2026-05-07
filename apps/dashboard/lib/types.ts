@@ -4,6 +4,12 @@ export interface InboxRow {
   personName: string;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
   preview: string;
+  /**
+   * "OUT" when the latest message was sent by the operator (preview should
+   * be prefixed "You: "). "IN" when the latest is from the other party.
+   * null on legacy rows that haven't been re-synced since Phase 2.
+   */
+  lastMessageDirection?: "IN" | "OUT" | null;
   unreadCount: number;
   riskLevel: "GREEN" | "AMBER" | "RED";
   needsReply: boolean;
@@ -14,6 +20,9 @@ export interface InboxRow {
   slaCountdown: string;
   identityWarning?: "unresolved_id" | null;
   messageCount?: number;
+  /** "outreach" | "genuine" | null (Phase 3 categorization). */
+  category?: string | null;
+  archivedAt?: string | null;
 }
 
 export interface InboxResponse {
