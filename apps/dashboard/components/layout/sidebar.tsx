@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Zap, Inbox, Users, Cable, ListChecks, Settings as SettingsIcon } from "lucide-react";
+import { Zap, Inbox, Users, Cable, ListChecks, Settings as SettingsIcon, CircleAlert, Archive } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -21,7 +21,9 @@ interface NavItem {
 
 const nav: NavItem[] = [
   { href: "/today", label: "Today", icon: Zap, attention: true },
+  { href: "/at-risk", label: "At-risk", icon: CircleAlert, attention: true },
   { href: "/inbox", label: "All inbox", icon: Inbox },
+  { href: "/archived", label: "Archived", icon: Archive },
   { href: "/people", label: "People", icon: Users },
   { href: "/platforms", label: "Platforms", icon: Cable },
   { href: "/logs", label: "Activity", icon: ListChecks },
