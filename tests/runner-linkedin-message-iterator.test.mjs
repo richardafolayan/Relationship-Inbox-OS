@@ -68,7 +68,7 @@ test("LinkedIn message iterator prefers data-event-urn events and handles non-te
   await context.close();
   await browser.close();
 
-  assert.equal(messages.length, 5);
+  assert.equal(messages.length, 6);
   assert.equal(messages[0].platformMessageKey, "urn:li:msg_event:1");
   assert.equal(messages[0].direction, "IN");
   assert.equal(messages[0].text, "Incoming hello");
@@ -84,10 +84,12 @@ test("LinkedIn message iterator prefers data-event-urn events and handles non-te
   assert.equal(messages[3].text, "[system event]");
 
   assert.equal(messages[4].platformMessageKey, "urn:li:msg_event:5");
-  assert.equal(messages[4].text, "First paragraph from one LinkedIn event.\n\nSecond paragraph from the same event.");
+  assert.equal(messages[4].text, "First paragraph from one LinkedIn event.");
+  assert.equal(messages[5].platformMessageKey, "urn:li:msg_event:5:body:1");
+  assert.equal(messages[5].text, "Second paragraph from the same event.");
 });
 
-test("LinkedIn visible message parser preserves body breaks inside one event", async (t) => {
+test("LinkedIn visible message parser emits separate messages for separate body segments", async (t) => {
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
@@ -109,6 +111,8 @@ test("LinkedIn visible message parser preserves body breaks inside one event", a
   await context.close();
   await browser.close();
 
-  const grouped = messages.find((message) => message.platformMessageKey === "urn:li:msg_event:5");
-  assert.equal(grouped?.text, "First paragraph from one LinkedIn event.\n\nSecond paragraph from the same event.");
+  const first = messages.find((message) => message.platformMessageKey === "urn:li:msg_event:5");
+  const second = messages.find((message) => message.platformMessageKey === "urn:li:msg_event:5:body:1");
+  assert.equal(first?.text, "First paragraph from one LinkedIn event.");
+  assert.equal(second?.text, "Second paragraph from the same event.");
 });
