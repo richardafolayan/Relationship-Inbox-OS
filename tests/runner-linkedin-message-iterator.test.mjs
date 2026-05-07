@@ -84,10 +84,10 @@ test("LinkedIn message iterator prefers data-event-urn events and handles non-te
   assert.equal(messages[3].text, "[system event]");
 
   assert.equal(messages[4].platformMessageKey, "urn:li:msg_event:5");
-  assert.equal(messages[4].text, "First line from one LinkedIn event. Second line from the same event.");
+  assert.equal(messages[4].text, "First paragraph from one LinkedIn event.\n\nSecond paragraph from the same event.");
 });
 
-test("LinkedIn visible message parser joins multiple bodies from one event", async (t) => {
+test("LinkedIn visible message parser preserves body breaks inside one event", async (t) => {
   let browser;
   try {
     browser = await chromium.launch({ headless: true });
@@ -110,5 +110,5 @@ test("LinkedIn visible message parser joins multiple bodies from one event", asy
   await browser.close();
 
   const grouped = messages.find((message) => message.platformMessageKey === "urn:li:msg_event:5");
-  assert.equal(grouped?.text, "First line from one LinkedIn event. Second line from the same event.");
+  assert.equal(grouped?.text, "First paragraph from one LinkedIn event.\n\nSecond paragraph from the same event.");
 });

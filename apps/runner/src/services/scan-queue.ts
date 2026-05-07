@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
-import { AdapterFailure, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
+import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
@@ -2389,7 +2389,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const timestampFallback = candidateListTimestamp ?? new Date();
     for (const message of messages) {
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
-      const messageText = cleanText(message.text);
+      const messageText = cleanMessageText(message.text);
       const key =
         message.platformMessageKey ??
         stableHash(`${thread.id}|${safeTimestamp.toISOString()}|${message.direction}|${messageText}`);

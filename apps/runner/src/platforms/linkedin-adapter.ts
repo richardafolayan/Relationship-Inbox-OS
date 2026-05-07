@@ -11,6 +11,7 @@ import type {
 } from "@inbox-os/core";
 import { stableHash } from "@inbox-os/core";
 import {
+  cleanMessageText,
   cleanText,
   AdapterFailure,
   toStageFailure,
@@ -6055,6 +6056,14 @@ export class LinkedInAdapter implements PlatformAdapter {
         ({ messageItemSelector, messageTextSelector }) => {
           const clean = (value: string | null | undefined): string =>
             (value ?? "").replace(/\s+/g, " ").trim();
+          const cleanMessage = (value: string | null | undefined): string =>
+            (value ?? "")
+              .replace(/\r\n?/g, "\n")
+              .split("\n")
+              .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+              .join("\n")
+              .replace(/\n{3,}/g, "\n\n")
+              .trim();
           const bubbles = Array.from(document.querySelectorAll(messageItemSelector));
           const out: Array<{
             platformMessageKey: string;
@@ -6094,7 +6103,9 @@ export class LinkedInAdapter implements PlatformAdapter {
             const timeText = clean(timeEl?.textContent ?? "");
             const timeDatetimeAttr = timeEl?.getAttribute("datetime") || null;
             const bodyEls = Array.from(bubbleEl.querySelectorAll(messageTextSelector));
-            const rawBody = clean(bodyEls.map((body) => body.textContent ?? "").join(" "));
+            const rawBody = cleanMessage(
+              bodyEls.map((body) => (body as HTMLElement).innerText || body.textContent || "").join("\n\n")
+            );
             // Scope attachment detection to the message body wrapper. The
             // bubble LI contains the avatar column AND the message body, and
             // the previous selector "img, video, svg, a[download], ..." was
@@ -7117,7 +7128,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               ...message,
               direction: message.direction === "IN" ? "IN" : "OUT",
               timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
-              text: cleanText(message.text),
+              text: cleanMessageText(message.text),
               senderName: message.senderName,
               raw: message.raw
             }));
@@ -7701,7 +7712,14 @@ export class LinkedInAdapter implements PlatformAdapter {
       if (count <= 0) {
         return "";
       }
-      return clean((await locator.allTextContents().catch(() => [])).join(" "));
+      const parts: string[] = [];
+      for (let index = 0; index < count; index += 1) {
+        const text = await locator.nth(index).innerText({ timeout: 0 }).catch(() => "");
+        if (text) {
+          parts.push(text);
+        }
+      }
+      return cleanMessageText(parts.join("\n\n"));
     };
     const readAttr = async (locator: Locator, name: string): Promise<string | null> => {
       const first = locator.first();
@@ -8318,7 +8336,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           platformMessageKey: message.platformMessageKey,
           direction: message.direction,
           timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
-          text: cleanText(message.text),
+          text: cleanMessageText(message.text),
           senderName: message.senderName,
           attachments: [],
           raw: {
@@ -8904,7 +8922,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           ...message,
           direction: message.direction === "IN" ? "IN" : "OUT",
           timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
-          text: cleanText(message.text),
+          text: cleanMessageText(message.text),
           senderName: message.senderName,
           raw: message.raw
         }));
