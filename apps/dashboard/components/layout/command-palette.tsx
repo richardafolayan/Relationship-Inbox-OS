@@ -101,7 +101,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Jump to a person, page, or thread…"
+          placeholder="Search people, pages, or threads…"
           className="w-full border-0 border-b border-hairline bg-transparent px-5 py-[18px] text-[16px] text-ink outline-none placeholder:text-ink-4"
         />
         <ul className="m-0 list-none p-[6px]">
