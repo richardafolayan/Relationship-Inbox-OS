@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import { ExternalLink, RefreshCcw, CheckCircle2, Loader2 } from "lucide-react";
@@ -53,6 +53,14 @@ export default function ThreadPage() {
       errorMessage?: string;
     }>
   >([]);
+  // Mirror of pendingSends accessible from the polling effect without
+  // re-creating its interval each time a bubble is added/removed. The
+  // poll only needs to read the current list; subscribing via the
+  // useEffect deps would tear down + re-arm the timer per send.
+  const pendingSendsRef = useRef(pendingSends);
+  useEffect(() => {
+    pendingSendsRef.current = pendingSends;
+  }, [pendingSends]);
 
   const refresh = useCallback(async () => {
     const [threadData, inbox, platformRows, logRows] = await Promise.all([
@@ -108,6 +116,78 @@ export default function ThreadPage() {
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
     return () => window.removeEventListener("runner-event", onRunnerEvent as EventListener);
+  }, [threadId, refresh]);
+
+  // Polling fallback for the optimistic-UI reconciliation above. SSE on
+  // /events is the primary path, but Next.js's HTTP rewrite proxy has
+  // historically buffered or timed out long-lived streams in dev — when
+  // that breaks, MESSAGE_SENT never arrives in the browser and the
+  // bubble sticks on "Sending…" even though the runner long since
+  // persisted the OUT message. The system status bar already polls
+  // /data/send-queue every 3s for its own banner; we ride the same
+  // endpoint and reconcile pendingSends ourselves so the thread page
+  // doesn't depend on SSE staying healthy.
+  useEffect(() => {
+    if (!threadId) return undefined;
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      // Bail out cheaply when there's nothing to reconcile — keeps the
+      // poll free in the common case (no in-flight sends on this thread).
+      if (pendingSendsRef.current.length === 0) return;
+      try {
+        const queue = await apiGet<{
+          recent: Array<{
+            clientSendId: string;
+            threadId: string;
+            status: "SENT" | "FAILED";
+            errorMessage?: string;
+          }>;
+        }>("/runner/data/send-queue");
+        if (cancelled) return;
+        const recentByClientId = new Map(queue.recent.map((row) => [row.clientSendId, row]));
+        let sawSent = false;
+        const sentIds = new Set<string>();
+        const next = pendingSendsRef.current.map((pending) => {
+          const match = recentByClientId.get(pending.clientSendId);
+          if (!match) return pending;
+          if (match.threadId !== threadId) return pending;
+          if (match.status === "SENT") {
+            sawSent = true;
+            sentIds.add(pending.clientSendId);
+            return pending;
+          }
+          if (match.status === "FAILED" && !pending.failed) {
+            return {
+              ...pending,
+              failed: true,
+              errorMessage: match.errorMessage ?? "Send failed"
+            };
+          }
+          return pending;
+        });
+        if (sawSent) {
+          // Refresh first so the persisted OUT message is in thread.messages
+          // before we drop the optimistic bubble (mirrors the SSE handler so
+          // the user never sees a flash of empty timeline).
+          await refresh();
+          if (cancelled) return;
+          setPendingSends((prev) => prev.filter((p) => !sentIds.has(p.clientSendId)));
+        } else if (next.some((p, i) => p !== pendingSendsRef.current[i])) {
+          setPendingSends(next);
+        }
+      } catch {
+        // Network blip — try again on the next tick.
+      }
+    };
+    const timer = setInterval(() => void tick(), 3000);
+    // Run once immediately so a freshly-loaded page reconciles without
+    // waiting 3s.
+    void tick();
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
   }, [threadId, refresh]);
 
   useEffect(() => {
