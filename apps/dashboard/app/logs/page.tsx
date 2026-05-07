@@ -49,11 +49,17 @@ export default function LogsPage() {
       ) : (
         <div className="flex flex-col">
           {logs.map((log) => {
-            const dot = log.status === "OK" ? "bg-risk-fresh" : "bg-risk-overdue";
+            const isFail = log.status !== "OK";
+            const dot = isFail ? "bg-risk-overdue" : "bg-risk-fresh";
+            const outcomeText = isFail ? "FAIL" : "OK";
+            const outcomeClass = isFail
+              ? "text-risk-overdue"
+              : "text-risk-fresh";
+            const hasArtifacts = !!(log.screenshotFile || log.domDumpFile);
             return (
               <div
                 key={log.id}
-                className="grid grid-cols-[160px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
+                className="grid grid-cols-[160px_1fr_auto_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
               >
                 <span className="font-mono text-[12px] tracking-[0.02em] text-ink-3">
                   {formatRelative(log.timestamp)}
@@ -68,6 +74,11 @@ export default function LogsPage() {
                     {log.stage ?? "general"}
                   </p>
                 </div>
+                <span
+                  className={`font-mono text-[11px] uppercase tracking-[0.08em] ${outcomeClass}`}
+                >
+                  {outcomeText}
+                </span>
                 <div className="flex items-center gap-3 font-mono text-[11px] text-ink-3">
                   {log.screenshotFile ? (
                     <a
@@ -89,6 +100,7 @@ export default function LogsPage() {
                       dom
                     </a>
                   ) : null}
+                  {!hasArtifacts ? <span className="text-ink-4">—</span> : null}
                 </div>
               </div>
             );
