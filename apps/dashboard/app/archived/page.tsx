@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL } from "@/lib/risk";
+import { initials, PLATFORM_LABEL, avatarTone } from "@/lib/risk";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 
@@ -59,7 +59,10 @@ export default function ArchivedPage() {
                 key={row.id}
                 className="grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
               >
-                <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[12px] font-semibold text-white">
+                <span
+                  className="grid h-8 w-8 place-items-center rounded-full font-display text-[12px] font-semibold text-white"
+                  style={{ background: avatarTone(row.personName) }}
+                >
                   {initials(row.personName)}
                 </span>
                 <button

@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { initials, PLATFORM_LABEL, toDisplayRisk, avatarTone } from "@/lib/risk";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 
@@ -113,7 +113,10 @@ export default function PeoplePage() {
                     active ? "bg-paper-2" : ""
                   }`}
                 >
-                  <span className="grid h-8 w-8 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[12px] font-semibold text-white">
+                  <span
+                    className="grid h-8 w-8 place-items-center rounded-full font-display text-[12px] font-semibold text-white"
+                    style={{ background: avatarTone(person.name) }}
+                  >
                     {initials(person.name)}
                   </span>
                   <span className="min-w-0">
@@ -121,18 +124,21 @@ export default function PeoplePage() {
                       <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">
                         {person.name}
                       </span>
-                      <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                      <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-ink-2">
                         {PLATFORM_LABEL[person.platform]}
                       </span>
                     </span>
-                    <span className="block max-w-[52ch] truncate text-[14px] text-ink-3">
+                    <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">
                       {person.headline ??
                         [person.currentRole, person.currentCompany].filter(Boolean).join(" at ") ??
                         "no profile yet"}
                     </span>
                   </span>
-                  <span className="flex items-center gap-[10px] font-mono text-[11px] tracking-[0.02em] text-ink-3">
-                    <span className={`h-[6px] w-[6px] rounded-full ${dot}`} />
+                  <span className={`text-[12px] ${
+                    risk === "overdue" ? "font-medium text-risk-overdue"
+                    : risk === "waiting" ? "font-medium text-risk-waiting"
+                    : "text-ink-2"
+                  }`}>
                     {person.lastInteractionAt
                       ? formatRelative(person.lastInteractionAt)
                       : "no contact yet"}

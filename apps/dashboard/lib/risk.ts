@@ -26,3 +26,28 @@ export function initials(name: string): string {
     .join("")
     .toUpperCase();
 }
+
+// Six muted avatar tones, picked deterministically by FNV-1a hash of the
+// person's name so a list of 30 rows scans as visually varied without
+// shouting. Same person, same colour, across pages and reloads.
+const AVATAR_TONES = [
+  "linear-gradient(135deg, oklch(72% 0.10 35), oklch(60% 0.13 22))",
+  "linear-gradient(135deg, oklch(70% 0.09 145), oklch(56% 0.11 155))",
+  "linear-gradient(135deg, oklch(68% 0.10 245), oklch(54% 0.13 252))",
+  "linear-gradient(135deg, oklch(74% 0.09 75), oklch(60% 0.12 65))",
+  "linear-gradient(135deg, oklch(70% 0.11 305), oklch(56% 0.14 295))",
+  "linear-gradient(135deg, oklch(66% 0.07 200), oklch(52% 0.09 210))"
+];
+
+function fnv1a(input: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < input.length; i += 1) {
+    h ^= input.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return h >>> 0;
+}
+
+export function avatarTone(name: string): string {
+  return AVATAR_TONES[fnv1a(name) % AVATAR_TONES.length] ?? AVATAR_TONES[0]!;
+}
