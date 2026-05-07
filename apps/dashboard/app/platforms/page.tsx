@@ -17,9 +17,17 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   TIKTOK: "Tiktok"
 };
 
-// Platforms: three quiet rows. Name (title-case display), `last scan Xm
-// ago` mono caption, status pill (dot + word), outlined "Open browser" /
-// "Connect" button. No card wrappers.
+// Only platforms whose adapter has been hardened against the live UI are
+// surfaced as actionable rows. Instagram and TikTok still flow through the
+// runner so settings + future work can re-enable them, but the operator
+// shouldn't see them as "Connect" rows on the main view yet.
+const VISIBLE_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["LINKEDIN"];
+const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["INSTAGRAM", "TIKTOK"];
+
+// Platforms: quiet rows for each platform we ship to operators. Name
+// (title-case display), `last scan Xm ago` mono caption, status pill
+// (dot + word), outlined "Open browser" / "Connect" button. No card
+// wrappers.
 export default function PlatformsPage() {
   const [rows, setRows] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
@@ -51,7 +59,7 @@ export default function PlatformsPage() {
       ) : null}
 
       {rows
-        .filter((row) => row.status === "DEGRADED")
+        .filter((row) => VISIBLE_PLATFORMS.includes(row.platform) && row.status === "DEGRADED")
         .map((row) => (
           <DegradedBanner
             key={row.platform}
@@ -76,7 +84,9 @@ export default function PlatformsPage() {
           />
         ))}
 
-      {rows.map((row) => {
+      {rows
+        .filter((row) => VISIBLE_PLATFORMS.includes(row.platform))
+        .map((row) => {
         const dot =
           row.status === "CONNECTED"
             ? "bg-risk-fresh"
@@ -149,7 +159,7 @@ export default function PlatformsPage() {
         );
       })}
 
-      {rows.length === 0 ? (
+      {rows.filter((row) => VISIBLE_PLATFORMS.includes(row.platform)).length === 0 ? (
         <p className="mt-10 font-mono text-[12px] text-ink-3">No platforms reported by the runner.</p>
       ) : null}
 
@@ -162,7 +172,7 @@ export default function PlatformsPage() {
           open receipts
         </button>
         {" · "}
-        {PLATFORM_LABEL.LINKEDIN}, {PLATFORM_LABEL.INSTAGRAM}, {PLATFORM_LABEL.TIKTOK}
+        {HIDDEN_PLATFORMS.map((p) => PLATFORM_LABEL[p]).join(", ")} coming later
       </p>
 
       <ReceiptsDrawer
