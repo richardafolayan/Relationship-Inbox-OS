@@ -226,6 +226,16 @@ export function cleanText(value: string): string {
   return stripUnpairedSurrogates(value).replace(/\s+/g, " ").trim();
 }
 
+export function cleanMessageText(value: string): string {
+  return stripUnpairedSurrogates(value)
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[ \t\f\v]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 /**
  * Truncate `text` to at most `maxCodePoints` Unicode code points, splitting
  * on grapheme/surrogate-pair boundaries rather than UTF-16 code units. Plain

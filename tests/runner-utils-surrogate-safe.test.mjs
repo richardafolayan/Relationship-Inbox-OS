@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { safeTruncate, stripUnpairedSurrogates, cleanText } from "../apps/runner/dist/platforms/utils.js";
+import { safeTruncate, stripUnpairedSurrogates, cleanMessageText, cleanText } from "../apps/runner/dist/platforms/utils.js";
 
 test("safeTruncate keeps 4-byte emojis whole when the cut lands on a surrogate boundary", () => {
   // Reproduce Sarah Nwisi sync-fail bug: trailing 😂 (😂) at chars
@@ -49,4 +49,9 @@ test("cleanText strips unpaired surrogates AND collapses whitespace", () => {
   // strips surrogates, naive callers don't have to remember to.
   const broken = "  Sarah:  hello\uD83D  world  ";
   assert.equal(cleanText(broken), "Sarah: hello world");
+});
+
+test("cleanMessageText preserves paragraph breaks while normalising line whitespace", () => {
+  const raw = "  Hi Richard,  \n\n  Thanks for letting me know.   \n  Wishing you all the best.  \n\n\n  BW  \n  Vilasinee 🙂  ";
+  assert.equal(cleanMessageText(raw), "Hi Richard,\n\nThanks for letting me know.\nWishing you all the best.\n\nBW\nVilasinee 🙂");
 });

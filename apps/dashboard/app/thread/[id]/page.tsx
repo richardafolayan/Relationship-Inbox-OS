@@ -544,7 +544,7 @@ export default function ThreadPage() {
                     {message.senderName ? (
                       <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-slate-500">{message.senderName}</p>
                     ) : null}
-                    <p>{message.text}</p>
+                    <p className="whitespace-pre-wrap">{message.text}</p>
                     <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
                       <span>{formatClock(message.timestamp)}</span>
                       {message.direction === "OUT" ? <span>Sent via automation ✓</span> : null}
@@ -572,7 +572,7 @@ export default function ThreadPage() {
                         : "border border-blue-200 bg-blue-50 text-blue-900 opacity-80"
                     }`}
                   >
-                    <p>{pending.text}</p>
+                    <p className="whitespace-pre-wrap">{pending.text}</p>
                     <div className="mt-1 flex items-center justify-between gap-2 text-[11px]">
                       <span className="text-slate-500">{formatClock(pending.sentAt)}</span>
                       {pending.failed ? (
