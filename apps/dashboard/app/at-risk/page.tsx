@@ -35,6 +35,7 @@ export default function AtRiskPage() {
       <PageHead
         eyebrow="Needs you"
         title="At risk"
+        subtitle="Threads breaching your reply SLA. Clear these first to stop relationships going cold."
         meta={
           <>
             <span className="text-ink">{overdue.length}</span> overdue ·{" "}

@@ -59,6 +59,7 @@ export default function InboxPage() {
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
+        subtitle="Every active thread, sectioned by urgency. Search and filter to find one fast."
         meta={<span>{rows.length} threads</span>}
       />
 

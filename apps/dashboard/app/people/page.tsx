@@ -83,6 +83,7 @@ export default function PeoplePage() {
       <PageHead
         eyebrow="Relationships"
         title="People"
+        subtitle="Lightweight relationship context across every conversation — risk, last touch, notes."
         meta={people.length > 0 ? <span>{people.length} relationships</span> : null}
       />
 

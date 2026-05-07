@@ -44,7 +44,11 @@ export default function PlatformsPage() {
 
   return (
     <Canvas>
-      <PageHead eyebrow="Connected accounts" title="Platforms" />
+      <PageHead
+        eyebrow="Connected accounts"
+        title="Platforms"
+        subtitle="Manage browser sessions, run scans, and inspect selector health for each platform."
+      />
 
       {actionError ? (
         <p className="mb-6 font-mono text-[11px] text-risk-overdue">{actionError}</p>
