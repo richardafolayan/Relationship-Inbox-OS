@@ -65,6 +65,25 @@ export class KeyedMutex {
     return this.states.get(key)?.running ?? false;
   }
 
+  /**
+   * Attempt to run `work` only if no holder is currently active for `key`.
+   * Resolves with `{ acquired: true, value }` on success and
+   * `{ acquired: false }` synchronously when the lock is held.
+   *
+   * Used by enrichment-queue to yield to live scan/send work without
+   * queueing behind it — a queued profile visit could sit for minutes
+   * behind a scan, causing pacing skew. With this, the worker simply
+   * defers the job and tries the next slot on the next tick.
+   */
+  async tryAcquire<T>(key: string, work: MutexWork<T>): Promise<{ acquired: true; value: T } | { acquired: false }> {
+    const state = this.states.get(key);
+    if (state?.running) {
+      return { acquired: false };
+    }
+    const value = await this.runExclusive(key, work);
+    return { acquired: true, value };
+  }
+
   private enqueue<T>(key: string, work: MutexWork<T>, mode: "all" | "queue_one"): Promise<T> {
     const state = this.states.get(key) ?? {
       running: false,

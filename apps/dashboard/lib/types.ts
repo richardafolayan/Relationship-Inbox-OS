@@ -46,6 +46,46 @@ export interface PeopleRow {
   risk: "GREEN" | "AMBER" | "RED";
   hasUnresolvedIdentityWarning?: boolean;
   unresolvedThreadCount?: number;
+  /** Phase 2 enrichment metadata. Null when the contact has not been enriched. */
+  enrichedAt?: string | null;
+  enrichmentFailedReason?: string | null;
+  headline?: string | null;
+  currentRole?: string | null;
+  currentCompany?: string | null;
+  location?: string | null;
+}
+
+export interface PersonDetailResponse {
+  person: {
+    id: string;
+    name: string;
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+    profileUrl: string | null;
+    enrichedAt: string | null;
+    enrichmentFailedReason: string | null;
+    tags: string[];
+    notes: string | null;
+  };
+  enrichment: {
+    headline: string | null;
+    about: string | null;
+    location: string | null;
+    currentCompany: string | null;
+    currentRole: string | null;
+    mutualCount: number | null;
+    experience: Array<{ title?: string | null; company?: string | null; dates?: string | null; description?: string | null }>;
+    education: Array<{ institution?: string | null; degree?: string | null; field?: string | null; dates?: string | null }>;
+    skills: string[];
+    services: string[];
+    recentPosts: Array<{ text?: string | null; postedAt?: string | null; hasImage?: boolean }>;
+    mutualNames: string[];
+  } | null;
+  summary: string | null;
+  starters: {
+    starters: Array<{ angle: string; citedField: string; text: string }>;
+    generatedAt: string;
+    validatedCount: number;
+  } | null;
 }
 
 export interface PlatformCard {
