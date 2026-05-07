@@ -141,6 +141,13 @@ export interface AiSource {
   providerDisplayName: string | null;
   /** When non-null, generation fell back from this provider. */
   fellBackFromProviderId: AiProvider | null;
+  /**
+   * Human display name for the active provider that was skipped — set
+   * alongside `fellBackFromProviderId` so the dashboard never has to map
+   * provider ids to display strings (and stays correct as new providers
+   * are added to the registry).
+   */
+  fellBackFromProviderDisplayName: string | null;
   /** Stable error-kind tag from the active provider's failure. */
   fellBackReason: AiErrorKind | null;
   /** One-line human explanation for logs / tooltip. */

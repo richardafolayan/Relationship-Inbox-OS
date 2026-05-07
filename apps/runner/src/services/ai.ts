@@ -312,6 +312,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
           providerId,
           providerDisplayName: entry.displayName,
           fellBackFromProviderId: isActive ? null : activeId,
+          fellBackFromProviderDisplayName: isActive ? null : providerRegistry[activeId].displayName,
           fellBackReason: isActive ? null : activeFailure?.kind ?? null,
           fellBackMessage: isActive ? null : activeFailure?.message ?? null
         };
@@ -322,11 +323,18 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       }
     }
 
-    // All providers exhausted — caller's fallback value is returned.
+    // All providers exhausted — caller's fallback value is returned. Log
+    // a single summary line so log-grepping for AI outages doesn't have
+    // to walk the per-attempt lines and figure out the chain ended.
+    console.warn(
+      `[ai] all providers exhausted for active=${activeId}; returning caller fallback. ` +
+        `Active provider's last failure: ${activeFailure?.message ?? "unknown"}`
+    );
     const source: AiSource = {
       providerId: null,
       providerDisplayName: null,
       fellBackFromProviderId: activeId,
+      fellBackFromProviderDisplayName: providerRegistry[activeId].displayName,
       fellBackReason: activeFailure?.kind ?? null,
       fellBackMessage: activeFailure?.message ?? null
     };
@@ -488,9 +496,7 @@ Hard rules:
 - Each intent describes WHAT THIS REPLY DOES, in this thread's context —
   e.g. "Acknowledge their move", "Suggest a time", "Match their warmth",
   "Offer a small update", "Decline gently", "Ask about timeline". Make
-  them specific to what was actually said.${
-    isOutreach ? "" : ""
-  }
+  them specific to what was actually said.
 
 ${
   isOutreach

@@ -840,7 +840,7 @@ export default function ThreadPage() {
                 title={thread.suggestedReplies.source.fellBackMessage ?? undefined}
               >
                 Generated with {thread.suggestedReplies.source.providerDisplayName ?? "fallback provider"} —{" "}
-                {thread.suggestedReplies.source.fellBackFromProviderId === "glm" ? "Z.AI GLM" : "OpenAI"}{" "}
+                {thread.suggestedReplies.source.fellBackFromProviderDisplayName ?? thread.suggestedReplies.source.fellBackFromProviderId}{" "}
                 was unavailable
                 {thread.suggestedReplies.source.fellBackReason
                   ? ` (${thread.suggestedReplies.source.fellBackReason.replace(/_/g, " ")})`

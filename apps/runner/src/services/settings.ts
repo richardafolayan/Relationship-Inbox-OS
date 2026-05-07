@@ -34,6 +34,12 @@ export function createSettingsStore(): SettingsStore {
       return cloneSettings(settingsCache);
     }
 
+    // Concurrency note: a writer (`updateSettings`) running while we're
+    // mid-DB-read can populate `settingsCache` before our promise resolves.
+    // The tail of the load promise must not clobber that fresher value, so
+    // we only assign when the cache is still empty (`??=`). Same pattern in
+    // `getSelectorOverrides`. The earlier in-place `settingsCache = ...`
+    // had a real write-race here.
     settingsLoadPromise ??= (async () => {
       const record = await prisma.setting.findUnique({ where: { key: APP_SETTINGS_KEY } });
       if (!record) {
@@ -45,14 +51,15 @@ export function createSettingsStore(): SettingsStore {
             valueJson: JSON.stringify(defaultSettings)
           }
         });
-        settingsCache = cloneSettings(defaultSettings);
+        settingsCache ??= cloneSettings(defaultSettings);
         return cloneSettings(settingsCache);
       }
 
-      settingsCache = {
+      const loaded: AppSettings = {
         ...defaultSettings,
         ...(JSON.parse(record.valueJson) as Partial<AppSettings>)
       };
+      settingsCache ??= cloneSettings(loaded);
       return cloneSettings(settingsCache);
     })().finally(() => {
       settingsLoadPromise = null;
@@ -74,7 +81,12 @@ export function createSettingsStore(): SettingsStore {
       create: { key: APP_SETTINGS_KEY, valueJson: JSON.stringify(next) }
     });
 
+    // Set cache *and* drop any in-flight load promise so a concurrent
+    // load-in-progress doesn't seal a stale value over ours via the
+    // load promise's tail assignment (which now uses `??=`, but
+    // dropping the promise is belt-and-braces).
     settingsCache = cloneSettings(next);
+    settingsLoadPromise = null;
     return cloneSettings(settingsCache);
   }
 
@@ -85,9 +97,10 @@ export function createSettingsStore(): SettingsStore {
 
     selectorOverridesLoadPromise ??= (async () => {
       const record = await prisma.setting.findUnique({ where: { key: SELECTOR_OVERRIDES_KEY } });
-      selectorOverridesCache = record
+      const loaded: SelectorOverrideStore = record
         ? (JSON.parse(record.valueJson) as SelectorOverrideStore)
         : {};
+      selectorOverridesCache ??= cloneSelectorOverrides(loaded);
       return cloneSelectorOverrides(selectorOverridesCache);
     })().finally(() => {
       selectorOverridesLoadPromise = null;
@@ -116,6 +129,7 @@ export function createSettingsStore(): SettingsStore {
       create: { key: SELECTOR_OVERRIDES_KEY, valueJson: JSON.stringify(next) }
     });
     selectorOverridesCache = cloneSelectorOverrides(next);
+    selectorOverridesLoadPromise = null;
   }
 
   async function resetSelectorOverride(platform: PlatformName, key: keyof SelectorRegistry): Promise<void> {
@@ -134,6 +148,7 @@ export function createSettingsStore(): SettingsStore {
       create: { key: SELECTOR_OVERRIDES_KEY, valueJson: JSON.stringify(next) }
     });
     selectorOverridesCache = cloneSelectorOverrides(next);
+    selectorOverridesLoadPromise = null;
   }
 
   async function getDemoSeedManifest(): Promise<DemoSeedManifest | null> {
