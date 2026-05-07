@@ -1,3 +1,5 @@
+import type { AiErrorKind, AiProvider } from "@inbox-os/core";
+
 export interface InboxRow {
   id: string;
   personId?: string;
@@ -199,6 +201,11 @@ export interface ThreadResponse {
   draft: string;
   contextUpdatedAt: string;
   messages: ThreadMessage[];
+  messagePage: {
+    hasOlder: boolean;
+    olderCursor: string | null;
+    limit: number;
+  };
   suggestedReplies: {
     replies: Array<{
       label: "A" | "B" | "C";
@@ -206,7 +213,23 @@ export interface ThreadResponse {
       text: string;
     }>;
     needs_user_input: string[];
+    /**
+     * Provenance of the most recent generation. Set when fallback was
+     * needed (e.g. Z.AI overloaded → fell back to OpenAI). Absent on
+     * legacy cached rows. The kind/provider literals are imported from
+     * `@inbox-os/core` so adding a new provider in the runner registry
+     * doesn't silently break this type.
+     */
+    source?: {
+      providerId: AiProvider | null;
+      providerDisplayName: string | null;
+      fellBackFromProviderId: AiProvider | null;
+      fellBackFromProviderDisplayName: string | null;
+      fellBackReason: AiErrorKind | null;
+      fellBackMessage: string | null;
+    } | null;
   };
+  suggestedRepliesStatus?: "ready" | "generating";
   receipts: AuditLogRow[];
 }
 
@@ -217,7 +240,9 @@ export interface HealthResponse {
   connectedPlatforms: number;
 }
 
-export type AiProvider = "openai" | "glm";
+// `AiProvider` is now imported from `@inbox-os/core` at the top of this
+// file. Adding a new provider in core's union (openai/glm/<future>) flows
+// straight through to AppSettings + AiSource without further edits here.
 
 export interface AppSettings {
   scanIntervalSeconds: number;
