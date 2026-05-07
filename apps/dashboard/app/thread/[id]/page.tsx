@@ -71,6 +71,10 @@ export default function ThreadPage() {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
+  // Source of the current composer text: empty / explicit draft typed
+  // by the operator / AI predraft (first suggested reply auto-filled
+  // when no explicit draft exists). Drives the "AI predraft" badge.
+  const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
   const chipsMenuRef = useRef<HTMLDivElement>(null);
 
   const [pendingSends, setPendingSends] = useState<
@@ -100,7 +104,23 @@ export default function ThreadPage() {
     ]);
     if (threadResult.status === "fulfilled") {
       setThread(threadResult.value);
-      setComposer((prev) => prev || threadResult.value.draft || "");
+      setComposer((prev) => {
+        if (prev) return prev; // operator already typed something
+        const explicitDraft = threadResult.value.draft;
+        if (explicitDraft) {
+          setComposerSource("draft");
+          return explicitDraft;
+        }
+        // No explicit draft — fall back to AI predraft (first suggested
+        // reply) so the operator opens an already-filled composer when
+        // /today has pre-warmed the cache.
+        const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
+        if (aiPredraft) {
+          setComposerSource("predraft");
+          return aiPredraft;
+        }
+        return "";
+      });
       setError(null);
     } else {
       const message =
@@ -662,10 +682,34 @@ export default function ThreadPage() {
               <p className="mb-2 font-mono text-[11px] text-risk-overdue">{error}</p>
             ) : null}
             <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+              {composerSource === "predraft" ? (
+                <div
+                  data-testid="ai-predraft-badge"
+                  className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
+                >
+                  <Sparkles className="h-[12px] w-[12px]" />
+                  AI predraft — review before sending
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setComposer("");
+                      setComposerSource("empty");
+                    }}
+                    className="ml-1 text-ink-3 hover:text-ink"
+                  >
+                    clear
+                  </button>
+                </div>
+              ) : null}
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
-                onChange={(event) => setComposer(event.target.value)}
+                onChange={(event) => {
+                  setComposer(event.target.value);
+                  if (composerSource === "predraft" || composerSource === "empty") {
+                    setComposerSource("user");
+                  }
+                }}
                 rows={3}
                 className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.55] text-ink outline-none placeholder:text-ink-4"
               />

@@ -74,6 +74,24 @@ export default function TodayPage() {
       .catch(() => setHeroSummary({ id: hero.id, summary: null }));
   }, [hero, heroSummary?.id]);
 
+  // Pre-warm AI suggested replies for the top 3 rows so opening any of
+  // them shows AI suggestions instantly. The runner endpoint is
+  // idempotent: re-fires for an unchanged thread are cheap (cache hit
+  // returns immediately, no AI call). Bounded to 3 to keep token spend
+  // proportional to what an operator can plausibly act on in one
+  // session.
+  const top3Ids = useMemo(() => rows.slice(0, 3).map((row) => row.id).join("|"), [rows]);
+  useEffect(() => {
+    if (!top3Ids) return;
+    const ids = top3Ids.split("|").filter(Boolean);
+    for (const id of ids) {
+      void apiPost<{ status: string }>(`/runner/control/thread/${id}/predraft`, {}).catch(() => {
+        // Best-effort warmup. A failure just means the operator pays
+        // the AI latency on first open; the existing flow handles that.
+      });
+    }
+  }, [top3Ids]);
+
   const today = new Date();
   const dayLabel = today.toLocaleDateString("en-GB", {
     weekday: "long",

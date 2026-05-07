@@ -2599,6 +2599,88 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
   }
 }));
 
+/**
+ * Pre-warm the suggested-replies cache for a thread. /today calls this
+ * for the top 3 threads so opening any of them shows AI suggestions
+ * instantly. No-op when the cache is already fresh.
+ */
+app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: { person: true }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "thread_not_found" });
+    return;
+  }
+
+  const lastInbound = await prisma.message.findFirst({
+    where: { threadId, direction: "IN" },
+    orderBy: { timestamp: "desc" },
+    select: { text: true }
+  });
+
+  const aiInputs = {
+    summary: thread.rollingSummary ?? "",
+    whatTheyWant: thread.whatTheyWant ?? "",
+    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    lastInboundMessage: lastInbound?.text ?? "",
+    category: (thread.category as "outreach" | "genuine" | null) ?? null,
+    lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
+    lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null
+  };
+  const lateBucket = (() => {
+    if (!aiInputs.lastInboundAt) return "n";
+    const inboundMs = Date.parse(aiInputs.lastInboundAt);
+    if (!Number.isFinite(inboundMs)) return "n";
+    const outboundMs = aiInputs.lastOutboundAt ? Date.parse(aiInputs.lastOutboundAt) : NaN;
+    if (Number.isFinite(outboundMs) && outboundMs >= inboundMs) return "n";
+    const gapDays = (Date.now() - inboundMs) / (1000 * 60 * 60 * 24);
+    if (gapDays >= 60) return "long";
+    if (gapDays >= 30) return "medium";
+    if (gapDays >= 14) return "short";
+    return "n";
+  })();
+  const cacheKey = createHash("sha256")
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}`)
+    .digest("hex");
+
+  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+    res.json({ status: "cached", cacheKey });
+    return;
+  }
+
+  // Fire and forget — the operator's next /data/thread fetch picks
+  // up the cache once the AI call resolves.
+  void aiService
+    .generateSuggestedReplies(aiInputs)
+    .then(async (generated) => {
+      await prisma.thread.update({
+        where: { id: threadId },
+        data: {
+          suggestedRepliesJson: JSON.stringify(generated),
+          suggestedRepliesCacheKey: cacheKey
+        }
+      });
+      eventBus.emit({
+        type: "SUGGESTED_REPLIES_UPDATED",
+        jobId: uuid(),
+        threadId
+      });
+    })
+    .catch((error) => {
+      console.warn(
+        `[predraft] failed for threadId=${threadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    });
+
+  res.json({ status: "queued", cacheKey });
+}));
+
 app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
