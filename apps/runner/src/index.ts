@@ -1572,6 +1572,28 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
   const voiceSamples = thread.messages
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
+
+  // Pull other-thread context for the same Person so the AI doesn't
+  // repeat questions already answered elsewhere or contradict prior
+  // tone. Bounded to 5 threads + person notes/tags.
+  const otherThreadsForCompose = await prisma.thread.findMany({
+    where: { personId: thread.personId, id: { not: thread.id }, archivedAt: null },
+    orderBy: { lastMessageAt: "desc" },
+    take: 5,
+    select: { platform: true, lastMessageAt: true, lastMessagePreview: true, whatTheyWant: true }
+  });
+  const relationshipContext = {
+    otherThreadCount: otherThreadsForCompose.length,
+    recentExchanges: otherThreadsForCompose.map((t) => ({
+      platform: t.platform,
+      lastMessageAt: t.lastMessageAt?.toISOString() ?? null,
+      preview: t.lastMessagePreview ?? null,
+      whatTheyWant: t.whatTheyWant ?? null
+    })),
+    notes: thread.person.notes ?? null,
+    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+  };
+
   const text = await aiService.composeInVoice({
     intent: payload.intent,
     displayName: thread.person.displayName,
@@ -1580,7 +1602,8 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
       direction: m.direction as "IN" | "OUT",
       text: m.text,
       timestamp: m.timestamp.toISOString()
-    }))
+    })),
+    relationshipContext
   });
 
   res.json({ text });
@@ -1947,6 +1970,39 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     take: 120
   });
 
+  // Cross-thread relationship memory — last message from each OTHER
+  // thread with the same Person, plus the Person's notes/tags. Powers
+  // the dashboard's memory chip and feeds the AI compose prompts so
+  // drafts don't repeat questions answered in another conversation.
+  const otherThreads = await prisma.thread.findMany({
+    where: {
+      personId: thread.personId,
+      id: { not: thread.id },
+      archivedAt: null
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: 5,
+    select: {
+      id: true,
+      platform: true,
+      lastMessageAt: true,
+      lastMessagePreview: true,
+      whatTheyWant: true
+    }
+  });
+  const relationshipMemory = {
+    otherThreadCount: otherThreads.length,
+    recentExchanges: otherThreads.map((t) => ({
+      threadId: t.id,
+      platform: t.platform,
+      lastMessageAt: t.lastMessageAt?.toISOString() ?? null,
+      preview: t.lastMessagePreview ?? null,
+      whatTheyWant: t.whatTheyWant ?? null
+    })),
+    notes: thread.person.notes ?? null,
+    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+  };
+
   res.json({
     id: thread.id,
     personName: thread.person.displayName,
@@ -1961,6 +2017,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
+    relationshipMemory,
     messages: pageMessages.map((message) => ({
       id: message.id,
       direction: message.direction,
