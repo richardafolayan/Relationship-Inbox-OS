@@ -323,6 +323,20 @@ export function createSendService(deps: SendServiceDeps) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
       const errorMessage = describeSendError(error);
 
+      // Map the (often opaque) error to a coarse kind the dashboard can
+      // turn into a one-tap recovery action ("Open browser to sign in",
+      // "Run selector tests", "Reset session", "Retry now").
+      const errorKind: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN" =
+        adapterError?.kind === "AUTH_REQUIRED"
+          ? "AUTH_REQUIRED"
+          : adapterError?.kind === "SELECTOR_MISMATCH"
+            ? "SELECTOR_FAIL"
+            : /profile.*lock|already in use|singleton/i.test(errorMessage)
+              ? "PROFILE_LOCKED"
+              : /timeout|temporarily|ECONN|navigation/i.test(errorMessage)
+                ? "TRANSIENT"
+                : "UNKNOWN";
+
       const logId = await deps.auditLog({
         platform: thread.platform as PlatformName,
         stage: "Send",
@@ -330,7 +344,8 @@ export function createSendService(deps: SendServiceDeps) {
         status: "FAIL",
         details: {
           threadId: thread.id,
-          message: errorMessage
+          message: errorMessage,
+          errorKind
         },
         screenshotFile: adapterError?.screenshotFile,
         domDumpFile: adapterError?.domDumpFile
@@ -342,6 +357,7 @@ export function createSendService(deps: SendServiceDeps) {
           status: "FAILED",
           errorJson: JSON.stringify({
             message: errorMessage,
+            errorKind,
             screenshotFile: adapterError?.screenshotFile,
             domDumpFile: adapterError?.domDumpFile,
             logId
@@ -356,7 +372,8 @@ export function createSendService(deps: SendServiceDeps) {
         platform: thread.platform as PlatformName,
         logId,
         clientSendId: input.clientSendId,
-        errorMessage
+        errorMessage,
+        errorKind
       });
 
       // Don't rethrow — the worker already logged FAILED state. Rethrowing
