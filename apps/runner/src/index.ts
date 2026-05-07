@@ -1940,6 +1940,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       timestamp: message.timestamp.toISOString(),
       text: message.text,
       senderName: message.senderName ?? null,
+      sentVia: message.sentVia ?? null,
       raw: message.rawJson ? JSON.parse(message.rawJson) : null,
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
     })),

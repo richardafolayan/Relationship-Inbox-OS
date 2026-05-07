@@ -230,17 +230,22 @@ export default function ThreadPage() {
     };
   }, [threadId, refresh]);
 
+  // Scope Cmd/Ctrl+Enter to the reply composer specifically — the listener
+  // used to live on `window`, which meant pressing Cmd+Enter inside the
+  // Compose-in-voice intent textarea (or anywhere else on the page) fired
+  // the main composer's Send. The handler is attached to the textarea
+  // directly via onKeyDown below; this hook now only owns the latest-onSend
+  // ref so the handler stays stable across renders.
+  const onSendRef = useRef<() => void>(() => {});
   useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-        event.preventDefault();
-        void onSend();
-      }
-    };
-
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    onSendRef.current = onSend;
   });
+  const onComposerKeyDown = useCallback((event: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+      event.preventDefault();
+      onSendRef.current();
+    }
+  }, []);
 
   const timeline = useMemo(() => {
     if (!thread) {
@@ -349,8 +354,11 @@ export default function ThreadPage() {
         `/runner/data/thread/${thread.id}?beforeMessageId=${encodeURIComponent(thread.messagePage.olderCursor)}&messagesLimit=${thread.messagePage.limit}`
       );
       setThread((current) => {
+        // Race guard: if the user has navigated to a different thread
+        // mid-fetch, the in-flight older-messages response now belongs
+        // to a stale thread and would clobber the visible one. Drop it.
         if (!current || current.id !== olderPage.id) {
-          return olderPage;
+          return current;
         }
         const existingIds = new Set(current.messages.map((message) => message.id));
         const olderMessages = olderPage.messages.filter((message) => !existingIds.has(message.id));
@@ -639,7 +647,9 @@ export default function ThreadPage() {
                     <p className="whitespace-pre-wrap">{message.text}</p>
                     <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-slate-500">
                       <span>{formatClock(message.timestamp)}</span>
-                      {message.direction === "OUT" ? <span>Sent via automation ✓</span> : null}
+                      {message.direction === "OUT" && message.sentVia === "automation" ? (
+                        <span>Sent via automation ✓</span>
+                      ) : null}
                     </div>
                     {message.attachments?.length ? (
                       <div className="mt-2">
@@ -696,6 +706,7 @@ export default function ThreadPage() {
               rows={5}
               value={composer}
               onChange={(event) => setComposer(event.target.value)}
+              onKeyDown={onComposerKeyDown}
               placeholder="Write a reply..."
             />
             <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
