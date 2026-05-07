@@ -80,6 +80,10 @@ export default function ThreadPage() {
       sentAt: string;
       failed?: boolean;
       errorMessage?: string;
+      // Coarse classification used to render a one-tap recovery action
+      // (Open browser / Run selector tests / Reset session / Retry now)
+      // instead of dumping a raw error message at the operator.
+      errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
     }>
   >([]);
   const pendingSendsRef = useRef(pendingSends);
@@ -130,6 +134,7 @@ export default function ThreadPage() {
         threadId?: string;
         clientSendId?: string;
         errorMessage?: string;
+        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
       }>).detail;
       if (!detail || !threadId || detail.threadId !== threadId) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
@@ -141,7 +146,7 @@ export default function ThreadPage() {
         setPendingSends((prev) =>
           prev.map((p) =>
             p.clientSendId === detail.clientSendId
-              ? { ...p, failed: true, errorMessage: message }
+              ? { ...p, failed: true, errorMessage: message, errorKind: detail.errorKind }
               : p
           )
         );
@@ -273,9 +278,75 @@ export default function ThreadPage() {
   const retryPendingSend = (clientSendId: string) => {
     const target = pendingSends.find((p) => p.clientSendId === clientSendId);
     if (!target || !thread) return;
-    setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
-    setComposer(target.text);
-    setTimeout(() => void onSend(), 0);
+    // Re-queue the existing failed SendRequest under a fresh clientSendId
+    // via the runner's /retry-send endpoint (the runner keeps the failed
+    // row for receipts and inserts a new PENDING row with the same text).
+    setPendingSends((prev) =>
+      prev.map((p) =>
+        p.clientSendId === clientSendId ? { ...p, failed: false, errorMessage: undefined, errorKind: undefined } : p
+      )
+    );
+    apiPost<{ clientSendId: string }>(`/runner/control/thread/${thread.id}/retry-send`, {
+      clientSendId
+    })
+      .then((r) => {
+        // Swap the local pending row's clientSendId so SSE reconciliation
+        // matches the new, in-flight one.
+        setPendingSends((prev) =>
+          prev.map((p) =>
+            p.clientSendId === clientSendId ? { ...p, clientSendId: r.clientSendId } : p
+          )
+        );
+      })
+      .catch((retryErr: unknown) => {
+        const message = retryErr instanceof Error ? retryErr.message : "Retry failed";
+        setPendingSends((prev) =>
+          prev.map((p) =>
+            p.clientSendId === clientSendId ? { ...p, failed: true, errorMessage: message } : p
+          )
+        );
+      });
+  };
+
+  const recoveryActionFor = (
+    pending: { errorKind?: string; errorMessage?: string; clientSendId: string },
+    platform?: string
+  ): { label: string; run: () => void } | null => {
+    if (!thread) return null;
+    const platformName = platform ?? thread.platform;
+    switch (pending.errorKind) {
+      case "AUTH_REQUIRED":
+        return {
+          label: "Open browser to sign in",
+          run: () =>
+            runAction(
+              apiPost("/runner/control/platform/open-browser", { platform: platformName }),
+              setError
+            )
+        };
+      case "SELECTOR_FAIL":
+        return {
+          label: "Run selector tests",
+          run: () =>
+            runAction(
+              apiPost("/runner/control/platform/test-selectors", { platform: platformName }),
+              setError,
+              refresh
+            )
+        };
+      case "PROFILE_LOCKED":
+        return {
+          label: "Reset session",
+          run: () =>
+            runAction(
+              apiPost("/runner/control/platform/reset-session", { platform: platformName }),
+              setError,
+              refresh
+            )
+        };
+      default:
+        return null;
+    }
   };
 
   // Server-paginated older-message fetch. Pairs with the runner's
@@ -635,11 +706,33 @@ export default function ThreadPage() {
                   <span>{formatClock(pending.sentAt)}</span>
                   {pending.failed ? (
                     <>
-                      <span className="text-risk-overdue">· failed</span>
+                      <span className="text-risk-overdue">
+                        · {pending.errorKind === "AUTH_REQUIRED"
+                          ? "auth required"
+                          : pending.errorKind === "SELECTOR_FAIL"
+                            ? "selector failed"
+                            : pending.errorKind === "PROFILE_LOCKED"
+                              ? "profile locked"
+                              : "failed"}
+                      </span>
+                      {(() => {
+                        const recovery = recoveryActionFor(pending);
+                        return recovery ? (
+                          <button
+                            type="button"
+                            onClick={recovery.run}
+                            className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                            title={pending.errorMessage}
+                          >
+                            {recovery.label}
+                          </button>
+                        ) : null;
+                      })()}
                       <button
                         type="button"
                         onClick={() => retryPendingSend(pending.clientSendId)}
                         className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                        title={pending.errorMessage}
                       >
                         retry
                       </button>
