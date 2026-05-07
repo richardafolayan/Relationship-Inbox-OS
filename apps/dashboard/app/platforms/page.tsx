@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -112,9 +113,14 @@ export default function PlatformsPage() {
                 <Button
                   variant="quiet"
                   onClick={() =>
-                    runAction(
+                    runActionWithFeedback(
                       apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                      setActionError
+                      {
+                        pending: `Opening ${PLATFORM_DISPLAY[row.platform]}…`,
+                        success: `${PLATFORM_DISPLAY[row.platform]} opened`,
+                        failure: `Couldn't open ${PLATFORM_DISPLAY[row.platform]}`,
+                        setError: setActionError
+                      }
                     )
                   }
                 >
@@ -123,10 +129,15 @@ export default function PlatformsPage() {
                 <Button
                   variant="ghost"
                   onClick={() =>
-                    runAction(
+                    runActionWithFeedback(
                       apiPost("/runner/control/scan", { platform: row.platform }),
-                      setActionError,
-                      refresh
+                      {
+                        pending: `Scanning ${PLATFORM_DISPLAY[row.platform]}…`,
+                        success: `${PLATFORM_DISPLAY[row.platform]} scan queued`,
+                        failure: `${PLATFORM_DISPLAY[row.platform]} scan failed`,
+                        setError: setActionError,
+                        onDone: () => refresh()
+                      }
                     )
                   }
                 >

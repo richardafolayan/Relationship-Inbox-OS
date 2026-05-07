@@ -7,6 +7,7 @@ import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-o
 import { Sidebar } from "@/components/layout/sidebar";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { SystemStatusBar } from "@/components/layout/system-status-bar";
+import { ToastHost } from "@/components/common/toast-host";
 import { apiGet, apiPost } from "@/lib/api";
 import { initials } from "@/lib/risk";
 import type { AppSettings, HealthResponse, InboxResponse } from "@/lib/types";
@@ -184,6 +185,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
+      <ToastHost />
     </div>
   );
 }
