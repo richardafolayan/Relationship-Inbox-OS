@@ -1,27 +1,39 @@
 import type { HTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
+import type { DisplayRisk } from "@/lib/risk";
 
 interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
-  tone?: "neutral" | "green" | "amber" | "red" | "blue";
+  risk: DisplayRisk;
+  label?: string;
+  emphasize?: boolean;
 }
 
-const tones: Record<NonNullable<BadgeProps["tone"]>, string> = {
-  neutral: "bg-slate-100 text-slate-700",
-  green: "bg-emerald-50 text-emerald-700",
-  amber: "bg-amber-50 text-amber-700",
-  red: "bg-rose-50 text-rose-700",
-  blue: "bg-blue-50 text-blue-700"
+const dotColor: Record<DisplayRisk, string> = {
+  overdue: "bg-risk-overdue",
+  waiting: "bg-risk-waiting",
+  fresh: "bg-risk-fresh"
 };
 
-export function Badge({ className, tone = "neutral", ...props }: BadgeProps) {
+const labelColor: Record<DisplayRisk, string> = {
+  overdue: "text-risk-overdue font-medium",
+  waiting: "text-ink-3",
+  fresh: "text-ink-3"
+};
+
+export function Badge({ risk, label, emphasize, className, ...props }: BadgeProps) {
   return (
     <span
       className={cn(
-        "inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium",
-        tones[tone],
+        "inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.02em]",
+        emphasize ? labelColor[risk] : "text-ink-3",
         className
       )}
       {...props}
-    />
+    >
+      <span className={cn("h-[6px] w-[6px] rounded-full", dotColor[risk])} aria-hidden />
+      <span className={emphasize && risk === "overdue" ? "text-risk-overdue font-medium" : undefined}>
+        {label ?? risk}
+      </span>
+    </span>
   );
 }
