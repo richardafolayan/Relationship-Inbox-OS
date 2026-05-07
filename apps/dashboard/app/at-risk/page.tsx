@@ -1,14 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
 import { apiGet } from "@/lib/api";
 import type { InboxResponse } from "@/lib/types";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
+import { Button } from "@/components/ui/button";
+
+const FOCUS_QUEUE_KEY = "inbox_focus_queue";
 
 // At-risk = inbox filtered to overdue + waiting. Same shell as Inbox; we
-// just drop the "fresh" bucket. Extrapolation per the README's IA table.
+// just drop the "fresh" bucket. Reply Focus Mode primes a queue of
+// thread ids in localStorage and routes to the first one; the thread
+// page reads the queue to show "Next in queue (N left)".
 export default function AtRiskPage() {
+  const router = useRouter();
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
 
@@ -30,6 +37,13 @@ export default function AtRiskPage() {
   const waiting = useMemo(() => rows.filter((r) => r.riskLevel === "AMBER"), [rows]);
   const total = overdue.length + waiting.length;
 
+  const enterFocusMode = () => {
+    const queue = [...overdue, ...waiting].map((r) => r.id);
+    if (!queue.length) return;
+    window.localStorage.setItem(FOCUS_QUEUE_KEY, JSON.stringify(queue));
+    router.push(`/thread/${queue[0]}`);
+  };
+
   return (
     <Canvas>
       <PageHead
@@ -42,6 +56,17 @@ export default function AtRiskPage() {
           </>
         }
       />
+
+      {total > 0 ? (
+        <div className="mb-6 flex items-center gap-3">
+          <Button variant="primary" onClick={enterFocusMode}>
+            ▶ Reply focus mode
+          </Button>
+          <span className="font-mono text-[11px] text-ink-3">
+            Steps through {total} thread{total === 1 ? "" : "s"}, oldest first.
+          </span>
+        </div>
+      ) : null}
 
       {!loaded ? (
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>

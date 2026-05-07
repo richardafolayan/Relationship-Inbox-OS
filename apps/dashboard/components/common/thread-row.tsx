@@ -22,8 +22,13 @@ export function ThreadRow({ row }: ThreadRowProps) {
   const risk = toDisplayRisk(row.riskLevel);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${row.preview}` : row.preview;
-  const rightLabel =
-    risk === "overdue"
+  const showCountdown =
+    (risk === "overdue" || risk === "waiting") &&
+    row.slaCountdown &&
+    row.slaCountdown !== "No SLA";
+  const rightLabel = showCountdown
+    ? row.slaCountdown
+    : risk === "overdue"
       ? "overdue"
       : risk === "waiting"
         ? "waiting"
