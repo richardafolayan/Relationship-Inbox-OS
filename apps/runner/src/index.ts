@@ -49,7 +49,7 @@ app.use(express.json({ limit: "1mb" }));
 const settingsStore = createSettingsStore();
 const auditService = createAuditService();
 const eventBus = createEventBus();
-const aiService = createAiService();
+const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
 
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
@@ -749,7 +749,12 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
       enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"])).optional(),
       demoMode: z.boolean().optional(),
-      recentThreadSweepCount: z.number().int().min(5).max(100).optional()
+      recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
+      aiProvider: z.enum(["openai", "glm"]).optional(),
+      // Empty string from the dashboard is normalised to undefined client-side,
+      // but accept either here defensively. Length cap matches typical model
+      // ids while preventing accidental megabyte payloads.
+      glmModel: z.string().max(100).optional()
     })
     .parse(req.body);
 

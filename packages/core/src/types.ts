@@ -131,6 +131,8 @@ export interface SuggestedRepliesOutput {
   needs_user_input: string[];
 }
 
+export type AiProvider = "openai" | "glm";
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -140,4 +142,11 @@ export interface AppSettings {
   enabledPlatforms: PlatformName[];
   demoMode: boolean;
   recentThreadSweepCount: number;
+  // Optional so existing rows persisted before this field was added still
+  // parse. When undefined, runner falls back to runnerConfig.aiProvider
+  // (which is seeded from the AI_PROVIDER env var).
+  aiProvider?: AiProvider;
+  // Optional override for the GLM model id. When undefined, runner uses
+  // runnerConfig.glmModel (Z_AI_MODEL env, default glm-4.7-flash).
+  glmModel?: string;
 }

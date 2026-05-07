@@ -217,6 +217,8 @@ export interface HealthResponse {
   connectedPlatforms: number;
 }
 
+export type AiProvider = "openai" | "glm";
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -226,6 +228,8 @@ export interface AppSettings {
   enabledPlatforms: Array<"LINKEDIN" | "INSTAGRAM" | "TIKTOK">;
   demoMode: boolean;
   recentThreadSweepCount: number;
+  aiProvider?: AiProvider;
+  glmModel?: string;
 }
 
 export interface SelectorTestReceipt {

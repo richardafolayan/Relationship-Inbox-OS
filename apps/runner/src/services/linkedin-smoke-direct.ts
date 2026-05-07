@@ -96,7 +96,7 @@ export async function runLinkedInSmokeDirect(): Promise<LinkedInSmokeResponse> {
   const settingsStore = createSettingsStore();
   const auditService = createAuditService();
   const eventBus = createEventBus();
-  const aiService = createAiService();
+  const aiService = createAiService(settingsStore);
   const { adapters, sessionManager } = createAdapters({
     settingsStore
   });
