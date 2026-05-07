@@ -64,6 +64,15 @@ export interface RunnerConfig {
     scrollWaitMs: number;
     messageBackfillAttempts: number;
   };
+  /**
+   * Min ms between LinkedIn profile-enrichment visits. Default 30s.
+   * Tunable up only after observation, never down — see Phase 2 brief.
+   */
+  enrichPaceMs: number;
+  /** Max enrichment jobs processed per drain pass. Default 30. */
+  enrichBatchMax: number;
+  /** Days before an enriched profile is considered stale. Default 30. */
+  enrichRefreshDays: number;
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -242,7 +251,10 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       stableIterations: parseIntOrDefault(env.LINKEDIN_SCAN_STABLE_ITERATIONS, 3),
       scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 1000),
       messageBackfillAttempts: parseIntOrDefault(env.LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS, 8)
-    }
+    },
+    enrichPaceMs: parseIntOrDefault(env.ENRICH_PACE_MS, 30_000),
+    enrichBatchMax: parseIntOrDefault(env.ENRICH_BATCH_MAX, 30),
+    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30)
   };
 }
 

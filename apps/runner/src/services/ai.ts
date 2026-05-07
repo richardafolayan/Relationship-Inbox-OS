@@ -3,7 +3,12 @@ import type { SummaryOutput, SuggestedRepliesOutput } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
-import type { AiService } from "../types/runtime";
+import type {
+  AiService,
+  ContactProfileSnapshot,
+  ConversationStartersOutput,
+  ConversationStarterCitedField
+} from "../types/runtime";
 
 const summarySchema = z.object({
   summary: z.string(),
@@ -115,7 +120,7 @@ function gpt5OptionsForModel(model: string): Gpt5RequestOverrides {
 // or a colon. Apply to every text-producing AI call before persisting /
 // returning to the dashboard.
 const FORBIDDEN_PUNCTUATION_RE = /[—–]|;|:/g;
-function applyVoiceRules(text: string): string {
+export function applyVoiceRules(text: string): string {
   if (!text) return text;
   return text
     .replace(/—/g, ", ")  // em-dash → comma to preserve flow
@@ -128,6 +133,65 @@ function applyVoiceRules(text: string): string {
 // Static analysis would flag FORBIDDEN_PUNCTUATION_RE as unused; keep it
 // exported only via the side-effect of being referenced in tests if added.
 void FORBIDDEN_PUNCTUATION_RE;
+
+const startersSchema = z.object({
+  starters: z
+    .array(
+      z.object({
+        angle: z.string().min(1),
+        citedField: z.enum([
+          "headline",
+          "about",
+          "experience",
+          "education",
+          "skills",
+          "services",
+          "recent_posts",
+          "location"
+        ]),
+        text: z.string().min(1)
+      })
+    )
+    .min(1)
+    .max(4)
+});
+
+/**
+ * Compress a ContactProfileSnapshot into the prompt-ready slice the AI
+ * actually reads. Avoids dumping unbounded JSON into the model context —
+ * each list is capped, each post body truncated. Numbers chosen to keep
+ * the user message under ~3-4k tokens for the typical contact.
+ */
+function snapshotForPrompt(snap: ContactProfileSnapshot | null): Record<string, unknown> | null {
+  if (!snap) return null;
+  return {
+    displayName: snap.displayName ?? null,
+    headline: snap.headline ?? null,
+    about: snap.about ? safeTruncate(snap.about, 600) : null,
+    location: snap.location ?? null,
+    currentRole: snap.currentRole ?? null,
+    currentCompany: snap.currentCompany ?? null,
+    experience: (snap.experience ?? []).slice(0, 5).map((e) => ({
+      title: e.title ?? null,
+      company: e.company ?? null,
+      dates: e.dates ?? null,
+      description: e.description ? safeTruncate(e.description, 240) : null
+    })),
+    education: (snap.education ?? []).slice(0, 4).map((e) => ({
+      institution: e.institution ?? null,
+      degree: e.degree ?? null,
+      field: e.field ?? null,
+      dates: e.dates ?? null
+    })),
+    skills: (snap.skills ?? []).slice(0, 10),
+    services: (snap.services ?? []).slice(0, 6),
+    recentPosts: (snap.recentPosts ?? []).slice(0, 5).map((p) => ({
+      text: p.text ? safeTruncate(p.text, 280) : null,
+      postedAt: p.postedAt ?? null,
+      hasImage: Boolean(p.hasImage)
+    }))
+  };
+}
 
 export function createAiService(): AiService {
   const client = runnerConfig.openAiApiKey
@@ -439,10 +503,129 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
     }
   }
 
+  /**
+   * Generate a 2-3 sentence summary of who this contact is, drawing on
+   * their LinkedIn profile and any commonality with the operator. Voice
+   * rules apply — punctuation post-processor scrubs em-dashes etc. as
+   * usual. Returns null when the AI client isn't configured so the
+   * dashboard can hide the section instead of showing a placeholder.
+   */
+  async function generateContactSummary(input: {
+    contact: ContactProfileSnapshot;
+    self: ContactProfileSnapshot | null;
+  }): Promise<string | null> {
+    if (!client) {
+      return null;
+    }
+
+    const contactPayload = snapshotForPrompt(input.contact);
+    const selfPayload = snapshotForPrompt(input.self);
+    const prompt = `Summarise who this contact is in 2 to 3 sentences for the operator.
+Lead with their current role or focus, then any clear commonality with the operator (shared school, shared work area, shared interest). If the operator's profile is null, omit the commonality and just describe the contact.
+
+Style:
+- British English. Conversational, like a peer briefing a peer.
+- No em dashes, en dashes, semicolons, or colons.
+- Plain prose. No headings, bullet points, or labels.
+- Stick to facts that are present in the data. Do not invent details.
+
+Return strict JSON: { "summary": "string" }
+
+Contact profile: ${JSON.stringify(contactPayload)}
+Operator profile: ${JSON.stringify(selfPayload)}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model: runnerConfig.openAiModel,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt }
+        ],
+        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = z.object({ summary: z.string().min(1) }).parse(JSON.parse(content));
+      return applyVoiceRules(stripUnpairedSurrogates(parsed.summary));
+    } catch (error) {
+      console.warn(
+        `[ai] generateContactSummary failed (model=${runnerConfig.openAiModel}); returning null. ${classifyOpenAiError(error)}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Generate 2-3 conversation openers grounded in the contact's profile.
+   * Each opener cites which enrichment field its commonality came from
+   * (`citedField`); the orchestration layer then verifies the field is
+   * actually populated in the contact's data, dropping any opener whose
+   * citation doesn't resolve. This catches the model claiming to have
+   * used field X while inventing the content. Returns null when the AI
+   * client isn't configured.
+   */
+  async function generateConversationStarters(input: {
+    contact: ContactProfileSnapshot;
+    self: ContactProfileSnapshot | null;
+  }): Promise<ConversationStartersOutput | null> {
+    if (!client) {
+      return null;
+    }
+
+    const contactPayload = snapshotForPrompt(input.contact);
+    const selfPayload = snapshotForPrompt(input.self);
+    const prompt = `Draft 2 to 3 conversation openers the operator could send to start a fresh chat with this contact on LinkedIn.
+
+Each opener must reference a real commonality between the operator and the contact (shared school, shared field of work, complementary roles, a recent post the contact made, a shared location). Do not invent details that are not in the provided data. If the operator's profile is null, ground the opener in something specific from the contact alone (a recent post, their headline, their location).
+
+For each opener, set "citedField" to the single enrichment field whose content the opener leans on. Allowed values: "headline", "about", "experience", "education", "skills", "services", "recent_posts", "location". If the opener references a recent post, use "recent_posts". If it references the contact's role, use "experience" or "headline". Pick the most direct source.
+
+Style:
+- British English. Conversational, warm, peer-to-peer. No corporate filler.
+- Each opener up to 500 characters, 1 to 3 sentences.
+- No em dashes, en dashes, semicolons, or colons.
+- End with a soft, optional invitation, not a hard ask.
+
+Return strict JSON: { "starters": [ { "angle": "string", "citedField": "headline" | "about" | "experience" | "education" | "skills" | "services" | "recent_posts" | "location", "text": "string" }, ... ] }
+
+Contact profile: ${JSON.stringify(contactPayload)}
+Operator profile: ${JSON.stringify(selfPayload)}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model: runnerConfig.openAiModel,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt }
+        ],
+        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = startersSchema.parse(JSON.parse(content));
+      return {
+        starters: parsed.starters.map((s) => ({
+          angle: applyVoiceRules(s.angle),
+          citedField: s.citedField as ConversationStarterCitedField,
+          text: applyVoiceRules(stripUnpairedSurrogates(s.text))
+        }))
+      };
+    } catch (error) {
+      console.warn(
+        `[ai] generateConversationStarters failed (model=${runnerConfig.openAiModel}); returning null. ${classifyOpenAiError(error)}`
+      );
+      return null;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
-    classifyThreadCategory
+    classifyThreadCategory,
+    generateContactSummary,
+    generateConversationStarters
   };
 }

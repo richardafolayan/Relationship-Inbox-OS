@@ -49,6 +49,13 @@ interface ScanQueueDeps {
     screenshotFile?: string;
     domDumpFile?: string;
   }) => Promise<string>;
+  /**
+   * Optional hook fired when a brand-new Person row is inserted during a
+   * scan. Used by the enrichment queue to schedule a profile-extraction
+   * pass for first-time contacts. Fire-and-forget — must not block the
+   * scan even if it throws.
+   */
+  onNewPerson?: (input: { personId: string; trigger: "first_seen" }) => void;
 }
 
 type ScanJob = {
@@ -2305,14 +2312,31 @@ export function createScanQueue(deps: ScanQueueDeps) {
       candidate.platformThreadId = canonicalPlatformThreadId;
     }
 
+    const existingPerson = await prisma.person.findFirst({
+      where: { displayName: candidate.displayName, platform }
+    });
     const person =
-      (await prisma.person.findFirst({ where: { displayName: candidate.displayName, platform } })) ??
+      existingPerson ??
       (await prisma.person.create({
         data: {
           displayName: candidate.displayName,
           platform
         }
       }));
+    if (!existingPerson && deps.onNewPerson) {
+      // Fire-and-forget. The callback enqueues a profile-enrichment job;
+      // it must never throw a scan-killing error even if the queue is
+      // mid-restart. The callback signature is sync void on purpose.
+      try {
+        deps.onNewPerson({ personId: person.id, trigger: "first_seen" });
+      } catch (error) {
+        console.warn(
+          `[scan-queue] onNewPerson hook threw for personId=${person.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
 
     const existing = await prisma.thread.findUnique({
       where: {
