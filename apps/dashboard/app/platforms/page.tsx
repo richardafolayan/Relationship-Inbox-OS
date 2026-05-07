@@ -75,7 +75,7 @@ export default function PlatformsPage() {
           />
         ))}
 
-      {rows.map((row) => {
+      {rows.filter((row) => row.enabled).map((row) => {
         const dot =
           row.status === "CONNECTED"
             ? "bg-risk-fresh"
@@ -92,49 +92,154 @@ export default function PlatformsPage() {
               : row.status === "ERROR"
                 ? "error"
                 : "not connected";
+        const selectorReport = row.latestSelectorReport;
+        const selectorPasses = selectorReport
+          ? selectorReport.results.filter((r) => r.status === "PASS").length
+          : 0;
+        const selectorTotal = selectorReport?.results.length ?? 0;
         return (
-          <QuietRow
+          <div
             key={row.platform}
-            name={PLATFORM_DISPLAY[row.platform]}
-            stat={
-              row.lastScanAt
-                ? `last scan ${formatRelative(row.lastScanAt)}`
-                : row.lastError ?? "sign in to enable"
-            }
-            status={
-              <span className="inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.04em] text-ink-2">
-                <span className={`h-[6px] w-[6px] rounded-full ${dot}`} />
-                {label}
-              </span>
-            }
-            action={
-              <div className="flex items-center gap-2">
-                <Button
-                  variant="quiet"
-                  onClick={() =>
-                    runAction(
-                      apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                      setActionError
-                    )
-                  }
-                >
-                  {row.status === "CONNECTED" ? "Open browser" : "Connect"}
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    runAction(
-                      apiPost("/runner/control/scan", { platform: row.platform }),
-                      setActionError,
-                      refresh
-                    )
-                  }
-                >
-                  Scan now
-                </Button>
-              </div>
-            }
-          />
+            className="border-b border-hairline last:border-b-0"
+          >
+            <QuietRow
+              name={PLATFORM_DISPLAY[row.platform]}
+              stat={
+                row.lastScanAt
+                  ? `last scan ${formatRelative(row.lastScanAt)}`
+                  : row.lastError ?? "sign in to enable"
+              }
+              status={
+                <span className="inline-flex items-center gap-2 font-mono text-[11px] tracking-[0.04em] text-ink-2">
+                  <span className={`h-[6px] w-[6px] rounded-full ${dot}`} />
+                  {label}
+                </span>
+              }
+              action={
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    variant="quiet"
+                    onClick={() =>
+                      runAction(
+                        apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+                        setActionError
+                      )
+                    }
+                  >
+                    {row.status === "CONNECTED" ? "Open browser" : "Connect"}
+                  </Button>
+                  {row.status === "CONNECTED" ? (
+                    <Button
+                      variant="quiet"
+                      onClick={() =>
+                        runAction(
+                          apiPost("/runner/control/platform/connect", { platform: row.platform }),
+                          setActionError,
+                          refresh
+                        )
+                      }
+                    >
+                      Reconnect
+                    </Button>
+                  ) : null}
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      runAction(
+                        apiPost("/runner/control/scan", { platform: row.platform }),
+                        setActionError,
+                        refresh
+                      )
+                    }
+                  >
+                    Scan now
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      runAction(
+                        apiPost("/runner/control/platform/test-selectors", {
+                          platform: row.platform
+                        }),
+                        setActionError,
+                        refresh
+                      )
+                    }
+                  >
+                    Run selector tests
+                  </Button>
+                  <Button
+                    variant="danger"
+                    onClick={() => {
+                      if (
+                        !window.confirm(
+                          `Reset shared session for ${PLATFORM_DISPLAY[row.platform]}? This signs you out of the runner's browser profile.`
+                        )
+                      ) {
+                        return;
+                      }
+                      runAction(
+                        apiPost("/runner/control/platform/reset-session", {
+                          platform: row.platform
+                        }),
+                        setActionError,
+                        refresh
+                      );
+                    }}
+                  >
+                    Reset shared session
+                  </Button>
+                </div>
+              }
+            />
+            <details className="px-1 pb-4">
+              <summary className="cursor-pointer list-none font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink">
+                Profile details
+              </summary>
+              <dl className="mt-3 grid grid-cols-[max-content_1fr] gap-x-4 gap-y-1 font-mono text-[11px] text-ink-3">
+                <dt>profile dir</dt>
+                <dd className="break-all text-ink-2">{row.profileDir}</dd>
+                {row.browserProfileMode ? (
+                  <>
+                    <dt>profile mode</dt>
+                    <dd className="text-ink-2">{row.browserProfileMode}</dd>
+                  </>
+                ) : null}
+                {row.browserProfileSyncMode ? (
+                  <>
+                    <dt>sync mode</dt>
+                    <dd className="text-ink-2">{row.browserProfileSyncMode}</dd>
+                  </>
+                ) : null}
+                {row.browserProfileName ? (
+                  <>
+                    <dt>chrome profile</dt>
+                    <dd className="text-ink-2">{row.browserProfileName}</dd>
+                  </>
+                ) : null}
+                {row.connectedAt ? (
+                  <>
+                    <dt>connected</dt>
+                    <dd className="text-ink-2">{formatRelative(row.connectedAt)}</dd>
+                  </>
+                ) : null}
+                {selectorReport ? (
+                  <>
+                    <dt>selector report</dt>
+                    <dd className="text-ink-2">
+                      {selectorPasses}/{selectorTotal} passed —{" "}
+                      {formatRelative(selectorReport.completedAt)}
+                    </dd>
+                  </>
+                ) : (
+                  <>
+                    <dt>selector report</dt>
+                    <dd className="text-ink-3">none yet — run selector tests to generate</dd>
+                  </>
+                )}
+              </dl>
+            </details>
+          </div>
         );
       })}
 
