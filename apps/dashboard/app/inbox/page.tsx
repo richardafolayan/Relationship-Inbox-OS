@@ -235,8 +235,27 @@ export default function InboxPage() {
                   {row.identityWarning === "unresolved_id" ? (
                     <p className="text-[11px] text-amber-700">Identity warning: unresolved thread ID</p>
                   ) : null}
-                  {row.category === "outreach" ? (
-                    <Badge tone="amber">Outreach</Badge>
+                  {/* Click the badge to flip the verdict — covers cases the
+                      classifier gets wrong (e.g. peer-to-peer industry chat
+                      where both parties describe their commercial work). */}
+                  {row.category ? (
+                    <button
+                      type="button"
+                      title={`Click to mark as ${row.category === "outreach" ? "genuine" : "outreach"}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const next = row.category === "outreach" ? "genuine" : "outreach";
+                        runAction(
+                          apiPost(`/runner/control/thread/${row.id}/recategorize`, { category: next }),
+                          setError,
+                          refresh
+                        );
+                      }}
+                    >
+                      <Badge tone={row.category === "outreach" ? "amber" : "green"}>
+                        {row.category === "outreach" ? "Outreach" : "Genuine"}
+                      </Badge>
+                    </button>
                   ) : null}
                 </div>
               </div>

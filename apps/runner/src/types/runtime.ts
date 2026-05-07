@@ -65,6 +65,8 @@ export interface AiService {
     whatTheyWant: string;
     openLoops: string[];
     lastInboundMessage: string;
+    /** When "outreach", reply C is a Polite decline instead of a Clarifying question. */
+    category?: "outreach" | "genuine" | null;
   }): Promise<SuggestedRepliesOutput>;
   transformReply(input: {
     mode: "SHORTEN" | "MAKE_WARMER";
@@ -80,6 +82,10 @@ export interface AiService {
   classifyThreadCategory(input: {
     displayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /** Pass the thread's rollingSummary so classifier can spot a pivot pattern. */
+    summary?: string | null;
+    /** Pass the thread's whatTheyWant for additional intent signal. */
+    whatTheyWant?: string | null;
   }): Promise<"outreach" | "genuine" | null>;
 }
 

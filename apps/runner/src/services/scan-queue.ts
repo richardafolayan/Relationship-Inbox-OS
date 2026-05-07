@@ -2485,7 +2485,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
             direction: message.direction,
             text: message.text,
             timestamp: message.timestamp.toISOString()
-          }))
+          })),
+          summary: summary ?? null,
+          whatTheyWant: whatTheyWant ?? null
         })
         .catch(() => null);
       if (classified) {

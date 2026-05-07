@@ -60,28 +60,74 @@ const categorySchema = z.object({
   category: z.enum(["outreach", "genuine"])
 });
 
-/**
- * GPT-5 family parameters that aren't (yet) typed in the OpenAI SDK we ship.
- * `reasoning_effort: "none"` and `verbosity` are valid at the API layer but
- * the npm SDK type catalog hasn't caught up — we cast at the call site rather
- * than hard-pin a newer SDK in the same change. `none` skips reasoning tokens
- * entirely, which is the right pick for our two short-form generations
- * (summary / 3 reply drafts) and one-shot rewrites (shorten / make warmer);
- * none of those benefit from chain-of-thought.
- *
- * Configuration mirrors the values the operator picked in the OpenAI dashboard:
- *   Top P 0.98, Reasoning effort none, Verbosity medium.
- * Override per-call by passing overrides into the spread.
- */
-const gpt5DefaultOptions = {
-  top_p: 0.98,
-  reasoning_effort: "none" as const,
-  verbosity: "medium" as const
-};
+// Voice + style rules applied to every AI generation (summary, suggested
+// replies, transformReply, classifier). Centralised so a tweak is one edit.
+// Three constraints in particular drive the rest of the prompts in this file:
+//   - 1-2 sentence outputs (informs prompt examples + zod max-length checks)
+//   - No em-dashes / en-dashes / semicolons / colons (post-processing strips
+//     these to handle GPT-5 occasionally slipping them in)
+//   - Match inbound register (downstream prompts pass the inbound text so the
+//     model can see the tone to mirror)
+export const SYSTEM_PROMPT = [
+  "You are a concise relationship assistant. Use British English. Keep outputs practical, calm, and grounded in evidence.",
+  "",
+  "- Conversational and direct, like talking to a peer. No corporate filler or marketing clichés like \"I noticed\".",
+  "- No em dashes or en dashes.",
+  "- No semicolons, or colons.",
+  "- Keep replies to 1-2 sentences.",
+  "- Match the inbound message's register. Warm if they're warm, formal if they're formal.",
+  "",
+  "If the inbound is a sales pitch, recruitment outreach, marketing, InMail, or cold solicitation, replace the \"Clarifying question\" reply with a \"Polite decline\" (a short, friendly \"not interested\" reply, ~1 sentence)."
+].join("\n");
 
-// Cast helper so the SDK type-checker doesn't reject the GPT-5 options it
-// doesn't yet know about. Localised here so a future SDK upgrade can drop it.
+/**
+ * Per-model request param shape. The GPT-5 family rotates which knobs are
+ * accepted: gpt-5.4 supports `reasoning_effort: "none"` + `top_p`; gpt-5-nano
+ * only accepts `minimal | low | medium | high` and rejects `top_p` entirely.
+ * Centralise the picker here so a model swap doesn't require chasing every
+ * call site.
+ *
+ * `verbosity: "medium"` and `reasoning_effort` are not (yet) typed in the
+ * OpenAI SDK we ship — both are valid at the API layer but require a cast at
+ * the call site to satisfy the typechecker.
+ */
 type Gpt5RequestOverrides = Record<string, unknown>;
+
+function gpt5OptionsForModel(model: string): Gpt5RequestOverrides {
+  // gpt-5-nano (and likely gpt-5-mini): minimal reasoning is the cheapest
+  // setting. No top_p. verbosity is OK. Anything else gets the broader set.
+  if (/^gpt-5-(nano|mini)/i.test(model)) {
+    return {
+      reasoning_effort: "minimal",
+      verbosity: "medium"
+    };
+  }
+  // gpt-5.4 family + base gpt-5: full knob set including no-reasoning.
+  return {
+    top_p: 0.98,
+    reasoning_effort: "none",
+    verbosity: "medium"
+  };
+}
+
+// Strip the punctuation forms the system prompt forbids. Defensive — even
+// with the rule in the system message, GPT-5 sometimes slips in an em-dash
+// or a colon. Apply to every text-producing AI call before persisting /
+// returning to the dashboard.
+const FORBIDDEN_PUNCTUATION_RE = /[—–]|;|:/g;
+function applyVoiceRules(text: string): string {
+  if (!text) return text;
+  return text
+    .replace(/—/g, ", ")  // em-dash → comma to preserve flow
+    .replace(/–/g, ", ")  // en-dash → comma
+    .replace(/;/g, ".")   // semicolon → full stop
+    .replace(/:/g, ",")   // colon → comma
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+// Static analysis would flag FORBIDDEN_PUNCTUATION_RE as unused; keep it
+// exported only via the side-effect of being referenced in tests if added.
+void FORBIDDEN_PUNCTUATION_RE;
 
 export function createAiService(): AiService {
   const client = runnerConfig.openAiApiKey
@@ -98,19 +144,10 @@ export function createAiService(): AiService {
         model: runnerConfig.openAiModel,
         response_format: { type: "json_object" },
         messages: [
-          {
-            role: "system",
-            content:
-              "You are a concise relationship assistant. Use British English. Keep outputs practical, calm, and grounded in evidence."
-          },
-          {
-            role: "user",
-            content: prompt
-          }
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: prompt }
         ],
-        // GPT-5 family knobs. JSON-mode response_format above forces strict
-        // JSON output; gpt-5.4 honours both response_format and verbosity.
-        ...(gpt5DefaultOptions as Gpt5RequestOverrides)
+        ...gpt5OptionsForModel(runnerConfig.openAiModel)
       });
 
       const content = response.choices[0]?.message?.content;
@@ -179,7 +216,15 @@ Messages: ${JSON.stringify(input.messages)}`;
     whatTheyWant: string;
     openLoops: string[];
     lastInboundMessage: string;
+    /**
+     * Thread classification. When "outreach", the third reply slot is a
+     * "Polite decline" instead of a "Clarifying question" — short friendly
+     * "not interested" wording per the operator's voice rules.
+     */
+    category?: "outreach" | "genuine" | null;
   }): Promise<SuggestedRepliesOutput> {
+    const isOutreach = input.category === "outreach";
+    const thirdIntent = isOutreach ? "Polite decline" : "Clarifying question";
     const fallback: SuggestedRepliesOutput = {
       replies: [
         {
@@ -194,35 +239,50 @@ Messages: ${JSON.stringify(input.messages)}`;
         },
         {
           label: "C",
-          intent: "Clarifying question",
-          text: "Before we confirm, could you share the preferred timeline?"
+          intent: thirdIntent,
+          text: isOutreach
+            ? "Thanks for reaching out, but it isn't something I'm looking at right now."
+            : "Before we confirm, could you share the preferred timeline?"
         }
       ],
       needs_user_input: []
     };
 
-    // Explicit schema — see the matching note in updateThreadSummary above.
-    // gpt-5.4 will otherwise return {A,B,C} as top-level keys instead of the
-    // {replies:[{label,intent,text}]} shape the zod parser expects.
     const prompt = `Return strict JSON matching this exact shape:
 {
   "replies": [
     { "label": "A", "intent": "Direct + helpful", "text": "..." },
     { "label": "B", "intent": "Warm + relationship-first", "text": "..." },
-    { "label": "C", "intent": "Clarifying question", "text": "..." }
+    { "label": "C", "intent": "${thirdIntent}", "text": "..." }
   ],
   "needs_user_input": ["string", ...]
 }
 
 Each reply text must be a complete, sendable message under 280 characters,
-written in British English. Vary the three intents as suggested.
+1-2 sentences, British English. No em dashes, en dashes, semicolons, or
+colons. Match the inbound message's register: warm if they're warm,
+formal if they're formal.
+
+${
+  isOutreach
+    ? "This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C must be a friendly Polite decline (~1 sentence, no commitment, no follow-up question)."
+    : ""
+}
 
 Summary: ${input.summary}
 What they want: ${input.whatTheyWant}
 Open loops: ${JSON.stringify(input.openLoops)}
 Last inbound: ${input.lastInboundMessage}`;
 
-    return modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
+    const parsed = await modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
+    // Defensive scrub of em-dashes, semicolons, colons — see applyVoiceRules.
+    return {
+      ...parsed,
+      replies: parsed.replies.map((r) => ({
+        ...r,
+        text: applyVoiceRules(r.text)
+      }))
+    };
   }
 
   async function transformReply(input: { mode: "SHORTEN" | "MAKE_WARMER"; text: string }): Promise<string> {
@@ -239,21 +299,16 @@ Last inbound: ${input.lastInboundMessage}`;
       const response = await client.chat.completions.create({
         model: runnerConfig.openAiModel,
         messages: [
-          {
-            role: "system",
-            content: "Use British English. Keep it natural and professional."
-          },
-          {
-            role: "user",
-            content: `${instruction}\n\n${input.text}`
-          }
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: `${instruction}\n\n${input.text}` }
         ],
-        // No response_format: this returns plain text, matching the operator's
-        // "Response: text" config in the OpenAI dashboard.
-        ...(gpt5DefaultOptions as Gpt5RequestOverrides)
+        // No response_format: this returns plain text. The voice-rule
+        // post-processor handles em-dash / semicolon / colon scrubbing.
+        ...gpt5OptionsForModel(runnerConfig.openAiModel)
       });
 
-      return response.choices[0]?.message?.content?.trim() || input.text;
+      const raw = response.choices[0]?.message?.content?.trim() || input.text;
+      return applyVoiceRules(raw);
     } catch (error) {
       console.warn(
         `[ai] transformReply failed (model=${runnerConfig.openAiModel}, mode=${input.mode}); returning original text. ${classifyOpenAiError(error)}`
@@ -263,47 +318,78 @@ Last inbound: ${input.lastInboundMessage}`;
   }
 
   /**
-   * Coarsely classify a thread as outreach (cold pitches, sales,
-   * recruitment, marketing, InMails) vs genuine (peer chats, ongoing
-   * relationships with no sales motive). Returns null if the AI service
-   * isn't available — callers should treat that as "leave the column
-   * unset" rather than as a default value.
+   * Classify a thread as outreach (sales / recruitment / marketing / InMail
+   * / cold solicitation) vs genuine (peer chats, ongoing relationships).
+   * Returns null when the AI service is unavailable — callers should treat
+   * that as "leave the column unset", not as a default verdict.
    *
-   * Single short prompt with json_object response format. Cheap; ~50 input
-   * tokens + 20 output tokens per thread.
+   * Earlier version only saw the first 1-2 inbound messages, which missed
+   * the common pivot pattern: a friendly opener ("just seen what you're
+   * building, how's it going?") followed two messages later by a sales
+   * question ("are you already working with an accountant?"). Now we feed:
+   *   - the rolling AI summary (high signal — already captures intent)
+   *   - the whatTheyWant extraction
+   *   - up to 5 inbound messages (the full early arc, not just the opener)
+   *
+   * Trade-off: ~3x token usage per classification (~200 vs ~70). Still cheap
+   * on gpt-5-nano (sub-cent per thread). Catches the Kyle Randall case
+   * where the second-half pivot was the giveaway.
    */
   async function classifyThreadCategory(input: {
     displayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+    whatTheyWant?: string | null;
   }): Promise<"outreach" | "genuine" | null> {
     if (!client) {
       return null;
     }
 
-    // Use only the first 1-2 inbound messages — outreach signal is
-    // overwhelmingly in the opener, and the operator's replies leak no
-    // categorisation info. Cap at ~1500 chars total to keep token cost
-    // bounded across long threads.
     const inboundMessages = input.messages
       .filter((m) => m.direction === "IN")
-      .slice(0, 2)
-      .map((m) => safeTruncate(m.text, 800))
+      .slice(0, 5)
+      .map((m) => safeTruncate(m.text, 600))
       .filter((t) => t.trim().length > 0);
 
     if (inboundMessages.length === 0) {
       return null;
     }
 
-    const prompt = `Classify the following LinkedIn thread as one of:
-  "outreach"  — cold pitches, sales, recruitment, marketing, InMails, sponsored
-                messages, anyone trying to sell or recruit.
-  "genuine"   — peer chats, ongoing relationships, real conversations with no
-                sales motive, friend/colleague/customer follow-ups.
+    const summaryLine = input.summary?.trim()
+      ? `Summary so far: ${safeTruncate(input.summary, 600)}`
+      : "Summary so far: (none)";
+    const whatTheyWantLine = input.whatTheyWant?.trim()
+      ? `What they want: ${safeTruncate(input.whatTheyWant, 400)}`
+      : "What they want: (none)";
+
+    const prompt = `Classify this LinkedIn thread as either:
+
+  "outreach" — cold pitches, sales, recruitment, marketing, InMails,
+              sponsored messages, lead-gen openers ("just saw your
+              business, how is it going?" followed by a service pitch),
+              financial-adviser / agency / SaaS pitches, or anyone with a
+              sales motive even if their opener is friendly.
+
+  "genuine" — peer chats, ongoing relationships, real conversations with
+             no sales motive (friends, classmates, ex-colleagues,
+             customers, mentors). Also genuine if there's no clear pitch
+             after several inbound messages.
+
+Decision rules:
+  - A friendly opener followed by a transactional question (e.g. "are
+    you already working with an accountant?") is OUTREACH.
+  - Compliments or interest in someone's work, then a pitch, is
+    OUTREACH.
+  - Two-way conversation with no sales motive is GENUINE.
+  - Brief one-line greeting with nothing else is GENUINE unless other
+    signals say otherwise.
 
 Return strict JSON: { "category": "outreach" | "genuine" }
 
 Person name: ${input.displayName}
-First inbound message(s):
+${summaryLine}
+${whatTheyWantLine}
+Inbound messages (oldest first):
 ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
 
     try {
@@ -311,14 +397,10 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
         model: runnerConfig.openAiModel,
         response_format: { type: "json_object" },
         messages: [
-          {
-            role: "system",
-            content:
-              "You are a precise classifier. Output strict JSON. Use British English where relevant."
-          },
+          { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt }
         ],
-        ...(gpt5DefaultOptions as Gpt5RequestOverrides)
+        ...gpt5OptionsForModel(runnerConfig.openAiModel)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;

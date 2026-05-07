@@ -1472,7 +1472,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    lastInboundMessage: lastInbound?.text ?? ""
+    lastInboundMessage: lastInbound?.text ?? "",
+    // Drives the "Polite decline" reply variant when the thread is outreach.
+    category: (thread.category ?? null) as "outreach" | "genuine" | null
   };
   // Cache key over the four AI inputs. Hashing keeps the column short and
   // doesn't leak content into the audit log if anyone ever inspects it. As
@@ -1480,7 +1482,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // calls on Save draft / Snooze / Mark done won't trigger a fresh OpenAI
   // hit, only a real conversation change does.
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}`)
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}`)
     .digest("hex");
 
   let suggested;
@@ -1692,14 +1694,45 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
   );
 }));
 
+// Manual category override. Lets the operator flip a thread's verdict from
+// the dashboard when the classifier got it wrong (e.g. peer-to-peer industry
+// chat that resembles a pitch). The runner does no AI work here — just
+// writes the column and trusts the operator's judgement.
+app.post("/control/thread/:threadId/recategorize", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({
+      category: z.enum(["outreach", "genuine"]).nullable()
+    })
+    .parse(req.body);
+  const thread = await prisma.thread.update({
+    where: { id: threadId },
+    data: {
+      category: payload.category,
+      // Bust the suggested-replies cache so the third reply slot's intent
+      // (Clarifying question vs Polite decline) regenerates next /data/thread fetch.
+      suggestedRepliesCacheKey: null,
+      suggestedRepliesJson: null
+    }
+  });
+  res.json({ ok: true, threadId: thread.id, category: thread.category });
+}));
+
 // Bulk-classify any threads that don't have a category yet. Reuses the
 // AI service's classifyThreadCategory helper. Decoupled from the scan
 // flow so the operator can backfill existing threads without re-scanning
 // LinkedIn — important after the Phase 3 schema rollout when 76+ threads
 // already exist with category=null.
-app.post("/control/classify-uncategorized", asyncRoute(async (_req, res) => {
+app.post("/control/classify-uncategorized", asyncRoute(async (req, res) => {
+  // Optional `force: true` body re-classifies EVERY thread regardless of
+  // existing category. Useful after a classifier prompt change to clear out
+  // verdicts from the older, weaker version. Default is the additive
+  // behaviour: only categorise threads that don't yet have a verdict.
+  const payload = z
+    .object({ force: z.boolean().optional() })
+    .parse(req.body ?? {});
   const targets = await prisma.thread.findMany({
-    where: { category: null },
+    where: payload.force ? {} : { category: null },
     include: {
       person: true,
       messages: {
@@ -1724,7 +1757,9 @@ app.post("/control/classify-uncategorized", asyncRoute(async (_req, res) => {
           direction: m.direction as "IN" | "OUT",
           text: m.text,
           timestamp: m.timestamp.toISOString()
-        }))
+        })),
+        summary: target.rollingSummary ?? null,
+        whatTheyWant: target.whatTheyWant ?? null
       });
       if (category) {
         await prisma.thread.update({
