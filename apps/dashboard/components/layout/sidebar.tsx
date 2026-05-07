@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Sun, Inbox, AlertTriangle, Archive, Users, Cable, ListChecks, Settings as SettingsIcon } from "lucide-react";
+import { Sun, Inbox, AlertTriangle, Archive, Users, Cable, ListChecks, Search, Settings as SettingsIcon } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
@@ -10,6 +10,7 @@ interface SidebarProps {
   health: HealthResponse | null;
   attentionCount: number;
   userInitials: string;
+  onOpenSearch: () => void;
 }
 
 interface NavItem {
@@ -30,7 +31,10 @@ const nav: NavItem[] = [
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ];
 
-export function Sidebar({ health, attentionCount, userInitials }: SidebarProps) {
+// 200px labelled sidebar (per #47). Search is a discoverable button at
+// the top that opens the ⌘K palette — gives operators a visible
+// affordance for what was a keyboard-only shortcut after the redesign.
+export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: SidebarProps) {
   const pathname = usePathname();
   const healthy = health?.runnerStatus === "ONLINE";
 
@@ -46,6 +50,17 @@ export function Sidebar({ health, attentionCount, userInitials }: SidebarProps) 
         </span>
         <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">Inbox OS</span>
       </Link>
+
+      <button
+        type="button"
+        onClick={onOpenSearch}
+        aria-label="Search (⌘K)"
+        className="mx-2 mb-2 flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] tracking-[-0.005em] text-ink-2 transition-[color,background-color] duration-calm hover:bg-paper-2 hover:text-ink"
+      >
+        <Search className="h-[18px] w-[18px]" strokeWidth={1.6} />
+        <span className="flex-1 text-left">Search</span>
+        <span className="font-mono text-[10px] text-ink-3">⌘K</span>
+      </button>
 
       <nav className="flex flex-col gap-[2px]">
         {nav.map((item) => {

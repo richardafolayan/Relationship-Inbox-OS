@@ -180,6 +180,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         health={health}
         attentionCount={sidebarAttention}
         userInitials={userInitials}
+        onOpenSearch={() => setPaletteOpen(true)}
       />
       <div className="flex h-screen min-h-0 flex-col">
         <RunnerTopStrip />
