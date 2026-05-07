@@ -33,10 +33,16 @@ export interface BrowserProfileConfig {
   personalChromeProfileResolutionStrategy: ChromeProfileResolutionStrategy;
 }
 
+export type AiProvider = "openai" | "glm";
+
 export interface RunnerConfig {
   port: number;
   openAiApiKey?: string;
   openAiModel: string;
+  aiProvider: AiProvider;
+  zAiApiKey?: string;
+  zAiBaseUrl: string;
+  glmModel: string;
   dbFile: string;
   profileDirs: {
     LINKEDIN: string;
@@ -234,6 +240,17 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     // OPENAI_MODEL for accounts wanting more power: gpt-5.4-mini, gpt-5.4,
     // gpt-4o-mini, gpt-4o.
     openAiModel: env.OPENAI_MODEL ?? "gpt-5-nano",
+    // AI_PROVIDER seeds the cold-start default. The dashboard /settings page
+    // can override per-call without a restart (read from SettingsStore in
+    // services/ai.ts -> resolveActive). "glm" routes through Z.AI's
+    // OpenAI-compatible endpoint.
+    aiProvider: env.AI_PROVIDER?.toLowerCase() === "glm" ? "glm" : "openai",
+    zAiApiKey: env.Z_AI_API_KEY?.trim() || undefined,
+    // Z.AI free-tier flash models are not listed in /v4/models but are
+    // accessible at chat/completions. Default to glm-4.7-flash; override
+    // via Z_AI_MODEL or the dashboard.
+    zAiBaseUrl: env.Z_AI_BASE_URL?.trim() || "https://api.z.ai/api/paas/v4",
+    glmModel: env.Z_AI_MODEL?.trim() || "glm-4.7-flash",
     linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
     linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
     dbFile: resolve(dataDir, "inbox-os.sqlite"),

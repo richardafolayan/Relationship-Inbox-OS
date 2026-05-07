@@ -1,13 +1,14 @@
 import OpenAI from "openai";
 import type { SummaryOutput, SuggestedRepliesOutput } from "@inbox-os/core";
 import { z } from "zod";
-import { runnerConfig } from "../config";
+import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
 import type {
   AiService,
   ContactProfileSnapshot,
   ConversationStartersOutput,
-  ConversationStarterCitedField
+  ConversationStarterCitedField,
+  SettingsStore
 } from "../types/runtime";
 
 const summarySchema = z.object({
@@ -20,14 +21,15 @@ const summarySchema = z.object({
 });
 
 /**
- * Classify an OpenAI SDK error into a human-readable hint. The OpenAI SDK
- * surfaces structured `code`/`status` fields on its error objects; using them
- * lets the operator distinguish the three common dead-ends — out of credits,
- * unknown model, missing key — without having to grep the message verbatim.
+ * Classify an LLM provider error into a human-readable hint. Both
+ * OpenAI and Z.AI's BigModel-compatible API surface structured
+ * `code`/`status` on their SDK error objects; the function branches on
+ * provider so the operator gets the right env-var name + the right
+ * billing URL in the hint message.
  *
  * Returns a single string ready to splice into a `console.warn` line.
  */
-export function classifyOpenAiError(error: unknown): string {
+export function classifyLlmError(error: unknown, provider: AiProvider): string {
   // Defensive duck-typing against `OpenAI.APIError`. We deliberately don't
   // import the type so a future SDK upgrade that renames the class doesn't
   // silently bypass this branch.
@@ -35,6 +37,25 @@ export function classifyOpenAiError(error: unknown): string {
   const message = err?.message ?? String(error);
   const code = err?.code;
   const status = err?.status;
+  if (provider === "glm") {
+    // Z.AI's BigModel returns code 1113 for "insufficient balance" — surfaces
+    // through the SDK as a 429 status with the body code stringified into the
+    // message. Free-tier flash models bypass this; paid SKUs need a balance.
+    if (status === 429 || code === "insufficient_quota" || /1113|insufficient.*balance|余额不足/i.test(message)) {
+      return (
+        "Reason: Z.AI account has no balance / no resource package (code 1113 / 429). " +
+        "Free-tier flash models (e.g. glm-4.7-flash) bypass this. For paid SKUs, top up at " +
+        "https://open.bigmodel.cn or https://api.z.ai, then retry."
+      );
+    }
+    if (code === "model_not_found" || /model.*(not found|does not exist|invalid)/i.test(message)) {
+      return `Reason: GLM model not available (${message}). Set Z_AI_MODEL to a valid id (e.g. glm-4.7-flash, glm-4.5-flash) and confirm against the pricing page — flash variants are free-tier and not always shown in /v4/models.`;
+    }
+    if (status === 401 || code === "invalid_api_key") {
+      return "Reason: Z_AI_API_KEY is missing or invalid. Set it in .env and restart the runner, or recheck the dashboard provider toggle.";
+    }
+    return `Reason: ${message}.`;
+  }
   if (code === "insufficient_quota" || status === 429) {
     return (
       "Reason: OpenAI account is out of credits (insufficient_quota / 429). " +
@@ -99,6 +120,12 @@ export const SYSTEM_PROMPT = [
 type Gpt5RequestOverrides = Record<string, unknown>;
 
 function gpt5OptionsForModel(model: string): Gpt5RequestOverrides {
+  // GLM family (Z.AI) — flash variants ignore most knobs and emit a separate
+  // `reasoning_content` field automatically. Pass nothing extra; the OpenAI
+  // SDK only reads `content` so the reasoning trace is harmlessly dropped.
+  if (/^glm[-.]/i.test(model)) {
+    return {};
+  }
   // gpt-5-nano (and likely gpt-5-mini): minimal reasoning is the cheapest
   // setting. No top_p. verbosity is OK. Anything else gets the broader set.
   if (/^gpt-5-(nano|mini)/i.test(model)) {
@@ -193,32 +220,53 @@ function snapshotForPrompt(snap: ContactProfileSnapshot | null): Record<string, 
   };
 }
 
-export function createAiService(): AiService {
-  const client = runnerConfig.openAiApiKey
+export function createAiService(settingsStore: SettingsStore): AiService {
+  // Build one client per provider up front, guarded by API key presence.
+  // Z.AI's chat-completions endpoint is OpenAI-compatible at the wire level,
+  // so reusing the OpenAI SDK with a different baseURL + key is the whole
+  // integration. The provider choice is resolved per-call from SettingsStore
+  // so a dashboard toggle takes effect without restarting the runner.
+  const openAiClient = runnerConfig.openAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.openAiApiKey })
     : null;
+  const glmClient = runnerConfig.zAiApiKey
+    ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl })
+    : null;
+
+  async function resolveActive(): Promise<{ client: OpenAI | null; model: string; provider: AiProvider }> {
+    // Settings.aiProvider is the live override; runnerConfig.aiProvider is
+    // the cold-start default seeded from the AI_PROVIDER env var. Settings
+    // reads are a single SQLite row lookup — cheap enough to do per call.
+    const settings = await settingsStore.getSettings();
+    const provider: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    if (provider === "glm") {
+      const model = settings.glmModel?.trim() || runnerConfig.glmModel;
+      return { client: glmClient, model, provider };
+    }
+    return { client: openAiClient, model: runnerConfig.openAiModel, provider };
+  }
 
   async function modelJson<T>(prompt: string, fallback: T, parser: (value: unknown) => T): Promise<T> {
+    const { client, model, provider } = await resolveActive();
     if (!client) {
       return fallback;
     }
 
     try {
       const response = await client.chat.completions.create({
-        model: runnerConfig.openAiModel,
+        model,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt }
         ],
-        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+        ...gpt5OptionsForModel(model)
       });
 
       const content = response.choices[0]?.message?.content;
       if (!content) {
         console.warn(
-          `[ai] OpenAI returned empty content (model=${runnerConfig.openAiModel}); using fallback. ` +
-            `Set OPENAI_MODEL to a model your account has access to (e.g. gpt-4o-mini).`
+          `[ai] ${provider} returned empty content (model=${model}); using fallback.`
         );
         return fallback;
       }
@@ -226,7 +274,7 @@ export function createAiService(): AiService {
       return parser(JSON.parse(content));
     } catch (error) {
       console.warn(
-        `[ai] OpenAI call failed (model=${runnerConfig.openAiModel}); using fallback. ${classifyOpenAiError(error)}`
+        `[ai] ${provider} call failed (model=${model}); using fallback. ${classifyLlmError(error, provider)}`
       );
       return fallback;
     }
@@ -350,6 +398,7 @@ Last inbound: ${input.lastInboundMessage}`;
   }
 
   async function transformReply(input: { mode: "SHORTEN" | "MAKE_WARMER"; text: string }): Promise<string> {
+    const { client, model, provider } = await resolveActive();
     if (!client) {
       return input.text;
     }
@@ -361,21 +410,21 @@ Last inbound: ${input.lastInboundMessage}`;
           : "Make this message warmer while preserving intent and keeping it concise.";
 
       const response = await client.chat.completions.create({
-        model: runnerConfig.openAiModel,
+        model,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: `${instruction}\n\n${input.text}` }
         ],
         // No response_format: this returns plain text. The voice-rule
         // post-processor handles em-dash / semicolon / colon scrubbing.
-        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+        ...gpt5OptionsForModel(model)
       });
 
       const raw = response.choices[0]?.message?.content?.trim() || input.text;
       return applyVoiceRules(raw);
     } catch (error) {
       console.warn(
-        `[ai] transformReply failed (model=${runnerConfig.openAiModel}, mode=${input.mode}); returning original text. ${classifyOpenAiError(error)}`
+        `[ai] transformReply failed (provider=${provider}, model=${model}, mode=${input.mode}); returning original text. ${classifyLlmError(error, provider)}`
       );
       return input.text;
     }
@@ -405,6 +454,7 @@ Last inbound: ${input.lastInboundMessage}`;
     summary?: string | null;
     whatTheyWant?: string | null;
   }): Promise<"outreach" | "genuine" | null> {
+    const { client, model, provider } = await resolveActive();
     if (!client) {
       return null;
     }
@@ -483,13 +533,13 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
 
     try {
       const response = await client.chat.completions.create({
-        model: runnerConfig.openAiModel,
+        model,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt }
         ],
-        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+        ...gpt5OptionsForModel(model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
@@ -497,7 +547,7 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
       return parsed.category;
     } catch (error) {
       console.warn(
-        `[ai] classifyThreadCategory failed (model=${runnerConfig.openAiModel}); returning null. ${classifyOpenAiError(error)}`
+        `[ai] classifyThreadCategory failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
       );
       return null;
     }
@@ -514,6 +564,7 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
     contact: ContactProfileSnapshot;
     self: ContactProfileSnapshot | null;
   }): Promise<string | null> {
+    const { client, model, provider } = await resolveActive();
     if (!client) {
       return null;
     }
@@ -536,13 +587,13 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
 
     try {
       const response = await client.chat.completions.create({
-        model: runnerConfig.openAiModel,
+        model,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt }
         ],
-        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+        ...gpt5OptionsForModel(model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
@@ -550,7 +601,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       return applyVoiceRules(stripUnpairedSurrogates(parsed.summary));
     } catch (error) {
       console.warn(
-        `[ai] generateContactSummary failed (model=${runnerConfig.openAiModel}); returning null. ${classifyOpenAiError(error)}`
+        `[ai] generateContactSummary failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
       );
       return null;
     }
@@ -569,6 +620,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     contact: ContactProfileSnapshot;
     self: ContactProfileSnapshot | null;
   }): Promise<ConversationStartersOutput | null> {
+    const { client, model, provider } = await resolveActive();
     if (!client) {
       return null;
     }
@@ -594,13 +646,13 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
 
     try {
       const response = await client.chat.completions.create({
-        model: runnerConfig.openAiModel,
+        model,
         response_format: { type: "json_object" },
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           { role: "user", content: prompt }
         ],
-        ...gpt5OptionsForModel(runnerConfig.openAiModel)
+        ...gpt5OptionsForModel(model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
@@ -614,7 +666,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       };
     } catch (error) {
       console.warn(
-        `[ai] generateConversationStarters failed (model=${runnerConfig.openAiModel}); returning null. ${classifyOpenAiError(error)}`
+        `[ai] generateConversationStarters failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
       );
       return null;
     }
