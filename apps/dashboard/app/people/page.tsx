@@ -82,7 +82,7 @@ export default function PeoplePage() {
     <Canvas>
       <PageHead
         eyebrow="Relationships"
-        title="People."
+        title="People"
         meta={people.length > 0 ? <span>{people.length} relationships</span> : null}
       />
 

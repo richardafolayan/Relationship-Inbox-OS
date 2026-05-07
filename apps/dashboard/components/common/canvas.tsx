@@ -13,26 +13,33 @@ export function Canvas({ children, className, ...rest }: HTMLAttributes<HTMLDivE
 }
 
 interface PageHeadProps {
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
+  subtitle?: ReactNode;
   meta?: ReactNode;
 }
 
-// Eyebrow + 56px title on the left, optional mono meta on the right.
-// The header is sticky and glassy: as the canvas scrolls, content slides
-// underneath it through a translucent paper-tinted blur, matching the
-// thread page's iOS-style sticky bar.
-export function PageHead({ eyebrow, title, meta }: PageHeadProps) {
+// Compact page header: title + optional one-line subtitle on the left,
+// meta on the right (same baseline as the title). Sticky + glassy, no
+// decorative bottom rule — content sections own their own dividers.
+export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
   return (
-    <header className="sticky top-0 z-10 -mx-12 mb-10 flex items-end justify-between gap-6 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] px-12 pb-6 pt-14 backdrop-blur-md backdrop-saturate-150">
-      <div>
-        <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
-        <h1 className="m-0 font-display text-[56px] font-semibold leading-[1.02] tracking-[-0.035em]">
-          {title}
-        </h1>
+    <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_82%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+      <div className="min-w-0">
+        {eyebrow ? (
+          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
+        ) : null}
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <h1 className="m-0 font-display text-[28px] font-semibold leading-[1.15] tracking-[-0.02em]">
+            {title}
+          </h1>
+          {subtitle ? (
+            <p className="m-0 max-w-[60ch] text-[13px] text-ink-2">{subtitle}</p>
+          ) : null}
+        </div>
       </div>
       {meta ? (
-        <div className="text-right font-mono text-[12px] text-ink-3">{meta}</div>
+        <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">{meta}</div>
       ) : null}
     </header>
   );

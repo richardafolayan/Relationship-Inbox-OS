@@ -39,7 +39,7 @@ export default function ArchivedPage() {
     <Canvas>
       <PageHead
         eyebrow="Handled"
-        title="Archived."
+        title="Archived"
         meta={rows && rows.length > 0 ? <span>{rows.length} threads</span> : null}
       />
 
