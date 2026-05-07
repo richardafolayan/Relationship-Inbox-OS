@@ -814,6 +814,17 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     displayName: string;
     voiceSamples: string[];
     threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    relationshipContext?: {
+      otherThreadCount: number;
+      recentExchanges: Array<{
+        platform: string;
+        lastMessageAt: string | null;
+        preview: string | null;
+        whatTheyWant: string | null;
+      }>;
+      notes: string | null;
+      tags: string[];
+    };
   }): Promise<string> {
     const trimmed = input.intent.trim();
     if (!trimmed) return "";
@@ -846,6 +857,22 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
         ? `\nThe operator hasn't replied in ${Math.round(gapDays)} days. Open the message with a brief, natural acknowledgement of the gap (e.g. "Sorry it's been ages") — don't dwell on it, just name it once and move on.`
         : "";
 
+    // Cross-thread relationship hint. Pulled from the dashboard's
+    // /data/thread relationshipMemory; gives the model just enough
+    // history to avoid repeating questions or contradicting prior tone.
+    // Capped to ~3 exchanges so prompt size stays bounded.
+    const relationshipHint = (() => {
+      const ctx = input.relationshipContext;
+      if (!ctx || ctx.otherThreadCount === 0) return "";
+      const exchanges = ctx.recentExchanges.slice(0, 3).map((ex, i) => {
+        const ts = ex.lastMessageAt ? ` (${new Date(ex.lastMessageAt).toISOString().slice(0, 10)})` : "";
+        return `${i + 1}. [${ex.platform}${ts}] ${safeTruncate(ex.preview ?? ex.whatTheyWant ?? "(no preview)", 220)}`;
+      });
+      const tagsLine = ctx.tags.length > 0 ? `\nTags: ${ctx.tags.join(", ")}` : "";
+      const notesLine = ctx.notes ? `\nNotes: ${safeTruncate(ctx.notes, 240)}` : "";
+      return `\n\nRelationship context (other threads with this person, do NOT repeat questions already answered elsewhere):${tagsLine}${notesLine}\n${exchanges.join("\n")}`;
+    })();
+
     const prompt = `Rewrite the operator's intent below as a complete, sendable LinkedIn message. Keep it short (1-3 sentences), British English, conversational, peer-to-peer. Match the voice in the samples — same register, warmth, vocabulary, sentence length. Do not invent facts beyond what the intent says. Do not greet by name unless the intent does. No em dashes, en dashes, semicolons, or colons.
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
@@ -854,7 +881,7 @@ Recipient: ${input.displayName}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
-${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}
 
 Return strict JSON: { "text": "string" }`;
 

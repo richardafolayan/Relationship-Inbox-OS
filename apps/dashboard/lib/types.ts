@@ -230,6 +230,24 @@ export interface ThreadResponse {
     } | null;
   };
   suggestedRepliesStatus?: "ready" | "generating";
+  /**
+   * Cross-thread context for the same Person — last message from each
+   * other active thread plus the Person's notes/tags. Surfaced as a
+   * "memory chip" on the composer so operators see at a glance whether
+   * AI / their own draft has historical context to lean on.
+   */
+  relationshipMemory?: {
+    otherThreadCount: number;
+    recentExchanges: Array<{
+      threadId: string;
+      platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+      lastMessageAt: string | null;
+      preview: string | null;
+      whatTheyWant: string | null;
+    }>;
+    notes: string | null;
+    tags: string[];
+  };
   receipts: AuditLogRow[];
 }
 
