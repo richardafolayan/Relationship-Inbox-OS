@@ -1264,6 +1264,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
               }
 
               const streamedCandidates: Array<{ rowKey: string; thread: ThreadStub; messages: NormalizedMessage[] }> = [];
+              // LinkedIn lists threads most-recent-first. Once we've seen
+              // N consecutive rows where the DB content is already up-to-
+              // date, we've crossed into already-scanned territory and
+              // can stop walking the inbox. Reset the streak whenever we
+              // open a row (something fresh / first-encounter / new
+              // thread). Threshold defaults to 5 — generous enough to
+              // tolerate LinkedIn's occasional list-side reordering, but
+              // tight enough to noticeably shorten "everything is up to
+              // date" scans.
+              const unchangedStreakLimit = (() => {
+                const raw = process.env.LINKEDIN_UNCHANGED_STREAK_LIMIT;
+                const parsed = raw ? Number(raw) : NaN;
+                if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 50) return parsed;
+                return 5;
+              })();
+              let unchangedStreakCount = 0;
               const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
                 maxThreads: effectiveMaxThreads,
                 maxOpens: effectiveMaxOpens,
@@ -1286,6 +1302,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
                         threadUrl: signals.threadUrl
                       }
                     });
+                    // Reset streak — this row will be opened (we don't know
+                    // if it's unchanged), so it doesn't count toward the
+                    // "everything is up-to-date" signal.
+                    unchangedStreakCount = 0;
                     return { open: true, mode: "delta" };
                   }
                   const existing = await prisma.thread.findUnique({
@@ -1313,6 +1333,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
                     if (signals.candidatePlatformThreadId) {
                       fullBackfillThreadIds.add(signals.candidatePlatformThreadId);
                     }
+                    // First-encounter / pending full backfill — we'll open
+                    // this row, so it breaks any unchanged streak.
+                    unchangedStreakCount = 0;
                     return { open: true, mode: "full", reason: existing ? "first_full_backfill" : "new_thread" };
                   }
 
@@ -1369,8 +1392,31 @@ export function createScanQueue(deps: ScanQueueDeps) {
                     }
                   });
                   if (timestampUnchanged && unreadUnchanged) {
-                    return { open: false, mode: "delta", reason: "unchanged" };
+                    unchangedStreakCount += 1;
+                    const stopScan = unchangedStreakCount >= unchangedStreakLimit;
+                    if (stopScan) {
+                      runLogger.logDecision({
+                        stage: "open_thread",
+                        decision:
+                          "Pre-open streak hit unchangedStreakLimit — requesting cooperative scan exit",
+                        details: {
+                          unchangedStreakCount,
+                          unchangedStreakLimit,
+                          rowKey: signals.rowKey
+                        }
+                      });
+                    }
+                    return {
+                      open: false,
+                      mode: "delta",
+                      reason: stopScan ? "unchanged_streak" : "unchanged",
+                      stopScan
+                    };
                   }
+                  // Row had a real change (timestamp / unread count) — reset
+                  // the streak so the next contiguous unchanged-rows window
+                  // counts from this point.
+                  unchangedStreakCount = 0;
                   return { open: true, mode: "delta" };
                 },
                 onThreadCandidate: async (input) => {

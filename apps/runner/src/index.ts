@@ -1207,15 +1207,64 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
-  const queued = scanQueue.enqueueScan(target.platform, {
-    requestId,
-    respectCooldown: true
-  });
-  res.json({
-    ...queued,
-    runTraceEnabled: scanQueue.isRunTraceEnabled(),
-    runTraceDir: scanQueue.isRunTraceEnabled() ? scanQueue.getRunTraceBaseDir() : null
-  });
+  const settings = await settingsStore.getSettings();
+
+  // Per-thread rescan: open ONLY this thread and re-parse its messages,
+  // instead of triggering a full-inbox scan via enqueueScan(). The full-
+  // inbox path takes 30-90s on a populated inbox; opening one thread is
+  // typically <5s. Wraps in the platform control lock so it serialises
+  // against any in-flight scan / send / open-thread operation.
+  const candidate: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+  try {
+    const result = await withPlatformControlLock(target.platform, async () => {
+      return scanQueue.syncThreadForIngest({
+        platform: target.platform,
+        candidate,
+        maxMessages: settings.maxMessagesPerThread,
+        requestId
+      });
+    });
+    await auditService.log({
+      platform: target.platform,
+      stage: "Scan",
+      action: "RESCAN_THREAD",
+      status: "OK",
+      details: {
+        requestId,
+        threadId: target.threadId,
+        platformThreadId: target.platformThreadId,
+        scope: "single_thread",
+        ...result
+      }
+    });
+    res.json({
+      ok: true,
+      requestId,
+      threadId: target.threadId,
+      scope: "single_thread",
+      ...result
+    });
+  } catch (error) {
+    await auditService.log({
+      platform: target.platform,
+      stage: "Scan",
+      action: "RESCAN_THREAD_FAIL",
+      status: "FAIL",
+      details: {
+        requestId,
+        threadId: target.threadId,
+        platformThreadId: target.platformThreadId,
+        scope: "single_thread",
+        ...summarizeError(error)
+      }
+    });
+    throw error;
+  }
 }));
 
 // Detects the static fallback that updateThreadSummary writes when the AI
@@ -1382,9 +1431,20 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
       return true;
     })
     .sort((a, b) => {
-      // Match LinkedIn's own inbox ordering: most-recent-message first.
-      // Risk and unread count are secondary tiebreakers when timestamps are
-      // identical (e.g. seed data or simultaneous messages).
+      // Bucket order: genuine first, uncategorised next, outreach last.
+      // Sales pitches sink to the bottom so the operator sees real
+      // relationships at the top of the list. Within each bucket we still
+      // mirror LinkedIn's most-recent-first ordering.
+      const rankCategory = (category: string | null): number => {
+        if (category === "genuine") return 0;
+        if (category === "outreach") return 2;
+        return 1; // null / unknown — between genuine and outreach
+      };
+      const aBucket = rankCategory(a.category);
+      const bBucket = rankCategory(b.category);
+      if (aBucket !== bBucket) {
+        return aBucket - bBucket;
+      }
       const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
       const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
       if (aTime !== bTime) {

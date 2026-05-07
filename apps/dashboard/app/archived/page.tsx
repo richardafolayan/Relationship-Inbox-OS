@@ -61,7 +61,7 @@ export default function ArchivedPage() {
   }
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] flex-col gap-4 overflow-hidden">
+    <div className="flex h-full flex-col gap-4 overflow-hidden">
       <div>
         <h2 className="text-2xl font-semibold">Archived</h2>
         <p className="text-sm text-slate-500">Threads you've finished with. Unarchive to send them back to the inbox.</p>

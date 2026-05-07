@@ -182,10 +182,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     setAutoScanEnabled((current) => !current);
   };
 
+  // Layout strategy: the right column is a viewport-height flex container
+  // so children that pass `h-full` always get exactly the available height
+  // (whatever the topbar + system-status-bar consume is auto-handled).
+  // Pages no longer need brittle `calc(100vh - 3rem)` guesses.
   return (
-    <div className="min-h-screen bg-bg">
+    <div className="h-screen overflow-hidden bg-bg">
       <Sidebar health={health} lastScanAt={lastScanAt} onScanNow={runScanNow} />
-      <div className="ml-[260px] min-h-screen">
+      <div className="ml-[260px] flex h-screen flex-col overflow-hidden">
         <Topbar
           settings={settings}
           health={health}
@@ -197,7 +201,7 @@ export function AppShell({ children }: { children: ReactNode }) {
           onOpenCommandPalette={() => setPaletteOpen(true)}
         />
         <SystemStatusBar />
-        <main className="p-6">{children}</main>
+        <main className="min-h-0 flex-1 overflow-hidden p-6">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
     </div>

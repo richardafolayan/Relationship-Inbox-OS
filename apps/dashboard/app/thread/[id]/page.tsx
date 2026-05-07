@@ -243,7 +243,7 @@ export default function ThreadPage() {
     // real content arrives. Three columns (threads / conversation / context)
     // matching the live layout's grid below.
     return (
-      <div className="flex h-[calc(100vh-3rem)] flex-col gap-3 overflow-hidden">
+      <div className="flex h-full flex-col gap-3 overflow-hidden">
         <div className="grid min-h-0 flex-1 grid-cols-12 gap-4">
           <Card className="col-span-12 flex min-h-0 flex-col overflow-hidden lg:col-span-3">
             <Skeleton className="mb-3 h-4 w-20" />
@@ -287,7 +287,7 @@ export default function ThreadPage() {
   const threadList = inboxRows;
 
   return (
-    <div className="flex h-[calc(100vh-3rem)] flex-col gap-3 overflow-hidden">
+    <div className="flex h-full flex-col gap-3 overflow-hidden">
       {degradedPlatform ? (
         <DegradedBanner
           platform={degradedPlatform.platform}

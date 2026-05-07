@@ -282,6 +282,15 @@ export interface LinkedInStreamPreOpenDecision {
   mode: "full" | "delta";
   /** Optional human-readable reason for skipping; logged into the audit trace. */
   reason?: string;
+  /**
+   * Cooperative early-exit signal. When the pre-open hook returns
+   * `stopScan: true`, the adapter terminates the streaming row loop
+   * immediately with stopReason "unchanged_streak". Used by the scan
+   * queue once it has seen N consecutive rows where the DB content is
+   * already up-to-date — LinkedIn lists most-recent-first, so a streak
+   * of unchanged rows proves we've crossed into already-scanned territory.
+   */
+  stopScan?: boolean;
 }
 
 export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
@@ -1900,7 +1909,12 @@ export type LinkedInCollectionStopReason =
   | "no_scroll_container"
   | "max_iterations"
   | "max_duration"
-  | "zero_threads_found";
+  | "zero_threads_found"
+  // Set when the pre-open hook reports an "unchanged streak" — i.e. the DB
+  // already has the same content for N consecutive recent rows. LinkedIn
+  // lists most-recent-first, so a streak of unchanged rows means we've
+  // reached the high-water mark and everything below is already scanned.
+  | "unchanged_streak";
 
 export function updateLinkedInCollectionStability(input: {
   previousCount: number;
@@ -6393,6 +6407,12 @@ export class LinkedInAdapter implements PlatformAdapter {
 
       let noNewRowKeysStreak = 0;
       let scrollTopStagnantStreak = 0;
+      // Cooperative early-exit signal from the pre-open hook — set when
+      // the scan queue reports an "unchanged streak" indicating we've
+      // crossed into already-scanned territory. processVisibleRowsOnce
+      // sets it from inside the row loop; the outer scroll loop reads it
+      // and bails with stopReason "unchanged_streak".
+      let earlyExitRequested: "unchanged_streak" | null = null;
       let shellResolution: LinkedInResolverNodeResolution | null = null;
       let listRootResolution: LinkedInResolverNodeResolution | null = null;
       let scrollResolution: LinkedInScrollContainerResolution | null = null;
@@ -7005,7 +7025,8 @@ export class LinkedInAdapter implements PlatformAdapter {
                     rowKey: row.rowKey,
                     displayName: row.displayName,
                     candidatePlatformThreadId: candidateThreadIdFromUrl,
-                    reason: decision.reason ?? "unchanged"
+                    reason: decision.reason ?? "unchanged",
+                    stopScan: Boolean(decision.stopScan)
                   }
                 });
                 this.logTraceEvent({
@@ -7016,10 +7037,20 @@ export class LinkedInAdapter implements PlatformAdapter {
                     displayName: row.displayName,
                     candidatePlatformThreadId: candidateThreadIdFromUrl,
                     listTimestampIso,
-                    reason: decision.reason ?? "unchanged"
+                    reason: decision.reason ?? "unchanged",
+                    stopScan: Boolean(decision.stopScan)
                   },
                   page
                 });
+                if (decision.stopScan) {
+                  // Cooperative early-exit. Bubble out via the
+                  // earlyExitRequested flag (read just below) instead of
+                  // breaking from inside processVisibleRowsOnce, so the
+                  // outer scroll loop sees the stop reason and runs its
+                  // post-loop bookkeeping unchanged.
+                  earlyExitRequested = "unchanged_streak";
+                  return { visibleRowCount: visibleRows.length, newRowsSeen, bottomRowKey: currentBottomRowKey };
+                }
                 continue;
               }
               openMode = decision.mode;
@@ -7139,6 +7170,10 @@ export class LinkedInAdapter implements PlatformAdapter {
           metrics.iterations += 1;
           const rowPass = await processVisibleRowsOnce();
 
+          if (earlyExitRequested) {
+            metrics.stopReason = earlyExitRequested;
+            break;
+          }
           if (metrics.stopReason === "max_threads") {
             break;
           }

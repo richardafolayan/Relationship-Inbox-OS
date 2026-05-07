@@ -364,25 +364,50 @@ Last inbound: ${input.lastInboundMessage}`;
 
     const prompt = `Classify this LinkedIn thread as either:
 
-  "outreach" — cold pitches, sales, recruitment, marketing, InMails,
-              sponsored messages, lead-gen openers ("just saw your
-              business, how is it going?" followed by a service pitch),
-              financial-adviser / agency / SaaS pitches, or anyone with a
-              sales motive even if their opener is friendly.
+  "outreach" — cold pitches with an EXPLICIT transactional move. The
+              giveaway is a concrete ASK directed at me (book a call,
+              hop on a chat, are you already working with X, can I send
+              you a deck, here's a discount, fill out this form). Cold
+              recruiters, sponsored InMails, agency / SaaS / financial-
+              adviser pitches, lead-gen scripts that pivot from a
+              compliment to a service offer. The motive must be
+              actionable, not just present.
 
-  "genuine" — peer chats, ongoing relationships, real conversations with
-             no sales motive (friends, classmates, ex-colleagues,
-             customers, mentors). Also genuine if there's no clear pitch
-             after several inbound messages.
+  "genuine" — peer chats, ongoing relationships, friends, classmates,
+             ex-colleagues, customers, mentors, or anyone introducing
+             themselves and their work without a transactional ask. A
+             person describing what they do and saying things like
+             "open to sharing ideas if relevant", "happy to chat if
+             useful", "let me know if interesting" is GENUINE — they
+             are positioning, not selling.
 
-Decision rules:
-  - A friendly opener followed by a transactional question (e.g. "are
-    you already working with an accountant?") is OUTREACH.
-  - Compliments or interest in someone's work, then a pitch, is
-    OUTREACH.
-  - Two-way conversation with no sales motive is GENUINE.
-  - Brief one-line greeting with nothing else is GENUINE unless other
-    signals say otherwise.
+Decision rules (apply in order):
+  1. If the inbound contains an EXPLICIT ask to act ("book a 15-min
+     call?", "are you already working with an accountant?", "can I send
+     a proposal?", "fill out this form") → OUTREACH.
+  2. If a friendly opener is followed within 1-2 messages by such an
+     explicit ask → OUTREACH.
+  3. If the person describes their commercial work but only offers
+     soft, optional engagement ("open to sharing ideas if relevant",
+     "happy to swap notes", "let me know if useful") with NO
+     transactional ask → GENUINE.
+  4. If the rolling summary already characterises them as "open to
+     sharing", "introduces themselves", "describes their work",
+     without flagging a pitch / ask / service offer → GENUINE.
+  5. Two-way conversation with no sales motive → GENUINE.
+  6. A brief one-line greeting with nothing else → GENUINE.
+  7. When ambiguous and there is no explicit ask in the messages →
+     GENUINE. Default to genuine unless the pitch is unmistakable.
+
+Examples:
+  GENUINE — "Hey, I work in data analytics helping businesses use
+            their data better. Open to sharing ideas if relevant."
+  GENUINE — "Saw your post about X, really resonated. I run a small
+            studio doing similar work. Always up for a chat if useful."
+  OUTREACH — "Hi, I help founders cut tax bills. Are you already
+            working with an accountant?"
+  OUTREACH — "Quick one — would you be open to a 15-min call this week
+            to see if we're a fit?"
 
 Return strict JSON: { "category": "outreach" | "genuine" }
 
