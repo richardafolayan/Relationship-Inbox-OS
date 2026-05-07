@@ -13,10 +13,8 @@ interface TopbarProps {
   health: HealthResponse | null;
   autoScanEnabled: boolean;
   autoScanDisabled: boolean;
-  scanFallbackEnabled: boolean;
   onToggleHeadless: () => Promise<void>;
   onToggleAutoScan: () => void;
-  onOpenCommandPalette: () => void;
 }
 
 export function Topbar({
