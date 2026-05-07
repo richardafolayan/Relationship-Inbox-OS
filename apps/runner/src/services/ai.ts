@@ -56,6 +56,10 @@ const repliesSchema = z.object({
   needs_user_input: z.array(z.string()).default([])
 });
 
+const categorySchema = z.object({
+  category: z.enum(["outreach", "genuine"])
+});
+
 /**
  * GPT-5 family parameters that aren't (yet) typed in the OpenAI SDK we ship.
  * `reasoning_effort: "none"` and `verbosity` are valid at the API layer but
@@ -258,9 +262,80 @@ Last inbound: ${input.lastInboundMessage}`;
     }
   }
 
+  /**
+   * Coarsely classify a thread as outreach (cold pitches, sales,
+   * recruitment, marketing, InMails) vs genuine (peer chats, ongoing
+   * relationships with no sales motive). Returns null if the AI service
+   * isn't available — callers should treat that as "leave the column
+   * unset" rather than as a default value.
+   *
+   * Single short prompt with json_object response format. Cheap; ~50 input
+   * tokens + 20 output tokens per thread.
+   */
+  async function classifyThreadCategory(input: {
+    displayName: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<"outreach" | "genuine" | null> {
+    if (!client) {
+      return null;
+    }
+
+    // Use only the first 1-2 inbound messages — outreach signal is
+    // overwhelmingly in the opener, and the operator's replies leak no
+    // categorisation info. Cap at ~1500 chars total to keep token cost
+    // bounded across long threads.
+    const inboundMessages = input.messages
+      .filter((m) => m.direction === "IN")
+      .slice(0, 2)
+      .map((m) => safeTruncate(m.text, 800))
+      .filter((t) => t.trim().length > 0);
+
+    if (inboundMessages.length === 0) {
+      return null;
+    }
+
+    const prompt = `Classify the following LinkedIn thread as one of:
+  "outreach"  — cold pitches, sales, recruitment, marketing, InMails, sponsored
+                messages, anyone trying to sell or recruit.
+  "genuine"   — peer chats, ongoing relationships, real conversations with no
+                sales motive, friend/colleague/customer follow-ups.
+
+Return strict JSON: { "category": "outreach" | "genuine" }
+
+Person name: ${input.displayName}
+First inbound message(s):
+${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model: runnerConfig.openAiModel,
+        response_format: { type: "json_object" },
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a precise classifier. Output strict JSON. Use British English where relevant."
+          },
+          { role: "user", content: prompt }
+        ],
+        ...(gpt5DefaultOptions as Gpt5RequestOverrides)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = categorySchema.parse(JSON.parse(content));
+      return parsed.category;
+    } catch (error) {
+      console.warn(
+        `[ai] classifyThreadCategory failed (model=${runnerConfig.openAiModel}); returning null. ${classifyOpenAiError(error)}`
+      );
+      return null;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
-    transformReply
+    transformReply,
+    classifyThreadCategory
   };
 }

@@ -70,6 +70,17 @@ export interface AiService {
     mode: "SHORTEN" | "MAKE_WARMER";
     text: string;
   }): Promise<string>;
+  /**
+   * Coarsely classify a thread as either "outreach" (cold pitches, sales,
+   * recruitment, marketing, InMails) or "genuine" (peer chats, real
+   * relationships). Returns null when the AI service is unavailable or the
+   * classification isn't confident enough — callers should treat null as
+   * "leave the column unset".
+   */
+  classifyThreadCategory(input: {
+    displayName: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<"outreach" | "genuine" | null>;
 }
 
 export interface PlatformDiagnosticsError extends Error {

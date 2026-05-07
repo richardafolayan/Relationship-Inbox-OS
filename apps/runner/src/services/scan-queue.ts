@@ -2472,6 +2472,27 @@ export function createScanQueue(deps: ScanQueueDeps) {
       toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
     }
 
+    // Phase 3: classify on first encounter only. Once a thread has a
+    // category we don't re-spend tokens on every scan. Re-classification
+    // can be triggered via /control/classify-uncategorized after a wrong
+    // verdict is corrected manually.
+    let categoryUpdate: string | null | undefined = undefined;
+    if (!thread.category && hasPersistedMessages) {
+      const classified = await deps.aiService
+        .classifyThreadCategory({
+          displayName: person.displayName,
+          messages: latestMessages.map((message) => ({
+            direction: message.direction,
+            text: message.text,
+            timestamp: message.timestamp.toISOString()
+          }))
+        })
+        .catch(() => null);
+      if (classified) {
+        categoryUpdate = classified;
+      }
+    }
+
     await prisma.thread.update({
       where: { id: thread.id },
       data: {
@@ -2485,6 +2506,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // stale the moment Richard replied.
         lastMessageDirection: lastMessage?.direction ?? thread.lastMessageDirection,
         lastMessageText: lastMessage?.text ?? thread.lastMessageText,
+        // Phase 3: only write when AI returned a confident classification.
+        // undefined leaves the existing column value unchanged (Prisma
+        // omits the field from the UPDATE statement).
+        ...(categoryUpdate ? { category: categoryUpdate } : {}),
         lastMessageAt: resolvedLastMessageAt,
         lastInboundAt: resolvedLastInboundAt,
         lastOutboundAt: resolvedLastOutboundAt,

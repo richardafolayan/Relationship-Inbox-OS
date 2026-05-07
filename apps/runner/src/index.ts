@@ -1692,6 +1692,57 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
   );
 }));
 
+// Bulk-classify any threads that don't have a category yet. Reuses the
+// AI service's classifyThreadCategory helper. Decoupled from the scan
+// flow so the operator can backfill existing threads without re-scanning
+// LinkedIn — important after the Phase 3 schema rollout when 76+ threads
+// already exist with category=null.
+app.post("/control/classify-uncategorized", asyncRoute(async (_req, res) => {
+  const targets = await prisma.thread.findMany({
+    where: { category: null },
+    include: {
+      person: true,
+      messages: {
+        orderBy: { timestamp: "asc" },
+        take: 10
+      }
+    }
+  });
+
+  let classified = 0;
+  let skipped = 0;
+  let failed = 0;
+  for (const target of targets) {
+    if (target.messages.length === 0) {
+      skipped += 1;
+      continue;
+    }
+    try {
+      const category = await aiService.classifyThreadCategory({
+        displayName: target.person.displayName,
+        messages: target.messages.map((m) => ({
+          direction: m.direction as "IN" | "OUT",
+          text: m.text,
+          timestamp: m.timestamp.toISOString()
+        }))
+      });
+      if (category) {
+        await prisma.thread.update({
+          where: { id: target.id },
+          data: { category }
+        });
+        classified += 1;
+      } else {
+        skipped += 1;
+      }
+    } catch {
+      failed += 1;
+    }
+  }
+
+  res.json({ ok: true, total: targets.length, classified, skipped, failed });
+}));
+
 // Archive a thread. Sets archivedAt to now; the thread disappears from the
 // default Inbox/At Risk/People views and only shows in the Archived view.
 app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
