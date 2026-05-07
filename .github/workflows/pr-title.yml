@@ -2,6 +2,11 @@ name: PR Title Check
 on:
   pull_request:
     types: [opened, edited, synchronize]
+# Default GITHUB_TOKEN permissions in this repo are read-only on contents
+# only, so the action can't read PR metadata without an explicit grant.
+# `pull-requests: read` is the minimum it needs to look up the title.
+permissions:
+  pull-requests: read
 jobs:
   check:
     runs-on: ubuntu-latest
