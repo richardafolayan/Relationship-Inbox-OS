@@ -1,6 +1,6 @@
 import { createReadStream, existsSync, openSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
@@ -1261,6 +1261,45 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
         stage: "enqueue",
         ...summarizeError(error)
       }
+    });
+    throw error;
+  }
+}));
+
+app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
+
+  // Look up the failed SendRequest row and re-queue under a fresh
+  // clientSendId. Original row stays in FAILED for receipts; the new
+  // row carries the same text so the operator never has to retype.
+  const original = await prisma.sendRequest.findUnique({
+    where: { clientSendId: payload.clientSendId }
+  });
+  if (!original) {
+    res.status(404).json({ error: "send_request_not_found" });
+    return;
+  }
+  if (original.threadId !== threadId) {
+    res.status(400).json({ error: "thread_mismatch" });
+    return;
+  }
+
+  const newClientSendId = randomUUID();
+  try {
+    const queueResult = await sendQueue.enqueueAndKick({
+      threadId,
+      text: original.requestText,
+      clientSendId: newClientSendId
+    });
+    res.json({ ...queueResult, clientSendId: newClientSendId });
+  } catch (error) {
+    await auditService.log({
+      platform: "LINKEDIN",
+      stage: "Send",
+      action: "SEND_RETRY_FAIL",
+      status: "FAIL",
+      details: { threadId, originalClientSendId: payload.clientSendId, ...summarizeError(error) }
     });
     throw error;
   }
