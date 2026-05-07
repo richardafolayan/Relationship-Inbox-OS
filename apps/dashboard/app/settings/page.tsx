@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
+import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AppSettings } from "@/lib/types";
 import { Card } from "@/components/ui/card";
@@ -14,9 +15,24 @@ const aiProviderLabels: Record<(typeof aiProviders)[number], string> = {
   glm: "GLM (Z.AI)"
 };
 
+// How long the "Saved" banner stays before fading out. Long enough to
+// register, short enough to not stick around if the operator is making
+// rapid edits.
+const SAVE_FEEDBACK_MS = 4000;
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [saving, setSaving] = useState(false);
+  // Inline feedback for the Save button. Without this, clicking Save
+  // gives no signal at all that the runner accepted (or rejected) the
+  // change — operators end up clicking it again to be sure, and any
+  // failure lands silently in the dev console.
+  const [saveStatus, setSaveStatus] = useState<
+    | { kind: "success"; at: number }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
+  const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [showResetModal, setShowResetModal] = useState(false);
   const [resetToken, setResetToken] = useState("");
   const [resetConfirm, setResetConfirm] = useState("");
@@ -27,15 +43,35 @@ export default function SettingsPage() {
     void apiGet<AppSettings>("/runner/data/settings").then(setSettings);
   }, []);
 
+  // Clean up the auto-fade timer if the component unmounts mid-fade.
+  useEffect(() => () => {
+    if (saveStatusTimer.current) clearTimeout(saveStatusTimer.current);
+  }, []);
+
   if (!settings) {
     return <Card>Loading settings...</Card>;
   }
 
   const save = async (partial: Partial<AppSettings>) => {
     setSaving(true);
-    const next = await apiPost<AppSettings>("/runner/control/settings", partial);
-    setSettings(next);
-    setSaving(false);
+    setSaveStatus(null);
+    if (saveStatusTimer.current) {
+      clearTimeout(saveStatusTimer.current);
+      saveStatusTimer.current = null;
+    }
+    try {
+      const next = await apiPost<AppSettings>("/runner/control/settings", partial);
+      setSettings(next);
+      setSaveStatus({ kind: "success", at: Date.now() });
+      saveStatusTimer.current = setTimeout(() => setSaveStatus(null), SAVE_FEEDBACK_MS);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to save settings";
+      // Errors stay until the next save attempt — operator should see
+      // these every time.
+      setSaveStatus({ kind: "error", message });
+    } finally {
+      setSaving(false);
+    }
   };
 
   const closeResetModal = () => {
@@ -213,28 +249,59 @@ export default function SettingsPage() {
           </div>
         </details>
 
-        <Button
-          variant="primary"
-          disabled={saving}
-          onClick={() =>
-            void save({
-              scanIntervalSeconds: settings.scanIntervalSeconds,
-              amberHours: settings.amberHours,
-              redHours: settings.redHours,
-              headless: settings.headless,
-              maxMessagesPerThread: settings.maxMessagesPerThread,
-              enabledPlatforms: settings.enabledPlatforms,
-              demoMode: settings.demoMode,
-              recentThreadSweepCount: settings.recentThreadSweepCount,
-              aiProvider: settings.aiProvider,
-              // Send empty string as undefined so the runner falls back to
-              // the env default rather than persisting "" as a model id.
-              glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined
-            })
-          }
-        >
-          Save settings
-        </Button>
+        <div className="flex items-center gap-3">
+          <Button
+            variant="primary"
+            disabled={saving}
+            onClick={() =>
+              void save({
+                scanIntervalSeconds: settings.scanIntervalSeconds,
+                amberHours: settings.amberHours,
+                redHours: settings.redHours,
+                headless: settings.headless,
+                maxMessagesPerThread: settings.maxMessagesPerThread,
+                enabledPlatforms: settings.enabledPlatforms,
+                demoMode: settings.demoMode,
+                recentThreadSweepCount: settings.recentThreadSweepCount,
+                aiProvider: settings.aiProvider,
+                // Send empty string as undefined so the runner falls back to
+                // the env default rather than persisting "" as a model id.
+                glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined
+              })
+            }
+          >
+            {saving ? (
+              <>
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                Saving…
+              </>
+            ) : (
+              "Save settings"
+            )}
+          </Button>
+          {/* Inline status — success fades after SAVE_FEEDBACK_MS, errors
+              stick until the next save attempt so the operator notices. */}
+          {saveStatus?.kind === "success" ? (
+            <span
+              role="status"
+              aria-live="polite"
+              className="flex items-center gap-1 text-sm text-emerald-700"
+            >
+              <CheckCircle2 className="h-4 w-4" />
+              Saved
+            </span>
+          ) : null}
+          {saveStatus?.kind === "error" ? (
+            <span
+              role="alert"
+              aria-live="polite"
+              className="flex items-center gap-1 text-sm text-rose-700"
+            >
+              <AlertCircle className="h-4 w-4" />
+              {saveStatus.message}
+            </span>
+          ) : null}
+        </div>
       </Card>
 
       <Card className="space-y-3 border-rose-200 bg-rose-50">

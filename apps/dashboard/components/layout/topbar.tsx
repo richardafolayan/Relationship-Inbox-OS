@@ -45,7 +45,9 @@ export function Topbar({
     if (restarting) return;
     if (
       !window.confirm(
-        "Restart the runner? Any in-flight scan or send will be cancelled. Sends queued in the database (PENDING SendRequests) survive and resume after restart."
+        "Restart the runner? Any in-flight scan or send will be cancelled. " +
+          "Sends queued in the database (PENDING SendRequests) survive and resume after restart. " +
+          "The restart rebuilds @inbox-os/core + @inbox-os/runner before relaunching, so it picks up any new code."
       )
     ) {
       return;
@@ -61,10 +63,11 @@ export function Topbar({
       return;
     }
 
-    // Wait for the runner to come back. Give the supervisor up to 30s —
-    // tsx watch is usually <2s; bare `node dist` will never come back.
+    // Wait for the runner to come back. Budget 90s — the bootstrap
+    // helper rebuilds core (~2s) + runner (~10-30s on a cold tsbuildinfo)
+    // before relaunching, so a healthy restart can take 15-45s.
     const startedAt = Date.now();
-    const maxWaitMs = 30_000;
+    const maxWaitMs = 90_000;
     const pollEveryMs = 500;
     while (Date.now() - startedAt < maxWaitMs) {
       // The first health checks during the restart window will reject
@@ -82,7 +85,7 @@ export function Topbar({
     }
 
     setRestartError(
-      "Runner did not come back within 30s. If you're running `node dist/index.js` without a supervisor (tsx watch / pm2 / systemd), restart it from a terminal."
+      "Runner did not come back within 90s. Tail /tmp/runner-restart.log to see whether the rebuild errored or the relaunch is still in progress."
     );
     setRestarting(false);
   }, [restarting]);
@@ -100,7 +103,13 @@ export function Topbar({
             variant={autoScanEnabled ? "primary" : "secondary"}
             onClick={onToggleAutoScan}
             disabled={autoScanDisabled}
-            title={autoScanDisabled ? "Auto-scan disabled in dev" : undefined}
+            title={
+              autoScanDisabled
+                ? "Auto-scan disabled by env (NEXT_PUBLIC_DISABLE_AUTOSCAN or LINKEDIN_DEV_DISABLE_AUTOSCAN). Restart the dashboard after editing .env."
+                : autoScanEnabled
+                  ? "Auto-scan firing every 10 minutes. Click to pause."
+                  : "Click to enable auto-scan (every 10 minutes)."
+            }
           >
             Auto-scan: {autoScanEnabled ? "On" : "Off"}
           </Button>
