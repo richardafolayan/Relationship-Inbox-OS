@@ -15,14 +15,32 @@ export default function AtRiskPage() {
   const router = useRouter();
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [focusIndex, setFocusIndex] = useState(0);
   const [focusOpen, setFocusOpen] = useState(false);
 
+  // Failure must surface inline rather than leaving the page on a permanent
+  // skeleton: prior to this we just chained .then with no .catch, so a
+  // network blip → loading=true forever and the operator gets no signal.
   useEffect(() => {
-    void apiGet<InboxResponse>("/runner/data/inbox").then((response) => {
-      setData(response);
-      setLoading(false);
-    });
+    let cancelled = false;
+    apiGet<InboxResponse>("/runner/data/inbox")
+      .then((response) => {
+        if (cancelled) return;
+        setData(response);
+        setError(null);
+      })
+      .catch((fetchError: unknown) => {
+        if (cancelled) return;
+        const message = fetchError instanceof Error ? fetchError.message : "Failed to load at-risk threads";
+        setError(message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const rows = useMemo(() => data?.rows.filter((row) => row.riskLevel !== "GREEN") ?? [], [data]);
@@ -40,6 +58,20 @@ export default function AtRiskPage() {
 
   if (loading) {
     return <Skeleton className="h-96 w-full" />;
+  }
+
+  if (error && !data) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h2 className="text-2xl font-semibold">At Risk</h2>
+        </div>
+        <Card className="border-rose-200 bg-rose-50/60">
+          <p className="text-sm font-semibold text-rose-900">Could not load at-risk threads</p>
+          <p className="mt-1 text-sm text-rose-800">{error}</p>
+        </Card>
+      </div>
+    );
   }
 
   return (
