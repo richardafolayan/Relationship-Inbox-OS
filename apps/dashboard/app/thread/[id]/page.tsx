@@ -36,6 +36,7 @@ export default function ThreadPage() {
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
+  const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -149,6 +150,8 @@ export default function ThreadPage() {
               : p
           )
         );
+      } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
+        void refresh();
       }
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
@@ -334,6 +337,45 @@ export default function ThreadPage() {
     // Defer to next tick so React applies the composer update before onSend
     // reads it.
     setTimeout(() => void onSend(), 0);
+  };
+
+  const loadOlderMessages = async () => {
+    if (!thread?.messagePage.hasOlder || !thread.messagePage.olderCursor || loadingOlderMessages) {
+      return;
+    }
+    setLoadingOlderMessages(true);
+    try {
+      const olderPage = await apiGet<ThreadResponse>(
+        `/runner/data/thread/${thread.id}?beforeMessageId=${encodeURIComponent(thread.messagePage.olderCursor)}&messagesLimit=${thread.messagePage.limit}`
+      );
+      setThread((current) => {
+        if (!current || current.id !== olderPage.id) {
+          return olderPage;
+        }
+        const existingIds = new Set(current.messages.map((message) => message.id));
+        const olderMessages = olderPage.messages.filter((message) => !existingIds.has(message.id));
+        return {
+          ...current,
+          messages: [...olderMessages, ...current.messages],
+          messagePage: olderPage.messagePage,
+          receipts: olderPage.receipts,
+          suggestedReplies:
+            olderPage.suggestedRepliesStatus === "ready"
+              ? olderPage.suggestedReplies
+              : current.suggestedReplies,
+          suggestedRepliesStatus:
+            olderPage.suggestedRepliesStatus === "ready"
+              ? "ready"
+              : current.suggestedRepliesStatus
+        };
+      });
+      setError(null);
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Failed to load older messages";
+      setError(message);
+    } finally {
+      setLoadingOlderMessages(false);
+    }
   };
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
@@ -528,6 +570,24 @@ export default function ThreadPage() {
           </div>
 
           <div className="flex-1 space-y-3 overflow-y-auto pb-4">
+            {thread.messagePage.hasOlder ? (
+              <div className="flex justify-center">
+                <Button
+                  variant="ghost"
+                  disabled={loadingOlderMessages}
+                  onClick={() => void loadOlderMessages()}
+                >
+                  {loadingOlderMessages ? (
+                    <>
+                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                      Loading…
+                    </>
+                  ) : (
+                    "Load older messages"
+                  )}
+                </Button>
+              </div>
+            ) : null}
             {timeline.map((message) => (
               <div key={message.id}>
                 {message.showDivider ? (
@@ -774,22 +834,29 @@ export default function ThreadPage() {
 
           <Card className="bg-slate-50">
             <h3 className="text-sm font-semibold uppercase tracking-wide text-slate-500">Suggested replies</h3>
-            <div className="mt-2 space-y-2">
-              {thread.suggestedReplies.replies.map((reply) => (
-                <div key={reply.label} className="rounded-lg border border-slate-200 bg-white p-2">
-                  <div className="mb-1 flex items-center justify-between">
-                    <Badge tone="blue">{reply.label}</Badge>
-                    <span className="text-xs text-slate-500">{reply.intent}</span>
+            {thread.suggestedRepliesStatus === "generating" && !thread.suggestedReplies.replies.length ? (
+              <div className="mt-2 flex items-center gap-2 rounded-lg border border-slate-200 bg-white p-2 text-sm text-slate-500">
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Generating suggestions…
+              </div>
+            ) : (
+              <div className="mt-2 space-y-2">
+                {thread.suggestedReplies.replies.map((reply) => (
+                  <div key={reply.label} className="rounded-lg border border-slate-200 bg-white p-2">
+                    <div className="mb-1 flex items-center justify-between">
+                      <Badge tone="blue">{reply.label}</Badge>
+                      <span className="text-xs text-slate-500">{reply.intent}</span>
+                    </div>
+                    <p className="text-sm text-slate-700">{reply.text}</p>
+                    <div className="mt-2">
+                      <Button variant="ghost" onClick={() => setComposer(reply.text)}>
+                        Use this
+                      </Button>
+                    </div>
                   </div>
-                  <p className="text-sm text-slate-700">{reply.text}</p>
-                  <div className="mt-2">
-                    <Button variant="ghost" onClick={() => setComposer(reply.text)}>
-                      Use this
-                    </Button>
-                  </div>
-                </div>
-              ))}
-            </div>
+                ))}
+              </div>
+            )}
             {thread.suggestedReplies.needs_user_input.length ? (
               <div className="mt-3 rounded-lg border border-amber-200 bg-warningSoft p-2 text-sm text-amber-900">
                 <p className="font-medium">Before replying, we need:</p>

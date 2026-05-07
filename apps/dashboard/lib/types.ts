@@ -199,6 +199,11 @@ export interface ThreadResponse {
   draft: string;
   contextUpdatedAt: string;
   messages: ThreadMessage[];
+  messagePage: {
+    hasOlder: boolean;
+    olderCursor: string | null;
+    limit: number;
+  };
   suggestedReplies: {
     replies: Array<{
       label: "A" | "B" | "C";
@@ -207,6 +212,7 @@ export interface ThreadResponse {
     }>;
     needs_user_input: string[];
   };
+  suggestedRepliesStatus?: "ready" | "generating";
   receipts: AuditLogRow[];
 }
 

@@ -81,6 +81,7 @@ export type RunnerEvent =
   | (RunnerEventBase & { type: "SCAN_PROGRESS"; platform: PlatformName; stage: string })
   | (RunnerEventBase & { type: "SCAN_FINISHED"; platform?: PlatformName; updatedThreads: number })
   | (RunnerEventBase & { type: "THREAD_UPDATED"; threadId: string })
+  | (RunnerEventBase & { type: "SUGGESTED_REPLIES_UPDATED"; threadId: string })
   | (RunnerEventBase & {
       type: "MESSAGE_SENT";
       threadId: string;

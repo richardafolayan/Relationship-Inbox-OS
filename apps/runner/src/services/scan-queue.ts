@@ -2404,6 +2404,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
     });
 
     const timestampFallback = candidateListTimestamp ?? new Date();
+    const batchedMessageWrites: Array<ReturnType<typeof prisma.message.upsert>> = [];
+    const flushBatchedMessageWrites = async (): Promise<void> => {
+      if (!batchedMessageWrites.length) {
+        return;
+      }
+      const batch = batchedMessageWrites.splice(0, batchedMessageWrites.length);
+      await prisma.$transaction(batch);
+    };
+
     for (const message of messages) {
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
       const messageText = cleanMessageText(message.text);
@@ -2416,6 +2425,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       // same physical message). Inbound messages don't have this problem —
       // they're only ever recorded by the scan parser.
       if (message.direction === "OUT") {
+        await flushBatchedMessageWrites();
         const windowMs = 5 * 60 * 1000;
         const [twins, canonical] = await Promise.all([
           prisma.message.findMany({
@@ -2453,7 +2463,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         }
       }
 
-      await prisma.message.upsert({
+      const write = prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
             threadId: thread.id,
@@ -2479,7 +2489,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
           rawJson: message.raw ? JSON.stringify(message.raw) : null
         }
       });
+      if (message.direction === "OUT") {
+        await write;
+      } else {
+        batchedMessageWrites.push(write);
+        if (batchedMessageWrites.length >= 25) {
+          await flushBatchedMessageWrites();
+        }
+      }
     }
+    await flushBatchedMessageWrites();
 
     const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage] = await Promise.all([
       prisma.message.findMany({

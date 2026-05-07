@@ -174,6 +174,11 @@ sendQueue.resume();
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
+const threadSummaryRefreshInFlight = new Map<string, Promise<void>>();
+const emptySuggestedReplies: SuggestedRepliesOutput = {
+  replies: [],
+  needs_user_input: []
+};
 
 const selfProfileService = createSelfProfileService({ sessionManager, personKey: defaultPersonKey });
 const conversationStartersService = createConversationStartersService({
@@ -1713,14 +1718,29 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const requestedMessageLimit = Number(req.query.messagesLimit ?? 60);
+  const messageLimit = Number.isFinite(requestedMessageLimit)
+    ? Math.max(20, Math.min(120, Math.floor(requestedMessageLimit)))
+    : 60;
+  const beforeMessageId = typeof req.query.beforeMessageId === "string" && req.query.beforeMessageId.trim()
+    ? req.query.beforeMessageId.trim()
+    : undefined;
+
+  if (beforeMessageId) {
+    const cursorExists = await prisma.message.findFirst({
+      where: { id: beforeMessageId, threadId },
+      select: { id: true }
+    });
+    if (!cursorExists) {
+      res.status(400).json({ error: "Invalid message cursor" });
+      return;
+    }
+  }
+
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
     include: {
       person: true,
-      messages: {
-        orderBy: { timestamp: "asc" },
-        take: 120
-      },
       drafts: {
         orderBy: { updatedAt: "desc" },
         take: 1
@@ -1733,24 +1753,63 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     return;
   }
 
-  // Self-heal stale summary on demand. Threads written before the AI was
-  // fully working still have rollingSummary === "Conversation with X." (the
-  // static fallback). The user shouldn't have to click "Rescan" or run a
-  // bulk script to fix that — when they open a stale thread, regenerate
-  // before responding. First load is slow (~5-10s), every subsequent load
-  // hits the cache. New threads from working scans are never stale, so
-  // this branch is a one-time cost per legacy thread.
+  // Self-heal stale summary on demand, but never block thread open on AI.
+  // Threads written before the AI was fully working still have
+  // rollingSummary === "Conversation with X." (the static fallback). Kick
+  // regeneration into the background and let the existing SSE refresh path
+  // replace the stale context when it lands.
   if (isStaleSummary(thread.rollingSummary, thread.person.displayName)) {
-    const refreshed = await resummarizeThreadById(thread.id).catch(() => null);
-    if (refreshed && refreshed.ok) {
-      thread.rollingSummary = refreshed.summary;
-      thread.whatTheyWant = refreshed.whatTheyWant;
-      thread.openLoopsJson = JSON.stringify(refreshed.openLoops);
+    const inFlightKey = thread.id;
+    if (!threadSummaryRefreshInFlight.has(inFlightKey)) {
+      const inFlight = resummarizeThreadById(thread.id)
+        .then((refreshed) => {
+          if (refreshed.ok) {
+            eventBus.emit({
+              type: "THREAD_UPDATED",
+              jobId: uuid(),
+              threadId: thread.id
+            });
+          }
+        })
+        .catch((error) => {
+          console.warn(
+            `[ai] background thread summary refresh failed for threadId=${thread.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        })
+        .finally(() => {
+          if (threadSummaryRefreshInFlight.get(inFlightKey) === inFlight) {
+            threadSummaryRefreshInFlight.delete(inFlightKey);
+          }
+        });
+      threadSummaryRefreshInFlight.set(inFlightKey, inFlight);
     }
   }
 
-  const lastInbound = [...thread.messages].reverse().find((msg) => msg.direction === "IN");
-  const lastOutbound = [...thread.messages].reverse().find((msg) => msg.direction === "OUT");
+  const [messagesDescWithExtra, lastInbound, lastOutbound] = await Promise.all([
+    prisma.message.findMany({
+      where: { threadId: thread.id },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: messageLimit + 1,
+      ...(beforeMessageId ? { cursor: { id: beforeMessageId }, skip: 1 } : {})
+    }),
+    prisma.message.findFirst({
+      where: { threadId: thread.id, direction: "IN" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }]
+    }),
+    prisma.message.findFirst({
+      where: { threadId: thread.id, direction: "OUT" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }]
+    })
+  ]);
+  const hasOlderMessages = messagesDescWithExtra.length > messageLimit;
+  const pageMessagesDesc = messagesDescWithExtra.slice(0, messageLimit);
+  const pageMessages = [...pageMessagesDesc].reverse();
+  const olderCursor = hasOlderMessages
+    ? pageMessages[0]?.id ?? null
+    : null;
+
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
@@ -1790,7 +1849,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}`)
     .digest("hex");
 
-  let suggested;
+  let suggested: SuggestedRepliesOutput | undefined;
+  let suggestedRepliesStatus: "ready" | "generating" = "ready";
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
     try {
       suggested = JSON.parse(thread.suggestedRepliesJson);
@@ -1801,27 +1861,40 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   }
   if (!suggested) {
     const inFlightKey = `${thread.id}:${cacheKey}`;
-    let inFlight = suggestedRepliesInFlight.get(inFlightKey);
-    if (!inFlight) {
-      inFlight = aiService.generateSuggestedReplies(aiInputs).finally(() => {
-        if (suggestedRepliesInFlight.get(inFlightKey) === inFlight) {
-          suggestedRepliesInFlight.delete(inFlightKey);
-        }
-      });
+    if (!suggestedRepliesInFlight.has(inFlightKey)) {
+      const inFlight = aiService.generateSuggestedReplies(aiInputs)
+        .then(async (generated) => {
+          await prisma.thread.update({
+            where: { id: thread.id },
+            data: {
+              suggestedRepliesJson: JSON.stringify(generated),
+              suggestedRepliesCacheKey: cacheKey
+            }
+          });
+          eventBus.emit({
+            type: "SUGGESTED_REPLIES_UPDATED",
+            jobId: uuid(),
+            threadId: thread.id
+          });
+          return generated;
+        })
+        .catch((error) => {
+          console.warn(
+            `[ai] background suggested replies failed for threadId=${thread.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          return emptySuggestedReplies;
+        })
+        .finally(() => {
+          if (suggestedRepliesInFlight.get(inFlightKey) === inFlight) {
+            suggestedRepliesInFlight.delete(inFlightKey);
+          }
+        });
       suggestedRepliesInFlight.set(inFlightKey, inFlight);
     }
-    suggested = await inFlight;
-    // Persist the cache. Best-effort — if the write fails, we still serve
-    // the freshly-generated replies and just won't cache for next time.
-    await prisma.thread
-      .update({
-        where: { id: thread.id },
-        data: {
-          suggestedRepliesJson: JSON.stringify(suggested),
-          suggestedRepliesCacheKey: cacheKey
-        }
-      })
-      .catch(() => undefined);
+    suggested = emptySuggestedReplies;
+    suggestedRepliesStatus = "generating";
   }
 
   const receipts = await prisma.auditLog.findMany({
@@ -1849,7 +1922,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
-    messages: thread.messages.map((message) => ({
+    messages: pageMessages.map((message) => ({
       id: message.id,
       direction: message.direction,
       timestamp: message.timestamp.toISOString(),
@@ -1858,7 +1931,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       raw: message.rawJson ? JSON.parse(message.rawJson) : null,
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
     })),
+    messagePage: {
+      hasOlder: hasOlderMessages,
+      olderCursor,
+      limit: messageLimit
+    },
     suggestedReplies: suggested,
+    suggestedRepliesStatus,
     receipts: receipts.map((log) => ({
       id: log.id,
       timestamp: log.timestamp.toISOString(),
