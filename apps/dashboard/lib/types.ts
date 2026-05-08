@@ -4,6 +4,7 @@ export interface InboxRow {
   id: string;
   personId?: string;
   personName: string;
+  personAvatarUrl?: string | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
   preview: string;
   /**
@@ -42,6 +43,7 @@ export interface PeopleRow {
   id: string;
   name: string;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  avatarUrl?: string | null;
   notes?: string | null;
   tags: string[];
   lastInteractionAt?: string | null;
@@ -197,6 +199,7 @@ export interface ThreadMessage {
 export interface ThreadResponse {
   id: string;
   personName: string;
+  personAvatarUrl?: string | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;

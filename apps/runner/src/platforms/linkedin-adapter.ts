@@ -85,6 +85,7 @@ interface LinkedInVisibleRowSnapshot {
   href?: string;
   activeKey?: string;
   threadUrl?: string;
+  avatarUrl?: string;
 }
 
 interface LinkedInStreamingRowRawSnapshot {
@@ -103,6 +104,7 @@ interface LinkedInStreamingRowRawSnapshot {
   pillText: string;
   href: string;
   activeKey: string;
+  avatarSrc: string;
 }
 
 interface LinkedInResolverNodeProbe {
@@ -5546,7 +5548,11 @@ export class LinkedInAdapter implements PlatformAdapter {
               readAttr("data-urn") ||
               readAttr("data-conversation-id") ||
               readAttr("data-id") ||
-              readAttr("id")
+              readAttr("id"),
+            // First <img> in the row is the participant avatar. LinkedIn's
+            // signed media URLs expire, but every scan rewrites Person.avatarUrl
+            // so the dashboard self-heals on broken loads via onError fallback.
+            avatarSrc: clean((row.querySelector("img") as HTMLImageElement | null)?.src ?? "")
           };
         })
         .filter((entry) => Boolean(entry)) as LinkedInStreamingRowRawSnapshot[];
@@ -5587,7 +5593,8 @@ export class LinkedInAdapter implements PlatformAdapter {
         locatorPath: row.locatorPath,
         href: row.href || undefined,
         activeKey: row.activeKey || undefined,
-        threadUrl
+        threadUrl,
+        avatarUrl: row.avatarSrc || undefined
       });
     }
     return snapshots.filter((row) => Boolean(row.displayName));
@@ -7152,7 +7159,8 @@ export class LinkedInAdapter implements PlatformAdapter {
               lastMessageAt: row.listTimestamp || undefined,
               threadUrl: openResult.descriptor.threadUrl ?? page.url(),
               needsReplyFromList: row.needsReplyFromList,
-              isUnreadCandidate: true
+              isUnreadCandidate: true,
+              avatarUrl: row.avatarUrl
             };
 
             this.logTraceEvent({

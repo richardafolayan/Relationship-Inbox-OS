@@ -305,9 +305,23 @@ export default function TodayPage() {
               {heroHeadline || "Catching up with someone"}
             </h2>
             <div className="mb-[18px] flex items-center gap-3">
-              <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[11px] font-semibold text-white">
-                {initials(hero.personName)}
-              </span>
+              {hero.personAvatarUrl ? (
+                <span className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-paper-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={hero.personAvatarUrl}
+                    alt=""
+                    width={28}
+                    height={28}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover"
+                  />
+                </span>
+              ) : (
+                <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[11px] font-semibold text-white">
+                  {initials(hero.personName)}
+                </span>
+              )}
               <span className="font-medium text-ink">{hero.personName}</span>
               <span className="font-mono text-[12px] text-ink-3">
                 {PLATFORM_LABEL[hero.platform]} · {heroLabel}
