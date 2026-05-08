@@ -2035,12 +2035,39 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
           });
           return generated;
         })
-        .catch((error) => {
+        .catch(async (error) => {
           console.warn(
             `[ai] background suggested replies failed for threadId=${thread.id}: ${
               error instanceof Error ? error.message : String(error)
             }`
           );
+          // Persist empty replies + the cacheKey so (a) the dashboard's
+          // next /data/thread fetch sees a cache hit and reports
+          // suggestedRepliesStatus="ready" (clears the "Generating
+          // suggestions…" spinner) and (b) we don't spin up another
+          // doomed generation on the very next refetch when the inputs
+          // haven't changed. The cache invalidates naturally when a new
+          // inbound message arrives or the thread is re-summarised.
+          try {
+            await prisma.thread.update({
+              where: { id: thread.id },
+              data: {
+                suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
+                suggestedRepliesCacheKey: cacheKey
+              }
+            });
+          } catch (persistError) {
+            console.warn(
+              `[ai] also failed to persist empty replies for threadId=${thread.id}: ${
+                persistError instanceof Error ? persistError.message : String(persistError)
+              }`
+            );
+          }
+          eventBus.emit({
+            type: "SUGGESTED_REPLIES_UPDATED",
+            jobId: uuid(),
+            threadId: thread.id
+          });
           return emptySuggestedReplies;
         })
         .finally(() => {
@@ -2983,12 +3010,36 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
         threadId
       });
     })
-    .catch((error) => {
+    .catch(async (error) => {
       console.warn(
         `[predraft] failed for threadId=${threadId}: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
+      // Mirror the inline-generation failure path: persist empty replies
+      // with the cacheKey + emit SUGGESTED_REPLIES_UPDATED so the
+      // dashboard transitions out of "generating" and a follow-up fetch
+      // doesn't loop into another doomed generation.
+      try {
+        await prisma.thread.update({
+          where: { id: threadId },
+          data: {
+            suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
+            suggestedRepliesCacheKey: cacheKey
+          }
+        });
+      } catch (persistError) {
+        console.warn(
+          `[predraft] also failed to persist empty replies for threadId=${threadId}: ${
+            persistError instanceof Error ? persistError.message : String(persistError)
+          }`
+        );
+      }
+      eventBus.emit({
+        type: "SUGGESTED_REPLIES_UPDATED",
+        jobId: uuid(),
+        threadId
+      });
     });
 
   res.json({ status: "queued", cacheKey });
