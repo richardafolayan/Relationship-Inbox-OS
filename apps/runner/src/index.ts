@@ -1381,6 +1381,50 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
   }
 }));
 
+app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  // Either text, scheduledFor, or both. Empty body 400s — there's
+  // nothing to do if the operator didn't send a change.
+  const payload = z
+    .object({
+      clientSendId: z.string().uuid(),
+      text: z.string().min(1).max(5000).optional(),
+      scheduledFor: z.string().datetime().optional()
+    })
+    .refine((v) => v.text !== undefined || v.scheduledFor !== undefined, {
+      message: "either text or scheduledFor required"
+    })
+    .parse(req.body);
+
+  const result = await sendService.updateScheduledSend({
+    clientSendId: payload.clientSendId,
+    threadId,
+    text: payload.text,
+    scheduledFor: payload.scheduledFor ? new Date(payload.scheduledFor) : undefined
+  });
+
+  if (!result.updated) {
+    res.status(409).json({ error: result.reason });
+    return;
+  }
+
+  // Same dashboard-poll-shortcut as cancel-send. The thread page
+  // refetches /data/thread on the event so the pill reflects the new
+  // text immediately.
+  eventBus.emit({
+    type: "SEND_QUEUE_UPDATED",
+    jobId: "update-send",
+    activeCount: await sendQueue.getActiveCount()
+  });
+
+  res.json({
+    status: "updated",
+    clientSendId: payload.clientSendId,
+    text: result.text,
+    scheduledFor: result.scheduledFor
+  });
+}));
+
 app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);

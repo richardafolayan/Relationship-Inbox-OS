@@ -218,6 +218,13 @@ export default function ThreadPage() {
   const [customScheduleValue, setCustomScheduleValue] = useState("");
   const [scheduling, setScheduling] = useState(false);
   const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
+  // Inline edit state for the scheduled-send pill. `editingScheduledId`
+  // is the clientSendId of the row currently being edited (null = none),
+  // `editingScheduledDraft` is the working textarea value, and
+  // `savingScheduledId` flips during the runner round-trip.
+  const [editingScheduledId, setEditingScheduledId] = useState<string | null>(null);
+  const [editingScheduledDraft, setEditingScheduledDraft] = useState("");
+  const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
   const scheduleMenuRef = useRef<HTMLDivElement>(null);
 
   const [pendingSends, setPendingSends] = useState<
@@ -471,6 +478,42 @@ export default function ThreadPage() {
       }
     },
     [refresh, thread]
+  );
+
+  const beginEditScheduled = useCallback((clientSendId: string, currentText: string) => {
+    setEditingScheduledId(clientSendId);
+    setEditingScheduledDraft(currentText);
+    setError(null);
+  }, []);
+
+  const cancelEditScheduled = useCallback(() => {
+    setEditingScheduledId(null);
+    setEditingScheduledDraft("");
+  }, []);
+
+  const saveEditScheduled = useCallback(
+    async (clientSendId: string) => {
+      if (!thread) return;
+      const text = editingScheduledDraft.trim();
+      if (!text) return;
+      setSavingScheduledId(clientSendId);
+      try {
+        await apiPost(`/runner/control/thread/${thread.id}/update-send`, {
+          clientSendId,
+          text
+        });
+        setEditingScheduledId(null);
+        setEditingScheduledDraft("");
+        await refresh();
+      } catch (saveError) {
+        const message =
+          saveError instanceof Error ? saveError.message : "Failed to update scheduled send";
+        setError(message);
+      } finally {
+        setSavingScheduledId(null);
+      }
+    },
+    [editingScheduledDraft, refresh, thread]
   );
 
   // Click-outside / Escape closes the schedule picker. Mirrors the
@@ -1192,28 +1235,85 @@ export default function ThreadPage() {
                 above. They're outbound, so right-aligned, but visually
                 quieter (dashed border, ink-3) so the operator clocks
                 "this hasn't sent yet" without the bubble pretending. */}
-            {(thread.scheduledSends ?? []).map((scheduled) => (
-              <div
-                key={`scheduled-${scheduled.clientSendId}`}
-                className="flex max-w-[72%] flex-col items-end self-end"
-              >
-                <div className="text-balance whitespace-pre-wrap rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
-                  {scheduled.text}
+            {(thread.scheduledSends ?? []).map((scheduled) => {
+              const isEditing = editingScheduledId === scheduled.clientSendId;
+              const isSaving = savingScheduledId === scheduled.clientSendId;
+              const isCancelling = cancellingScheduledId === scheduled.clientSendId;
+              return (
+                <div
+                  key={`scheduled-${scheduled.clientSendId}`}
+                  className="flex max-w-[72%] flex-col items-end self-end"
+                >
+                  {isEditing ? (
+                    <textarea
+                      value={editingScheduledDraft}
+                      onChange={(event) => setEditingScheduledDraft(event.target.value)}
+                      autoFocus
+                      rows={Math.max(2, Math.min(8, editingScheduledDraft.split("\n").length))}
+                      className="w-full resize-y rounded-2xl rounded-br-[6px] border border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink outline-none focus:border-ink-2"
+                      onKeyDown={(event) => {
+                        // Cmd/Ctrl-Enter saves, Escape cancels — same shortcuts the
+                        // composer uses, so the muscle memory carries over.
+                        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault();
+                          void saveEditScheduled(scheduled.clientSendId);
+                        } else if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelEditScheduled();
+                        }
+                      }}
+                    />
+                  ) : (
+                    <div className="text-balance whitespace-pre-wrap rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
+                      {scheduled.text}
+                    </div>
+                  )}
+                  <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                    <Clock className="h-3 w-3" strokeWidth={1.8} />
+                    <span>scheduled · {formatScheduledFor(scheduled.scheduledFor)}</span>
+                    {isEditing ? (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => void saveEditScheduled(scheduled.clientSendId)}
+                          disabled={isSaving || !editingScheduledDraft.trim()}
+                          className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+                        >
+                          {isSaving ? "saving…" : "save"}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={cancelEditScheduled}
+                          disabled={isSaving}
+                          className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+                        >
+                          discard
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          onClick={() => beginEditScheduled(scheduled.clientSendId, scheduled.text)}
+                          disabled={isCancelling}
+                          className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+                        >
+                          edit
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void cancelScheduledSend(scheduled.clientSendId)}
+                          disabled={isCancelling}
+                          className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+                        >
+                          {isCancelling ? "cancelling…" : "cancel"}
+                        </button>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
-                  <Clock className="h-3 w-3" strokeWidth={1.8} />
-                  <span>scheduled · {formatScheduledFor(scheduled.scheduledFor)}</span>
-                  <button
-                    type="button"
-                    onClick={() => void cancelScheduledSend(scheduled.clientSendId)}
-                    disabled={cancellingScheduledId === scheduled.clientSendId}
-                    className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
-                  >
-                    {cancellingScheduledId === scheduled.clientSendId ? "cancelling…" : "cancel"}
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             {pendingSends.map((pending) => (
               <div
