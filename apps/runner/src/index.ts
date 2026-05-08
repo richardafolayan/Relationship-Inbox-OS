@@ -253,12 +253,29 @@ const enrichmentQueue = createEnrichmentQueue({
   sessionManager,
   operationMutex,
   personKey: defaultPersonKey,
-  paceMs: runnerConfig.enrichPaceMs,
+  paceMinMs: runnerConfig.enrichPaceMinMs,
+  paceMaxMs: runnerConfig.enrichPaceMaxMs,
   batchMax: runnerConfig.enrichBatchMax,
+  dailyCap: runnerConfig.enrichDailyCap,
+  longIdleEvery: runnerConfig.enrichLongIdleEvery,
+  longIdleMinMs: runnerConfig.enrichLongIdleMinMs,
+  longIdleMaxMs: runnerConfig.enrichLongIdleMaxMs,
   refreshDays: runnerConfig.enrichRefreshDays,
   scanLockKey: platformLockKey,
   sendLockKey: sendLockKeyFor,
-  enrichLockKey: enrichLockKeyFor()
+  enrichLockKey: enrichLockKeyFor(),
+  ensureConnected: async () => {
+    // adapters is Partial<Record<PlatformName, PlatformAdapter>> ever
+    // since IMESSAGE landed (some platforms can be unconfigured at
+    // runtime). LinkedIn is always registered by the factory today, but
+    // throw a clear error if that ever changes rather than calling
+    // through `undefined`.
+    const linkedin = adapters.LINKEDIN;
+    if (!linkedin) {
+      throw new Error("LinkedIn adapter is not configured; enrichment cannot ensure session");
+    }
+    await linkedin.ensureConnected();
+  }
 });
 enqueueEnrichmentForScan = (input) => {
   void enrichmentQueue.enqueue(input.personId, input.trigger);
@@ -3251,15 +3268,37 @@ app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) =>
 // per-person coalescing inside `enqueue` (manual triggers always create
 // a fresh row so a Scan-all click while another is in-flight will still
 // produce visible progress).
-app.post("/control/people/scan-all", asyncRoute(async (_req, res) => {
+app.post("/control/people/scan-all", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({ scope: z.enum(["all", "new"]).optional() })
+    .parse(req.body ?? {});
+  const scope = payload.scope ?? "all";
   const candidates = await prisma.person.findMany({
-    where: { profileUrl: { not: null } },
+    where: {
+      profileUrl: { not: null },
+      // "new" = no enrichment tag visible under the name in the dashboard
+      // (matches the headline ?? role/company fallback in people/page.tsx).
+      // Either no PersonEnrichment row at all, or one with all three display
+      // fields blank — covers prior failed attempts that left a partial row.
+      ...(scope === "new"
+        ? {
+            OR: [
+              { enrichment: { is: null } },
+              {
+                enrichment: {
+                  is: { headline: null, currentRole: null, currentCompany: null }
+                }
+              }
+            ]
+          }
+        : {})
+    },
     select: { id: true }
   });
   for (const candidate of candidates) {
     await enrichmentQueue.enqueue(candidate.id, "manual");
   }
-  res.json({ status: "queued", count: candidates.length });
+  res.json({ status: "queued", count: candidates.length, scope });
 }));
 
 app.post("/control/self/enrich", asyncRoute(async (req, res) => {

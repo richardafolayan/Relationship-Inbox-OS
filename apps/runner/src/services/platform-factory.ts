@@ -48,10 +48,16 @@ export function createAdapters(input: {
       messageBackfillAttempts: runnerConfig.linkedInScan.messageBackfillAttempts,
       resolveSelectors: () => resolveSelectorsForPlatform("LINKEDIN"),
       sessionManager,
-      // Optional fallback creds. Both must be set or we don't pass anything,
-      // which keeps the auto-login codepath inert in dev / CI / first-run.
+      // Optional fallback creds. Both must be set AND auto-login must be
+      // explicitly opted in via LINKEDIN_AUTO_LOGIN=1 — auto-filling the
+      // sign-in form when the persistent session expires can re-trip an
+      // automated-activity restriction (see 2026-05-08 incident in README),
+      // so the safer default is to surface AUTH_REQUIRED and let the
+      // operator log in manually in the controlled Chrome window.
       linkedInCredentials:
-        runnerConfig.linkedInUsername && runnerConfig.linkedInPassword
+        runnerConfig.linkedInAutoLoginEnabled &&
+        runnerConfig.linkedInUsername &&
+        runnerConfig.linkedInPassword
           ? {
               username: runnerConfig.linkedInUsername,
               password: runnerConfig.linkedInPassword
