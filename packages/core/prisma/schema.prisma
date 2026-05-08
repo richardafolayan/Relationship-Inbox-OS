@@ -70,6 +70,10 @@ model Person {
   handle      String?
   platform    PlatformName
   profileUrl  String?
+  // Provenance for profileUrl: "auto" when the row scanner inferred the URL
+  // from a chat row's avatar/name anchor, "manual" when the operator pasted
+  // it via the dashboard. Auto-discovery never overwrites a manual value.
+  profileUrlSource String?
   // Hotlinked profile photo URL captured during scans (LinkedIn only today).
   // The platform signs these URLs and they expire, but every scan refreshes
   // the value, so the dashboard tolerates broken images by falling back to
@@ -114,8 +118,14 @@ model PersonEnrichment {
   educationJson     String?
   skillsJson        String?
   servicesJson      String?
+  licensesJson      String?
   recentPostsJson   String?
+  recentCommentsJson String?
+  recentReactionsJson String?
   mutualNamesJson   String?
+  // Follower count from the profile header. Null when LinkedIn doesn't
+  // expose it (Recruiter/limited profiles, or when the badge fails to parse).
+  followersCount    Int?
   // Cached AI output, regenerated when the cache key (a hash over the
   // enrichment payload + Richard's self-profile hash) no longer matches.
   // Including the self-profile hash means a one-off self-refresh
