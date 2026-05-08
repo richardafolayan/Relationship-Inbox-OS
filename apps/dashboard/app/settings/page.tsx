@@ -23,7 +23,11 @@ const QUIET_HOURS_KEY = "inbox_quiet_hours";
 // advanced surface (scan thresholds, AI provider, danger-zone reset,
 // runner restart) sits behind a quiet expander so it stays out of the
 // way until the operator asks for it.
-const PLATFORMS = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
+//
+// Only LinkedIn is shipped today. Instagram/TikTok still flow through
+// the runner so their settings can persist, but we don't render toggles
+// for them on this page until the adapter work lands (issue #93).
+const PLATFORMS = ["LINKEDIN"] as const;
 type Platform = (typeof PLATFORMS)[number];
 
 export default function SettingsPage() {
@@ -214,7 +218,7 @@ export default function SettingsPage() {
 
       <QuietRow
         name="Quiet hours"
-        stat="after 22:00, mute the sidebar dot"
+        stat="22:00 – 06:00 local: mute the sidebar dot and pause auto-scan"
         action={
           <Button variant="quiet" onClick={toggleQuietHours}>
             {quietHours ? "On" : "Off"}
@@ -366,7 +370,7 @@ export default function SettingsPage() {
             })}
           </div>
           <p className="mt-2 font-mono text-[11px] text-ink-3">
-            Saved with the rest of advanced settings.
+            Saved with the rest of advanced settings. Instagram and TikTok are coming later.
           </p>
           {/* GLM model input — ported from main. Operators on GLM can
               override the runner's `Z_AI_MODEL` env default per-account

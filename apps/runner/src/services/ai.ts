@@ -196,6 +196,23 @@ export function applyVoiceRules(text: string): string {
     .replace(/\s{2,}/g, " ")
     .trim();
 }
+
+// Models occasionally narrate the prompt back to the operator ("the
+// operator profile is not available, so no commonality can be identified").
+// Strip any sentence that admits missing operator data — see issue #95.
+export function stripOperatorMetaTalk(text: string): string {
+  if (!text) return text;
+  const sentences = text.split(/(?<=[.!?])\s+/);
+  const kept = sentences.filter((sentence) => {
+    const lower = sentence.toLowerCase();
+    if (!lower.includes("operator")) return true;
+    return !/(not available|unavailable|missing|unknown|no commonality|cannot be identified|can't be identified|isn't provided|is not provided|no operator profile)/.test(
+      lower
+    );
+  });
+  const cleaned = kept.join(" ").replace(/\s{2,}/g, " ").trim();
+  return cleaned.length > 0 ? cleaned : text;
+}
 // Static analysis would flag FORBIDDEN_PUNCTUATION_RE as unused; keep it
 // exported only via the side-effect of being referenced in tests if added.
 void FORBIDDEN_PUNCTUATION_RE;
@@ -771,8 +788,15 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
 
     const contactPayload = snapshotForPrompt(input.contact);
     const selfPayload = snapshotForPrompt(input.self);
+    const hasOperatorProfile = selfPayload !== null;
+    const operatorBlock = hasOperatorProfile
+      ? `\nOperator profile: ${JSON.stringify(selfPayload)}`
+      : "";
+    const commonalityRule = hasOperatorProfile
+      ? "Lead with their current role or focus, then any clear commonality with the operator (shared school, shared work area, shared interest)."
+      : "Lead with their current role or focus and add one or two grounded details from the contact's profile (location, recent post, area of work). Do not mention the operator at all. Never write that anything is unavailable, missing, unknown, or cannot be identified.";
     const prompt = `Summarise who this contact is in 2 to 3 sentences for the operator.
-Lead with their current role or focus, then any clear commonality with the operator (shared school, shared work area, shared interest). If the operator's profile is null, omit the commonality and just describe the contact.
+${commonalityRule}
 
 Style:
 - British English. Conversational, like a peer briefing a peer.
@@ -782,8 +806,7 @@ Style:
 
 Return strict JSON: { "summary": "string" }
 
-Contact profile: ${JSON.stringify(contactPayload)}
-Operator profile: ${JSON.stringify(selfPayload)}`;
+Contact profile: ${JSON.stringify(contactPayload)}${operatorBlock}`;
 
     try {
       const response = await client.chat.completions.create({
@@ -798,7 +821,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
       const parsed = z.object({ summary: z.string().min(1) }).parse(JSON.parse(content));
-      return applyVoiceRules(stripUnpairedSurrogates(parsed.summary));
+      return stripOperatorMetaTalk(applyVoiceRules(stripUnpairedSurrogates(parsed.summary)));
     } catch (error) {
       console.warn(
         `[ai] generateContactSummary failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`

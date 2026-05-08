@@ -6,6 +6,7 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, avatarTone } from "@/lib/risk";
+import { normalizePreview } from "@/lib/preview";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 
@@ -52,8 +53,9 @@ export default function ArchivedPage() {
       ) : (
         <div className="flex flex-col">
           {rows.map((row) => {
+            const cleanPreview = normalizePreview(row.preview);
             const previewBody =
-              row.lastMessageDirection === "OUT" ? `You: ${row.preview}` : row.preview;
+              row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
             return (
               <div
                 key={row.id}
