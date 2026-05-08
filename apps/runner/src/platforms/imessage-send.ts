@@ -1,7 +1,37 @@
 import { execFile } from "node:child_process";
+import { existsSync, statSync } from "node:fs";
+import { dirname, extname, join } from "node:path";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
+
+/**
+ * Transcode an audio file to Apple's `.caf` (Core Audio Format) using
+ * macOS's pre-installed `afconvert`. Output mirrors Apple's native voice-
+ * memo container so Messages.app at least accepts the file cleanly even
+ * if the recipient bubble still renders as a generic file attachment
+ * (the native waveform bubble is reserved for the in-app mic flow and
+ * isn't reachable via AppleScript). Returns the original path on failure
+ * so the send still goes through.
+ */
+async function maybeTranscodeAudioToCaf(absolutePath: string): Promise<string> {
+  if (!existsSync(absolutePath)) return absolutePath;
+  const ext = extname(absolutePath).toLowerCase();
+  // Already a caf — nothing to do.
+  if (ext === ".caf") return absolutePath;
+  // Only transcode browser-recorded audio formats. Leave m4a/aac alone —
+  // Messages handles them, and afconvert occasionally chokes on tiny clips.
+  if (ext !== ".webm" && ext !== ".ogg" && ext !== ".opus") return absolutePath;
+  const dst = join(dirname(absolutePath), "Audio Message.caf");
+  try {
+    // ima4 / caff matches Apple's voice-memo encoding most closely.
+    await execFileAsync("afconvert", [absolutePath, dst, "-d", "ima4", "-f", "caff"], { timeout: 30_000 });
+    if (existsSync(dst) && statSync(dst).size > 0) return dst;
+  } catch {
+    // fall through — send as-is
+  }
+  return absolutePath;
+}
 
 /**
  * Escape a string for embedding in an AppleScript double-quoted literal.
@@ -37,7 +67,11 @@ export async function sendIMessage(opts: SendIMessageOptions): Promise<void> {
   // Send each attachment as its own Messages.app bubble (Apple's UI does
   // the same — one media per bubble). Then the text body. Order matters
   // for how the recipient reads the conversation.
-  for (const path of opts.attachmentPaths ?? []) {
+  for (const rawPath of opts.attachmentPaths ?? []) {
+    // Browser MediaRecorder hands us webm/opus or mp4. Apple's native
+    // voice-memo container is .caf with ima4 codec — transcode to that
+    // when possible so delivery doesn't bounce.
+    const path = await maybeTranscodeAudioToCaf(rawPath);
     const escaped = escapeAppleScript(path);
     const script = [
       `tell application "Messages"`,
