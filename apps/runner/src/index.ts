@@ -21,6 +21,7 @@ import { createAdapters } from "./services/platform-factory";
 import { createScanQueue } from "./services/scan-queue";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
@@ -177,6 +178,16 @@ const sendQueue = createSendQueue({
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
 sendQueue.resume();
+
+// Promotes SCHEDULED SendRequests to PENDING when their scheduledFor
+// timestamp has elapsed, then kicks the send-queue worker. Runs every
+// 30s — coarse enough to be cheap, fine enough that "send in 5 minutes"
+// fires within ~30s of the target time.
+const scheduledSendPromoter = createScheduledSendPromoter({
+  sendQueue,
+  eventBus
+});
+scheduledSendPromoter.start();
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
@@ -1247,9 +1258,53 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
   const payload = z
     .object({
       text: z.string().min(1),
-      clientSendId: z.string().uuid()
+      clientSendId: z.string().uuid(),
+      // Optional ISO 8601 timestamp. When present, the send is persisted
+      // as SCHEDULED and the scheduled-send promoter flips it to PENDING
+      // when the time elapses. When absent, the send is enqueued
+      // immediately (existing behaviour).
+      scheduledFor: z.string().datetime().optional()
     })
     .parse(req.body);
+
+  // Schedule path: persist a SCHEDULED row and return immediately. The
+  // dashboard renders a "scheduled for X" pill instead of pushing the
+  // bubble through the optimistic-send timeline. The promoter takes
+  // over from there.
+  if (payload.scheduledFor) {
+    try {
+      const scheduleResult = await sendService.enqueueScheduledSend({
+        threadId,
+        text: payload.text,
+        clientSendId: payload.clientSendId,
+        scheduledFor: new Date(payload.scheduledFor)
+      });
+      res.json({
+        clientSendId: scheduleResult.clientSendId,
+        status: scheduleResult.status,
+        scheduledFor: scheduleResult.scheduledFor,
+        replayed: scheduleResult.replayed,
+        // Surfaced for parity with enqueueAndKick's response shape so the
+        // dashboard doesn't need a separate fetch to refresh the bar.
+        activeCount: await sendQueue.getActiveCount(),
+        queuePosition: -1
+      });
+      return;
+    } catch (error) {
+      await auditService.log({
+        platform: "LINKEDIN",
+        stage: "Send",
+        action: "SEND_SCHEDULE_FAIL",
+        status: "FAIL",
+        details: {
+          threadId,
+          stage: "schedule",
+          ...summarizeError(error)
+        }
+      });
+      throw error;
+    }
+  }
 
   // Enqueue + kick. Returns in ~50ms (just inserting/checking a SendRequest
   // row) regardless of whether a scan is currently holding the platform
@@ -1279,6 +1334,30 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
     });
     throw error;
   }
+}));
+
+app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
+
+  const result = await sendService.cancelScheduledSend({
+    clientSendId: payload.clientSendId,
+    threadId
+  });
+
+  if (!result.cancelled) {
+    res.status(409).json({ error: result.reason ?? "cancel_failed" });
+    return;
+  }
+
+  // Tell the dashboard the queue moved without waiting for its 3-second poll.
+  eventBus.emit({
+    type: "SEND_QUEUE_UPDATED",
+    jobId: "cancel-send",
+    activeCount: await sendQueue.getActiveCount()
+  });
+
+  res.json({ status: "cancelled", clientSendId: payload.clientSendId });
 }));
 
 app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
@@ -1985,6 +2064,14 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     take: 120
   });
 
+  // Surfaced so the thread page can render scheduled sends as pinned pills
+  // above the timeline without a second fetch. Only SCHEDULED rows leak
+  // here — PENDING/SENT/FAILED already drive the live optimistic-UI flow.
+  const scheduledSendRows = await prisma.sendRequest.findMany({
+    where: { threadId: thread.id, status: "SCHEDULED" },
+    orderBy: { scheduledFor: "asc" }
+  });
+
   // Cross-thread relationship memory — last message from each OTHER
   // thread with the same Person, plus the Person's notes/tags. Powers
   // the dashboard's memory chip and feeds the AI compose prompts so
@@ -2056,6 +2143,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     },
     suggestedReplies: suggested,
     suggestedRepliesStatus,
+    scheduledSends: scheduledSendRows.map((row) => ({
+      clientSendId: row.clientSendId,
+      text: row.requestText,
+      scheduledFor: row.scheduledFor?.toISOString() ?? null,
+      createdAt: row.createdAt.toISOString()
+    })),
     receipts: receipts.map((log) => ({
       id: log.id,
       timestamp: log.timestamp.toISOString(),
@@ -2361,7 +2454,7 @@ app.get("/data/archived", asyncRoute(async (_req, res) => {
 // click during a scan sits in PENDING until the lease frees up. This endpoint
 // just exposes that state to the UI.
 app.get("/data/send-queue", asyncRoute(async (_req, res) => {
-  const [activeRows, recentDoneRows] = await Promise.all([
+  const [activeRows, scheduledRows, recentDoneRows] = await Promise.all([
     prisma.sendRequest.findMany({
       where: { status: "PENDING" },
       include: {
@@ -2370,6 +2463,15 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
         }
       },
       orderBy: { createdAt: "asc" }
+    }),
+    prisma.sendRequest.findMany({
+      where: { status: "SCHEDULED" },
+      include: {
+        thread: {
+          include: { person: true }
+        }
+      },
+      orderBy: { scheduledFor: "asc" }
     }),
     // Show the last 5 completed sends so the bar can briefly say "Sent to X"
     // before fading out, and so a failed send is visible even if the user
@@ -2400,6 +2502,16 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
       // behind another send. The runner serializes sends through the platform
       // lease, so only one send can be IN_FLIGHT at a time.
       queuePosition: index
+    })),
+    scheduled: scheduledRows.map((row) => ({
+      clientSendId: row.clientSendId,
+      threadId: row.threadId,
+      personName: row.thread.person.displayName,
+      platform: row.thread.platform,
+      status: row.status,
+      requestText: row.requestText,
+      scheduledFor: row.scheduledFor?.toISOString() ?? null,
+      enqueuedAt: row.createdAt.toISOString()
     })),
     recent: recentDoneRows.map((row) => {
       let errorPayload: unknown = null;
