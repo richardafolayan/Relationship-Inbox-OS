@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
@@ -25,11 +25,27 @@ export default function PeoplePage() {
   const [profileUrlInput, setProfileUrlInput] = useState("");
   const [savingProfileUrl, setSavingProfileUrl] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Local draft so the textarea is fully controlled. The Notes column on
+  // people lives off the API, but keystrokes go to local state and we
+  // debounce a PATCH-equivalent POST to /runner/control/person/:id/notes.
+  const [notesDraft, setNotesDraft] = useState<string>("");
+  const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const savedNotesAtRef = useRef<number>(0);
 
-  const loadList = useCallback(async () => {
-    const data = await apiGet<PeopleRow[]>("/runner/data/people").catch(() => [] as PeopleRow[]);
-    setPeople(data);
-    return data;
+  // Load list with explicit error surfacing (#74 pattern). Stays a
+  // useCallback so dependencies in effects below don't churn between renders.
+  const loadList = useCallback(async (): Promise<PeopleRow[]> => {
+    try {
+      const data = await apiGet<PeopleRow[]>("/runner/data/people");
+      setPeople(data);
+      setError(null);
+      return data;
+    } catch (loadError) {
+      const message = loadError instanceof Error ? loadError.message : "Failed to load people";
+      setError(message);
+      return [];
+    }
   }, []);
 
   const loadDetail = useCallback(
@@ -67,6 +83,44 @@ export default function PeoplePage() {
     () => people.find((person) => person.id === selectedId) ?? null,
     [people, selectedId]
   );
+
+  // Whenever the selected person changes, hydrate the notes draft from the
+  // server-side value. Cancel any in-flight debounce so we don't write the
+  // previous person's notes onto the new one.
+  useEffect(() => {
+    if (notesSaveTimer.current) {
+      clearTimeout(notesSaveTimer.current);
+      notesSaveTimer.current = null;
+    }
+    setNotesDraft(selected?.notes ?? "");
+    setNotesStatus("idle");
+  }, [selectedId, selected?.notes]);
+
+  // Tear down the timer if the page unmounts mid-debounce.
+  useEffect(() => () => {
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+  }, []);
+
+  const onNotesChange = useCallback((value: string): void => {
+    setNotesDraft(value);
+    setNotesStatus("saving");
+    if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+    const personId = selectedId;
+    if (!personId) return;
+    notesSaveTimer.current = setTimeout(async () => {
+      try {
+        await apiPost(`/runner/control/person/${personId}/notes`, { notes: value });
+        savedNotesAtRef.current = Date.now();
+        setNotesStatus("saved");
+        // Refresh the people list so the next selectedId switch sees the
+        // updated notes value (selected.notes is sourced from people, not
+        // detail).
+        void loadList();
+      } catch {
+        setNotesStatus("error");
+      }
+    }, 600);
+  }, [selectedId, loadList]);
 
   const refreshEnrichment = useCallback(() => {
     if (!selectedId) return;
@@ -255,6 +309,34 @@ export default function PeoplePage() {
                   </div>
                 </div>
               ) : null}
+
+              {/* Notes — debounced auto-save (#62 wiring). The header
+                  status line ("Saving…" / "Saved" / "Failed to save") is
+                  the only feedback; on save the people list reloads so a
+                  later selection swap reads the persisted value. */}
+              <div className="mt-6 rounded-card border border-hairline bg-paper px-4 py-3">
+                <div className="flex items-center justify-between">
+                  <p className="m-0 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                    Notes
+                  </p>
+                  <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+                    {notesStatus === "saving"
+                      ? "saving…"
+                      : notesStatus === "saved"
+                        ? "saved"
+                        : notesStatus === "error"
+                          ? <span className="text-risk-overdue">failed to save</span>
+                          : ""}
+                  </span>
+                </div>
+                <textarea
+                  rows={6}
+                  value={notesDraft}
+                  onChange={(event) => onNotesChange(event.target.value)}
+                  placeholder="Internal relationship notes..."
+                  className="mt-2 w-full resize-none border-0 bg-transparent text-[14px] leading-[1.5] text-ink outline-none placeholder:text-ink-4"
+                />
+              </div>
 
               <div className="mt-6 flex flex-wrap items-center gap-3">
                 <Button variant="quiet" disabled={refreshing} onClick={refreshEnrichment}>

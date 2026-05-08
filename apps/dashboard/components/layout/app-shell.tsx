@@ -34,7 +34,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
-
   const refreshMeta = useCallback(async () => {
     const [healthData, settingsData, inboxData] = await Promise.all([
       apiGet<HealthResponse>("/runner/health").catch(() => null),

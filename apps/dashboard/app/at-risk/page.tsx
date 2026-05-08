@@ -15,15 +15,25 @@ import { PLATFORM_LABEL } from "@/lib/risk";
 export default function AtRiskPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // #74: surface load errors inline instead of leaving the page on a
+  // permanent loading state when /data/inbox blips.
+  const [error, setError] = useState<string | null>(null);
   const [focusOpen, setFocusOpen] = useState(false);
   const [focusIndex, setFocusIndex] = useState(0);
   const [focusError, setFocusError] = useState<string | null>(null);
   const router = useRouter();
 
   const refresh = useCallback(async () => {
-    const inbox = await apiGet<InboxResponse>("/runner/data/inbox").catch(() => null);
-    if (inbox) setData(inbox);
-    setLoaded(true);
+    try {
+      const inbox = await apiGet<InboxResponse>("/runner/data/inbox");
+      setData(inbox);
+      setError(null);
+    } catch (fetchError) {
+      const message = fetchError instanceof Error ? fetchError.message : "Failed to load at-risk threads";
+      setError(message);
+    } finally {
+      setLoaded(true);
+    }
   }, []);
 
   useEffect(() => {
@@ -89,6 +99,20 @@ export default function AtRiskPage() {
     );
     advance();
   };
+
+  if (error && !data) {
+    return (
+      <div className="space-y-4">
+        <div>
+          <h2 className="text-2xl font-semibold">At Risk</h2>
+        </div>
+        <Card className="border-rose-200 bg-rose-50/60">
+          <p className="text-sm font-semibold text-rose-900">Could not load at-risk threads</p>
+          <p className="mt-1 text-sm text-rose-800">{error}</p>
+        </Card>
+      </div>
+    );
+  }
 
   return (
     <Canvas>

@@ -73,7 +73,7 @@ export function DegradedBanner({
             href={`/artifacts/screenshots/${screenshotFile}`}
             target="_blank"
             className="font-mono text-[11px] text-ink-3 underline-offset-2 hover:text-ink hover:underline"
-            rel="noreferrer"
+            rel="noopener noreferrer"
           >
             screenshot
           </a>
@@ -83,7 +83,7 @@ export function DegradedBanner({
             href={`/artifacts/dom_dumps/${domDumpFile}`}
             target="_blank"
             className="font-mono text-[11px] text-ink-3 underline-offset-2 hover:text-ink hover:underline"
-            rel="noreferrer"
+            rel="noopener noreferrer"
           >
             dom dump
           </a>

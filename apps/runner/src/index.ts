@@ -129,6 +129,12 @@ function globalResetLockKey(): string {
   return `${defaultPersonKey}:GLOBAL_RESET`;
 }
 
+function filterDismissedOpenLoops(loops: string[], dismissedJson: string | null): string[] {
+  if (!dismissedJson) return loops;
+  const dismissed = new Set(JSON.parse(dismissedJson) as string[]);
+  return loops.filter((loop) => !dismissed.has(loop));
+}
+
 // Forward reference: the scan-queue's `onNewPerson` hook needs to call
 // the enrichment queue's `enqueue`, but the enrichment queue is built
 // AFTER scan-queue (it depends on sessionManager + lock vocabulary that
@@ -237,8 +243,17 @@ function normalizeOptionalPositiveNumber(value: number | null | undefined): numb
   return value;
 }
 
+// Normalise dynamic path segments to placeholders so the audit-log
+// `action` column is the same string for every "enrich a person" call
+// rather than a unique-per-person token. Without this, /control/person/
+// <cuid>/enrich becomes POST_PERSON_<cuid>_ENRICH_END and the operator
+// can't scan the column. Drop the ids into the details payload at the
+// call site if you need them — keep them out of the action string.
 function normalizeControlPath(path: string): string {
-  return path.replace(/\/thread\/[^/]+/g, "/thread/:threadId");
+  return path
+    .replace(/\/thread\/[^/]+/g, "/thread/:threadId")
+    .replace(/\/person\/[^/]+/g, "/person/:personId")
+    .replace(/\/job\/[^/]+/g, "/job/:jobId");
 }
 
 function stageForControlPath(path: string): string {
@@ -2013,7 +2028,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     needsReply: thread.needsReply,
     summary: thread.rollingSummary,
     whatTheyWant: thread.whatTheyWant,
-    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    openLoops: filterDismissedOpenLoops(
+      thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+      thread.dismissedOpenLoopsJson
+    ),
+    dismissedOpenLoops: thread.dismissedOpenLoopsJson
+      ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
+      : [],
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
@@ -2024,6 +2045,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       timestamp: message.timestamp.toISOString(),
       text: message.text,
       senderName: message.senderName ?? null,
+      sentVia: message.sentVia ?? null,
       raw: message.rawJson ? JSON.parse(message.rawJson) : null,
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
     })),
@@ -2279,6 +2301,37 @@ app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
   res.json({ ok: true, threadId: thread.id, archivedAt: thread.archivedAt?.toISOString() });
 }));
 
+// Toggle whether an open-loop string is dismissed for a thread. The dashboard
+// thread-pane renders an "Open loops" checklist; ticking persists the loop in
+// dismissedOpenLoopsJson so it stays hidden even after the AI re-summarises
+// the thread (which keeps emitting the same loop until it's actually closed
+// in the conversation).
+app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const { loop, dismissed } = z
+    .object({ loop: z.string().min(1).max(2_000), dismissed: z.boolean() })
+    .parse(req.body ?? {});
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { id: true, dismissedOpenLoopsJson: true }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "thread not found" });
+    return;
+  }
+  const current = new Set(
+    thread.dismissedOpenLoopsJson ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[]) : []
+  );
+  if (dismissed) current.add(loop);
+  else current.delete(loop);
+  const nextJson = current.size > 0 ? JSON.stringify(Array.from(current)) : null;
+  await prisma.thread.update({
+    where: { id: threadId },
+    data: { dismissedOpenLoopsJson: nextJson }
+  });
+  res.json({ ok: true, dismissedOpenLoops: Array.from(current) });
+}));
+
 // Unarchive — clears archivedAt so the thread returns to the active Inbox.
 app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
@@ -2496,6 +2549,24 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
     summary,
     starters
   });
+}));
+
+app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const { notes } = z
+    .object({ notes: z.string().max(10_000).nullable().optional() })
+    .parse(req.body ?? {});
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  const trimmed = typeof notes === "string" ? notes : null;
+  await prisma.person.update({
+    where: { id: personId },
+    data: { notes: trimmed && trimmed.length > 0 ? trimmed : null }
+  });
+  res.json({ status: "ok" });
 }));
 
 app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
