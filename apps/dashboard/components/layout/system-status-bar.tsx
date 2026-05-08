@@ -40,7 +40,7 @@ const RECENT_FRESHNESS_MS = 8000;
 
 type StatusBarState =
   | { kind: "idle" }
-  | { kind: "scanning" }
+  | { kind: "scanning"; platform?: string | null }
   | { kind: "enriching"; total: number; running: number }
   | {
       kind: "sending";
@@ -79,7 +79,7 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
     }
   }
   if (blockedByScan) {
-    return { kind: "scanning" };
+    return { kind: "scanning", platform: input.health?.currentScanPlatform ?? null };
   }
   // Enrichment shows up under scanning so the operator sees the heavier
   // signal first when both are happening; an enrichment-only state is
@@ -259,13 +259,28 @@ function AnimatedEllipsis() {
   );
 }
 
+function platformDisplay(platform: string): string {
+  switch (platform) {
+    case "LINKEDIN":
+      return "linkedin";
+    case "IMESSAGE":
+      return "iMessage";
+    case "INSTAGRAM":
+      return "instagram";
+    case "TIKTOK":
+      return "tiktok";
+    default:
+      return platform.toLowerCase();
+  }
+}
+
 function stateLabel(state: StatusBarState): string {
   switch (state.kind) {
     case "scanning":
       // Trailing "…" is now rendered as <AnimatedEllipsis /> in the JSX so
       // it pulses; keeping the bare label here lets aria-live announce a
       // clean string to screen readers.
-      return "Scanning linkedin";
+      return state.platform ? `Scanning ${platformDisplay(state.platform)}` : "Scanning";
     case "enriching":
       return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
     case "sending":

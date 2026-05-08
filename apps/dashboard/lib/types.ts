@@ -304,6 +304,13 @@ export interface HealthResponse {
   queueDepth: number;
   connectedPlatforms: number;
   /**
+   * Platform currently being scanned. Used by the status bar so the
+   * "Scanning …" label names the actual platform (LinkedIn, iMessage)
+   * instead of always claiming linkedin. Optional so older runner builds
+   * still parse cleanly.
+   */
+  currentScanPlatform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | null;
+  /**
    * Background enrichment queue depth. Drives the status bar's
    * "Enriching N profiles" indicator while a Scan-all bulk run drains.
    * `total` is `pending + running`. Optional so older runner builds

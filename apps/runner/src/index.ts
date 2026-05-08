@@ -722,6 +722,10 @@ app.get("/health", asyncRoute(async (_req, res) => {
     lastScanAt: lastScanAt?.toISOString() ?? null,
     queueDepth: scanQueue.getQueueDepth(),
     connectedPlatforms,
+    // Current platform being scanned, if any. Drives the status bar's
+    // "Scanning <platform>" label so it stops claiming "linkedin" when
+    // an iMessage scan is running.
+    currentScanPlatform: scanQueue.getCurrentScanPlatform() ?? null,
     // Surfaced for the dashboard's status bar so a "Scan all" click
     // (which queues every Person with a profileUrl) shows visible
     // progress while the queue drains, instead of silently chugging.

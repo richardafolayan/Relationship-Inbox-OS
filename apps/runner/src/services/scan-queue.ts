@@ -2754,6 +2754,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     processNext,
     getQueueDepth,
     isScanning: () => processing,
+    getCurrentScanPlatform: () => currentJob?.platform,
     startScheduler,
     runJob,
     requestAbort: (reason: string) => {
