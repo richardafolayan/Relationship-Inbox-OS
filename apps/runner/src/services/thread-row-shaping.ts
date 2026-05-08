@@ -36,6 +36,7 @@ export interface ThreadRowSource {
     id: string;
     displayName: string;
     platform: PlatformName;
+    avatarUrl: string | null;
   };
   _count?: {
     messages: number;
@@ -46,6 +47,7 @@ export interface ShapedThreadRow {
   id: string;
   personId: string;
   personName: string;
+  personAvatarUrl: string | null;
   platform: PlatformName;
   preview: string;
   /**
@@ -178,6 +180,7 @@ export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
     id: source.id,
     personId: source.personId,
     personName: source.person.displayName,
+    personAvatarUrl: source.person.avatarUrl ?? null,
     platform: source.platform,
     preview: previewText,
     lastMessageDirection: source.lastMessageDirection ?? null,

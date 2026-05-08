@@ -9,6 +9,7 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
@@ -928,9 +929,12 @@ export default function ThreadPage() {
                     className={`mt-[6px] inline-block h-[6px] w-[6px] flex-shrink-0 rounded-full ${dotClass}`}
                     aria-hidden
                   />
-                  <span className="grid h-7 w-7 flex-shrink-0 place-items-center rounded-full bg-paper-2 font-mono text-[10px] text-ink-2">
-                    {initials(row.personName)}
-                  </span>
+                  <PersonAvatar
+                    name={row.personName}
+                    avatarUrl={row.personAvatarUrl}
+                    size={28}
+                    className="flex-shrink-0 font-mono text-[10px]"
+                  />
                   <span className="min-w-0 flex-1">
                     <span
                       className={`block truncate text-[12.5px] leading-[1.3] ${
@@ -995,9 +999,27 @@ export default function ThreadPage() {
               Back to today
             </button>
             <header className="flex items-center gap-4">
-              <span className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[16px] font-semibold text-white">
-                {initials(thread.personName)}
-              </span>
+              {thread.personAvatarUrl ? (
+                <span className="grid h-12 w-12 place-items-center overflow-hidden rounded-full bg-paper-2">
+                  {/* Hotlinked LinkedIn avatar — URL is signed and may
+                  expire. Don't bother with onError fallback here: every
+                  scan refreshes it, and rendering the gradient initials on
+                  rare temporary 404s isn't worth the extra state hook. */}
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={thread.personAvatarUrl}
+                    alt=""
+                    width={48}
+                    height={48}
+                    referrerPolicy="no-referrer"
+                    className="h-full w-full object-cover"
+                  />
+                </span>
+              ) : (
+                <span className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[16px] font-semibold text-white">
+                  {initials(thread.personName)}
+                </span>
+              )}
               <div className="min-w-0 flex-1">
                 <h2 className="m-0 font-display text-[22px] font-semibold tracking-[-0.02em]">
                   {thread.personName}

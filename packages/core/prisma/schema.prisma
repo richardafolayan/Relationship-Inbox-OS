@@ -70,6 +70,11 @@ model Person {
   handle      String?
   platform    PlatformName
   profileUrl  String?
+  // Hotlinked profile photo URL captured during scans (LinkedIn only today).
+  // The platform signs these URLs and they expire, but every scan refreshes
+  // the value, so the dashboard tolerates broken images by falling back to
+  // the initials tile until the next scan rewrites the row.
+  avatarUrl   String?
   notes       String?
   tagsJson    String?
   // Set by the enrichment queue when a profile-extraction job completes
