@@ -129,37 +129,28 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
 
   async function persistSuccess(personId: string, profile: ExtractedProfile): Promise<void> {
     await prisma.$transaction(async (tx) => {
+      const fields = {
+        headline: profile.headline,
+        about: profile.about,
+        location: profile.location,
+        currentCompany: profile.currentCompany,
+        currentRole: profile.currentRole,
+        mutualCount: profile.mutualCount,
+        followersCount: profile.followersCount,
+        experienceJson: JSON.stringify(profile.experience ?? []),
+        educationJson: JSON.stringify(profile.education ?? []),
+        skillsJson: JSON.stringify(profile.skills ?? []),
+        servicesJson: JSON.stringify(profile.services ?? []),
+        licensesJson: JSON.stringify(profile.licenses ?? []),
+        recentPostsJson: JSON.stringify(profile.recentPosts ?? []),
+        recentCommentsJson: JSON.stringify(profile.recentComments ?? []),
+        recentReactionsJson: JSON.stringify(profile.recentReactions ?? []),
+        mutualNamesJson: JSON.stringify(profile.mutualNames ?? [])
+      };
       await tx.personEnrichment.upsert({
         where: { personId },
-        update: {
-          headline: profile.headline,
-          about: profile.about,
-          location: profile.location,
-          currentCompany: profile.currentCompany,
-          currentRole: profile.currentRole,
-          mutualCount: profile.mutualCount,
-          experienceJson: JSON.stringify(profile.experience ?? []),
-          educationJson: JSON.stringify(profile.education ?? []),
-          skillsJson: JSON.stringify(profile.skills ?? []),
-          servicesJson: JSON.stringify(profile.services ?? []),
-          recentPostsJson: JSON.stringify(profile.recentPosts ?? []),
-          mutualNamesJson: JSON.stringify(profile.mutualNames ?? [])
-        },
-        create: {
-          personId,
-          headline: profile.headline,
-          about: profile.about,
-          location: profile.location,
-          currentCompany: profile.currentCompany,
-          currentRole: profile.currentRole,
-          mutualCount: profile.mutualCount,
-          experienceJson: JSON.stringify(profile.experience ?? []),
-          educationJson: JSON.stringify(profile.education ?? []),
-          skillsJson: JSON.stringify(profile.skills ?? []),
-          servicesJson: JSON.stringify(profile.services ?? []),
-          recentPostsJson: JSON.stringify(profile.recentPosts ?? []),
-          mutualNamesJson: JSON.stringify(profile.mutualNames ?? [])
-        }
+        update: fields,
+        create: { personId, ...fields }
       });
       await tx.person.update({
         where: { id: personId },

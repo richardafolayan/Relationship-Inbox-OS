@@ -10,6 +10,7 @@ import { cleanContactSummary } from "@/lib/preview";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
+import { ProfileSections } from "@/components/common/profile-sections";
 
 // People — relationship rows in the same calm pattern as ThreadRow. Click
 // any row to open a slim detail panel below with summary + enrichment +
@@ -23,6 +24,8 @@ export default function PeoplePage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [scanningAll, setScanningAll] = useState(false);
+  const [scanAllStatus, setScanAllStatus] = useState<string | null>(null);
   const [startersLoading, setStartersLoading] = useState(false);
   const [profileUrlInput, setProfileUrlInput] = useState("");
   const [savingProfileUrl, setSavingProfileUrl] = useState(false);
@@ -159,6 +162,23 @@ export default function PeoplePage() {
     }
   };
 
+  const scanAll = useCallback(async () => {
+    setScanningAll(true);
+    setScanAllStatus(null);
+    setError(null);
+    try {
+      const result = await apiPost<{ status: string; count: number }>(
+        "/runner/control/people/scan-all",
+        {}
+      );
+      setScanAllStatus(`Queued ${result.count} profile${result.count === 1 ? "" : "s"} for rescan.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to enqueue scan-all");
+    } finally {
+      setScanningAll(false);
+    }
+  }, []);
+
   const fetchStarters = () => {
     if (!selectedId) return;
     setStartersLoading(true);
@@ -179,6 +199,17 @@ export default function PeoplePage() {
         subtitle="Lightweight relationship context across every conversation — risk, last touch, notes."
         meta={people.length > 0 ? <span>{people.length} relationships</span> : null}
       />
+
+      {people.length > 0 ? (
+        <div className="mb-4 flex flex-wrap items-center gap-3">
+          <Button variant="quiet" disabled={scanningAll} onClick={() => void scanAll()}>
+            {scanningAll ? "Queueing…" : "Scan all"}
+          </Button>
+          {scanAllStatus ? (
+            <span className="font-mono text-[11px] text-ink-3">{scanAllStatus}</span>
+          ) : null}
+        </div>
+      ) : null}
 
       {error ? (
         <p className="mb-6 font-mono text-[11px] text-risk-overdue">{error}</p>
@@ -280,18 +311,10 @@ export default function PeoplePage() {
                 </div>
               ) : null}
 
-              {detail?.enrichment ? (
-                <ul className="mt-4 space-y-1 font-mono text-[12px] text-ink-3">
-                  {detail.enrichment.headline ? <li>{detail.enrichment.headline}</li> : null}
-                  {detail.enrichment.currentRole || detail.enrichment.currentCompany ? (
-                    <li>
-                      {[detail.enrichment.currentRole, detail.enrichment.currentCompany]
-                        .filter(Boolean)
-                        .join(" at ")}
-                    </li>
-                  ) : null}
-                  {detail.enrichment.location ? <li>{detail.enrichment.location}</li> : null}
-                </ul>
+              {detail ? (
+                <div className="mt-6">
+                  <ProfileSections detail={detail} />
+                </div>
               ) : null}
 
               {detail?.starters && detail.starters.starters.length > 0 ? (
