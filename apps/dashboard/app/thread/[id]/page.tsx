@@ -476,44 +476,11 @@ export default function ThreadPage() {
     }
   };
 
-  const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
-    if (!composer.trim() || !thread) {
-      return;
-    }
-
-    try {
-      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
-        mode,
-        text: composer
-      });
-      setComposer(output.text);
-      setError(null);
-    } catch (transformError) {
-      const message = transformError instanceof Error ? transformError.message : "Transform failed";
-      console.warn("[action]", message);
-      setError(message);
-    }
-  };
-
-  const composeIntentToVoice = async () => {
-    const intent = composeIntent.trim();
-    if (!intent || !thread || composing) return;
-    setComposing(true);
-    setComposeError(null);
-    try {
-      const output = await apiPost<{ text: string }>(
-        `/runner/control/thread/${thread.id}/compose`,
-        { intent }
-      );
-      setComposeDraft(output.text);
-    } catch (composeErr) {
-      const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
-      setComposeError(message);
-    } finally {
-      setComposing(false);
-    }
-  };
-
+  // `transform` and `composeFromIntent` are defined further down with
+  // loading-state tracking for the redesign's button labels — the older
+  // duplicate from #62 was dropped here on the post-merge sweep. The
+  // `toggleOpenLoop` helper still lives here because it's used by the
+  // right-rail open-loops checkboxes.
   const toggleOpenLoop = async (loop: string, dismissed: boolean) => {
     if (!thread) return;
     // Optimistic local update so the checkbox flips immediately. The
