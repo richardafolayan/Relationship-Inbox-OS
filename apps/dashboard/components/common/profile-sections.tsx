@@ -5,6 +5,14 @@ import { formatRelative } from "@/lib/time";
 
 interface ProfileSectionsProps {
   detail: PersonDetailResponse;
+  /**
+   * When true, skip the big name heading. The People-page inline
+   * accordion already shows the person's name on the row directly above
+   * the panel — repeating it inside the panel is redundant. Defaults to
+   * false so the thread-page profile drawer (called from a different
+   * context) keeps showing the name as before.
+   */
+  hideName?: boolean;
 }
 
 function compactNumber(n: number): string {
@@ -19,7 +27,7 @@ function SectionHead({ children }: { children: React.ReactNode }) {
   );
 }
 
-export function ProfileSections({ detail }: ProfileSectionsProps) {
+export function ProfileSections({ detail, hideName = false }: ProfileSectionsProps) {
   const { person, enrichment } = detail;
 
   return (
@@ -30,11 +38,13 @@ export function ProfileSections({ detail }: ProfileSectionsProps) {
           {person.profileUrlSource ? <> · profile {person.profileUrlSource}-discovered</> : null}
           {person.enrichedAt ? <> · enriched {formatRelative(person.enrichedAt)}</> : null}
         </p>
-        <h3 className="mt-2 font-display text-[24px] font-semibold tracking-[-0.02em]">
-          {person.name}
-        </h3>
+        {hideName ? null : (
+          <h3 className="mt-2 font-display text-[24px] font-semibold tracking-[-0.02em]">
+            {person.name}
+          </h3>
+        )}
         {enrichment?.headline ? (
-          <p className="mt-1 max-w-[58ch] text-[14px] leading-[1.55] text-ink-2">{enrichment.headline}</p>
+          <p className={`${hideName ? "mt-2" : "mt-1"} max-w-[58ch] text-[14px] leading-[1.55] text-ink-2`}>{enrichment.headline}</p>
         ) : null}
         <ul className="mt-3 flex flex-wrap gap-x-4 gap-y-1 font-mono text-[12px] text-ink-3">
           {enrichment?.currentRole || enrichment?.currentCompany ? (
