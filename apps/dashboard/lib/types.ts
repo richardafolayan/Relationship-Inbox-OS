@@ -303,6 +303,17 @@ export interface HealthResponse {
   lastScanAt: string | null;
   queueDepth: number;
   connectedPlatforms: number;
+  /**
+   * Background enrichment queue depth. Drives the status bar's
+   * "Enriching N profiles" indicator while a Scan-all bulk run drains.
+   * `total` is `pending + running`. Optional so older runner builds
+   * still parse cleanly.
+   */
+  enrichmentQueue?: {
+    pending: number;
+    running: number;
+    total: number;
+  };
 }
 
 // `AiProvider` is now imported from `@inbox-os/core` at the top of this

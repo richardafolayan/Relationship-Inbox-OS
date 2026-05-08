@@ -700,7 +700,15 @@ app.use("/control", (req, res, next) => {
 });
 
 app.get("/health", asyncRoute(async (_req, res) => {
-  const platforms = await prisma.platform.findMany();
+  const [platforms, enrichmentPending, enrichmentRunning] = await Promise.all([
+    prisma.platform.findMany(),
+    // PENDING + RUNNING surface as "in flight" to the dashboard. DEFERRED
+    // (waiting on scan/send lock) is technically active too — a busy
+    // platform can leave a job DEFERRED for ~minute — so include it. DONE
+    // and FAILED stay out of the count.
+    prisma.enrichmentJob.count({ where: { status: { in: ["PENDING", "DEFERRED"] } } }),
+    prisma.enrichmentJob.count({ where: { status: "RUNNING" } })
+  ]);
   const lastScanAt = platforms
     .map((platform) => platform.lastScanAt)
     .filter(Boolean)
@@ -713,7 +721,15 @@ app.get("/health", asyncRoute(async (_req, res) => {
     runnerStatus,
     lastScanAt: lastScanAt?.toISOString() ?? null,
     queueDepth: scanQueue.getQueueDepth(),
-    connectedPlatforms
+    connectedPlatforms,
+    // Surfaced for the dashboard's status bar so a "Scan all" click
+    // (which queues every Person with a profileUrl) shows visible
+    // progress while the queue drains, instead of silently chugging.
+    enrichmentQueue: {
+      pending: enrichmentPending,
+      running: enrichmentRunning,
+      total: enrichmentPending + enrichmentRunning
+    }
   });
 }));
 

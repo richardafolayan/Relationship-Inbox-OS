@@ -41,6 +41,7 @@ const RECENT_FRESHNESS_MS = 8000;
 type StatusBarState =
   | { kind: "idle" }
   | { kind: "scanning" }
+  | { kind: "enriching"; total: number; running: number }
   | {
       kind: "sending";
       personName: string;
@@ -79,6 +80,18 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
   }
   if (blockedByScan) {
     return { kind: "scanning" };
+  }
+  // Enrichment shows up under scanning so the operator sees the heavier
+  // signal first when both are happening; an enrichment-only state is
+  // still worth surfacing because Scan-all can queue 50+ profiles that
+  // take many minutes to drain in the background.
+  const enrichmentTotal = input.health?.enrichmentQueue?.total ?? 0;
+  if (enrichmentTotal > 0) {
+    return {
+      kind: "enriching",
+      total: enrichmentTotal,
+      running: input.health?.enrichmentQueue?.running ?? 0
+    };
   }
   return { kind: "idle" };
 }
@@ -140,6 +153,7 @@ export function SystemStatusBar() {
     switch (state.kind) {
       case "scanning":
       case "sending":
+      case "enriching":
         return "bg-risk-waiting";
       case "send_failed":
         return "bg-risk-overdue";
@@ -150,11 +164,13 @@ export function SystemStatusBar() {
     }
   })();
 
-  // Active states (scan in flight, send in flight) get a thin
-  // indeterminate progress sweep + animated trailing dots so the operator
-  // can tell at a glance the runner is still working. send_failed /
-  // send_succeeded are terminal — no animation.
-  const isActive = state.kind === "scanning" || state.kind === "sending";
+  // Active states (scan in flight, send in flight, enrichment queue
+  // draining) get a thin indeterminate progress sweep + animated
+  // trailing dots so the operator can tell at a glance the runner is
+  // still working. send_failed / send_succeeded are terminal — no
+  // animation.
+  const isActive =
+    state.kind === "scanning" || state.kind === "sending" || state.kind === "enriching";
 
   return (
     <div
@@ -212,6 +228,8 @@ function stateLabel(state: StatusBarState): string {
       // it pulses; keeping the bare label here lets aria-live announce a
       // clean string to screen readers.
       return "Scanning linkedin";
+    case "enriching":
+      return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
     case "sending":
       return state.blockedByScan
         ? `Send queued — waiting on scan before replying to ${state.personName}`
@@ -228,6 +246,9 @@ function stateLabel(state: StatusBarState): string {
 function stateDetail(state: StatusBarState): string | null {
   if (state.kind === "sending" && state.queuedBehind > 0) {
     return `${state.queuedBehind} more send${state.queuedBehind === 1 ? "" : "s"} queued`;
+  }
+  if (state.kind === "enriching" && state.running > 0) {
+    return `${state.running} in flight`;
   }
   if (state.kind === "send_failed") {
     return state.message;
