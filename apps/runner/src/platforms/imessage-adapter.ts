@@ -186,13 +186,17 @@ export class IMessageAdapter implements PlatformAdapter {
       });
     } catch (error) {
       const stderr = (error as { stderr?: string }).stderr ?? "";
-      const isAutomation = /not authorized|errAEEventNotPermitted|-1743|-600/.test(stderr);
+      const message = (error as Error).message ?? "";
+      const isAutomation = /not authorized|errAEEventNotPermitted|-1743|-600/.test(stderr + message);
+      const isAccessibility = /osascript is not allowed to send keystrokes|\(1002\)|System Events.*not authorized/.test(stderr + message);
       throw new AdapterFailure(
-        isAutomation
-          ? "Messages.app rejected automation — grant Automation permission to the runner's terminal."
-          : `iMessage send failed: ${(error as Error).message}`,
+        isAccessibility
+          ? "Messages.app needs Accessibility permission to deliver files — grant it under System Settings → Privacy & Security → Accessibility for your terminal app, then retry."
+          : isAutomation
+            ? "Messages.app rejected automation — grant Automation permission to the runner's terminal."
+            : `iMessage send failed: ${message}`,
         {
-          kind: isAutomation ? "AUTH_REQUIRED" : "THREAD_FETCH_FAILED",
+          kind: isAutomation || isAccessibility ? "AUTH_REQUIRED" : "THREAD_FETCH_FAILED",
           platform: this.platform,
           stage: "persist",
           platformThreadId: thread.platformThreadId,

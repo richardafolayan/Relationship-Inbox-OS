@@ -911,12 +911,18 @@ app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
     ranSteps.push(`messages_probe_prompt:${((error as Error).message ?? "").slice(0, 80)}`);
   }
   try {
+    // Open BOTH panes in turn so the operator can verify Automation +
+    // Accessibility — file sends now go through UI scripting (clipboard
+    // paste in the Messages window), which needs Accessibility on top of
+    // Automation. The first one opened wins focus; macOS keeps the other
+    // available a click away.
     await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], { timeout: 5_000 });
+    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"], { timeout: 5_000 });
     ranSteps.push("settings_opened");
   } catch {
     // non-fatal
   }
-  res.json({ ok: true, steps: ranSteps, message: "Permissions reset. If macOS prompted, click Allow, then retry the send." });
+  res.json({ ok: true, steps: ranSteps, message: "Permissions reset. Toggle your terminal app ON for both Automation > Messages AND Accessibility, then retry the send." });
 }));
 
 // Stream a Messages.app attachment (photo / voice note / video) to the

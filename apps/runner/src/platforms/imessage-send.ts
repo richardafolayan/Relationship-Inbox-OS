@@ -1,6 +1,8 @@
 import { execFile } from "node:child_process";
-import { existsSync, statSync } from "node:fs";
-import { dirname, extname, join } from "node:path";
+import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, extname, join } from "node:path";
+import { randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
@@ -15,6 +17,72 @@ const execFileAsync = promisify(execFile);
  * so the send still goes through.
  */
 const AUDIO_EXTS = new Set([".m4a", ".mp4", ".aac", ".webm", ".ogg", ".opus", ".wav", ".aiff", ".aif", ".mp3"]);
+
+/**
+ * Copy `src` to a fresh /tmp/<uuid>/<basename> path so Messages.app can
+ * actually read it. Files staged under our data/ dir live outside the
+ * Messages sandbox's read scope — the AppleScript send "succeeds"
+ * (osascript exits 0) but Messages later fails to upload the bubble,
+ * which surfaces in chat.db as message.error=25 and "Not Delivered" on
+ * the recipient side. /tmp is universally readable.
+ */
+/**
+ * Send a file via Messages.app using UI scripting (open chat, set
+ * clipboard to file, ⌘V, Return). Required because the documented
+ * AppleScript path (`send POSIX file "..." to buddy`) reliably fails
+ * with chat.db error=25 / "Not Delivered" — Messages accepts the
+ * AppleScript, queues the bubble, then drops it during the iCloud
+ * upload phase. The clipboard-paste path mirrors what a human does
+ * via the Messages UI and goes through the normal delivery code.
+ *
+ * Requires:
+ *   - Automation permission to control Messages (already granted; this
+ *     is the same plumbing the text-send path uses).
+ *   - Accessibility permission to drive System Events (UI keystrokes).
+ *     Granted in System Settings → Privacy & Security → Accessibility
+ *     for the runner's terminal app.
+ */
+async function sendFileViaUiScripting(input: { filePath: string; handle: string; timeoutMs: number }): Promise<void> {
+  const filePath = escapeAppleScript(input.filePath);
+  const handle = escapeAppleScript(input.handle);
+  const script = `
+on run
+  set theFile to POSIX file "${filePath}"
+  -- Stage the file on the clipboard so Messages' window can paste it.
+  set the clipboard to theFile
+  -- Open the chat with this buddy. The imessage: URL scheme selects
+  -- (or creates) the conversation and brings Messages forward.
+  do shell script "open 'imessage:${handle}'"
+  delay 0.6
+  tell application "Messages" to activate
+  delay 0.3
+  tell application "System Events"
+    tell process "Messages"
+      set frontmost to true
+      delay 0.1
+      keystroke "v" using {command down}
+      delay 0.4
+      keystroke return
+    end tell
+  end tell
+end run
+`;
+  await execFileAsync("osascript", ["-e", script], { timeout: input.timeoutMs });
+}
+
+function stageInReadableTmp(src: string): string {
+  if (!existsSync(src)) return src;
+  const stagingRoot = join(tmpdir(), "inbox-os-imessage-outgoing");
+  const dir = join(stagingRoot, randomUUID());
+  mkdirSync(dir, { recursive: true });
+  const dst = join(dir, basename(src));
+  try {
+    copyFileSync(src, dst);
+    return dst;
+  } catch {
+    return src;
+  }
+}
 
 async function maybeTranscodeAudioToCaf(absolutePath: string): Promise<string> {
   if (!existsSync(absolutePath)) return absolutePath;
@@ -74,16 +142,13 @@ export async function sendIMessage(opts: SendIMessageOptions): Promise<void> {
     // Browser MediaRecorder hands us webm/opus or mp4. Apple's native
     // voice-memo container is .caf with ima4 codec — transcode to that
     // when possible so delivery doesn't bounce.
-    const path = await maybeTranscodeAudioToCaf(rawPath);
-    const escaped = escapeAppleScript(path);
-    const script = [
-      `tell application "Messages"`,
-      `  set targetService to 1st service whose service type = ${service}`,
-      `  set targetBuddy to buddy "${handle}" of targetService`,
-      `  send POSIX file "${escaped}" to targetBuddy`,
-      `end tell`
-    ].join("\n");
-    await execFileAsync("osascript", ["-e", script], { timeout });
+    const transcoded = await maybeTranscodeAudioToCaf(rawPath);
+    const path = stageInReadableTmp(transcoded);
+    await sendFileViaUiScripting({
+      filePath: path,
+      handle: opts.handle,
+      timeoutMs: timeout
+    });
   }
 
   if (opts.text.trim().length > 0) {
