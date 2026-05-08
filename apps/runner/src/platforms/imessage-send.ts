@@ -14,17 +14,20 @@ const execFileAsync = promisify(execFile);
  * isn't reachable via AppleScript). Returns the original path on failure
  * so the send still goes through.
  */
+const AUDIO_EXTS = new Set([".m4a", ".mp4", ".aac", ".webm", ".ogg", ".opus", ".wav", ".aiff", ".aif", ".mp3"]);
+
 async function maybeTranscodeAudioToCaf(absolutePath: string): Promise<string> {
   if (!existsSync(absolutePath)) return absolutePath;
   const ext = extname(absolutePath).toLowerCase();
-  // Already a caf — nothing to do.
   if (ext === ".caf") return absolutePath;
-  // Only transcode browser-recorded audio formats. Leave m4a/aac alone —
-  // Messages handles them, and afconvert occasionally chokes on tiny clips.
-  if (ext !== ".webm" && ext !== ".ogg" && ext !== ".opus") return absolutePath;
+  if (!AUDIO_EXTS.has(ext)) return absolutePath;
   const dst = join(dirname(absolutePath), "Audio Message.caf");
   try {
     // ima4 / caff matches Apple's voice-memo encoding most closely.
+    // afconvert reads aiff/wav/m4a/aac/mp3/caf natively. webm/opus may
+    // fail; in that case we fall through and ship the original — which
+    // Messages will at least surface as a generic audio file rather than
+    // bouncing.
     await execFileAsync("afconvert", [absolutePath, dst, "-d", "ima4", "-f", "caff"], { timeout: 30_000 });
     if (existsSync(dst) && statSync(dst).size > 0) return dst;
   } catch {
