@@ -4,6 +4,7 @@ import Link from "next/link";
 import type { InboxRow } from "@/lib/types";
 import { PLATFORM_LABEL, initials, toDisplayRisk, avatarTone, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
+import { normalizePreview } from "@/lib/preview";
 
 interface ThreadRowProps {
   row: InboxRow;
@@ -17,8 +18,9 @@ const riskTextClass: Record<DisplayRisk, string> = {
 
 export function ThreadRow({ row }: ThreadRowProps) {
   const risk = toDisplayRisk(row.riskLevel);
+  const cleanPreview = normalizePreview(row.preview);
   const previewBody =
-    row.lastMessageDirection === "OUT" ? `You: ${row.preview}` : row.preview;
+    row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
   const rightLabel =
     risk === "overdue"
       ? "Overdue"

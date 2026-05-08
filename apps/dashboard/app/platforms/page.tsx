@@ -7,6 +7,7 @@ import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
+import { Menu } from "@/components/ui/menu";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
@@ -135,7 +136,7 @@ export default function PlatformsPage() {
               <div className="flex items-center gap-1 text-[12px] text-ink-3 group-open:text-ink">
                 <span className="hover:text-ink">Profile details ▾</span>
               </div>
-              <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.preventDefault()}>
+              <div className="flex items-center gap-2" onClick={(e) => e.preventDefault()}>
                 <Button
                   variant="quiet"
                   onClick={() =>
@@ -152,64 +153,69 @@ export default function PlatformsPage() {
                 >
                   {row.status === "CONNECTED" ? "Open browser" : "Connect"}
                 </Button>
-                {row.status === "CONNECTED" ? (
-                  <Button
-                    variant="ghost"
-                    onClick={() =>
-                      runAction(
-                        apiPost("/runner/control/platform/connect", { platform: row.platform }),
-                        setActionError,
-                        refresh
-                      )
-                    }
-                  >
-                    Reconnect
-                  </Button>
-                ) : null}
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    runActionWithFeedback(
-                      apiPost("/runner/control/scan", { platform: row.platform }),
-                      {
-                        pending: `Scanning ${PLATFORM_DISPLAY[row.platform]}…`,
-                        success: `${PLATFORM_DISPLAY[row.platform]} scan queued`,
-                        failure: `${PLATFORM_DISPLAY[row.platform]} scan failed`,
-                        setError: setActionError,
-                        onDone: () => refresh()
+                <Menu
+                  trigger={
+                    <Button variant="ghost" aria-label="More actions">
+                      More ▾
+                    </Button>
+                  }
+                  items={[
+                    {
+                      label: "Scan now",
+                      onSelect: () =>
+                        runActionWithFeedback(
+                          apiPost("/runner/control/scan", { platform: row.platform }),
+                          {
+                            pending: `Scanning ${PLATFORM_DISPLAY[row.platform]}…`,
+                            success: `${PLATFORM_DISPLAY[row.platform]} scan queued`,
+                            failure: `${PLATFORM_DISPLAY[row.platform]} scan failed`,
+                            setError: setActionError,
+                            onDone: () => refresh()
+                          }
+                        )
+                    },
+                    ...(row.status === "CONNECTED"
+                      ? [
+                          {
+                            label: "Reconnect",
+                            onSelect: () =>
+                              runAction(
+                                apiPost("/runner/control/platform/connect", { platform: row.platform }),
+                                setActionError,
+                                refresh
+                              )
+                          }
+                        ]
+                      : []),
+                    {
+                      label: "Run selector tests",
+                      onSelect: () =>
+                        runAction(
+                          apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
+                          setActionError,
+                          refresh
+                        )
+                    },
+                    {
+                      label: "Reset session…",
+                      danger: true,
+                      onSelect: () => {
+                        if (
+                          !window.confirm(
+                            `Reset the ${PLATFORM_DISPLAY[row.platform]} session? You'll need to sign in again.`
+                          )
+                        ) {
+                          return;
+                        }
+                        runAction(
+                          apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
+                          setActionError,
+                          refresh
+                        );
                       }
-                    )
-                  }
-                >
-                  Scan now
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() =>
-                    runAction(
-                      apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                      setActionError,
-                      refresh
-                    )
-                  }
-                >
-                  Run selector tests
-                </Button>
-                <Button
-                  variant="ghost"
-                  onClick={() => {
-                    if (!window.confirm(`Reset the ${PLATFORM_DISPLAY[row.platform]} session? You'll need to sign in again.`)) {
-                      return;
                     }
-                    runAction(
-                      apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
-                      setActionError,
-                      refresh
-                    );
-                  }}
-                >
-                  Reset session
-                </Button>
+                  ]}
+                />
               </div>
             </summary>
 
@@ -259,7 +265,7 @@ export default function PlatformsPage() {
         <p className="mt-10 font-mono text-[12px] text-ink-3">No platforms reported by the runner.</p>
       ) : null}
 
-      <p className="mt-10 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+      <div className="mt-10 flex flex-wrap items-center justify-between gap-3 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
         <button
           type="button"
           onClick={() => setReceiptsOpen(true)}
@@ -267,9 +273,10 @@ export default function PlatformsPage() {
         >
           open receipts
         </button>
-        {" · "}
-        {HIDDEN_PLATFORMS.map((p) => PLATFORM_LABEL[p]).join(", ")} coming later
-      </p>
+        <span>
+          {HIDDEN_PLATFORMS.map((p) => PLATFORM_LABEL[p]).join(", ")} coming later
+        </span>
+      </div>
 
       <ReceiptsDrawer
         open={receiptsOpen}

@@ -11,6 +11,7 @@ import { ToastHost } from "@/components/common/toast-host";
 import { RunnerTopStrip } from "@/components/layout/runner-top-strip";
 import { apiGet, apiPost } from "@/lib/api";
 import { initials } from "@/lib/risk";
+import { isQuietHoursActive } from "@/lib/quiet-hours";
 import type { AppSettings, HealthResponse, InboxResponse } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
@@ -82,6 +83,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (autoScanDisabled || !autoScanEnabled) return undefined;
     const timer = setInterval(() => {
       if (autoScanInFlightRef.current) return;
+      // Quiet hours pause auto-scan during the 22:00–06:00 window. The
+      // toggle is otherwise inert; this gives it something tangible to do
+      // (#94).
+      if (isQuietHoursActive()) return;
       autoScanInFlightRef.current = true;
       void apiPost("/runner/control/scan", { platform: "LINKEDIN" })
         .catch(() => undefined)
@@ -160,13 +165,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const operatorName = "Richard";
   const userInitials = initials(operatorName);
 
-  // Quiet hours (UI-only for now): if the user has set "quiet_hours" in
-  // localStorage, drop the attention dot from the sidebar even when
-  // overdue+waiting > 0. Matches the README intent without touching the
-  // runner-side AppSettings shape.
-  const quietHours =
-    typeof window !== "undefined" && window.localStorage.getItem("inbox_quiet_hours") === "1";
-  const sidebarAttention = quietHours ? 0 : attentionCount;
+  // Quiet hours: when the toggle is on AND the local time is between
+  // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan
+  // (gated above). Keeps the toggle honest with its label (#94).
+  const sidebarAttention = isQuietHoursActive() ? 0 : attentionCount;
 
   // Suppress unused-warning for settings; pages that need it (Settings,
   // Platforms) fetch their own copy. We hold it here so a future toolbar

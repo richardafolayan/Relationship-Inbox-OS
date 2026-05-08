@@ -6,6 +6,7 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk, avatarTone } from "@/lib/risk";
+import { cleanContactSummary } from "@/lib/preview";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 
@@ -251,7 +252,7 @@ export default function PeoplePage() {
               </h3>
 
               <p className="mt-4 max-w-[58ch] text-[15px] leading-[1.55] text-ink-2">
-                {detail?.summary ??
+                {cleanContactSummary(detail?.summary) ??
                   (detail?.enrichment
                     ? "No summary yet. Refresh to generate one."
                     : profileUrlMissing
