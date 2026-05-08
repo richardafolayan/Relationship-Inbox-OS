@@ -2333,13 +2333,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
       where: { displayName: candidate.displayName, platform }
     });
     const candidateAvatarUrl = candidate.avatarUrl?.trim() || null;
+    const candidateProfileUrl = candidate.profileUrl?.trim() || null;
     const person =
       existingPerson ??
       (await prisma.person.create({
         data: {
           displayName: candidate.displayName,
           platform,
-          avatarUrl: candidateAvatarUrl
+          avatarUrl: candidateAvatarUrl,
+          profileUrl: candidateProfileUrl,
+          profileUrlSource: candidateProfileUrl ? "auto" : null
         }
       }));
     if (existingPerson && candidateAvatarUrl && existingPerson.avatarUrl !== candidateAvatarUrl) {
@@ -2347,6 +2350,34 @@ export function createScanQueue(deps: ScanQueueDeps) {
         where: { id: existingPerson.id },
         data: { avatarUrl: candidateAvatarUrl }
       });
+    }
+    // Auto-discovery never clobbers a manually-pasted URL. Only update
+    // when there's no URL yet, or when the existing URL was also an auto
+    // discovery (slug may have changed if the user renamed their handle).
+    if (
+      existingPerson &&
+      candidateProfileUrl &&
+      existingPerson.profileUrlSource !== "manual" &&
+      existingPerson.profileUrl !== candidateProfileUrl
+    ) {
+      await prisma.person.update({
+        where: { id: existingPerson.id },
+        data: { profileUrl: candidateProfileUrl, profileUrlSource: "auto" }
+      });
+      // First time we've ever seen a URL for this contact — kick the
+      // enrichment queue so the dashboard fills in immediately rather
+      // than waiting for the next periodic tick.
+      if (!existingPerson.profileUrl && deps.onNewPerson) {
+        try {
+          deps.onNewPerson({ personId: existingPerson.id, trigger: "first_seen" });
+        } catch (error) {
+          console.warn(
+            `[scan-queue] onNewPerson hook (auto-url) threw for personId=${existingPerson.id}: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        }
+      }
     }
     if (!existingPerson && deps.onNewPerson) {
       // Fire-and-forget. The callback enqueues a profile-enrichment job;

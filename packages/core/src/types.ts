@@ -10,6 +10,14 @@ export interface ThreadStub {
   platformThreadId: string;
   displayName: string;
   avatarUrl?: string;
+  /**
+   * Participant's profile URL (e.g. `https://www.linkedin.com/in/<slug>/`)
+   * inferred from the avatar/name anchor inside the thread. Populated by
+   * the LinkedIn adapter when the thread header exposes it; downstream
+   * consumers persist it on Person.profileUrl with `profileUrlSource =
+   * "auto"` so a manually-pasted URL is never overwritten.
+   */
+  profileUrl?: string;
   unreadCount?: number;
   lastMessagePreview: string;
   lastMessageAt?: string;
