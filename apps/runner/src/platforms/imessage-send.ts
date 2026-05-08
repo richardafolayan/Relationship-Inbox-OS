@@ -53,15 +53,25 @@ on run
   -- Open the chat with this buddy. The imessage: URL scheme selects
   -- (or creates) the conversation and brings Messages forward.
   do shell script "open 'imessage:${handle}'"
-  delay 0.6
+  delay 0.9
   tell application "Messages" to activate
-  delay 0.3
+  delay 0.4
   tell application "System Events"
     tell process "Messages"
       set frontmost to true
+      delay 0.15
+      -- Focus the message input by clicking it explicitly. The composer
+      -- text area is the last text element in the front window (Apple's
+      -- a11y tree puts it after the conversation list). Falls back to
+      -- a tab-key dance if direct focus fails so paste still lands in
+      -- the right place across macOS versions.
+      try
+        set theTextArea to text area 1 of scroll area 1 of group 1 of window 1
+        set focused of theTextArea to true
+      end try
       delay 0.1
       keystroke "v" using {command down}
-      delay 0.4
+      delay 0.6
       keystroke return
     end tell
   end tell
