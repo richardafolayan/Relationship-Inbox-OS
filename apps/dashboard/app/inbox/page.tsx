@@ -205,7 +205,7 @@ export default function InboxPage() {
               <SectionDivider label={bucket.label} />
               <div className="flex flex-col">
                 {bucket.items.map((row) => (
-                  <ThreadRow key={row.id} row={row} />
+                  <ThreadRow key={row.id} row={row} onPersonChanged={() => void refresh()} />
                 ))}
               </div>
             </section>

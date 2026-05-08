@@ -6,9 +6,12 @@ import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
+import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
 
 interface ThreadRowProps {
   row: InboxRow;
+  /** Optional — when provided, called after a name suggestion is confirmed/edited/dismissed so the parent can refresh the inbox. */
+  onPersonChanged?: () => void;
 }
 
 const riskTextClass: Record<DisplayRisk, string> = {
@@ -17,7 +20,7 @@ const riskTextClass: Record<DisplayRisk, string> = {
   fresh: "text-ink-2"
 };
 
-export function ThreadRow({ row }: ThreadRowProps) {
+export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
   const risk = toDisplayRisk(row.riskLevel);
   const cleanPreview = normalizePreview(row.preview);
   const previewBody =
@@ -46,6 +49,13 @@ export function ThreadRow({ row }: ThreadRowProps) {
           <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-ink-2">
             {PLATFORM_LABEL[row.platform]}
           </span>
+          {row.personInferredName && row.personId ? (
+            <NameSuggestionPill
+              personId={row.personId}
+              inferredName={row.personInferredName}
+              onChanged={() => onPersonChanged?.()}
+            />
+          ) : null}
         </span>
         <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>
       </span>

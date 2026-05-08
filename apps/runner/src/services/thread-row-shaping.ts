@@ -35,6 +35,7 @@ export interface ThreadRowSource {
   person: {
     id: string;
     displayName: string;
+    inferredName: string | null;
     platform: PlatformName;
     avatarUrl: string | null;
   };
@@ -47,6 +48,13 @@ export interface ShapedThreadRow {
   id: string;
   personId: string;
   personName: string;
+  /**
+   * Heuristic name guess for personas with phone/email displayNames
+   * (iMessage). The dashboard shows "Maybe …" with confirm/edit/dismiss
+   * actions. Null when the displayName is already a real name (LinkedIn)
+   * or when no inference matched.
+   */
+  personInferredName: string | null;
   personAvatarUrl: string | null;
   platform: PlatformName;
   preview: string;
@@ -180,6 +188,7 @@ export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
     id: source.id,
     personId: source.personId,
     personName: source.person.displayName,
+    personInferredName: source.person.inferredName ?? null,
     personAvatarUrl: source.person.avatarUrl ?? null,
     platform: source.platform,
     preview: previewText,

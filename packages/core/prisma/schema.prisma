@@ -68,6 +68,12 @@ model Platform {
 model Person {
   id          String   @id @default(cuid())
   displayName String
+  // For platforms that don't expose a real name (iMessage stores phone
+  // numbers / emails), we run a heuristic over outbound greetings ("Hi
+  // Marianne") to guess one. Surfaced in the dashboard as a "Maybe …"
+  // suggestion the operator can confirm into displayName, edit, or
+  // reject. Cleared once the operator promotes or dismisses it.
+  inferredName String?
   handle      String?
   platform    PlatformName
   profileUrl  String?

@@ -549,6 +549,7 @@ async function loadVisibleThreadRows(options?: {
         select: {
           id: true,
           displayName: true,
+          inferredName: true,
           platform: true,
           avatarUrl: true
         }
@@ -2835,6 +2836,60 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
     summary,
     starters
   });
+}));
+
+// Promote / edit / dismiss the heuristic name suggestion. The runner
+// guesses a contact's first name from outbound greetings ("Hi Marianne")
+// when a Person's displayName is just a phone or email; the dashboard
+// surfaces it as a "Maybe …" pill with confirm / edit / reject actions
+// that hit this endpoint.
+//
+//   action: "confirm"  → set displayName = inferredName, clear inferredName
+//   action: "rename"   → set displayName = <name>, clear inferredName
+//   action: "dismiss"  → clear inferredName (keep displayName as-is)
+app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({
+      action: z.enum(["confirm", "rename", "dismiss"]),
+      name: z.string().trim().min(1).max(120).optional()
+    })
+    .parse(req.body ?? {});
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  if (payload.action === "confirm") {
+    if (!person.inferredName) {
+      res.status(409).json({ error: "no inferred name to confirm" });
+      return;
+    }
+    const updated = await prisma.person.update({
+      where: { id: personId },
+      data: { displayName: person.inferredName, inferredName: null }
+    });
+    res.json({ status: "ok", displayName: updated.displayName });
+    return;
+  }
+  if (payload.action === "rename") {
+    if (!payload.name) {
+      res.status(400).json({ error: "name is required for rename" });
+      return;
+    }
+    const updated = await prisma.person.update({
+      where: { id: personId },
+      data: { displayName: payload.name, inferredName: null }
+    });
+    res.json({ status: "ok", displayName: updated.displayName });
+    return;
+  }
+  // dismiss
+  await prisma.person.update({
+    where: { id: personId },
+    data: { inferredName: null }
+  });
+  res.json({ status: "ok" });
 }));
 
 app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {

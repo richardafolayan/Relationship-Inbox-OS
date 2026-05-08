@@ -4,6 +4,13 @@ export interface InboxRow {
   id: string;
   personId?: string;
   personName: string;
+  /**
+   * Heuristic name guess from outbound greetings ("Hi Marianne") for
+   * personas whose displayName is just a phone or email (iMessage). Null
+   * when the displayName is already a real name. The inbox row renders
+   * "Maybe …" with confirm / edit / dismiss actions.
+   */
+  personInferredName?: string | null;
   personAvatarUrl?: string | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   preview: string;

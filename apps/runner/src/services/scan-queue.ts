@@ -14,6 +14,7 @@ import {
   type ScanCooldownStatus
 } from "./scan-retry-controller";
 import { isLinkedInInFlight } from "./linkedin-inflight-guard";
+import { inferContactName, looksLikeUnresolvedHandle } from "./name-inference";
 import {
   createRunLogger,
   type RunLogger,
@@ -2698,6 +2699,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
             : (thread.firstFullBackfillAt ?? undefined)
       }
     });
+
+    // Heuristic name inference for platforms whose displayName is just a
+    // handle (iMessage = phone/email). Run this after the message rows are
+    // persisted, on threads where the operator hasn't already named the
+    // contact. The inferredName surfaces in the dashboard as a "Maybe …"
+    // suggestion they can confirm into displayName.
+    if (platform === "IMESSAGE" && looksLikeUnresolvedHandle(person.displayName)) {
+      const recentMessages = await prisma.message.findMany({
+        where: { threadId: thread.id },
+        orderBy: { timestamp: "desc" },
+        take: 200,
+        select: { direction: true, text: true }
+      });
+      const guess = inferContactName(
+        recentMessages.map((m) => ({ direction: m.direction, text: m.text }))
+      );
+      if (guess && guess !== person.inferredName) {
+        await prisma.person.update({
+          where: { id: person.id },
+          data: { inferredName: guess }
+        });
+      }
+    }
 
     deps.eventBus.emit({
       type: "THREAD_UPDATED",
