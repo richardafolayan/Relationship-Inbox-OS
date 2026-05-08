@@ -634,6 +634,21 @@ export default function ThreadPage() {
     const platformName = platform ?? thread.platform;
     switch (pending.errorKind) {
       case "AUTH_REQUIRED":
+        if (platformName === "IMESSAGE") {
+          return {
+            label: "Grant Messages access",
+            run: async () => {
+              try {
+                await apiPost("/runner/control/imessage/permission-reset", {});
+                setError(
+                  "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then click retry."
+                );
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Permission reset failed");
+              }
+            }
+          };
+        }
         return {
           label: "Open browser to sign in",
           run: () =>
