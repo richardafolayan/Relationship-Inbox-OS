@@ -37,7 +37,27 @@ const nav: NavItem[] = [
 // affordance for what was a keyboard-only shortcut after the redesign.
 export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: SidebarProps) {
   const pathname = usePathname();
-  const healthy = health?.runnerStatus === "ONLINE";
+  // Three runner states the sidebar can surface, in priority order:
+  //   - unreachable: dashboard couldn't fetch /runner/health (network or
+  //     the runner process is genuinely down) → red dot, "Runner offline".
+  //   - busy:       runner reachable but mid-task (scanning, sending, or
+  //                 draining the enrichment queue) → amber dot, "Runner busy".
+  //   - online:     reachable + idle → green dot, "Runner online".
+  // The previous binary check (runnerStatus === "ONLINE") collapsed busy
+  // into "Runner offline", which read as broken when the runner was
+  // actually working as intended.
+  const runnerLabel: { kind: "online" | "busy" | "offline"; text: string } = (() => {
+    if (!health) return { kind: "offline", text: "Runner offline" };
+    if (health.runnerStatus !== "ONLINE") return { kind: "busy", text: "Runner busy" };
+    if ((health.enrichmentQueue?.total ?? 0) > 0) return { kind: "busy", text: "Runner busy" };
+    return { kind: "online", text: "Runner online" };
+  })();
+  const dotColor =
+    runnerLabel.kind === "online"
+      ? "bg-risk-fresh"
+      : runnerLabel.kind === "busy"
+        ? "bg-risk-waiting"
+        : "bg-risk-overdue";
 
   return (
     <aside className="sticky top-0 z-10 flex h-screen w-[200px] flex-col border-r border-hairline bg-paper py-5 px-3">
@@ -110,13 +130,10 @@ export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: 
           <p className="m-0 truncate text-[12px] font-medium text-ink">Operator</p>
           <p className="m-0 flex items-center gap-[6px] text-[11px] text-ink-3">
             <span
-              className={cn(
-                "h-[6px] w-[6px] rounded-full",
-                healthy ? "bg-risk-fresh" : "bg-risk-overdue"
-              )}
+              className={cn("h-[6px] w-[6px] rounded-full", dotColor)}
               aria-hidden
             />
-            <span>{healthy ? "Runner online" : "Runner offline"}</span>
+            <span>{runnerLabel.text}</span>
           </p>
         </div>
         <ThemeToggle />

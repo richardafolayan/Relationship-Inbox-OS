@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import type { HealthResponse } from "@/lib/types";
 
 // One-line summary of the runner's current state. Hidden when idle so it
@@ -100,6 +100,10 @@ export function SystemStatusBar() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
   const [, setTick] = useState(0);
+  // Per-task cancel-in-flight flag. Switches the cancel button to a
+  // "Cancelling…" label while the runner POST is in flight, then clears
+  // when the next /health poll confirms the task left the active state.
+  const [cancelling, setCancelling] = useState<"scan" | "enrichment" | null>(null);
   const refresh = useCallback(async () => {
     const [healthData, queueData] = await Promise.all([
       apiGet<HealthResponse>("/runner/health").catch(() => null),
@@ -172,6 +176,30 @@ export function SystemStatusBar() {
   const isActive =
     state.kind === "scanning" || state.kind === "sending" || state.kind === "enriching";
 
+  // Cancellable tasks. Sends are intentionally not cancellable from this
+  // bar — they're typically short and partly-mid-network when this state
+  // is shown; aborting risks duplicate sends or an inconsistent thread.
+  // Scans + enrichment-queue drains can be aborted cleanly.
+  const cancelTarget: "scan" | "enrichment" | null =
+    state.kind === "scanning" ? "scan" : state.kind === "enriching" ? "enrichment" : null;
+
+  const onCancel = async () => {
+    if (!cancelTarget || cancelling) return;
+    setCancelling(cancelTarget);
+    try {
+      const path =
+        cancelTarget === "scan" ? "/runner/control/scan/abort" : "/runner/control/enrichment/cancel-pending";
+      await apiPost(path, {});
+      // Trigger an immediate refresh so the bar transitions out of the
+      // active state without waiting for the 3s poll tick.
+      await refreshRef.current();
+    } catch (error) {
+      console.warn("[status-bar] cancel failed", error);
+    } finally {
+      setCancelling(null);
+    }
+  };
+
   return (
     <div
       role="status"
@@ -185,6 +213,16 @@ export function SystemStatusBar() {
           {isActive ? <AnimatedEllipsis /> : null}
         </span>
         {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
+        {cancelTarget ? (
+          <button
+            type="button"
+            onClick={() => void onCancel()}
+            disabled={!!cancelling}
+            className="ml-auto rounded-row border border-hairline bg-paper px-2 py-[2px] font-mono text-[11px] text-ink-3 transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-50"
+          >
+            {cancelling ? "cancelling…" : "cancel"}
+          </button>
+        ) : null}
       </div>
       {isActive ? (
         // The dashboard's color tokens are `var(--ink-2)` etc. — opaque

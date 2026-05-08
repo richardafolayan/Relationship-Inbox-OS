@@ -898,6 +898,30 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
   res.json(next);
 }));
 
+// Cooperative scan abort. Drives the cancel button in the dashboard's
+// system status bar. The scan loop polls `shouldAbort()` between thread
+// iterations and exits cleanly with stopReason="aborted" — safer than
+// killing the browser context mid-DOM-read. Idempotent: calling when no
+// scan is in flight is a no-op.
+app.post("/control/scan/abort", asyncRoute(async (_req, res) => {
+  const wasScanning = scanQueue.isScanning();
+  scanQueue.requestAbort("manual");
+  res.json({ status: wasScanning ? "aborting" : "idle" });
+}));
+
+// Cancel every queued (PENDING + DEFERRED) enrichment job. The currently
+// RUNNING job (if any) is left to finish — killing it mid-page would
+// leave the playwright context in a wedged state, and the next job
+// would likely fail. One outstanding job is acceptable cancel
+// semantics. Returns the count of rows transitioned to FAILED.
+app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
+  const result = await prisma.enrichmentJob.updateMany({
+    where: { status: { in: ["PENDING", "DEFERRED"] } },
+    data: { status: "FAILED", lastError: "cancelled by operator", nextAttemptAt: null }
+  });
+  res.json({ status: "ok", cancelled: result.count });
+}));
+
 app.post("/control/scan", asyncRoute(async (req, res) => {
   const payload = z
     .object({
