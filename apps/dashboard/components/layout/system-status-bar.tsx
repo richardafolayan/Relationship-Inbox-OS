@@ -171,11 +171,15 @@ export function SystemStatusBar() {
         {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
       </div>
       {isActive ? (
+        // The dashboard's color tokens are `var(--ink-2)` etc. — opaque
+        // CSS variables, so Tailwind's `bg-ink-2/30` opacity-channel
+        // syntax doesn't apply (background ends up fully transparent).
+        // Use a solid token + element-level opacity instead.
         <div
           aria-hidden
-          className="pointer-events-none absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden"
+          className="pointer-events-none absolute bottom-0 left-0 right-0 h-[3px] overflow-hidden"
         >
-          <div className="animate-progress-sweep h-full w-[30%] rounded-full bg-ink-2/30" />
+          <div className="animate-progress-sweep h-full w-[30%] rounded-full bg-ink-2 opacity-40" />
         </div>
       ) : null}
     </div>
