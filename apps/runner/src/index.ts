@@ -2795,6 +2795,9 @@ app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
   // the dashboard surfaces in the UI (apiPost prefers `error`).
   const reasonMessages: Record<string, string> = {
     not_found: "We don't have a LinkedIn profile URL for this person yet.",
+    auth_required: "LinkedIn session needs re-authenticating in the runner.",
+    selectors_outdated:
+      "LinkedIn changed their page layout — the profile parser needs an update before enrichment can run.",
     unknown: "LinkedIn profile fetch failed; check the runner logs."
   };
   const message =
