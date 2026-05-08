@@ -88,6 +88,16 @@ button { font: inherit; color: inherit; transition: transform 180ms ease, backgr
 button:active { transform: scale(0.98); }
 ::selection { background: var(--accent-soft); color: var(--accent-ink); }
 
+/* Inline accordion expansion (People page detail panel). Soft fade +
+ * 4px slide so a click reveals the panel without feeling jumpy. The
+ * reduced-motion block below short-circuits this for users who've opted
+ * out — no JS check needed. */
+@keyframes fadeSlideDown {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.animate-accordion-down { animation: fadeSlideDown 220ms ease-out both; }
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
