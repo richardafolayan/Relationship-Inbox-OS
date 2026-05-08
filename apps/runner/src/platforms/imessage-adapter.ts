@@ -99,7 +99,13 @@ export class IMessageAdapter implements PlatformAdapter {
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
     const db = this.getDb();
-    const rows = db.fetchMessages(thread.platformThreadId, limit);
+    // chat.db is on-disk and cheap to query, so we ignore the platform-agnostic
+    // limit (which targets LinkedIn's tiny `maxMessagesPerThread` cap of 15)
+    // and always pull a generous window. The dashboard paginates from our
+    // persisted message rows, so a deeper backfill on first scan unlocks
+    // proper scroll-back without re-scanning.
+    const effectiveLimit = Math.max(limit, 500);
+    const rows = db.fetchMessages(thread.platformThreadId, effectiveLimit);
     return rows.map((r) => ({
       platformMessageKey: r.guid,
       direction: r.direction,

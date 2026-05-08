@@ -12,12 +12,19 @@ import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 type FilterMode = "all" | "unread" | "needs_reply" | "genuine";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
 
 const FILTERS: { key: FilterMode; label: string }[] = [
   { key: "all", label: "All" },
   { key: "unread", label: "Unread" },
   { key: "needs_reply", label: "Needs reply" },
   { key: "genuine", label: "Genuine" }
+];
+
+const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
+  { key: "all", label: "All platforms" },
+  { key: "LINKEDIN", label: "LinkedIn" },
+  { key: "IMESSAGE", label: "iMessage" }
 ];
 
 function applyFilter(row: InboxRow, mode: FilterMode): boolean {
@@ -33,6 +40,11 @@ function applyFilter(row: InboxRow, mode: FilterMode): boolean {
   }
 }
 
+function applyPlatformFilter(row: InboxRow, platform: PlatformFilter): boolean {
+  if (platform === "all") return true;
+  return row.platform === platform;
+}
+
 export default function InboxPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
@@ -42,6 +54,7 @@ export default function InboxPage() {
   const [loaded, setLoaded] = useState(false);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterMode>("all");
+  const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
 
   const refresh = useCallback(async () => {
     const [inbox, platformRows, logRows] = await Promise.all([
@@ -72,6 +85,7 @@ export default function InboxPage() {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return allRows.filter((row) => {
+      if (!applyPlatformFilter(row, platformFilter)) return false;
       if (!applyFilter(row, filter)) return false;
       if (!q) return true;
       return (
@@ -79,7 +93,7 @@ export default function InboxPage() {
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, filter]);
+  }, [allRows, query, filter, platformFilter]);
 
   const overdue = useMemo(() => visible.filter((r) => r.riskLevel === "RED"), [visible]);
   const waiting = useMemo(() => visible.filter((r) => r.riskLevel === "AMBER"), [visible]);
@@ -138,6 +152,16 @@ export default function InboxPage() {
             </button>
           ))}
         </div>
+        <select
+          value={platformFilter}
+          onChange={(e) => setPlatformFilter(e.target.value as PlatformFilter)}
+          className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
+          aria-label="Filter by platform"
+        >
+          {PLATFORM_FILTERS.map((p) => (
+            <option key={p.key} value={p.key}>{p.label}</option>
+          ))}
+        </select>
       </div>
 
       {degraded ? (
