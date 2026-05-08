@@ -223,7 +223,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
         </section>
       ) : null}
 
-      {!enrichment ? (
+      {!enrichment && person.platform === "LINKEDIN" ? (
         <p className="text-[13px] text-ink-3">
           {person.profileUrl
             ? "Not enriched yet. Use rescan to fetch the LinkedIn profile."
