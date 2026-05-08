@@ -6,6 +6,7 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { HealthResponse, InboxResponse, PlatformCard, ThreadResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { normalizePreview } from "@/lib/preview";
 import { Button } from "@/components/ui/button";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
@@ -228,7 +229,7 @@ export default function TodayPage() {
   const heroHeadlineRaw =
     heroSummary && heroSummary.id === hero?.id && heroSummary.summary
       ? heroSummary.summary
-      : hero?.preview ?? "";
+      : normalizePreview(hero?.preview);
   const heroHeadline = (() => {
     if (!heroHeadlineRaw) return "";
     const firstSentence = heroHeadlineRaw.split(/(?<=[.!?])\s+/)[0] ?? heroHeadlineRaw;
@@ -313,7 +314,7 @@ export default function TodayPage() {
               </span>
             </div>
             <p className="m-0 mb-7 max-w-[58ch] text-balance border-l-2 border-hairline-strong pl-4 text-[17px] leading-[1.55] text-ink-2">
-              {hero.preview}
+              {normalizePreview(hero.preview)}
             </p>
             <div
               className="relative flex items-center gap-[10px]"

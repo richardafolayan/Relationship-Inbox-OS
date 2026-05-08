@@ -8,6 +8,7 @@ import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/
 import { ThreadRow } from "@/components/common/thread-row";
 import { Button } from "@/components/ui/button";
 import { PLATFORM_LABEL } from "@/lib/risk";
+import { normalizePreview } from "@/lib/preview";
 
 // At-risk = inbox filtered to overdue + waiting. Same shell as Inbox; we
 // just drop the "fresh" bucket. Adds Reply Focus Mode (one-thread-at-a-time
@@ -245,8 +246,8 @@ export default function AtRiskPage() {
                 </h3>
                 <p className="m-0 mb-6 line-clamp-[6] text-[14px] leading-relaxed text-ink-2">
                   {focusThread.lastMessageDirection === "OUT"
-                    ? `You: ${focusThread.preview}`
-                    : focusThread.preview}
+                    ? `You: ${normalizePreview(focusThread.preview)}`
+                    : normalizePreview(focusThread.preview)}
                 </p>
                 {focusError ? (
                   <p className="mb-3 font-mono text-[11px] text-risk-overdue">{focusError}</p>

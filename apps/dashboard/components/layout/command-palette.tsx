@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api";
 import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
+import { normalizePreview } from "@/lib/preview";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -53,12 +54,15 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         }
       }
     ];
-    const threadItems: PaletteItem[] = threads.map((thread) => ({
-      id: `thread-${thread.id}`,
-      label: `${thread.personName} — ${thread.preview.slice(0, 60)}${thread.preview.length > 60 ? "…" : ""}`,
-      glyph: PLATFORM_LABEL[thread.platform],
-      run: () => router.push(`/thread/${thread.id}`)
-    }));
+    const threadItems: PaletteItem[] = threads.map((thread) => {
+      const preview = normalizePreview(thread.preview);
+      return {
+        id: `thread-${thread.id}`,
+        label: `${thread.personName} — ${preview.slice(0, 60)}${preview.length > 60 ? "…" : ""}`,
+        glyph: PLATFORM_LABEL[thread.platform],
+        run: () => router.push(`/thread/${thread.id}`)
+      };
+    });
     const all = [...pages, ...threadItems];
     if (!query.trim()) return all.slice(0, 8);
     return all.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
