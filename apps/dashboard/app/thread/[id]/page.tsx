@@ -182,6 +182,7 @@ export default function ThreadPage() {
 
   const [thread, setThread] = useState<ThreadResponse | null>(null);
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
+  const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
@@ -872,14 +873,16 @@ export default function ThreadPage() {
   // bouncing to /today. Sort RED → AMBER → GREEN, then by recency.
   const siblingRows = useMemo(() => {
     const order: Record<"RED" | "AMBER" | "GREEN", number> = { RED: 0, AMBER: 1, GREEN: 2 };
-    return [...siblings].sort((a, b) => {
-      const riskDiff = (order[a.riskLevel] ?? 3) - (order[b.riskLevel] ?? 3);
-      if (riskDiff !== 0) return riskDiff;
-      const aAt = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
-      const bAt = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
-      return bAt - aAt;
-    });
-  }, [siblings]);
+    return [...siblings]
+      .filter((row) => siblingPlatform === "all" || row.platform === siblingPlatform)
+      .sort((a, b) => {
+        const riskDiff = (order[a.riskLevel] ?? 3) - (order[b.riskLevel] ?? 3);
+        if (riskDiff !== 0) return riskDiff;
+        const aAt = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+        const bAt = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+        return bAt - aAt;
+      });
+  }, [siblings, siblingPlatform]);
 
   // Force-scroll-to-bottom when switching threads.
   useEffect(() => {
@@ -985,9 +988,21 @@ export default function ThreadPage() {
       {/* ───── Sibling-thread list ───── */}
       <aside className="hidden h-full min-h-0 flex-col overflow-y-auto border-r border-hairline bg-paper-2/30 lg:flex">
         <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-4 py-4">
-          <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            Threads
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+              Threads
+            </p>
+            <select
+              value={siblingPlatform}
+              onChange={(e) => setSiblingPlatform(e.target.value as "all" | "LINKEDIN" | "IMESSAGE")}
+              className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
+              aria-label="Filter sibling threads by platform"
+            >
+              <option value="all">All</option>
+              <option value="LINKEDIN">LinkedIn</option>
+              <option value="IMESSAGE">iMessage</option>
+            </select>
+          </div>
         </div>
         <ul className="m-0 list-none space-y-[2px] p-2">
           {siblingRows.map((row) => {
