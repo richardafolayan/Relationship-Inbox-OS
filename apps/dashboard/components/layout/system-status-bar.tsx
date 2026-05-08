@@ -150,27 +150,68 @@ export function SystemStatusBar() {
     }
   })();
 
+  // Active states (scan in flight, send in flight) get a thin
+  // indeterminate progress sweep + animated trailing dots so the operator
+  // can tell at a glance the runner is still working. send_failed /
+  // send_succeeded are terminal — no animation.
+  const isActive = state.kind === "scanning" || state.kind === "sending";
+
   return (
     <div
       role="status"
       aria-live="polite"
-      className="flex items-center gap-3 border-b border-hairline bg-paper px-12 py-2 font-mono text-[12px] text-ink-3"
+      className="relative border-b border-hairline bg-paper px-12 py-2 font-mono text-[12px] text-ink-3"
     >
-      <span className={`h-2 w-2 rounded-full ${dot}`} />
-      <span className="text-ink-2">{stateLabel(state)}</span>
-      {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
+      <div className="flex items-center gap-3">
+        <span className={`h-2 w-2 rounded-full ${dot}`} />
+        <span className="text-ink-2">
+          {stateLabel(state)}
+          {isActive ? <AnimatedEllipsis /> : null}
+        </span>
+        {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
+      </div>
+      {isActive ? (
+        <div
+          aria-hidden
+          className="pointer-events-none absolute bottom-0 left-0 right-0 h-[2px] overflow-hidden"
+        >
+          <div className="animate-progress-sweep h-full w-[30%] rounded-full bg-ink-2/30" />
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+// Three dots that pulse in sequence — replaces the inert "…" character so
+// the operator can tell at a glance the task is still running and not
+// stuck. Each dot has a staggered delay so they fade in like a wave.
+function AnimatedEllipsis() {
+  return (
+    <span aria-hidden className="ml-[1px] inline-flex">
+      {[0, 200, 400].map((delay) => (
+        <span
+          key={delay}
+          className="animate-pulse-dot"
+          style={{ animationDelay: `${delay}ms` }}
+        >
+          .
+        </span>
+      ))}
+    </span>
   );
 }
 
 function stateLabel(state: StatusBarState): string {
   switch (state.kind) {
     case "scanning":
-      return "Scanning linkedin…";
+      // Trailing "…" is now rendered as <AnimatedEllipsis /> in the JSX so
+      // it pulses; keeping the bare label here lets aria-live announce a
+      // clean string to screen readers.
+      return "Scanning linkedin";
     case "sending":
       return state.blockedByScan
         ? `Send queued — waiting on scan before replying to ${state.personName}`
-        : `Sending reply to ${state.personName}…`;
+        : `Sending reply to ${state.personName}`;
     case "send_failed":
       return `Failed to send to ${state.personName}`;
     case "send_succeeded":
