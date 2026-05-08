@@ -51,6 +51,20 @@ export interface SettingsStore {
   resetSelectorOverride(platform: PlatformName, key: keyof SelectorRegistry): Promise<void>;
   getDemoSeedManifest(): Promise<DemoSeedManifest | null>;
   setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void>;
+  getOperatorProfile(): Promise<OperatorProfile>;
+  updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
+}
+
+/**
+ * Free-text operator self-description that the AI prompts consume so
+ * suggested replies and voice rewrites sound like the operator and stay
+ * within their domain. Distinct from the LinkedIn-derived self snapshot
+ * (which lives behind `SelfProfileService`) — this one is what the
+ * operator types into Settings ("how I write", "things I care about").
+ */
+export interface OperatorProfile {
+  about: string;
+  interests: string;
 }
 
 export interface AiService {
@@ -76,6 +90,18 @@ export interface AiService {
      */
     lastInboundAt?: string | null;
     lastOutboundAt?: string | null;
+    /**
+     * Free-text operator self-description from Settings. When present,
+     * the model uses it to keep replies in-domain (don't promise things
+     * the operator doesn't do; reference shared interests when relevant).
+     */
+    operatorProfile?: OperatorProfile | null;
+    /**
+     * Compressed snapshot of the contact's enrichment (headline, about,
+     * recent posts, experience). When present, replies can ground in
+     * something specific the contact has shared.
+     */
+    contact?: ContactProfileSnapshot | null;
   }): Promise<SuggestedRepliesOutput>;
   transformReply(input: {
     mode: "SHORTEN" | "MAKE_WARMER";
@@ -151,6 +177,16 @@ export interface AiService {
       notes: string | null;
       tags: string[];
     };
+    /**
+     * Free-text operator self-description from Settings. Same purpose as
+     * for generateSuggestedReplies — keeps the rewrite in-domain and
+     * reflective of what the operator actually cares about.
+     */
+    operatorProfile?: OperatorProfile | null;
+    /** Contact's enrichment snapshot — lets the rewrite reference the
+     *  recipient's headline, recent posts, etc. when the operator's intent
+     *  is light on detail. */
+    contact?: ContactProfileSnapshot | null;
   }): Promise<string>;
   /**
    * Suggest up to 3 snooze targets grounded in the conversation. Picks

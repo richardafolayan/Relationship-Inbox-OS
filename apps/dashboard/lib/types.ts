@@ -98,6 +98,16 @@ export interface PersonDetailResponse {
   } | null;
 }
 
+/**
+ * Operator's free-text self-description used by the AI prompts. Matches
+ * runner-side `OperatorProfile`. Both fields are stored as plain strings;
+ * empty string means "not set" (no opinion injected into prompts).
+ */
+export interface OperatorProfile {
+  about: string;
+  interests: string;
+}
+
 export interface PlatformCard {
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
   status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
