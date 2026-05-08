@@ -1,11 +1,14 @@
 import type { AppSettings, PlatformName, SelectorOverrideStore, SelectorRegistry } from "@inbox-os/core";
 import { defaultSettings } from "@inbox-os/core";
 import { prisma } from "../db";
-import type { DemoSeedManifest, SettingsStore } from "../types/runtime";
+import type { DemoSeedManifest, OperatorProfile, SettingsStore } from "../types/runtime";
 
 const APP_SETTINGS_KEY = "app_settings";
 const SELECTOR_OVERRIDES_KEY = "selector_overrides";
 const DEMO_SEED_MANIFEST_KEY = "demo_seed_manifest";
+const OPERATOR_PROFILE_KEY = "operator_profile_v1";
+
+const emptyOperatorProfile: OperatorProfile = { about: "", interests: "" };
 
 function cloneSettings(settings: AppSettings): AppSettings {
   return {
@@ -172,6 +175,34 @@ export function createSettingsStore(): SettingsStore {
     });
   }
 
+  async function getOperatorProfile(): Promise<OperatorProfile> {
+    const record = await prisma.setting.findUnique({ where: { key: OPERATOR_PROFILE_KEY } });
+    if (!record) return { ...emptyOperatorProfile };
+    try {
+      const parsed = JSON.parse(record.valueJson) as Partial<OperatorProfile>;
+      return {
+        about: typeof parsed.about === "string" ? parsed.about : "",
+        interests: typeof parsed.interests === "string" ? parsed.interests : ""
+      };
+    } catch {
+      return { ...emptyOperatorProfile };
+    }
+  }
+
+  async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
+    const current = await getOperatorProfile();
+    const next: OperatorProfile = {
+      about: typeof partial.about === "string" ? partial.about : current.about,
+      interests: typeof partial.interests === "string" ? partial.interests : current.interests
+    };
+    await prisma.setting.upsert({
+      where: { key: OPERATOR_PROFILE_KEY },
+      update: { valueJson: JSON.stringify(next) },
+      create: { key: OPERATOR_PROFILE_KEY, valueJson: JSON.stringify(next) }
+    });
+    return next;
+  }
+
   return {
     getSettings,
     updateSettings,
@@ -179,6 +210,8 @@ export function createSettingsStore(): SettingsStore {
     saveSelectorOverride,
     resetSelectorOverride,
     getDemoSeedManifest,
-    setDemoSeedManifest
+    setDemoSeedManifest,
+    getOperatorProfile,
+    updateOperatorProfile
   };
 }

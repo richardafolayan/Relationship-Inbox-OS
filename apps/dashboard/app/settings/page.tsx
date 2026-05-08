@@ -1,9 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
-import type { AppSettings, HealthResponse } from "@/lib/types";
+import type { AppSettings, HealthResponse, OperatorProfile } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Canvas, PageHead, QuietRow } from "@/components/common/canvas";
@@ -41,6 +41,14 @@ export default function SettingsPage() {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // Operator self-description. Two free-text fields the AI prompts read
+  // (apps/runner/src/services/ai.ts → operatorProfileFragment) so suggested
+  // replies and voice rewrites stay in the operator's domain. Saved with
+  // the same debounce-then-PATCH pattern Notes uses on the People page.
+  const [operatorProfile, setOperatorProfile] = useState<OperatorProfile>({ about: "", interests: "" });
+  const [operatorProfileStatus, setOperatorProfileStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
+  const operatorProfileSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Danger-zone reset modal state. Mirrors the main-branch flow: an
   // admin token + literal "RESET" string, both required before the
   // confirm button enables.
@@ -55,12 +63,36 @@ export default function SettingsPage() {
   >(null);
 
   const refreshAll = useCallback(async () => {
-    const [settingsData, aiData] = await Promise.all([
+    const [settingsData, aiData, operatorData] = await Promise.all([
       apiGet<AppSettings>("/runner/data/settings").catch(() => null),
-      apiGet<AiStatus>("/runner/data/ai-status").catch(() => null)
+      apiGet<AiStatus>("/runner/data/ai-status").catch(() => null),
+      apiGet<OperatorProfile>("/runner/data/operator-profile").catch(() => null)
     ]);
     if (settingsData) setSettings(settingsData);
     setAiStatus(aiData);
+    if (operatorData) setOperatorProfile(operatorData);
+  }, []);
+
+  // Tear down the debounce timer if the page unmounts mid-save.
+  useEffect(() => () => {
+    if (operatorProfileSaveTimer.current) clearTimeout(operatorProfileSaveTimer.current);
+  }, []);
+
+  const onOperatorProfileChange = useCallback((field: keyof OperatorProfile, value: string) => {
+    setOperatorProfile((prev) => ({ ...prev, [field]: value }));
+    setOperatorProfileStatus("saving");
+    if (operatorProfileSaveTimer.current) clearTimeout(operatorProfileSaveTimer.current);
+    operatorProfileSaveTimer.current = setTimeout(async () => {
+      try {
+        const next = await apiPost<OperatorProfile>("/runner/control/operator-profile", {
+          [field]: value
+        });
+        setOperatorProfile(next);
+        setOperatorProfileStatus("saved");
+      } catch {
+        setOperatorProfileStatus("error");
+      }
+    }, 600);
   }, []);
 
   useEffect(() => {
@@ -256,6 +288,61 @@ export default function SettingsPage() {
           </Button>
         }
       />
+
+      <section
+        data-testid="operator-profile"
+        className="mt-10 rounded-card border border-hairline bg-paper p-5"
+      >
+        <div className="flex items-baseline justify-between">
+          <div>
+            <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+              About me
+            </p>
+            <p className="mt-1 max-w-[60ch] text-[13px] leading-[1.55] text-ink-2">
+              The AI uses these two boxes when drafting suggested replies and rewriting in your
+              voice. Empty boxes are fine — they just mean nothing extra is added to the prompt.
+            </p>
+          </div>
+          <span
+            className="font-mono text-[11px] text-ink-3"
+            aria-live="polite"
+          >
+            {operatorProfileStatus === "saving"
+              ? "saving…"
+              : operatorProfileStatus === "saved"
+                ? "saved"
+                : operatorProfileStatus === "error"
+                  ? <span className="text-risk-overdue">failed to save</span>
+                  : ""}
+          </span>
+        </div>
+
+        <label className="mt-4 block">
+          <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+            How you write / about you
+          </span>
+          <textarea
+            rows={4}
+            value={operatorProfile.about}
+            onChange={(event) => onOperatorProfileChange("about", event.target.value)}
+            placeholder="e.g. British, peer-to-peer, conversational. I'm a software engineer working on AI relationship tools. I prefer short replies — never use em-dashes or corporate filler."
+            className="mt-2 w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+          />
+        </label>
+
+        <label className="mt-4 block">
+          <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+            Things you care about
+          </span>
+          <textarea
+            rows={4}
+            value={operatorProfile.interests}
+            onChange={(event) => onOperatorProfileChange("interests", event.target.value)}
+            placeholder="e.g. AI agents, developer tooling, music production, climbing. Open to grabbing coffee with people working on similar problems; politely declining sales pitches."
+            className="mt-2 w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+          />
+        </label>
+      </section>
 
       <details
         open={advancedOpen}
