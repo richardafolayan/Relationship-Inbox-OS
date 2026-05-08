@@ -123,6 +123,18 @@ function buildSchedulePresets(now: Date): Array<{ label: string; sub: string; at
   ];
 }
 
+// Convert an ISO timestamp to the "YYYY-MM-DDTHH:mm" format that
+// <input type="datetime-local"> expects. Local timezone — the input is
+// user-facing, so we want the wall-clock time the operator sees in
+// the existing pill, not UTC.
+function toLocalInputValue(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => n.toString().padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 // Format an absolute timestamp for the "scheduled for X" pill — show the
 // weekday/time if it's in the next 7 days, otherwise the full date.
 function formatScheduledFor(iso: string | null | undefined): string {
@@ -220,10 +232,14 @@ export default function ThreadPage() {
   const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
   // Inline edit state for the scheduled-send pill. `editingScheduledId`
   // is the clientSendId of the row currently being edited (null = none),
-  // `editingScheduledDraft` is the working textarea value, and
-  // `savingScheduledId` flips during the runner round-trip.
+  // `editingScheduledDraft` is the working textarea value,
+  // `editingScheduledTime` is the working <input type="datetime-local">
+  // value (local wall-clock, "YYYY-MM-DDTHH:mm"), and `savingScheduledId`
+  // flips during the runner round-trip.
   const [editingScheduledId, setEditingScheduledId] = useState<string | null>(null);
   const [editingScheduledDraft, setEditingScheduledDraft] = useState("");
+  const [editingScheduledTime, setEditingScheduledTime] = useState("");
+  const [originalScheduledTime, setOriginalScheduledTime] = useState("");
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
   const scheduleMenuRef = useRef<HTMLDivElement>(null);
 
@@ -480,15 +496,23 @@ export default function ThreadPage() {
     [refresh, thread]
   );
 
-  const beginEditScheduled = useCallback((clientSendId: string, currentText: string) => {
-    setEditingScheduledId(clientSendId);
-    setEditingScheduledDraft(currentText);
-    setError(null);
-  }, []);
+  const beginEditScheduled = useCallback(
+    (clientSendId: string, currentText: string, currentScheduledFor: string | null) => {
+      const localTime = toLocalInputValue(currentScheduledFor);
+      setEditingScheduledId(clientSendId);
+      setEditingScheduledDraft(currentText);
+      setEditingScheduledTime(localTime);
+      setOriginalScheduledTime(localTime);
+      setError(null);
+    },
+    []
+  );
 
   const cancelEditScheduled = useCallback(() => {
     setEditingScheduledId(null);
     setEditingScheduledDraft("");
+    setEditingScheduledTime("");
+    setOriginalScheduledTime("");
   }, []);
 
   const saveEditScheduled = useCallback(
@@ -496,14 +520,26 @@ export default function ThreadPage() {
       if (!thread) return;
       const text = editingScheduledDraft.trim();
       if (!text) return;
+      // Only include scheduledFor when the operator changed it. Sending
+      // an unchanged "now-ish" datetime risks the runner's
+      // future-only validation rejecting because seconds elapsed
+      // between open + save.
+      const body: { clientSendId: string; text: string; scheduledFor?: string } = {
+        clientSendId,
+        text
+      };
+      if (editingScheduledTime && editingScheduledTime !== originalScheduledTime) {
+        const parsed = new Date(editingScheduledTime);
+        if (Number.isNaN(parsed.getTime())) {
+          setError("Invalid date/time.");
+          return;
+        }
+        body.scheduledFor = parsed.toISOString();
+      }
       setSavingScheduledId(clientSendId);
       try {
-        await apiPost(`/runner/control/thread/${thread.id}/update-send`, {
-          clientSendId,
-          text
-        });
-        setEditingScheduledId(null);
-        setEditingScheduledDraft("");
+        await apiPost(`/runner/control/thread/${thread.id}/update-send`, body);
+        cancelEditScheduled();
         await refresh();
       } catch (saveError) {
         const message =
@@ -513,7 +549,7 @@ export default function ThreadPage() {
         setSavingScheduledId(null);
       }
     },
-    [editingScheduledDraft, refresh, thread]
+    [cancelEditScheduled, editingScheduledDraft, editingScheduledTime, originalScheduledTime, refresh, thread]
   );
 
   // Click-outside / Escape closes the schedule picker. Mirrors the
@@ -1270,9 +1306,15 @@ export default function ThreadPage() {
                   )}
                   <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
                     <Clock className="h-3 w-3" strokeWidth={1.8} />
-                    <span>scheduled · {formatScheduledFor(scheduled.scheduledFor)}</span>
                     {isEditing ? (
                       <>
+                        <span>scheduled ·</span>
+                        <input
+                          type="datetime-local"
+                          value={editingScheduledTime}
+                          onChange={(event) => setEditingScheduledTime(event.target.value)}
+                          className="rounded-row border border-hairline bg-paper px-2 py-[2px] font-mono text-[11px] text-ink outline-none focus:border-ink-2"
+                        />
                         <button
                           type="button"
                           onClick={() => void saveEditScheduled(scheduled.clientSendId)}
@@ -1292,9 +1334,16 @@ export default function ThreadPage() {
                       </>
                     ) : (
                       <>
+                        <span>scheduled · {formatScheduledFor(scheduled.scheduledFor)}</span>
                         <button
                           type="button"
-                          onClick={() => beginEditScheduled(scheduled.clientSendId, scheduled.text)}
+                          onClick={() =>
+                            beginEditScheduled(
+                              scheduled.clientSendId,
+                              scheduled.text,
+                              scheduled.scheduledFor
+                            )
+                          }
                           disabled={isCancelling}
                           className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
                         >
