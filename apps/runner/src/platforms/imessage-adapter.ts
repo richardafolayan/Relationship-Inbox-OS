@@ -141,7 +141,10 @@ export class IMessageAdapter implements PlatformAdapter {
       attachments: r.attachments.map((a) => ({
         type: a.kind,
         manualReview: a.kind === "unknown",
-        rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment"
+        rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
+        guid: a.guid || undefined,
+        kind: a.kind,
+        byteSize: a.totalBytes ?? undefined
       }))
     }));
   }

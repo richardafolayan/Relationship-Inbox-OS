@@ -223,7 +223,16 @@ export interface ThreadMessage {
    */
   sentVia?: "automation" | string | null;
   raw?: Record<string, unknown> | null;
-  attachments: Array<{ type: string; manualReview: boolean; rawLabel?: string }>;
+  attachments: Array<{
+    type: string;
+    manualReview: boolean;
+    rawLabel?: string;
+    /** Stable platform-side id used to fetch the binary (iMessage). */
+    guid?: string;
+    /** Coarse media kind so the dashboard knows which element to render. */
+    kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "unknown";
+    byteSize?: number;
+  }>;
 }
 
 export interface ThreadResponse {

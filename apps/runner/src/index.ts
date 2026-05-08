@@ -22,6 +22,8 @@ import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
+import { IMessageDb } from "./platforms/imessage-db";
+import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
@@ -819,6 +821,45 @@ app.get("/artifacts/:type/:name", (req, res) => {
     res.status(400).json({ error: "Invalid artifact name" });
   }
 });
+
+// Stream a Messages.app attachment (photo / voice note / video) to the
+// dashboard. Reads chat.db for the file path and serves the bytes from
+// ~/Library/Messages/Attachments. Localhost-only access (the runner
+// already binds 127.0.0.1) gates this to the operator's machine.
+app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
+  if (!runnerConfig.imessage.enabled) {
+    res.status(503).json({ error: "iMessage adapter not enabled" });
+    return;
+  }
+  const { guid } = z.object({ guid: z.string().min(8).max(100) }).parse(req.params);
+  let db: IMessageDb;
+  try {
+    db = new IMessageDb(runnerConfig.imessage.dbPath);
+  } catch {
+    res.status(503).json({ error: "cannot open chat.db (Full Disk Access?)" });
+    return;
+  }
+  try {
+    const meta = db.findAttachmentByGuid(guid);
+    if (!meta) {
+      res.status(404).json({ error: "attachment not found in chat.db" });
+      return;
+    }
+    if (!meta.absolutePath) {
+      res.status(404).json({ error: "attachment file path unresolved" });
+      return;
+    }
+    await streamIMessageAttachment({
+      absolutePath: meta.absolutePath,
+      mimeType: meta.mimeType,
+      transferName: meta.transferName,
+      filename: meta.filename,
+      res
+    });
+  } finally {
+    db.close();
+  }
+}));
 
 app.get("/data/settings", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();

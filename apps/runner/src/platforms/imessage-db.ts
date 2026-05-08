@@ -179,6 +179,39 @@ export class IMessageDb {
     }
   }
 
+  /**
+   * Look up a single attachment by its chat.db guid. Used by the runner's
+   * /data/imessage-attachment/:guid endpoint so the dashboard can stream
+   * inline photos / voice notes / videos. Returns the resolved absolute
+   * path to the file on disk along with mime info and our coarse kind.
+   */
+  findAttachmentByGuid(guid: string): { absolutePath: string | null; mimeType: string | null; transferName: string | null; filename: string | null; totalBytes: number | null; kind: IMessageAttachment["kind"] } | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT filename, mime_type AS mimeType, transfer_name AS transferName, total_bytes AS totalBytes
+           FROM attachment WHERE guid = ? LIMIT 1`
+      )
+      .get(guid) as
+        | { filename: string | null; mimeType: string | null; transferName: string | null; totalBytes: number | bigint | null }
+        | undefined;
+    if (!row) return undefined;
+    const home = process.env.HOME ?? "";
+    const raw = row.filename ?? "";
+    const absolutePath = raw.startsWith("~")
+      ? raw.replace(/^~/, home)
+      : raw.startsWith("/")
+        ? raw
+        : null;
+    return {
+      absolutePath,
+      mimeType: row.mimeType,
+      transferName: row.transferName,
+      filename: row.filename,
+      totalBytes: row.totalBytes === null ? null : Number(row.totalBytes),
+      kind: classifyAttachment(row.mimeType, row.transferName, row.filename)
+    };
+  }
+
   walMtimeKey(): string {
     // Caller can stat() chat.db-wal externally; this stub returns the
     // configured path so the adapter can build the wal path in one place.

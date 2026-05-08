@@ -31,6 +31,17 @@ export interface AttachmentPlaceholder {
   type: string;
   manualReview: boolean;
   rawLabel?: string;
+  /**
+   * Stable platform-side identifier the dashboard can use to fetch the
+   * actual file (e.g. iMessage attachment guid). Optional because most
+   * platforms either don't expose this or aren't supported for inline
+   * media yet.
+   */
+  guid?: string;
+  /** Coarse media kind, when known. iMessage adapter populates this. */
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "unknown";
+  /** byte size, when known. Used by the dashboard to skip huge files. */
+  byteSize?: number;
 }
 
 export interface NormalizedMessage {

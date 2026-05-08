@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid";
 import { ChevronDown, ChevronLeft, Clock, Loader2, Send, Sparkles } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
+import { IMessageMedia } from "@/components/thread/imessage-media";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -1257,15 +1258,36 @@ export default function ThreadPage() {
                     <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
                       {senderLabel}
                     </span>
-                    <div
-                      className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
-                        message.direction === "OUT"
-                          ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
-                          : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
-                      }`}
-                    >
-                      {message.text}
-                    </div>
+                    {(() => {
+                      const playableAttachments = (message.attachments ?? []).filter(
+                        (a) => a.guid && a.kind && a.kind !== "unknown"
+                      );
+                      const hasInlineMedia = playableAttachments.length > 0;
+                      const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
+                      // When the bubble is purely an attachment, drop the
+                      // "[Photo]" label since the inline media is now visible.
+                      const showText = !(hasInlineMedia && isAttachmentOnlyText);
+                      return (
+                        <div
+                          className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
+                            message.direction === "OUT"
+                              ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+                              : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                          }`}
+                        >
+                          {hasInlineMedia ? (
+                            <div className="flex flex-col gap-2">
+                              {playableAttachments.map((a, attIdx) => (
+                                <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                              ))}
+                            </div>
+                          ) : null}
+                          {showText ? (
+                            <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                     <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
                       <span>{formatClock(message.timestamp)}</span>
                       {/* Honest "Sent via automation ✓" — only shown when
