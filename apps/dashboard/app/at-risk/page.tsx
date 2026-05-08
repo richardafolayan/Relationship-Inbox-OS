@@ -100,17 +100,21 @@ export default function AtRiskPage() {
     advance();
   };
 
+  // Inline error surface in the redesign's mono-caption style — used when
+  // the initial /data/inbox load fails outright (no rows to render against).
   if (error && !data) {
     return (
-      <div className="space-y-4">
-        <div>
-          <h2 className="text-2xl font-semibold">At Risk</h2>
-        </div>
-        <Card className="border-rose-200 bg-rose-50/60">
-          <p className="text-sm font-semibold text-rose-900">Could not load at-risk threads</p>
-          <p className="mt-1 text-sm text-rose-800">{error}</p>
-        </Card>
-      </div>
+      <Canvas>
+        <PageHead
+          eyebrow="Needs you"
+          title="At risk"
+          subtitle="Threads breaching your reply SLA. Clear these first to stop relationships going cold."
+        />
+        <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-risk-overdue">
+          Could not load at-risk threads
+        </p>
+        <p className="font-mono text-[12px] text-ink-3">{error}</p>
+      </Canvas>
     );
   }
 
