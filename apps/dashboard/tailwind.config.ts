@@ -9,21 +9,35 @@ const config: Config = {
   theme: {
     extend: {
       colors: {
-        bg: "#f7f8fb",
-        surface: "#ffffff",
-        border: "#e2e8f0",
-        accent: "#2563eb",
-        accentSoft: "#eff6ff",
-        successSoft: "#ecfdf3",
-        warningSoft: "#fffbeb",
-        dangerSoft: "#fff1f2"
+        paper: "var(--paper)",
+        "paper-2": "var(--paper-2)",
+        "paper-3": "var(--paper-3)",
+        ink: "var(--ink)",
+        "ink-2": "var(--ink-2)",
+        "ink-3": "var(--ink-3)",
+        "ink-4": "var(--ink-4)",
+        hairline: "var(--hairline)",
+        "hairline-strong": "var(--hairline-strong)",
+        accent: "var(--accent)",
+        "accent-soft": "var(--accent-soft)",
+        "accent-ink": "var(--accent-ink)",
+        "risk-overdue": "var(--risk-overdue)",
+        "risk-waiting": "var(--risk-waiting)",
+        "risk-fresh": "var(--risk-fresh)"
+      },
+      fontFamily: {
+        display: "var(--font-display)",
+        text: "var(--font-text)",
+        mono: "var(--font-mono)"
       },
       borderRadius: {
-        xl2: "1rem",
-        xl3: "1.25rem"
+        card: "var(--radius-card)",
+        row: "var(--radius-row)",
+        pill: "var(--radius-pill)"
       },
       boxShadow: {
-        soft: "0 1px 2px rgba(15,23,42,0.06), 0 6px 16px rgba(15,23,42,0.05)"
+        card: "var(--shadow-card)",
+        pop: "var(--shadow-pop)"
       },
       transitionDuration: {
         calm: "180ms"

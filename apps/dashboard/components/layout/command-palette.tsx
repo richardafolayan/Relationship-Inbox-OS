@@ -1,103 +1,130 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Search } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api";
 import type { InboxResponse } from "@/lib/types";
-import { Input } from "@/components/ui/input";
-import { Button } from "@/components/ui/button";
+import { PLATFORM_LABEL } from "@/lib/risk";
 
 interface CommandPaletteProps {
   open: boolean;
   onClose: () => void;
 }
 
+interface PaletteItem {
+  id: string;
+  label: string;
+  glyph: string;
+  run: () => void;
+}
+
+// ⌘K palette. Replaces the topbar's search and the old "run scan now"
+// command rail. Two kinds of entries: page jumps and thread jumps.
+// Esc closes (this is wired in app-shell so it also closes any open thread).
 export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
+  const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
-    if (!open) {
-      return;
-    }
-
-    void apiGet<InboxResponse>("/runner/data/inbox").then((data) => setThreads(data.rows.slice(0, 30)));
+    if (!open) return;
+    setQuery("");
+    setActiveIndex(0);
+    void apiGet<InboxResponse>("/runner/data/inbox")
+      .then((data) => setThreads(data.rows.slice(0, 30)))
+      .catch(() => undefined);
   }, [open]);
 
-  const commands = useMemo(() => {
-    const core = [
+  const items: PaletteItem[] = useMemo(() => {
+    const pages: PaletteItem[] = [
+      { id: "today", label: "Go to Today", glyph: "↵", run: () => router.push("/today") },
+      { id: "inbox", label: "Go to Inbox", glyph: "↵", run: () => router.push("/inbox") },
+      { id: "people", label: "Go to People", glyph: "↵", run: () => router.push("/people") },
+      { id: "platforms", label: "Go to Platforms", glyph: "↵", run: () => router.push("/platforms") },
+      { id: "logs", label: "Go to Activity", glyph: "↵", run: () => router.push("/logs") },
+      { id: "settings", label: "Go to Settings", glyph: "↵", run: () => router.push("/settings") },
       {
-        id: "scan",
-        title: "Run scan now",
-        action: async () => {
-          await apiPost("/runner/control/scan", {});
-        }
-      },
-      {
-        id: "platforms",
-        title: "Open Platforms",
-        action: async () => {
-          router.push("/platforms");
-        }
-      },
-      {
-        id: "inbox",
-        title: "Open Inbox",
-        action: async () => {
-          router.push("/inbox");
+        id: "scan-now",
+        label: "Run scan now",
+        glyph: "scan",
+        run: () => {
+          void apiPost("/runner/control/scan", {}).catch(() => undefined);
         }
       }
     ];
-
-    const threadCommands = threads.map((thread) => ({
+    const threadItems: PaletteItem[] = threads.map((thread) => ({
       id: `thread-${thread.id}`,
-      title: `Jump to ${thread.personName}`,
-      action: async () => {
-        router.push(`/thread/${thread.id}`);
-      }
+      label: `${thread.personName} — ${thread.preview.slice(0, 60)}${thread.preview.length > 60 ? "…" : ""}`,
+      glyph: PLATFORM_LABEL[thread.platform],
+      run: () => router.push(`/thread/${thread.id}`)
     }));
-
-    const all = [...core, ...threadCommands];
-    if (!query.trim()) {
-      return all;
-    }
-
-    return all.filter((item) => item.title.toLowerCase().includes(query.toLowerCase()));
+    const all = [...pages, ...threadItems];
+    if (!query.trim()) return all.slice(0, 8);
+    return all.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
   }, [query, router, threads]);
 
-  if (!open) {
-    return null;
-  }
+  useEffect(() => {
+    setActiveIndex(0);
+  }, [items]);
+
+  if (!open) return null;
+
+  const onKeyDown = (event: React.KeyboardEvent) => {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveIndex((i) => Math.min(items.length - 1, i + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveIndex((i) => Math.max(0, i - 1));
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const target = items[activeIndex];
+      if (target) {
+        target.run();
+        onClose();
+      }
+    }
+  };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/30 p-8">
-      <div className="mx-auto mt-20 max-w-2xl rounded-2xl border border-slate-200 bg-white p-4 shadow-2xl">
-        <div className="mb-3 flex items-center gap-2">
-          <Search className="h-4 w-4 text-slate-400" />
-          <Input placeholder="Jump to thread, run scan, open platforms..." value={query} onChange={(event) => setQuery(event.target.value)} />
-          <Button variant="ghost" onClick={onClose}>
-            Close
-          </Button>
-        </div>
-
-        <div className="max-h-[420px] space-y-2 overflow-y-auto">
-          {commands.map((command) => (
-            <button
-              key={command.id}
-              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-left text-sm font-medium text-slate-700 hover:bg-slate-100"
-              onClick={async () => {
-                await command.action();
+    <div
+      className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[18vh] backdrop-blur-md"
+      onClick={onClose}
+    >
+      <div
+        className="w-[min(560px,92vw)] overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <input
+          autoFocus
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          onKeyDown={onKeyDown}
+          placeholder="Search people, pages, or threads…"
+          className="w-full border-0 border-b border-hairline bg-transparent px-5 py-[18px] text-[16px] text-ink outline-none placeholder:text-ink-4"
+        />
+        <ul className="m-0 list-none p-[6px]">
+          {items.map((item, index) => (
+            <li
+              key={item.id}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => {
+                item.run();
                 onClose();
               }}
+              className={`flex cursor-pointer items-center gap-[10px] rounded-[10px] px-[14px] py-[10px] text-[14px] ${
+                index === activeIndex ? "bg-paper-2 text-ink" : "text-ink-2"
+              }`}
             >
-              {command.title}
-            </button>
+              <span className="flex-1 truncate">{item.label}</span>
+              <span className="ml-auto font-mono text-[11px] text-ink-3">{item.glyph}</span>
+            </li>
           ))}
-
-          {!commands.length ? <p className="text-sm text-slate-500">No commands found.</p> : null}
-        </div>
+          {!items.length ? (
+            <li className="px-[14px] py-[10px] text-[14px] text-ink-3">No matches.</li>
+          ) : null}
+        </ul>
       </div>
     </div>
   );

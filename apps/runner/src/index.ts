@@ -1,6 +1,6 @@
 import { createReadStream, existsSync, openSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
@@ -1281,6 +1281,45 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
   }
 }));
 
+app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
+
+  // Look up the failed SendRequest row and re-queue under a fresh
+  // clientSendId. Original row stays in FAILED for receipts; the new
+  // row carries the same text so the operator never has to retype.
+  const original = await prisma.sendRequest.findUnique({
+    where: { clientSendId: payload.clientSendId }
+  });
+  if (!original) {
+    res.status(404).json({ error: "send_request_not_found" });
+    return;
+  }
+  if (original.threadId !== threadId) {
+    res.status(400).json({ error: "thread_mismatch" });
+    return;
+  }
+
+  const newClientSendId = randomUUID();
+  try {
+    const queueResult = await sendQueue.enqueueAndKick({
+      threadId,
+      text: original.requestText,
+      clientSendId: newClientSendId
+    });
+    res.json({ ...queueResult, clientSendId: newClientSendId });
+  } catch (error) {
+    await auditService.log({
+      platform: "LINKEDIN",
+      stage: "Send",
+      action: "SEND_RETRY_FAIL",
+      status: "FAIL",
+      details: { threadId, originalClientSendId: payload.clientSendId, ...summarizeError(error) }
+    });
+    throw error;
+  }
+}));
+
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
@@ -1548,6 +1587,28 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
   const voiceSamples = thread.messages
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
+
+  // Pull other-thread context for the same Person so the AI doesn't
+  // repeat questions already answered elsewhere or contradict prior
+  // tone. Bounded to 5 threads + person notes/tags.
+  const otherThreadsForCompose = await prisma.thread.findMany({
+    where: { personId: thread.personId, id: { not: thread.id }, archivedAt: null },
+    orderBy: { lastMessageAt: "desc" },
+    take: 5,
+    select: { platform: true, lastMessageAt: true, lastMessagePreview: true, whatTheyWant: true }
+  });
+  const relationshipContext = {
+    otherThreadCount: otherThreadsForCompose.length,
+    recentExchanges: otherThreadsForCompose.map((t) => ({
+      platform: t.platform,
+      lastMessageAt: t.lastMessageAt?.toISOString() ?? null,
+      preview: t.lastMessagePreview ?? null,
+      whatTheyWant: t.whatTheyWant ?? null
+    })),
+    notes: thread.person.notes ?? null,
+    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+  };
+
   const text = await aiService.composeInVoice({
     intent: payload.intent,
     displayName: thread.person.displayName,
@@ -1556,7 +1617,8 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
       direction: m.direction as "IN" | "OUT",
       text: m.text,
       timestamp: m.timestamp.toISOString()
-    }))
+    })),
+    relationshipContext
   });
 
   res.json({ text });
@@ -1923,6 +1985,39 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     take: 120
   });
 
+  // Cross-thread relationship memory — last message from each OTHER
+  // thread with the same Person, plus the Person's notes/tags. Powers
+  // the dashboard's memory chip and feeds the AI compose prompts so
+  // drafts don't repeat questions answered in another conversation.
+  const otherThreads = await prisma.thread.findMany({
+    where: {
+      personId: thread.personId,
+      id: { not: thread.id },
+      archivedAt: null
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: 5,
+    select: {
+      id: true,
+      platform: true,
+      lastMessageAt: true,
+      lastMessagePreview: true,
+      whatTheyWant: true
+    }
+  });
+  const relationshipMemory = {
+    otherThreadCount: otherThreads.length,
+    recentExchanges: otherThreads.map((t) => ({
+      threadId: t.id,
+      platform: t.platform,
+      lastMessageAt: t.lastMessageAt?.toISOString() ?? null,
+      preview: t.lastMessagePreview ?? null,
+      whatTheyWant: t.whatTheyWant ?? null
+    })),
+    notes: thread.person.notes ?? null,
+    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+  };
+
   res.json({
     id: thread.id,
     personName: thread.person.displayName,
@@ -1943,6 +2038,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
+    relationshipMemory,
     messages: pageMessages.map((message) => ({
       id: message.id,
       direction: message.direction,
@@ -2496,7 +2592,38 @@ app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
     res.json({ status: "deferred", reason: "scan or send is currently active; enqueued" });
     return;
   }
-  res.status(502).json({ status: "failed", reason: result.reason });
+  // Translate the runner's terse reason codes into operator-readable
+  // messages. The `reason` field stays for telemetry; `error` is what
+  // the dashboard surfaces in the UI (apiPost prefers `error`).
+  const reasonMessages: Record<string, string> = {
+    not_found: "We don't have a LinkedIn profile URL for this person yet.",
+    unknown: "LinkedIn profile fetch failed; check the runner logs."
+  };
+  const message =
+    reasonMessages[result.reason] ?? `Enrichment failed: ${result.reason}`;
+  res.status(502).json({ status: "failed", reason: result.reason, error: message });
+}));
+
+// Manual profile-URL capture. The LinkedIn scan currently doesn't pull a
+// profile URL from the inbox sidebar, so people created from a scan land
+// without one and the enrichment queue can't visit them. This endpoint
+// lets the operator paste a known profile URL onto a person row so the
+// next enrichment run has a target. Mirrors the shape of /control/self/enrich.
+app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({ profileUrl: z.string().url() })
+    .parse(req.body);
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  await prisma.person.update({
+    where: { id: personId },
+    data: { profileUrl: payload.profileUrl, enrichmentFailedReason: null }
+  });
+  res.json({ status: "ok", profileUrl: payload.profileUrl });
 }));
 
 app.post("/control/self/enrich", asyncRoute(async (req, res) => {
@@ -2670,6 +2797,129 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
   }
 }));
 
+/**
+ * Pre-warm the suggested-replies cache for a thread. /today calls this
+ * for the top 3 threads so opening any of them shows AI suggestions
+ * instantly. No-op when the cache is already fresh.
+ */
+app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: { person: true }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "thread_not_found" });
+    return;
+  }
+
+  const lastInbound = await prisma.message.findFirst({
+    where: { threadId, direction: "IN" },
+    orderBy: { timestamp: "desc" },
+    select: { text: true }
+  });
+
+  const aiInputs = {
+    summary: thread.rollingSummary ?? "",
+    whatTheyWant: thread.whatTheyWant ?? "",
+    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    lastInboundMessage: lastInbound?.text ?? "",
+    category: (thread.category as "outreach" | "genuine" | null) ?? null,
+    lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
+    lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null
+  };
+  const lateBucket = (() => {
+    if (!aiInputs.lastInboundAt) return "n";
+    const inboundMs = Date.parse(aiInputs.lastInboundAt);
+    if (!Number.isFinite(inboundMs)) return "n";
+    const outboundMs = aiInputs.lastOutboundAt ? Date.parse(aiInputs.lastOutboundAt) : NaN;
+    if (Number.isFinite(outboundMs) && outboundMs >= inboundMs) return "n";
+    const gapDays = (Date.now() - inboundMs) / (1000 * 60 * 60 * 24);
+    if (gapDays >= 60) return "long";
+    if (gapDays >= 30) return "medium";
+    if (gapDays >= 14) return "short";
+    return "n";
+  })();
+  const cacheKey = createHash("sha256")
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}`)
+    .digest("hex");
+
+  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+    res.json({ status: "cached", cacheKey });
+    return;
+  }
+
+  // Fire and forget — the operator's next /data/thread fetch picks
+  // up the cache once the AI call resolves.
+  void aiService
+    .generateSuggestedReplies(aiInputs)
+    .then(async (generated) => {
+      await prisma.thread.update({
+        where: { id: threadId },
+        data: {
+          suggestedRepliesJson: JSON.stringify(generated),
+          suggestedRepliesCacheKey: cacheKey
+        }
+      });
+      eventBus.emit({
+        type: "SUGGESTED_REPLIES_UPDATED",
+        jobId: uuid(),
+        threadId
+      });
+    })
+    .catch((error) => {
+      console.warn(
+        `[predraft] failed for threadId=${threadId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    });
+
+  res.json({ status: "queued", cacheKey });
+}));
+
+/**
+ * Rewrite a draft in the operator's voice without an explicit intent.
+ * Used by the composer's voice-match indicator: when the local
+ * heuristic flags a draft as low-voice, this endpoint converts the
+ * existing text in place using composeInVoice + the thread's outbound
+ * history. Returned text is voice-rule-cleaned.
+ */
+app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ draft: z.string().min(1).max(5000) }).parse(req.body);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: {
+      person: true,
+      messages: { orderBy: { timestamp: "asc" }, take: 80 }
+    }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+
+  const voiceSamples = thread.messages
+    .filter((m) => m.direction === "OUT")
+    .map((m) => m.text);
+
+  const text = await aiService.composeInVoice({
+    intent: `Rewrite the message below in my voice, preserving the meaning. Keep it about the same length. Message: ${payload.draft}`,
+    displayName: thread.person.displayName,
+    voiceSamples,
+    threadMessages: thread.messages.map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    }))
+  });
+
+  res.json({ text });
+}));
+
 app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
@@ -2714,6 +2964,43 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   });
 
   res.json({ status: "ok" });
+}));
+
+app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: {
+      whatTheyWant: true,
+      rollingSummary: true,
+      lastInboundAt: true,
+      lastInboundHash: true,
+      person: { select: { displayName: true } },
+      messages: {
+        where: { direction: "IN" },
+        orderBy: { timestamp: "desc" },
+        take: 1,
+        select: { text: true, timestamp: true }
+      }
+    }
+  });
+
+  if (!thread) {
+    res.status(404).json({ error: "thread_not_found" });
+    return;
+  }
+
+  const lastInbound = thread.messages[0];
+  const result = await aiService.suggestSnoozeTimings({
+    displayName: thread.person.displayName,
+    lastInboundText: lastInbound?.text ?? "",
+    lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
+    summary: thread.rollingSummary,
+    whatTheyWant: thread.whatTheyWant
+  });
+
+  res.json(result);
 }));
 
 app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {

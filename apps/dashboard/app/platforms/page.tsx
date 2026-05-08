@@ -1,184 +1,69 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { ApiRequestError, apiGet, apiPost, runAction } from "@/lib/api";
-import type {
-  AuditLogRow,
-  PlatformCard,
-  ScanControlBlockedResponse,
-  ScanControlResponse,
-  SelectorTestFailurePayload,
-  SelectorTestSuccessPayload
-} from "@/lib/types";
+import { apiGet, apiPost, runAction } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
+import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { PLATFORM_LABEL } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
-function statusTone(status: PlatformCard["status"]): "green" | "amber" | "red" | "neutral" {
-  if (status === "CONNECTED") {
-    return "green";
-  }
-  if (status === "DEGRADED") {
-    return "amber";
-  }
-  if (status === "ERROR") {
-    return "red";
-  }
-  return "neutral";
-}
+const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
+  LINKEDIN: "Linkedin",
+  INSTAGRAM: "Instagram",
+  TIKTOK: "Tiktok"
+};
 
+// Only platforms whose adapter has been hardened against the live UI are
+// surfaced as actionable rows. Instagram and TikTok still flow through the
+// runner so settings + future work can re-enable them, but the operator
+// shouldn't see them as "Connect" rows on the main view yet.
+const VISIBLE_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["LINKEDIN"];
+const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["INSTAGRAM", "TIKTOK"];
+
+// Platforms: quiet rows for each platform we ship to operators. Name
+// (title-case display), `last scan Xm ago` mono caption, status pill
+// (dot + word), outlined "Open browser" / "Connect" button. No card
+// wrappers.
 export default function PlatformsPage() {
   const [rows, setRows] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
-  const [receiptsOpen, setReceiptsOpen] = useState(false);
-  const [editingSelector, setEditingSelector] = useState<Record<string, string>>({});
-  const [selectorErrors, setSelectorErrors] = useState<Record<string, SelectorTestFailurePayload | undefined>>({});
-  // scanBlocks entries used to be set on /control/scan failure and cleared
-  // only on the *next* successful scan or thrown error. The "retry in 30s"
-  // toast then sat there forever long after the cooldown actually elapsed.
-  // Now we stamp each entry with an absolute `untilMs` and a 1-second tick
-  // self-clears when the wall clock passes it.
-  const [scanBlocks, setScanBlocks] = useState<
-    Record<string, { response: ScanControlBlockedResponse; untilMs: number } | undefined>
-  >({});
-  const [, setTickNow] = useState<number>(() => Date.now());
   const [actionError, setActionError] = useState<string | null>(null);
+  const [receiptsOpen, setReceiptsOpen] = useState(false);
 
   const refresh = useCallback(async () => {
     const [platforms, logRows] = await Promise.all([
-      apiGet<PlatformCard[]>("/runner/data/platforms"),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
+      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => []),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150").catch(() => [])
     ]);
-    setRows(platforms);
-    setLogs(logRows);
+    setRows(platforms ?? []);
+    setLogs(logRows ?? []);
   }, []);
 
   useEffect(() => {
     void refresh();
-  }, [refresh]);
-
-  // Drive the cooldown countdown re-render and self-clear expired entries.
-  // 1s is fine — these toasts are showing seconds-precision anyway.
-  useEffect(() => {
-    const id = setInterval(() => {
-      const now = Date.now();
-      setTickNow(now);
-      setScanBlocks((prev) => {
-        let changed = false;
-        const next: typeof prev = { ...prev };
-        for (const [platform, entry] of Object.entries(prev)) {
-          if (entry && entry.untilMs <= now) {
-            next[platform] = undefined;
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
-    }, 1000);
-    return () => clearInterval(id);
-  }, []);
-
-  useEffect(() => {
-    const onResync = () => {
-      void refresh();
-    };
-
+    const onResync = () => void refresh();
     window.addEventListener("runner-resync", onResync);
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refresh]);
 
-  const normalizeSelectorError = useCallback((platform: PlatformCard["platform"], error: unknown): SelectorTestFailurePayload => {
-    if (error instanceof ApiRequestError && error.payload && typeof error.payload === "object") {
-      const payload = error.payload as Partial<SelectorTestFailurePayload>;
-      if (payload.ok === false && payload.stage && payload.error && payload.requestId) {
-        return {
-          ok: false,
-          platform: payload.platform ?? platform,
-          stage: payload.stage,
-          error: payload.error,
-          requestId: payload.requestId,
-          reason: payload.reason,
-          receipts: payload.receipts,
-          artifacts: payload.artifacts
-        };
-      }
-    }
-
-    return {
-      ok: false,
-      platform,
-      stage: "persist",
-      error: error instanceof Error ? error.message : String(error),
-      requestId: crypto.randomUUID()
-    };
-  }, []);
-
-  const runSelectorTests = useCallback(
-    async (input: { platform: PlatformCard["platform"]; key?: string; selector?: string }) => {
-      try {
-        await apiPost<SelectorTestSuccessPayload>("/runner/control/platform/test-selectors", input);
-        setSelectorErrors((prev) => ({ ...prev, [input.platform]: undefined }));
-        await refresh();
-      } catch (error) {
-        setSelectorErrors((prev) => ({
-          ...prev,
-          [input.platform]: normalizeSelectorError(input.platform, error)
-        }));
-      }
-    },
-    [normalizeSelectorError, refresh]
-  );
-
-  const runScan = useCallback(
-    async (platform: PlatformCard["platform"]) => {
-      try {
-        const response = await apiPost<ScanControlResponse>("/runner/control/scan", { platform });
-        if (!response.ok && response.blocked) {
-          setScanBlocks((prev) => ({
-            ...prev,
-            [platform]: {
-              response,
-              untilMs: Date.now() + Math.max(0, response.retryAfterSeconds) * 1000
-            }
-          }));
-          return;
-        }
-
-        setScanBlocks((prev) => ({
-          ...prev,
-          [platform]: undefined
-        }));
-        await refresh();
-      } catch {
-        setScanBlocks((prev) => ({
-          ...prev,
-          [platform]: undefined
-        }));
-      }
-    },
-    [refresh]
-  );
-
   return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="text-2xl font-semibold">Platforms</h2>
-        <p className="text-sm text-slate-500">Transparent platform control, selector checks, and session trust signals.</p>
-      </div>
+    <Canvas>
+      <PageHead
+        eyebrow="Connected accounts"
+        title="Platforms"
+        subtitle="Manage browser sessions, run scans, and inspect selector health for each platform."
+      />
 
       {actionError ? (
-        <Card className="border-rose-200 bg-rose-50/60">
-          <p className="text-sm font-semibold text-rose-900">Action failed</p>
-          <p className="mt-1 text-sm text-rose-800">{actionError}</p>
-        </Card>
+        <p className="mb-6 font-mono text-[11px] text-risk-overdue">{actionError}</p>
       ) : null}
 
       {rows
-        .filter((row) => row.status === "DEGRADED")
+        .filter((row) => VISIBLE_PLATFORMS.includes(row.platform) && row.status === "DEGRADED")
         .map((row) => (
           <DegradedBanner
             key={row.platform}
@@ -188,102 +73,132 @@ export default function PlatformsPage() {
             requestId={row.lastScanFailure?.requestId}
             errorSummary={row.lastScanFailure?.errorSummary ?? row.lastError ?? undefined}
             screenshotFile={row.lastScanFailure?.screenshotFile}
-            onOpenReceipts={() => setReceiptsOpen(true)}
-            onRunSelectorTests={() => void runSelectorTests({ platform: row.platform })}
             domDumpFile={
               row.lastScanFailure?.domDumpFile ??
               logs.find((log) => log.platform === row.platform && log.domDumpFile)?.domDumpFile
             }
+            onRunSelectorTests={() =>
+              runAction(
+                apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
+                setActionError,
+                refresh
+              )
+            }
+            onOpenReceipts={() => setReceiptsOpen(true)}
           />
         ))}
 
-      <div className="space-y-4">
-        {rows.map((row) => (
-          <Card key={row.platform}>
-            <div className="flex flex-wrap items-start justify-between gap-4">
+      {rows
+        .filter((row) => VISIBLE_PLATFORMS.includes(row.platform))
+        .map((row) => {
+        const statusClass =
+          row.status === "CONNECTED"
+            ? "bg-risk-fresh/15 text-risk-fresh"
+            : row.status === "DEGRADED"
+              ? "bg-risk-waiting/15 text-risk-waiting"
+              : row.status === "ERROR"
+                ? "bg-risk-overdue/15 text-risk-overdue"
+                : "bg-paper-2 text-ink-3";
+        const label =
+          row.status === "CONNECTED"
+            ? "Connected"
+            : row.status === "DEGRADED"
+              ? "Needs a look"
+              : row.status === "ERROR"
+                ? "Error"
+                : "Not connected";
+        const report = row.latestSelectorReport;
+        const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
+        const total = report?.results.length ?? 0;
+        return (
+          <details
+            key={row.platform}
+            className="group border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
+          >
+            <summary className="grid cursor-pointer list-none grid-cols-[1fr_auto_auto] items-center gap-6">
               <div>
-                <h3 className="text-lg font-semibold">{row.platform}</h3>
-                <div className="mt-1 flex items-center gap-2">
-                  <Badge tone={statusTone(row.status)}>{row.status}</Badge>
-                  <span className="text-sm text-slate-500">Last scan {formatRelative(row.lastScanAt)}</span>
+                <div className="flex items-center gap-3">
+                  <p className="m-0 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">
+                    {PLATFORM_DISPLAY[row.platform]}
+                  </p>
+                  <span
+                    className={`inline-flex items-center rounded-[6px] px-[8px] py-[2px] text-[11px] font-medium uppercase tracking-[0.04em] ${statusClass}`}
+                  >
+                    {label}
+                  </span>
                 </div>
-                {row.lastError && row.status !== "DEGRADED" ? (
-                  <p className="mt-2 text-sm text-rose-600">{row.lastError}</p>
-                ) : null}
-                {(() => {
-                  const block = scanBlocks[row.platform];
-                  if (!block) return null;
-                  const secondsLeft = Math.max(0, Math.ceil((block.untilMs - Date.now()) / 1000));
-                  if (secondsLeft <= 0) return null;
-                  return (
-                    <p className="mt-2 rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-900">
-                      {block.response.reason === "in_flight"
-                        ? `Scan already in flight - retry in ${secondsLeft}s`
-                        : `Cooling down - next retry in ${secondsLeft}s`}
-                    </p>
-                  );
-                })()}
-                <details className="mt-2">
-                  <summary className="cursor-pointer text-xs text-slate-500 marker:text-slate-400">
-                    Profile details
-                  </summary>
-                  <div className="mt-2 space-y-1 text-xs text-slate-500">
-                    <p>Profile: {row.profileDir}</p>
-                    <p>
-                      Browser mode:{" "}
-                      {row.browserProfileMode === "personal"
-                        ? `Personal (${row.browserProfileDirectory ?? "Person 1"}${row.browserProfileName ? `, ${row.browserProfileName}` : ""})`
-                        : "Isolated automation profile"}
-                    </p>
-                    {row.browserProfileMode === "personal" ? (
-                      <>
-                        <p>Sync mode: {row.browserProfileSyncMode ?? "smart"}</p>
-                        <p>Source user-data dir: {row.browserProfileSourceUserDataDir ?? "n/a"}</p>
-                        <p>Launch user-data dir: {row.browserProfileLaunchUserDataDir ?? "n/a"}</p>
-                        <p>Profile resolution: {row.browserProfileResolutionStrategy ?? "n/a"}</p>
-                      </>
-                    ) : null}
-                  </div>
-                </details>
+                <p className="mt-1 font-mono text-[12px] text-ink-3">
+                  {row.lastScanAt ? `last scan ${formatRelative(row.lastScanAt)}` : row.lastError ?? "sign in to enable"}
+                  {report ? ` · selectors ${passes}/${total} passing` : ""}
+                </p>
               </div>
-
-              <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center gap-1 text-[12px] text-ink-3 group-open:text-ink">
+                <span className="hover:text-ink">Profile details ▾</span>
+              </div>
+              <div className="flex flex-wrap items-center gap-2" onClick={(e) => e.preventDefault()}>
                 <Button
-                  variant="primary"
+                  variant="quiet"
+                  onClick={() =>
+                    runActionWithFeedback(
+                      apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+                      {
+                        pending: `Opening ${PLATFORM_DISPLAY[row.platform]}…`,
+                        success: `${PLATFORM_DISPLAY[row.platform]} opened`,
+                        failure: `Couldn't open ${PLATFORM_DISPLAY[row.platform]}`,
+                        setError: setActionError
+                      }
+                    )
+                  }
+                >
+                  {row.status === "CONNECTED" ? "Open browser" : "Connect"}
+                </Button>
+                {row.status === "CONNECTED" ? (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      runAction(
+                        apiPost("/runner/control/platform/connect", { platform: row.platform }),
+                        setActionError,
+                        refresh
+                      )
+                    }
+                  >
+                    Reconnect
+                  </Button>
+                ) : null}
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    runActionWithFeedback(
+                      apiPost("/runner/control/scan", { platform: row.platform }),
+                      {
+                        pending: `Scanning ${PLATFORM_DISPLAY[row.platform]}…`,
+                        success: `${PLATFORM_DISPLAY[row.platform]} scan queued`,
+                        failure: `${PLATFORM_DISPLAY[row.platform]} scan failed`,
+                        setError: setActionError,
+                        onDone: () => refresh()
+                      }
+                    )
+                  }
+                >
+                  Scan now
+                </Button>
+                <Button
+                  variant="ghost"
                   onClick={() =>
                     runAction(
-                      apiPost("/runner/control/platform/connect", { platform: row.platform }),
+                      apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
                       setActionError,
                       refresh
                     )
                   }
                 >
-                  {row.status === "CONNECTED" ? "Reconnect" : "Connect"}
-                </Button>
-                <Button variant="secondary" onClick={() => void runScan(row.platform)}>
-                  Run scan
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() =>
-                    runAction(
-                      apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                      setActionError
-                    )
-                  }
-                >
-                  Open browser window
-                </Button>
-                <Button
-                  variant="secondary"
-                  onClick={() => void runSelectorTests({ platform: row.platform })}
-                >
                   Run selector tests
                 </Button>
                 <Button
-                  variant="danger"
+                  variant="ghost"
                   onClick={() => {
-                    if (!confirm("Reset shared session context for all platforms? This wipes managed profile state.")) {
+                    if (!window.confirm(`Reset the ${PLATFORM_DISPLAY[row.platform]} session? You'll need to sign in again.`)) {
                       return;
                     }
                     runAction(
@@ -293,122 +208,75 @@ export default function PlatformsPage() {
                     );
                   }}
                 >
-                  Reset shared session
+                  Reset session
                 </Button>
               </div>
+            </summary>
+
+            <div className="mt-4 grid grid-cols-2 gap-x-8 gap-y-1 font-mono text-[12px] text-ink-2">
+              <p className="m-0">profile dir <span className="text-ink-3">·</span> <span className="text-ink-3">{row.profileDir}</span></p>
+              {row.browserProfileMode ? (
+                <p className="m-0">browser mode <span className="text-ink-3">·</span> <span className="text-ink-3">{row.browserProfileMode}</span></p>
+              ) : null}
+              {row.browserProfileName ? (
+                <p className="m-0">profile <span className="text-ink-3">·</span> <span className="text-ink-3">{row.browserProfileName}</span></p>
+              ) : null}
+              {row.connectedAt ? (
+                <p className="m-0">connected <span className="text-ink-3">·</span> <span className="text-ink-3">{formatRelative(row.connectedAt)}</span></p>
+              ) : null}
             </div>
 
-            {selectorErrors[row.platform] ? (
-              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
-                <p className="font-semibold">Selector tests failed</p>
-                <p className="mt-1">
-                  Stage: <span className="font-medium">{selectorErrors[row.platform]?.stage}</span>
+            {report ? (
+              <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/50 p-4">
+                <p className="m-0 mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                  Latest selector report · {formatRelative(report.completedAt)}
                 </p>
-                <p className="mt-1">{selectorErrors[row.platform]?.error}</p>
-                {selectorErrors[row.platform]?.reason ? (
-                  <p className="mt-1 text-xs">Reason: {selectorErrors[row.platform]?.reason}</p>
-                ) : null}
-                <p className="mt-1 text-xs">Request ID: {selectorErrors[row.platform]?.requestId}</p>
-                <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-                  {selectorErrors[row.platform]?.artifacts?.screenshot ? (
-                    <a
-                      className="text-rose-700 underline"
-                      href={`/artifacts/screenshots/${selectorErrors[row.platform]?.artifacts?.screenshot}`}
-                      target="_blank" rel="noopener noreferrer"
-                    >
-                      Failure screenshot
-                    </a>
-                  ) : null}
-                  {selectorErrors[row.platform]?.artifacts?.domDump ? (
-                    <a
-                      className="text-rose-700 underline"
-                      href={`/artifacts/dom_dumps/${selectorErrors[row.platform]?.artifacts?.domDump}`}
-                      target="_blank" rel="noopener noreferrer"
-                    >
-                      Failure DOM dump
-                    </a>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
-
-            {row.latestSelectorReport ? (
-              <div className="mt-4 rounded-xl border border-slate-200">
-                <div className="grid grid-cols-[1fr_2fr_1fr_1fr_2fr] gap-2 border-b border-slate-200 px-3 py-2 text-xs font-medium uppercase tracking-wide text-slate-500">
-                  <span>Selector key</span>
-                  <span>Selector</span>
-                  <span>Count</span>
-                  <span>Status</span>
-                  <span>Actions</span>
-                </div>
-                {row.latestSelectorReport.results.map((result) => {
-                  const editKey = `${row.platform}:${result.key}`;
-                  const edited = editingSelector[editKey] ?? result.selector;
-
-                  return (
-                    <div key={result.key} className="grid grid-cols-[1fr_2fr_1fr_1fr_2fr] gap-2 border-b border-slate-100 px-3 py-2 text-sm">
-                      <span className="font-medium text-slate-700">{result.key}</span>
-                      <Input value={edited} onChange={(event) => setEditingSelector((prev) => ({ ...prev, [editKey]: event.target.value }))} />
-                      <span className="text-slate-600">{result.count}</span>
-                      <span>
-                        <Badge tone={result.status === "PASS" ? "green" : "red"}>{result.status}</Badge>
-                      </span>
-                      <div className="flex flex-wrap gap-2">
-                        <Button
-                          variant="ghost"
-                          onClick={() => void runSelectorTests({ platform: row.platform, key: result.key, selector: edited })}
-                        >
-                          Test this selector
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          onClick={() =>
-                            runAction(
-                              apiPost("/runner/control/platform/save-selector-override", {
-                                platform: row.platform,
-                                key: result.key,
-                                selector: edited
-                              }),
-                              setActionError,
-                              refresh
-                            )
-                          }
-                        >
-                          Save override
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          onClick={() =>
-                            runAction(
-                              apiPost("/runner/control/platform/reset-selector-override", {
-                                platform: row.platform,
-                                key: result.key
-                              }),
-                              setActionError,
-                              refresh
-                            )
-                          }
-                        >
-                          Reset to default
-                        </Button>
-                        {result.screenshotFile ? (
-                          <a className="text-xs font-medium text-blue-700 hover:underline" href={`/artifacts/screenshots/${result.screenshotFile}`} target="_blank" rel="noopener noreferrer">
-                            Screenshot
-                          </a>
-                        ) : null}
-                      </div>
-                    </div>
-                  );
-                })}
+                <ul className="m-0 space-y-1 text-[12px]">
+                  {report.results.map((r) => (
+                    <li key={r.key} className="flex items-center gap-2">
+                      <span
+                        className={`h-[6px] w-[6px] rounded-full ${
+                          r.status === "PASS" ? "bg-risk-fresh" : "bg-risk-overdue"
+                        }`}
+                      />
+                      <span className="text-ink-2">{r.key}</span>
+                      <span className="text-ink-3">·</span>
+                      <span className="text-ink-3">{r.count} hits</span>
+                    </li>
+                  ))}
+                </ul>
               </div>
             ) : (
-              <p className="mt-4 text-sm text-slate-500">No selector report yet. Run selector tests to generate one.</p>
+              <p className="mt-4 font-mono text-[12px] text-ink-3">
+                No selector report yet. Run selector tests to generate one.
+              </p>
             )}
-          </Card>
-        ))}
-      </div>
+          </details>
+        );
+      })}
 
-      <ReceiptsDrawer open={receiptsOpen} onClose={() => setReceiptsOpen(false)} rows={logs} title="Platform receipts" />
-    </div>
+      {rows.filter((row) => VISIBLE_PLATFORMS.includes(row.platform)).length === 0 ? (
+        <p className="mt-10 font-mono text-[12px] text-ink-3">No platforms reported by the runner.</p>
+      ) : null}
+
+      <p className="mt-10 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+        <button
+          type="button"
+          onClick={() => setReceiptsOpen(true)}
+          className="hover:text-ink"
+        >
+          open receipts
+        </button>
+        {" · "}
+        {HIDDEN_PLATFORMS.map((p) => PLATFORM_LABEL[p]).join(", ")} coming later
+      </p>
+
+      <ReceiptsDrawer
+        open={receiptsOpen}
+        onClose={() => setReceiptsOpen(false)}
+        rows={logs}
+        title="Platform receipts"
+      />
+    </Canvas>
   );
 }

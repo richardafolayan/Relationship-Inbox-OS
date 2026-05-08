@@ -2,76 +2,122 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Archive, Bell, CircleAlert, Users, Cable, ListChecks, Settings, RefreshCw, Sparkles } from "lucide-react";
+import { Sun, Inbox, AlertTriangle, Archive, Users, Cable, ListChecks, Search, Settings as SettingsIcon } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
-import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
-import { Button } from "@/components/ui/button";
-import { Badge } from "@/components/ui/badge";
 
 interface SidebarProps {
   health: HealthResponse | null;
-  lastScanAt: string | null;
-  onScanNow: () => Promise<void>;
+  attentionCount: number;
+  userInitials: string;
+  onOpenSearch: () => void;
 }
 
-const nav = [
-  { href: "/inbox", label: "Inbox", icon: Bell },
-  { href: "/at-risk", label: "At Risk", icon: CircleAlert },
+interface NavItem {
+  href: string;
+  label: string;
+  icon: typeof Sun;
+  attention?: boolean;
+}
+
+const nav: NavItem[] = [
+  { href: "/today", label: "Today", icon: Sun, attention: true },
+  { href: "/inbox", label: "Inbox", icon: Inbox },
+  { href: "/at-risk", label: "At Risk", icon: AlertTriangle },
   { href: "/archived", label: "Archived", icon: Archive },
   { href: "/people", label: "People", icon: Users },
   { href: "/platforms", label: "Platforms", icon: Cable },
-  { href: "/logs", label: "Activity Log", icon: ListChecks },
-  { href: "/settings", label: "Settings", icon: Settings }
+  { href: "/logs", label: "Activity", icon: ListChecks },
+  { href: "/settings", label: "Settings", icon: SettingsIcon }
 ];
 
-export function Sidebar({ health, lastScanAt, onScanNow }: SidebarProps) {
+// 200px labelled sidebar (per #47). Search is a discoverable button at
+// the top that opens the ⌘K palette — gives operators a visible
+// affordance for what was a keyboard-only shortcut after the redesign.
+export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: SidebarProps) {
   const pathname = usePathname();
+  const healthy = health?.runnerStatus === "ONLINE";
 
   return (
-    <aside className="fixed left-0 top-0 flex h-screen w-[260px] flex-col border-r border-slate-200 bg-white px-4 py-5">
-      <div>
-        <p className="text-xs font-semibold uppercase tracking-[0.12em] text-slate-400">Relationship Inbox OS</p>
-        <h1 className="mt-1 flex items-center gap-2 text-lg font-semibold text-slate-900">
-          <Sparkles className="h-4 w-4 text-blue-600" />
-          Inbox OS
-        </h1>
-      </div>
+    <aside className="sticky top-0 z-10 flex h-screen w-[200px] flex-col border-r border-hairline bg-paper py-5 px-3">
+      <Link
+        href="/today"
+        className="mx-2 mb-6 flex items-center gap-2 text-ink"
+        aria-label="Relationship Inbox OS"
+      >
+        <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-ink font-display text-[14px] font-bold text-paper tracking-[-0.04em]">
+          R
+        </span>
+        <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">Inbox OS</span>
+      </Link>
 
-      <nav className="mt-6 space-y-1">
+      <button
+        type="button"
+        onClick={onOpenSearch}
+        aria-label="Search (⌘K)"
+        className="mx-2 mb-2 flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] tracking-[-0.005em] text-ink-2 transition-[color,background-color] duration-calm hover:bg-paper-2 hover:text-ink"
+      >
+        <Search className="h-[18px] w-[18px]" strokeWidth={1.6} />
+        <span className="flex-1 text-left">Search</span>
+        <span className="font-mono text-[10px] text-ink-3">⌘K</span>
+      </button>
+
+      <nav className="flex flex-col gap-[2px]">
         {nav.map((item) => {
           const Icon = item.icon;
-          const active = pathname.startsWith(item.href);
+          const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
+          const showDot = item.attention && attentionCount > 0;
           return (
             <Link
               key={item.href}
               href={item.href}
               className={cn(
-                "flex items-center gap-2 rounded-lg px-3 py-2 text-sm font-medium transition duration-calm",
-                active ? "bg-blue-50 text-blue-700" : "text-slate-700 hover:bg-slate-100"
+                "relative flex items-center gap-3 rounded-[10px] px-3 py-2 text-[13px] tracking-[-0.005em]",
+                "transition-[color,background-color] duration-calm",
+                active
+                  ? "bg-ink text-paper font-medium"
+                  : "text-ink-2 hover:bg-paper-2 hover:text-ink"
               )}
+              aria-current={active ? "page" : undefined}
             >
-              <Icon className="h-4 w-4" />
-              {item.label}
+              <Icon className="h-[16px] w-[16px] shrink-0" strokeWidth={active ? 2 : 1.6} />
+              <span className="flex-1 truncate">{item.label}</span>
+              {showDot ? (
+                <span
+                  className={cn(
+                    "ml-auto inline-flex min-w-[18px] justify-center rounded-full px-[6px] py-[1px] font-mono text-[10px] font-medium",
+                    active ? "bg-paper text-ink" : "bg-accent/15 text-accent"
+                  )}
+                  aria-label={`${attentionCount} need attention`}
+                >
+                  {attentionCount}
+                </span>
+              ) : null}
             </Link>
           );
         })}
       </nav>
 
-      <div className="mt-auto space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-3">
-        <Button className="w-full" variant="primary" onClick={() => void onScanNow()}>
-          <RefreshCw className="mr-2 h-4 w-4" />
-          Scan now
-        </Button>
-
-        <div className="flex items-center justify-between text-xs text-slate-600">
-          <span>Runner</span>
-          <Badge tone={health?.runnerStatus === "SCANNING" ? "amber" : health?.runnerStatus === "ERROR" ? "red" : "green"}>
-            {health?.runnerStatus ?? "-"}
-          </Badge>
+      <div className="mt-auto flex items-center gap-3 rounded-[10px] border border-hairline bg-paper-2/40 px-3 py-2">
+        <div
+          className="grid h-8 w-8 shrink-0 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[12px] font-semibold text-white"
+          aria-label="Operator avatar"
+        >
+          {userInitials}
         </div>
-
-        <p className="text-xs text-slate-500">Last scan: {formatRelative(lastScanAt)}</p>
+        <div className="min-w-0 flex-1">
+          <p className="m-0 truncate text-[12px] font-medium text-ink">Operator</p>
+          <p className="m-0 flex items-center gap-[6px] text-[11px] text-ink-3">
+            <span
+              className={cn(
+                "h-[6px] w-[6px] rounded-full",
+                healthy ? "bg-risk-fresh" : "bg-risk-overdue"
+              )}
+              aria-hidden
+            />
+            <span>{healthy ? "Runner online" : "Runner offline"}</span>
+          </p>
+        </div>
       </div>
     </aside>
   );

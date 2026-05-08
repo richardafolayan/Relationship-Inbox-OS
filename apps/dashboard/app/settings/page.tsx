@@ -1,24 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
-import type { AppSettings } from "@/lib/types";
-import { Card } from "@/components/ui/card";
+import type { AppSettings, HealthResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-
-const platforms = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
-const aiProviders = ["openai", "glm"] as const;
-const aiProviderLabels: Record<(typeof aiProviders)[number], string> = {
-  openai: "OpenAI",
-  glm: "GLM (Z.AI)"
-};
-
-// How long the "Saved" banner stays before fading out. Long enough to
-// register, short enough to not stick around if the operator is making
-// rapid edits.
-const SAVE_FEEDBACK_MS = 4000;
+import { Canvas, PageHead, QuietRow } from "@/components/common/canvas";
 
 interface AiStatus {
   activeProvider: "openai" | "glm";
@@ -27,411 +15,540 @@ interface AiStatus {
   activeProviderConfigured: boolean;
 }
 
+const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
+const QUIET_HOURS_KEY = "inbox_quiet_hours";
+
+// Settings — leading with the four primary toggles in the calm row
+// pattern (Quiet hours, Auto-scan, Headless browser, Demo data). The
+// advanced surface (scan thresholds, AI provider, danger-zone reset,
+// runner restart) sits behind a quiet expander so it stays out of the
+// way until the operator asks for it.
+const PLATFORMS = ["LINKEDIN", "INSTAGRAM", "TIKTOK"] as const;
+type Platform = (typeof PLATFORMS)[number];
+
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [autoScan, setAutoScan] = useState(false);
+  const [quietHours, setQuietHours] = useState(false);
+  const [autoScanDisabled, setAutoScanDisabled] = useState(false);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  // Inline feedback for the Save button. Without this, clicking Save
-  // gives no signal at all that the runner accepted (or rejected) the
-  // change — operators end up clicking it again to be sure, and any
-  // failure lands silently in the dev console.
-  const [saveStatus, setSaveStatus] = useState<
-    | { kind: "success"; at: number }
-    | { kind: "error"; message: string }
-    | null
-  >(null);
-  const saveStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [showResetModal, setShowResetModal] = useState(false);
+  const [savedAt, setSavedAt] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  // Danger-zone reset modal state. Mirrors the main-branch flow: an
+  // admin token + literal "RESET" string, both required before the
+  // confirm button enables.
+  const [resetOpen, setResetOpen] = useState(false);
   const [resetToken, setResetToken] = useState("");
   const [resetConfirm, setResetConfirm] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
-  const [resetStatus, setResetStatus] = useState<{ type: "success" | "error"; message: string } | null>(null);
+  const [resetStatus, setResetStatus] = useState<
+    | { kind: "success"; message: string }
+    | { kind: "error"; message: string }
+    | null
+  >(null);
 
-  // Refetch both side by side. ai-status is needed alongside settings
-  // so the warning can flag "you've selected GLM but Z_AI_API_KEY is
-  // missing" before the operator wonders why every reply comes back as
-  // the canned default.
-  const refreshAll = () => {
-    void apiGet<AppSettings>("/runner/data/settings").then(setSettings);
-    void apiGet<AiStatus>("/runner/data/ai-status")
-      .then(setAiStatus)
-      .catch(() => setAiStatus(null));
-  };
+  const refreshAll = useCallback(async () => {
+    const [settingsData, aiData] = await Promise.all([
+      apiGet<AppSettings>("/runner/data/settings").catch(() => null),
+      apiGet<AiStatus>("/runner/data/ai-status").catch(() => null)
+    ]);
+    if (settingsData) setSettings(settingsData);
+    setAiStatus(aiData);
+  }, []);
 
   useEffect(() => {
-    refreshAll();
-  }, []);
+    void refreshAll();
+    setAutoScanDisabled(
+      resolveAutoScanDisabled({
+        nodeEnv: process.env.NODE_ENV,
+        disableAutoScan: process.env.NEXT_PUBLIC_DISABLE_AUTOSCAN,
+        legacyDisableAutoScan: process.env.NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN
+      })
+    );
+    setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
+    setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
+  }, [refreshAll]);
 
-  // Clean up the auto-fade timer if the component unmounts mid-fade.
-  useEffect(() => () => {
-    if (saveStatusTimer.current) clearTimeout(saveStatusTimer.current);
-  }, []);
-
-  if (!settings) {
-    return <Card>Loading settings...</Card>;
-  }
-
-  const save = async (partial: Partial<AppSettings>) => {
+  const updateRunner = async (partial: Partial<AppSettings>) => {
     setSaving(true);
-    setSaveStatus(null);
-    if (saveStatusTimer.current) {
-      clearTimeout(saveStatusTimer.current);
-      saveStatusTimer.current = null;
-    }
+    setError(null);
     try {
       const next = await apiPost<AppSettings>("/runner/control/settings", partial);
       setSettings(next);
-      // Re-fetch ai-status so the "key missing" warning reflects the
-      // newly-saved provider — the runner's config doesn't change but
-      // the active provider switching can flip the warning on/off.
+      setSavedAt(Date.now());
+      // Refresh ai-status after settings change so the missing-key warning
+      // reflects the active provider.
       void apiGet<AiStatus>("/runner/data/ai-status")
         .then(setAiStatus)
         .catch(() => undefined);
-      setSaveStatus({ kind: "success", at: Date.now() });
-      saveStatusTimer.current = setTimeout(() => setSaveStatus(null), SAVE_FEEDBACK_MS);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to save settings";
-      // Errors stay until the next save attempt — operator should see
-      // these every time.
-      setSaveStatus({ kind: "error", message });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
     }
   };
 
+  const toggleQuietHours = () => {
+    const next = !quietHours;
+    setQuietHours(next);
+    window.localStorage.setItem(QUIET_HOURS_KEY, next ? "1" : "0");
+    setSavedAt(Date.now());
+  };
+
+  const toggleAutoScan = () => {
+    if (autoScanDisabled) return;
+    const next = !autoScan;
+    setAutoScan(next);
+    window.localStorage.setItem(AUTO_SCAN_KEY, next ? "true" : "false");
+    setSavedAt(Date.now());
+  };
+
+  const toggleHeadless = () => {
+    if (!settings) return;
+    void updateRunner({ headless: !settings.headless });
+  };
+
+  const toggleDemo = () => {
+    if (!settings) return;
+    void updateRunner({ demoMode: !settings.demoMode });
+  };
+
+  const togglePlatform = (platform: Platform) => {
+    if (!settings) return;
+    const enabled = settings.enabledPlatforms.includes(platform);
+    const enabledPlatforms = enabled
+      ? settings.enabledPlatforms.filter((item) => item !== platform)
+      : [...settings.enabledPlatforms, platform];
+    setSettings({ ...settings, enabledPlatforms });
+  };
+
   const closeResetModal = () => {
-    setShowResetModal(false);
+    if (resetBusy) return;
+    setResetOpen(false);
     setResetToken("");
     setResetConfirm("");
-    setResetBusy(false);
   };
 
   const submitLinkedInReset = async () => {
     setResetBusy(true);
     setResetStatus(null);
     try {
-      await apiPost(
+      const result = await apiPost<unknown>(
         "/runner/admin/reset",
-        {
-          platform: "LINKEDIN",
-          confirm: "RESET"
-        },
-        {
-          headers: {
-            "x-admin-reset-token": resetToken
-          }
-        }
+        { platform: "LINKEDIN", confirm: "RESET" },
+        { headers: { "x-admin-reset-token": resetToken } }
       );
       setResetStatus({
-        type: "success",
-        message: "LinkedIn inbox data cleared. Run a fresh scan to rebuild."
+        kind: "success",
+        message: `LinkedIn inbox cleared. ${JSON.stringify(result)}`
       });
-      closeResetModal();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Reset failed";
+      setResetOpen(false);
+      setResetToken("");
+      setResetConfirm("");
+    } catch (err) {
       setResetStatus({
-        type: "error",
-        message
+        kind: "error",
+        message: err instanceof Error ? err.message : "Reset failed"
       });
+    } finally {
       setResetBusy(false);
     }
   };
 
+  const restartRunner = async () => {
+    if (!window.confirm("Restart the runner? Any in-flight scan or send will be cancelled.")) {
+      return;
+    }
+    try {
+      await apiPost("/runner/control/system/restart", {});
+      // The runner exits ~250ms after the 202; poll back up.
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 90_000) {
+        const ok = await apiGet<HealthResponse>("/runner/health")
+          .then(() => true)
+          .catch(() => false);
+        if (ok) {
+          window.location.reload();
+          return;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
+      setError("Runner did not come back within 90s.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Restart failed");
+    }
+  };
+
+  if (!settings) {
+    return (
+      <Canvas>
+        <PageHead
+          eyebrow="Preferences"
+          title="Settings"
+          subtitle="Configure scan cadence, SLAs, and runtime behaviour for the local runner."
+        />
+        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+      </Canvas>
+    );
+  }
+
   return (
-    <div className="space-y-4">
-      <div>
-        <h2 className="text-2xl font-semibold">Settings</h2>
-        <p className="text-sm text-slate-500">Configure scan cadence, SLAs, and runtime behaviour for our local runner.</p>
-      </div>
+    <Canvas>
+      <PageHead
+        eyebrow="Preferences"
+        title="Settings"
+        subtitle="Configure scan cadence, SLAs, and runtime behaviour for the local runner."
+        meta={
+          savedAt && Date.now() - savedAt < 4000 ? (
+            <span className="text-ink">saved</span>
+          ) : null
+        }
+      />
 
-      <Card className="space-y-4">
-        <div>
-          <label className="mb-1 block text-sm font-medium">Scan interval (seconds)</label>
-          <div className="flex items-center gap-2">
-            <input
-              type="range"
-              min={10}
-              max={600}
-              value={settings.scanIntervalSeconds}
-              onChange={(event) => setSettings({ ...settings, scanIntervalSeconds: Number(event.target.value) })}
-              className="w-full"
-            />
+      {error ? (
+        <p className="mb-4 font-mono text-[11px] text-risk-overdue">{error}</p>
+      ) : null}
+
+      <QuietRow
+        name="Quiet hours"
+        stat="after 22:00, mute the sidebar dot"
+        action={
+          <Button variant="quiet" onClick={toggleQuietHours}>
+            {quietHours ? "On" : "Off"}
+          </Button>
+        }
+      />
+      <QuietRow
+        name="Auto-scan"
+        stat={
+          autoScanDisabled
+            ? "disabled by env — restart the dashboard after editing .env"
+            : "every 10 minutes"
+        }
+        action={
+          <Button variant="quiet" disabled={autoScanDisabled} onClick={toggleAutoScan}>
+            {autoScan && !autoScanDisabled ? "On" : "Off"}
+          </Button>
+        }
+      />
+      <QuietRow
+        name="Headless browser"
+        stat="scan invisibly in the background"
+        action={
+          <Button variant="quiet" disabled={saving} onClick={toggleHeadless}>
+            {settings.headless ? "On" : "Off"}
+          </Button>
+        }
+      />
+      <QuietRow
+        name="Demo data"
+        stat="seed sample threads & receipts"
+        action={
+          <Button variant="quiet" disabled={saving} onClick={toggleDemo}>
+            {settings.demoMode ? "On" : "Off"}
+          </Button>
+        }
+      />
+
+      <details
+        open={advancedOpen}
+        onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
+        className="mt-10"
+      >
+        <summary className="cursor-pointer list-none font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3 hover:text-ink">
+          Advanced
+        </summary>
+
+        <div className="mt-6 grid grid-cols-2 gap-4">
+          <label className="block">
+            <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              Scan interval (seconds)
+            </span>
             <Input
               type="number"
-              className="w-28"
+              className="mt-2"
               value={settings.scanIntervalSeconds}
-              onChange={(event) => setSettings({ ...settings, scanIntervalSeconds: Number(event.target.value) })}
+              onChange={(event) =>
+                setSettings({ ...settings, scanIntervalSeconds: Number(event.target.value) })
+              }
             />
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-          <div>
-            <label className="mb-1 block text-sm font-medium">Amber threshold (hours)</label>
+          </label>
+          <label className="block">
+            <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              Waiting threshold (hours)
+            </span>
             <Input
               type="number"
+              className="mt-2"
               value={settings.amberHours}
-              onChange={(event) => setSettings({ ...settings, amberHours: Number(event.target.value) })}
+              onChange={(event) =>
+                setSettings({ ...settings, amberHours: Number(event.target.value) })
+              }
             />
-          </div>
-          <div>
-            <label className="mb-1 block text-sm font-medium">Red threshold (hours)</label>
+          </label>
+          <label className="block">
+            <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              Overdue threshold (hours)
+            </span>
             <Input
               type="number"
+              className="mt-2"
               value={settings.redHours}
-              onChange={(event) => setSettings({ ...settings, redHours: Number(event.target.value) })}
+              onChange={(event) =>
+                setSettings({ ...settings, redHours: Number(event.target.value) })
+              }
             />
-          </div>
+          </label>
+          <label className="block">
+            <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+              Max messages per thread
+            </span>
+            <Input
+              type="number"
+              className="mt-2"
+              value={settings.maxMessagesPerThread}
+              onChange={(event) =>
+                setSettings({ ...settings, maxMessagesPerThread: Number(event.target.value) })
+              }
+            />
+          </label>
         </div>
 
-        <div>
-          <p className="mb-2 text-sm font-medium">Enabled platforms</p>
-          <div className="flex flex-wrap gap-2">
-            {platforms.map((platform) => {
+        <div className="mt-6">
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+            AI provider
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {(["openai", "glm"] as const).map((provider) => {
+              const active = (settings.aiProvider ?? "openai") === provider;
+              const configured = aiStatus?.configuredProviders.includes(provider) ?? true;
+              return (
+                <Button
+                  key={provider}
+                  variant={active ? "primary" : "quiet"}
+                  onClick={() => setSettings({ ...settings, aiProvider: provider })}
+                >
+                  {provider === "openai" ? "OpenAI" : "GLM (Z.AI)"}
+                  {configured ? null : " ·"}
+                </Button>
+              );
+            })}
+          </div>
+          {aiStatus && !aiStatus.activeProviderConfigured ? (
+            <p className="mt-3 font-mono text-[11px] text-risk-overdue">
+              {aiStatus.activeProvider === "glm" ? "GLM" : "OpenAI"} is selected but no API key is
+              configured. Set{" "}
+              <code>{aiStatus.activeProvider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"}</code>{" "}
+              in <code>.env</code> and restart the runner.
+            </p>
+          ) : null}
+        </div>
+
+        <div className="mt-6">
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+            Enabled platforms
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            {PLATFORMS.map((platform) => {
               const active = settings.enabledPlatforms.includes(platform);
               return (
                 <Button
                   key={platform}
-                  variant={active ? "primary" : "secondary"}
-                  onClick={() => {
-                    const enabledPlatforms = active
-                      ? settings.enabledPlatforms.filter((item) => item !== platform)
-                      : [...settings.enabledPlatforms, platform];
-                    setSettings({ ...settings, enabledPlatforms });
-                  }}
+                  variant={active ? "primary" : "quiet"}
+                  onClick={() => togglePlatform(platform)}
                 >
                   {platform}
                 </Button>
               );
             })}
           </div>
-        </div>
-
-        <div>
-          <p className="mb-2 text-sm font-medium">AI provider</p>
-          <div className="flex flex-wrap gap-2">
-            {aiProviders.map((provider) => {
-              const active = (settings.aiProvider ?? "openai") === provider;
-              const configured = aiStatus?.configuredProviders.includes(provider) ?? true;
-              return (
-                <Button
-                  key={provider}
-                  variant={active ? "primary" : "secondary"}
-                  onClick={() => setSettings({ ...settings, aiProvider: provider })}
-                  title={configured ? undefined : `${aiProviderLabels[provider]} has no API key configured. Set ${provider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"} in .env and restart the runner.`}
-                >
-                  {aiProviderLabels[provider]}
-                  {configured ? null : " ⚠"}
-                </Button>
-              );
-            })}
-          </div>
-          <p className="mt-1 text-xs text-slate-500">
-            Active provider for summaries, suggested replies, and the outreach/genuine classifier. The runner default is seeded by AI_PROVIDER in .env; this overrides it without a restart.
+          <p className="mt-2 font-mono text-[11px] text-ink-3">
+            Saved with the rest of advanced settings.
           </p>
-          {/* Loud warning when the active provider has no key. Without
-              this the operator just sees canned default replies coming
-              back forever and has no clue why — a silent fallback in
-              modelJson is the failure mode. */}
-          {aiStatus && !aiStatus.activeProviderConfigured ? (
-            <div className="mt-3 flex items-start gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-              <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
-              <div>
-                <p className="font-medium">
-                  {aiProviderLabels[aiStatus.activeProvider]} is selected but has no API key configured.
-                </p>
-                <p className="mt-1 text-amber-900/80">
-                  Every AI call will fall back to the canned default reply until you set{" "}
-                  <code>{aiStatus.activeProvider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"}</code>{" "}
-                  in <code>.env</code>, then restart the runner so it picks up the new key.
-                </p>
-              </div>
-            </div>
-          ) : null}
+          {/* GLM model input — ported from main. Operators on GLM can
+              override the runner's `Z_AI_MODEL` env default per-account
+              without restarting (e.g. switch between glm-4.7-flash and
+              glm-4.5-flash). The aiStatus warning above already covers
+              the no-key failure mode. */}
           {(settings.aiProvider ?? "openai") === "glm" ? (
             <div className="mt-3">
-              <label className="mb-1 block text-sm font-medium">GLM model (optional)</label>
+              <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                GLM model
+              </p>
               <Input
                 type="text"
                 placeholder="glm-4.7-flash"
                 value={settings.glmModel ?? ""}
                 onChange={(event) => setSettings({ ...settings, glmModel: event.target.value })}
               />
-              <p className="mt-1 text-xs text-slate-500">
+              <p className="mt-1 font-mono text-[11px] text-ink-3">
                 Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.
               </p>
             </div>
           ) : null}
         </div>
 
-        <details className="group rounded-lg border border-slate-200 bg-slate-50 p-3">
-          <summary className="cursor-pointer text-sm font-medium text-slate-700 marker:text-slate-400">
-            Advanced
-          </summary>
-          <div className="mt-3 space-y-3">
-            <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
-              <div>
-                <label className="mb-1 block text-sm font-medium">Max messages per thread</label>
-                <Input
-                  type="number"
-                  value={settings.maxMessagesPerThread}
-                  onChange={(event) => setSettings({ ...settings, maxMessagesPerThread: Number(event.target.value) })}
-                />
-              </div>
-              <div>
-                <label className="mb-1 block text-sm font-medium">Recent thread sweep count</label>
-                <Input
-                  type="number"
-                  value={settings.recentThreadSweepCount}
-                  onChange={(event) => setSettings({ ...settings, recentThreadSweepCount: Number(event.target.value) })}
-                />
-              </div>
-            </div>
-            <Button
-              variant={settings.demoMode ? "primary" : "secondary"}
-              onClick={() => setSettings({ ...settings, demoMode: !settings.demoMode })}
-            >
-              Demo mode: {settings.demoMode ? "On" : "Off"}
-            </Button>
-          </div>
-        </details>
-
-        <div className="flex items-center gap-3">
+        <div className="mt-6 flex items-center gap-3">
           <Button
             variant="primary"
             disabled={saving}
             onClick={() =>
-              void save({
+              void updateRunner({
                 scanIntervalSeconds: settings.scanIntervalSeconds,
                 amberHours: settings.amberHours,
                 redHours: settings.redHours,
-                headless: settings.headless,
                 maxMessagesPerThread: settings.maxMessagesPerThread,
                 enabledPlatforms: settings.enabledPlatforms,
-                demoMode: settings.demoMode,
-                recentThreadSweepCount: settings.recentThreadSweepCount,
                 aiProvider: settings.aiProvider,
-                // Send empty string as undefined so the runner falls back to
-                // the env default rather than persisting "" as a model id.
                 glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined
               })
             }
           >
-            {saving ? (
-              <>
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                Saving…
-              </>
-            ) : (
-              "Save settings"
-            )}
+            Save settings
           </Button>
-          {/* Inline status — success fades after SAVE_FEEDBACK_MS, errors
-              stick until the next save attempt so the operator notices. */}
-          {saveStatus?.kind === "success" ? (
-            <span
-              role="status"
-              aria-live="polite"
-              className="flex items-center gap-1 text-sm text-emerald-700"
-            >
-              <CheckCircle2 className="h-4 w-4" />
-              Saved
-            </span>
-          ) : null}
-          {saveStatus?.kind === "error" ? (
-            <span
-              role="alert"
-              aria-live="polite"
-              className="flex items-center gap-1 text-sm text-rose-700"
-            >
-              <AlertCircle className="h-4 w-4" />
-              {saveStatus.message}
-            </span>
-          ) : null}
+          <Button variant="quiet" onClick={() => void restartRunner()}>
+            Restart runner
+          </Button>
         </div>
-      </Card>
 
-      <Card className="space-y-3 border-rose-200 bg-rose-50">
-        <div>
-          <h3 className="text-lg font-semibold text-rose-900">Danger zone</h3>
-          <p className="mt-1 text-sm text-rose-800/80">
-            Per-platform session resets live on the Platforms page. This wipes LinkedIn data locally.
+        <div className="mt-10 rounded-[10px] border border-risk-overdue/30 bg-risk-overdue/5 p-5">
+          <p className="m-0 mb-1 text-[13px] font-medium text-risk-overdue">Danger zone</p>
+          <p className="m-0 mb-3 text-[12px] text-ink-2">
+            Per-platform session resets live on the Platforms page. This wipes LinkedIn data
+            locally so the runner can rebuild from a fresh scan.
           </p>
+          <Button
+            variant="quiet"
+            className="border-risk-overdue/40 text-risk-overdue hover:bg-risk-overdue/10"
+            onClick={async () => {
+              if (
+                !window.confirm(
+                  "Clear LinkedIn inbox and rebuild? This deletes all stored LinkedIn threads, messages, and receipts locally."
+                )
+              ) {
+                return;
+              }
+              try {
+                await apiPost("/runner/admin/reset", { platform: "LINKEDIN" });
+                setSavedAt(Date.now());
+                window.dispatchEvent(new CustomEvent("runner-resync"));
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Reset failed");
+              }
+            }}
+          >
+            Clear LinkedIn inbox and rebuild
+          </Button>
         </div>
+      </details>
+
+      <section className="mt-12 border-t border-hairline pt-6">
+        <p className="mb-4 font-mono text-[11px] uppercase tracking-[0.08em] text-[oklch(45%_0.18_28)]">
+          Danger zone
+        </p>
+        <QuietRow
+          name="Clear LinkedIn inbox and rebuild"
+          stat="wipes LinkedIn threads/messages locally — next scan rebuilds"
+          action={
+            <Button
+              variant="danger"
+              onClick={() => {
+                setResetStatus(null);
+                setResetOpen(true);
+              }}
+            >
+              Reset…
+            </Button>
+          }
+        />
         {resetStatus ? (
-          <div
+          <p
             className={
-              resetStatus.type === "success"
-                ? "rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm text-emerald-800"
-                : "rounded-lg border border-rose-300 bg-rose-100 px-3 py-2 text-sm text-rose-900"
+              resetStatus.kind === "success"
+                ? "mt-3 font-mono text-[11px] text-ink-2"
+                : "mt-3 font-mono text-[11px] text-risk-overdue"
             }
           >
             {resetStatus.message}
-          </div>
+          </p>
         ) : null}
-        <Button
-          variant="danger"
-          onClick={() => {
-            setShowResetModal(true);
-            setResetStatus(null);
-          }}
-        >
-          Clear LinkedIn inbox and rebuild
-        </Button>
-      </Card>
+      </section>
 
-      {showResetModal ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 px-4">
-          <Card className="w-full max-w-lg space-y-4 border-rose-300">
+      {resetOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={closeResetModal}
+        >
+          <div
+            className="w-full max-w-lg space-y-4 rounded-xl border border-hairline bg-paper p-6 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
             <div>
-              <h3 className="text-lg font-semibold text-slate-900">Confirm LinkedIn reset</h3>
-              <p className="mt-1 text-sm text-slate-600">
-                This will remove LinkedIn threads/messages in the local DB. Type <code>RESET</code> and enter your admin token.
+              <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-[oklch(45%_0.18_28)]">
+                Danger zone
+              </p>
+              <p className="mt-2 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">
+                Confirm LinkedIn reset
+              </p>
+              <p className="mt-2 font-mono text-[12px] text-ink-3">
+                This removes LinkedIn threads and messages from the local DB. Type{" "}
+                <code className="text-ink">RESET</code> and provide the admin token to proceed.
               </p>
             </div>
 
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-700">Admin reset token</label>
+            <label className="block">
+              <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                Admin reset token
+              </span>
               <Input
                 type="password"
+                className="mt-2"
                 value={resetToken}
                 onChange={(event) => setResetToken(event.target.value)}
-                placeholder="Enter ADMIN_RESET_TOKEN"
+                placeholder="ADMIN_RESET_TOKEN"
                 autoComplete="off"
               />
-            </div>
+            </label>
 
-            <div className="space-y-2">
-              <label className="block text-sm font-medium text-slate-700">Type RESET to confirm</label>
+            <label className="block">
+              <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                Type RESET to confirm
+              </span>
               <Input
+                className="mt-2"
                 value={resetConfirm}
                 onChange={(event) => setResetConfirm(event.target.value)}
                 placeholder="RESET"
                 autoComplete="off"
               />
-            </div>
+            </label>
 
-            <div className="flex justify-end gap-2">
-              <Button
-                variant="secondary"
-                onClick={closeResetModal}
-                disabled={resetBusy}
-              >
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <Button variant="quiet" onClick={closeResetModal} disabled={resetBusy}>
                 Cancel
               </Button>
               <Button
                 variant="danger"
-                disabled={resetBusy || resetConfirm !== "RESET" || resetToken.trim().length === 0}
-                onClick={() => {
-                  void submitLinkedInReset();
-                }}
+                disabled={
+                  resetBusy || resetConfirm !== "RESET" || resetToken.trim().length === 0
+                }
+                onClick={() => void submitLinkedInReset()}
               >
-                {resetBusy ? "Resetting..." : "Confirm reset"}
+                {resetBusy ? "Resetting…" : "Confirm reset"}
               </Button>
             </div>
-          </Card>
+
+            {resetStatus?.kind === "error" ? (
+              <p className="font-mono text-[11px] text-risk-overdue">{resetStatus.message}</p>
+            ) : null}
+          </div>
         </div>
       ) : null}
-    </div>
+    </Canvas>
   );
 }
