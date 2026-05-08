@@ -5,7 +5,16 @@ import { apiPost } from "@/lib/api";
 
 interface NameSuggestionPillProps {
   personId: string;
-  inferredName: string;
+  /**
+   * - When set, renders as "Maybe <name>" with confirm / edit / dismiss
+   *   options. The operator hasn't yet promoted or rejected this guess.
+   * - When null, renders as a subtle edit affordance (a small pencil-style
+   *   pill). Only the rename action is offered. Used to let the operator
+   *   correct an already-confirmed name (e.g. the heuristic was wrong).
+   */
+  inferredName: string | null;
+  /** Current displayName — pre-fills the edit box when no inferredName is set. */
+  currentName?: string;
   /** Called after a successful confirm/rename/dismiss so the parent can re-fetch. */
   onChanged: () => void;
 }
@@ -20,10 +29,12 @@ interface NameSuggestionPillProps {
  * stops propagation and prevents default so a click on the pill never
  * navigates to the thread.
  */
-export function NameSuggestionPill({ personId, inferredName, onChanged }: NameSuggestionPillProps) {
+export function NameSuggestionPill({ personId, inferredName, currentName, onChanged }: NameSuggestionPillProps) {
+  const editOnlyMode = inferredName === null;
   const [open, setOpen] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [draft, setDraft] = useState(inferredName);
+  // In edit-only mode the popover opens straight into the rename input.
+  const [editing, setEditing] = useState(editOnlyMode);
+  const [draft, setDraft] = useState(inferredName ?? currentName ?? "");
   const [busy, setBusy] = useState(false);
   const containerRef = useRef<HTMLSpanElement>(null);
 
@@ -63,12 +74,18 @@ export function NameSuggestionPill({ personId, inferredName, onChanged }: NameSu
         type="button"
         onClick={(event) => {
           stop(event);
+          setEditing(editOnlyMode);
+          setDraft(inferredName ?? currentName ?? "");
           setOpen((prev) => !prev);
         }}
-        className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium tracking-[0.02em] text-ink-2 hover:bg-ink hover:text-paper transition-colors duration-calm"
-        title="Click to confirm or change this guessed name"
+        className={
+          editOnlyMode
+            ? "rounded px-[5px] py-[1px] text-[10px] text-ink-3 opacity-0 hover:bg-paper-2 hover:text-ink-2 group-hover:opacity-100 transition-opacity duration-calm"
+            : "rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium tracking-[0.02em] text-ink-2 hover:bg-ink hover:text-paper transition-colors duration-calm"
+        }
+        title={editOnlyMode ? "Edit name" : "Click to confirm or change this guessed name"}
       >
-        Maybe {inferredName}
+        {editOnlyMode ? "✎" : `Maybe ${inferredName}`}
       </button>
       {open ? (
         <span
