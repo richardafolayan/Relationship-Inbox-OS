@@ -4,24 +4,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet } from "@/lib/api";
 import type { HealthResponse } from "@/lib/types";
 
-// One-line summary of the runner's current state. The bar shows nothing
-// when idle so it doesn't burn screen real estate; it only appears for
-// states the user needs to know about (a scan is in progress, a send is
-// in flight, sends are queued behind a scan, or a recent send failed).
-//
-// The state is sourced from two places:
-//   1. /runner/health — runnerStatus:"SCANNING" + lastScanAt for the scan
-//      progress label.
-//   2. /runner/data/send-queue — list of PENDING SendRequests + last 5
-//      completed sends. PENDING covers both "queued behind a scan" and
-//      "currently being sent through the platform lease" — they're the
-//      same row in the DB, just different lease state.
-//
-// We poll both every 3s. The AppShell already subscribes to /events SSE
-// and dispatches a `runner-event` window event for every emitted event;
-// we listen and force-refresh on MESSAGE_SENT / MESSAGE_SEND_FAILED /
-// SCAN_FINISHED so the bar reacts within ~50ms of the runner side state
-// change instead of waiting for the next poll tick.
+// One-line summary of the runner's current state. Hidden when idle so it
+// doesn't burn screen real estate. Voice and tokens follow the new design
+// (mono caption, hairline, no shouty colors).
 
 interface SendQueueItem {
   clientSendId: string;
@@ -51,15 +36,11 @@ interface SendQueueResponse {
 }
 
 const POLL_INTERVAL_MS = 3000;
-// A "recent send" toast (success or failure) hangs around briefly so the user
-// sees confirmation even if they were on a different page when the runner
-// flipped status. Ignore older completions on first load — only show what
-// happened *while the user has the dashboard open*.
 const RECENT_FRESHNESS_MS = 8000;
 
 type StatusBarState =
   | { kind: "idle" }
-  | { kind: "scanning"; lastScanAt: string | null }
+  | { kind: "scanning" }
   | {
       kind: "sending";
       personName: string;
@@ -78,13 +59,9 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
       kind: "sending",
       personName: head.personName,
       blockedByScan,
-      // queue position 0 == the head being processed; everyone after them
-      // is the backlog count.
       queuedBehind: Math.max(0, queueActive.length - 1)
     };
   }
-  // No active sends. Surface a brief recent-completion banner if anything
-  // landed in the last few seconds.
   const recentest = input.queue?.recent[0];
   if (recentest) {
     const completedAt = Date.parse(recentest.completedAt);
@@ -101,7 +78,7 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
     }
   }
   if (blockedByScan) {
-    return { kind: "scanning", lastScanAt: input.health?.lastScanAt ?? null };
+    return { kind: "scanning" };
   }
   return { kind: "idle" };
 }
@@ -109,11 +86,7 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
 export function SystemStatusBar() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
-  // Re-render every second when there's a recent send to expire the
-  // "Sent to X" banner without an explicit poll. Cheap (no fetches).
   const [, setTick] = useState(0);
-  // Refs so the visibility-change handler can fetch without re-creating
-  // the polling effect every render.
   const refresh = useCallback(async () => {
     const [healthData, queueData] = await Promise.all([
       apiGet<HealthResponse>("/runner/health").catch(() => null),
@@ -131,9 +104,6 @@ export function SystemStatusBar() {
     return () => clearInterval(timer);
   }, [refresh]);
 
-  // Fast path: react to runner-emitted events the AppShell SSE already
-  // forwards as window events. Cuts perceived latency from ~3s (poll) to
-  // ~50ms (event arrival → fetch).
   useEffect(() => {
     const onEvent = (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string }>).detail;
@@ -152,8 +122,6 @@ export function SystemStatusBar() {
     return () => window.removeEventListener("runner-event", onEvent as EventListener);
   }, []);
 
-  // Tick at 1Hz while a recent-completion banner is showing so it disappears
-  // when it ages past RECENT_FRESHNESS_MS without needing another fetch.
   useEffect(() => {
     const recentest = queue?.recent[0];
     if (!recentest) return undefined;
@@ -168,58 +136,40 @@ export function SystemStatusBar() {
     return null;
   }
 
+  const dot = (() => {
+    switch (state.kind) {
+      case "scanning":
+      case "sending":
+        return "bg-risk-waiting";
+      case "send_failed":
+        return "bg-risk-overdue";
+      case "send_succeeded":
+        return "bg-risk-fresh";
+      default:
+        return "bg-ink-3";
+    }
+  })();
+
   return (
     <div
       role="status"
       aria-live="polite"
-      className={`flex items-center gap-3 border-b px-6 py-2 text-sm ${stateBackground(state)}`}
+      className="flex items-center gap-3 border-b border-hairline bg-paper px-12 py-2 font-mono text-[12px] text-ink-3"
     >
-      <span className={`inline-block h-2 w-2 rounded-full ${stateDotColor(state)} ${state.kind === "scanning" || state.kind === "sending" ? "animate-pulse" : ""}`} />
-      <span className="font-medium text-slate-900">{stateLabel(state)}</span>
-      {stateDetail(state) ? (
-        <span className="text-slate-600">{stateDetail(state)}</span>
-      ) : null}
+      <span className={`h-2 w-2 rounded-full ${dot}`} />
+      <span className="text-ink-2">{stateLabel(state)}</span>
+      {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
     </div>
   );
-}
-
-function stateBackground(state: StatusBarState): string {
-  switch (state.kind) {
-    case "scanning":
-      return "border-blue-200 bg-blue-50/70";
-    case "sending":
-      return "border-amber-200 bg-amber-50/70";
-    case "send_failed":
-      return "border-rose-200 bg-rose-50/70";
-    case "send_succeeded":
-      return "border-emerald-200 bg-emerald-50/70";
-    default:
-      return "border-slate-200 bg-white";
-  }
-}
-
-function stateDotColor(state: StatusBarState): string {
-  switch (state.kind) {
-    case "scanning":
-      return "bg-blue-500";
-    case "sending":
-      return "bg-amber-500";
-    case "send_failed":
-      return "bg-rose-500";
-    case "send_succeeded":
-      return "bg-emerald-500";
-    default:
-      return "bg-slate-400";
-  }
 }
 
 function stateLabel(state: StatusBarState): string {
   switch (state.kind) {
     case "scanning":
-      return "Scanning LinkedIn…";
+      return "Scanning linkedin…";
     case "sending":
       return state.blockedByScan
-        ? `Send queued — waiting for scan to finish before replying to ${state.personName}`
+        ? `Send queued — waiting on scan before replying to ${state.personName}`
         : `Sending reply to ${state.personName}…`;
     case "send_failed":
       return `Failed to send to ${state.personName}`;

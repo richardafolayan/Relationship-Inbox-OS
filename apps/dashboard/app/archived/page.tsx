@@ -1,30 +1,23 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArchiveRestore } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { InboxRow } from "@/lib/types";
-import { formatRelative, formatClock } from "@/lib/time";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { formatRelative } from "@/lib/time";
+import { initials, PLATFORM_LABEL, avatarTone } from "@/lib/risk";
+import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
-import { Skeleton } from "@/components/ui/skeleton";
-
-// Mirror of the Inbox view that lists archived threads. Same row shape, just
-// with an Unarchive action on hover instead of Mark done / Archive. The data
-// source is /runner/data/archived which filters server-side to archivedAt
-// IS NOT NULL — keeps the operator's current inbox uncluttered while still
-// preserving full history for everything they've handled.
 
 interface ArchivedResponse {
   rows: InboxRow[];
 }
 
+// Archived threads — rows in the same calm pattern. Click to open the
+// thread, or use the quiet "unarchive" link to send it back to the inbox.
 export default function ArchivedPage() {
   const router = useRouter();
   const [rows, setRows] = useState<InboxRow[] | null>(null);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -34,8 +27,6 @@ export default function ArchivedPage() {
       setError(null);
     } catch (refreshError) {
       setError(refreshError instanceof Error ? refreshError.message : "Failed to load archived threads");
-    } finally {
-      setLoading(false);
     }
   }, []);
 
@@ -43,75 +34,61 @@ export default function ArchivedPage() {
     void refresh();
   }, [refresh]);
 
-  const sortedRows = useMemo(() => rows ?? [], [rows]);
-
-  if (loading && !rows) {
-    return (
-      <div className="space-y-4">
-        <Skeleton className="h-8 w-48" />
-        <Skeleton className="h-80 w-full" />
-      </div>
-    );
-  }
-
   return (
-    <div className="flex h-full flex-col gap-4 overflow-hidden">
-      <div>
-        <h2 className="text-2xl font-semibold">Archived</h2>
-        <p className="text-sm text-slate-500">Threads you've finished with. Unarchive to send them back to the inbox.</p>
-      </div>
+    <Canvas>
+      <PageHead
+        eyebrow="Handled"
+        title="Archived"
+        subtitle="Conversations you’ve marked done. Unarchive to bring one back into the queue."
+        meta={rows && rows.length > 0 ? <span>{rows.length} threads</span> : null}
+      />
 
       {error ? (
-        <Card className="border-rose-200 bg-rose-50/60">
-          <p className="text-sm font-semibold text-rose-900">{error}</p>
-        </Card>
+        <p className="mb-6 font-mono text-[11px] text-risk-overdue">{error}</p>
       ) : null}
 
-      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-soft">
-        <div className="grid grid-cols-[2fr_1fr_2fr_1fr_1fr] gap-3 border-b border-slate-200 px-4 py-3 text-xs font-medium uppercase tracking-wide text-slate-500">
-          <span>Person</span>
-          <span>Platform</span>
-          <span>Preview</span>
-          <span>Time</span>
-          <span className="text-right">Actions</span>
-        </div>
-        <div className="min-h-0 flex-1 overflow-y-auto">
-          {sortedRows.map((row) => {
+      {!rows || rows.length === 0 ? (
+        <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />
+      ) : (
+        <div className="flex flex-col">
+          {rows.map((row) => {
             const previewBody =
               row.lastMessageDirection === "OUT" ? `You: ${row.preview}` : row.preview;
             return (
               <div
                 key={row.id}
-                role="button"
-                tabIndex={0}
-                aria-label={`Open archived thread with ${row.personName}`}
-                className="grid cursor-pointer grid-cols-[2fr_1fr_2fr_1fr_1fr] gap-3 border-b border-slate-100 px-4 py-3 transition duration-calm hover:bg-slate-50 focus-visible:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500"
-                onClick={() => router.push(`/thread/${row.id}`)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" || event.key === " ") {
-                    event.preventDefault();
-                    router.push(`/thread/${row.id}`);
-                  }
-                }}
+                className="grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
               >
-                <div className="min-w-0">
-                  <p className="font-medium text-slate-900">{row.personName}</p>
-                  <p className="text-xs text-slate-500">Archived</p>
-                </div>
-                <div>
-                  <Badge tone="blue">{row.platform}</Badge>
-                </div>
-                <div className="min-w-0">
-                  <p className="truncate text-sm text-slate-700">{previewBody}</p>
-                </div>
-                <div>
-                  <p className="text-sm text-slate-700">{formatClock(row.lastMessageAt)}</p>
-                  <p className="text-xs text-slate-500">{formatRelative(row.lastMessageAt)}</p>
-                </div>
-                <div className="flex items-center justify-end gap-1">
+                <span
+                  className="grid h-8 w-8 place-items-center rounded-full font-display text-[12px] font-semibold text-white"
+                  style={{ background: avatarTone(row.personName) }}
+                >
+                  {initials(row.personName)}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => router.push(`/thread/${row.id}`)}
+                  aria-label={`Open archived thread with ${row.personName}`}
+                  className="min-w-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ink/40"
+                >
+                  <span className="mb-1 flex items-baseline gap-[10px]">
+                    <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">
+                      {row.personName}
+                    </span>
+                    <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                      {PLATFORM_LABEL[row.platform]}
+                    </span>
+                  </span>
+                  <span className="block max-w-[52ch] truncate text-[14px] text-ink-3">
+                    {previewBody}
+                  </span>
+                </button>
+                <div className="flex items-center gap-3">
+                  <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                    {formatRelative(row.lastMessageAt)}
+                  </span>
                   <Button
-                    variant="ghost"
-                    title="Unarchive"
+                    variant="quiet"
                     aria-label={`Unarchive thread with ${row.personName}`}
                     onClick={(event) => {
                       event.stopPropagation();
@@ -122,18 +99,14 @@ export default function ArchivedPage() {
                       );
                     }}
                   >
-                    <ArchiveRestore className="mr-1 h-4 w-4" />
                     Unarchive
                   </Button>
                 </div>
               </div>
             );
           })}
-          {sortedRows.length === 0 ? (
-            <div className="px-4 py-10 text-center text-sm text-slate-500">No archived threads yet.</div>
-          ) : null}
         </div>
-      </div>
-    </div>
+      )}
+    </Canvas>
   );
 }
