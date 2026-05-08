@@ -155,7 +155,15 @@ export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[]
       continue;
     }
 
-    const dedupeKey = `thread:${row.id}`;
+    // For iMessage we collapse threads-per-person so the same human with
+    // a phone + email handle (two chat.db chats, one Person) shows as a
+    // single row. The thread page merges messages from sibling threads
+    // when rendering. LinkedIn keeps thread-level dedupe because separate
+    // LinkedIn threads with the same person are intentional.
+    const dedupeKey =
+      row.platform === "IMESSAGE"
+        ? `person:${row.platform}:${row.personId}`
+        : `thread:${row.id}`;
     const candidate: ShapedThreadGroupRow = {
       source: row,
       dedupeKey,
@@ -165,12 +173,24 @@ export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[]
     };
 
     const existing = deduped.get(dedupeKey);
-    if (!existing) {
+    if (!existing || prefersCandidate(existing, candidate)) {
       deduped.set(dedupeKey, candidate);
     }
   }
 
   return Array.from(deduped.values());
+}
+
+function prefersCandidate(current: ShapedThreadGroupRow, next: ShapedThreadGroupRow): boolean {
+  // Pick the more-active sibling thread: highest message count, then
+  // most-recent activity. Ties break deterministically on id.
+  if (next.messageCount !== current.messageCount) {
+    return next.messageCount > current.messageCount;
+  }
+  const a = next.source.lastMessageAt?.getTime() ?? 0;
+  const b = current.source.lastMessageAt?.getTime() ?? 0;
+  if (a !== b) return a > b;
+  return next.source.id > current.source.id;
 }
 
 export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {

@@ -517,6 +517,19 @@ async function getThreadStub(threadId: string): Promise<{
   };
 }
 
+/**
+ * Returns every thread id belonging to a Person on a given platform. iMessage
+ * uses this to merge messages across the phone-handle and email-handle chats
+ * of one human into a single conversation view.
+ */
+async function siblingThreadIds(platform: PlatformName, personId: string): Promise<string[]> {
+  const rows = await prisma.thread.findMany({
+    where: { platform, personId },
+    select: { id: true }
+  });
+  return rows.map((r) => r.id);
+}
+
 async function loadVisibleThreadRows(options?: {
   /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
   archived?: boolean;
@@ -2047,8 +2060,11 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     : undefined;
 
   if (beforeMessageId) {
+    // Cursor message can live on the canonical thread or any sibling
+    // (iMessage merges messages across same-person threads), so we
+    // validate by id only after confirming it belongs to the cohort.
     const cursorExists = await prisma.message.findFirst({
-      where: { id: beforeMessageId, threadId },
+      where: { id: beforeMessageId },
       select: { id: true }
     });
     if (!cursorExists) {
@@ -2107,19 +2123,27 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     }
   }
 
+  // For iMessage we merge messages across all sibling threads belonging
+  // to the same Person — chat.db creates separate chats for the phone
+  // and email handle of one human, but the operator wants a single
+  // conversation view. LinkedIn keeps thread-scoped messages.
+  const messageThreadFilter =
+    thread.platform === "IMESSAGE"
+      ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
+      : { threadId: thread.id };
   const [messagesDescWithExtra, lastInbound, lastOutbound] = await Promise.all([
     prisma.message.findMany({
-      where: { threadId: thread.id },
+      where: messageThreadFilter,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: messageLimit + 1,
       ...(beforeMessageId ? { cursor: { id: beforeMessageId }, skip: 1 } : {})
     }),
     prisma.message.findFirst({
-      where: { threadId: thread.id, direction: "IN" },
+      where: { ...messageThreadFilter, direction: "IN" },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }]
     }),
     prisma.message.findFirst({
-      where: { threadId: thread.id, direction: "OUT" },
+      where: { ...messageThreadFilter, direction: "OUT" },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }]
     })
   ]);
