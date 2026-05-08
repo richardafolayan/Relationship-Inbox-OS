@@ -44,11 +44,11 @@ Stack:
   - Degraded banner shortcuts to selector tests, receipts, and DOM dumps.
 - Thread workspace:
   - Timeline view with message direction and timestamps.
-  - Actions: open in platform, rescan thread, save draft, snooze, mark done/manual review, send.
-  - AI tools: suggested replies, shorten, make warmer.
+  - Actions: open in platform, rescan thread, save draft, snooze, mark done/manual review, archive/unarchive, open-loop reminder, send, schedule send, cancel/retry queued send.
+  - AI tools: suggested replies, shorten, make warmer, voice rewrite, predraft, compose, thread summary, reassess risk, recategorize.
   - Receipts drawer for traceability.
 - Platforms:
-  - Connect/reconnect per platform.
+  - Connect/reconnect per platform (LinkedIn shipped; Instagram/TikTok hidden until adapter ships).
   - Run platform scan.
   - Open browser window.
   - Run selector tests.
@@ -61,12 +61,22 @@ Stack:
   - Headless toggle.
   - Demo mode toggle.
   - Enabled platforms.
-  - Danger zone: reset platform sessions, clear LinkedIn inbox and rebuild (token + typed confirmation).
+  - Quiet Hours toggle (suppresses scheduled-send promotion outside operating window).
+  - AI provider selection (OpenAI / GLM) and model override.
+  - Danger zone: reset platform sessions, clear LinkedIn inbox and rebuild (token + typed confirmation), clear DB, restart runner.
 - Activity Log:
   - Receipts-first trace of scans, sends, selector checks, failures.
   - Artifact links for screenshots and DOM dumps.
 - People view:
   - Lightweight relationship panel with platform, last interaction, risk, tags, notes.
+  - Per-person enrichment + profile URL editing; self enrichment for sender voice.
+- Send queue + scheduled sends:
+  - Persisted send queue with idempotent `clientSendId`.
+  - Schedule sends for a future time; promoter flips `SCHEDULED` rows to `PENDING` when due.
+  - Cancel or retry queued/failed sends from the thread workspace.
+- Archive + open-loop:
+  - Archive completed threads; reopen with `unarchive`.
+  - Open-loop reminders re-surface a thread after a chosen delay.
 
 ### Runner capabilities
 
@@ -337,6 +347,8 @@ curl http://localhost:4001/health
 | `headless` | Browser visibility mode for automation. |
 | `demoMode` | Seed/cleanup demo dataset and demo receipts. |
 | `enabledPlatforms` | Active platform list for scheduler scans. |
+| `aiProvider` | AI provider for summary/reply features (`openai` or `glm`). Falls back to `AI_PROVIDER` env. |
+| `glmModel` | Optional GLM model id override. Falls back to `Z_AI_MODEL` env (default `glm-4.7-flash`). |
 
 ## Profiles and Browser Session Model
 
@@ -396,13 +408,33 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/platform/open-browser`
 - `POST /control/platform/linkedin/smoke-unread`
 - `POST /control/platform/reset-session`
-- `POST /control/thread/:threadId/send`
+- `POST /control/thread/:threadId/send` — body accepts optional `scheduledFor` (ISO 8601) for scheduled sends
+- `POST /control/thread/:threadId/cancel-send`
+- `POST /control/thread/:threadId/retry-send`
 - `POST /control/thread/:threadId/open`
 - `POST /control/thread/:threadId/rescan`
+- `POST /control/thread/:threadId/resummarize`
 - `POST /control/thread/:threadId/transform`
+- `POST /control/thread/:threadId/compose`
+- `POST /control/thread/:threadId/predraft`
+- `POST /control/thread/:threadId/voice-rewrite`
 - `POST /control/thread/:threadId/draft`
+- `POST /control/thread/:threadId/reassess`
+- `POST /control/thread/:threadId/recategorize`
+- `POST /control/thread/:threadId/archive`
+- `POST /control/thread/:threadId/unarchive`
+- `POST /control/thread/:threadId/open-loop`
 - `POST /control/thread/:threadId/mark-done`
 - `POST /control/thread/:threadId/snooze`
+- `GET  /control/thread/:threadId/suggest-snooze`
+- `POST /control/classify-uncategorized`
+- `POST /control/resummarize-stale`
+- `POST /control/person/:personId/notes`
+- `POST /control/person/:personId/enrich`
+- `POST /control/person/:personId/profile-url`
+- `POST /control/self/enrich`
+- `POST /control/system/clear-db`
+- `POST /control/system/restart`
 
 ### Admin routes
 
@@ -430,12 +462,17 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 ### Data routes
 
 - `GET /data/settings`
+- `GET /data/ai-status`
 - `GET /data/inbox`
 - `GET /data/thread/:threadId`
 - `GET /data/receipts`
 - `GET /data/platforms`
 - `GET /data/logs`
 - `GET /data/people`
+- `GET /data/person/:personId`
+- `GET /data/self`
+- `GET /data/archived`
+- `GET /data/send-queue`
 
 ## Troubleshooting
 
