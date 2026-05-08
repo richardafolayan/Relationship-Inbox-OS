@@ -321,6 +321,12 @@ model SendRequest {
   scheduledFor DateTime?
   receiptJson  String?
   errorJson    String?
+  // Outgoing attachments staged for this send. JSON array of
+  // { absolutePath, displayName, mimeType, kind }. When the platform
+  // adapter's sendMessage runs, it dispatches each file to the platform
+  // (iMessage today; LinkedIn cap at text-only). Cleaned up by the send
+  // worker after the row reaches SENT or FAILED.
+  attachmentsJson String?
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

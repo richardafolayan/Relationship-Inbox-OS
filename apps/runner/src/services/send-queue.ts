@@ -35,6 +35,7 @@ export interface SendQueueService {
     threadId: string;
     text: string;
     clientSendId: string;
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";

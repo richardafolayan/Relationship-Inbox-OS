@@ -54,6 +54,19 @@ export interface NormalizedMessage {
   attachments: AttachmentPlaceholder[];
 }
 
+/**
+ * A file the operator wants to send alongside (or instead of) the
+ * message text. The runner stages the file on disk and passes the
+ * absolute path to the adapter; the adapter is responsible for getting
+ * it onto the platform (Messages.app via osascript today).
+ */
+export interface OutboundAttachment {
+  absolutePath: string;
+  displayName: string;
+  mimeType?: string;
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown";
+}
+
 export interface SendReceipt {
   sentAt: string;
   screenshotFile?: string;

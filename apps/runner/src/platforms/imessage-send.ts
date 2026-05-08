@@ -17,6 +17,8 @@ export interface SendIMessageOptions {
   /** "iMessage" or "SMS" (rarely "iMessage" reaches non-Apple targets — the OS picks). */
   service?: string;
   text: string;
+  /** Absolute paths of files to attach (sent as separate Messages.app bubbles). */
+  attachmentPaths?: string[];
   timeoutMs?: number;
 }
 
@@ -29,16 +31,33 @@ export interface SendIMessageOptions {
  */
 export async function sendIMessage(opts: SendIMessageOptions): Promise<void> {
   const service = opts.service && opts.service.toLowerCase().includes("sms") ? "SMS" : "iMessage";
-  const text = escapeAppleScript(opts.text);
   const handle = escapeAppleScript(opts.handle);
-  const script = [
-    `tell application "Messages"`,
-    `  set targetService to 1st service whose service type = ${service}`,
-    `  set targetBuddy to buddy "${handle}" of targetService`,
-    `  send "${text}" to targetBuddy`,
-    `end tell`
-  ].join("\n");
+  const timeout = opts.timeoutMs ?? 30_000;
 
-  const timeout = opts.timeoutMs ?? 15_000;
-  await execFileAsync("osascript", ["-e", script], { timeout });
+  // Send each attachment as its own Messages.app bubble (Apple's UI does
+  // the same — one media per bubble). Then the text body. Order matters
+  // for how the recipient reads the conversation.
+  for (const path of opts.attachmentPaths ?? []) {
+    const escaped = escapeAppleScript(path);
+    const script = [
+      `tell application "Messages"`,
+      `  set targetService to 1st service whose service type = ${service}`,
+      `  set targetBuddy to buddy "${handle}" of targetService`,
+      `  send POSIX file "${escaped}" to targetBuddy`,
+      `end tell`
+    ].join("\n");
+    await execFileAsync("osascript", ["-e", script], { timeout });
+  }
+
+  if (opts.text.trim().length > 0) {
+    const text = escapeAppleScript(opts.text);
+    const script = [
+      `tell application "Messages"`,
+      `  set targetService to 1st service whose service type = ${service}`,
+      `  set targetBuddy to buddy "${handle}" of targetService`,
+      `  send "${text}" to targetBuddy`,
+      `end tell`
+    ].join("\n");
+    await execFileAsync("osascript", ["-e", script], { timeout });
+  }
 }

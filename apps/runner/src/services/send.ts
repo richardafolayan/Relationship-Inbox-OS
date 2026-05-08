@@ -144,6 +144,7 @@ export function createSendService(deps: SendServiceDeps) {
     threadId: string;
     text: string;
     clientSendId: string;
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -184,7 +185,10 @@ export function createSendService(deps: SendServiceDeps) {
           clientSendId: input.clientSendId,
           threadId: input.threadId,
           requestText: input.text,
-          status: "PENDING"
+          status: "PENDING",
+          attachmentsJson: input.attachments && input.attachments.length > 0
+            ? JSON.stringify(input.attachments)
+            : null
         }
       });
     } catch (error) {
@@ -250,7 +254,19 @@ export function createSendService(deps: SendServiceDeps) {
         details: { threadId: thread.id, clientSendId: input.clientSendId }
       });
 
-      const receipt = await adapter.sendMessage(threadStub, input.text);
+      const stagedAttachments = sendRequest.attachmentsJson
+        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
+        : [];
+      const receipt = await adapter.sendMessage(
+        threadStub,
+        input.text,
+        stagedAttachments.map((a) => ({
+          absolutePath: a.absolutePath,
+          displayName: a.displayName,
+          mimeType: a.mimeType,
+          kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
+        }))
+      );
 
       await prisma.message.upsert({
         where: {
@@ -407,6 +423,7 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     scheduledFor: Date;
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -447,7 +464,10 @@ export function createSendService(deps: SendServiceDeps) {
           threadId: input.threadId,
           requestText: input.text,
           status: "SCHEDULED",
-          scheduledFor: input.scheduledFor
+          scheduledFor: input.scheduledFor,
+          attachmentsJson: input.attachments && input.attachments.length > 0
+            ? JSON.stringify(input.attachments)
+            : null
         }
       });
     } catch (error) {

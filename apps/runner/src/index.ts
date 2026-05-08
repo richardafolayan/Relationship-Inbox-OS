@@ -1,14 +1,15 @@
-import { createReadStream, existsSync, openSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, openSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
+import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { prisma } from "./db";
-import { resolveConnectTimeoutMs, runnerConfig, projectRoot } from "./config";
+import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
@@ -53,6 +54,46 @@ import {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+// Multer is loaded lazily on multipart routes (file uploads for outbound
+// attachments). The default disk-storage strategy puts files under
+// data/outgoing-attachments/<send-request-id>/ so the iMessage adapter
+// can reference them by absolute path when shelling out to osascript.
+const outgoingAttachmentsRoot = resolve(dataDir, "outgoing-attachments");
+mkdirSync(outgoingAttachmentsRoot, { recursive: true });
+const uploadAttachments = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = resolve(outgoingAttachmentsRoot, uuid());
+      mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      // Keep extension so Messages.app can sniff the right file type.
+      cb(null, file.originalname);
+    }
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
+}).array("attachments", 10);
+
+function maybeMultipart(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const ct = (req.headers["content-type"] ?? "").toLowerCase();
+  if (ct.startsWith("multipart/form-data")) {
+    uploadAttachments(req, res, next);
+  } else {
+    next();
+  }
+}
+
+function kindFromMime(mime: string | undefined, filename: string | undefined): "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" {
+  const m = (mime ?? "").toLowerCase();
+  const n = (filename ?? "").toLowerCase();
+  if (m.startsWith("image/")) return "photo";
+  if (m.startsWith("video/")) return "video";
+  if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
+  if (m.startsWith("audio/")) return /webm|opus|m4a|aac|caf/.test(m) || /audio.message/.test(n) ? "voice_note" : "audio";
+  return "unknown";
+}
 
 const settingsStore = createSettingsStore();
 const auditService = createAuditService();
@@ -1400,11 +1441,14 @@ app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res
   res.json({ status: "ok" });
 }));
 
-app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
+app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  // For multipart bodies, multer puts file metadata on req.files and
+  // string fields on req.body. Reuse the same JSON schema for the field
+  // values so the validation flow is identical between JSON and multipart.
   const payload = z
     .object({
-      text: z.string().min(1),
+      text: z.string(),
       clientSendId: z.string().uuid(),
       // Optional ISO 8601 timestamp. When present, the send is persisted
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
@@ -1413,6 +1457,17 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
       scheduledFor: z.string().datetime().optional()
     })
     .parse(req.body);
+  const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const stagedAttachments = uploadedFiles.map((f) => ({
+    absolutePath: f.path,
+    displayName: f.originalname,
+    mimeType: f.mimetype,
+    kind: kindFromMime(f.mimetype, f.originalname)
+  }));
+  if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
+    res.status(400).json({ error: "send must have text, attachments, or both" });
+    return;
+  }
 
   // Schedule path: persist a SCHEDULED row and return immediately. The
   // dashboard renders a "scheduled for X" pill instead of pushing the
@@ -1424,7 +1479,8 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
         threadId,
         text: payload.text,
         clientSendId: payload.clientSendId,
-        scheduledFor: new Date(payload.scheduledFor)
+        scheduledFor: new Date(payload.scheduledFor),
+        attachments: stagedAttachments
       });
       res.json({
         clientSendId: scheduleResult.clientSendId,
@@ -1464,7 +1520,8 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
-      clientSendId: payload.clientSendId
+      clientSendId: payload.clientSendId,
+      attachments: stagedAttachments
     });
     res.json(queueResult);
   } catch (error) {

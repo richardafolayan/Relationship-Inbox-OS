@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import type {
   NormalizedMessage,
+  OutboundAttachment,
   PlatformAdapter,
   PlatformName,
   SendReceipt,
@@ -150,7 +151,7 @@ export class IMessageAdapter implements PlatformAdapter {
     }));
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
     const db = this.getDb();
     // Look up the chat to recover handle + group flag. We re-list one row;
     // chat.db doesn't have a single-row-by-guid method that also computes
@@ -177,7 +178,12 @@ export class IMessageAdapter implements PlatformAdapter {
     const handle = chat.participants[0] ?? chat.chatIdentifier;
     const sendStartedAt = Date.now();
     try {
-      await sendIMessage({ handle, service: chat.service ?? undefined, text });
+      await sendIMessage({
+        handle,
+        service: chat.service ?? undefined,
+        text,
+        attachmentPaths: (attachments ?? []).map((a) => a.absolutePath)
+      });
     } catch (error) {
       const stderr = (error as { stderr?: string }).stderr ?? "";
       const isAutomation = /not authorized|errAEEventNotPermitted|-1743|-600/.test(stderr);
