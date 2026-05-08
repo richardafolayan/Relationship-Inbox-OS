@@ -545,7 +545,8 @@ async function loadVisibleThreadRows(options?: {
         select: {
           id: true,
           displayName: true,
-          platform: true
+          platform: true,
+          avatarUrl: true
         }
       },
       _count: {
@@ -2108,6 +2109,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   res.json({
     id: thread.id,
     personName: thread.person.displayName,
+    personAvatarUrl: thread.person.avatarUrl ?? null,
     platform: thread.platform,
     riskLevel: thread.riskLevel,
     riskReason: thread.riskReason,
@@ -2594,6 +2596,7 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
         id: person.id,
         name: person.displayName,
         platform: person.platform,
+        avatarUrl: person.avatarUrl ?? null,
         notes: person.notes,
         tags: person.tagsJson ? JSON.parse(person.tagsJson) : [],
         lastInteractionAt: latest,

@@ -5,10 +5,11 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk, avatarTone } from "@/lib/risk";
+import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { cleanContactSummary } from "@/lib/preview";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
+import { PersonAvatar } from "@/components/common/person-avatar";
 
 // People — relationship rows in the same calm pattern as ThreadRow. Click
 // any row to open a slim detail panel below with summary + enrichment +
@@ -206,12 +207,12 @@ export default function PeoplePage() {
                     active ? "bg-paper-2" : ""
                   }`}
                 >
-                  <span
-                    className="grid h-8 w-8 place-items-center rounded-full font-display text-[12px] font-semibold text-white"
-                    style={{ background: avatarTone(person.name) }}
-                  >
-                    {initials(person.name)}
-                  </span>
+                  <PersonAvatar
+                    name={person.name}
+                    avatarUrl={person.avatarUrl}
+                    size={32}
+                    className="text-[12px]"
+                  />
                   <span className="min-w-0">
                     <span className="mb-1 flex items-baseline gap-[10px]">
                       <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">
