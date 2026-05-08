@@ -138,9 +138,11 @@ export class IMessageAdapter implements PlatformAdapter {
       timestamp: r.timestamp ?? new Date().toISOString(),
       text: r.text,
       senderName: r.senderHandle,
-      attachments: r.hasAttachments
-        ? [{ type: "attachment", manualReview: true, rawLabel: "iMessage attachment" }]
-        : []
+      attachments: r.attachments.map((a) => ({
+        type: a.kind,
+        manualReview: a.kind === "unknown",
+        rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment"
+      }))
     }));
   }
 
