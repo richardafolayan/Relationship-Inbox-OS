@@ -1,12 +1,33 @@
-import { prisma } from "../db";
+import { prisma as defaultPrisma } from "../db";
 import type { EventBus } from "../types/runtime";
 import type { SendQueueService } from "./send-queue";
+
+/**
+ * Subset of the Prisma client surface the promoter actually uses, narrowed
+ * so tests can swap in an in-memory fake without pulling in @prisma/client.
+ */
+export interface ScheduledSendPromoterPrisma {
+  sendRequest: {
+    findMany(args: {
+      where: { status: "SCHEDULED"; scheduledFor: { lte: Date } };
+      orderBy: { scheduledFor: "asc" };
+      select: { id: true; clientSendId: true };
+    }): Promise<Array<{ id: string; clientSendId: string }>>;
+    updateMany(args: {
+      where: { id: { in: string[] } };
+      data: { status: "PENDING" };
+    }): Promise<{ count: number }>;
+    count(args: { where: { status: "PENDING" } }): Promise<number>;
+  };
+}
 
 interface ScheduledSendPromoterDeps {
   sendQueue: SendQueueService;
   eventBus: EventBus;
   /** Polling cadence in ms. Defaults to 30s; tests override to make ticks observable. */
   intervalMs?: number;
+  /** Override the prisma client. Defaults to the runner's singleton; tests inject a fake. */
+  prisma?: ScheduledSendPromoterPrisma;
 }
 
 /**
@@ -30,6 +51,7 @@ export interface ScheduledSendPromoter {
 
 export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): ScheduledSendPromoter {
   const intervalMs = deps.intervalMs ?? 30_000;
+  const prisma: ScheduledSendPromoterPrisma = deps.prisma ?? defaultPrisma;
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
 
