@@ -6031,6 +6031,49 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
   }
 
+  /**
+   * Best-effort extraction of the participant's profile URL from the open
+   * thread page. The thread header avatar/name link points at
+   * `linkedin.com/in/<slug>`; we normalise that to the canonical form so
+   * downstream code can use it as `Person.profileUrl`.
+   *
+   * Returns undefined when nothing useful is found — group threads, system
+   * messages, or DOM variants we don't recognise. Never throws; the
+   * caller treats absence as "skip auto-discovery for this scan".
+   */
+  private async extractParticipantProfileUrl(page: Page): Promise<string | undefined> {
+    try {
+      const href = await page.evaluate(() => {
+        // Thread header on LinkedIn messaging exposes a link to the
+        // participant's profile via the avatar image and the name. Both
+        // resolve to /in/<slug>; pick the first one inside the message
+        // header / about-section. Fall back to a global query as a last
+        // resort — group threads will return nothing useful and we'll
+        // bail out at the URL filter below.
+        const candidates: Array<HTMLAnchorElement | null> = [
+          document.querySelector('header a[href*="/in/"]') as HTMLAnchorElement | null,
+          document.querySelector('.msg-thread__link-to-profile[href*="/in/"]') as HTMLAnchorElement | null,
+          document.querySelector('.msg-overlay-bubble-header a[href*="/in/"]') as HTMLAnchorElement | null,
+          document.querySelector('.scaffold-layout__detail a[href*="/in/"]') as HTMLAnchorElement | null,
+          document.querySelector('a[href*="/in/"]') as HTMLAnchorElement | null
+        ];
+        for (const node of candidates) {
+          const value = (node?.getAttribute("href") ?? "").trim();
+          if (value && /\/in\/[A-Za-z0-9_-]+/.test(value)) return value;
+        }
+        return null;
+      });
+      if (!href) return undefined;
+      // Strip query/fragment, drop trailing path segments past the slug,
+      // ensure absolute. Avoids storing tracking params.
+      const match = href.match(/\/in\/([A-Za-z0-9_%\-]+)/);
+      if (!match) return undefined;
+      return `https://www.linkedin.com/in/${match[1]}/`;
+    } catch {
+      return undefined;
+    }
+  }
+
   private async collectVisibleThreadMessages(
     page: Page,
     selectors: SelectorRegistry,
@@ -7151,6 +7194,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               raw: message.raw
             }));
 
+            const profileUrl = await this.extractParticipantProfileUrl(page);
             const thread: ThreadStub = {
               platformThreadId: canonicalPlatformThreadId,
               displayName: openResult.descriptor.displayName ?? row.displayName,
@@ -7160,7 +7204,8 @@ export class LinkedInAdapter implements PlatformAdapter {
               threadUrl: openResult.descriptor.threadUrl ?? page.url(),
               needsReplyFromList: row.needsReplyFromList,
               isUnreadCandidate: true,
-              avatarUrl: row.avatarUrl
+              avatarUrl: row.avatarUrl,
+              profileUrl
             };
 
             this.logTraceEvent({
@@ -8378,6 +8423,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         await logStep(7, "persist", "persisting thread and messages");
         const unreadCount = threadMeta.unreadCount ?? 1;
+        const profileUrl = await this.extractParticipantProfileUrl(page);
         const thread: ThreadStub = {
           platformThreadId: canonicalPlatformThreadId!,
           displayName: threadMeta.participantName,
@@ -8386,7 +8432,8 @@ export class LinkedInAdapter implements PlatformAdapter {
           threadUrl: resolvedThreadUrl,
           unreadCount,
           needsReplyFromList: threadMeta.needsReplyFromList,
-          isUnreadCandidate: true
+          isUnreadCandidate: true,
+          profileUrl
         };
         const persisted = await input.persist({
           thread,

@@ -2108,6 +2108,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
   res.json({
     id: thread.id,
+    personId: thread.person.id,
     personName: thread.person.displayName,
     personAvatarUrl: thread.person.avatarUrl ?? null,
     platform: thread.platform,
@@ -2640,8 +2641,10 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
       name: person.displayName,
       platform: person.platform,
       profileUrl: person.profileUrl,
+      profileUrlSource: person.profileUrlSource ?? null,
       enrichedAt: person.enrichedAt ? person.enrichedAt.toISOString() : null,
       enrichmentFailedReason: person.enrichmentFailedReason ?? null,
+      avatarUrl: person.avatarUrl ?? null,
       tags: person.tagsJson ? JSON.parse(person.tagsJson) : [],
       notes: person.notes
     },
@@ -2653,11 +2656,15 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
           currentCompany: enrichment.currentCompany,
           currentRole: enrichment.currentRole,
           mutualCount: enrichment.mutualCount,
+          followersCount: enrichment.followersCount ?? null,
           experience: enrichment.experienceJson ? JSON.parse(enrichment.experienceJson) : [],
           education: enrichment.educationJson ? JSON.parse(enrichment.educationJson) : [],
           skills: enrichment.skillsJson ? JSON.parse(enrichment.skillsJson) : [],
           services: enrichment.servicesJson ? JSON.parse(enrichment.servicesJson) : [],
+          licenses: enrichment.licensesJson ? JSON.parse(enrichment.licensesJson) : [],
           recentPosts: enrichment.recentPostsJson ? JSON.parse(enrichment.recentPostsJson) : [],
+          recentComments: enrichment.recentCommentsJson ? JSON.parse(enrichment.recentCommentsJson) : [],
+          recentReactions: enrichment.recentReactionsJson ? JSON.parse(enrichment.recentReactionsJson) : [],
           mutualNames: enrichment.mutualNamesJson ? JSON.parse(enrichment.mutualNamesJson) : []
         }
       : null,
@@ -2736,9 +2743,30 @@ app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) =>
   }
   await prisma.person.update({
     where: { id: personId },
-    data: { profileUrl: payload.profileUrl, enrichmentFailedReason: null }
+    data: {
+      profileUrl: payload.profileUrl,
+      profileUrlSource: "manual",
+      enrichmentFailedReason: null
+    }
   });
   res.json({ status: "ok", profileUrl: payload.profileUrl });
+}));
+
+// Bulk-enqueue every person with a known profile URL for re-enrichment.
+// Returns the count of jobs enqueued. The queue handles its own pacing
+// and concurrency, so we don't need to throttle here beyond the
+// per-person coalescing inside `enqueue` (manual triggers always create
+// a fresh row so a Scan-all click while another is in-flight will still
+// produce visible progress).
+app.post("/control/people/scan-all", asyncRoute(async (_req, res) => {
+  const candidates = await prisma.person.findMany({
+    where: { profileUrl: { not: null } },
+    select: { id: true }
+  });
+  for (const candidate of candidates) {
+    await enrichmentQueue.enqueue(candidate.id, "manual");
+  }
+  res.json({ status: "queued", count: candidates.length });
 }));
 
 app.post("/control/self/enrich", asyncRoute(async (req, res) => {

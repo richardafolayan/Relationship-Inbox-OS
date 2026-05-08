@@ -65,8 +65,10 @@ export interface PersonDetailResponse {
     name: string;
     platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
     profileUrl: string | null;
+    profileUrlSource: "auto" | "manual" | null;
     enrichedAt: string | null;
     enrichmentFailedReason: string | null;
+    avatarUrl: string | null;
     tags: string[];
     notes: string | null;
   };
@@ -77,11 +79,15 @@ export interface PersonDetailResponse {
     currentCompany: string | null;
     currentRole: string | null;
     mutualCount: number | null;
+    followersCount: number | null;
     experience: Array<{ title?: string | null; company?: string | null; dates?: string | null; description?: string | null }>;
     education: Array<{ institution?: string | null; degree?: string | null; field?: string | null; dates?: string | null }>;
     skills: string[];
     services: string[];
+    licenses: Array<{ name?: string | null; issuer?: string | null; dates?: string | null }>;
     recentPosts: Array<{ text?: string | null; postedAt?: string | null; hasImage?: boolean }>;
+    recentComments: Array<{ text?: string | null; postedAt?: string | null; onPostBy?: string | null }>;
+    recentReactions: Array<{ text?: string | null; postedAt?: string | null; reaction?: string | null; onPostBy?: string | null }>;
     mutualNames: string[];
   } | null;
   summary: string | null;
@@ -198,6 +204,7 @@ export interface ThreadMessage {
 
 export interface ThreadResponse {
   id: string;
+  personId: string;
   personName: string;
   personAvatarUrl?: string | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";

@@ -15,6 +15,7 @@ export interface ExtractedProfile {
   currentCompany: string | null;
   currentRole: string | null;
   mutualCount: number | null;
+  followersCount: number | null;
   experience: Array<{
     title: string | null;
     company: string | null;
@@ -29,10 +30,26 @@ export interface ExtractedProfile {
   }>;
   skills: string[];
   services: string[];
+  licenses: Array<{
+    name: string | null;
+    issuer: string | null;
+    dates: string | null;
+  }>;
   recentPosts: Array<{
     text: string | null;
     postedAt: string | null;
     hasImage: boolean;
+  }>;
+  recentComments: Array<{
+    text: string | null;
+    postedAt: string | null;
+    onPostBy: string | null;
+  }>;
+  recentReactions: Array<{
+    text: string | null;
+    postedAt: string | null;
+    reaction: string | null;
+    onPostBy: string | null;
   }>;
   mutualNames: string[];
 }
@@ -90,13 +107,44 @@ export async function extractProfile(page: Page, profileUrl: string): Promise<Pr
   if (phaseB.kind === "ok") {
     profile.recentPosts = phaseB.value;
   } else {
-    // Phase B failure is logged but never invalidates Phase A.
     console.warn(
-      `[linkedin-profile-adapter] phase B (recent activity) failed for ${profileUrl}: ${
+      `[linkedin-profile-adapter] phase B (recent posts) failed for ${profileUrl}: ${
         phaseB.kind === "timeout" ? "timeout" : phaseB.error instanceof Error ? phaseB.error.message : String(phaseB.error)
       }`
     );
     profile.recentPosts = [];
+  }
+
+  const phaseB2 = await runWithTimeout(
+    PHASE_B_TIMEOUT_MS,
+    () => extractRecentComments(page, profileUrl),
+    "phase_b2"
+  );
+  if (phaseB2.kind === "ok") {
+    profile.recentComments = phaseB2.value;
+  } else {
+    console.warn(
+      `[linkedin-profile-adapter] phase B2 (recent comments) failed for ${profileUrl}: ${
+        phaseB2.kind === "timeout" ? "timeout" : phaseB2.error instanceof Error ? phaseB2.error.message : String(phaseB2.error)
+      }`
+    );
+    profile.recentComments = [];
+  }
+
+  const phaseB3 = await runWithTimeout(
+    PHASE_B_TIMEOUT_MS,
+    () => extractRecentReactions(page, profileUrl),
+    "phase_b3"
+  );
+  if (phaseB3.kind === "ok") {
+    profile.recentReactions = phaseB3.value;
+  } else {
+    console.warn(
+      `[linkedin-profile-adapter] phase B3 (recent reactions) failed for ${profileUrl}: ${
+        phaseB3.kind === "timeout" ? "timeout" : phaseB3.error instanceof Error ? phaseB3.error.message : String(phaseB3.error)
+      }`
+    );
+    profile.recentReactions = [];
   }
 
   return profile;
@@ -264,6 +312,39 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
         return clean((node.querySelector("span.t-14") as HTMLElement | null)?.innerText ?? node.innerText);
       }).filter((s) => s.length > 0 && s.length < 80);
 
+      // Licenses & certifications. Same structural pattern as experience:
+      // <li> with a bold name span, an issuer line, and a dates caption.
+      const licenseItems = listItemsIn('section[id*="licenses"], section[id*="certifications"]').slice(0, 10).map((node) => {
+        const name = (node.querySelector("span.mr1.t-bold span, span.mr1.hoverable-link-text span, span.t-bold span") as HTMLElement | null)?.innerText ?? null;
+        const issuer = (node.querySelector("span.t-14.t-normal span") as HTMLElement | null)?.innerText ?? null;
+        const dates = (node.querySelector(".pvs-entity__caption-wrapper, span.t-14.t-normal.t-black--light span") as HTMLElement | null)?.innerText ?? null;
+        return {
+          name: name ? clean(name) : null,
+          issuer: issuer ? clean(issuer) : null,
+          dates: dates ? clean(dates) : null
+        };
+      }).filter((item) => item.name);
+
+      // Followers count appears on the top card as "<N> followers" — small
+      // muted text, sometimes a link. Match defensively because LinkedIn
+      // localises the number with thousand separators ("1,234") and an
+      // optional "K" suffix ("3K followers" on profile cards).
+      let followersCount: number | null = null;
+      const followersScopes: Element[] = [topCard, document.body].filter((n): n is Element => Boolean(n));
+      for (const scope of followersScopes) {
+        const text = clean((scope as HTMLElement).innerText ?? "");
+        const match = text.match(/([\d.,]+)\s*([KMB]?)\s+followers/i);
+        if (match && match[1]) {
+          const base = parseFloat(match[1].replace(/,/g, ""));
+          if (Number.isFinite(base)) {
+            const suffix = (match[2] || "").toUpperCase();
+            const multiplier = suffix === "K" ? 1_000 : suffix === "M" ? 1_000_000 : suffix === "B" ? 1_000_000_000 : 1;
+            followersCount = Math.round(base * multiplier);
+            break;
+          }
+        }
+      }
+
       // Mutual connections appear as a small badge near the top of the
       // profile, e.g. "12 mutual connections, including Alice and Bob".
       const mutualNode = document.querySelector('a[href*="mutualConnections"], a[href*="facetNetwork"]');
@@ -296,6 +377,8 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
         education: educationItems,
         skills: skillItems,
         services: serviceItems,
+        licenses: licenseItems,
+        followersCount,
         mutualCount,
         mutualNames,
         textNotFound: textOf("body")?.toLowerCase().includes("page not found") ?? false
@@ -317,6 +400,7 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
     currentCompany: raw.currentCompany ? safeTruncate(cleanText(raw.currentCompany), 160) : null,
     currentRole: raw.currentRole ? safeTruncate(cleanText(raw.currentRole), 160) : null,
     mutualCount: typeof raw.mutualCount === "number" && Number.isFinite(raw.mutualCount) ? raw.mutualCount : null,
+    followersCount: typeof raw.followersCount === "number" && Number.isFinite(raw.followersCount) ? raw.followersCount : null,
     experience: (raw.experience ?? []).map((e) => ({
       title: e.title ? safeTruncate(cleanText(e.title), 160) : null,
       company: e.company ? safeTruncate(cleanText(e.company), 160) : null,
@@ -331,7 +415,14 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
     })),
     skills: (raw.skills ?? []).slice(0, 12).map((s) => safeTruncate(cleanText(s), 120)),
     services: (raw.services ?? []).slice(0, 8).map((s) => safeTruncate(cleanText(s), 120)),
+    licenses: (raw.licenses ?? []).slice(0, 10).map((l) => ({
+      name: l.name ? safeTruncate(cleanText(l.name), 160) : null,
+      issuer: l.issuer ? safeTruncate(cleanText(l.issuer), 160) : null,
+      dates: l.dates ? safeTruncate(cleanText(l.dates), 80) : null
+    })),
     recentPosts: [],
+    recentComments: [],
+    recentReactions: [],
     mutualNames: (raw.mutualNames ?? []).slice(0, 8).map((s) => safeTruncate(cleanText(s), 120))
   };
 }
@@ -369,5 +460,86 @@ async function extractRecentPosts(
     text: entry.text ? safeTruncate(cleanText(entry.text), 600) : null,
     postedAt: entry.postedAt ? safeTruncate(cleanText(entry.postedAt), 80) : null,
     hasImage: Boolean(entry.hasImage)
+  }));
+}
+
+async function extractRecentComments(
+  page: Page,
+  profileUrl: string
+): Promise<ExtractedProfile["recentComments"]> {
+  const url = profileUrl.replace(/\/$/, "") + "/recent-activity/comments/";
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 7_000 });
+  await humanDelay(300, 600);
+
+  const items = await page
+    .evaluate(() => {
+      function clean(value: string | null | undefined): string {
+        return (value ?? "").replace(/\s+/g, " ").trim();
+      }
+      const cards = Array.from(
+        document.querySelectorAll(".feed-shared-update-v2, .occludable-update, .scaffold-finite-scroll__content > div")
+      ).slice(0, 10);
+      return cards
+        .map((card) => {
+          const commentNode = card.querySelector(".comments-comment-item__main-content, .update-components-text") as HTMLElement | null;
+          const text = commentNode ? clean(commentNode.innerText) : "";
+          const onPostByNode = card.querySelector(".update-components-actor__title span[aria-hidden='true'], .feed-shared-actor__name") as HTMLElement | null;
+          const onPostBy = onPostByNode ? clean(onPostByNode.innerText) : null;
+          const dateNode = card.querySelector("time, .update-components-actor__sub-description span[aria-hidden='true']") as HTMLElement | null;
+          const postedAt = dateNode ? clean(dateNode.innerText) : null;
+          return { text, postedAt, onPostBy };
+        })
+        .filter((entry) => entry.text.length > 0);
+    })
+    .catch(() => []);
+
+  return items.slice(0, 8).map((entry) => ({
+    text: entry.text ? safeTruncate(cleanText(entry.text), 600) : null,
+    postedAt: entry.postedAt ? safeTruncate(cleanText(entry.postedAt), 80) : null,
+    onPostBy: entry.onPostBy ? safeTruncate(cleanText(entry.onPostBy), 160) : null
+  }));
+}
+
+async function extractRecentReactions(
+  page: Page,
+  profileUrl: string
+): Promise<ExtractedProfile["recentReactions"]> {
+  const url = profileUrl.replace(/\/$/, "") + "/recent-activity/reactions/";
+  await page.goto(url, { waitUntil: "domcontentloaded", timeout: 7_000 });
+  await humanDelay(300, 600);
+
+  const items = await page
+    .evaluate(() => {
+      function clean(value: string | null | undefined): string {
+        return (value ?? "").replace(/\s+/g, " ").trim();
+      }
+      const cards = Array.from(
+        document.querySelectorAll(".feed-shared-update-v2, .occludable-update, .scaffold-finite-scroll__content > div")
+      ).slice(0, 10);
+      return cards
+        .map((card) => {
+          const textNode = card.querySelector(".update-components-text, .feed-shared-update-v2__description") as HTMLElement | null;
+          const text = textNode ? clean(textNode.innerText) : "";
+          const headerNode = card.querySelector(".update-components-header__text-view, .update-components-header") as HTMLElement | null;
+          const headerText = headerNode ? clean(headerNode.innerText) : "";
+          // "<Name> liked this" / "<Name> celebrates this" — strip name
+          // and keep the verb as the reaction label.
+          const reactionMatch = headerText.match(/(liked|loved|celebrated|supported|insightful|funny|curious)/i);
+          const reaction = reactionMatch ? reactionMatch[1]!.toLowerCase() : null;
+          const onPostByNode = card.querySelector(".update-components-actor__title span[aria-hidden='true'], .feed-shared-actor__name") as HTMLElement | null;
+          const onPostBy = onPostByNode ? clean(onPostByNode.innerText) : null;
+          const dateNode = card.querySelector("time, .update-components-actor__sub-description span[aria-hidden='true']") as HTMLElement | null;
+          const postedAt = dateNode ? clean(dateNode.innerText) : null;
+          return { text, postedAt, reaction, onPostBy };
+        })
+        .filter((entry) => entry.text.length > 0 || entry.reaction !== null);
+    })
+    .catch(() => []);
+
+  return items.slice(0, 8).map((entry) => ({
+    text: entry.text ? safeTruncate(cleanText(entry.text), 400) : null,
+    postedAt: entry.postedAt ? safeTruncate(cleanText(entry.postedAt), 80) : null,
+    reaction: entry.reaction ? safeTruncate(cleanText(entry.reaction), 40) : null,
+    onPostBy: entry.onPostBy ? safeTruncate(cleanText(entry.onPostBy), 160) : null
   }));
 }
