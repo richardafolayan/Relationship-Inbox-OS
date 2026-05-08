@@ -531,10 +531,75 @@ export function createSendService(deps: SendServiceDeps) {
     return { cancelled: true };
   }
 
+  /**
+   * Update a still-SCHEDULED send's text and/or scheduledFor. Operators
+   * commonly schedule a draft, then re-read it, and want to tweak the
+   * wording before it goes out — without having to cancel + rewrite +
+   * re-schedule from scratch. Validates that the row is still SCHEDULED
+   * (PENDING/SENT/FAILED/CANCELLED rows refuse the update so a send
+   * that's already in flight can't be rewritten under the worker's
+   * feet). Returns the updated text + scheduledFor on success.
+   */
+  async function updateScheduledSend(input: {
+    clientSendId: string;
+    threadId: string;
+    text?: string;
+    scheduledFor?: Date;
+  }): Promise<
+    | { updated: true; text: string; scheduledFor: string }
+    | { updated: false; reason: string }
+  > {
+    const row = await prisma.sendRequest.findUnique({
+      where: { clientSendId: input.clientSendId }
+    });
+    if (!row) return { updated: false, reason: "not_found" };
+    if (row.threadId !== input.threadId) return { updated: false, reason: "thread_mismatch" };
+    if (row.status !== "SCHEDULED") return { updated: false, reason: `not_scheduled:${row.status}` };
+
+    const nextText = typeof input.text === "string" ? input.text : row.requestText;
+    if (nextText.length === 0) return { updated: false, reason: "empty_text" };
+    const nextScheduledFor = input.scheduledFor ?? row.scheduledFor;
+    if (!nextScheduledFor) return { updated: false, reason: "no_scheduled_for" };
+    if (Number.isNaN(nextScheduledFor.getTime())) return { updated: false, reason: "invalid_scheduled_for" };
+    if (input.scheduledFor && input.scheduledFor.getTime() <= Date.now()) {
+      return { updated: false, reason: "scheduled_for_must_be_future" };
+    }
+
+    await prisma.sendRequest.update({
+      where: { clientSendId: input.clientSendId },
+      data: { requestText: nextText, scheduledFor: nextScheduledFor }
+    });
+
+    const thread = await prisma.thread.findUnique({ where: { id: input.threadId } });
+    if (thread) {
+      await deps.auditLog({
+        platform: thread.platform as PlatformName,
+        stage: "Send",
+        action: "SEND_SCHEDULE_UPDATED",
+        status: "OK",
+        details: {
+          threadId: input.threadId,
+          clientSendId: input.clientSendId,
+          textChanged: typeof input.text === "string" && input.text !== row.requestText,
+          scheduledForChanged:
+            !!input.scheduledFor && row.scheduledFor?.getTime() !== input.scheduledFor.getTime(),
+          scheduledFor: nextScheduledFor.toISOString()
+        }
+      });
+    }
+
+    return {
+      updated: true,
+      text: nextText,
+      scheduledFor: nextScheduledFor.toISOString()
+    };
+  }
+
   return {
     enqueueSend,
     enqueueScheduledSend,
     cancelScheduledSend,
+    updateScheduledSend,
     processSendRequest
   };
 }
