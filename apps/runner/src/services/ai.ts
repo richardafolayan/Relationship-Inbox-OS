@@ -8,6 +8,7 @@ import type {
   ContactProfileSnapshot,
   ConversationStartersOutput,
   ConversationStarterCitedField,
+  OperatorProfile,
   SettingsStore
 } from "../types/runtime";
 import {
@@ -238,6 +239,58 @@ const startersSchema = z.object({
     .min(1)
     .max(4)
 });
+
+/**
+ * Render the operator's free-text self-description as a prompt fragment.
+ * Returns "" when both fields are blank so we don't emit an empty
+ * "About the operator:" header that consumes tokens for nothing.
+ * Truncated per-field so a runaway paste in Settings can't blow the
+ * context window.
+ */
+function operatorProfileFragment(profile: OperatorProfile | null | undefined): string {
+  const about = profile?.about?.trim();
+  const interests = profile?.interests?.trim();
+  if (!about && !interests) return "";
+  const lines: string[] = ["", "About the operator (use to keep replies in-domain and in their voice):"];
+  if (about) lines.push(`- How they write / about them: ${safeTruncate(about, 800)}`);
+  if (interests) lines.push(`- Things they care about: ${safeTruncate(interests, 800)}`);
+  return lines.join("\n");
+}
+
+/**
+ * Stable fingerprint of an OperatorProfile for cache-key inclusion. The
+ * suggested-replies cache is keyed on AI inputs so a Settings change
+ * needs to invalidate cached replies — we feed this into the same
+ * cacheKey hash. Trimmed so trailing whitespace edits don't churn the
+ * cache.
+ */
+export function operatorProfileFingerprint(profile: OperatorProfile | null | undefined): string {
+  if (!profile) return "";
+  return `${(profile.about ?? "").trim()}|${(profile.interests ?? "").trim()}`;
+}
+
+/**
+ * Stable fingerprint of a ContactProfileSnapshot for cache-key inclusion.
+ * We deliberately key on the small subset of fields the prompt actually
+ * reads, not the raw row, so a re-enrichment that produces identical
+ * prompt-relevant content doesn't force a regeneration.
+ */
+export function contactSnapshotFingerprint(snap: ContactProfileSnapshot | null | undefined): string {
+  if (!snap) return "";
+  const recentPostFp = (snap.recentPosts ?? [])
+    .slice(0, 5)
+    .map((p) => `${p.postedAt ?? ""}::${(p.text ?? "").slice(0, 120)}`)
+    .join("|");
+  return [
+    snap.headline ?? "",
+    (snap.about ?? "").slice(0, 600),
+    snap.location ?? "",
+    snap.currentRole ?? "",
+    snap.currentCompany ?? "",
+    (snap.skills ?? []).slice(0, 10).join(","),
+    recentPostFp
+  ].join("§");
+}
 
 /**
  * Compress a ContactProfileSnapshot into the prompt-ready slice the AI
@@ -516,6 +569,8 @@ Messages: ${JSON.stringify(input.messages)}`;
      * (don't apologise unprompted).
      */
     lastOutboundAt?: string | null;
+    operatorProfile?: OperatorProfile | null;
+    contact?: ContactProfileSnapshot | null;
   }): Promise<SuggestedRepliesOutput> {
     const isOutreach = input.category === "outreach";
 
@@ -595,7 +650,11 @@ ${
   isOutreach
     ? `This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C MUST be a friendly Polite decline (~1 sentence, no commitment, no follow-up question), labelled with intent "Polite decline". Replies A and B can still pick intents that fit.`
     : ""
-}${lateReplyHint}
+}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
+  input.contact
+    ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
+    : ""
+}
 
 Summary: ${input.summary}
 What they want: ${input.whatTheyWant}
@@ -924,6 +983,8 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       notes: string | null;
       tags: string[];
     };
+    operatorProfile?: OperatorProfile | null;
+    contact?: ContactProfileSnapshot | null;
   }): Promise<string> {
     const trimmed = input.intent.trim();
     if (!trimmed) return "";
@@ -990,7 +1051,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       return `\n\nRelationship context (other threads with this person, do NOT repeat questions already answered elsewhere):${tagsLine}${notesLine}\n${exchanges.join("\n")}`;
     })();
 
-    const prompt = `Rewrite the operator's intent below as a complete, sendable LinkedIn message in Richard's voice. Match the length and energy of the recipient's last message (reciprocity rule from system prompt). When in doubt, err shorter. The voice samples below are additional calibration for this thread, the few-shot examples in the system prompt are the primary reference.
+    const prompt = `Rewrite the operator's intent below as a complete, sendable LinkedIn message in the operator's voice. Match the length and energy of the recipient's last message (reciprocity rule from system prompt). When in doubt, err shorter. The voice samples below are additional calibration for this thread, the few-shot examples in the system prompt are the primary reference.
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
 
@@ -998,7 +1059,11 @@ Recipient: ${input.displayName}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
-${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${
+  input.contact
+    ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
+    : ""
+}
 
 Return strict JSON: { "text": "string" }`;
 

@@ -13,7 +13,11 @@ import { ensurePathInside } from "./utils/fs";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
-import { createAiService } from "./services/ai";
+import {
+  createAiService,
+  contactSnapshotFingerprint,
+  operatorProfileFingerprint
+} from "./services/ai";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
@@ -1689,6 +1693,11 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
   };
 
+  const [composeOperatorProfile, composeContactSnapshot] = await Promise.all([
+    settingsStore.getOperatorProfile(),
+    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
+  ]);
+
   const text = await aiService.composeInVoice({
     intent: payload.intent,
     displayName: thread.person.displayName,
@@ -1698,7 +1707,9 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
       text: m.text,
       timestamp: m.timestamp.toISOString()
     })),
-    relationshipContext
+    relationshipContext,
+    operatorProfile: composeOperatorProfile,
+    contact: composeContactSnapshot
   });
 
   res.json({ text });
@@ -1967,6 +1978,18 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     ? pageMessages[0]?.id ?? null
     : null;
 
+  // Operator self-description from Settings + the contact's own enrichment
+  // snapshot. Both feed `generateSuggestedReplies` so replies stay in the
+  // operator's domain ("how I write", "things I care about") and ground
+  // references in real fields the contact has shared rather than inventing
+  // details. Both can be null (operator hasn't filled Settings, contact
+  // not enriched yet) — the prompt gracefully omits the section in that
+  // case.
+  const [operatorProfile, contactSnapshot] = await Promise.all([
+    settingsStore.getOperatorProfile(),
+    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
+  ]);
+
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
@@ -1980,7 +2003,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     // the cache key — minute-precision would invalidate replies every
     // few minutes for no reason.
     lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
-    lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null
+    lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null,
+    operatorProfile,
+    contact: contactSnapshot
   };
   // Cache key over the AI inputs. Hashing keeps the column short and
   // doesn't leak content into the audit log if anyone ever inspects it. As
@@ -1989,7 +2014,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // hit, only a real conversation change does. The late-reply state is
   // bucketed by day (UTC) so the cache holds as the gap grows hour by
   // hour but invalidates when the gap actually crosses a 14d / 30d / 60d
-  // bucket boundary.
+  // bucket boundary. Operator profile + contact enrichment fingerprints
+  // are folded in too: an edit in Settings or a re-enrichment must
+  // invalidate stale replies.
   const lateBucket = (() => {
     if (!aiInputs.lastInboundAt) return "n";
     const inboundMs = Date.parse(aiInputs.lastInboundAt);
@@ -2003,7 +2030,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     return "n";
   })();
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}`)
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
     .digest("hex");
 
   let suggested: SuggestedRepliesOutput | undefined;
@@ -2826,6 +2853,26 @@ app.get("/data/self", asyncRoute(async (_req, res) => {
   res.json({ self: record });
 }));
 
+// Operator's free-text self-description — what they care about and how
+// they write. Distinct from /data/self (LinkedIn-derived). The AI prompts
+// (suggested replies + composeInVoice) read this so drafts sound like the
+// operator and stay within their domain.
+app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
+  const profile = await settingsStore.getOperatorProfile();
+  res.json(profile);
+}));
+
+app.post("/control/operator-profile", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      about: z.string().max(4000).optional(),
+      interests: z.string().max(4000).optional()
+    })
+    .parse(req.body);
+  const updated = await settingsStore.updateOperatorProfile(payload);
+  res.json(updated);
+}));
+
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
@@ -2984,11 +3031,15 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return;
   }
 
-  const lastInbound = await prisma.message.findFirst({
-    where: { threadId, direction: "IN" },
-    orderBy: { timestamp: "desc" },
-    select: { text: true }
-  });
+  const [lastInbound, operatorProfile, contactSnapshot] = await Promise.all([
+    prisma.message.findFirst({
+      where: { threadId, direction: "IN" },
+      orderBy: { timestamp: "desc" },
+      select: { text: true }
+    }),
+    settingsStore.getOperatorProfile(),
+    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
+  ]);
 
   const aiInputs = {
     summary: thread.rollingSummary ?? "",
@@ -2997,7 +3048,9 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     lastInboundMessage: lastInbound?.text ?? "",
     category: (thread.category as "outreach" | "genuine" | null) ?? null,
     lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
-    lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null
+    lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
+    operatorProfile,
+    contact: contactSnapshot
   };
   const lateBucket = (() => {
     if (!aiInputs.lastInboundAt) return "n";
@@ -3011,8 +3064,10 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     if (gapDays >= 14) return "short";
     return "n";
   })();
+  // Mirror the inline /data/thread cacheKey shape so a predraft pre-warm
+  // and a subsequent /data/thread fetch hit the same cache row.
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}`)
+    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
     .digest("hex");
 
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
@@ -3100,6 +3155,11 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
+  const [rewriteOperatorProfile, rewriteContactSnapshot] = await Promise.all([
+    settingsStore.getOperatorProfile(),
+    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
+  ]);
+
   const text = await aiService.composeInVoice({
     intent: `Rewrite the message below in my voice, preserving the meaning. Keep it about the same length. Message: ${payload.draft}`,
     displayName: thread.person.displayName,
@@ -3108,7 +3168,9 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
       direction: m.direction as "IN" | "OUT",
       text: m.text,
       timestamp: m.timestamp.toISOString()
-    }))
+    })),
+    operatorProfile: rewriteOperatorProfile,
+    contact: rewriteContactSnapshot
   });
 
   res.json({ text });
