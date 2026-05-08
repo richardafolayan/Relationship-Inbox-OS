@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { Sun, Inbox, AlertTriangle, Archive, Users, Cable, ListChecks, Search, Settings as SettingsIcon } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { ThemeToggle } from "@/components/layout/theme-toggle";
 
 interface SidebarProps {
   health: HealthResponse | null;
@@ -118,6 +119,7 @@ export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: 
             <span>{healthy ? "Runner online" : "Runner offline"}</span>
           </p>
         </div>
+        <ThemeToggle />
       </div>
     </aside>
   );
