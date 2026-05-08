@@ -37,9 +37,11 @@ enum AuditStatus {
 }
 
 enum SendRequestStatus {
+  SCHEDULED
   PENDING
   SENT
   FAILED
+  CANCELLED
 }
 
 enum EnrichmentJobStatus {
@@ -291,6 +293,10 @@ model SendRequest {
   threadId     String
   status       SendRequestStatus @default(PENDING)
   requestText  String
+  // Set on scheduled sends. The promoter looks for SCHEDULED rows whose
+  // scheduledFor has passed and flips them to PENDING so the regular
+  // send-queue worker drains them. Null on rows that were sent immediately.
+  scheduledFor DateTime?
   receiptJson  String?
   errorJson    String?
   createdAt    DateTime          @default(now())
@@ -299,5 +305,6 @@ model SendRequest {
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
   @@index([threadId, status])
+  @@index([status, scheduledFor])
   @@map("send_requests")
 }

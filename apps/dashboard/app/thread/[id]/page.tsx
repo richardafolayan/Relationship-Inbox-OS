@@ -4,7 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
-import { ChevronDown, ChevronLeft, Loader2, Send, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronLeft, Clock, Loader2, Send, Sparkles } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { formatClock, formatRelative } from "@/lib/time";
@@ -82,6 +82,75 @@ function formatDayLabel(date: Date): string {
   return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
 }
 
+// Build the standard list of schedule-send presets relative to `now`.
+// Times round forward to whole hours / 9 am the next morning, matching the
+// conventions Gmail and the Apple Mail "Send Later" picker use — operators
+// don't expect "in 1 hour" to land at 4:23 pm.
+function buildSchedulePresets(now: Date): Array<{ label: string; sub: string; at: Date }> {
+  const inOneHour = new Date(now.getTime() + 60 * 60 * 1000);
+  inOneHour.setMinutes(0, 0, 0);
+  if (inOneHour.getTime() <= now.getTime()) inOneHour.setHours(inOneHour.getHours() + 1);
+
+  const inThreeHours = new Date(now.getTime() + 3 * 60 * 60 * 1000);
+  inThreeHours.setMinutes(0, 0, 0);
+  if (inThreeHours.getTime() <= now.getTime()) inThreeHours.setHours(inThreeHours.getHours() + 1);
+
+  const tomorrowMorning = new Date(now);
+  tomorrowMorning.setDate(tomorrowMorning.getDate() + 1);
+  tomorrowMorning.setHours(9, 0, 0, 0);
+
+  const mondayMorning = new Date(now);
+  // 1=Mon..6=Sat,0=Sun. Find the next Monday strictly in the future.
+  const day = mondayMorning.getDay();
+  const daysUntilMonday = ((1 - day + 7) % 7) || 7;
+  mondayMorning.setDate(mondayMorning.getDate() + daysUntilMonday);
+  mondayMorning.setHours(9, 0, 0, 0);
+
+  const fmt = (d: Date) =>
+    d.toLocaleString(undefined, {
+      weekday: "short",
+      hour: "numeric",
+      minute: "2-digit"
+    });
+
+  return [
+    { label: "In 1 hour", sub: fmt(inOneHour), at: inOneHour },
+    { label: "In 3 hours", sub: fmt(inThreeHours), at: inThreeHours },
+    { label: "Tomorrow 9 am", sub: fmt(tomorrowMorning), at: tomorrowMorning },
+    { label: "Monday 9 am", sub: fmt(mondayMorning), at: mondayMorning }
+  ];
+}
+
+// Format an absolute timestamp for the "scheduled for X" pill — show the
+// weekday/time if it's in the next 7 days, otherwise the full date.
+function formatScheduledFor(iso: string | null | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const now = new Date();
+  const within7Days = d.getTime() - now.getTime() < 7 * 24 * 60 * 60 * 1000;
+  if (within7Days) {
+    const sameDay =
+      d.getFullYear() === now.getFullYear() &&
+      d.getMonth() === now.getMonth() &&
+      d.getDate() === now.getDate();
+    if (sameDay) {
+      return `today at ${d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
+    }
+    return d.toLocaleString(undefined, {
+      weekday: "short",
+      hour: "numeric",
+      minute: "2-digit"
+    });
+  }
+  return d.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit"
+  });
+}
+
 function DayDivider({ label }: { label: string }) {
   return (
     <div className="my-3 flex items-center gap-3 self-stretch">
@@ -135,6 +204,18 @@ export default function ThreadPage() {
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+
+  // Scheduled-send picker state. The picker hangs off a chevron next to the
+  // Send button; opens a popover with quick presets ("In 1 hour", "Tomorrow
+  // 9 am", custom). When the user picks a time, we POST /send with
+  // `scheduledFor` and the runner persists a SCHEDULED row instead of
+  // enqueuing immediately. The picker also exposes a custom datetime-local
+  // input for arbitrary times.
+  const [scheduleMenuOpen, setScheduleMenuOpen] = useState(false);
+  const [customScheduleValue, setCustomScheduleValue] = useState("");
+  const [scheduling, setScheduling] = useState(false);
+  const [cancellingScheduledId, setCancellingScheduledId] = useState<string | null>(null);
+  const scheduleMenuRef = useRef<HTMLDivElement>(null);
 
   const [pendingSends, setPendingSends] = useState<
     Array<{
@@ -336,6 +417,78 @@ export default function ThreadPage() {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onSend]);
+
+  // Schedule the current composer text to send at `at`. Closes the picker,
+  // refreshes the thread (to pick up the new SCHEDULED row), and clears the
+  // composer on success. Errors surface in the existing inline error slot
+  // — sends are persisted server-side so an error here is rare (validation
+  // only).
+  const scheduleSend = useCallback(
+    async (at: Date) => {
+      if (!thread || !composer.trim() || scheduling) return;
+      const clientSendId = uuid();
+      const text = composer;
+      setScheduling(true);
+      setError(null);
+      try {
+        await apiPost(`/runner/control/thread/${thread.id}/send`, {
+          text,
+          clientSendId,
+          scheduledFor: at.toISOString()
+        });
+        setComposer("");
+        setScheduleMenuOpen(false);
+        setCustomScheduleValue("");
+        await refresh();
+      } catch (sendError) {
+        const message = sendError instanceof Error ? sendError.message : "Failed to schedule send";
+        setError(message);
+      } finally {
+        setScheduling(false);
+      }
+    },
+    [composer, refresh, scheduling, thread]
+  );
+
+  const cancelScheduledSend = useCallback(
+    async (clientSendId: string) => {
+      if (!thread) return;
+      setCancellingScheduledId(clientSendId);
+      try {
+        await apiPost(`/runner/control/thread/${thread.id}/cancel-send`, {
+          clientSendId
+        });
+        await refresh();
+      } catch (cancelError) {
+        const message =
+          cancelError instanceof Error ? cancelError.message : "Failed to cancel scheduled send";
+        setError(message);
+      } finally {
+        setCancellingScheduledId(null);
+      }
+    },
+    [refresh, thread]
+  );
+
+  // Click-outside / Escape closes the schedule picker. Mirrors the
+  // suggested-replies dropdown behaviour right below.
+  useEffect(() => {
+    if (!scheduleMenuOpen) return undefined;
+    const onClick = (event: MouseEvent) => {
+      if (!scheduleMenuRef.current?.contains(event.target as Node)) {
+        setScheduleMenuOpen(false);
+      }
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setScheduleMenuOpen(false);
+    };
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [scheduleMenuOpen]);
 
   // Click-outside / Escape closes the suggestion dropdown.
   useEffect(() => {
@@ -1007,6 +1160,34 @@ export default function ThreadPage() {
               );
             })}
 
+            {/* Scheduled-send rows. Render before pending so the timeline
+                reads chronologically: inflight at the bottom, scheduled
+                above. They're outbound, so right-aligned, but visually
+                quieter (dashed border, ink-3) so the operator clocks
+                "this hasn't sent yet" without the bubble pretending. */}
+            {(thread.scheduledSends ?? []).map((scheduled) => (
+              <div
+                key={`scheduled-${scheduled.clientSendId}`}
+                className="flex max-w-[72%] flex-col items-end self-end"
+              >
+                <div className="text-balance whitespace-pre-wrap rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
+                  {scheduled.text}
+                </div>
+                <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                  <Clock className="h-3 w-3" strokeWidth={1.8} />
+                  <span>scheduled · {formatScheduledFor(scheduled.scheduledFor)}</span>
+                  <button
+                    type="button"
+                    onClick={() => void cancelScheduledSend(scheduled.clientSendId)}
+                    disabled={cancellingScheduledId === scheduled.clientSendId}
+                    className="text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+                  >
+                    {cancellingScheduledId === scheduled.clientSendId ? "cancelling…" : "cancel"}
+                  </button>
+                </div>
+              </div>
+            ))}
+
             {pendingSends.map((pending) => (
               <div
                 key={`pending-${pending.clientSendId}`}
@@ -1308,6 +1489,68 @@ export default function ThreadPage() {
                   >
                     {transforming === "MAKE_WARMER" ? "warming…" : "make warmer"}
                   </button>
+                  <div className="relative" ref={scheduleMenuRef}>
+                    <button
+                      type="button"
+                      onClick={() => setScheduleMenuOpen((v) => !v)}
+                      disabled={!composer.trim() || sending || scheduling}
+                      title="Schedule send"
+                      aria-label="Schedule send"
+                      className="inline-flex h-[36px] w-[36px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                    >
+                      <Clock className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                    </button>
+                    {scheduleMenuOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[300px] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                        <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                          Schedule send
+                        </p>
+                        {buildSchedulePresets(new Date()).map((preset) => (
+                          <button
+                            key={preset.label}
+                            type="button"
+                            onClick={() => void scheduleSend(preset.at)}
+                            disabled={scheduling}
+                            className="flex w-full items-center justify-between rounded-[10px] px-3 py-[10px] text-left transition-colors duration-calm hover:bg-paper-2 disabled:opacity-50"
+                          >
+                            <span className="text-[13px] font-medium text-ink">{preset.label}</span>
+                            <span className="font-mono text-[11px] text-ink-3">{preset.sub}</span>
+                          </button>
+                        ))}
+                        <div className="mx-2 my-2 border-t border-hairline" />
+                        <div className="px-3 pb-2 pt-1">
+                          <p className="mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                            Custom
+                          </p>
+                          <input
+                            type="datetime-local"
+                            value={customScheduleValue}
+                            onChange={(e) => setCustomScheduleValue(e.target.value)}
+                            className="w-full rounded-row border border-hairline bg-paper px-3 py-[7px] text-[13px] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
+                          />
+                          <button
+                            type="button"
+                            disabled={!customScheduleValue || scheduling}
+                            onClick={() => {
+                              const at = new Date(customScheduleValue);
+                              if (Number.isNaN(at.getTime())) {
+                                setError("Pick a valid date and time.");
+                                return;
+                              }
+                              if (at.getTime() <= Date.now()) {
+                                setError("Pick a time in the future.");
+                                return;
+                              }
+                              void scheduleSend(at);
+                            }}
+                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                          >
+                            {scheduling ? "Scheduling…" : "Schedule"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
                   <Button variant="primary" onClick={() => void onSend()} disabled={sending || !composer.trim()}>
                     {sending ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <Send className="h-[14px] w-[14px]" strokeWidth={1.8} />}
                     Send

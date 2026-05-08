@@ -122,6 +122,13 @@ export interface EnqueueSendResult {
   errorMessage?: string;
 }
 
+export interface ScheduleSendResult {
+  clientSendId: string;
+  status: "SCHEDULED";
+  scheduledFor: string;
+  replayed: boolean;
+}
+
 export function createSendService(deps: SendServiceDeps) {
   /**
    * Insert a SendRequest in PENDING state and return immediately. The actual
@@ -385,8 +392,149 @@ export function createSendService(deps: SendServiceDeps) {
     }
   }
 
+  /**
+   * Persist a SendRequest in SCHEDULED state with a future scheduledFor
+   * timestamp. The scheduled-send promoter ticks periodically and flips
+   * SCHEDULED rows whose `scheduledFor <= now()` to PENDING, at which
+   * point the existing send-queue worker drains them through the same
+   * `processSendRequest` path as immediate sends.
+   *
+   * Idempotent on `clientSendId` — repeat calls return the existing row's
+   * scheduled timestamp instead of failing or double-scheduling.
+   */
+  async function enqueueScheduledSend(input: {
+    threadId: string;
+    text: string;
+    clientSendId: string;
+    scheduledFor: Date;
+  }): Promise<ScheduleSendResult> {
+    const thread = await prisma.thread.findUnique({
+      where: { id: input.threadId }
+    });
+    if (!thread) {
+      throw new Error("Thread not found");
+    }
+
+    if (Number.isNaN(input.scheduledFor.getTime())) {
+      throw new Error("scheduledFor must be a valid date");
+    }
+    if (input.scheduledFor.getTime() <= Date.now()) {
+      throw new Error("scheduledFor must be in the future");
+    }
+
+    const existing = await prisma.sendRequest.findUnique({
+      where: { clientSendId: input.clientSendId }
+    });
+    if (existing) {
+      if (existing.threadId !== input.threadId) {
+        throw new Error("clientSendId is already linked to another thread");
+      }
+      if (existing.status === "SCHEDULED" && existing.scheduledFor) {
+        return {
+          clientSendId: input.clientSendId,
+          status: "SCHEDULED",
+          scheduledFor: existing.scheduledFor.toISOString(),
+          replayed: true
+        };
+      }
+      throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
+    }
+
+    try {
+      await prisma.sendRequest.create({
+        data: {
+          clientSendId: input.clientSendId,
+          threadId: input.threadId,
+          requestText: input.text,
+          status: "SCHEDULED",
+          scheduledFor: input.scheduledFor
+        }
+      });
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
+      }
+      // Concurrent insert beat us; treat as replay.
+      return {
+        clientSendId: input.clientSendId,
+        status: "SCHEDULED",
+        scheduledFor: input.scheduledFor.toISOString(),
+        replayed: true
+      };
+    }
+
+    await deps.auditLog({
+      platform: thread.platform as PlatformName,
+      stage: "Send",
+      action: "SEND_SCHEDULED",
+      status: "OK",
+      details: {
+        threadId: input.threadId,
+        clientSendId: input.clientSendId,
+        scheduledFor: input.scheduledFor.toISOString()
+      }
+    });
+
+    return {
+      clientSendId: input.clientSendId,
+      status: "SCHEDULED",
+      scheduledFor: input.scheduledFor.toISOString(),
+      replayed: false
+    };
+  }
+
+  /**
+   * Cancel a SCHEDULED send before its `scheduledFor` fires. Refuses to
+   * touch rows in any other status (PENDING/SENT/FAILED/CANCELLED) so the
+   * operator can't accidentally undo a row mid-flight or re-cancel one
+   * that's already been processed.
+   */
+  async function cancelScheduledSend(input: {
+    clientSendId: string;
+    threadId: string;
+  }): Promise<{ cancelled: boolean; reason?: string }> {
+    const row = await prisma.sendRequest.findUnique({
+      where: { clientSendId: input.clientSendId }
+    });
+    if (!row) {
+      return { cancelled: false, reason: "not_found" };
+    }
+    if (row.threadId !== input.threadId) {
+      return { cancelled: false, reason: "thread_mismatch" };
+    }
+    if (row.status !== "SCHEDULED") {
+      return { cancelled: false, reason: `not_scheduled:${row.status}` };
+    }
+
+    await prisma.sendRequest.update({
+      where: { clientSendId: input.clientSendId },
+      data: { status: "CANCELLED" }
+    });
+
+    const thread = await prisma.thread.findUnique({
+      where: { id: input.threadId }
+    });
+    if (thread) {
+      await deps.auditLog({
+        platform: thread.platform as PlatformName,
+        stage: "Send",
+        action: "SEND_CANCELLED",
+        status: "OK",
+        details: {
+          threadId: input.threadId,
+          clientSendId: input.clientSendId,
+          scheduledFor: row.scheduledFor?.toISOString()
+        }
+      });
+    }
+
+    return { cancelled: true };
+  }
+
   return {
     enqueueSend,
+    enqueueScheduledSend,
+    cancelScheduledSend,
     processSendRequest
   };
 }

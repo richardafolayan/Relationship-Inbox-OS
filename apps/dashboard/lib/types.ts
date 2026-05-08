@@ -240,6 +240,17 @@ export interface ThreadResponse {
   };
   suggestedRepliesStatus?: "ready" | "generating";
   /**
+   * Pending scheduled sends for this thread. Surfaced so the composer can
+   * render a "scheduled for X — cancel" pill above the timeline without a
+   * second fetch. Empty array when nothing is scheduled.
+   */
+  scheduledSends?: Array<{
+    clientSendId: string;
+    text: string;
+    scheduledFor: string | null;
+    createdAt: string;
+  }>;
+  /**
    * Cross-thread context for the same Person — last message from each
    * other active thread plus the Person's notes/tags. Surfaced as a
    * "memory chip" on the composer so operators see at a glance whether
