@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
@@ -24,6 +24,12 @@ export default function PeoplePage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  // Inline status next to the Refresh enrichment button — every action
+  // surfaces what it's doing while it runs and briefly after, not just a
+  // button-label flip. Auto-clears on success/deferred after ~4s; errors
+  // still route through the page-level `error` banner.
+  const [enrichStatus, setEnrichStatus] = useState<string | null>(null);
+  const enrichStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scanningAll, setScanningAll] = useState(false);
   const [scanAllStatus, setScanAllStatus] = useState<string | null>(null);
   const [startersLoading, setStartersLoading] = useState(false);
@@ -108,7 +114,19 @@ export default function PeoplePage() {
   // Tear down the timer if the page unmounts mid-debounce.
   useEffect(() => () => {
     if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
+    if (enrichStatusTimer.current) clearTimeout(enrichStatusTimer.current);
   }, []);
+
+  // Switching person mid-flight: drop the previous enrich status — it
+  // described the previous selection and would mis-attribute "saved" to
+  // a person who wasn't actually refreshed.
+  useEffect(() => {
+    if (enrichStatusTimer.current) {
+      clearTimeout(enrichStatusTimer.current);
+      enrichStatusTimer.current = null;
+    }
+    setEnrichStatus(null);
+  }, [selectedId]);
 
   const onNotesChange = useCallback((value: string): void => {
     setNotesDraft(value);
@@ -134,16 +152,33 @@ export default function PeoplePage() {
   const refreshEnrichment = useCallback(() => {
     if (!selectedId) return;
     setRefreshing(true);
-    runAction(
-      apiPost(`/runner/control/person/${selectedId}/enrich?wait=1`, {}).finally(() =>
-        setRefreshing(false)
-      ),
-      setError,
-      async () => {
+    setError(null);
+    setEnrichStatus("Fetching LinkedIn profile…");
+    if (enrichStatusTimer.current) {
+      clearTimeout(enrichStatusTimer.current);
+      enrichStatusTimer.current = null;
+    }
+    apiPost<{ status: "ok" | "deferred" | "queued"; reason?: string }>(
+      `/runner/control/person/${selectedId}/enrich?wait=1`,
+      {}
+    )
+      .then(async (result) => {
+        setEnrichStatus(
+          result.status === "deferred"
+            ? "Runner is busy — queued for next slot."
+            : "Profile refreshed."
+        );
+        enrichStatusTimer.current = setTimeout(() => setEnrichStatus(null), 4000);
         await loadList();
         if (selectedId) await loadDetail(selectedId);
-      }
-    );
+      })
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        console.warn("[action]", message);
+        setError(message);
+        setEnrichStatus(null);
+      })
+      .finally(() => setRefreshing(false));
   }, [selectedId, loadList, loadDetail]);
 
   const saveProfileUrlAndEnrich = async () => {
@@ -381,6 +416,14 @@ export default function PeoplePage() {
                       <Button variant="quiet" disabled={refreshing} onClick={refreshEnrichment}>
                         {refreshing ? "Refreshing…" : "Refresh enrichment"}
                       </Button>
+                      {enrichStatus ? (
+                        <span
+                          className="font-mono text-[11px] text-ink-3"
+                          aria-live="polite"
+                        >
+                          {enrichStatus}
+                        </span>
+                      ) : null}
                       <Button
                         variant="quiet"
                         disabled={!detail?.enrichment || startersLoading}
