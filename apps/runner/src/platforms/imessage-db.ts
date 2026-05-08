@@ -19,6 +19,27 @@ function isTapbackType(t: number | null | undefined): boolean {
 }
 
 /**
+ * Heuristic: does the chat look like an automated SMS / iMessage service?
+ * These are short-code numbers (e.g. "12345") or alphanumeric sender IDs
+ * (e.g. "StripeLink", "giffgaff", "Anster") — never real people, never
+ * worth replying to. We filter them out at scan time so they don't
+ * pollute the inbox.
+ */
+export function looksLikeAutomatedSender(chatIdentifier: string): boolean {
+  const id = chatIdentifier.trim();
+  if (!id) return false;
+  // Email and phone (with + or 7+ digits) are kept.
+  if (id.includes("@")) return false;
+  const digits = id.replace(/\D/g, "");
+  if (digits.length >= 7) return false;
+  // Pure alphabetic / alphanumeric sender ID (StripeLink, giffgaff, etc.).
+  if (/^[A-Za-z][A-Za-z0-9 ._-]{1,29}$/.test(id)) return true;
+  // Short-code phone (3-6 digits).
+  if (/^\d{2,6}$/.test(digits)) return true;
+  return false;
+}
+
+/**
  * Walk an NSAttributedString typedstream blob and return the message text.
  *
  * Format we exploit:
@@ -329,7 +350,8 @@ export class IMessageDb {
         lastIsFromMe: number | null;
       }>;
 
-    const filtered = opts.unreadOnly ? rows.filter((r) => r.unreadCount > 0) : rows;
+    const nonAutomated = rows.filter((r) => !looksLikeAutomatedSender(r.chatIdentifier));
+    const filtered = opts.unreadOnly ? nonAutomated.filter((r) => r.unreadCount > 0) : nonAutomated;
 
     return filtered.map((r) => {
       const participants = this.listParticipants(r.chatId);

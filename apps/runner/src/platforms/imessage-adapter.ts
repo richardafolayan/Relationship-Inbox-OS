@@ -216,8 +216,25 @@ export class IMessageAdapter implements PlatformAdapter {
   }
 
   async openThread(thread: ThreadStub): Promise<void> {
-    // Bring Messages.app forward; can't reliably navigate to a specific
-    // chat by guid via URL scheme, so we just activate.
+    // For 1:1 chats we can deeplink with `imessage:<handle>` (or `sms:`
+    // for SMS), which both opens Messages.app AND selects the conversation
+    // with that buddy. For group chats macOS exposes no public URL form,
+    // so we fall back to just activating Messages.app.
+    try {
+      const db = this.getDb();
+      const allChats = db.listThreads(500, { unreadOnly: false });
+      const chat = allChats.find((c) => c.guid === thread.platformThreadId);
+      if (chat && !chat.isGroup) {
+        const handle = chat.participants[0] ?? chat.chatIdentifier;
+        if (handle) {
+          const scheme = (chat.service ?? "").toLowerCase().includes("sms") ? "sms" : "imessage";
+          await execFileAsync("open", [`${scheme}:${handle}`], { timeout: 5_000 });
+          return;
+        }
+      }
+    } catch {
+      // fall through to plain activate
+    }
     try {
       await execFileAsync("osascript", [
         "-e",
@@ -226,7 +243,6 @@ export class IMessageAdapter implements PlatformAdapter {
     } catch {
       // non-fatal; the dashboard's UI feedback is sufficient.
     }
-    void thread;
   }
 
   async closeSession(_reason?: string): Promise<void> {
