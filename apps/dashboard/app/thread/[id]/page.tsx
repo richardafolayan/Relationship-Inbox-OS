@@ -444,8 +444,11 @@ export default function ThreadPage() {
         `/runner/data/thread/${thread.id}?beforeMessageId=${encodeURIComponent(thread.messagePage.olderCursor)}&messagesLimit=${thread.messagePage.limit}`
       );
       setThread((current) => {
+        // Race guard: if the user has navigated to a different thread
+        // mid-fetch, the in-flight older-messages response now belongs
+        // to a stale thread and would clobber the visible one. Drop it.
         if (!current || current.id !== olderPage.id) {
-          return olderPage;
+          return current;
         }
         const existingIds = new Set(current.messages.map((message) => message.id));
         const olderMessages = olderPage.messages.filter((message) => !existingIds.has(message.id));
@@ -470,6 +473,76 @@ export default function ThreadPage() {
       setError(message);
     } finally {
       setLoadingOlderMessages(false);
+    }
+  };
+
+  const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
+    if (!composer.trim() || !thread) {
+      return;
+    }
+
+    try {
+      const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/transform`, {
+        mode,
+        text: composer
+      });
+      setComposer(output.text);
+      setError(null);
+    } catch (transformError) {
+      const message = transformError instanceof Error ? transformError.message : "Transform failed";
+      console.warn("[action]", message);
+      setError(message);
+    }
+  };
+
+  const composeIntentToVoice = async () => {
+    const intent = composeIntent.trim();
+    if (!intent || !thread || composing) return;
+    setComposing(true);
+    setComposeError(null);
+    try {
+      const output = await apiPost<{ text: string }>(
+        `/runner/control/thread/${thread.id}/compose`,
+        { intent }
+      );
+      setComposeDraft(output.text);
+    } catch (composeErr) {
+      const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
+      setComposeError(message);
+    } finally {
+      setComposing(false);
+    }
+  };
+
+  const toggleOpenLoop = async (loop: string, dismissed: boolean) => {
+    if (!thread) return;
+    // Optimistic local update so the checkbox flips immediately. The
+    // refresh that follows will reconcile against the runner.
+    setThread((current) => {
+      if (!current || current.id !== thread.id) return current;
+      const dismissedSet = new Set(current.dismissedOpenLoops);
+      const activeSet = new Set(current.openLoops);
+      if (dismissed) {
+        dismissedSet.add(loop);
+        activeSet.delete(loop);
+      } else {
+        dismissedSet.delete(loop);
+        activeSet.add(loop);
+      }
+      return {
+        ...current,
+        openLoops: Array.from(activeSet),
+        dismissedOpenLoops: Array.from(dismissedSet)
+      };
+    });
+    try {
+      await apiPost(`/runner/control/thread/${thread.id}/open-loop`, { loop, dismissed });
+    } catch (loopError) {
+      // Roll back via a fresh refresh; surfacing the error inline is
+      // enough — the operator sees the box flip back.
+      const message = loopError instanceof Error ? loopError.message : "Failed to update open loop";
+      setError(message);
+      void refresh();
     }
   };
 
@@ -952,8 +1025,15 @@ export default function ThreadPage() {
                     >
                       {message.text}
                     </div>
-                    <span className="mt-[6px] text-[11px] text-ink-3">
-                      {formatClock(message.timestamp)}
+                    <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
+                      <span>{formatClock(message.timestamp)}</span>
+                      {/* Honest "Sent via automation ✓" — only shown when
+                          the runner actually flagged this message as sent
+                          via the bot, per #65. The previous always-on
+                          indicator from #61 was dishonest. */}
+                      {message.direction === "OUT" && message.sentVia === "automation" ? (
+                        <span className="text-ink-4">· sent via automation ✓</span>
+                      ) : null}
                     </span>
                   </div>
                 </div>
@@ -1116,8 +1196,9 @@ export default function ThreadPage() {
                 onKeyDown={(event) => {
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
-                    // Stop the native window-level keydown listener (also
-                    // bound for Cmd/Ctrl-Enter) from firing onSend twice.
+                    // #65: stop the native window-level keydown listener
+                    // (still in scope for global shortcuts) so onSend
+                    // doesn't fire twice when the composer has focus.
                     event.nativeEvent.stopImmediatePropagation();
                     void onSend();
                   }
@@ -1360,15 +1441,40 @@ export default function ThreadPage() {
             </section>
           ) : null}
 
-          {thread.openLoops.length ? (
+          {/* Open loops — active rows render with an unchecked box; ticking
+              dismisses the loop (#62). Dismissed loops still render below
+              in a muted, struck-through form so the operator can restore
+              one by un-ticking. */}
+          {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
             <section>
               <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
                 Open loops
               </p>
               <ul className="m-0 list-none space-y-[6px] p-0">
                 {thread.openLoops.map((item) => (
-                  <li key={item} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
-                    <span className="text-ink-4">·</span>
+                  <li key={`open:${item}`} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
+                    <input
+                      type="checkbox"
+                      checked={false}
+                      onChange={() => void toggleOpenLoop(item, true)}
+                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink"
+                      aria-label={`Mark "${item}" as resolved`}
+                    />
+                    {item}
+                  </li>
+                ))}
+                {thread.dismissedOpenLoops.map((item) => (
+                  <li
+                    key={`dismissed:${item}`}
+                    className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-4 line-through"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={true}
+                      onChange={() => void toggleOpenLoop(item, false)}
+                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink-3"
+                      aria-label={`Restore "${item}" as an open loop`}
+                    />
                     {item}
                   </li>
                 ))}
