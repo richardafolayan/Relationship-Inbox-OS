@@ -498,6 +498,7 @@ async function getThreadStub(threadId: string): Promise<{
   platformThreadId: string;
   threadUrl?: string;
   displayName: string;
+  personId: string;
 }> {
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
@@ -513,7 +514,8 @@ async function getThreadStub(threadId: string): Promise<{
     platform: thread.platform as PlatformName,
     platformThreadId: thread.platformThreadId,
     threadUrl: thread.threadUrl ?? undefined,
-    displayName: thread.person.displayName
+    displayName: thread.person.displayName,
+    personId: thread.personId
   };
 }
 
@@ -834,6 +836,47 @@ app.get("/artifacts/:type/:name", (req, res) => {
     res.status(400).json({ error: "Invalid artifact name" });
   }
 });
+
+// Reset macOS Automation permissions and re-trigger the Allow-Messages
+// dialog. Called from the dashboard banner when a send fails with -1743.
+// Runs `tccutil reset AppleEvents` (macOS-only, no-op on other OSes) and
+// then attempts a benign `osascript` against Messages so the system
+// re-prompts for Automation. Also opens System Settings -> Privacy ->
+// Automation as a fallback so the operator can flip the toggle directly.
+app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
+  if (process.platform !== "darwin") {
+    res.status(400).json({ error: "macOS only" });
+    return;
+  }
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const ranSteps: string[] = [];
+  try {
+    await run("tccutil", ["reset", "AppleEvents"], { timeout: 10_000 });
+    ranSteps.push("tccutil_reset");
+  } catch (error) {
+    ranSteps.push(`tccutil_reset_failed:${(error as Error).message}`);
+  }
+  try {
+    // Trigger a benign event so macOS knows we want Messages access; this
+    // pops the Allow-prompt on next osascript invocation against Messages.
+    await run("osascript", ["-e", 'tell application "Messages" to count of services'], { timeout: 8_000 });
+    ranSteps.push("messages_probe_ok");
+  } catch (error) {
+    // Expected: the probe re-pops the Allow dialog. Operator clicks Allow,
+    // and the next real send works. If the probe still errored we surface
+    // the deeplink to settings as the fallback path.
+    ranSteps.push(`messages_probe_prompt:${((error as Error).message ?? "").slice(0, 80)}`);
+  }
+  try {
+    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], { timeout: 5_000 });
+    ranSteps.push("settings_opened");
+  } catch {
+    // non-fatal
+  }
+  res.json({ ok: true, steps: ranSteps, message: "Permissions reset. If macOS prompted, click Allow, then retry the send." });
+}));
 
 // Stream a Messages.app attachment (photo / voice note / video) to the
 // dashboard. Reads chat.db for the file path and serves the bytes from
@@ -1597,25 +1640,44 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const settings = await settingsStore.getSettings();
 
+  // For iMessage we render one row per Person but chat.db may have several
+  // chats with that human (phone + email). Rescanning ONLY the canonical
+  // thread leaves the sibling rows stale, which the operator perceives as
+  // "the rescan messed it up". So for iMessage we walk every sibling
+  // thread of the same Person and refresh each.
+  const targets =
+    target.platform === "IMESSAGE"
+      ? await prisma.thread.findMany({
+          where: { platform: target.platform, personId: target.personId },
+          select: { id: true, platformThreadId: true, threadUrl: true, person: { select: { displayName: true } } }
+        })
+      : [{ id: target.threadId, platformThreadId: target.platformThreadId, threadUrl: target.threadUrl, person: { displayName: target.displayName } }];
+
   // Per-thread rescan: open ONLY this thread and re-parse its messages,
   // instead of triggering a full-inbox scan via enqueueScan(). The full-
   // inbox path takes 30-90s on a populated inbox; opening one thread is
   // typically <5s. Wraps in the platform control lock so it serialises
   // against any in-flight scan / send / open-thread operation.
-  const candidate: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
   try {
     const result = await withPlatformControlLock(target.platform, async () => {
-      return scanQueue.syncThreadForIngest({
-        platform: target.platform,
-        candidate,
-        maxMessages: settings.maxMessagesPerThread,
-        requestId
-      });
+      const aggregate = { updatedThreads: 0, parsedMessages: 0 };
+      for (const t of targets) {
+        const candidate: ThreadStub = {
+          platformThreadId: t.platformThreadId,
+          displayName: t.person.displayName,
+          threadUrl: t.threadUrl ?? undefined,
+          lastMessagePreview: ""
+        };
+        const partial = await scanQueue.syncThreadForIngest({
+          platform: target.platform,
+          candidate,
+          maxMessages: settings.maxMessagesPerThread,
+          requestId
+        });
+        aggregate.updatedThreads += partial.updatedThreads ?? 0;
+        aggregate.parsedMessages += partial.parsedMessages ?? 0;
+      }
+      return aggregate;
     });
     await auditService.log({
       platform: target.platform,

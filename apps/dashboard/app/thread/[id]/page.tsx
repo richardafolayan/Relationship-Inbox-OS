@@ -1264,26 +1264,40 @@ export default function ThreadPage() {
                       );
                       const hasInlineMedia = playableAttachments.length > 0;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
-                      // When the bubble is purely an attachment, drop the
-                      // "[Photo]" label since the inline media is now visible.
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
+                      const reactions = (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
                       return (
-                        <div
-                          className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
-                            message.direction === "OUT"
-                              ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
-                              : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
-                          }`}
-                        >
-                          {hasInlineMedia ? (
-                            <div className="flex flex-col gap-2">
-                              {playableAttachments.map((a, attIdx) => (
-                                <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                        <div className="relative">
+                          <div
+                            className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
+                              message.direction === "OUT"
+                                ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+                                : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                            }`}
+                          >
+                            {hasInlineMedia ? (
+                              <div className="flex flex-col gap-2">
+                                {playableAttachments.map((a, attIdx) => (
+                                  <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                                ))}
+                              </div>
+                            ) : null}
+                            {showText ? (
+                              <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                            ) : null}
+                          </div>
+                          {reactions.length > 0 ? (
+                            <span
+                              className={`absolute -top-3 ${
+                                message.direction === "OUT" ? "-left-2" : "-right-2"
+                              } flex items-center gap-[2px] rounded-full border border-hairline bg-paper px-[6px] py-[2px] text-[11px] shadow-sm`}
+                            >
+                              {reactions.map((r, i) => (
+                                <span key={`${r.kind}-${r.direction}-${i}`} title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}>
+                                  {r.emoji}
+                                </span>
                               ))}
-                            </div>
-                          ) : null}
-                          {showText ? (
-                            <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                            </span>
                           ) : null}
                         </div>
                       );

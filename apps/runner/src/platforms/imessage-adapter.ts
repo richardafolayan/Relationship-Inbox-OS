@@ -138,6 +138,7 @@ export class IMessageAdapter implements PlatformAdapter {
       timestamp: r.timestamp ?? new Date().toISOString(),
       text: r.text,
       senderName: r.senderHandle,
+      raw: r.reactions.length > 0 ? { reactions: r.reactions } : undefined,
       attachments: r.attachments.map((a) => ({
         type: a.kind,
         manualReview: a.kind === "unknown",

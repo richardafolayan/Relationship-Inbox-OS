@@ -6,6 +6,40 @@ import Database, { type Database as Db } from "better-sqlite3";
 // is the unix-ms offset.
 const APPLE_EPOCH_OFFSET_MS = 978_307_200_000;
 
+export interface IMessageReaction {
+  /** Apple's emoji-equivalent for the tapback. */
+  emoji: string;
+  /** "love" | "like" | "dislike" | "laugh" | "emphasis" | "question". */
+  kind: "love" | "like" | "dislike" | "laugh" | "emphasis" | "question";
+  /** Direction of the tapback — IN means the other party reacted. */
+  direction: "IN" | "OUT";
+  timestamp?: string;
+  /** Inverse tapback (3000-3005 range) acts as removal — surfaced as `removed: true`. */
+  removed: boolean;
+}
+
+const TAPBACK_KINDS: Record<number, { emoji: string; kind: IMessageReaction["kind"] }> = {
+  2000: { emoji: "❤", kind: "love" },
+  2001: { emoji: "👍", kind: "like" },
+  2002: { emoji: "👎", kind: "dislike" },
+  2003: { emoji: "😂", kind: "laugh" },
+  2004: { emoji: "‼", kind: "emphasis" },
+  2005: { emoji: "❓", kind: "question" }
+};
+
+function tapbackInfo(t: number | null | undefined): { emoji: string; kind: IMessageReaction["kind"]; removed: boolean } | null {
+  if (t === null || t === undefined) return null;
+  if (t >= 2000 && t <= 2005) {
+    const info = TAPBACK_KINDS[t];
+    return info ? { ...info, removed: false } : null;
+  }
+  if (t >= 3000 && t <= 3005) {
+    const info = TAPBACK_KINDS[t - 1000];
+    return info ? { ...info, removed: true } : null;
+  }
+  return null;
+}
+
 /**
  * Tapback / reaction `associated_message_type` values:
  *   2000-2005  apply tapback (love, like, dislike, laugh, emphasis, question)
@@ -135,6 +169,8 @@ export interface IMessageMessageRow {
   senderHandle?: string;
   hasAttachments: boolean;
   attachments: IMessageAttachment[];
+  /** Tapbacks the other party (or you) sent on this message, latest-state aggregated. */
+  reactions: IMessageReaction[];
 }
 
 /**
@@ -431,6 +467,73 @@ export class IMessageDb {
     return map;
   }
 
+  /**
+   * Fetch reactions/tapbacks targeting a list of message guids and aggregate
+   * by parent. Multiple tapbacks of the same kind from the same sender
+   * collapse: a 3000-series (remove) row of the same kind cancels prior 2000-
+   * series rows. The result is the latest visible reaction state per parent.
+   */
+  private fetchReactionsByMessageGuids(messageGuids: string[]): Map<string, IMessageReaction[]> {
+    const map = new Map<string, IMessageReaction[]>();
+    if (messageGuids.length === 0) return map;
+    const placeholders = messageGuids.map(() => "?").join(",");
+    const rows = this.db
+      .prepare(
+        `SELECT
+           m.associated_message_guid AS parentGuidRaw,
+           m.associated_message_type AS associatedType,
+           m.is_from_me              AS isFromMe,
+           m.date                    AS date
+         FROM message m
+         WHERE m.associated_message_type BETWEEN 2000 AND 3005
+           AND m.associated_message_guid IN (${messageGuids.map(() => "?").join(",")}
+                                              ${placeholders ? "," : ""}
+                                              ${messageGuids.map(() => "?").join(",")})
+         ORDER BY m.date ASC`
+      )
+      .all(
+        // associated_message_guid is stored prefixed: "p:0/<guid>" or "bp:<guid>"
+        // — bind both forms so we don't miss either.
+        ...messageGuids.map((g) => `p:0/${g}`),
+        ...messageGuids.map((g) => `bp:${g}`)
+      ) as Array<{ parentGuidRaw: string; associatedType: number; isFromMe: number; date: number | bigint | null }>;
+
+    type ReactionKey = string; // `${kind}|${direction}`
+    type Aggregator = Map<ReactionKey, { reaction: IMessageReaction; lastDate: number }>;
+    const byParent = new Map<string, Aggregator>();
+
+    for (const r of rows) {
+      const info = tapbackInfo(r.associatedType);
+      if (!info) continue;
+      const parentGuid = r.parentGuidRaw.replace(/^(?:p:0\/|bp:)/, "");
+      const dir: "IN" | "OUT" = r.isFromMe === 1 ? "OUT" : "IN";
+      const key = `${info.kind}|${dir}`;
+      const dateNum = typeof r.date === "bigint" ? Number(r.date) : (r.date ?? 0);
+      const agg = byParent.get(parentGuid) ?? new Map();
+      const prior = agg.get(key);
+      if (!prior || dateNum > prior.lastDate) {
+        agg.set(key, {
+          reaction: {
+            emoji: info.emoji,
+            kind: info.kind,
+            direction: dir,
+            timestamp: appleTimeToIso(r.date),
+            removed: info.removed
+          },
+          lastDate: dateNum
+        });
+      }
+      byParent.set(parentGuid, agg);
+    }
+
+    for (const [parentGuid, agg] of byParent) {
+      // Drop reactions whose latest state is "removed"; keep active ones.
+      const live = [...agg.values()].filter((v) => !v.reaction.removed).map((v) => v.reaction);
+      if (live.length > 0) map.set(parentGuid, live);
+    }
+    return map;
+  }
+
   fetchMessages(chatGuid: string, limit: number): IMessageMessageRow[] {
     const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
       | { chatId: number }
@@ -478,6 +581,7 @@ export class IMessageDb {
     const attachmentsByRowId = this.fetchAttachmentsByMessageRowIds(
       chronological.filter((r) => r.hasAttachments === 1).map((r) => r.rowId)
     );
+    const reactionsByGuid = this.fetchReactionsByMessageGuids(chronological.map((r) => r.guid));
     return chronological.map((r) => {
       const decodedText = r.text && r.text.length > 0 ? r.text : IMessageDb.decodeAttributedBody(r.attributedBody);
       const attachments = attachmentsByRowId.get(r.rowId) ?? [];
@@ -494,7 +598,8 @@ export class IMessageDb {
         timestamp: appleTimeToIso(r.date),
         senderHandle: r.handleId ?? undefined,
         hasAttachments: r.hasAttachments === 1,
-        attachments
+        attachments,
+        reactions: reactionsByGuid.get(r.guid) ?? []
       };
     });
   }
@@ -535,7 +640,8 @@ export class IMessageDb {
       direction: "OUT",
       timestamp: appleTimeToIso(row.date),
       hasAttachments: row.hasAttachments === 1,
-      attachments: []
+      attachments: [],
+      reactions: []
     };
   }
 }

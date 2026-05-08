@@ -213,6 +213,15 @@ export function SystemStatusBar() {
           {isActive ? <AnimatedEllipsis /> : null}
         </span>
         {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
+        {state.kind === "send_failed" && isPermissionDenied(state.message) ? (
+          <button
+            type="button"
+            onClick={() => void runPermissionReset()}
+            className="ml-2 rounded-row border border-hairline bg-paper px-2 py-[2px] font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink"
+          >
+            grant access
+          </button>
+        ) : null}
         {cancelTarget ? (
           <button
             type="button"
@@ -257,6 +266,18 @@ function AnimatedEllipsis() {
       ))}
     </span>
   );
+}
+
+function isPermissionDenied(message: string): boolean {
+  return /-1743|not authorized to send Apple events|grant Automation/i.test(message);
+}
+
+async function runPermissionReset(): Promise<void> {
+  try {
+    await fetch("/runner/control/imessage/permission-reset", { method: "POST" });
+  } catch {
+    // best-effort; operator can still grant via System Settings manually.
+  }
 }
 
 function platformDisplay(platform: string): string {
