@@ -13,16 +13,15 @@ apps/runner/dist
 packages/core/generated
 
 # Data runtime state
-/data/inbox-os.sqlite
-/data/inbox-os.sqlite-journal
-/data/profiles
-/data/screenshots
-/data/dom_dumps
-/data/repair
-/data/traces
+/data/
+/logs/runs/
 /apps/runner/logs/runs
 /apps/runner/LATEST_LINKEDIN_SCAN.txt
 /apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt
 /apps/runner/logs/**/*.trace
 /apps/runner/logs/**/*.ndjson
 /apps/runner/logs/**/*.csv
+
+# Local tooling state (not part of the project)
+/.claude/
+/.codex-disabled-*/
