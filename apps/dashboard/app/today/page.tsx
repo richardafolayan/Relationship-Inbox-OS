@@ -145,8 +145,14 @@ export default function TodayPage() {
   // be the hero even if the runner keeps them in /data/inbox for archive
   // context. The strict `!== false` form includes legacy rows where the
   // field is undefined; the optimistic-removal Set covers in-flight actions.
+  // scheduledSendAt presence means the operator already queued a reply —
+  // suppress until the schedule fires (row vanishes naturally) or is
+  // cancelled (scheduledSendAt clears, row returns).
   const rows = useMemo(
-    () => allRows.filter((row) => row.needsReply !== false && !removedIds.has(row.id)),
+    () =>
+      allRows.filter(
+        (row) => row.needsReply !== false && !row.scheduledSendAt && !removedIds.has(row.id)
+      ),
     [allRows, removedIds]
   );
   const overdueCount = rows.filter((row) => row.riskLevel === "RED").length;
