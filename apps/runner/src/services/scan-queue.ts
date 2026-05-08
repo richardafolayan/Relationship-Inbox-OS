@@ -153,7 +153,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
   }): Promise<ThreadStub[]>;
 }
 
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 type EnqueueScanOptions = {
   respectCooldown?: boolean;

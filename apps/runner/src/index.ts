@@ -105,7 +105,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -231,7 +231,7 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 function parsePlatform(value: unknown): PlatformName {
-  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).parse(value);
+  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).parse(value);
   return parsed;
 }
 
@@ -245,7 +245,7 @@ interface ControlTraceContext {
 }
 
 function maybeParsePlatform(value: unknown): PlatformName | undefined {
-  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK") {
+  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK" && value !== "IMESSAGE") {
     return undefined;
   }
   return value;
@@ -567,7 +567,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).default("LINKEDIN"),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -853,7 +853,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"])).optional(),
+      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"])).optional(),
       demoMode: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
       aiProvider: z.enum(["openai", "glm"]).optional(),
@@ -925,7 +925,7 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
 app.post("/control/scan", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional(),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional()
@@ -989,7 +989,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
@@ -1151,7 +1151,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
       key: z
         .enum([
           "thread_list",
@@ -1256,7 +1256,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 app.post("/control/platform/save-selector-override", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
       key: z.enum([
         "thread_list",
         "thread_item",
@@ -1279,7 +1279,7 @@ app.post("/control/platform/save-selector-override", asyncRoute(async (req, res)
 app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
       key: z.enum([
         "thread_list",
         "thread_item",
@@ -2361,7 +2361,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK"] as PlatformName[]).map(async (platform) => {
+    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
@@ -2983,7 +2983,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     const adapter = adapters[payload.platform];
     await adapter.ensureConnected();
@@ -3392,7 +3392,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional() }).parse(req.body ?? {});
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");

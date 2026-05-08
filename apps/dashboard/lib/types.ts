@@ -5,7 +5,7 @@ export interface InboxRow {
   personId?: string;
   personName: string;
   personAvatarUrl?: string | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   preview: string;
   /**
    * "OUT" when the latest message was sent by the operator (preview should
@@ -49,7 +49,7 @@ export interface InboxResponse {
 export interface PeopleRow {
   id: string;
   name: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   avatarUrl?: string | null;
   notes?: string | null;
   tags: string[];
@@ -70,7 +70,7 @@ export interface PersonDetailResponse {
   person: {
     id: string;
     name: string;
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
     profileUrl: string | null;
     profileUrlSource: "auto" | "manual" | null;
     enrichedAt: string | null;
@@ -116,7 +116,7 @@ export interface OperatorProfile {
 }
 
 export interface PlatformCard {
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
   lastScanAt: string | null;
   connectedAt: string | null;
@@ -141,7 +141,7 @@ export interface PlatformCard {
     | null;
   latestSelectorReport?: {
     reportId: string;
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
     startedAt: string;
     completedAt: string;
     results: Array<{
@@ -168,7 +168,7 @@ export interface ScanControlQueuedResponse {
   jobId: string;
   status: "queued" | "running";
   requestId: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 }
 
 export interface ScanControlBlockedResponse {
@@ -177,11 +177,11 @@ export interface ScanControlBlockedResponse {
   reason: "cooldown_active" | "in_flight";
   retryAfterSeconds: number;
   requestId: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 }
 
 export interface ScanControlRequest {
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   maxThreads?: number | null;
   maxOpens?: number | null;
   forceFallback?: boolean | null;
@@ -192,7 +192,7 @@ export type ScanControlResponse = ScanControlQueuedResponse | ScanControlBlocked
 export interface AuditLogRow {
   id: string;
   timestamp: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   stage?: string;
   action: string;
   status: "OK" | "FAIL";
@@ -224,7 +224,7 @@ export interface ThreadResponse {
   personId: string;
   personName: string;
   personAvatarUrl?: string | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;
   unreadCount: number;
@@ -287,7 +287,7 @@ export interface ThreadResponse {
     otherThreadCount: number;
     recentExchanges: Array<{
       threadId: string;
-      platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+      platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
       lastMessageAt: string | null;
       preview: string | null;
       whatTheyWant: string | null;
@@ -326,7 +326,7 @@ export interface AppSettings {
   redHours: number;
   headless: boolean;
   maxMessagesPerThread: number;
-  enabledPlatforms: Array<"LINKEDIN" | "INSTAGRAM" | "TIKTOK">;
+  enabledPlatforms: Array<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE">;
   demoMode: boolean;
   recentThreadSweepCount: number;
   aiProvider?: AiProvider;
@@ -344,7 +344,7 @@ export interface SelectorTestReceipt {
 
 export interface SelectorTestFailurePayload {
   ok: false;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   stage: SelectorTestReceipt["stage"];
   error: string;
   requestId: string;
@@ -359,7 +359,7 @@ export interface SelectorTestFailurePayload {
 export interface SelectorTestSuccessPayload {
   ok: true;
   reportId: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   startedAt: string;
   completedAt: string;
   results: Array<{

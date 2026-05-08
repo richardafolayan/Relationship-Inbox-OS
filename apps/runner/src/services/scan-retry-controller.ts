@@ -1,6 +1,6 @@
-export type ScanRetryPlatform = "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+export type ScanRetryPlatform = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 
-const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 interface PlatformCooldownState {
   consecutiveFailures: number;

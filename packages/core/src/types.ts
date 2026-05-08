@@ -1,4 +1,4 @@
-export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
 export type PlatformStatus = "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";

@@ -11,6 +11,7 @@ enum PlatformName {
   LINKEDIN
   INSTAGRAM
   TIKTOK
+  IMESSAGE
 }
 
 enum PlatformStatus {

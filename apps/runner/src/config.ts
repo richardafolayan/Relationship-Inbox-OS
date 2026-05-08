@@ -48,6 +48,12 @@ export interface RunnerConfig {
     LINKEDIN: string;
     INSTAGRAM: string;
     TIKTOK: string;
+    IMESSAGE: string;
+  };
+  imessage: {
+    enabled: boolean;
+    dbPath: string;
+    pollMs: number;
   };
   screenshotDir: string;
   domDumpDir: string;
@@ -257,7 +263,16 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     profileDirs: {
       LINKEDIN: resolve(dataDir, "profiles", "linkedin"),
       INSTAGRAM: resolve(dataDir, "profiles", "instagram"),
-      TIKTOK: resolve(dataDir, "profiles", "tiktok")
+      TIKTOK: resolve(dataDir, "profiles", "tiktok"),
+      IMESSAGE: resolve(dataDir, "profiles", "imessage")
+    },
+    imessage: {
+      // Mac-only adapter. Default off so Linux/CI runners don't try to open
+      // a non-existent chat.db. Set IMESSAGE_ENABLED=true on a Mac with
+      // Full Disk Access granted to the runner's parent process.
+      enabled: env.IMESSAGE_ENABLED === "true" && process.platform === "darwin",
+      dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
+      pollMs: parseIntOrDefault(env.IMESSAGE_POLL_MS, 5_000)
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),

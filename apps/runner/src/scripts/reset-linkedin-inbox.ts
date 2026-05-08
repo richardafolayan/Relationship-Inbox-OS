@@ -20,7 +20,7 @@ function parseCliArgs(argv: string[]): CliOptions {
     const arg = argv[index];
     if (arg === "--platform") {
       const value = (argv[index + 1] ?? "").toUpperCase();
-      if (value === "LINKEDIN" || value === "INSTAGRAM" || value === "TIKTOK") {
+      if (value === "LINKEDIN" || value === "INSTAGRAM" || value === "TIKTOK" || value === "IMESSAGE") {
         options.platform = value;
       }
       index += 1;

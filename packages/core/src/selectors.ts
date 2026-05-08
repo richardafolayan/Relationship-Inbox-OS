@@ -7,7 +7,8 @@ export type SelectorOverrideStore = Partial<Record<PlatformName, Partial<Selecto
 const SELECTOR_FILES: Record<PlatformName, string> = {
   LINKEDIN: "linkedin.json",
   INSTAGRAM: "instagram.json",
-  TIKTOK: "tiktok.json"
+  TIKTOK: "tiktok.json",
+  IMESSAGE: "imessage.json"
 };
 
 export function loadDefaultSelectors(platform: PlatformName, baseDir: string): SelectorRegistry {

@@ -20,6 +20,7 @@
   "dependencies": {
     "@inbox-os/core": "0.1.0",
     "@prisma/client": "^6.3.1",
+    "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
     "openai": "^4.78.1",
@@ -28,6 +29,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.6",
     "tsx": "^4.19.2",
