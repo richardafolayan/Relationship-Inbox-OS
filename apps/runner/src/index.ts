@@ -1796,7 +1796,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  const [visibleRows, outboundLast7DaysCount, sentToday] = await Promise.all([
+  const [visibleRows, outboundLast7DaysCount, sentToday, scheduledSends] = await Promise.all([
     loadVisibleThreadRows(),
     prisma.message.count({
       where: {
@@ -1813,10 +1813,32 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
           gte: todayStart
         }
       }
+    }),
+    prisma.sendRequest.findMany({
+      where: { status: "SCHEDULED" },
+      select: { threadId: true, scheduledFor: true }
     })
   ]);
 
-  const dedupedRows = visibleRows.map((row) => toInboxRow(row));
+  // Earliest SCHEDULED scheduledFor per thread — Today uses this to skip
+  // threads the operator has already queued a reply for.
+  const scheduledSendByThread = new Map<string, Date>();
+  for (const row of scheduledSends) {
+    if (!row.scheduledFor) continue;
+    const existing = scheduledSendByThread.get(row.threadId);
+    if (!existing || row.scheduledFor.getTime() < existing.getTime()) {
+      scheduledSendByThread.set(row.threadId, row.scheduledFor);
+    }
+  }
+
+  const dedupedRows = visibleRows.map((row) => {
+    const shaped = toInboxRow(row);
+    const scheduledFor = scheduledSendByThread.get(shaped.id);
+    return {
+      ...shaped,
+      scheduledSendAt: scheduledFor ? scheduledFor.toISOString() : null
+    };
+  });
 
   const rows = dedupedRows
     .filter((row) => {

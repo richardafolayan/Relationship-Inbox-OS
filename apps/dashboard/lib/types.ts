@@ -26,6 +26,13 @@ export interface InboxRow {
   /** "outreach" | "genuine" | null (Phase 3 categorization). */
   category?: string | null;
   archivedAt?: string | null;
+  /**
+   * ISO timestamp of the earliest SCHEDULED outbound send for this thread,
+   * or null when none. Today uses this to suppress threads the operator
+   * has already queued a reply for; Inbox still lists them with the
+   * existing scheduled pill.
+   */
+  scheduledSendAt?: string | null;
 }
 
 export interface InboxResponse {
