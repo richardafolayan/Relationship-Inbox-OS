@@ -368,6 +368,27 @@ export default function SettingsPage() {
           <p className="mt-2 font-mono text-[11px] text-ink-3">
             Saved with the rest of advanced settings.
           </p>
+          {/* GLM model input — ported from main. Operators on GLM can
+              override the runner's `Z_AI_MODEL` env default per-account
+              without restarting (e.g. switch between glm-4.7-flash and
+              glm-4.5-flash). The aiStatus warning above already covers
+              the no-key failure mode. */}
+          {(settings.aiProvider ?? "openai") === "glm" ? (
+            <div className="mt-3">
+              <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                GLM model
+              </p>
+              <Input
+                type="text"
+                placeholder="glm-4.7-flash"
+                value={settings.glmModel ?? ""}
+                onChange={(event) => setSettings({ ...settings, glmModel: event.target.value })}
+              />
+              <p className="mt-1 font-mono text-[11px] text-ink-3">
+                Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.
+              </p>
+            </div>
+          ) : null}
         </div>
 
         <div className="mt-6 flex items-center gap-3">

@@ -9,6 +9,28 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
 // Activity log — receipts list using the same row pattern. Click any row
 // to inspect details/screenshots/DOM dumps in the receipts drawer.
+
+// Render an audit-log action key as something an operator can scan.
+// Action keys come from the runner as raw enums (e.g.
+// `POST_PERSON_:PERSONID_PROFILE_URL_END`, `CONNECT_BROWSER_LAUNCH_OK`,
+// `SCAN_END`). Without this they read like internal tokens.
+function prettyAction(action: string): string {
+  // Drop the `POST_` / `GET_` HTTP-method prefix on control-route audits.
+  let label = action.replace(/^(POST|GET|PUT|DELETE|PATCH)_/, "");
+  // Strip the parameter-placeholder tokens the runner inserts to keep
+  // the action constant across IDs. `:personId` survives the audit
+  // build's non-alphanumeric scrub as a bare uppercase `PERSONID` token,
+  // so we drop those known names directly.
+  label = label.replace(/_(PERSONID|THREADID|JOBID|REQUESTID)(?=_|$)/g, "");
+  // Title-case each underscore-segment so the result looks like
+  // "Person Profile Url End" instead of "PERSON_PROFILE_URL_END".
+  return label
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0) + word.slice(1).toLowerCase())
+    .join(" ");
+}
+
 export default function LogsPage() {
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -65,9 +87,9 @@ export default function LogsPage() {
                   {formatRelative(log.timestamp)}
                 </span>
                 <div className="min-w-0">
-                  <p className="m-0 flex items-center gap-2 text-[15px] tracking-[-0.01em] text-ink">
+                  <p className="m-0 flex items-center gap-2 text-[15px] tracking-[-0.01em] text-ink" title={log.action}>
                     <span className={`h-[6px] w-[6px] rounded-full ${dot}`} />
-                    {log.action}
+                    {prettyAction(log.action)}
                   </p>
                   <p className="m-0 mt-1 font-mono text-[11px] tracking-[0.02em] text-ink-3">
                     {log.platform ? `${log.platform.toLowerCase()} · ` : ""}
@@ -85,7 +107,7 @@ export default function LogsPage() {
                       className="hover:text-ink hover:underline"
                       href={`/artifacts/screenshots/${log.screenshotFile}`}
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                     >
                       screenshot
                     </a>
@@ -95,7 +117,7 @@ export default function LogsPage() {
                       className="hover:text-ink hover:underline"
                       href={`/artifacts/dom_dumps/${log.domDumpFile}`}
                       target="_blank"
-                      rel="noreferrer"
+                      rel="noopener noreferrer"
                     >
                       dom
                     </a>

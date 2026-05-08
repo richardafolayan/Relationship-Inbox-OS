@@ -255,14 +255,16 @@ export function createSendService(deps: SendServiceDeps) {
         update: {
           text: input.text,
           direction: "OUT",
-          timestamp: new Date(receipt.sentAt)
+          timestamp: new Date(receipt.sentAt),
+          sentVia: "automation"
         },
         create: {
           threadId: thread.id,
           platformMessageKey: stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`),
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
-          text: input.text
+          text: input.text,
+          sentVia: "automation"
         }
       });
 

@@ -15,7 +15,6 @@ interface ArchivedResponse {
 
 // Archived threads — rows in the same calm pattern. Click to open the
 // thread, or use the quiet "unarchive" link to send it back to the inbox.
-// Not in the sidebar nav; reachable directly via /archived.
 export default function ArchivedPage() {
   const router = useRouter();
   const [rows, setRows] = useState<InboxRow[] | null>(null);
@@ -69,7 +68,8 @@ export default function ArchivedPage() {
                 <button
                   type="button"
                   onClick={() => router.push(`/thread/${row.id}`)}
-                  className="min-w-0 text-left"
+                  aria-label={`Open archived thread with ${row.personName}`}
+                  className="min-w-0 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ink/40"
                 >
                   <span className="mb-1 flex items-baseline gap-[10px]">
                     <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">
@@ -89,13 +89,15 @@ export default function ArchivedPage() {
                   </span>
                   <Button
                     variant="quiet"
-                    onClick={() =>
+                    aria-label={`Unarchive thread with ${row.personName}`}
+                    onClick={(event) => {
+                      event.stopPropagation();
                       runAction(
                         apiPost(`/runner/control/thread/${row.id}/unarchive`, {}),
                         setError,
                         refresh
-                      )
-                    }
+                      );
+                    }}
                   >
                     Unarchive
                   </Button>

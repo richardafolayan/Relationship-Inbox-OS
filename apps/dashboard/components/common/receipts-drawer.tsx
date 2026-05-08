@@ -78,7 +78,7 @@ export function ReceiptsDrawer({ open, title = "Receipts", rows, onClose }: Rece
                     className="underline-offset-2 hover:text-ink hover:underline"
                     href={`/artifacts/screenshots/${row.screenshotFile}`}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                   >
                     screenshot
                   </a>
@@ -88,7 +88,7 @@ export function ReceiptsDrawer({ open, title = "Receipts", rows, onClose }: Rece
                     className="underline-offset-2 hover:text-ink hover:underline"
                     href={`/artifacts/dom_dumps/${row.domDumpFile}`}
                     target="_blank"
-                    rel="noreferrer"
+                    rel="noopener noreferrer"
                   >
                     dom dump
                   </a>
