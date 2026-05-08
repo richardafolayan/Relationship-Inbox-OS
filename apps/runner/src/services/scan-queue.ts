@@ -2508,7 +2508,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
     }
     await flushBatchedMessageWrites();
 
-    const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage] = await Promise.all([
+    // System-event placeholders (e.g. LinkedIn "X turned on read receipts")
+    // shouldn't drive needs-reply state or surface as the latest preview —
+    // they aren't real messages from the other party. Exclude them from
+    // inbound/outbound aggregates and from lastMessage selection.
+    const SYSTEM_EVENT_PLACEHOLDER = "[system event]";
+    const notSystemEvent = { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } } as const;
+
+    const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage, latestRealMessage] = await Promise.all([
       prisma.message.findMany({
         where: { threadId: thread.id },
         orderBy: { timestamp: "desc" },
@@ -2519,15 +2526,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
         _max: { timestamp: true }
       }),
       prisma.message.aggregate({
-        where: { threadId: thread.id, direction: "IN" },
+        where: { threadId: thread.id, direction: "IN", ...notSystemEvent },
         _max: { timestamp: true }
       }),
       prisma.message.aggregate({
-        where: { threadId: thread.id, direction: "OUT" },
+        where: { threadId: thread.id, direction: "OUT", ...notSystemEvent },
         _max: { timestamp: true }
       }),
       prisma.message.findFirst({
-        where: { threadId: thread.id, direction: "IN" },
+        where: { threadId: thread.id, direction: "IN", ...notSystemEvent },
+        orderBy: { timestamp: "desc" }
+      }),
+      prisma.message.findFirst({
+        where: { threadId: thread.id, ...notSystemEvent },
         orderBy: { timestamp: "desc" }
       })
     ]);
@@ -2541,7 +2552,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
     );
     const resolvedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
-    const lastMessage = latestMessagesDesc[0];
+    const lastMessage = latestRealMessage ?? latestMessagesDesc[0];
     const resolvedLastMessagePreview = cleanText(
       candidate.lastMessagePreview ?? lastMessage?.text ?? thread.lastMessagePreview ?? ""
     );
