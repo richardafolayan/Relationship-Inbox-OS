@@ -207,12 +207,47 @@ function classifyError(error: unknown): ExtractionFailure {
   return { failed: true, reason: "unknown", detail: message };
 }
 
+// URL patterns that LinkedIn redirects to when the session isn't
+// authenticated: the join page (/signup), the sign-in page (/login,
+// /uas/login), checkpoint flows, and the generic /authwall interstitial.
+// Both the warmup goto and the eventual profile goto are checked
+// against this regex; either landing here is a hard auth_required.
+const AUTH_GATE_REDIRECT = /\/(login|checkpoint|authwall|uas\/login|signup)/;
+
 async function extractMainProfile(page: Page, profileUrl: string): Promise<ProfileExtractionResult> {
+  // Warm the session before going to the profile URL. Profile pages are
+  // an aggressive auth-gate target — /in/<slug>/ tends to redirect to
+  // /authwall on a cold context even when /messaging works fine. We
+  // first navigate to /feed/, check what URL we land on, and bail out
+  // with `auth_required` if the warmup itself was redirected. This both
+  // (a) gives the runner a fast-fail when logged out (instead of
+  // wasting a profile goto + DOM evaluate), and (b) primes the session
+  // cookies so the subsequent profile goto reuses an authenticated
+  // state. The /messaging path that the scan uses is also accepted as
+  // healthy if a previous scan navigated there.
+  await page.goto("https://www.linkedin.com/feed/", {
+    waitUntil: "domcontentloaded",
+    timeout: 12_000
+  }).catch(() => undefined);
+  await humanDelay(300, 700);
+  const warmupUrl = (page.url() ?? "").toLowerCase();
+  if (AUTH_GATE_REDIRECT.test(warmupUrl)) {
+    return {
+      failed: true,
+      reason: "auth_required",
+      detail: `feed warmup redirected to ${warmupUrl}`
+    };
+  }
+  // If the warmup landed somewhere unexpected (network issue, LinkedIn
+  // error page) but didn't redirect to an auth gate, still try the
+  // profile — better to attempt and fail with concrete extraction
+  // signals than to refuse pre-emptively.
+
   await page.goto(profileUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
   await humanDelay(400, 900);
 
   const currentUrl = (page.url() ?? "").toLowerCase();
-  if (/\/(login|checkpoint|authwall|uas\/login)/.test(currentUrl)) {
+  if (AUTH_GATE_REDIRECT.test(currentUrl)) {
     return { failed: true, reason: "auth_required", detail: `redirected to ${currentUrl}` };
   }
 
