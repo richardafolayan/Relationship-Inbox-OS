@@ -67,7 +67,8 @@ export function createAdapters(input: {
       sessionManager
     }),
     IMESSAGE: new IMessageAdapter({
-      dbPath: runnerConfig.imessage.dbPath
+      dbPath: runnerConfig.imessage.dbPath,
+      contactsVcfPath: runnerConfig.imessage.contactsVcfPath
     })
   };
 

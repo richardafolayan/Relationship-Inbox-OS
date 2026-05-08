@@ -54,6 +54,12 @@ export interface RunnerConfig {
     enabled: boolean;
     dbPath: string;
     pollMs: number;
+    /**
+     * Path to a vCard 3.0 export of the operator's address book. When set,
+     * the iMessage adapter resolves phone numbers / emails from chat.db
+     * to real display names. Default: data/contacts.vcf if present.
+     */
+    contactsVcfPath: string | undefined;
   };
   screenshotDir: string;
   domDumpDir: string;
@@ -272,7 +278,8 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // Full Disk Access granted to the runner's parent process.
       enabled: env.IMESSAGE_ENABLED === "true" && process.platform === "darwin",
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
-      pollMs: parseIntOrDefault(env.IMESSAGE_POLL_MS, 5_000)
+      pollMs: parseIntOrDefault(env.IMESSAGE_POLL_MS, 5_000),
+      contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),

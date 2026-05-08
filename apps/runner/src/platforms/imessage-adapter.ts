@@ -11,11 +11,13 @@ import type {
 import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { sendIMessage } from "./imessage-send";
+import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
 
 const execFileAsync = promisify(execFile);
 
 interface IMessageAdapterDependencies {
   dbPath: string;
+  contactsVcfPath?: string;
 }
 
 /**
@@ -32,8 +34,32 @@ interface IMessageAdapterDependencies {
 export class IMessageAdapter implements PlatformAdapter {
   readonly platform: PlatformName = "IMESSAGE";
   private db?: IMessageDb;
+  private contactResolver: ContactResolver;
 
-  constructor(private readonly deps: IMessageAdapterDependencies) {}
+  constructor(private readonly deps: IMessageAdapterDependencies) {
+    this.contactResolver = loadContactResolver(deps.contactsVcfPath);
+  }
+
+  /**
+   * Best-effort name resolution: if the contacts vcf has a name for any of
+   * the chat's participants, use it; otherwise keep the chat.db-provided
+   * displayName (phone/email/group name).
+   */
+  private resolveDisplayName(row: IMessageThreadRow): string {
+    if (!row.isGroup) {
+      const direct = this.contactResolver.resolve(row.chatIdentifier);
+      if (direct) return direct;
+    } else {
+      // For groups: if every participant resolves to a name, render as
+      // "Alice, Bob, Charlie". Otherwise fall back to whatever chat.db had.
+      const resolved = row.participants.map((p) => this.contactResolver.resolve(p) ?? p);
+      const allResolved = resolved.every((name, i) => name !== row.participants[i]);
+      if (allResolved && resolved.length > 0) {
+        return resolved.join(", ");
+      }
+    }
+    return row.displayName;
+  }
 
   private getDb(): IMessageDb {
     if (!this.db) {
@@ -70,7 +96,7 @@ export class IMessageAdapter implements PlatformAdapter {
   private toThreadStub(row: IMessageThreadRow, isUnread: boolean, isRecent: boolean): ThreadStub {
     return {
       platformThreadId: row.guid,
-      displayName: row.displayName,
+      displayName: this.resolveDisplayName(row),
       unreadCount: row.unreadCount,
       lastMessagePreview: row.lastDirection === "OUT"
         ? `You: ${row.lastMessagePreview}`
