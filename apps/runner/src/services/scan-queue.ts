@@ -2332,14 +2332,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const existingPerson = await prisma.person.findFirst({
       where: { displayName: candidate.displayName, platform }
     });
+    const candidateAvatarUrl = candidate.avatarUrl?.trim() || null;
     const person =
       existingPerson ??
       (await prisma.person.create({
         data: {
           displayName: candidate.displayName,
-          platform
+          platform,
+          avatarUrl: candidateAvatarUrl
         }
       }));
+    if (existingPerson && candidateAvatarUrl && existingPerson.avatarUrl !== candidateAvatarUrl) {
+      await prisma.person.update({
+        where: { id: existingPerson.id },
+        data: { avatarUrl: candidateAvatarUrl }
+      });
+    }
     if (!existingPerson && deps.onNewPerson) {
       // Fire-and-forget. The callback enqueues a profile-enrichment job;
       // it must never throw a scan-killing error even if the queue is

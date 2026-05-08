@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import type { InboxRow } from "@/lib/types";
-import { PLATFORM_LABEL, initials, toDisplayRisk, avatarTone, type DisplayRisk } from "@/lib/risk";
+import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
+import { PersonAvatar } from "@/components/common/person-avatar";
 
 interface ThreadRowProps {
   row: InboxRow;
@@ -33,12 +34,12 @@ export function ThreadRow({ row }: ThreadRowProps) {
       href={`/thread/${row.id}`}
       className="grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
     >
-      <span
-        className="grid h-8 w-8 place-items-center rounded-full font-display text-[12px] font-semibold text-white"
-        style={{ background: avatarTone(row.personName) }}
-      >
-        {initials(row.personName)}
-      </span>
+      <PersonAvatar
+        name={row.personName}
+        avatarUrl={row.personAvatarUrl}
+        size={32}
+        className="text-[12px]"
+      />
       <span className="min-w-0">
         <span className="mb-1 flex items-baseline gap-[10px]">
           <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">{row.personName}</span>
