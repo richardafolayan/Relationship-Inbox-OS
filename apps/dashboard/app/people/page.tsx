@@ -153,7 +153,7 @@ export default function PeoplePage() {
     if (!selectedId) return;
     setRefreshing(true);
     setError(null);
-    setEnrichStatus("Fetching LinkedIn profile…");
+    setEnrichStatus(detail?.person.platform === "LINKEDIN" ? "Fetching LinkedIn profile…" : "Fetching profile…");
     if (enrichStatusTimer.current) {
       clearTimeout(enrichStatusTimer.current);
       enrichStatusTimer.current = null;

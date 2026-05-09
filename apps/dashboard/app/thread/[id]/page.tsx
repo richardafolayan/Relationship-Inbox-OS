@@ -4,9 +4,10 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
-import { ChevronDown, ChevronLeft, Clock, Loader2, Send, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronLeft, Clock, Loader2, Mic, Paperclip, Send, Sparkles } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
+import { IMessageMedia } from "@/components/thread/imessage-media";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -182,6 +183,7 @@ export default function ThreadPage() {
 
   const [thread, setThread] = useState<ThreadResponse | null>(null);
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
+  const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [composer, setComposer] = useState("");
@@ -198,6 +200,18 @@ export default function ThreadPage() {
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
+  // Outbound attachments staged in the composer. Cleared after a successful
+  // send. Each entry holds the actual File for upload + a previewUrl for the
+  // chip thumbnail (image previews; a generic icon for everything else).
+  const [composerAttachments, setComposerAttachments] = useState<Array<{
+    id: string;
+    file: File;
+    previewUrl: string;
+    kind: "photo" | "voice_note" | "video" | "audio" | "pdf" | "unknown";
+  }>>([]);
+  const [recording, setRecording] = useState(false);
+  const recorderRef = useRef<MediaRecorder | null>(null);
+  const recordedChunksRef = useRef<BlobPart[]>([]);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -403,21 +417,52 @@ export default function ThreadPage() {
     };
   }, [threadId, refresh]);
 
+  const kindFromMime = (mime: string | undefined, filename: string | undefined): string => {
+    const m = (mime ?? "").toLowerCase();
+    const n = (filename ?? "").toLowerCase();
+    if (m.startsWith("image/")) return "photo";
+    if (m.startsWith("video/")) return "video";
+    if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
+    if (m.startsWith("audio/")) return /audio.message|voice/i.test(n) ? "voice_note" : "audio";
+    return "unknown";
+  };
+
   const onSend = useCallback(async () => {
-    if (!thread || !composer.trim() || sending) return;
+    if (!thread || sending) return;
+    if (!composer.trim() && composerAttachments.length === 0) return;
     const clientSendId = uuid();
     const text = composer;
+    const attachmentsToSend = composerAttachments;
     const sentAt = new Date().toISOString();
     setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
     setComposer("");
+    setComposerAttachments([]);
     setSending(true);
     setError(null);
     stickToBottomRef.current = true;
     try {
-      await apiPost(`/runner/control/thread/${thread.id}/send`, {
-        text,
-        clientSendId
-      });
+      if (attachmentsToSend.length > 0) {
+        // Multipart upload — needed for binary file payloads.
+        const form = new FormData();
+        form.append("text", text);
+        form.append("clientSendId", clientSendId);
+        for (const a of attachmentsToSend) {
+          form.append("attachments", a.file, a.file.name);
+        }
+        const resp = await fetch(`/runner/control/thread/${thread.id}/send`, {
+          method: "POST",
+          body: form
+        });
+        if (!resp.ok) {
+          const errText = await resp.text();
+          throw new Error(errText || `Send failed (${resp.status})`);
+        }
+      } else {
+        await apiPost(`/runner/control/thread/${thread.id}/send`, {
+          text,
+          clientSendId
+        });
+      }
     } catch (sendError) {
       const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
       setPendingSends((prev) =>
@@ -427,10 +472,69 @@ export default function ThreadPage() {
       );
       setError(message);
       setComposer(text);
+      setComposerAttachments(attachmentsToSend);
     } finally {
       setSending(false);
     }
-  }, [composer, sending, thread]);
+  }, [composer, composerAttachments, sending, thread]);
+
+  const addFiles = useCallback((files: FileList | File[]) => {
+    const list = Array.from(files);
+    setComposerAttachments((prev) => [
+      ...prev,
+      ...list.map((file) => ({
+        id: uuid(),
+        file,
+        previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : "",
+        kind: kindFromMime(file.type, file.name) as "photo" | "voice_note" | "video" | "audio" | "pdf" | "unknown"
+      }))
+    ]);
+  }, []);
+
+  const removeAttachment = useCallback((id: string) => {
+    setComposerAttachments((prev) => {
+      const next = prev.filter((a) => a.id !== id);
+      const removed = prev.find((a) => a.id === id);
+      if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+      return next;
+    });
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (recording) return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Prefer mp4/aac if supported (Safari + iMessage friendly); fall back
+      // to webm/opus everywhere else and let the runner transcode.
+      const mimeType = MediaRecorder.isTypeSupported("audio/mp4")
+        ? "audio/mp4"
+        : MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+          ? "audio/webm;codecs=opus"
+          : "";
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      recordedChunksRef.current = [];
+      recorder.ondataavailable = (e) => { if (e.data.size > 0) recordedChunksRef.current.push(e.data); };
+      recorder.onstop = () => {
+        const blob = new Blob(recordedChunksRef.current, { type: recorder.mimeType });
+        const ext = recorder.mimeType.includes("mp4") ? "m4a" : "webm";
+        const file = new File([blob], `Voice Message.${ext}`, { type: recorder.mimeType });
+        addFiles([file]);
+        stream.getTracks().forEach((t) => t.stop());
+      };
+      recorder.start();
+      recorderRef.current = recorder;
+      setRecording(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Microphone access denied");
+    }
+  }, [addFiles, recording]);
+
+  const stopRecording = useCallback(() => {
+    if (!recording || !recorderRef.current) return;
+    recorderRef.current.stop();
+    recorderRef.current = null;
+    setRecording(false);
+  }, [recording]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -632,6 +736,21 @@ export default function ThreadPage() {
     const platformName = platform ?? thread.platform;
     switch (pending.errorKind) {
       case "AUTH_REQUIRED":
+        if (platformName === "IMESSAGE") {
+          return {
+            label: "Grant Messages access",
+            run: async () => {
+              try {
+                await apiPost("/runner/control/imessage/permission-reset", {});
+                setError(
+                  "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then click retry."
+                );
+              } catch (err) {
+                setError(err instanceof Error ? err.message : "Permission reset failed");
+              }
+            }
+          };
+        }
         return {
           label: "Open browser to sign in",
           run: () =>
@@ -872,14 +991,16 @@ export default function ThreadPage() {
   // bouncing to /today. Sort RED → AMBER → GREEN, then by recency.
   const siblingRows = useMemo(() => {
     const order: Record<"RED" | "AMBER" | "GREEN", number> = { RED: 0, AMBER: 1, GREEN: 2 };
-    return [...siblings].sort((a, b) => {
-      const riskDiff = (order[a.riskLevel] ?? 3) - (order[b.riskLevel] ?? 3);
-      if (riskDiff !== 0) return riskDiff;
-      const aAt = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
-      const bAt = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
-      return bAt - aAt;
-    });
-  }, [siblings]);
+    return [...siblings]
+      .filter((row) => siblingPlatform === "all" || row.platform === siblingPlatform)
+      .sort((a, b) => {
+        const riskDiff = (order[a.riskLevel] ?? 3) - (order[b.riskLevel] ?? 3);
+        if (riskDiff !== 0) return riskDiff;
+        const aAt = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+        const bAt = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+        return bAt - aAt;
+      });
+  }, [siblings, siblingPlatform]);
 
   // Force-scroll-to-bottom when switching threads.
   useEffect(() => {
@@ -985,9 +1106,21 @@ export default function ThreadPage() {
       {/* ───── Sibling-thread list ───── */}
       <aside className="hidden h-full min-h-0 flex-col overflow-y-auto border-r border-hairline bg-paper-2/30 lg:flex">
         <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-4 py-4">
-          <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            Threads
-          </p>
+          <div className="flex items-center justify-between gap-2">
+            <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+              Threads
+            </p>
+            <select
+              value={siblingPlatform}
+              onChange={(e) => setSiblingPlatform(e.target.value as "all" | "LINKEDIN" | "IMESSAGE")}
+              className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
+              aria-label="Filter sibling threads by platform"
+            >
+              <option value="all">All</option>
+              <option value="LINKEDIN">LinkedIn</option>
+              <option value="IMESSAGE">iMessage</option>
+            </select>
+          </div>
         </div>
         <ul className="m-0 list-none space-y-[2px] p-2">
           {siblingRows.map((row) => {
@@ -1250,15 +1383,50 @@ export default function ThreadPage() {
                     <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
                       {senderLabel}
                     </span>
-                    <div
-                      className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
-                        message.direction === "OUT"
-                          ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
-                          : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
-                      }`}
-                    >
-                      {message.text}
-                    </div>
+                    {(() => {
+                      const playableAttachments = (message.attachments ?? []).filter(
+                        (a) => a.guid && a.kind && a.kind !== "unknown"
+                      );
+                      const hasInlineMedia = playableAttachments.length > 0;
+                      const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
+                      const showText = !(hasInlineMedia && isAttachmentOnlyText);
+                      const reactions = (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                      return (
+                        <div className="relative">
+                          <div
+                            className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
+                              message.direction === "OUT"
+                                ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+                                : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                            }`}
+                          >
+                            {hasInlineMedia ? (
+                              <div className="flex flex-col gap-2">
+                                {playableAttachments.map((a, attIdx) => (
+                                  <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                                ))}
+                              </div>
+                            ) : null}
+                            {showText ? (
+                              <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                            ) : null}
+                          </div>
+                          {reactions.length > 0 ? (
+                            <span
+                              className={`absolute -top-3 ${
+                                message.direction === "OUT" ? "-left-2" : "-right-2"
+                              } flex items-center gap-[2px] rounded-full border border-hairline bg-paper px-[6px] py-[2px] text-[11px] shadow-sm`}
+                            >
+                              {reactions.map((r, i) => (
+                                <span key={`${r.kind}-${r.direction}-${i}`} title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}>
+                                  {r.emoji}
+                                </span>
+                              ))}
+                            </span>
+                          ) : null}
+                        </div>
+                      );
+                    })()}
                     <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
                       <span>{formatClock(message.timestamp)}</span>
                       {/* Honest "Sent via automation ✓" — only shown when
@@ -1735,12 +1903,80 @@ export default function ThreadPage() {
                       </div>
                     ) : null}
                   </div>
-                  <Button variant="primary" onClick={() => void onSend()} disabled={sending || !composer.trim()}>
+                  {thread.platform === "IMESSAGE" ? (
+                    <>
+                      <input
+                        type="file"
+                        multiple
+                        accept="image/*,video/*,audio/*,application/pdf"
+                        className="hidden"
+                        id="composer-file-input"
+                        onChange={(e) => {
+                          if (e.target.files) addFiles(e.target.files);
+                          e.target.value = "";
+                        }}
+                      />
+                      <button
+                        type="button"
+                        onClick={() => document.getElementById("composer-file-input")?.click()}
+                        className="rounded-pill border border-hairline bg-paper p-2 text-ink-2 hover:text-ink"
+                        title="Attach photos / files"
+                        aria-label="Attach files"
+                      >
+                        <Paperclip className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => (recording ? stopRecording() : void startRecording())}
+                        className={`rounded-pill border p-2 ${
+                          recording
+                            ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue animate-pulse"
+                            : "border-hairline bg-paper text-ink-2 hover:text-ink"
+                        }`}
+                        title={recording ? "Stop recording" : "Record voice note"}
+                        aria-label={recording ? "Stop recording" : "Record voice note"}
+                      >
+                        <Mic className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                      </button>
+                    </>
+                  ) : null}
+                  <Button
+                    variant="primary"
+                    onClick={() => void onSend()}
+                    disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
+                  >
                     {sending ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <Send className="h-[14px] w-[14px]" strokeWidth={1.8} />}
                     Send
                   </Button>
                 </div>
               </div>
+              {composerAttachments.length > 0 ? (
+                <div className="mt-2 flex flex-wrap gap-2 border-t border-hairline pt-2">
+                  {composerAttachments.map((a) => (
+                    <span
+                      key={a.id}
+                      className="inline-flex items-center gap-2 rounded-pill border border-hairline bg-paper px-2 py-1 text-[12px]"
+                    >
+                      {a.kind === "photo" && a.previewUrl ? (
+                        <img src={a.previewUrl} alt="" className="h-6 w-6 rounded object-cover" />
+                      ) : (
+                        <span className="text-ink-3">
+                          {a.kind === "voice_note" ? "🎤" : a.kind === "video" ? "🎥" : a.kind === "pdf" ? "📄" : "📎"}
+                        </span>
+                      )}
+                      <span className="max-w-[140px] truncate text-ink">{a.file.name}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(a.id)}
+                        className="text-ink-3 hover:text-risk-overdue"
+                        aria-label="Remove attachment"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              ) : null}
             </div>
 
             {snoozeMenuOpen ? (

@@ -17,7 +17,7 @@ const demoPeople = [
   "Lena Brooks"
 ];
 
-const platforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const platforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 export async function seedDemoData(input: { screenshotDir: string; domDumpDir: string }): Promise<DemoSeedManifest> {
   const now = Date.now();

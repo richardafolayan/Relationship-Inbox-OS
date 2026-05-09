@@ -147,6 +147,7 @@ export function createSendService(deps: SendServiceDeps) {
     threadId: string;
     text: string;
     clientSendId: string;
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -187,7 +188,10 @@ export function createSendService(deps: SendServiceDeps) {
           clientSendId: input.clientSendId,
           threadId: input.threadId,
           requestText: input.text,
-          status: "PENDING"
+          status: "PENDING",
+          attachmentsJson: input.attachments && input.attachments.length > 0
+            ? JSON.stringify(input.attachments)
+            : null
         }
       });
     } catch (error) {
@@ -267,8 +271,29 @@ export function createSendService(deps: SendServiceDeps) {
           `Platform ${thread.platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`
         );
       }
-      const receipt = await adapter.sendMessage(threadStub, input.text);
+      const stagedAttachments = sendRequest.attachmentsJson
+        ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
+        : [];
+      const receipt = await adapter.sendMessage(
+        threadStub,
+        input.text,
+        stagedAttachments.map((a) => ({
+          absolutePath: a.absolutePath,
+          displayName: a.displayName,
+          mimeType: a.mimeType,
+          kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
+        }))
+      );
 
+      // Persist platform-side attachments on the OUT row when the adapter
+      // captured them post-send (iMessage adapter looks them up from
+      // chat.db). Without this, voice notes / photos / videos sent from
+      // the composer only show as a text bubble in the dashboard — the
+      // attachment guid the IMessageMedia component needs is missing.
+      const attachmentsJson =
+        receipt.attachments && receipt.attachments.length > 0
+          ? JSON.stringify(receipt.attachments)
+          : null;
       await prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
@@ -280,7 +305,8 @@ export function createSendService(deps: SendServiceDeps) {
           text: input.text,
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
-          sentVia: "automation"
+          sentVia: "automation",
+          attachmentsJson
         },
         create: {
           threadId: thread.id,
@@ -288,7 +314,8 @@ export function createSendService(deps: SendServiceDeps) {
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
           text: input.text,
-          sentVia: "automation"
+          sentVia: "automation",
+          attachmentsJson
         }
       });
 
@@ -424,6 +451,7 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     scheduledFor: Date;
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -464,7 +492,10 @@ export function createSendService(deps: SendServiceDeps) {
           threadId: input.threadId,
           requestText: input.text,
           status: "SCHEDULED",
-          scheduledFor: input.scheduledFor
+          scheduledFor: input.scheduledFor,
+          attachmentsJson: input.attachments && input.attachments.length > 0
+            ? JSON.stringify(input.attachments)
+            : null
         }
       });
     } catch (error) {

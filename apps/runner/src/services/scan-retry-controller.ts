@@ -1,9 +1,8 @@
-// Aligned with `PlatformName` so callers in scan-queue (which receive a
+// Aliased to `PlatformName` so callers in scan-queue (which receive a
 // PlatformName from the scan loop) can hand the value straight through
-// without narrowing. IMESSAGE was added to PlatformName so prisma can read
-// iMessage rows; the retry controller will track an unused entry for it
-// (the scan loop only iterates over enabledPlatforms which excludes
-// IMESSAGE today, so its cooldown/reload state stays empty at runtime).
+// without narrowing. The retry controller maintains entries for every
+// platform; the scan loop only iterates `enabledPlatforms`, so platforms
+// the operator hasn't enabled keep an empty cooldown/reload state.
 import type { PlatformName } from "@inbox-os/core";
 export type ScanRetryPlatform = PlatformName;
 

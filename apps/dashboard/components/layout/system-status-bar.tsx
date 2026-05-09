@@ -42,6 +42,12 @@ type StatusBarState =
   | { kind: "idle" }
   | {
       kind: "scanning";
+      // From the iMessage-adapter line of work — surface which platform is
+      // mid-scan when the operator is multi-platform. Null when /health
+      // doesn't expose `currentScanPlatform`.
+      platform?: string | null;
+      // From #133 (determinate progress bar) — populated when the LinkedIn
+      // streaming scan reports row-level progress. Both shapes can coexist.
       processedRows?: number;
       total?: number;
       percent?: number;
@@ -85,17 +91,19 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
     }
   }
   if (blockedByScan) {
+    const platform = input.health?.currentScanPlatform ?? null;
     const progress = input.health?.scanProgress;
     if (progress) {
       return {
         kind: "scanning",
+        platform,
         processedRows: progress.processedRows,
         total: progress.total,
         percent: progress.percent,
         etaSeconds: progress.etaSeconds
       };
     }
-    return { kind: "scanning" };
+    return { kind: "scanning", platform };
   }
   // Enrichment shows up under scanning so the operator sees the heavier
   // signal first when both are happening; an enrichment-only state is
@@ -229,6 +237,15 @@ export function SystemStatusBar() {
           {isActive ? <AnimatedEllipsis /> : null}
         </span>
         {stateDetail(state) ? <span>· {stateDetail(state)}</span> : null}
+        {state.kind === "send_failed" && isPermissionDenied(state.message) ? (
+          <button
+            type="button"
+            onClick={() => void runPermissionReset()}
+            className="ml-2 rounded-row border border-hairline bg-paper px-2 py-[2px] font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink"
+          >
+            grant access
+          </button>
+        ) : null}
         {cancelTarget ? (
           <button
             type="button"
@@ -286,20 +303,50 @@ function AnimatedEllipsis() {
   );
 }
 
+function isPermissionDenied(message: string): boolean {
+  return /-1743|not authorized to send Apple events|grant Automation/i.test(message);
+}
+
+async function runPermissionReset(): Promise<void> {
+  try {
+    await fetch("/runner/control/imessage/permission-reset", { method: "POST" });
+  } catch {
+    // best-effort; operator can still grant via System Settings manually.
+  }
+}
+
+function platformDisplay(platform: string): string {
+  switch (platform) {
+    case "LINKEDIN":
+      return "linkedin";
+    case "IMESSAGE":
+      return "iMessage";
+    case "INSTAGRAM":
+      return "instagram";
+    case "TIKTOK":
+      return "tiktok";
+    default:
+      return platform.toLowerCase();
+  }
+}
+
 function stateLabel(state: StatusBarState): string {
   switch (state.kind) {
     case "scanning":
       // Trailing "…" is now rendered as <AnimatedEllipsis /> in the JSX so
       // it pulses; keeping the bare label here lets aria-live announce a
       // clean string to screen readers.
-      if (
-        typeof state.processedRows === "number" &&
-        typeof state.total === "number" &&
-        state.total > 0
-      ) {
-        return `Scanning linkedin · ${state.processedRows}/${state.total}`;
+      {
+        const platformLabel = state.platform ? platformDisplay(state.platform) : "linkedin";
+        if (
+          typeof state.processedRows === "number" &&
+          typeof state.total === "number" &&
+          state.total > 0
+        ) {
+          return `Scanning ${platformLabel} · ${state.processedRows}/${state.total}`;
+        }
+        return `Scanning ${platformLabel}`;
       }
-      return "Scanning linkedin";
     case "enriching":
       return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
     case "sending":

@@ -1,9 +1,8 @@
-// `IMESSAGE` is declared here so `prisma.thread.findUnique({...})` doesn't
-// throw on rows ingested by the separate iMessage adapter work. Main has
-// no iMessage adapter — the runner's `requireAdapter` guard (added in
-// #135 / #140) returns a clean "platform not supported" error if anything
-// tries to dispatch on it. Removing IMESSAGE from this union without
-// also removing the underlying rows would break the runner's prisma reads.
+// IMESSAGE landed first as a schema-only declaration on main (so prisma
+// could read existing iMessage rows without throwing). This branch brings
+// the matching adapter — the runner now dispatches iMessage operations
+// for real. Removing IMESSAGE from this union without also removing the
+// underlying DB rows would break the runner's prisma reads.
 export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
@@ -37,6 +36,17 @@ export interface AttachmentPlaceholder {
   type: string;
   manualReview: boolean;
   rawLabel?: string;
+  /**
+   * Stable platform-side identifier the dashboard can use to fetch the
+   * actual file (e.g. iMessage attachment guid). Optional because most
+   * platforms either don't expose this or aren't supported for inline
+   * media yet.
+   */
+  guid?: string;
+  /** Coarse media kind, when known. iMessage adapter populates this. */
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "unknown";
+  /** byte size, when known. Used by the dashboard to skip huge files. */
+  byteSize?: number;
 }
 
 export interface NormalizedMessage {
@@ -49,10 +59,31 @@ export interface NormalizedMessage {
   attachments: AttachmentPlaceholder[];
 }
 
+/**
+ * A file the operator wants to send alongside (or instead of) the
+ * message text. The runner stages the file on disk and passes the
+ * absolute path to the adapter; the adapter is responsible for getting
+ * it onto the platform (Messages.app via osascript today).
+ */
+export interface OutboundAttachment {
+  absolutePath: string;
+  displayName: string;
+  mimeType?: string;
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown";
+}
+
 export interface SendReceipt {
   sentAt: string;
   screenshotFile?: string;
   verifiedBy: VerificationMethod;
+  /**
+   * Attachments the platform actually persisted on the outbound message,
+   * for adapters that send media (e.g. iMessage voice notes / photos).
+   * The runner stores these on the Message row so the dashboard can
+   * render them inline alongside the bubble. Optional — text-only
+   * platforms (LinkedIn) leave this unset.
+   */
+  attachments?: AttachmentPlaceholder[];
 }
 
 export interface SelectorRegistry {

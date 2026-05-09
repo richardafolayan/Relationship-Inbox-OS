@@ -2419,10 +2419,27 @@ export class LinkedInAdapter implements PlatformAdapter {
       note: input?.note,
       attempt: input?.attempt,
       run: async () => {
-        await page.goto(url, {
-          waitUntil: input?.waitUntil ?? "domcontentloaded",
-          timeout: input?.timeoutMs
-        });
+        try {
+          await page.goto(url, {
+            waitUntil: input?.waitUntil ?? "domcontentloaded",
+            timeout: input?.timeoutMs
+          });
+        } catch (error) {
+          // LinkedIn's SPA frequently aborts the initial navigation when
+          // its in-page router intercepts the same URL ("frame was
+          // detached" / ERR_ABORTED). The destination is usually already
+          // committed under us, so a single retry against the live page
+          // resolves it. If the second attempt still fails we surface the
+          // original error so upstream stage handling kicks in.
+          const message = error instanceof Error ? error.message : String(error);
+          const aborted = /ERR_ABORTED|frame was detached|Navigation interrupted/i.test(message);
+          if (!aborted) throw error;
+          await page.waitForTimeout(200);
+          await page.goto(url, {
+            waitUntil: input?.waitUntil ?? "domcontentloaded",
+            timeout: input?.timeoutMs
+          });
+        }
       }
     });
   }

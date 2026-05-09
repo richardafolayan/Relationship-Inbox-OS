@@ -15,14 +15,15 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "Linkedin",
   INSTAGRAM: "Instagram",
-  TIKTOK: "Tiktok"
+  TIKTOK: "Tiktok",
+  IMESSAGE: "iMessage"
 };
 
 // Only platforms whose adapter has been hardened against the live UI are
 // surfaced as actionable rows. Instagram and TikTok still flow through the
 // runner so settings + future work can re-enable them, but the operator
 // shouldn't see them as "Connect" rows on the main view yet.
-const VISIBLE_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["LINKEDIN"];
+const VISIBLE_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["LINKEDIN", "IMESSAGE"];
 const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["INSTAGRAM", "TIKTOK"];
 
 // Platforms: quiet rows for each platform we ship to operators. Name
