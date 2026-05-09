@@ -4,7 +4,11 @@ import type { PlatformName, SelectorRegistry } from "./types";
 
 export type SelectorOverrideStore = Partial<Record<PlatformName, Partial<SelectorRegistry>>>;
 
-const SELECTOR_FILES: Record<PlatformName, string> = {
+// Partial because IMESSAGE — declared in PlatformName so prisma can read
+// iMessage rows — has no DOM-scraping selector file (its adapter, when it
+// lands, won't use this DOM-driven loader). Callers that hit IMESSAGE here
+// get a readable error rather than a silent missing-file crash.
+const SELECTOR_FILES: Partial<Record<PlatformName, string>> = {
   LINKEDIN: "linkedin.json",
   INSTAGRAM: "instagram.json",
   TIKTOK: "tiktok.json"
@@ -12,6 +16,11 @@ const SELECTOR_FILES: Record<PlatformName, string> = {
 
 export function loadDefaultSelectors(platform: PlatformName, baseDir: string): SelectorRegistry {
   const file = SELECTOR_FILES[platform];
+  if (!file) {
+    throw new Error(
+      `No DOM selector file registered for platform ${platform}. Supported platforms: ${Object.keys(SELECTOR_FILES).join(", ")}.`
+    );
+  }
   const raw = readFileSync(join(baseDir, file), "utf-8");
   return JSON.parse(raw) as SelectorRegistry;
 }

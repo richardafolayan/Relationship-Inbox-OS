@@ -1,4 +1,10 @@
-export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+// `IMESSAGE` is declared here so `prisma.thread.findUnique({...})` doesn't
+// throw on rows ingested by the separate iMessage adapter work. Main has
+// no iMessage adapter — the runner's `requireAdapter` guard (added in
+// #135 / #140) returns a clean "platform not supported" error if anything
+// tries to dispatch on it. Removing IMESSAGE from this union without
+// also removing the underlying rows would break the runner's prisma reads.
+export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
 export type PlatformStatus = "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";

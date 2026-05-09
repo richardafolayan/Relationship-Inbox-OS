@@ -1,6 +1,13 @@
-export type ScanRetryPlatform = "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+// Aligned with `PlatformName` so callers in scan-queue (which receive a
+// PlatformName from the scan loop) can hand the value straight through
+// without narrowing. IMESSAGE was added to PlatformName so prisma can read
+// iMessage rows; the retry controller will track an unused entry for it
+// (the scan loop only iterates over enabledPlatforms which excludes
+// IMESSAGE today, so its cooldown/reload state stays empty at runtime).
+import type { PlatformName } from "@inbox-os/core";
+export type ScanRetryPlatform = PlatformName;
 
-const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 interface PlatformCooldownState {
   consecutiveFailures: number;

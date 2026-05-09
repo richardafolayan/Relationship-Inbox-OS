@@ -7,7 +7,10 @@ import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 
 interface SendServiceDeps {
-  adapters: Record<PlatformName, PlatformAdapter>;
+  // Partial: not every PlatformName has an adapter on main today. The
+  // worker checks `if (!adapter)` before dispatching (see
+  // processSendRequest); the route guards earlier via requireAdapter.
+  adapters: Partial<Record<PlatformName, PlatformAdapter>>;
   eventBus: EventBus;
   settingsStore: SettingsStore;
   auditLog: (input: {
