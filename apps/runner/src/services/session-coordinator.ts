@@ -12,7 +12,11 @@ export interface SessionPreemptSummary {
 }
 
 interface SessionCoordinatorDeps {
-  adapters: Record<PlatformName, PlatformAdapter>;
+  // Partial: not every PlatformName has an adapter on main today. IMESSAGE
+  // was added to PlatformName so prisma can read existing rows; its
+  // adapter lives on a separate line of work. Coordinator iteration over
+  // adapters skips entries that aren't registered.
+  adapters: Partial<Record<PlatformName, PlatformAdapter>>;
   scanQueue: {
     requestAbort: (reason: string) => void;
   };
@@ -72,10 +76,14 @@ export function createSessionCoordinator(deps: SessionCoordinatorDeps) {
 
       deps.scanQueue.requestAbort(abortReason);
 
-      const platforms = Object.keys(deps.adapters) as PlatformName[];
+      // Iterate entries instead of keys so TS narrows away the
+      // `Partial<...>` `undefined` (Object.keys still hands back string,
+      // which the cast widens, but the value lookup remains undefined-typed
+      // — entries gives us the value already narrowed).
+      const adapterEntries = Object.entries(deps.adapters) as Array<[PlatformName, PlatformAdapter]>;
       const closeResults = await Promise.allSettled(
-        platforms.map(async (platform) => {
-          await deps.adapters[platform].closeSession(abortReason);
+        adapterEntries.map(async ([platform, adapter]) => {
+          await adapter.closeSession(abortReason);
           return platform;
         })
       );
@@ -84,10 +92,11 @@ export function createSessionCoordinator(deps: SessionCoordinatorDeps) {
       const failedPlatforms: Array<{ platform: PlatformName; reason: string }> = [];
 
       closeResults.forEach((result, index) => {
-        const platform = platforms[index];
-        if (!platform) {
+        const entry = adapterEntries[index];
+        if (!entry) {
           return;
         }
+        const [platform] = entry;
         if (result.status === "fulfilled") {
           closedPlatforms.push(platform);
           return;

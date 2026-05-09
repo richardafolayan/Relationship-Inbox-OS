@@ -1077,7 +1077,11 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         reusedInFlight = true;
       } else {
         let trackedPromise: Promise<void>;
-        trackedPromise = adapters[platform].ensureConnected().finally(() => {
+        // requireAdapter narrows `adapters[platform]` away from undefined
+        // (the map is now Partial<Record<PlatformName, PlatformAdapter>>;
+        // see services/platform-factory.ts).
+        const platformAdapter = requireAdapter(platform);
+        trackedPromise = platformAdapter.ensureConnected().finally(() => {
           if (connectInFlight.get(platform) === trackedPromise) {
             connectInFlight.delete(platform);
           }
@@ -3057,7 +3061,11 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
-    const adapter = adapters[payload.platform];
+    // The zod payload restricts platform to the three with adapters today,
+    // but the adapters map is now Partial — narrow via requireAdapter to
+    // keep the runtime contract explicit (and to surface a clean error if
+    // someone removes an adapter without updating the zod enum).
+    const adapter = requireAdapter(payload.platform);
     await adapter.ensureConnected();
     res.json({ status: "ok" });
   });
