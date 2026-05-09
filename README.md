@@ -219,7 +219,6 @@ OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5
 RUNNER_PORT=4001
 DASHBOARD_PORT=3100
-USE_EVENTS_PROXY=false
 BROWSER_PROFILE_MODE=isolated
 ```
 
@@ -311,7 +310,6 @@ curl http://localhost:4001/health
 | `DATABASE_URL` | `file:./data/inbox-os.sqlite` | Prisma DB URL (scripts often override explicitly). |
 | `RUNNER_PORT` | `4001` | Runner API server port. |
 | `DASHBOARD_PORT` | `3100` | Dashboard port. |
-| `USE_EVENTS_PROXY` | `false` | Use dashboard SSE proxy route instead of direct rewrite stream. |
 | `BROWSER_PROFILE_MODE` | `isolated` | `isolated` or `personal`. |
 | `PERSONAL_PROFILE_FALLBACK` | `error` | In personal mode: `error` or `allow_isolated` fallback behavior. |
 | `PERSONAL_PROFILE_SYNC_MODE` | `smart` | Mirror sync mode: `smart`, `always`, `never`. |
