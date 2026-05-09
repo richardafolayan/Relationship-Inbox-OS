@@ -33,7 +33,10 @@ import {
 import { parseLinkedInListTimestamp } from "../linkedin/linkedinTime.js";
 
 interface ScanQueueDeps {
-  adapters: Record<PlatformName, PlatformAdapter>;
+  // Partial: not every PlatformName has an adapter on main today. The
+  // scan loop only iterates `enabledPlatforms` (which excludes IMESSAGE
+  // by default); per-thread sync paths guard via requireAdapter.
+  adapters: Partial<Record<PlatformName, PlatformAdapter>>;
   eventBus: EventBus;
   settingsStore: SettingsStore;
   aiService: AiService;
@@ -97,6 +100,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
       thread: ThreadStub;
       messages: NormalizedMessage[];
     }) => Promise<void>;
+    onProgress?: (snapshot: { processedRows: number; openedRows: number; total: number }) => void;
   }): Promise<{
     stopReason: string;
     iterations: number;
@@ -334,6 +338,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
   const queue: ScanJob[] = [];
   let processing = false;
   let currentJob: ScanJob | null = null;
+  let currentScanProgress:
+    | {
+        platform: PlatformName;
+        processedRows: number;
+        openedRows: number;
+        total: number;
+        startedAt: number;
+      }
+    | null = null;
   let scheduler: NodeJS.Timeout | undefined;
   let abortVersion = 0;
   let abortReason: string | null = null;
@@ -950,6 +963,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
         };
 
         const adapter = deps.adapters[platform];
+        if (!adapter) {
+          // Adapter map is Partial: a platform appearing in enabledPlatforms
+          // without a registered adapter is a config drift, not a fatal
+          // runtime state. Log and skip this iteration. (At time of writing
+          // only IMESSAGE has no adapter; settings.enabledPlatforms doesn't
+          // include it, so this path is purely defensive.)
+          await deps.auditLog({
+            platform,
+            stage: "Scan",
+            action: "SCAN_SKIPPED",
+            status: "FAIL",
+            details: {
+              reason: "no_adapter_registered",
+              message: `No adapter registered for platform ${platform}; skipping scan iteration.`
+            }
+          });
+          return;
+        }
         const linkedInAdapter = platform === "LINKEDIN" ? (adapter as LinkedInScanAdapter) : null;
         const traceAwareAdapter = toTraceAwareAdapter(adapter);
         traceAwareAdapter.setRunLogger?.(runLogger);
@@ -1318,12 +1349,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 return 5;
               })();
               let unchangedStreakCount = 0;
+              currentScanProgress = {
+                platform: "LINKEDIN",
+                processedRows: 0,
+                openedRows: 0,
+                total: effectiveMaxThreads ?? 0,
+                startedAt: Date.now()
+              };
               const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
                 maxThreads: effectiveMaxThreads,
                 maxOpens: effectiveMaxOpens,
                 disableDeepScroll: linkedInDevCaps.disableDeepScroll,
                 requestId: job.jobId,
                 runLogger,
+                onProgress: (snap) => {
+                  if (currentScanProgress) {
+                    currentScanProgress.processedRows = snap.processedRows;
+                    currentScanProgress.openedRows = snap.openedRows;
+                    // The adapter resolves a real `maxThreads` when the
+                    // queue passes undefined (uses the adapter dep cap),
+                    // so trust the adapter's number for the live total.
+                    currentScanProgress.total = snap.total;
+                  }
+                },
                 shouldOpenCandidate: async (signals) => {
                   // We can only consult the DB if the row anchor gave us a
                   // canonical thread ID. Without one, fall back to "open in
@@ -2117,6 +2165,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         } finally {
           traceAwareAdapter.setRunLogger?.(null);
           activeRunLoggerByPlatform.delete(platform);
+          if (currentScanProgress?.platform === platform) {
+            currentScanProgress = null;
+          }
           runLogger.mergeCounters({
             threadsScannedCount,
             candidatesToOpenCount: candidatesCount,
@@ -2269,6 +2320,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
+    if (!adapter) {
+      // The route entry-points (rescan / send / retry-send / open) guard
+      // via index.ts:requireAdapter, so callers should never reach here
+      // for an unsupported platform. Defensive throw with a clear message
+      // matches the requireAdapter shape so any future code path that
+      // skips the route guard still fails readably.
+      throw new Error(
+        `Platform ${platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`
+      );
+    }
 
     await deps.auditLog({
       platform,
@@ -2637,6 +2698,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     if (!thread.category && hasPersistedMessages) {
       const classified = await deps.aiService
         .classifyThreadCategory({
+          platform: thread.platform as PlatformName,
           displayName: person.displayName,
           messages: latestMessages.map((message) => ({
             direction: message.direction,
@@ -2779,6 +2841,21 @@ export function createScanQueue(deps: ScanQueueDeps) {
     getQueueDepth,
     isScanning: () => processing,
     getCurrentScanPlatform: () => currentJob?.platform,
+    /**
+     * Live snapshot of the LinkedIn streaming scan in flight, or `null` when
+     * no scan is running. Drives the system status bar's determinate progress
+     * indicator (see `/health` -> `scanProgress`).
+     */
+    getCurrentScanProgress: () =>
+      currentScanProgress
+        ? {
+            platform: currentScanProgress.platform,
+            processedRows: currentScanProgress.processedRows,
+            openedRows: currentScanProgress.openedRows,
+            total: currentScanProgress.total,
+            startedAt: currentScanProgress.startedAt
+          }
+        : null,
     startScheduler,
     runJob,
     requestAbort: (reason: string) => {

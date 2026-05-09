@@ -40,7 +40,19 @@ const RECENT_FRESHNESS_MS = 8000;
 
 type StatusBarState =
   | { kind: "idle" }
-  | { kind: "scanning"; platform?: string | null }
+  | {
+      kind: "scanning";
+      // From the iMessage-adapter line of work — surface which platform is
+      // mid-scan when the operator is multi-platform. Null when /health
+      // doesn't expose `currentScanPlatform`.
+      platform?: string | null;
+      // From #133 (determinate progress bar) — populated when the LinkedIn
+      // streaming scan reports row-level progress. Both shapes can coexist.
+      processedRows?: number;
+      total?: number;
+      percent?: number;
+      etaSeconds?: number | null;
+    }
   | { kind: "enriching"; total: number; running: number }
   | {
       kind: "sending";
@@ -79,7 +91,19 @@ function computeState(input: { health: HealthResponse | null; queue: SendQueueRe
     }
   }
   if (blockedByScan) {
-    return { kind: "scanning", platform: input.health?.currentScanPlatform ?? null };
+    const platform = input.health?.currentScanPlatform ?? null;
+    const progress = input.health?.scanProgress;
+    if (progress) {
+      return {
+        kind: "scanning",
+        platform,
+        processedRows: progress.processedRows,
+        total: progress.total,
+        percent: progress.percent,
+        etaSeconds: progress.etaSeconds
+      };
+    }
+    return { kind: "scanning", platform };
   }
   // Enrichment shows up under scanning so the operator sees the heavier
   // signal first when both are happening; an enrichment-only state is
@@ -238,11 +262,22 @@ export function SystemStatusBar() {
         // CSS variables, so Tailwind's `bg-ink-2/30` opacity-channel
         // syntax doesn't apply (background ends up fully transparent).
         // Use a solid token + element-level opacity instead.
+        //
+        // Scans get a determinate fill driven by /health.scanProgress.
+        // Sending and enrichment-queue drains stay on the indeterminate
+        // sweep (no upstream count to drive a percentage yet).
         <div
           aria-hidden
           className="pointer-events-none absolute bottom-0 left-0 right-0 h-[3px] overflow-hidden"
         >
-          <div className="animate-progress-sweep h-full w-[30%] rounded-full bg-ink-2 opacity-40" />
+          {state.kind === "scanning" && typeof state.percent === "number" ? (
+            <div
+              className="h-full rounded-full bg-ink-2 opacity-40 transition-[width] duration-300"
+              style={{ width: `${state.percent}%` }}
+            />
+          ) : (
+            <div className="animate-progress-sweep h-full w-[30%] rounded-full bg-ink-2 opacity-40" />
+          )}
         </div>
       ) : null}
     </div>
@@ -301,7 +336,17 @@ function stateLabel(state: StatusBarState): string {
       // Trailing "…" is now rendered as <AnimatedEllipsis /> in the JSX so
       // it pulses; keeping the bare label here lets aria-live announce a
       // clean string to screen readers.
-      return state.platform ? `Scanning ${platformDisplay(state.platform)}` : "Scanning";
+      {
+        const platformLabel = state.platform ? platformDisplay(state.platform) : "linkedin";
+        if (
+          typeof state.processedRows === "number" &&
+          typeof state.total === "number" &&
+          state.total > 0
+        ) {
+          return `Scanning ${platformLabel} · ${state.processedRows}/${state.total}`;
+        }
+        return `Scanning ${platformLabel}`;
+      }
     case "enriching":
       return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
     case "sending":
@@ -323,6 +368,15 @@ function stateDetail(state: StatusBarState): string | null {
   }
   if (state.kind === "enriching" && state.running > 0) {
     return `${state.running} in flight`;
+  }
+  if (state.kind === "scanning" && typeof state.etaSeconds === "number") {
+    if (state.etaSeconds <= 0) {
+      return "wrapping up…";
+    }
+    if (state.etaSeconds < 60) {
+      return `~${state.etaSeconds}s left`;
+    }
+    return `~${Math.round(state.etaSeconds / 60)}m left`;
   }
   if (state.kind === "send_failed") {
     return state.message;

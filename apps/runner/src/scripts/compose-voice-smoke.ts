@@ -38,13 +38,14 @@ type AppSettings = import("@inbox-os/core").AppSettings;
 type SettingsStore = import("../types/runtime").SettingsStore;
 
 // Stub settings store so we don't need a DB. createAiService only reads
-// `aiProvider` / `glmModel` from it; everything else comes from
-// runnerConfig (env vars).
+// `aiProvider` / `glmModel` / `geminiModel` from it; everything else comes
+// from runnerConfig (env vars).
 const stubSettings: SettingsStore = {
   async getSettings(): Promise<AppSettings> {
     return {
       aiProvider: (process.env.AI_PROVIDER as AppSettings["aiProvider"]) ?? "openai",
-      glmModel: process.env.Z_AI_MODEL ?? null
+      glmModel: process.env.Z_AI_MODEL ?? null,
+      geminiModel: process.env.GEMINI_MODEL ?? null
     } as AppSettings;
   },
   async updateSettings() {
@@ -133,6 +134,7 @@ async function main() {
     try {
       const text = await ai.composeInVoice({
         intent: s.intent,
+        platform: "LINKEDIN",
         displayName: s.displayName,
         voiceSamples: s.voiceSamples,
         threadMessages: s.threadMessages

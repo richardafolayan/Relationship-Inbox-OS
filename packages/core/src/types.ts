@@ -1,3 +1,8 @@
+// IMESSAGE landed first as a schema-only declaration on main (so prisma
+// could read existing iMessage rows without throwing). This branch brings
+// the matching adapter — the runner now dispatches iMessage operations
+// for real. Removing IMESSAGE from this union without also removing the
+// underlying DB rows would break the runner's prisma reads.
 export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
@@ -197,7 +202,7 @@ export interface SuggestedRepliesOutput {
   source?: AiSource | null;
 }
 
-export type AiProvider = "openai" | "glm";
+export type AiProvider = "openai" | "glm" | "gemini";
 
 export type AiErrorKind =
   | "balance"
@@ -224,4 +229,9 @@ export interface AppSettings {
   // Optional override for the GLM model id. When undefined, runner uses
   // runnerConfig.glmModel (Z_AI_MODEL env, default glm-4.7-flash).
   glmModel?: string;
+  // Optional override for the Gemini model id. When undefined, runner uses
+  // runnerConfig.geminiModel (GEMINI_MODEL env, default gemma-4-31b-it).
+  // Gemma works through Google's OpenAI-compat endpoint once the
+  // thinking_level=MINIMAL extra is set; see services/ai.ts:geminiExtraBody.
+  geminiModel?: string;
 }

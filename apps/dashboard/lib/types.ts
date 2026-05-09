@@ -337,6 +337,21 @@ export interface HealthResponse {
     running: number;
     total: number;
   };
+  /**
+   * Live snapshot of the in-flight platform scan. Drives the system status
+   * bar's determinate progress bar. `total` is the row cap the loop will
+   * stop at; `percent` is clamped to [0, 99] until the scan completes (so
+   * the bar never claims 100% before the runner actually finishes), and
+   * `etaSeconds` is `null` when no prior run-time exists to estimate from.
+   * Optional so older runner builds still parse cleanly.
+   */
+  scanProgress?: {
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+    processedRows: number;
+    total: number;
+    percent: number;
+    etaSeconds: number | null;
+  };
 }
 
 // `AiProvider` is now imported from `@inbox-os/core` at the top of this
@@ -354,6 +369,7 @@ export interface AppSettings {
   recentThreadSweepCount: number;
   aiProvider?: AiProvider;
   glmModel?: string;
+  geminiModel?: string;
 }
 
 export interface SelectorTestReceipt {

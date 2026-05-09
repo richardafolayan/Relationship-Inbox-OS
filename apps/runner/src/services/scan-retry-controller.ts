@@ -1,4 +1,10 @@
-export type ScanRetryPlatform = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+// Aliased to `PlatformName` so callers in scan-queue (which receive a
+// PlatformName from the scan loop) can hand the value straight through
+// without narrowing. The retry controller maintains entries for every
+// platform; the scan loop only iterates `enabledPlatforms`, so platforms
+// the operator hasn't enabled keep an empty cooldown/reload state.
+import type { PlatformName } from "@inbox-os/core";
+export type ScanRetryPlatform = PlatformName;
 
 const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
