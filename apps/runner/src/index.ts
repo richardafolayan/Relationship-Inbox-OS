@@ -1364,6 +1364,13 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
     })
     .parse(req.body);
 
+  // Reject early for unsupported platforms — without this, the SendRequest
+  // queues, the worker hits `adapter.sendMessage(undefined)` and records a
+  // confusing "Cannot read properties of undefined" on the FAILED row.
+  // Same guard as /open and /rescan; see requireAdapter.
+  const target = await getThreadStub(threadId);
+  requireAdapter(target.platform);
+
   // Schedule path: persist a SCHEDULED row and return immediately. The
   // dashboard renders a "scheduled for X" pill instead of pushing the
   // bubble through the optimistic-send timeline. The promoter takes
@@ -1504,6 +1511,11 @@ app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) =>
 app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
+
+  // Same unsupported-platform guard as /send. Without this, retrying a
+  // FAILED row on an iMessage thread just queues another doomed request.
+  const retryTarget = await getThreadStub(threadId);
+  requireAdapter(retryTarget.platform);
 
   // Look up the failed SendRequest row and re-queue under a fresh
   // clientSendId. Original row stays in FAILED for receipts; the new
