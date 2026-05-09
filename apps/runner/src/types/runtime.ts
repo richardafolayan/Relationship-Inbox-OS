@@ -115,6 +115,10 @@ export interface AiService {
    * "leave the column unset".
    */
   classifyThreadCategory(input: {
+    /** Drives prompt tier — LinkedIn uses InMail / recruiter / SaaS-pitch
+     * patterns; casual platforms use bulk-broadcast / spam / cold-DM
+     * patterns. Output enum stays the same across both tiers. */
+    platform: PlatformName;
     displayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     /** Pass the thread's rollingSummary so classifier can spot a pivot pattern. */
@@ -140,6 +144,11 @@ export interface AiService {
    * field is non-empty as an anti-hallucination check before persisting.
    */
   generateConversationStarters(input: {
+    /** Cold-opener generation is LinkedIn-only — non-formal tiers return
+     * null (the People page hides the section). The underlying snapshot
+     * fields are LinkedIn-shaped and PersonEnrichment is only populated
+     * for LinkedIn anyway. */
+    platform: PlatformName;
     contact: ContactProfileSnapshot;
     self: ContactProfileSnapshot | null;
   }): Promise<ConversationStartersOutput | null>;
@@ -153,6 +162,8 @@ export interface AiService {
    */
   composeInVoice(input: {
     intent: string;
+    /** Drives the voice tier (LinkedIn → formal; everything else → casual-DM). */
+    platform: PlatformName;
     displayName: string;
     /** Recent outbound messages from THIS thread, oldest first. Used as
      *  voice samples — register, warmth, vocabulary. */

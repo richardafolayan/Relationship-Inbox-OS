@@ -133,6 +133,7 @@ async function main() {
     try {
       const text = await ai.composeInVoice({
         intent: s.intent,
+        platform: "LINKEDIN",
         displayName: s.displayName,
         voiceSamples: s.voiceSamples,
         threadMessages: s.threadMessages
