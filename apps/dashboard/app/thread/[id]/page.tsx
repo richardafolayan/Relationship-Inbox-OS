@@ -1229,8 +1229,16 @@ export default function ThreadPage() {
                   </div>
                 );
               }
+              // Operator-authored messages always render as "You". The
+              // platform-scraped senderName for an outbound bubble is the
+              // operator's own platform identity (e.g. their phone number on
+              // iMessage, or whatever LinkedIn writes into the bubble header)
+              // — never useful as a label, sometimes actively wrong (#129,
+              // where iMessage put the contact's number on every bubble).
               const senderLabel =
-                message.senderName ?? (message.direction === "OUT" ? "You" : firstName);
+                message.direction === "OUT"
+                  ? "You"
+                  : (message.senderName ?? firstName);
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? <DayDivider label={dayLabel} /> : null}
