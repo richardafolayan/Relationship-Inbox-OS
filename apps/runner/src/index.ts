@@ -717,6 +717,34 @@ app.get("/health", asyncRoute(async (_req, res) => {
   const runnerStatus = scanQueue.isScanning() ? "SCANNING" : "ONLINE";
   const connectedPlatforms = platforms.filter((platform) => platform.status === "CONNECTED").length;
 
+  // Determinate scan progress: surfaced so the status bar can render a real
+  // progress bar instead of an indeterminate sweep. ETA is computed against
+  // the previous scan's wall-clock duration — first-ever scans have no ETA.
+  const scanProgress = (() => {
+    const snap = scanQueue.getCurrentScanProgress();
+    if (!snap) return undefined;
+    const total = snap.total > 0 ? snap.total : 0;
+    const percent = total > 0
+      ? Math.min(99, Math.max(0, Math.round((snap.processedRows / total) * 100)))
+      : 0;
+    const lastSummary = scanQueue.getLatestRunSummary(snap.platform);
+    let etaSeconds: number | null = null;
+    if (lastSummary?.startedAt && lastSummary?.completedAt) {
+      const prevMs = Date.parse(lastSummary.completedAt) - Date.parse(lastSummary.startedAt);
+      const elapsedMs = Date.now() - snap.startedAt;
+      if (Number.isFinite(prevMs) && prevMs > 0) {
+        etaSeconds = Math.max(0, Math.round((prevMs - elapsedMs) / 1000));
+      }
+    }
+    return {
+      platform: snap.platform,
+      processedRows: snap.processedRows,
+      total,
+      percent,
+      etaSeconds
+    };
+  })();
+
   res.json({
     runnerStatus,
     lastScanAt: lastScanAt?.toISOString() ?? null,
@@ -729,7 +757,8 @@ app.get("/health", asyncRoute(async (_req, res) => {
       pending: enrichmentPending,
       running: enrichmentRunning,
       total: enrichmentPending + enrichmentRunning
-    }
+    },
+    scanProgress
   });
 }));
 

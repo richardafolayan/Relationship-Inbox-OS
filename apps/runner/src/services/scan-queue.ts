@@ -96,6 +96,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
       thread: ThreadStub;
       messages: NormalizedMessage[];
     }) => Promise<void>;
+    onProgress?: (snapshot: { processedRows: number; openedRows: number; total: number }) => void;
   }): Promise<{
     stopReason: string;
     iterations: number;
@@ -333,6 +334,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
   const queue: ScanJob[] = [];
   let processing = false;
   let currentJob: ScanJob | null = null;
+  let currentScanProgress:
+    | {
+        platform: PlatformName;
+        processedRows: number;
+        openedRows: number;
+        total: number;
+        startedAt: number;
+      }
+    | null = null;
   let scheduler: NodeJS.Timeout | undefined;
   let abortVersion = 0;
   let abortReason: string | null = null;
@@ -1317,12 +1327,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 return 5;
               })();
               let unchangedStreakCount = 0;
+              currentScanProgress = {
+                platform: "LINKEDIN",
+                processedRows: 0,
+                openedRows: 0,
+                total: effectiveMaxThreads ?? 0,
+                startedAt: Date.now()
+              };
               const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
                 maxThreads: effectiveMaxThreads,
                 maxOpens: effectiveMaxOpens,
                 disableDeepScroll: linkedInDevCaps.disableDeepScroll,
                 requestId: job.jobId,
                 runLogger,
+                onProgress: (snap) => {
+                  if (currentScanProgress) {
+                    currentScanProgress.processedRows = snap.processedRows;
+                    currentScanProgress.openedRows = snap.openedRows;
+                    // The adapter resolves a real `maxThreads` when the
+                    // queue passes undefined (uses the adapter dep cap),
+                    // so trust the adapter's number for the live total.
+                    currentScanProgress.total = snap.total;
+                  }
+                },
                 shouldOpenCandidate: async (signals) => {
                   // We can only consult the DB if the row anchor gave us a
                   // canonical thread ID. Without one, fall back to "open in
@@ -2116,6 +2143,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         } finally {
           traceAwareAdapter.setRunLogger?.(null);
           activeRunLoggerByPlatform.delete(platform);
+          if (currentScanProgress?.platform === platform) {
+            currentScanProgress = null;
+          }
           runLogger.mergeCounters({
             threadsScannedCount,
             candidatesToOpenCount: candidatesCount,
@@ -2754,6 +2784,21 @@ export function createScanQueue(deps: ScanQueueDeps) {
     processNext,
     getQueueDepth,
     isScanning: () => processing,
+    /**
+     * Live snapshot of the LinkedIn streaming scan in flight, or `null` when
+     * no scan is running. Drives the system status bar's determinate progress
+     * indicator (see `/health` -> `scanProgress`).
+     */
+    getCurrentScanProgress: () =>
+      currentScanProgress
+        ? {
+            platform: currentScanProgress.platform,
+            processedRows: currentScanProgress.processedRows,
+            openedRows: currentScanProgress.openedRows,
+            total: currentScanProgress.total,
+            startedAt: currentScanProgress.startedAt
+          }
+        : null,
     startScheduler,
     runJob,
     requestAbort: (reason: string) => {
