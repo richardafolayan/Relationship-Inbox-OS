@@ -48,6 +48,9 @@ export interface RunnerConfig {
     LINKEDIN: string;
     INSTAGRAM: string;
     TIKTOK: string;
+    /** whatsapp-web.js LocalAuth root. Separate from the Playwright-managed
+     * profiles above — WhatsApp uses its own Puppeteer instance. */
+    WHATSAPP: string;
   };
   screenshotDir: string;
   domDumpDir: string;
@@ -257,7 +260,8 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     profileDirs: {
       LINKEDIN: resolve(dataDir, "profiles", "linkedin"),
       INSTAGRAM: resolve(dataDir, "profiles", "instagram"),
-      TIKTOK: resolve(dataDir, "profiles", "tiktok")
+      TIKTOK: resolve(dataDir, "profiles", "tiktok"),
+      WHATSAPP: resolve(dataDir, "profiles", "whatsapp")
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),

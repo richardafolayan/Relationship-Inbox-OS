@@ -6,7 +6,7 @@ export const defaultSettings: AppSettings = {
   redHours: 18,
   headless: false,
   maxMessagesPerThread: 15,
-  enabledPlatforms: ["LINKEDIN", "INSTAGRAM", "TIKTOK"],
+  enabledPlatforms: ["LINKEDIN", "INSTAGRAM", "TIKTOK", "WHATSAPP"],
   demoMode: false,
   recentThreadSweepCount: 30,
   aiProvider: "openai"

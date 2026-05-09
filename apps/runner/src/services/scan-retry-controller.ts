@@ -1,6 +1,11 @@
-export type ScanRetryPlatform = "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+// Tracks PlatformName so newly-added platforms (WhatsApp, future iMessage,
+// etc.) don't break the per-platform cooldown plumbing. The actual cooldown
+// state is platform-agnostic; callers that don't use the scrape-retry path
+// (e.g. the whatsapp-web.js adapter) simply never populate their slot.
+import type { PlatformName } from "@inbox-os/core";
+export type ScanRetryPlatform = PlatformName;
 
-const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "WHATSAPP"];
 
 interface PlatformCooldownState {
   consecutiveFailures: number;
