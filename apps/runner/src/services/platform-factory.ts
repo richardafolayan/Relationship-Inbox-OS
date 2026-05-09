@@ -13,7 +13,13 @@ export function createAdapters(input: {
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
 }): {
-  adapters: Record<PlatformName, PlatformAdapter>;
+  // `Partial` because not every PlatformName has an adapter on main today.
+  // IMESSAGE was added to PlatformName so prisma can read existing iMessage
+  // rows (ingested by a separate line of work); the runner's
+  // `requireAdapter` guard (services/index.ts, added in #135 / #140)
+  // surfaces a clean "platform not supported" error if anything tries to
+  // dispatch on an unsupported platform.
+  adapters: Partial<Record<PlatformName, PlatformAdapter>>;
   resolveSelectorsForPlatform: (platform: PlatformName) => Promise<SelectorRegistry>;
   sessionManager: ReturnType<typeof createSessionManager>;
 } {
@@ -31,7 +37,7 @@ export function createAdapters(input: {
     onPersonalProfileFallback: input.onPersonalProfileFallback
   });
 
-  const adapters: Record<PlatformName, PlatformAdapter> = {
+  const adapters: Partial<Record<PlatformName, PlatformAdapter>> = {
     LINKEDIN: new LinkedInAdapter({
       screenshotDir: runnerConfig.screenshotDir,
       domDumpDir: runnerConfig.domDumpDir,

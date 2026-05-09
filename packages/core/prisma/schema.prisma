@@ -11,6 +11,17 @@ enum PlatformName {
   LINKEDIN
   INSTAGRAM
   TIKTOK
+  // IMESSAGE rows already live in the threads table (ingested by the
+  // separate iMessage adapter line of work). Declaring the value here
+  // lets prisma read those rows without throwing
+  // `Value 'IMESSAGE' not found in enum 'PlatformName'`. This main-side
+  // change carries no adapter — services/platform-factory.ts treats the
+  // adapter map as Partial<Record<PlatformName, PlatformAdapter>> and
+  // the requireAdapter guard (introduced in #135 / #140) returns a
+  // clean error for any platform without a registered adapter. Full
+  // iMessage support lands separately via the feat/imessage-adapter
+  // line of work.
+  IMESSAGE
 }
 
 enum PlatformStatus {
