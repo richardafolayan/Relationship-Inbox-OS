@@ -1784,6 +1784,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
 
   const text = await aiService.composeInVoice({
     intent: payload.intent,
+    platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
     threadMessages: thread.messages.map((m) => ({
@@ -1835,6 +1836,7 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   }
   const category = await aiService
     .classifyThreadCategory({
+      platform: thread.platform as PlatformName,
       displayName: thread.person.displayName,
       messages: thread.messages.map((m) => ({
         direction: m.direction as "IN" | "OUT",
@@ -2520,6 +2522,7 @@ app.post("/control/classify-uncategorized", asyncRoute(async (req, res) => {
     }
     try {
       const category = await aiService.classifyThreadCategory({
+        platform: target.platform as PlatformName,
         displayName: target.person.displayName,
         messages: target.messages.map((m) => ({
           direction: m.direction as "IN" | "OUT",
@@ -2790,7 +2793,7 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
   // generated when the user clicks "Start a conversation".
   const summary = enrichment ? await conversationStartersService.getOrGenerateSummary(personId, person.displayName) : null;
   const starters = req.query.includeStarters === "1" && enrichment
-    ? await conversationStartersService.getOrGenerateStarters(personId, person.displayName)
+    ? await conversationStartersService.getOrGenerateStarters(personId, person.displayName, person.platform as PlatformName)
     : enrichment?.startersJson
     ? JSON.parse(enrichment.startersJson)
     : null;
@@ -3271,6 +3274,7 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
 
   const text = await aiService.composeInVoice({
     intent: `Rewrite the message below in my voice, preserving the meaning. Keep it about the same length. Message: ${payload.draft}`,
+    platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
     threadMessages: thread.messages.map((m) => ({

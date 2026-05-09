@@ -2636,6 +2636,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     if (!thread.category && hasPersistedMessages) {
       const classified = await deps.aiService
         .classifyThreadCategory({
+          platform: thread.platform as PlatformName,
           displayName: person.displayName,
           messages: latestMessages.map((message) => ({
             direction: message.direction,
