@@ -431,6 +431,89 @@ function gpt5OptionsForModel(model: string): Gpt5RequestOverrides {
   };
 }
 
+/**
+ * Provider-aware request param resolution. Replaces direct calls to
+ * `gpt5OptionsForModel` so a non-OpenAI provider doesn't accidentally pick
+ * up GPT-5 knobs. GLM and Gemini both reject GPT-5 params (verbosity,
+ * reasoning_effort, top_p) at the wire — Google's OpenAI-compat endpoint
+ * returns HTTP 400 for any of them.
+ */
+function providerOptions(provider: AiProvider, model: string): Gpt5RequestOverrides {
+  if (provider === "glm" || provider === "gemini") return {};
+  return gpt5OptionsForModel(model);
+}
+
+/**
+ * Gemma 4 served through Google's OpenAI-compat endpoint emits unfiltered
+ * <thought> reasoning traces by default — every JSON-mode call returns a
+ * preamble that breaks zod parsing. The smoke test at
+ * apps/runner/src/scripts/gemini-smoke.ts proved this is suppressible by
+ * setting `thinking_level: "MINIMAL"` via Google's `extra_body` channel.
+ * The narrow valid-value set is documented as MINIMAL / HIGH; LOW / MEDIUM
+ * / numeric `thinking_budget` shapes get rejected with HTTP 400.
+ *
+ * No-op for every non-Gemma model. Gemini-2.x / 3.x flash served via the
+ * compat endpoint don't need it (and rejecting silly extras is one way the
+ * surface tells you that). OpenAI and GLM behaviour is unchanged.
+ */
+export function geminiExtraBody(provider: AiProvider, model: string): Record<string, unknown> {
+  if (provider === "gemini" && /^gemma/i.test(model)) {
+    return {
+      extra_body: {
+        google: {
+          thinking_config: {
+            thinking_level: "MINIMAL"
+          }
+        }
+      }
+    };
+  }
+  return {};
+}
+
+// ── Model-aware JSON-mode helpers ─────────────────────────────────────────
+//
+// Outcome D of the Gemini smoke test: Gemma 4 ships as default with the
+// thinking_level=MINIMAL extra spread into every request via
+// `geminiExtraBody`. With that flag in place, response_format is honoured
+// and JSON parses cleanly. The reinforcement + fence-stripper below stay
+// in as belt-and-braces for any future Gemma model rev that drifts.
+//
+// All four helpers (jsonReinforcementForModel, stripJsonFences,
+// reinforceJsonPrompt, parseAiJson, shouldUseJsonResponseFormat) are
+// model-aware so they are no-ops for non-Gemma models — OpenAI and GLM
+// behaviour is unchanged.
+
+function jsonReinforcementForModel(model: string): string {
+  if (/^gemma/i.test(model)) {
+    return "\n\nRespond ONLY with a single JSON object that matches the schema above. No markdown, no code fences, no commentary, no thinking traces.";
+  }
+  return "";
+}
+
+function stripJsonFences(content: string): string {
+  return content.replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/i, "").trim();
+}
+
+function reinforceJsonPrompt(prompt: string, model: string): string {
+  return `${prompt}${jsonReinforcementForModel(model)}`;
+}
+
+function parseAiJson<T>(content: string, model: string): T {
+  const cleaned = /^gemma/i.test(model) ? stripJsonFences(content) : content;
+  return JSON.parse(cleaned) as T;
+}
+
+/**
+ * Whether to send `response_format: { type: "json_object" }`. Outcome D
+ * of the smoke test confirmed Gemma 4 honours response_format cleanly
+ * once `thinking_level: "MINIMAL"` is set via `geminiExtraBody`, so we
+ * keep it on for every supported provider/model combination.
+ */
+function shouldUseJsonResponseFormat(_provider: AiProvider, _model: string): boolean {
+  return true;
+}
+
 // Strip the punctuation forms the system prompt forbids. Defensive — even
 // with the rule in the system message, GPT-5 sometimes slips in an em-dash
 // or a colon. Apply to every text-producing AI call before persisting /
@@ -580,15 +663,19 @@ function snapshotForPrompt(snap: ContactProfileSnapshot | null): Record<string, 
 
 export function createAiService(settingsStore: SettingsStore): AiService {
   // Build one client per provider up front, guarded by API key presence.
-  // Z.AI's chat-completions endpoint is OpenAI-compatible at the wire level,
-  // so reusing the OpenAI SDK with a different baseURL + key is the whole
-  // integration. The provider choice is resolved per-call from SettingsStore
-  // so a dashboard toggle takes effect without restarting the runner.
+  // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
+  // endpoints, so reusing the OpenAI SDK with a different baseURL + key is
+  // the whole integration. The provider choice is resolved per-call from
+  // SettingsStore so a dashboard toggle takes effect without restarting
+  // the runner.
   const openAiClient = runnerConfig.openAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.openAiApiKey })
     : null;
   const glmClient = runnerConfig.zAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl })
+    : null;
+  const geminiClient = runnerConfig.geminiApiKey
+    ? new OpenAI({ apiKey: runnerConfig.geminiApiKey, baseURL: runnerConfig.geminiBaseUrl })
     : null;
 
   // Per-provider client + model resolution. The set of clients is built
@@ -597,6 +684,9 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   function resolveProvider(providerId: AiProvider): { client: OpenAI | null; model: string } {
     if (providerId === "glm") {
       return { client: glmClient, model: runnerConfig.glmModel };
+    }
+    if (providerId === "gemini") {
+      return { client: geminiClient, model: runnerConfig.geminiModel };
     }
     return { client: openAiClient, model: runnerConfig.openAiModel };
   }
@@ -610,6 +700,10 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
       return { client: glmClient, model, provider: providerId };
+    }
+    if (providerId === "gemini") {
+      const model = settings.geminiModel?.trim() || runnerConfig.geminiModel;
+      return { client: geminiClient, model, provider: providerId };
     }
     return { client: openAiClient, model: runnerConfig.openAiModel, provider: providerId };
   }
@@ -637,12 +731,15 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       try {
         const response = await client.chat.completions.create({
           model,
-          response_format: { type: "json_object" },
+          ...(shouldUseJsonResponseFormat(providerId, model)
+            ? { response_format: { type: "json_object" as const } }
+            : {}),
           messages: [
             { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: prompt }
+            { role: "user", content: reinforceJsonPrompt(prompt, model) }
           ],
-          ...gpt5OptionsForModel(model)
+          ...providerOptions(providerId, model),
+          ...geminiExtraBody(providerId, model)
         });
         const content = response.choices[0]?.message?.content;
         if (!content) {
@@ -658,7 +755,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
           }
           break;
         }
-        return { ok: true, result: parser(JSON.parse(content)) };
+        return { ok: true, result: parser(parseAiJson(content, model)) };
       } catch (error) {
         lastClass = entry.classifyError(error);
         console.warn(
@@ -942,7 +1039,8 @@ Last inbound: ${input.lastInboundMessage}`;
         ],
         // No response_format: this returns plain text. The voice-rule
         // post-processor handles em-dash / semicolon / colon scrubbing.
-        ...gpt5OptionsForModel(model)
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
       });
 
       const raw = response.choices[0]?.message?.content?.trim() || input.text;
@@ -1015,16 +1113,19 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
     try {
       const response = await client.chat.completions.create({
         model,
-        response_format: { type: "json_object" },
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt }
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
         ],
-        ...gpt5OptionsForModel(model)
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
-      const parsed = categorySchema.parse(JSON.parse(content));
+      const parsed = categorySchema.parse(parseAiJson(content, model));
       return parsed.category;
     } catch (error) {
       console.warn(
@@ -1075,16 +1176,19 @@ Contact profile: ${JSON.stringify(contactPayload)}${operatorBlock}`;
     try {
       const response = await client.chat.completions.create({
         model,
-        response_format: { type: "json_object" },
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt }
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
         ],
-        ...gpt5OptionsForModel(model)
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
-      const parsed = z.object({ summary: z.string().min(1) }).parse(JSON.parse(content));
+      const parsed = z.object({ summary: z.string().min(1) }).parse(parseAiJson(content, model));
       return stripOperatorMetaTalk(applyVoiceRules(stripUnpairedSurrogates(parsed.summary)));
     } catch (error) {
       console.warn(
@@ -1144,16 +1248,19 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     try {
       const response = await client.chat.completions.create({
         model,
-        response_format: { type: "json_object" },
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt }
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
         ],
-        ...gpt5OptionsForModel(model)
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
-      const parsed = startersSchema.parse(JSON.parse(content));
+      const parsed = startersSchema.parse(parseAiJson(content, model));
       return {
         starters: parsed.starters.map((s) => ({
           angle: applyVoiceRules(s.angle),
@@ -1286,16 +1393,19 @@ Return strict JSON: { "text": "string" }`;
     try {
       const response = await client.chat.completions.create({
         model,
-        response_format: { type: "json_object" },
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
         messages: [
           { role: "system", content: selectVoicePrompt(input.platform) },
-          { role: "user", content: prompt }
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
         ],
-        ...gpt5OptionsForModel(model)
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return trimmed;
-      const parsed = z.object({ text: z.string().min(1) }).parse(JSON.parse(content));
+      const parsed = z.object({ text: z.string().min(1) }).parse(parseAiJson(content, model));
       return applyVoiceRules(stripUnpairedSurrogates(parsed.text));
     } catch (error) {
       console.warn(
@@ -1345,12 +1455,15 @@ If the message has no time hint, return { "suggestions": [] }.`;
     try {
       const response = await client.chat.completions.create({
         model,
-        response_format: { type: "json_object" },
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: prompt }
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
         ],
-        ...gpt5OptionsForModel(model)
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return { suggestions: [] };
@@ -1366,7 +1479,7 @@ If the message has no time hint, return { "suggestions": [] }.`;
             )
             .max(3)
         })
-        .parse(JSON.parse(content));
+        .parse(parseAiJson(content, model));
       return parsed;
     } catch (error) {
       console.warn(

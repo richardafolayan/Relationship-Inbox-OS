@@ -346,6 +346,7 @@ export interface AppSettings {
   recentThreadSweepCount: number;
   aiProvider?: AiProvider;
   glmModel?: string;
+  geminiModel?: string;
 }
 
 export interface SelectorTestReceipt {

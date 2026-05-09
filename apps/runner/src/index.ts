@@ -878,15 +878,19 @@ app.get("/data/settings", asyncRoute(async (_req, res) => {
 app.get("/data/ai-status", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   const activeProvider = settings.aiProvider ?? runnerConfig.aiProvider;
-  const configuredProviders: Array<"openai" | "glm"> = [];
+  const configuredProviders: Array<"openai" | "glm" | "gemini"> = [];
   if (runnerConfig.openAiApiKey) configuredProviders.push("openai");
   if (runnerConfig.zAiApiKey) configuredProviders.push("glm");
+  if (runnerConfig.geminiApiKey) configuredProviders.push("gemini");
+  const activeModel =
+    activeProvider === "glm"
+      ? settings.glmModel?.trim() || runnerConfig.glmModel
+      : activeProvider === "gemini"
+        ? settings.geminiModel?.trim() || runnerConfig.geminiModel
+        : runnerConfig.openAiModel;
   res.json({
     activeProvider,
-    activeModel:
-      activeProvider === "glm"
-        ? settings.glmModel?.trim() || runnerConfig.glmModel
-        : runnerConfig.openAiModel,
+    activeModel,
     configuredProviders,
     activeProviderConfigured: configuredProviders.includes(activeProvider)
   });
@@ -903,11 +907,12 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"])).optional(),
       demoMode: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
-      aiProvider: z.enum(["openai", "glm"]).optional(),
+      aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
       // Empty string from the dashboard is normalised to undefined client-side,
       // but accept either here defensively. Length cap matches typical model
       // ids while preventing accidental megabyte payloads.
-      glmModel: z.string().max(100).optional()
+      glmModel: z.string().max(100).optional(),
+      geminiModel: z.string().max(100).optional()
     })
     .parse(req.body);
 

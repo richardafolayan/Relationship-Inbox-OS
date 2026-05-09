@@ -4,16 +4,57 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AppSettings, HealthResponse, OperatorProfile } from "@/lib/types";
+import type { AiProvider } from "@inbox-os/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Canvas, PageHead, QuietRow } from "@/components/common/canvas";
 
 interface AiStatus {
-  activeProvider: "openai" | "glm";
+  activeProvider: AiProvider;
   activeModel: string;
-  configuredProviders: Array<"openai" | "glm">;
+  configuredProviders: AiProvider[];
   activeProviderConfigured: boolean;
 }
+
+// Explicit ordering for the provider toggle. Don't iterate Object.keys on
+// the records below — TS doesn't guarantee insertion order at the type
+// level even when V8 does at runtime. Adding a new provider goes here
+// alongside the matching entries in the records.
+const AI_PROVIDERS: AiProvider[] = ["openai", "glm", "gemini"];
+
+const PROVIDER_LABELS: Record<AiProvider, string> = {
+  openai: "OpenAI",
+  glm: "GLM (Z.AI)",
+  gemini: "Gemini API"
+};
+
+const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
+  openai: "OPENAI_API_KEY",
+  glm: "Z_AI_API_KEY",
+  gemini: "GEMINI_API_KEY"
+};
+
+// Which `AppSettings` field a model-override input writes to for each
+// provider. `null` means the provider has no per-account model override
+// (OpenAI is set globally via OPENAI_MODEL).
+const PROVIDER_MODEL_FIELD: Record<AiProvider, "glmModel" | "geminiModel" | null> = {
+  openai: null,
+  glm: "glmModel",
+  gemini: "geminiModel"
+};
+
+const PROVIDER_MODEL_PLACEHOLDER: Record<AiProvider, string> = {
+  openai: "",
+  glm: "glm-4.7-flash",
+  gemini: "gemma-4-31b-it"
+};
+
+const PROVIDER_MODEL_HINT: Record<AiProvider, string> = {
+  openai: "",
+  glm: "Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.",
+  gemini:
+    "Leave blank to use the GEMINI_MODEL env default (gemma-4-31b-it). Also works: gemini-3-flash-preview. Gemma is set up to work cleanly without extra config."
+};
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
@@ -413,7 +454,7 @@ export default function SettingsPage() {
             AI provider
           </p>
           <div className="flex flex-wrap items-center gap-2">
-            {(["openai", "glm"] as const).map((provider) => {
+            {AI_PROVIDERS.map((provider) => {
               const active = (settings.aiProvider ?? "openai") === provider;
               const configured = aiStatus?.configuredProviders.includes(provider) ?? true;
               return (
@@ -422,7 +463,7 @@ export default function SettingsPage() {
                   variant={active ? "primary" : "quiet"}
                   onClick={() => setSettings({ ...settings, aiProvider: provider })}
                 >
-                  {provider === "openai" ? "OpenAI" : "GLM (Z.AI)"}
+                  {PROVIDER_LABELS[provider]}
                   {configured ? null : " ·"}
                 </Button>
               );
@@ -430,10 +471,9 @@ export default function SettingsPage() {
           </div>
           {aiStatus && !aiStatus.activeProviderConfigured ? (
             <p className="mt-3 font-mono text-[11px] text-risk-overdue">
-              {aiStatus.activeProvider === "glm" ? "GLM" : "OpenAI"} is selected but no API key is
-              configured. Set{" "}
-              <code>{aiStatus.activeProvider === "glm" ? "Z_AI_API_KEY" : "OPENAI_API_KEY"}</code>{" "}
-              in <code>.env</code> and restart the runner.
+              {PROVIDER_LABELS[aiStatus.activeProvider]} is selected but no API key is
+              configured. Set <code>{PROVIDER_KEY_ENV[aiStatus.activeProvider]}</code> in{" "}
+              <code>.env</code> and restart the runner.
             </p>
           ) : null}
         </div>
@@ -459,27 +499,31 @@ export default function SettingsPage() {
           <p className="mt-2 font-mono text-[11px] text-ink-3">
             Saved with the rest of advanced settings. Instagram and TikTok are coming later.
           </p>
-          {/* GLM model input — ported from main. Operators on GLM can
-              override the runner's `Z_AI_MODEL` env default per-account
-              without restarting (e.g. switch between glm-4.7-flash and
-              glm-4.5-flash). The aiStatus warning above already covers
-              the no-key failure mode. */}
-          {(settings.aiProvider ?? "openai") === "glm" ? (
-            <div className="mt-3">
-              <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                GLM model
-              </p>
-              <Input
-                type="text"
-                placeholder="glm-4.7-flash"
-                value={settings.glmModel ?? ""}
-                onChange={(event) => setSettings({ ...settings, glmModel: event.target.value })}
-              />
-              <p className="mt-1 font-mono text-[11px] text-ink-3">
-                Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.
-              </p>
-            </div>
-          ) : null}
+          {/* Per-provider model override input. Operators on GLM or Gemini can
+              swap the runner's env-default model without restarting. The
+              aiStatus warning above already covers the no-key failure mode.
+              OpenAI is set globally via OPENAI_MODEL — no field rendered. */}
+          {(() => {
+            const activeProvider: AiProvider = settings.aiProvider ?? "openai";
+            const field = PROVIDER_MODEL_FIELD[activeProvider];
+            if (!field) return null;
+            return (
+              <div className="mt-3">
+                <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                  {PROVIDER_LABELS[activeProvider]} model
+                </p>
+                <Input
+                  type="text"
+                  placeholder={PROVIDER_MODEL_PLACEHOLDER[activeProvider]}
+                  value={settings[field] ?? ""}
+                  onChange={(event) => setSettings({ ...settings, [field]: event.target.value })}
+                />
+                <p className="mt-1 font-mono text-[11px] text-ink-3">
+                  {PROVIDER_MODEL_HINT[activeProvider]}
+                </p>
+              </div>
+            );
+          })()}
         </div>
 
         <div className="mt-6 flex items-center gap-3">
@@ -494,7 +538,8 @@ export default function SettingsPage() {
                 maxMessagesPerThread: settings.maxMessagesPerThread,
                 enabledPlatforms: settings.enabledPlatforms,
                 aiProvider: settings.aiProvider,
-                glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined
+                glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined,
+                geminiModel: settings.geminiModel?.trim() ? settings.geminiModel.trim() : undefined
               })
             }
           >
