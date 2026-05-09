@@ -229,7 +229,16 @@ export function createSendService(deps: SendServiceDeps) {
       throw new Error(`Thread ${sendRequest.threadId} not found for SendRequest ${sendRequestId}`);
     }
 
-    const adapter = deps.adapters[thread.platform as PlatformName];
+    // The threads table can hold rows whose `platform` column has values
+    // the typed `PlatformAdapter` registry doesn't cover (e.g. iMessage
+    // threads ingested via a separate path). The route-level guard at
+    // `/control/thread/:threadId/send` rejects those before they queue,
+    // but defensive belt-and-braces here means a stray PENDING row from
+    // some other path (manual SQL, future code path) fails with a
+    // readable error rather than "Cannot read properties of undefined
+    // (reading 'sendMessage')". The existing try/catch below records the
+    // thrown message into the SendRequest's errorJson.
+    const adapter = (deps.adapters as Record<string, PlatformAdapter | undefined>)[thread.platform];
     const threadStub: ThreadStub = {
       platformThreadId: thread.platformThreadId,
       displayName: thread.person.displayName,
@@ -250,6 +259,11 @@ export function createSendService(deps: SendServiceDeps) {
         details: { threadId: thread.id, clientSendId: input.clientSendId }
       });
 
+      if (!adapter) {
+        throw new Error(
+          `Platform ${thread.platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`
+        );
+      }
       const receipt = await adapter.sendMessage(threadStub, input.text);
 
       await prisma.message.upsert({
