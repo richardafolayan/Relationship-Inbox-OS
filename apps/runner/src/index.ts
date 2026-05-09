@@ -6,7 +6,7 @@ import { spawn } from "node:child_process";
 import express from "express";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import type { NormalizedMessage, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import type { NormalizedMessage, PlatformAdapter, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -513,6 +513,24 @@ async function getThreadStub(threadId: string): Promise<{
     threadUrl: thread.threadUrl ?? undefined,
     displayName: thread.person.displayName
   };
+}
+
+// The threads table can hold rows whose `platform` column has values the
+// typed `PlatformAdapter` registry doesn't cover (e.g. iMessage threads
+// ingested via a separate path). `getThreadStub` casts the column to
+// `PlatformName` at the DB boundary, so TS lies to the runtime — every
+// adapter access on a thread coming from the DB needs this guard or it
+// blows up with "Cannot read properties of undefined (reading 'X')".
+// Throws a clean Error that the route's catch / Express error path
+// surfaces to the dashboard as readable text.
+function requireAdapter(platform: string): PlatformAdapter {
+  const adapter = (adapters as Record<string, PlatformAdapter | undefined>)[platform];
+  if (!adapter) {
+    throw new Error(
+      `Platform ${platform} is not supported by this runner. Supported platforms: ${Object.keys(adapters).join(", ")}.`
+    );
+  }
+  return adapter;
 }
 
 async function loadVisibleThreadRows(options?: {
@@ -1520,10 +1538,11 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
 
   await withPlatformControlLock(target.platform, async () => {
     try {
-      await adapters[target.platform].openThread({
+      await adapter.openThread({
         platformThreadId: target.platformThreadId,
         displayName: target.displayName,
         lastMessagePreview: "",
@@ -1564,6 +1583,10 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
+  // Reject early for unsupported platforms — see requireAdapter. Without
+  // this, scanQueue.syncThread → adapter.fetchThreadMessages crashes with
+  // a confusing "Cannot read properties of undefined" TypeError.
+  requireAdapter(target.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const settings = await settingsStore.getSettings();
 
