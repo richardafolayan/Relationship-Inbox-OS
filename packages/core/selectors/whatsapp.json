@@ -1,0 +1,12 @@
+{
+  "_comment": "WhatsApp uses whatsapp-web.js (high-level chat/message API), not DOM scraping. These selectors are placeholders so the SelectorRegistry shape is satisfied and the per-platform loader/override store/test page work uniformly. None of these are actually queried by the WhatsApp adapter.",
+  "inbox_url": "https://web.whatsapp.com/",
+  "thread_list": "[data-testid='chat-list']",
+  "thread_item": "[data-testid='cell-frame-container']",
+  "unread_badge": "[data-testid='icon-unread-count']",
+  "message_container": "[data-testid='conversation-panel-messages']",
+  "message_item": "[data-testid='msg-container']",
+  "message_text": ".selectable-text",
+  "composer_input": "[data-testid='conversation-compose-box-input']",
+  "send_button": "[data-testid='compose-btn-send']"
+}

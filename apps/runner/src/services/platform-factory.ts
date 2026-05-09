@@ -8,6 +8,29 @@ import { BetaAdapter } from "../platforms/beta-adapter";
 import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "../platforms/browser-launch";
 import { createSessionManager } from "./session-manager";
 
+/**
+ * Lazy-throwing adapter shell used while a platform is in scaffolding.
+ * Conforms to PlatformAdapter so the factory's Record stays well-typed and
+ * the runner boots, but every operation rejects with a clear error rather
+ * than silently doing the wrong thing (e.g. launching Chrome at a stub
+ * selector). Replaced with the real adapter as that platform's phase lands.
+ */
+export function createNotImplementedAdapter(platform: PlatformName): PlatformAdapter {
+  const reject = async (op: string): Promise<never> => {
+    throw new Error(`${platform} adapter not yet implemented (${op})`);
+  };
+  return {
+    platform,
+    ensureConnected: () => reject("ensureConnected"),
+    scanUnreadThreads: () => reject("scanUnreadThreads"),
+    fetchRecentThreads: () => reject("fetchRecentThreads"),
+    fetchThreadMessages: () => reject("fetchThreadMessages"),
+    sendMessage: () => reject("sendMessage"),
+    openThread: () => reject("openThread"),
+    closeSession: () => reject("closeSession")
+  };
+}
+
 export function createAdapters(input: {
   settingsStore: SettingsStore;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
@@ -64,7 +87,14 @@ export function createAdapters(input: {
       domDumpDir: runnerConfig.domDumpDir,
       resolveSelectors: () => resolveSelectorsForPlatform("TIKTOK"),
       sessionManager
-    })
+    }),
+    // WhatsApp is wired in Phase B (whatsapp-web.js adapter). Phase A only
+    // adds the platform value + schema columns + plumbing. The stub
+    // implements the PlatformAdapter contract without doing any DOM /
+    // network work, so the runner boots cleanly with WHATSAPP enabled but
+    // any operator-triggered scan / send / open against it surfaces a
+    // clear error instead of silently launching Chrome at the wrong target.
+    WHATSAPP: createNotImplementedAdapter("WHATSAPP")
   };
 
   return {

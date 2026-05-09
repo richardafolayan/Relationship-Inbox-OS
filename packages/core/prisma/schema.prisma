@@ -11,6 +11,7 @@ enum PlatformName {
   LINKEDIN
   INSTAGRAM
   TIKTOK
+  WHATSAPP
 }
 
 enum PlatformStatus {
@@ -197,6 +198,17 @@ model Thread {
   // (messages newer than `lastMessageAt`). Null means full-history backfill
   // hasn't run yet for this thread.
   firstFullBackfillAt DateTime?
+
+  // WhatsApp group identity. v1 models groups via a single-Person hack: the
+  // Thread points at a synthetic Person whose displayName equals groupName,
+  // and per-message senders go on Message.senderName. A proper participants
+  // table is queued as a follow-up. isGroup defaults false so existing rows
+  // (LinkedIn / Instagram / TikTok) need no backfill.
+  isGroup    Boolean  @default(false)
+  groupName  String?
+  // Stable platform-side group id (e.g. WhatsApp's `<id>@g.us` JID). Lets us
+  // find the same group across re-scans even if groupName changes.
+  groupId    String?
 
   // Cached AI-generated suggested replies. Regenerated only when the cache
   // key (a hash of the AI inputs: last-inbound text + timestamp + summary +
