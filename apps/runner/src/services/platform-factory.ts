@@ -5,6 +5,7 @@ import { runnerConfig } from "../config";
 import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
 import { BetaAdapter } from "../platforms/beta-adapter";
+import { IMessageAdapter } from "../platforms/imessage-adapter";
 import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "../platforms/browser-launch";
 import { createSessionManager } from "./session-manager";
 
@@ -70,6 +71,10 @@ export function createAdapters(input: {
       domDumpDir: runnerConfig.domDumpDir,
       resolveSelectors: () => resolveSelectorsForPlatform("TIKTOK"),
       sessionManager
+    }),
+    IMESSAGE: new IMessageAdapter({
+      dbPath: runnerConfig.imessage.dbPath,
+      contactsVcfPath: runnerConfig.imessage.contactsVcfPath
     })
   };
 

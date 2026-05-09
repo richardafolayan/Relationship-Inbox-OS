@@ -14,6 +14,7 @@ import {
   type ScanCooldownStatus
 } from "./scan-retry-controller";
 import { isLinkedInInFlight } from "./linkedin-inflight-guard";
+import { inferContactName, looksLikeUnresolvedHandle } from "./name-inference";
 import {
   createRunLogger,
   type RunLogger,
@@ -157,7 +158,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
   }): Promise<ThreadStub[]>;
 }
 
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 type EnqueueScanOptions = {
   respectCooldown?: boolean;
@@ -2761,6 +2762,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     });
 
+    // Heuristic name inference for platforms whose displayName is just a
+    // handle (iMessage = phone/email). Run this after the message rows are
+    // persisted, on threads where the operator hasn't already named the
+    // contact. The inferredName surfaces in the dashboard as a "Maybe …"
+    // suggestion they can confirm into displayName.
+    if (platform === "IMESSAGE" && looksLikeUnresolvedHandle(person.displayName)) {
+      const recentMessages = await prisma.message.findMany({
+        where: { threadId: thread.id },
+        orderBy: { timestamp: "desc" },
+        take: 200,
+        select: { direction: true, text: true }
+      });
+      const guess = inferContactName(
+        recentMessages.map((m) => ({ direction: m.direction, text: m.text }))
+      );
+      if (guess && guess !== person.inferredName) {
+        await prisma.person.update({
+          where: { id: person.id },
+          data: { inferredName: guess }
+        });
+      }
+    }
+
     deps.eventBus.emit({
       type: "THREAD_UPDATED",
       jobId,
@@ -2816,6 +2840,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     processNext,
     getQueueDepth,
     isScanning: () => processing,
+    getCurrentScanPlatform: () => currentJob?.platform,
     /**
      * Live snapshot of the LinkedIn streaming scan in flight, or `null` when
      * no scan is running. Drives the system status bar's determinate progress

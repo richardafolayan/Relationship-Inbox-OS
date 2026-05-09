@@ -1,14 +1,15 @@
-import { createReadStream, existsSync, openSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, openSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
+import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { prisma } from "./db";
-import { resolveConnectTimeoutMs, runnerConfig, projectRoot } from "./config";
+import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
@@ -22,6 +23,8 @@ import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
+import { IMessageDb } from "./platforms/imessage-db";
+import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
@@ -51,6 +54,46 @@ import {
 
 const app = express();
 app.use(express.json({ limit: "1mb" }));
+
+// Multer is loaded lazily on multipart routes (file uploads for outbound
+// attachments). The default disk-storage strategy puts files under
+// data/outgoing-attachments/<send-request-id>/ so the iMessage adapter
+// can reference them by absolute path when shelling out to osascript.
+const outgoingAttachmentsRoot = resolve(dataDir, "outgoing-attachments");
+mkdirSync(outgoingAttachmentsRoot, { recursive: true });
+const uploadAttachments = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = resolve(outgoingAttachmentsRoot, uuid());
+      mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => {
+      // Keep extension so Messages.app can sniff the right file type.
+      cb(null, file.originalname);
+    }
+  }),
+  limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
+}).array("attachments", 10);
+
+function maybeMultipart(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  const ct = (req.headers["content-type"] ?? "").toLowerCase();
+  if (ct.startsWith("multipart/form-data")) {
+    uploadAttachments(req, res, next);
+  } else {
+    next();
+  }
+}
+
+function kindFromMime(mime: string | undefined, filename: string | undefined): "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" {
+  const m = (mime ?? "").toLowerCase();
+  const n = (filename ?? "").toLowerCase();
+  if (m.startsWith("image/")) return "photo";
+  if (m.startsWith("video/")) return "video";
+  if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
+  if (m.startsWith("audio/")) return /webm|opus|m4a|aac|caf/.test(m) || /audio.message/.test(n) ? "voice_note" : "audio";
+  return "unknown";
+}
 
 const settingsStore = createSettingsStore();
 const auditService = createAuditService();
@@ -105,7 +148,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -231,7 +274,7 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 function parsePlatform(value: unknown): PlatformName {
-  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).parse(value);
+  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).parse(value);
   return parsed;
 }
 
@@ -245,7 +288,7 @@ interface ControlTraceContext {
 }
 
 function maybeParsePlatform(value: unknown): PlatformName | undefined {
-  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK") {
+  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK" && value !== "IMESSAGE") {
     return undefined;
   }
   return value;
@@ -496,6 +539,7 @@ async function getThreadStub(threadId: string): Promise<{
   platformThreadId: string;
   threadUrl?: string;
   displayName: string;
+  personId: string;
 }> {
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
@@ -511,18 +555,30 @@ async function getThreadStub(threadId: string): Promise<{
     platform: thread.platform as PlatformName,
     platformThreadId: thread.platformThreadId,
     threadUrl: thread.threadUrl ?? undefined,
-    displayName: thread.person.displayName
+    displayName: thread.person.displayName,
+    personId: thread.personId
   };
 }
 
-// The threads table can hold rows whose `platform` column has values the
-// typed `PlatformAdapter` registry doesn't cover (e.g. iMessage threads
-// ingested via a separate path). `getThreadStub` casts the column to
-// `PlatformName` at the DB boundary, so TS lies to the runtime — every
-// adapter access on a thread coming from the DB needs this guard or it
-// blows up with "Cannot read properties of undefined (reading 'X')".
-// Throws a clean Error that the route's catch / Express error path
-// surfaces to the dashboard as readable text.
+/**
+ * Returns every thread id belonging to a Person on a given platform. iMessage
+ * uses this to merge messages across the phone-handle and email-handle chats
+ * of one human into a single conversation view.
+ */
+async function siblingThreadIds(platform: PlatformName, personId: string): Promise<string[]> {
+  const rows = await prisma.thread.findMany({
+    where: { platform, personId },
+    select: { id: true }
+  });
+  return rows.map((r) => r.id);
+}
+
+// The adapters map is `Partial<Record<PlatformName, PlatformAdapter>>` —
+// every platform-name access from a DB row needs to narrow before
+// dispatching, otherwise the call blows up with
+// "Cannot read properties of undefined (reading 'X')". Throws a clean
+// Error that the route's catch / Express error path surfaces to the
+// dashboard as readable text. (#135 / #140)
 function requireAdapter(platform: string): PlatformAdapter {
   const adapter = (adapters as Record<string, PlatformAdapter | undefined>)[platform];
   if (!adapter) {
@@ -567,6 +623,7 @@ async function loadVisibleThreadRows(options?: {
         select: {
           id: true,
           displayName: true,
+          inferredName: true,
           platform: true,
           avatarUrl: true
         }
@@ -585,7 +642,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).default("LINKEDIN"),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -768,6 +825,10 @@ app.get("/health", asyncRoute(async (_req, res) => {
     lastScanAt: lastScanAt?.toISOString() ?? null,
     queueDepth: scanQueue.getQueueDepth(),
     connectedPlatforms,
+    // Current platform being scanned, if any. Drives the status bar's
+    // "Scanning <platform>" label so it stops claiming "linkedin" when
+    // an iMessage scan is running.
+    currentScanPlatform: scanQueue.getCurrentScanPlatform() ?? null,
     // Surfaced for the dashboard's status bar so a "Scan all" click
     // (which queues every Person with a profileUrl) shows visible
     // progress while the queue drains, instead of silently chugging.
@@ -862,6 +923,92 @@ app.get("/artifacts/:type/:name", (req, res) => {
   }
 });
 
+// Reset macOS Automation permissions and re-trigger the Allow-Messages
+// dialog. Called from the dashboard banner when a send fails with -1743.
+// Runs `tccutil reset AppleEvents` (macOS-only, no-op on other OSes) and
+// then attempts a benign `osascript` against Messages so the system
+// re-prompts for Automation. Also opens System Settings -> Privacy ->
+// Automation as a fallback so the operator can flip the toggle directly.
+app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
+  if (process.platform !== "darwin") {
+    res.status(400).json({ error: "macOS only" });
+    return;
+  }
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  const ranSteps: string[] = [];
+  try {
+    await run("tccutil", ["reset", "AppleEvents"], { timeout: 10_000 });
+    ranSteps.push("tccutil_reset");
+  } catch (error) {
+    ranSteps.push(`tccutil_reset_failed:${(error as Error).message}`);
+  }
+  try {
+    // Trigger a benign event so macOS knows we want Messages access; this
+    // pops the Allow-prompt on next osascript invocation against Messages.
+    await run("osascript", ["-e", 'tell application "Messages" to count of services'], { timeout: 8_000 });
+    ranSteps.push("messages_probe_ok");
+  } catch (error) {
+    // Expected: the probe re-pops the Allow dialog. Operator clicks Allow,
+    // and the next real send works. If the probe still errored we surface
+    // the deeplink to settings as the fallback path.
+    ranSteps.push(`messages_probe_prompt:${((error as Error).message ?? "").slice(0, 80)}`);
+  }
+  try {
+    // Open BOTH panes in turn so the operator can verify Automation +
+    // Accessibility — file sends now go through UI scripting (clipboard
+    // paste in the Messages window), which needs Accessibility on top of
+    // Automation. The first one opened wins focus; macOS keeps the other
+    // available a click away.
+    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], { timeout: 5_000 });
+    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"], { timeout: 5_000 });
+    ranSteps.push("settings_opened");
+  } catch {
+    // non-fatal
+  }
+  res.json({ ok: true, steps: ranSteps, message: "Permissions reset. Toggle your terminal app ON for both Automation > Messages AND Accessibility, then retry the send." });
+}));
+
+// Stream a Messages.app attachment (photo / voice note / video) to the
+// dashboard. Reads chat.db for the file path and serves the bytes from
+// ~/Library/Messages/Attachments. Localhost-only access (the runner
+// already binds 127.0.0.1) gates this to the operator's machine.
+app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
+  if (!runnerConfig.imessage.enabled) {
+    res.status(503).json({ error: "iMessage adapter not enabled" });
+    return;
+  }
+  const { guid } = z.object({ guid: z.string().min(8).max(100) }).parse(req.params);
+  let db: IMessageDb;
+  try {
+    db = new IMessageDb(runnerConfig.imessage.dbPath);
+  } catch {
+    res.status(503).json({ error: "cannot open chat.db (Full Disk Access?)" });
+    return;
+  }
+  try {
+    const meta = db.findAttachmentByGuid(guid);
+    if (!meta) {
+      res.status(404).json({ error: "attachment not found in chat.db" });
+      return;
+    }
+    if (!meta.absolutePath) {
+      res.status(404).json({ error: "attachment file path unresolved" });
+      return;
+    }
+    await streamIMessageAttachment({
+      absolutePath: meta.absolutePath,
+      mimeType: meta.mimeType,
+      transferName: meta.transferName,
+      filename: meta.filename,
+      res
+    });
+  } finally {
+    db.close();
+  }
+}));
+
 app.get("/data/settings", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   res.json(settings);
@@ -904,7 +1051,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"])).optional(),
+      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"])).optional(),
       demoMode: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
       aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
@@ -977,7 +1124,7 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
 app.post("/control/scan", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional(),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional()
@@ -1041,7 +1188,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
@@ -1207,7 +1354,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
       key: z
         .enum([
           "thread_list",
@@ -1312,7 +1459,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 app.post("/control/platform/save-selector-override", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
       key: z.enum([
         "thread_list",
         "thread_item",
@@ -1335,7 +1482,7 @@ app.post("/control/platform/save-selector-override", asyncRoute(async (req, res)
 app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
       key: z.enum([
         "thread_list",
         "thread_item",
@@ -1354,11 +1501,14 @@ app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res
   res.json({ status: "ok" });
 }));
 
-app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
+app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  // For multipart bodies, multer puts file metadata on req.files and
+  // string fields on req.body. Reuse the same JSON schema for the field
+  // values so the validation flow is identical between JSON and multipart.
   const payload = z
     .object({
-      text: z.string().min(1),
+      text: z.string(),
       clientSendId: z.string().uuid(),
       // Optional ISO 8601 timestamp. When present, the send is persisted
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
@@ -1367,6 +1517,17 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
       scheduledFor: z.string().datetime().optional()
     })
     .parse(req.body);
+  const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const stagedAttachments = uploadedFiles.map((f) => ({
+    absolutePath: f.path,
+    displayName: f.originalname,
+    mimeType: f.mimetype,
+    kind: kindFromMime(f.mimetype, f.originalname)
+  }));
+  if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
+    res.status(400).json({ error: "send must have text, attachments, or both" });
+    return;
+  }
 
   // Reject early for unsupported platforms — without this, the SendRequest
   // queues, the worker hits `adapter.sendMessage(undefined)` and records a
@@ -1385,7 +1546,8 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
         threadId,
         text: payload.text,
         clientSendId: payload.clientSendId,
-        scheduledFor: new Date(payload.scheduledFor)
+        scheduledFor: new Date(payload.scheduledFor),
+        attachments: stagedAttachments
       });
       res.json({
         clientSendId: scheduleResult.clientSendId,
@@ -1425,7 +1587,8 @@ app.post("/control/thread/:threadId/send", asyncRoute(async (req, res) => {
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
-      clientSendId: payload.clientSendId
+      clientSendId: payload.clientSendId,
+      attachments: stagedAttachments
     });
     res.json(queueResult);
   } catch (error) {
@@ -1611,25 +1774,44 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const settings = await settingsStore.getSettings();
 
+  // For iMessage we render one row per Person but chat.db may have several
+  // chats with that human (phone + email). Rescanning ONLY the canonical
+  // thread leaves the sibling rows stale, which the operator perceives as
+  // "the rescan messed it up". So for iMessage we walk every sibling
+  // thread of the same Person and refresh each.
+  const targets =
+    target.platform === "IMESSAGE"
+      ? await prisma.thread.findMany({
+          where: { platform: target.platform, personId: target.personId },
+          select: { id: true, platformThreadId: true, threadUrl: true, person: { select: { displayName: true } } }
+        })
+      : [{ id: target.threadId, platformThreadId: target.platformThreadId, threadUrl: target.threadUrl, person: { displayName: target.displayName } }];
+
   // Per-thread rescan: open ONLY this thread and re-parse its messages,
   // instead of triggering a full-inbox scan via enqueueScan(). The full-
   // inbox path takes 30-90s on a populated inbox; opening one thread is
   // typically <5s. Wraps in the platform control lock so it serialises
   // against any in-flight scan / send / open-thread operation.
-  const candidate: ThreadStub = {
-    platformThreadId: target.platformThreadId,
-    displayName: target.displayName,
-    threadUrl: target.threadUrl,
-    lastMessagePreview: ""
-  };
   try {
     const result = await withPlatformControlLock(target.platform, async () => {
-      return scanQueue.syncThreadForIngest({
-        platform: target.platform,
-        candidate,
-        maxMessages: settings.maxMessagesPerThread,
-        requestId
-      });
+      const aggregate = { updatedThreads: 0, parsedMessages: 0 };
+      for (const t of targets) {
+        const candidate: ThreadStub = {
+          platformThreadId: t.platformThreadId,
+          displayName: t.person.displayName,
+          threadUrl: t.threadUrl ?? undefined,
+          lastMessagePreview: ""
+        };
+        const partial = await scanQueue.syncThreadForIngest({
+          platform: target.platform,
+          candidate,
+          maxMessages: settings.maxMessagesPerThread,
+          requestId
+        });
+        aggregate.updatedThreads += partial.updatedThreads ?? 0;
+        aggregate.parsedMessages += partial.parsedMessages ?? 0;
+      }
+      return aggregate;
     });
     await auditService.log({
       platform: target.platform,
@@ -2076,8 +2258,11 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     : undefined;
 
   if (beforeMessageId) {
+    // Cursor message can live on the canonical thread or any sibling
+    // (iMessage merges messages across same-person threads), so we
+    // validate by id only after confirming it belongs to the cohort.
     const cursorExists = await prisma.message.findFirst({
-      where: { id: beforeMessageId, threadId },
+      where: { id: beforeMessageId },
       select: { id: true }
     });
     if (!cursorExists) {
@@ -2136,19 +2321,27 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     }
   }
 
+  // For iMessage we merge messages across all sibling threads belonging
+  // to the same Person — chat.db creates separate chats for the phone
+  // and email handle of one human, but the operator wants a single
+  // conversation view. LinkedIn keeps thread-scoped messages.
+  const messageThreadFilter =
+    thread.platform === "IMESSAGE"
+      ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
+      : { threadId: thread.id };
   const [messagesDescWithExtra, lastInbound, lastOutbound] = await Promise.all([
     prisma.message.findMany({
-      where: { threadId: thread.id },
+      where: messageThreadFilter,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: messageLimit + 1,
       ...(beforeMessageId ? { cursor: { id: beforeMessageId }, skip: 1 } : {})
     }),
     prisma.message.findFirst({
-      where: { threadId: thread.id, direction: "IN" },
+      where: { ...messageThreadFilter, direction: "IN" },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }]
     }),
     prisma.message.findFirst({
-      where: { threadId: thread.id, direction: "OUT" },
+      where: { ...messageThreadFilter, direction: "OUT" },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }]
     })
   ]);
@@ -2436,7 +2629,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK"] as PlatformName[]).map(async (platform) => {
+    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
@@ -2909,6 +3102,60 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
   });
 }));
 
+// Promote / edit / dismiss the heuristic name suggestion. The runner
+// guesses a contact's first name from outbound greetings ("Hi Marianne")
+// when a Person's displayName is just a phone or email; the dashboard
+// surfaces it as a "Maybe …" pill with confirm / edit / reject actions
+// that hit this endpoint.
+//
+//   action: "confirm"  → set displayName = inferredName, clear inferredName
+//   action: "rename"   → set displayName = <name>, clear inferredName
+//   action: "dismiss"  → clear inferredName (keep displayName as-is)
+app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({
+      action: z.enum(["confirm", "rename", "dismiss"]),
+      name: z.string().trim().min(1).max(120).optional()
+    })
+    .parse(req.body ?? {});
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  if (payload.action === "confirm") {
+    if (!person.inferredName) {
+      res.status(409).json({ error: "no inferred name to confirm" });
+      return;
+    }
+    const updated = await prisma.person.update({
+      where: { id: personId },
+      data: { displayName: person.inferredName, inferredName: null }
+    });
+    res.json({ status: "ok", displayName: updated.displayName });
+    return;
+  }
+  if (payload.action === "rename") {
+    if (!payload.name) {
+      res.status(400).json({ error: "name is required for rename" });
+      return;
+    }
+    const updated = await prisma.person.update({
+      where: { id: personId },
+      data: { displayName: payload.name, inferredName: null }
+    });
+    res.json({ status: "ok", displayName: updated.displayName });
+    return;
+  }
+  // dismiss
+  await prisma.person.update({
+    where: { id: personId },
+    data: { inferredName: null }
+  });
+  res.json({ status: "ok" });
+}));
+
 app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
   const { notes } = z
@@ -3059,7 +3306,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     // The zod payload restricts platform to the three with adapters today,
     // but the adapters map is now Partial — narrow via requireAdapter to
@@ -3473,7 +3720,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK"]).optional() }).parse(req.body ?? {});
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");

@@ -11,16 +11,12 @@ enum PlatformName {
   LINKEDIN
   INSTAGRAM
   TIKTOK
-  // IMESSAGE rows already live in the threads table (ingested by the
-  // separate iMessage adapter line of work). Declaring the value here
-  // lets prisma read those rows without throwing
-  // `Value 'IMESSAGE' not found in enum 'PlatformName'`. This main-side
-  // change carries no adapter — services/platform-factory.ts treats the
-  // adapter map as Partial<Record<PlatformName, PlatformAdapter>> and
-  // the requireAdapter guard (introduced in #135 / #140) returns a
-  // clean error for any platform without a registered adapter. Full
-  // iMessage support lands separately via the feat/imessage-adapter
-  // line of work.
+  // IMESSAGE landed first as a schema-only declaration on main (so prisma
+  // could read existing iMessage rows without throwing
+  // `Value 'IMESSAGE' not found in enum 'PlatformName'`). This branch
+  // brings the matching adapter alongside; the enum entry stays, the
+  // runner now actually dispatches iMessage operations against an
+  // adapter (see services/platform-factory.ts).
   IMESSAGE
 }
 
@@ -78,6 +74,12 @@ model Platform {
 model Person {
   id          String   @id @default(cuid())
   displayName String
+  // For platforms that don't expose a real name (iMessage stores phone
+  // numbers / emails), we run a heuristic over outbound greetings ("Hi
+  // Marianne") to guess one. Surfaced in the dashboard as a "Maybe …"
+  // suggestion the operator can confirm into displayName, edit, or
+  // reject. Cleared once the operator promotes or dismisses it.
+  inferredName String?
   handle      String?
   platform    PlatformName
   profileUrl  String?
@@ -325,6 +327,12 @@ model SendRequest {
   scheduledFor DateTime?
   receiptJson  String?
   errorJson    String?
+  // Outgoing attachments staged for this send. JSON array of
+  // { absolutePath, displayName, mimeType, kind }. When the platform
+  // adapter's sendMessage runs, it dispatches each file to the platform
+  // (iMessage today; LinkedIn cap at text-only). Cleaned up by the send
+  // worker after the row reaches SENT or FAILED.
+  attachmentsJson String?
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

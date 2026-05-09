@@ -550,35 +550,6 @@ export default function SettingsPage() {
           </Button>
         </div>
 
-        <div className="mt-10 rounded-[10px] border border-risk-overdue/30 bg-risk-overdue/5 p-5">
-          <p className="m-0 mb-1 text-[13px] font-medium text-risk-overdue">Danger zone</p>
-          <p className="m-0 mb-3 text-[12px] text-ink-2">
-            Per-platform session resets live on the Platforms page. This wipes LinkedIn data
-            locally so the runner can rebuild from a fresh scan.
-          </p>
-          <Button
-            variant="quiet"
-            className="border-risk-overdue/40 text-risk-overdue hover:bg-risk-overdue/10"
-            onClick={async () => {
-              if (
-                !window.confirm(
-                  "Clear LinkedIn inbox and rebuild? This deletes all stored LinkedIn threads, messages, and receipts locally."
-                )
-              ) {
-                return;
-              }
-              try {
-                await apiPost("/runner/admin/reset", { platform: "LINKEDIN" });
-                setSavedAt(Date.now());
-                window.dispatchEvent(new CustomEvent("runner-resync"));
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "Reset failed");
-              }
-            }}
-          >
-            Clear LinkedIn inbox and rebuild
-          </Button>
-        </div>
       </details>
 
       <section className="mt-12 border-t border-hairline pt-6">

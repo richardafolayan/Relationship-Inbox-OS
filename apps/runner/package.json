@@ -15,19 +15,28 @@
     "linkedin:smoke": "tsx src/cli.ts linkedin-smoke",
     "repair:linkedin-threads": "tsx src/scripts/repair-linkedin-threads.ts",
     "db:reset:linkedin": "tsx src/scripts/reset-linkedin-inbox.ts --platform LINKEDIN --confirm RESET",
-    "cleanup:artifacts": "tsx src/scripts/cleanup-artifacts.ts"
+    "cleanup:artifacts": "tsx src/scripts/cleanup-artifacts.ts",
+    "imessage:backfill-names": "tsx src/scripts/backfill-imessage-names.ts",
+    "imessage:dedupe-people": "tsx src/scripts/dedupe-imessage-people.ts",
+    "imessage:reset-permissions": "tsx src/scripts/imessage-permission-reset.ts",
+    "imessage:purge-automated": "tsx src/scripts/purge-automated-imessage.ts",
+    "imessage:keep-voice-notes": "tsx src/scripts/imessage-keep-voice-notes.ts"
   },
   "dependencies": {
     "@inbox-os/core": "0.1.0",
     "@prisma/client": "^6.3.1",
+    "@types/multer": "^2.1.0",
+    "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "multer": "^2.1.1",
     "openai": "^4.78.1",
     "playwright": "^1.50.1",
     "uuid": "^11.0.5",
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/express": "^5.0.0",
     "@types/node": "^22.10.6",
     "tsx": "^4.19.2",
