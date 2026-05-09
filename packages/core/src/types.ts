@@ -76,6 +76,14 @@ export interface SendReceipt {
   sentAt: string;
   screenshotFile?: string;
   verifiedBy: VerificationMethod;
+  /**
+   * Attachments the platform actually persisted on the outbound message,
+   * for adapters that send media (e.g. iMessage voice notes / photos).
+   * The runner stores these on the Message row so the dashboard can
+   * render them inline alongside the bubble. Optional — text-only
+   * platforms (LinkedIn) leave this unset.
+   */
+  attachments?: AttachmentPlaceholder[];
 }
 
 export interface SelectorRegistry {

@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { promisify } from "node:util";
 import type {
+  AttachmentPlaceholder,
   NormalizedMessage,
   OutboundAttachment,
   PlatformAdapter,
@@ -175,7 +176,15 @@ export class IMessageAdapter implements PlatformAdapter {
         details: { reason: "GROUP_SEND_UNSUPPORTED" }
       });
     }
-    const handle = chat.participants[0] ?? chat.chatIdentifier;
+    // Pick the best handle to send to. The chat row we picked above is keyed
+    // by *one* of the contact's handles (e.g. their phone). If that handle
+    // isn't iMessage-registered on this Mac, Messages.app silently routes
+    // via SMS and (for Macs without Text Message Forwarding from an iPhone)
+    // the message fails to deliver. Prefer a sibling handle that IS
+    // iMessage-registered. Falls through to the original handle if none
+    // is found.
+    const initialHandle = chat.participants[0] ?? chat.chatIdentifier;
+    const handle = this.pickBestSendHandle(initialHandle);
     const sendStartedAt = Date.now();
     try {
       await sendIMessage({
@@ -206,24 +215,130 @@ export class IMessageAdapter implements PlatformAdapter {
       );
     }
 
-    // Poll chat.db briefly for the new outbound row to get its guid.
+    // Poll chat.db briefly for the new outbound row to get its guid +
+    // delivery status. We care about three signals from Messages.app:
+    //   - chat.db error column ≠ 0 → hard failure (e.g. error 25 = SMS
+    //     send couldn't reach the network because there's no Text
+    //     Message Forwarding pathway). Throw with a clear hint so the
+    //     dashboard surfaces the real reason instead of "Sent ✓".
+    //   - is_delivered = 1 → recipient device acknowledged, we're done
+    //   - is_sent = 1 but is_delivered = 0 → handed off, recipient may
+    //     be offline; report "best_effort" rather than throwing.
     let receiptGuid: string | undefined;
     let receiptTs: string | undefined;
-    const deadline = Date.now() + 3_000;
+    let isDelivered = false;
+    const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
-      const found = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
-      if (found) {
-        receiptGuid = found.guid;
-        receiptTs = found.timestamp;
-        break;
+      const status = db.findOutboundDeliveryStatus(thread.platformThreadId, sendStartedAt - 1000);
+      if (status) {
+        if (status.error && status.error !== 0) {
+          const serviceLabel = status.service ?? "?";
+          const smsExplain =
+            status.service === "SMS"
+              ? " — routed via SMS, but this Mac has no SMS pathway (no SIM and Text Message Forwarding from iPhone is off, OR the recipient's phone isn't iMessage-registered). Try the recipient's iMessage email instead."
+              : "";
+          throw new AdapterFailure(
+            `Messages.app reports send failed (chat.db error=${status.error}, service=${serviceLabel})${smsExplain}`,
+            {
+              kind: "THREAD_FETCH_FAILED",
+              platform: this.platform,
+              stage: "persist",
+              platformThreadId: thread.platformThreadId,
+              details: { messagesError: status.error, service: status.service, handle }
+            }
+          );
+        }
+        receiptGuid = status.guid;
+        if (status.isDelivered) {
+          isDelivered = true;
+          break;
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, 250));
+      await new Promise((resolve) => setTimeout(resolve, 200));
     }
+    if (!receiptTs && receiptGuid) {
+      // We have a guid but the delivery poll didn't grab the timestamp;
+      // fall back to the legacy lookup for the row's date.
+      const fallback = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
+      receiptTs = fallback?.timestamp;
+    }
+
+    // Capture attachments from chat.db for the new outbound message so
+    // send.ts can persist them on the Message row (otherwise the dashboard
+    // shows only the text bubble for voice notes / photos / videos).
+    const dbAttachments = db.findOutboundAttachments(thread.platformThreadId, sendStartedAt - 1000);
+    const receiptAttachments: AttachmentPlaceholder[] = dbAttachments.map((a) => ({
+      type: a.kind,
+      manualReview: a.kind === "unknown",
+      rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
+      guid: a.guid || undefined,
+      kind: a.kind,
+      byteSize: a.totalBytes ?? undefined
+    }));
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
-      verifiedBy: receiptGuid ? "bubble_detected" : "best_effort"
+      // "bubble_detected" if Messages.app confirmed delivery; else
+      // "best_effort" — the bubble exists but the recipient hasn't
+      // acked yet (offline, slow, etc.).
+      verifiedBy: isDelivered ? "bubble_detected" : "best_effort",
+      attachments: receiptAttachments.length > 0 ? receiptAttachments : undefined
     };
+  }
+
+  /**
+   * Given a handle picked from chat.db (typically the chat row's first
+   * participant), find the *best* handle to actually send via iMessage.
+   *
+   * Preference order:
+   *   1. iMessage-registered EMAIL — emails are tied to Apple ID and
+   *      route reliably via iMessage regardless of current device state.
+   *   2. iMessage-registered PHONE — works when the recipient's SIM is
+   *      currently iMessage-active. Apple lazy-routes to SMS at send
+   *      time if not, even if chat.db has an iMessage handle row from a
+   *      previous session.
+   *   3. The original handle, as a last resort.
+   *
+   * The siblings come from the operator's vCard via `contactResolver`.
+   * Without this, a contact who has both an iMessage email and a phone
+   * (the phone may or may not currently be iMessage-active) tends to
+   * get routed via SMS — which silently fails on Macs without Text
+   * Message Forwarding from an iPhone.
+   */
+  private pickBestSendHandle(handle: string): string {
+    const db = this.getDb();
+    // Build the full handle pool (vcard siblings + the original itself,
+    // in case the original isn't in the vcard).
+    const pool = Array.from(new Set([handle, ...this.contactResolver.siblingHandles(handle)]));
+    // Prefer iMessage-registered emails first.
+    const iMessageEmails = pool.filter(
+      (h) => h.includes("@") && db.findHandleService(h) === "iMessage"
+    );
+    if (iMessageEmails.length > 0) {
+      const picked = iMessageEmails[0]!;
+      if (picked !== handle) {
+        console.log(`[imessage] preferring iMessage email ${picked} over chat handle ${handle}`);
+      }
+      return picked;
+    }
+    // Then iMessage-registered phones.
+    const iMessagePhones = pool.filter(
+      (h) => !h.includes("@") && db.findHandleService(h) === "iMessage"
+    );
+    if (iMessagePhones.length > 0) {
+      const picked = iMessagePhones[0]!;
+      if (picked !== handle) {
+        console.log(`[imessage] preferring iMessage phone ${picked} over chat handle ${handle}`);
+      }
+      return picked;
+    }
+    // No iMessage-reachable handle found for this contact; fall through.
+    if (db.findHandleService(handle) !== "iMessage") {
+      console.log(
+        `[imessage] no iMessage handle found for contact (chat handle ${handle}, siblings ${pool.length}); send will likely fall back to SMS`
+      );
+    }
+    return handle;
   }
 
   async openThread(thread: ThreadStub): Promise<void> {

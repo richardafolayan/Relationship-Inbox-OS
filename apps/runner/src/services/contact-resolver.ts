@@ -97,12 +97,22 @@ function normalizeEmail(raw: string): string | null {
 export interface ContactResolver {
   /** Returns the resolved real name for a chat.db handle, or null when no contact matches. */
   resolve(handle: string): string | null;
+  /**
+   * Returns every handle (phones + emails, in their original vCard form)
+   * for the contact that owns `handle`, including `handle` itself. Used by
+   * the iMessage adapter to pick the iMessage-registered handle for a
+   * recipient who has both an SMS phone and an iMessage email — without
+   * this we'd send to whichever handle the chat row happened to be keyed
+   * by, which is often the SMS one and silently routes via SMS.
+   */
+  siblingHandles(handle: string): string[];
   /** How many distinct contacts are loaded. Used for log lines / health surfaces. */
   size(): number;
 }
 
 const NULL_RESOLVER: ContactResolver = {
   resolve: () => null,
+  siblingHandles: () => [],
   size: () => 0
 };
 
@@ -117,6 +127,9 @@ export function loadContactResolver(vcfPath: string | undefined): ContactResolve
   const entries = parseVcardEntries(raw);
   const phoneMap = new Map<string, string>();
   const emailMap = new Map<string, string>();
+  // name → entry, for siblingHandles(). Last-wins on name collision matches
+  // the resolve() last-wins semantics.
+  const entryByName = new Map<string, VcardEntry>();
   for (const entry of entries) {
     for (const phone of entry.phones) {
       const key = normalizePhone(phone);
@@ -126,16 +139,25 @@ export function loadContactResolver(vcfPath: string | undefined): ContactResolve
       const key = normalizeEmail(email);
       if (key) emailMap.set(key, entry.name);
     }
+    entryByName.set(entry.name, entry);
+  }
+  function resolveName(handle: string): string | null {
+    if (!handle) return null;
+    const trimmed = handle.trim();
+    if (trimmed.includes("@")) {
+      return emailMap.get(trimmed.toLowerCase()) ?? null;
+    }
+    const key = normalizePhone(trimmed);
+    return key ? phoneMap.get(key) ?? null : null;
   }
   return {
-    resolve(handle: string): string | null {
-      if (!handle) return null;
-      const trimmed = handle.trim();
-      if (trimmed.includes("@")) {
-        return emailMap.get(trimmed.toLowerCase()) ?? null;
-      }
-      const key = normalizePhone(trimmed);
-      return key ? phoneMap.get(key) ?? null : null;
+    resolve: resolveName,
+    siblingHandles(handle: string): string[] {
+      const name = resolveName(handle);
+      if (!name) return [handle];
+      const entry = entryByName.get(name);
+      if (!entry) return [handle];
+      return [...entry.phones, ...entry.emails];
     },
     size(): number {
       return phoneMap.size + emailMap.size;

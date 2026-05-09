@@ -605,6 +605,110 @@ export class IMessageDb {
   }
 
   /**
+   * Look up which Messages.app service ("iMessage" or "SMS") a given
+   * handle is registered against on this Mac. Returns null when the
+   * handle doesn't appear in chat.db's `handle` table at all (i.e. the
+   * Mac has never received or sent a message to this handle).
+   *
+   * Used by the iMessage adapter's send path to prefer the
+   * iMessage-registered handle for a contact who has both an iMessage
+   * email and an SMS-only phone — otherwise Messages.app silently routes
+   * via SMS and (for Macs without Text Message Forwarding from an
+   * iPhone) the message fails to deliver.
+   */
+  findHandleService(handle: string): string | null {
+    // chat.db can have multiple rows for the same id (one per service —
+    // a phone number used for both SMS and iMessage gets two handle rows).
+    // Prefer the iMessage row when both exist so callers see "iMessage"
+    // for any handle that has *ever* been iMessage-reachable.
+    const row = this.db
+      .prepare(
+        `SELECT service FROM handle WHERE id = ?
+         ORDER BY CASE WHEN service = 'iMessage' THEN 0 ELSE 1 END
+         LIMIT 1`
+      )
+      .get(handle) as { service: string | null } | undefined;
+    return row?.service ?? null;
+  }
+
+  /**
+   * Poll chat.db for a freshly-sent outbound message and report whether
+   * Messages.app considers it delivered. Returns the most recent
+   * outbound row in the chat newer than `afterUnixMs` along with its
+   * raw send-state flags.
+   *
+   * Apple's relevant message columns:
+   *   - is_sent       1 once Messages.app has handed it off
+   *   - is_delivered  1 once the recipient's device has acknowledged
+   *   - error         non-zero on a failed delivery (25 = "send failed",
+   *                   common for SMS-fallback when there's no SMS pathway)
+   */
+  findOutboundDeliveryStatus(chatGuid: string, afterUnixMs: number):
+    | { rowId: number; guid: string; service: string | null; isSent: boolean; isDelivered: boolean; error: number }
+    | undefined {
+    const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
+      | { chatId: number }
+      | undefined;
+    if (!chat) return undefined;
+    const afterAppleNs = (afterUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
+    const row = this.db
+      .prepare(
+        `SELECT m.ROWID AS rowId, m.guid AS guid, m.service AS service,
+                m.is_sent AS isSent, m.is_delivered AS isDelivered, m.error AS error
+           FROM message m
+           JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+          WHERE cmj.chat_id = ?
+            AND m.is_from_me = 1
+            AND m.date >= ?
+          ORDER BY m.date DESC
+          LIMIT 1`
+      )
+      .get(chat.chatId, afterAppleNs) as
+      | { rowId: number; guid: string; service: string | null; isSent: number; isDelivered: number; error: number | null }
+      | undefined;
+    if (!row) return undefined;
+    return {
+      rowId: row.rowId,
+      guid: row.guid,
+      service: row.service,
+      isSent: row.isSent === 1,
+      isDelivered: row.isDelivered === 1,
+      error: row.error ?? 0
+    };
+  }
+
+  /**
+   * Look up the chat.db attachments for the most-recent outbound message
+   * in `chatGuid` newer than `afterUnixMs`. Used by send.ts to capture
+   * voice-note / photo / video attachments the operator just sent so the
+   * dashboard can render them inline (the dashboard's IMessageMedia
+   * component fetches binaries via /data/imessage-attachment/<guid>).
+   * Without this, OUT messages with attachments persist with empty
+   * attachmentsJson and only the text bubble shows in the dashboard.
+   */
+  findOutboundAttachments(chatGuid: string, afterUnixMs: number): IMessageAttachment[] {
+    const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
+      | { chatId: number }
+      | undefined;
+    if (!chat) return [];
+    const afterAppleNs = (afterUnixMs - APPLE_EPOCH_OFFSET_MS) * 1e6;
+    const row = this.db
+      .prepare(
+        `SELECT m.ROWID AS rowId
+           FROM message m
+           JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+          WHERE cmj.chat_id = ?
+            AND m.is_from_me = 1
+            AND m.date >= ?
+          ORDER BY m.date DESC
+          LIMIT 1`
+      )
+      .get(chat.chatId, afterAppleNs) as { rowId: number } | undefined;
+    if (!row) return [];
+    return this.fetchAttachmentsByMessageRowIds([row.rowId]).get(row.rowId) ?? [];
+  }
+
+  /**
    * Used right after a send to find the new outbound message and harvest
    * its guid for the SendReceipt. Looks for the most-recent outbound row
    * in the chat with a date strictly newer than `afterAppleNs`.

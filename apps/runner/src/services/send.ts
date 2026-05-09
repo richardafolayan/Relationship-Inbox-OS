@@ -285,6 +285,15 @@ export function createSendService(deps: SendServiceDeps) {
         }))
       );
 
+      // Persist platform-side attachments on the OUT row when the adapter
+      // captured them post-send (iMessage adapter looks them up from
+      // chat.db). Without this, voice notes / photos / videos sent from
+      // the composer only show as a text bubble in the dashboard — the
+      // attachment guid the IMessageMedia component needs is missing.
+      const attachmentsJson =
+        receipt.attachments && receipt.attachments.length > 0
+          ? JSON.stringify(receipt.attachments)
+          : null;
       await prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
@@ -296,7 +305,8 @@ export function createSendService(deps: SendServiceDeps) {
           text: input.text,
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
-          sentVia: "automation"
+          sentVia: "automation",
+          attachmentsJson
         },
         create: {
           threadId: thread.id,
@@ -304,7 +314,8 @@ export function createSendService(deps: SendServiceDeps) {
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
           text: input.text,
-          sentVia: "automation"
+          sentVia: "automation",
+          attachmentsJson
         }
       });
 
