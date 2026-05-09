@@ -173,7 +173,7 @@ export interface SuggestedRepliesOutput {
   source?: AiSource | null;
 }
 
-export type AiProvider = "openai" | "glm";
+export type AiProvider = "openai" | "glm" | "gemini";
 
 export type AiErrorKind =
   | "balance"
@@ -200,4 +200,9 @@ export interface AppSettings {
   // Optional override for the GLM model id. When undefined, runner uses
   // runnerConfig.glmModel (Z_AI_MODEL env, default glm-4.7-flash).
   glmModel?: string;
+  // Optional override for the Gemini model id. When undefined, runner uses
+  // runnerConfig.geminiModel (GEMINI_MODEL env, default gemma-4-31b-it).
+  // Gemma works through Google's OpenAI-compat endpoint once the
+  // thinking_level=MINIMAL extra is set; see services/ai.ts:geminiExtraBody.
+  geminiModel?: string;
 }

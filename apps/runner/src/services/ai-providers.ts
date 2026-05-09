@@ -116,6 +116,121 @@ function classifyGlmError(error: unknown): AiErrorClassification {
   };
 }
 
+/**
+ * Typed shape for the various error envelopes Google's OpenAI-compatibility
+ * layer emits. Errors arrive in three shapes depending on which layer threw:
+ *   - OpenAI SDK shape: `{ status, code, message }`
+ *   - Google REST shape: `{ error: { code, status, message } }` (string status
+ *     like "INVALID_ARGUMENT" or "RESOURCE_EXHAUSTED")
+ *   - SDK-wrapped REST shape: `{ response: { status, data: { error: ... } } }`
+ * This interface lets us narrow without `any` casts at the call site.
+ */
+type ErrorLike = {
+  status?: unknown;
+  code?: unknown;
+  message?: unknown;
+  error?: {
+    code?: unknown;
+    status?: unknown;
+    message?: unknown;
+  };
+  response?: {
+    status?: unknown;
+    data?: {
+      error?: {
+        code?: unknown;
+        status?: unknown;
+        message?: unknown;
+      };
+    };
+  };
+};
+
+function asErrorLike(err: unknown): ErrorLike {
+  return typeof err === "object" && err !== null ? (err as ErrorLike) : {};
+}
+
+/**
+ * Google Gemini API errors via the OpenAI-compat endpoint. Reads nested
+ * Google REST shapes (`error.code`, `error.status`, `response.data.error.*`)
+ * as well as the OpenAI-SDK-shaped fallback. Default model is gemma-4-31b-it
+ * with thinking_level=MINIMAL applied automatically; the model_not_found
+ * hint points operators at the env var so they can swap if needed.
+ */
+function classifyGeminiError(error: unknown): AiErrorClassification {
+  const e = asErrorLike(error);
+  const rawStatus = e.status ?? e.response?.status ?? e.error?.code ?? e.code;
+  const status = typeof rawStatus === "number" ? rawStatus : undefined;
+  const message =
+    typeof e.message === "string"
+      ? e.message
+      : typeof e.error?.message === "string"
+        ? e.error.message
+        : typeof e.response?.data?.error?.message === "string"
+          ? e.response.data.error.message
+          : "";
+  const googleStatus =
+    typeof e.error?.status === "string"
+      ? e.error.status
+      : typeof e.response?.data?.error?.status === "string"
+        ? e.response.data.error.status
+        : "";
+  const code = e.code;
+
+  if (status === 401 || /api.?key.*invalid|unauthorized/i.test(message)) {
+    return {
+      kind: "auth",
+      message:
+        "GEMINI_API_KEY is missing or invalid. Get a key from https://aistudio.google.com/apikey, " +
+        "set it in .env, and restart the runner.",
+      retriable: false
+    };
+  }
+  if (status === 403 && /quota|billing/i.test(message)) {
+    return {
+      kind: "balance",
+      message:
+        "Gemini API quota exhausted (HTTP 403). Check usage at " +
+        "https://aistudio.google.com/ and adjust limits or billing.",
+      retriable: false
+    };
+  }
+  if (status === 429 || googleStatus === "RESOURCE_EXHAUSTED") {
+    return {
+      kind: "rate_limit",
+      message: "Gemini API rate limit reached. Retrying with backoff.",
+      retriable: true
+    };
+  }
+  if (typeof status === "number" && status >= 500 && status <= 504) {
+    return {
+      kind: "service_overloaded",
+      message: `Gemini API returned ${status}. Treating as transient and retrying with backoff.`,
+      retriable: true
+    };
+  }
+  if (
+    code === "model_not_found" ||
+    /model.*(not found|does not exist|invalid)/i.test(message) ||
+    googleStatus === "NOT_FOUND"
+  ) {
+    return {
+      kind: "model_not_found",
+      message:
+        `Gemini model not available (${message || googleStatus || "no detail"}). Set GEMINI_MODEL ` +
+        "to a valid id. Smoke-confirmed working choices: gemma-4-31b-it (default, " +
+        "uses thinking_level=MINIMAL automatically) and gemini-3-flash-preview. See " +
+        "apps/runner/src/scripts/gemini-smoke.ts for the value space.",
+      retriable: false
+    };
+  }
+  return {
+    kind: "unknown",
+    message: `${message || googleStatus || "no detail"}.`,
+    retriable: true
+  };
+}
+
 function classifyOpenAiError(error: unknown): AiErrorClassification {
   const err = error as { code?: string; status?: number; message?: string } | undefined;
   const message = err?.message ?? String(error);
@@ -187,16 +302,35 @@ const openaiEntry: AiProviderEntry = {
   baseBackoffMs: 2000
 };
 
+const geminiEntry: AiProviderEntry = {
+  id: "gemini",
+  displayName: "Gemini API",
+  classifyError: classifyGeminiError,
+  // Conservative starting position for an unproven provider. Three attempts
+  // with ~5s base delay sit between OpenAI's 2s (reliable) and GLM's 7s
+  // (noisy). Tune up only after observability shows the failure shape.
+  maxAttempts: 3,
+  baseBackoffMs: 5000
+};
+
 export const providerRegistry: Record<AiProvider, AiProviderEntry> = {
   openai: openaiEntry,
-  glm: glmEntry
+  glm: glmEntry,
+  gemini: geminiEntry
 };
 
 /**
  * Default fallback chain. When the active provider exhausts retries OR
- * returns a non-retriable error, walk this chain (skipping the active
- * provider). Adding a new provider that should NOT be in the fallback
- * path: leave it out here.
+ * returns a non-retriable error, the runtime walks this chain (skipping
+ * the active provider). The resolution loop in services/ai.ts:modelJson
+ * does the actual walking, so this is just the ordered list.
+ *
+ * Gemini is intentionally NOT in the fallback chain initially — it's a
+ * fresh integration and we don't want to mask Gemma/Gemini outages by
+ * silently absorbing them into requests originally aimed at OpenAI or
+ * GLM. Operators who pick Gemini as active still fall through to OpenAI
+ * on Gemini failures (active = gemini → chain = ["gemini", "openai"]).
+ * Revisit including gemini here after a few weeks of observed reliability.
  */
 export const fallbackChain: AiProvider[] = ["openai"];
 
