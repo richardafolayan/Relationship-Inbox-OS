@@ -304,6 +304,13 @@ export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
    * before clicking each row and respects the returned decision.
    */
   shouldOpenCandidate?: (signals: LinkedInStreamPreOpenSignals) => Promise<LinkedInStreamPreOpenDecision>;
+  /**
+   * Live progress hook. Fires after each row is processed and after each row
+   * is opened, so callers can surface a determinate progress indicator
+   * without waiting for the full scan to settle. `total` is the resolved
+   * `maxThreads` cap the loop will stop at.
+   */
+  onProgress?: (snapshot: { processedRows: number; openedRows: number; total: number }) => void;
 }
 
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
@@ -7041,6 +7048,11 @@ export class LinkedInAdapter implements PlatformAdapter {
             processedRowKeys.add(row.rowKey);
             newRowsSeen += 1;
             metrics.processedRows += 1;
+            options.onProgress?.({
+              processedRows: metrics.processedRows,
+              openedRows: metrics.openedRows,
+              total: maxThreads
+            });
 
             const candidateSignals: LinkedInStreamCandidateSignals = {
               rowKey: row.rowKey,
@@ -7244,6 +7256,11 @@ export class LinkedInAdapter implements PlatformAdapter {
               messages: normalizedMessages
             });
             metrics.openedRows += 1;
+            options.onProgress?.({
+              processedRows: metrics.processedRows,
+              openedRows: metrics.openedRows,
+              total: maxThreads
+            });
           }
 
           return {

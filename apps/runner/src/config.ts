@@ -33,7 +33,7 @@ export interface BrowserProfileConfig {
   personalChromeProfileResolutionStrategy: ChromeProfileResolutionStrategy;
 }
 
-export type AiProvider = "openai" | "glm";
+export type AiProvider = "openai" | "glm" | "gemini";
 
 export interface RunnerConfig {
   port: number;
@@ -43,6 +43,9 @@ export interface RunnerConfig {
   zAiApiKey?: string;
   zAiBaseUrl: string;
   glmModel: string;
+  geminiApiKey?: string;
+  geminiBaseUrl: string;
+  geminiModel: string;
   dbFile: string;
   profileDirs: {
     LINKEDIN: string;
@@ -255,14 +258,31 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     // AI_PROVIDER seeds the cold-start default. The dashboard /settings page
     // can override per-call without a restart (read from SettingsStore in
     // services/ai.ts -> resolveActive). "glm" routes through Z.AI's
-    // OpenAI-compatible endpoint.
-    aiProvider: env.AI_PROVIDER?.toLowerCase() === "glm" ? "glm" : "openai",
+    // OpenAI-compatible endpoint; "gemini" routes through Google's.
+    aiProvider:
+      env.AI_PROVIDER?.toLowerCase() === "glm"
+        ? "glm"
+        : env.AI_PROVIDER?.toLowerCase() === "gemini"
+          ? "gemini"
+          : "openai",
     zAiApiKey: env.Z_AI_API_KEY?.trim() || undefined,
     // Z.AI free-tier flash models are not listed in /v4/models but are
     // accessible at chat/completions. Default to glm-4.7-flash; override
     // via Z_AI_MODEL or the dashboard.
     zAiBaseUrl: env.Z_AI_BASE_URL?.trim() || "https://api.z.ai/api/paas/v4",
     glmModel: env.Z_AI_MODEL?.trim() || "glm-4.7-flash",
+    // Google Gemini API. Default model is gemma-4-31b-it. The smoke test
+    // (apps/runner/src/scripts/gemini-smoke.ts) confirmed Gemma 4 ships
+    // with thinking traces ON by default, but Google's OpenAI-compat
+    // endpoint accepts `extra_body.google.thinking_config.thinking_level`
+    // = "MINIMAL" to suppress them. The runner spreads that flag at every
+    // Gemma call site via `geminiExtraBody` in services/ai.ts. Operators
+    // who want to use a Gemini model instead of Gemma can set
+    // GEMINI_MODEL=gemini-3-flash-preview (also smoke-confirmed clean).
+    geminiApiKey: env.GEMINI_API_KEY?.trim() || undefined,
+    geminiBaseUrl:
+      env.GEMINI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
+    geminiModel: env.GEMINI_MODEL?.trim() || "gemma-4-31b-it",
     linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
     linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
     dbFile: resolve(dataDir, "inbox-os.sqlite"),

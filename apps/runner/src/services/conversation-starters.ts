@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { PlatformName } from "@inbox-os/core";
 import { prisma } from "../db";
 import type {
   AiService,
@@ -49,8 +50,10 @@ interface ConversationStartersDeps {
 export interface ConversationStartersService {
   /** Generate (or return cached) summary for a person, persisting to DB. */
   getOrGenerateSummary(personId: string, displayName: string): Promise<string | null>;
-  /** Generate (or return cached) starters for a person, persisting to DB. */
-  getOrGenerateStarters(personId: string, displayName: string): Promise<ConversationStartersResult | null>;
+  /** Generate (or return cached) starters for a person, persisting to DB.
+   * Platform drives tier-gating in the underlying AI call — only the formal
+   * (LinkedIn) tier produces starters; other platforms return null. */
+  getOrGenerateStarters(personId: string, displayName: string, platform: PlatformName): Promise<ConversationStartersResult | null>;
   /** Project a PersonEnrichment row to the AI prompt input shape. */
   toContactSnapshot(personId: string, displayName: string): Promise<ContactProfileSnapshot | null>;
 }
@@ -166,7 +169,8 @@ export function createConversationStartersService(deps: ConversationStartersDeps
 
   async function getOrGenerateStarters(
     personId: string,
-    displayName: string
+    displayName: string,
+    platform: PlatformName
   ): Promise<ConversationStartersResult | null> {
     const row = await loadEnrichmentRow(personId);
     if (!row) return null;
@@ -179,7 +183,7 @@ export function createConversationStartersService(deps: ConversationStartersDeps
       if (cached) return cached;
     }
 
-    const generated = await deps.aiService.generateConversationStarters({ contact, self });
+    const generated = await deps.aiService.generateConversationStarters({ platform, contact, self });
     if (!generated) return null;
 
     // Citation check — drop any starter whose cited field doesn't have

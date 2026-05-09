@@ -11,6 +11,12 @@ enum PlatformName {
   LINKEDIN
   INSTAGRAM
   TIKTOK
+  // IMESSAGE landed first as a schema-only declaration on main (so prisma
+  // could read existing iMessage rows without throwing
+  // `Value 'IMESSAGE' not found in enum 'PlatformName'`). This branch
+  // brings the matching adapter alongside; the enum entry stays, the
+  // runner now actually dispatches iMessage operations against an
+  // adapter (see services/platform-factory.ts).
   IMESSAGE
 }
 

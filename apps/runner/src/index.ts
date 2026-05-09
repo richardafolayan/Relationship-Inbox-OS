@@ -7,7 +7,7 @@ import express from "express";
 import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import type { NormalizedMessage, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import type { NormalizedMessage, PlatformAdapter, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -573,6 +573,22 @@ async function siblingThreadIds(platform: PlatformName, personId: string): Promi
   return rows.map((r) => r.id);
 }
 
+// The adapters map is `Partial<Record<PlatformName, PlatformAdapter>>` —
+// every platform-name access from a DB row needs to narrow before
+// dispatching, otherwise the call blows up with
+// "Cannot read properties of undefined (reading 'X')". Throws a clean
+// Error that the route's catch / Express error path surfaces to the
+// dashboard as readable text. (#135 / #140)
+function requireAdapter(platform: string): PlatformAdapter {
+  const adapter = (adapters as Record<string, PlatformAdapter | undefined>)[platform];
+  if (!adapter) {
+    throw new Error(
+      `Platform ${platform} is not supported by this runner. Supported platforms: ${Object.keys(adapters).join(", ")}.`
+    );
+  }
+  return adapter;
+}
+
 async function loadVisibleThreadRows(options?: {
   /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
   archived?: boolean;
@@ -776,6 +792,34 @@ app.get("/health", asyncRoute(async (_req, res) => {
   const runnerStatus = scanQueue.isScanning() ? "SCANNING" : "ONLINE";
   const connectedPlatforms = platforms.filter((platform) => platform.status === "CONNECTED").length;
 
+  // Determinate scan progress: surfaced so the status bar can render a real
+  // progress bar instead of an indeterminate sweep. ETA is computed against
+  // the previous scan's wall-clock duration — first-ever scans have no ETA.
+  const scanProgress = (() => {
+    const snap = scanQueue.getCurrentScanProgress();
+    if (!snap) return undefined;
+    const total = snap.total > 0 ? snap.total : 0;
+    const percent = total > 0
+      ? Math.min(99, Math.max(0, Math.round((snap.processedRows / total) * 100)))
+      : 0;
+    const lastSummary = scanQueue.getLatestRunSummary(snap.platform);
+    let etaSeconds: number | null = null;
+    if (lastSummary?.startedAt && lastSummary?.completedAt) {
+      const prevMs = Date.parse(lastSummary.completedAt) - Date.parse(lastSummary.startedAt);
+      const elapsedMs = Date.now() - snap.startedAt;
+      if (Number.isFinite(prevMs) && prevMs > 0) {
+        etaSeconds = Math.max(0, Math.round((prevMs - elapsedMs) / 1000));
+      }
+    }
+    return {
+      platform: snap.platform,
+      processedRows: snap.processedRows,
+      total,
+      percent,
+      etaSeconds
+    };
+  })();
+
   res.json({
     runnerStatus,
     lastScanAt: lastScanAt?.toISOString() ?? null,
@@ -792,7 +836,8 @@ app.get("/health", asyncRoute(async (_req, res) => {
       pending: enrichmentPending,
       running: enrichmentRunning,
       total: enrichmentPending + enrichmentRunning
-    }
+    },
+    scanProgress
   });
 }));
 
@@ -980,15 +1025,19 @@ app.get("/data/settings", asyncRoute(async (_req, res) => {
 app.get("/data/ai-status", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   const activeProvider = settings.aiProvider ?? runnerConfig.aiProvider;
-  const configuredProviders: Array<"openai" | "glm"> = [];
+  const configuredProviders: Array<"openai" | "glm" | "gemini"> = [];
   if (runnerConfig.openAiApiKey) configuredProviders.push("openai");
   if (runnerConfig.zAiApiKey) configuredProviders.push("glm");
+  if (runnerConfig.geminiApiKey) configuredProviders.push("gemini");
+  const activeModel =
+    activeProvider === "glm"
+      ? settings.glmModel?.trim() || runnerConfig.glmModel
+      : activeProvider === "gemini"
+        ? settings.geminiModel?.trim() || runnerConfig.geminiModel
+        : runnerConfig.openAiModel;
   res.json({
     activeProvider,
-    activeModel:
-      activeProvider === "glm"
-        ? settings.glmModel?.trim() || runnerConfig.glmModel
-        : runnerConfig.openAiModel,
+    activeModel,
     configuredProviders,
     activeProviderConfigured: configuredProviders.includes(activeProvider)
   });
@@ -1005,11 +1054,12 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"])).optional(),
       demoMode: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
-      aiProvider: z.enum(["openai", "glm"]).optional(),
+      aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
       // Empty string from the dashboard is normalised to undefined client-side,
       // but accept either here defensively. Length cap matches typical model
       // ids while preventing accidental megabyte payloads.
-      glmModel: z.string().max(100).optional()
+      glmModel: z.string().max(100).optional(),
+      geminiModel: z.string().max(100).optional()
     })
     .parse(req.body);
 
@@ -1174,7 +1224,11 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         reusedInFlight = true;
       } else {
         let trackedPromise: Promise<void>;
-        trackedPromise = adapters[platform].ensureConnected().finally(() => {
+        // requireAdapter narrows `adapters[platform]` away from undefined
+        // (the map is now Partial<Record<PlatformName, PlatformAdapter>>;
+        // see services/platform-factory.ts).
+        const platformAdapter = requireAdapter(platform);
+        trackedPromise = platformAdapter.ensureConnected().finally(() => {
           if (connectInFlight.get(platform) === trackedPromise) {
             connectInFlight.delete(platform);
           }
@@ -1475,6 +1529,13 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     return;
   }
 
+  // Reject early for unsupported platforms — without this, the SendRequest
+  // queues, the worker hits `adapter.sendMessage(undefined)` and records a
+  // confusing "Cannot read properties of undefined" on the FAILED row.
+  // Same guard as /open and /rescan; see requireAdapter.
+  const target = await getThreadStub(threadId);
+  requireAdapter(target.platform);
+
   // Schedule path: persist a SCHEDULED row and return immediately. The
   // dashboard renders a "scheduled for X" pill instead of pushing the
   // bubble through the optimistic-send timeline. The promoter takes
@@ -1618,6 +1679,11 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
 
+  // Same unsupported-platform guard as /send. Without this, retrying a
+  // FAILED row on an iMessage thread just queues another doomed request.
+  const retryTarget = await getThreadStub(threadId);
+  requireAdapter(retryTarget.platform);
+
   // Look up the failed SendRequest row and re-queue under a fresh
   // clientSendId. Original row stays in FAILED for receipts; the new
   // row carries the same text so the operator never has to retype.
@@ -1656,10 +1722,11 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
 
   await withPlatformControlLock(target.platform, async () => {
     try {
-      await adapters[target.platform].openThread({
+      await adapter.openThread({
         platformThreadId: target.platformThreadId,
         displayName: target.displayName,
         lastMessagePreview: "",
@@ -1700,6 +1767,10 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);
+  // Reject early for unsupported platforms — see requireAdapter. Without
+  // this, scanQueue.syncThread → adapter.fetchThreadMessages crashes with
+  // a confusing "Cannot read properties of undefined" TypeError.
+  requireAdapter(target.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const settings = await settingsStore.getSettings();
 
@@ -1968,6 +2039,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
 
   const text = await aiService.composeInVoice({
     intent: payload.intent,
+    platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
     threadMessages: thread.messages.map((m) => ({
@@ -2019,6 +2091,7 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   }
   const category = await aiService
     .classifyThreadCategory({
+      platform: thread.platform as PlatformName,
       displayName: thread.person.displayName,
       messages: thread.messages.map((m) => ({
         direction: m.direction as "IN" | "OUT",
@@ -2715,6 +2788,7 @@ app.post("/control/classify-uncategorized", asyncRoute(async (req, res) => {
     }
     try {
       const category = await aiService.classifyThreadCategory({
+        platform: target.platform as PlatformName,
         displayName: target.person.displayName,
         messages: target.messages.map((m) => ({
           direction: m.direction as "IN" | "OUT",
@@ -2985,7 +3059,7 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
   // generated when the user clicks "Start a conversation".
   const summary = enrichment ? await conversationStartersService.getOrGenerateSummary(personId, person.displayName) : null;
   const starters = req.query.includeStarters === "1" && enrichment
-    ? await conversationStartersService.getOrGenerateStarters(personId, person.displayName)
+    ? await conversationStartersService.getOrGenerateStarters(personId, person.displayName, person.platform as PlatformName)
     : enrichment?.startersJson
     ? JSON.parse(enrichment.startersJson)
     : null;
@@ -3234,7 +3308,11 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
-    const adapter = adapters[payload.platform];
+    // The zod payload restricts platform to the three with adapters today,
+    // but the adapters map is now Partial — narrow via requireAdapter to
+    // keep the runtime contract explicit (and to surface a clean error if
+    // someone removes an adapter without updating the zod enum).
+    const adapter = requireAdapter(payload.platform);
     await adapter.ensureConnected();
     res.json({ status: "ok" });
   });
@@ -3520,6 +3598,7 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
 
   const text = await aiService.composeInVoice({
     intent: `Rewrite the message below in my voice, preserving the meaning. Keep it about the same length. Message: ${payload.draft}`,
+    platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
     threadMessages: thread.messages.map((m) => ({
