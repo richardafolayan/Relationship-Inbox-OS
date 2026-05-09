@@ -14,7 +14,7 @@ test("getVoiceTier maps TIKTOK to casual", () => {
   assert.equal(getVoiceTier("TIKTOK"), "casual");
 });
 
-test("getVoiceTier falls through to casual for future enum values (e.g. WHATSAPP)", () => {
+test("getVoiceTier maps WHATSAPP to casual", () => {
   assert.equal(getVoiceTier("WHATSAPP"), "casual");
 });
 
