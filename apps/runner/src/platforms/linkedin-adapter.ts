@@ -2984,8 +2984,16 @@ export class LinkedInAdapter implements PlatformAdapter {
       this.deps.linkedInCredentials?.username && this.deps.linkedInCredentials?.password
     );
     if (!credsConfigured) {
+      // The previous message ("no LINKEDIN_USERNAME/LINKEDIN_PASSWORD
+      // configured") sent operators down the wrong diagnostic path
+      // because credentials may BE set in .env but `linkedInCredentials`
+      // here can also be undefined when LINKEDIN_AUTO_LOGIN=1 is missing
+      // (see services/platform-factory.ts gate that requires
+      // linkedInAutoLoginEnabled && linkedInUsername && linkedInPassword).
+      // The phrasing below covers both causes and points at the actual
+      // .env knobs the operator needs to set.
       console.warn(
-        `[auth-recovery] no LINKEDIN_USERNAME/LINKEDIN_PASSWORD configured — surfacing AUTH_REQUIRED context=${context}`
+        `[auth-recovery] auto-login not active (need LINKEDIN_AUTO_LOGIN=1 with LINKEDIN_USERNAME and LINKEDIN_PASSWORD set in .env) — surfacing AUTH_REQUIRED context=${context}`
       );
     }
     if (this.deps.linkedInCredentials?.username && this.deps.linkedInCredentials?.password) {
