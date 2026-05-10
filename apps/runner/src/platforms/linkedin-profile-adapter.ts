@@ -618,7 +618,7 @@ async function extractRecentPosts(
       }
       const cards = Array.from(
         document.querySelectorAll(".feed-shared-update-v2, .occludable-update, .scaffold-finite-scroll__content > div")
-      ).slice(0, 8);
+      ).slice(0, 14);
       return cards
         .map((card) => {
           const textNode = card.querySelector(".update-components-text, .feed-shared-update-v2__description") as HTMLElement | null;
@@ -632,7 +632,7 @@ async function extractRecentPosts(
     })
     .catch(() => []);
 
-  return items.slice(0, 5).map((entry) => ({
+  return items.slice(0, 10).map((entry) => ({
     text: entry.text ? safeTruncate(cleanText(entry.text), 600) : null,
     postedAt: entry.postedAt ? safeTruncate(cleanText(entry.postedAt), 80) : null,
     hasImage: Boolean(entry.hasImage)
@@ -654,7 +654,7 @@ async function extractRecentComments(
       }
       const cards = Array.from(
         document.querySelectorAll(".feed-shared-update-v2, .occludable-update, .scaffold-finite-scroll__content > div")
-      ).slice(0, 10);
+      ).slice(0, 14);
       return cards
         .map((card) => {
           const commentNode = card.querySelector(".comments-comment-item__main-content, .update-components-text") as HTMLElement | null;
@@ -669,7 +669,7 @@ async function extractRecentComments(
     })
     .catch(() => []);
 
-  return items.slice(0, 8).map((entry) => ({
+  return items.slice(0, 10).map((entry) => ({
     text: entry.text ? safeTruncate(cleanText(entry.text), 600) : null,
     postedAt: entry.postedAt ? safeTruncate(cleanText(entry.postedAt), 80) : null,
     onPostBy: entry.onPostBy ? safeTruncate(cleanText(entry.onPostBy), 160) : null
@@ -691,7 +691,7 @@ async function extractRecentReactions(
       }
       const cards = Array.from(
         document.querySelectorAll(".feed-shared-update-v2, .occludable-update, .scaffold-finite-scroll__content > div")
-      ).slice(0, 10);
+      ).slice(0, 14);
       return cards
         .map((card) => {
           const textNode = card.querySelector(".update-components-text, .feed-shared-update-v2__description") as HTMLElement | null;
@@ -712,7 +712,7 @@ async function extractRecentReactions(
     })
     .catch(() => []);
 
-  return items.slice(0, 8).map((entry) => ({
+  return items.slice(0, 10).map((entry) => ({
     text: entry.text ? safeTruncate(cleanText(entry.text), 400) : null,
     postedAt: entry.postedAt ? safeTruncate(cleanText(entry.postedAt), 80) : null,
     reaction: entry.reaction ? safeTruncate(cleanText(entry.reaction), 40) : null,
