@@ -16,7 +16,7 @@ interface DegradedBannerProps {
 }
 
 // Calm, single-sentence banner. The voice rule: "Something looks off on
-// {platform}." — no shouty caps, no DEGRADED label. The action link is
+// {platform}." - no shouty caps, no DEGRADED label. The action link is
 // quiet and lives in the same row.
 export function DegradedBanner({
   platform,

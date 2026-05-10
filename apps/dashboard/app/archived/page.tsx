@@ -15,7 +15,7 @@ interface ArchivedResponse {
   rows: InboxRow[];
 }
 
-// Archived threads — rows in the same calm pattern. Click to open the
+// Archived threads - rows in the same calm pattern. Click to open the
 // thread, or use the quiet "unarchive" link to send it back to the inbox.
 export default function ArchivedPage() {
   const router = useRouter();

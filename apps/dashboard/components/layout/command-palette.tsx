@@ -60,7 +60,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       const preview = normalizePreview(thread.preview);
       return {
         id: `thread-${thread.id}`,
-        label: `${thread.personName} — ${preview.slice(0, 60)}${preview.length > 60 ? "…" : ""}`,
+        label: `${thread.personName} - ${preview.slice(0, 60)}${preview.length > 60 ? "…" : ""}`,
         glyph: PLATFORM_LABEL[thread.platform],
         run: () => router.push(`/thread/${thread.id}`)
       };

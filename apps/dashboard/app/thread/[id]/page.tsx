@@ -17,7 +17,7 @@ import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 
-// Thread workspace — landscape layout.
+// Thread workspace - landscape layout.
 //
 //   ┌──────────── chat column (fills) ─────────┬── context rail (360) ──┐
 //   │ back link + thread header                │  WHAT THEY WANT        │
@@ -29,7 +29,7 @@ import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 //
 // The chat column owns the conversation. The right rail keeps "what they
 // want", open loops, and the AI compose helper visible without crowding
-// the message stream — and scrolls independently when content overflows.
+// the message stream - and scrolls independently when content overflows.
 //
 // Behaviour preserved across the rebuild:
 //   • Auto-scroll to the most recent message on open / new send.
@@ -43,7 +43,7 @@ import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 //     (they need direct access to the current draft).
 
 const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (firstName: string) => string }> = [
-  { intent: "Warm yes", glyph: "↵", build: (n) => `Hey ${n}, yes — let's do it.` },
+  { intent: "Warm yes", glyph: "↵", build: (n) => `Hey ${n}, yes - let's do it.` },
   { intent: "Polite pass", glyph: "·", build: (n) => `Hi ${n}, appreciate it but I'll pass for now.` },
   { intent: "Ask for time", glyph: "⏱", build: (n) => `Hey ${n}, can I get back to you next week?` }
 ];
@@ -87,7 +87,7 @@ function formatDayLabel(date: Date): string {
 
 // Build the standard list of schedule-send presets relative to `now`.
 // Times round forward to whole hours / 9 am the next morning, matching the
-// conventions Gmail and the Apple Mail "Send Later" picker use — operators
+// conventions Gmail and the Apple Mail "Send Later" picker use - operators
 // don't expect "in 1 hour" to land at 4:23 pm.
 function buildSchedulePresets(now: Date): Array<{ label: string; sub: string; at: Date }> {
   const inOneHour = new Date(now.getTime() + 60 * 60 * 1000);
@@ -125,7 +125,7 @@ function buildSchedulePresets(now: Date): Array<{ label: string; sub: string; at
 }
 
 // Convert an ISO timestamp to the "YYYY-MM-DDTHH:mm" format that
-// <input type="datetime-local"> expects. Local timezone — the input is
+// <input type="datetime-local"> expects. Local timezone - the input is
 // user-facing, so we want the wall-clock time the operator sees in
 // the existing pill, not UTC.
 function toLocalInputValue(iso: string | null | undefined): string {
@@ -136,7 +136,7 @@ function toLocalInputValue(iso: string | null | undefined): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
-// Format an absolute timestamp for the "scheduled for X" pill — show the
+// Format an absolute timestamp for the "scheduled for X" pill - show the
 // weekday/time if it's in the next 7 days, otherwise the full date.
 function formatScheduledFor(iso: string | null | undefined): string {
   if (!iso) return "";
@@ -223,7 +223,7 @@ export default function ThreadPage() {
     null | { loading: boolean; items: Array<{ label: string; hours: number; reason: string }> }
   >(null);
   const [snoozeMenuOpen, setSnoozeMenuOpen] = useState(false);
-  // Inspectable popover for the memory chip — opens a quick list of
+  // Inspectable popover for the memory chip - opens a quick list of
   // the other threads/notes the AI prompts can pull from.
   const [memoryOpen, setMemoryOpen] = useState(false);
   // Voice-match: rebuilt only when the thread's outbound history
@@ -296,7 +296,7 @@ export default function ThreadPage() {
           setComposerSource("draft");
           return explicitDraft;
         }
-        // No explicit draft — fall back to AI predraft (first suggested
+        // No explicit draft - fall back to AI predraft (first suggested
         // reply) so the operator opens an already-filled composer when
         // /today has pre-warmed the cache.
         const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
@@ -406,7 +406,7 @@ export default function ThreadPage() {
           setPendingSends(next);
         }
       } catch {
-        // Network blip — try again next tick.
+        // Network blip - try again next tick.
       }
     };
     const timer = setInterval(() => void tick(), 3000);
@@ -442,7 +442,7 @@ export default function ThreadPage() {
     stickToBottomRef.current = true;
     try {
       if (attachmentsToSend.length > 0) {
-        // Multipart upload — needed for binary file payloads.
+        // Multipart upload - needed for binary file payloads.
         const form = new FormData();
         form.append("text", text);
         form.append("clientSendId", clientSendId);
@@ -551,7 +551,7 @@ export default function ThreadPage() {
   // Schedule the current composer text to send at `at`. Closes the picker,
   // refreshes the thread (to pick up the new SCHEDULED row), and clears the
   // composer on success. Errors surface in the existing inline error slot
-  // — sends are persisted server-side so an error here is rare (validation
+  // - sends are persisted server-side so an error here is rare (validation
   // only).
   const scheduleSend = useCallback(
     async (at: Date) => {
@@ -831,7 +831,7 @@ export default function ThreadPage() {
   };
 
   // `transform` and `composeFromIntent` are defined further down with
-  // loading-state tracking for the redesign's button labels — the older
+  // loading-state tracking for the redesign's button labels - the older
   // duplicate from #62 was dropped here on the post-merge sweep. The
   // `toggleOpenLoop` helper still lives here because it's used by the
   // right-rail open-loops checkboxes.
@@ -860,7 +860,7 @@ export default function ThreadPage() {
       await apiPost(`/runner/control/thread/${thread.id}/open-loop`, { loop, dismissed });
     } catch (loopError) {
       // Roll back via a fresh refresh; surfacing the error inline is
-      // enough — the operator sees the box flip back.
+      // enough - the operator sees the box flip back.
       const message = loopError instanceof Error ? loopError.message : "Failed to update open loop";
       setError(message);
       void refresh();
@@ -939,7 +939,7 @@ export default function ThreadPage() {
     );
   }, [logs, thread]);
 
-  // Voice match — built from this thread's outbound history. Memos
+  // Voice match - built from this thread's outbound history. Memos
   // live up here (before early returns) so the React hook order is
   // stable across the loading/loaded transition.
   const voiceCorpus = useMemo(() => {
@@ -1071,7 +1071,7 @@ export default function ThreadPage() {
   // otherwise fall back to the static prototype set so the dropdown is
   // never empty. The runner now exposes `suggestedRepliesStatus` and a
   // `source` describing which provider produced the chips (and whether
-  // fallback fired) — both surfaced inline below.
+  // fallback fired) - both surfaced inline below.
   const repliesReady = thread.suggestedReplies.replies.length > 0;
   const repliesGenerating =
     thread.suggestedRepliesStatus === "generating" && !repliesReady;
@@ -1201,7 +1201,7 @@ export default function ThreadPage() {
           className="relative min-h-0 flex-1 overflow-y-auto"
         >
           {/* Glassy sticky header. Sits inside the scroll container so the
-              timeline scrolls visibly behind it — matches the iOS / Apple
+              timeline scrolls visibly behind it - matches the iOS / Apple
               translucent-bar aesthetic the rest of the redesign nods at. */}
           <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-12 pb-4 pt-9">
             <button
@@ -1366,7 +1366,7 @@ export default function ThreadPage() {
               // platform-scraped senderName for an outbound bubble is the
               // operator's own platform identity (e.g. their phone number on
               // iMessage, or whatever LinkedIn writes into the bubble header)
-              // — never useful as a label, sometimes actively wrong (#129,
+              // - never useful as a label, sometimes actively wrong (#129,
               // where iMessage put the contact's number on every bubble).
               const senderLabel =
                 message.direction === "OUT"
@@ -1429,7 +1429,7 @@ export default function ThreadPage() {
                     })()}
                     <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
                       <span>{formatClock(message.timestamp)}</span>
-                      {/* Honest "Sent via automation ✓" — only shown when
+                      {/* Honest "Sent via automation ✓" - only shown when
                           the runner actually flagged this message as sent
                           via the bot, per #65. The previous always-on
                           indicator from #61 was dishonest. */}
@@ -1464,7 +1464,7 @@ export default function ThreadPage() {
                       rows={Math.max(2, Math.min(8, editingScheduledDraft.split("\n").length))}
                       className="w-full resize-y rounded-2xl rounded-br-[6px] border border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink outline-none focus:border-ink-2"
                       onKeyDown={(event) => {
-                        // Cmd/Ctrl-Enter saves, Escape cancels — same shortcuts the
+                        // Cmd/Ctrl-Enter saves, Escape cancels - same shortcuts the
                         // composer uses, so the muscle memory carries over.
                         if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
                           event.preventDefault();
@@ -1671,7 +1671,7 @@ export default function ThreadPage() {
                   className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
                 >
                   <Sparkles className="h-[12px] w-[12px]" />
-                  AI predraft — review before sending
+                  AI predraft - review before sending
                   <button
                     type="button"
                     onClick={() => {
@@ -2071,7 +2071,7 @@ export default function ThreadPage() {
             </section>
           ) : null}
 
-          {/* Open loops — active rows render with an unchecked box; ticking
+          {/* Open loops - active rows render with an unchecked box; ticking
               dismisses the loop (#62). Dismissed loops still render below
               in a muted, struck-through form so the operator can restore
               one by un-ticking. */}

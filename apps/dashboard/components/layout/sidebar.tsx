@@ -33,7 +33,7 @@ const nav: NavItem[] = [
 ];
 
 // 200px labelled sidebar (per #47). Search is a discoverable button at
-// the top that opens the ⌘K palette — gives operators a visible
+// the top that opens the ⌘K palette - gives operators a visible
 // affordance for what was a keyboard-only shortcut after the redesign.
 export function Sidebar({ health, attentionCount, userInitials, onOpenSearch }: SidebarProps) {
   const pathname = usePathname();

@@ -10,7 +10,7 @@ interface ProfileSectionsProps {
   /**
    * When true, skip the big name heading. The People-page inline
    * accordion already shows the person's name on the row directly above
-   * the panel — repeating it inside the panel is redundant. Defaults to
+   * the panel - repeating it inside the panel is redundant. Defaults to
    * false so the thread-page profile drawer (called from a different
    * context) keeps showing the name as before.
    */
@@ -37,7 +37,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
   // Routes the click through the runner so the profile lands in the
   // runner-controlled Chrome (which is signed into LinkedIn) rather
   // than the operator's default browser. Falls back gracefully when
-  // the runner can't reach Chrome — in that case we still open in
+  // the runner can't reach Chrome - in that case we still open in
   // the default browser so the operator isn't blocked.
   const openProfileInRunner = async () => {
     if (!person.profileUrl) return;
@@ -114,7 +114,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
           <ul className="m-0 list-none space-y-2 p-0">
             {enrichment.experience.map((item, idx) => (
               <li key={idx} className="text-[13.5px] leading-[1.5] text-ink">
-                <span className="font-medium">{item.title ?? "—"}</span>
+                <span className="font-medium">{item.title ?? "-"}</span>
                 {item.company ? <span className="text-ink-2"> · {item.company}</span> : null}
                 {item.dates ? (
                   <span className="ml-2 font-mono text-[11px] text-ink-3">{item.dates}</span>
@@ -136,7 +136,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
           <ul className="m-0 list-none space-y-1 p-0">
             {enrichment.education.map((item, idx) => (
               <li key={idx} className="text-[13.5px] leading-[1.5] text-ink">
-                <span className="font-medium">{item.institution ?? "—"}</span>
+                <span className="font-medium">{item.institution ?? "-"}</span>
                 {item.degree ? <span className="text-ink-2"> · {item.degree}</span> : null}
                 {item.field ? <span className="text-ink-2">, {item.field}</span> : null}
                 {item.dates ? (
@@ -154,7 +154,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
           <ul className="m-0 list-none space-y-1 p-0">
             {enrichment.licenses.map((item, idx) => (
               <li key={idx} className="text-[13.5px] leading-[1.5] text-ink">
-                <span className="font-medium">{item.name ?? "—"}</span>
+                <span className="font-medium">{item.name ?? "-"}</span>
                 {item.issuer ? <span className="text-ink-2"> · {item.issuer}</span> : null}
                 {item.dates ? (
                   <span className="ml-2 font-mono text-[11px] text-ink-3">{item.dates}</span>
@@ -207,7 +207,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
               <li key={idx} className="rounded-row border border-hairline p-3 text-[13px] leading-[1.55] text-ink-2">
                 {post.text ? <p className="m-0 whitespace-pre-line">{post.text}</p> : null}
                 <p className="mt-2 font-mono text-[11px] text-ink-3">
-                  {post.postedAt ?? "—"}
+                  {post.postedAt ?? "-"}
                   {post.hasImage ? " · 📷" : ""}
                 </p>
               </li>
@@ -225,7 +225,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
                 {c.text ? <p className="m-0 whitespace-pre-line">{c.text}</p> : null}
                 <p className="mt-2 font-mono text-[11px] text-ink-3">
                   {c.onPostBy ? `on ${c.onPostBy} · ` : ""}
-                  {c.postedAt ?? "—"}
+                  {c.postedAt ?? "-"}
                 </p>
               </li>
             ))}
@@ -243,7 +243,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
                   {r.reaction ?? "reacted"} {r.onPostBy ? `· ${r.onPostBy}` : ""}
                 </p>
                 {r.text ? <p className="mt-1 whitespace-pre-line">{r.text}</p> : null}
-                <p className="mt-2 font-mono text-[11px] text-ink-3">{r.postedAt ?? "—"}</p>
+                <p className="mt-2 font-mono text-[11px] text-ink-3">{r.postedAt ?? "-"}</p>
               </li>
             ))}
           </ul>

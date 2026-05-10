@@ -13,7 +13,7 @@
 //   <55    -> off-voice (red, surfaces the "Rewrite in my voice" affordance)
 //
 // Returns the signals so the UI can render the most informative one in
-// a tooltip ("opens with 'Hi {name}!' — your voice rarely uses
+// a tooltip ("opens with 'Hi {name}!' - your voice rarely uses
 // exclamation in openers").
 
 export interface VoiceCorpusStats {
@@ -113,7 +113,7 @@ export function scoreDraftAgainstCorpus(draft: string, corpus: VoiceCorpusStats)
   let penalty = 0;
 
   // Sentence length deviation. Half-or-double the corpus average is a
-  // strong signal — operator's voice changed register or copy-pasted.
+  // strong signal - operator's voice changed register or copy-pasted.
   if (corpus.averageSentenceLength > 0) {
     const ratio = draftAvgSentenceLength / corpus.averageSentenceLength;
     const drift = Math.abs(Math.log2(Math.max(0.25, ratio))); // log-scale so 2x and 0.5x are equal
@@ -133,13 +133,13 @@ export function scoreDraftAgainstCorpus(draft: string, corpus: VoiceCorpusStats)
   if (draftGreets === 1 && corpus.greetByNameRate < 0.2) {
     penalty += 12;
     signals.push({
-      signal: "Opens with 'Hi {Name}' — your voice rarely greets by name",
+      signal: "Opens with 'Hi {Name}' - your voice rarely greets by name",
       delta: 1
     });
   } else if (draftGreets === 0 && corpus.greetByNameRate > 0.7) {
     penalty += 8;
     signals.push({
-      signal: "No name greeting — you usually open with one",
+      signal: "No name greeting - you usually open with one",
       delta: 1
     });
   }
