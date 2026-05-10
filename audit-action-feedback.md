@@ -52,7 +52,7 @@ Helpers referenced
 |---|---|---|---|---|---|
 | Back to today | thread/[id]/page.tsx:1209 | navigation | navigation | — | 🟢 |
 | Open profile (header click) | thread/[id]/page.tsx:1218 | drawer opens | drawer visible | — | 🟢 |
-| `Reassess` | thread/[id]/page.tsx:1253 | label flip "Reassessing…" + disabled | — (no toast; data refresh) | inline `setError` | 🟡 — label flip only, no success acknowledgement |
+| `Reassess` | thread/[id]/page.tsx:1253 | label flip "Reassessing…" + disabled | risk pill + summary/whatTheyWant + suggested replies all visibly recalculate after refresh | inline `setError` | 🟡 — running is label-only; success is the recomputed risk/summary, but there's no explicit "reassessed" acknowledgement next to the button |
 | `AI assist` toggle | thread/[id]/page.tsx:1261 | rail expands/collapses | visible state | — | 🟢 |
 | `Save draft` | thread/[id]/page.tsx:1269 | — | — | only `setError` | 🔴 silent |
 | `Snooze` (open menu) | thread/[id]/page.tsx:1281 | menu opens; lazy "thinking…" | suggestions render or "No clear time hint" | catch swallowed | 🟢 |
@@ -81,7 +81,7 @@ Helpers referenced
 | Open schedule menu | thread/[id]/page.tsx:1845 | menu opens | menu visible | — | 🟢 |
 | Schedule preset (1h / 3h / Tomorrow / Monday) | thread/[id]/page.tsx:1860 | preset row disabled | scheduled-send pill appears in timeline + composer cleared | inline `setError` | 🟢 |
 | Custom schedule submit | thread/[id]/page.tsx:1883 | label flip "Scheduling…" + disabled; preset rows disabled | scheduled-send pill appears + composer cleared | inline `setError` (incl. validation) | 🟢 |
-| Cancel scheduled send | thread/[id]/page.tsx:1528 | label flip "cancelling…" + disabled | row disappears on refresh | inline `setError` | 🟡 — label flip is the only running indicator; no success toast |
+| Cancel scheduled send | thread/[id]/page.tsx:1528 | label flip "cancelling…" + disabled | scheduled-send pill vanishes from the timeline on refresh | inline `setError` | 🟢 — disappearance is a clear success signal, not just a label flip |
 | Begin edit scheduled (`edit`) | thread/[id]/page.tsx:1514 | inline edit mode opens | textarea + datetime input visible | — | 🟢 |
 | Save edited scheduled | thread/[id]/page.tsx:1494 | label flip "saving…" + disabled | row re-renders with new text/time | inline `setError` | 🟡 — label flip; no toast |
 | Discard scheduled edit | thread/[id]/page.tsx:1502 | exits edit mode | reverts | — | 🟢 |
@@ -107,9 +107,9 @@ Helpers referenced
 
 | Action | File:line | Running | Success | Error | Severity |
 |---|---|---|---|---|---|
-| AI snooze suggestion chip | thread/[id]/page.tsx:1998 | — (menu just closes) | — | inline `setError` | 🔴 silent |
-| Quick snooze `6h` | thread/[id]/page.tsx:2020 | — | — | inline `setError` | 🔴 silent |
-| Quick snooze `1d` | thread/[id]/page.tsx:2034 | — | — | inline `setError` | 🔴 silent |
+| AI snooze suggestion chip | thread/[id]/page.tsx:1998 | popover closes | — (no row-level "snoozed" state on the thread until inbox/today refreshes) | inline `setError` | 🟡 — popover-close is some feedback, but the actual silence is the thread state not reflecting the snooze immediately |
+| Quick snooze `6h` | thread/[id]/page.tsx:2020 | popover closes | — (same) | inline `setError` | 🟡 — same |
+| Quick snooze `1d` | thread/[id]/page.tsx:2034 | popover closes | — (same) | inline `setError` | 🟡 — same |
 
 ### Right rail / open loops
 
@@ -336,7 +336,7 @@ Pure renderer for `<img>/<video>/<audio>/<a>`. No user actions beyond native med
 | Action | File:line | Running | Success | Error | Severity |
 |---|---|---|---|---|---|
 | `runner-resync` listener (forces refresh on every page) | app-shell.tsx:107 | — | — | — | n/a |
-| Auto-scan poller (every 10 min, when toggled on) | app-shell.tsx:82 | passive: status bar surfaces `Scanning …` when runner picks up | status bar transitions out | swallowed (`.catch`) — no error toast | 🟡 (background, not directly user-triggered) |
+| Auto-scan poller (every 10 min, when toggled on) | app-shell.tsx:82 | passive: status bar surfaces `Scanning …` when runner picks up | status bar transitions out | swallowed (`.catch`) | n/a (background, not user-triggered) |
 
 ---
 
@@ -352,68 +352,73 @@ These call `runAction` with only `setError`; on the happy path the operator sees
 2. **Thread › `Mark as handled` (toolbar)** — thread/[id]/page.tsx:1301
 3. **Thread › `Open in {platform}`** — thread/[id]/page.tsx:1313
 4. **Thread › `Rescan`** — thread/[id]/page.tsx:1319
-5. **Thread › Snooze suggestion chip (AI)** — thread/[id]/page.tsx:1998
-6. **Thread › Snooze quick chip `6h`** — thread/[id]/page.tsx:2020
-7. **Thread › Snooze quick chip `1d`** — thread/[id]/page.tsx:2034
-8. **Thread › Recovery `Open browser to sign in`** — thread/[id]/page.tsx:756
-9. **Thread › Recovery `Run selector tests`** — thread/[id]/page.tsx:765
-10. **Thread › Recovery `Reset session`** — thread/[id]/page.tsx:775
-11. **Today › Degraded banner `Run selector tests`** — today/page.tsx:277
-12. **Inbox › Degraded banner `Run selector tests`** — inbox/page.tsx:179
-13. **Thread › Degraded banner `Run selector tests`** — thread/[id]/page.tsx:1186
-14. **Platforms › Degraded banner `Run selector tests`** — platforms/page.tsx:82
-15. **Platforms › More menu `Reconnect`** — platforms/page.tsx:182
-16. **Platforms › More menu `Run selector tests`** — platforms/page.tsx:193
-17. **Platforms › More menu `Reset session…`** — platforms/page.tsx:202 (has `window.confirm`, but that's input, not feedback)
-18. **Archived › `Unarchive`** — archived/page.tsx:96
-19. **Command palette › `Run scan now`** — command-palette.tsx:50 (catch is swallowed; palette merely closes)
-20. **Status bar › `grant access`** — system-status-bar.tsx:241 (fire-and-forget fetch; permission reset has no acknowledgement either way)
+5. **Thread › Recovery `Open browser to sign in`** — thread/[id]/page.tsx:756
+6. **Thread › Recovery `Run selector tests`** — thread/[id]/page.tsx:765
+7. **Thread › Recovery `Reset session`** — thread/[id]/page.tsx:775
+8. **Today › Degraded banner `Run selector tests`** — today/page.tsx:277
+9. **Inbox › Degraded banner `Run selector tests`** — inbox/page.tsx:179
+10. **Thread › Degraded banner `Run selector tests`** — thread/[id]/page.tsx:1186
+11. **Platforms › Degraded banner `Run selector tests`** — platforms/page.tsx:82
+12. **Platforms › More menu `Reconnect`** — platforms/page.tsx:182
+13. **Platforms › More menu `Run selector tests`** — platforms/page.tsx:193
+14. **Platforms › More menu `Reset session…`** — platforms/page.tsx:202 (has `window.confirm`, but that's input, not feedback)
+15. **Archived › `Unarchive`** — archived/page.tsx:96
+16. **Command palette › `Run scan now`** — command-palette.tsx:50 (catch is swallowed; palette merely closes)
+17. **Status bar › `grant access`** — system-status-bar.tsx:241 (fire-and-forget fetch; permission reset has no acknowledgement either way)
 
 ## P1 — partial (🟡) actions where the only feedback is a label flip / disabled state
 
 Convention says label flip alone is **not** sufficient. Add an inline running indicator (spinner) **and** an explicit success surface (toast / status chip / "saved" badge).
 
-21. **Thread › `Reassess`** — thread/[id]/page.tsx:1253 (label only, no success state)
-22. **Thread › `Shorten`** — thread/[id]/page.tsx:1828 (label flip only)
-23. **Thread › `Make warmer`** — thread/[id]/page.tsx:1836 (label flip only)
-24. **Thread › `rewrite in my voice`** — thread/[id]/page.tsx:1741 (label flip only)
-25. **Thread › Recovery `Grant Messages access`** — thread/[id]/page.tsx:744 (success message reuses the error slot — confusing)
-26. **Thread › Cancel scheduled send** — thread/[id]/page.tsx:1528 (label flip only; no success toast)
-27. **Thread › Save edited scheduled send** — thread/[id]/page.tsx:1494 (label flip only; no success toast)
-28. **Today › `Snooze ’til tomorrow`** — today/page.tsx:346 (covered by hero transition only; no toast)
-29. **Today › `Mark as handled`** — today/page.tsx:360 (covered by hero transition only)
-30. **At-risk › Focus modal `mark handled`** — at-risk/page.tsx:257 (no spinner; success implied by advance only)
-31. **People › `Start a conversation`** — people/page.tsx:430 (label flip; errors swallowed by `loadDetail.catch`)
-32. **People › `Save & enrich`** — people/page.tsx:360 (label flip only; success only via re-render)
-33. **Settings › `Headless browser` toggle** — settings/page.tsx:318 (only `saving` disable, global "saved" chip)
-34. **Settings › `Demo data` toggle** — settings/page.tsx:327 (same)
-35. **Settings › `Save settings`** — settings/page.tsx:530 (no per-button running label/spinner; only global `saved` chip)
-36. **Settings › `Restart runner`** — settings/page.tsx:548 (no "restarting…" label; the top-strip variant does have one)
-37. **Settings › Scan interval / Amber / Red / Max-msgs inputs** — settings/page.tsx:402–447 (no dirty-state indicator before Save)
-38. **Settings › AI provider buttons** — settings/page.tsx:461 (uncommitted; no dirty hint)
-39. **Settings › Provider model input** — settings/page.tsx:515 (same)
-40. **Settings › Enabled platform toggle** — settings/page.tsx:489 (same)
-41. **Profile drawer › `Rescan`** — profile-drawer.tsx:94 (label flip + spinner; no explicit success acknowledgement)
-42. **Profile drawer › `Save & enrich`** — profile-drawer.tsx:127 (label flip only; no toast)
-43. **Status bar › `cancel`** — system-status-bar.tsx:252 (label flip; errors only `console.warn`)
-44. **Name suggestion › `Use {inferredName}`** — name-suggestion-pill.tsx:122 (only disabled state; **errors silently swallowed**)
-45. **Name suggestion › `Save` (rename)** — name-suggestion-pill.tsx:108 (only disabled; errors swallowed)
-46. **Name suggestion › `Not this one` (dismiss)** — name-suggestion-pill.tsx:143 (only disabled; errors swallowed)
+18. **Thread › `Reassess`** — thread/[id]/page.tsx:1253 (label flip; success is the recomputed risk pill but no explicit acknowledgement)
+19. **Thread › `Shorten`** — thread/[id]/page.tsx:1828 (label flip only)
+20. **Thread › `Make warmer`** — thread/[id]/page.tsx:1836 (label flip only)
+21. **Thread › `rewrite in my voice`** — thread/[id]/page.tsx:1741 (label flip only)
+22. **Thread › Recovery `Grant Messages access`** — thread/[id]/page.tsx:744 (**bug**: success message reuses the error slot, so the operator reads a "permission reset triggered…" instruction styled like an error)
+23. **Thread › Save edited scheduled send** — thread/[id]/page.tsx:1494 (label flip only; no success toast)
+24. **Thread › Snooze suggestion chip (AI)** — thread/[id]/page.tsx:1998 (popover closes, but the thread row's "snoozed" state isn't visible until inbox/today refreshes — the *real* silence)
+25. **Thread › Snooze quick chip `6h`** — thread/[id]/page.tsx:2020 (same)
+26. **Thread › Snooze quick chip `1d`** — thread/[id]/page.tsx:2034 (same)
+27. **Today › `Snooze ’til tomorrow`** — today/page.tsx:346 (covered by hero transition only; no toast)
+28. **Today › `Mark as handled`** — today/page.tsx:360 (covered by hero transition only)
+29. **At-risk › Focus modal `mark handled`** — at-risk/page.tsx:257 (no spinner; success implied by advance only)
+30. **People › `Start a conversation`** — people/page.tsx:430 (label flip; errors swallowed by `loadDetail.catch`)
+31. **People › `Save & enrich`** — people/page.tsx:360 (label flip only; success only via re-render)
+32. **Settings › `Headless browser` toggle** — settings/page.tsx:318 (only `saving` disable, global "saved" chip)
+33. **Settings › `Demo data` toggle** — settings/page.tsx:327 (same)
+34. **Settings › `Save settings`** — settings/page.tsx:530 (no per-button running label/spinner; only global `saved` chip)
+35. **Settings › `Restart runner`** — settings/page.tsx:548 (no "restarting…" label; the top-strip variant does have one)
+36. **Settings › Scan interval / Amber / Red / Max-msgs inputs** — settings/page.tsx:402–447 (no dirty-state indicator before Save)
+37. **Settings › AI provider buttons** — settings/page.tsx:461 (uncommitted; no dirty hint)
+38. **Settings › Provider model input** — settings/page.tsx:515 (same)
+39. **Settings › Enabled platform toggle** — settings/page.tsx:489 (same)
+40. **Profile drawer › `Rescan`** — profile-drawer.tsx:94 (label flip + spinner; no explicit success acknowledgement)
+41. **Profile drawer › `Save & enrich`** — profile-drawer.tsx:127 (label flip only; no toast)
+42. **Status bar › `cancel`** — system-status-bar.tsx:252 (label flip; errors only `console.warn`)
+43. **Name suggestion › `Use {inferredName}`** — name-suggestion-pill.tsx:122 (**bug**: try/finally with no catch silently swallows rename errors)
+44. **Name suggestion › `Save` (rename)** — name-suggestion-pill.tsx:108 (same swallowed-error bug)
+45. **Name suggestion › `Not this one` (dismiss)** — name-suggestion-pill.tsx:143 (same swallowed-error bug)
 
 ## Cross-cutting recommendations
 
 - **Standardise on `runActionWithFeedback`** for any action that hits `apiPost`. The pending → success/error toast lifecycle covers all three states with one call. Reserve `runAction` for cases where another inline surface (status bar, optimistic UI) already covers running + success.
 - **Wire `DegradedBanner` callers consistently.** Today, Inbox, Thread and Platforms all wrap `onRunSelectorTests` in `runAction` (silent on success). Either move `runActionWithFeedback` into the banner itself (component-owned feedback) or fix all four call sites.
-- **`NameSuggestionPill` swallows errors** in its private `call` helper (no `catch`). At minimum, surface an inline error so a failed rename/dismiss isn't invisible.
+- **`NameSuggestionPill` swallows errors** in its private `call` helper (no `catch`). This is a real bug, not just polish — a failed rename/dismiss is currently invisible to the operator. Fix on its own merits.
+- **`Grant Messages access` reuses the error slot for a success message.** The operator sees instructional success copy styled identically to a failure. Treat as a bug; route through a toast.
 - **Status-bar `grant access` and `cancel`** bypass user feedback (`catch {}` / `console.warn`). Route these through `showToast` so failures aren't invisible.
 - **Settings advanced inputs** are committed only by `Save settings`. Without a dirty-state indicator the operator can't tell their edits are uncommitted; add a chip ("unsaved") or auto-save on blur to match the operator-profile / notes pattern that already works well.
+
+## Out of scope / followups
+
+- **Accessibility / screen-reader announcements.** This audit only checked sighted-user feedback (toasts, spinners, label flips, status chips). The same rule should arguably extend to `aria-live` regions: a sighted operator gets a toast; a screen-reader operator needs an equivalent announcement. The `ToastHost` already uses `role="status"` / `role="alert"`, but the inline patterns (label flips, status chips, optimistic UI) are mostly silent to assistive tech. A separate sweep would catch the gap.
+- **Latency-tier prioritisation.** A 50ms local toggle probably doesn't need a spinner; a 3s LinkedIn rescan absolutely does. The 🔴/🟡 lists above mix both. When fixing, weight by expected duration: actions hitting the runner / browser / AI provider need the strongest feedback (toast + status-bar entry); pure local-state actions can lean on inline updates alone.
 
 ---
 
 ## Summary
 
-- 🔴 silent: **20** actions
-- 🟡 partial: **26** actions
-- 🟢 fully covered: ~55 actions (navigation, drawer toggles, send pipeline, toast-based platform actions, debounced text inputs, etc.)
+- 🔴 silent: **17** actions
+- 🟡 partial: **28** actions
+- 🟢 fully covered: ~56 actions (navigation, drawer toggles, send pipeline, toast-based platform actions, debounced text inputs, scheduled-send cancellation via timeline disappearance, etc.)
 
-Bringing the 20 silent actions onto `runActionWithFeedback` and giving the 26 partial ones an explicit success acknowledgement (toast or inline status) would bring the dashboard into compliance with the AGENTS.md feedback rule.
+Bringing the 17 silent actions onto `runActionWithFeedback` and giving the 28 partial ones an explicit success acknowledgement (toast or inline status) would bring the dashboard into compliance with the AGENTS.md feedback rule. The two outright bugs (`NameSuggestionPill` swallowed errors, `Grant Messages access` success-in-error-slot) are worth fixing on their own merits even ahead of the broader feedback work.
