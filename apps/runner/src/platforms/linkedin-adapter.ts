@@ -7865,8 +7865,56 @@ export class LinkedInAdapter implements PlatformAdapter {
             (await readText(root.locator(".msg-s-message-group__name").first())) ??
             ""
         );
-        const timeLocator = root.locator("time").first();
-        const timestamp = clean((await readAttr(timeLocator, "datetime")) ?? (await readText(timeLocator)) ?? "");
+        // Pull the bubble's time-of-day AND the enclosing group LI's date
+        // heading in one DOM round-trip. The previous version only read
+        // the bubble's <time> (typically just "10:59 PM" with no date),
+        // so downstream normalisation had to guess "today/yesterday" and
+        // got it wrong for any message older than ~24h. The sibling
+        // extractor `collectVisibleThreadMessages` already had this
+        // logic — bringing parity here.
+        const bubbleTimeData = await root
+          .evaluate((el: Element) => {
+            const cleanInner = (value: string | null | undefined): string =>
+              (value ?? "").replace(/\s+/g, " ").trim();
+            const bubbleTimes = Array.from(el.querySelectorAll("time")).filter(
+              (t) => !t.matches("time.msg-s-message-list__time-heading")
+            );
+            const timeEl = bubbleTimes[0] ?? null;
+            const groupLi = el.closest("li.msg-s-message-list__event");
+            const heading = groupLi?.querySelector("time.msg-s-message-list__time-heading");
+            return {
+              timeText: cleanInner(timeEl?.textContent ?? ""),
+              timeDatetimeAttr: timeEl?.getAttribute("datetime") ?? null,
+              dateHeadingText: cleanInner(heading?.textContent ?? "")
+            };
+          })
+          .catch(() => ({ timeText: "", timeDatetimeAttr: null as string | null, dateHeadingText: "" }));
+
+        // Prefer datetime attribute (rare, but fully qualified). Otherwise
+        // combine date heading + time-of-day. Leave timestamp empty if we
+        // resolved nothing — fetchThreadMessages's downstream fallback will
+        // attach a per-message scan-time stamp, but only as a last resort.
+        let timestamp = "";
+        if (bubbleTimeData.timeDatetimeAttr) {
+          const parsedAttr = Date.parse(bubbleTimeData.timeDatetimeAttr);
+          if (!Number.isNaN(parsedAttr)) {
+            timestamp = new Date(parsedAttr).toISOString();
+          }
+        }
+        if (!timestamp && bubbleTimeData.timeText) {
+          const combined = parseLinkedInMessageTimestamp(
+            bubbleTimeData.timeText,
+            bubbleTimeData.dateHeadingText,
+            new Date()
+          );
+          if (combined) {
+            timestamp = combined.toISOString();
+          } else {
+            // Fall through to raw text so downstream normalizeTimestamp
+            // can still try its own parsing path.
+            timestamp = bubbleTimeData.timeText;
+          }
+        }
         const basePlatformMessageKey = await readMessageKey(root, index);
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
