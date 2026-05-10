@@ -41,6 +41,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     const pages: PaletteItem[] = [
       { id: "today", label: "Go to Today", glyph: "↵", run: () => router.push("/today") },
       { id: "inbox", label: "Go to Inbox", glyph: "↵", run: () => router.push("/inbox") },
+      { id: "at-risk", label: "Go to At Risk", glyph: "↵", run: () => router.push("/at-risk") },
+      { id: "archived", label: "Go to Archived", glyph: "↵", run: () => router.push("/archived") },
       { id: "people", label: "Go to People", glyph: "↵", run: () => router.push("/people") },
       { id: "platforms", label: "Go to Platforms", glyph: "↵", run: () => router.push("/platforms") },
       { id: "logs", label: "Go to Activity", glyph: "↵", run: () => router.push("/logs") },
