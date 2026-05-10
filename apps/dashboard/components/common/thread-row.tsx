@@ -31,6 +31,15 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
       : risk === "waiting"
         ? "Waiting"
         : formatRelative(row.lastInboundAt ?? row.lastMessageAt);
+  const category = row.category?.toLowerCase();
+  const categoryLabel =
+    category === "genuine" ? "genuine" : category === "outreach" ? "outreach" : null;
+  // "needs reply" is more conservative than the `needsReply` flag on the
+  // row: only inbound, only when there's something unread, and only on
+  // threads the operator hasn't archived. Surfaced as a quiet inline
+  // marker so the operator can spot it while scanning the list.
+  const needsReplyMarker =
+    row.lastMessageDirection === "IN" && row.unreadCount > 0 && !row.archivedAt;
 
   return (
     <Link
@@ -63,6 +72,16 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
               currentName={row.personName}
               onChanged={() => onPersonChanged?.()}
             />
+          ) : null}
+          {categoryLabel ? (
+            <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
+              · {categoryLabel}
+            </span>
+          ) : null}
+          {needsReplyMarker ? (
+            <span className="font-mono text-[11px] tracking-[0.02em] text-risk-overdue">
+              · needs reply
+            </span>
           ) : null}
         </span>
         <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>

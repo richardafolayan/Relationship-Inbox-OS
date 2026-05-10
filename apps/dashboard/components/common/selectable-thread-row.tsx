@@ -46,6 +46,11 @@ export function SelectableThreadRow({
       : risk === "waiting"
         ? "Waiting"
         : formatRelative(row.lastInboundAt ?? row.lastMessageAt);
+  const category = row.category?.toLowerCase();
+  const categoryLabel =
+    category === "genuine" ? "genuine" : category === "outreach" ? "outreach" : null;
+  const needsReplyMarker =
+    row.lastMessageDirection === "IN" && row.unreadCount > 0 && !row.archivedAt;
 
   const renamePill = row.personId
     ? row.personInferredName
@@ -97,6 +102,16 @@ export function SelectableThreadRow({
             {PLATFORM_LABEL[row.platform]}
           </span>
           {renamePill}
+          {categoryLabel ? (
+            <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
+              · {categoryLabel}
+            </span>
+          ) : null}
+          {needsReplyMarker ? (
+            <span className="font-mono text-[11px] tracking-[0.02em] text-risk-overdue">
+              · needs reply
+            </span>
+          ) : null}
         </span>
         <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>
       </span>
