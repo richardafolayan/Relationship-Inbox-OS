@@ -369,7 +369,11 @@ export default function InboxPage() {
           {!selectMode ? (
             <div className="mb-3 flex items-center justify-between">
               <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                Tip: ⌘-click a row to select multiple at once.
+                Tip:{" "}
+                <kbd className="rounded border border-hairline-strong bg-paper-2 px-[5px] py-[1px] font-mono text-[11px] normal-case tracking-normal text-ink-2">
+                  ⌘
+                </kbd>
+                -click a row to select multiple at once.
               </p>
               <button
                 type="button"
