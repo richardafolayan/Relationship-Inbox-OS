@@ -8023,8 +8023,14 @@ export class LinkedInAdapter implements PlatformAdapter {
     rows.sort((left, right) => {
       const leftTime = Date.parse(left.timestamp);
       const rightTime = Date.parse(right.timestamp);
-      const safeLeft = Number.isNaN(leftTime) ? 0 : leftTime;
-      const safeRight = Number.isNaN(rightTime) ? 0 : rightTime;
+      // Empty / unparseable timestamps go to the END (treated as
+      // "newest unknown") so they don't get sorted before real messages
+      // and break downstream inherit-from-previous logic. Was Number(0)
+      // — that put continuation bubbles (no <time>) at the start of
+      // the array, which broke fetchThreadMessages's chronological
+      // inherit pass for any thread containing a continuation bubble.
+      const safeLeft = Number.isNaN(leftTime) ? Number.POSITIVE_INFINITY : leftTime;
+      const safeRight = Number.isNaN(rightTime) ? Number.POSITIVE_INFINITY : rightTime;
       return safeLeft - safeRight;
     });
     this.logTraceEvent({
