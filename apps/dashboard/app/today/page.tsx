@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import type { HealthResponse, InboxResponse, PlatformCard, ThreadResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
@@ -275,10 +276,15 @@ export default function TodayPage() {
           screenshotFile={degraded.lastScanFailure?.screenshotFile}
           domDumpFile={degraded.lastScanFailure?.domDumpFile}
           onRunSelectorTests={() =>
-            runAction(
+            runActionWithFeedback(
               apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-              setError,
-              refresh
+              {
+                pending: `Running selector tests for ${degraded.platform}…`,
+                success: `Selector tests queued for ${degraded.platform}`,
+                failure: `Selector tests failed for ${degraded.platform}`,
+                setError,
+                onDone: () => refresh()
+              }
             )
           }
         />
@@ -347,10 +353,16 @@ export default function TodayPage() {
                 variant="ghost"
                 onClick={() => {
                   const id = hero.id;
-                  runAction(
+                  const name = hero.personName;
+                  runActionWithFeedback(
                     apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }),
-                    setError,
-                    refresh
+                    {
+                      pending: `Snoozing ${name} until tomorrow…`,
+                      success: `Snoozed ${name} until tomorrow`,
+                      failure: "Couldn't snooze thread",
+                      setError,
+                      onDone: () => refresh()
+                    }
                   );
                   advanceHero(id, "Snoozed - next up");
                 }}
@@ -361,10 +373,16 @@ export default function TodayPage() {
                 variant="ghost"
                 onClick={() => {
                   const id = hero.id;
-                  runAction(
+                  const name = hero.personName;
+                  runActionWithFeedback(
                     apiPost(`/runner/control/thread/${id}/mark-done`, {}),
-                    setError,
-                    refresh
+                    {
+                      pending: `Marking ${name} as handled…`,
+                      success: `Marked ${name} as handled`,
+                      failure: "Couldn't mark as handled",
+                      setError,
+                      onDone: () => refresh()
+                    }
                   );
                   advanceHero(id, "Handled - next up");
                 }}

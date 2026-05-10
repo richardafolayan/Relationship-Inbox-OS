@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { SelectableThreadRow } from "@/components/common/selectable-thread-row";
@@ -439,10 +440,15 @@ export default function InboxPage() {
             logs.find((log) => log.platform === degraded.platform && log.domDumpFile)?.domDumpFile
           }
           onRunSelectorTests={() =>
-            runAction(
+            runActionWithFeedback(
               apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-              setError,
-              refresh
+              {
+                pending: `Running selector tests for ${degraded.platform}…`,
+                success: `Selector tests queued for ${degraded.platform}`,
+                failure: `Selector tests failed for ${degraded.platform}`,
+                setError,
+                onDone: () => refresh()
+              }
             )
           }
           onOpenReceipts={() => setReceiptsOpen(true)}

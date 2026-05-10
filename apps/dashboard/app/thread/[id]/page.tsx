@@ -7,6 +7,7 @@ import { v4 as uuid } from "uuid";
 import { ChevronDown, ChevronLeft, Clock, Loader2, Mic, MoreHorizontal, Paperclip, Send, Sparkles } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { IMessageMedia } from "@/components/thread/imessage-media";
 import { formatClock, formatRelative } from "@/lib/time";
@@ -742,10 +743,12 @@ export default function ThreadPage() {
         await apiPost(`/runner/control/thread/${thread.id}/update-send`, body);
         cancelEditScheduled();
         await refresh();
+        showToast({ kind: "success", title: "Scheduled send updated" });
       } catch (saveError) {
         const message =
           saveError instanceof Error ? saveError.message : "Failed to update scheduled send";
         setError(message);
+        showToast({ kind: "error", title: "Couldn't update scheduled send", description: message });
       } finally {
         setSavingScheduledId(null);
       }
@@ -836,44 +839,60 @@ export default function ThreadPage() {
         if (platformName === "IMESSAGE") {
           return {
             label: "Grant Messages access",
-            run: async () => {
-              try {
-                await apiPost("/runner/control/imessage/permission-reset", {});
-                setError(
-                  "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then click retry."
-                );
-              } catch (err) {
-                setError(err instanceof Error ? err.message : "Permission reset failed");
-              }
-            }
+            run: () =>
+              runActionWithFeedback(
+                apiPost("/runner/control/imessage/permission-reset", {}),
+                {
+                  pending: "Resetting Messages permission…",
+                  success:
+                    "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then retry.",
+                  failure: "Permission reset failed",
+                  setError
+                }
+              )
           };
         }
         return {
           label: "Open browser to sign in",
           run: () =>
-            runAction(
+            runActionWithFeedback(
               apiPost("/runner/control/platform/open-browser", { platform: platformName }),
-              setError
+              {
+                pending: `Opening ${platformName} sign-in…`,
+                success: `Sign-in window opened for ${platformName}`,
+                failure: `Couldn't open ${platformName} sign-in`,
+                setError
+              }
             )
         };
       case "SELECTOR_FAIL":
         return {
           label: "Run selector tests",
           run: () =>
-            runAction(
+            runActionWithFeedback(
               apiPost("/runner/control/platform/test-selectors", { platform: platformName }),
-              setError,
-              refresh
+              {
+                pending: `Running selector tests for ${platformName}…`,
+                success: `Selector tests queued for ${platformName}`,
+                failure: `Selector tests failed for ${platformName}`,
+                setError,
+                onDone: () => refresh()
+              }
             )
         };
       case "PROFILE_LOCKED":
         return {
           label: "Reset session",
           run: () =>
-            runAction(
+            runActionWithFeedback(
               apiPost("/runner/control/platform/reset-session", { platform: platformName }),
-              setError,
-              refresh
+              {
+                pending: `Resetting ${platformName} session…`,
+                success: `${platformName} session reset — you'll need to sign in again`,
+                failure: `Couldn't reset ${platformName} session`,
+                setError,
+                onDone: () => refresh()
+              }
             )
         };
       default:
@@ -971,9 +990,11 @@ export default function ThreadPage() {
     try {
       await apiPost(`/runner/control/thread/${thread.id}/reassess`, {});
       await refresh();
+      showToast({ kind: "success", title: `Reassessed ${thread.personName}` });
     } catch (reassessError) {
       const message = reassessError instanceof Error ? reassessError.message : "Reassess failed";
       setError(message);
+      showToast({ kind: "error", title: "Reassess failed", description: message });
     } finally {
       setReassessing(false);
     }
@@ -989,9 +1010,18 @@ export default function ThreadPage() {
         text: composer
       });
       setComposer(output.text);
+      showToast({
+        kind: "success",
+        title: mode === "SHORTEN" ? "Draft shortened" : "Draft made warmer"
+      });
     } catch (transformError) {
       const message = transformError instanceof Error ? transformError.message : "Transform failed";
       setError(message);
+      showToast({
+        kind: "error",
+        title: mode === "SHORTEN" ? "Couldn't shorten draft" : "Couldn't warm draft",
+        description: message
+      });
     } finally {
       setTransforming(null);
     }
@@ -1303,10 +1333,15 @@ export default function ThreadPage() {
               screenshotFile={degraded.lastScanFailure?.screenshotFile}
               domDumpFile={degradedDomDump}
               onRunSelectorTests={() =>
-                runAction(
+                runActionWithFeedback(
                   apiPost("/runner/control/platform/test-selectors", { platform: degraded.platform }),
-                  setError,
-                  refresh
+                  {
+                    pending: `Running selector tests for ${degraded.platform}…`,
+                    success: `Selector tests queued for ${degraded.platform}`,
+                    failure: `Selector tests failed for ${degraded.platform}`,
+                    setError,
+                    onDone: () => refresh()
+                  }
                 )
               }
               onOpenReceipts={() => setReceiptsOpen(true)}
@@ -1388,9 +1423,14 @@ export default function ThreadPage() {
               <Button
                 variant="ghost"
                 onClick={() =>
-                  runAction(
+                  runActionWithFeedback(
                     apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                    setError
+                    {
+                      pending: "Saving draft…",
+                      success: "Draft saved",
+                      failure: "Couldn't save draft",
+                      setError
+                    }
                   )
                 }
               >
@@ -1418,15 +1458,24 @@ export default function ThreadPage() {
               <Button
                 variant="ghost"
                 onClick={() =>
-                  runAction(
+                  runActionWithFeedback(
                     apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                    setError,
-                    refresh
+                    {
+                      pending: "Marking as handled…",
+                      success: `Marked ${thread.personName} as handled`,
+                      failure: "Couldn't mark as handled",
+                      setError,
+                      onDone: () => refresh()
+                    }
                   )
                 }
               >
                 Mark as handled
               </Button>
+              {/* Kebab keeps Open / Rescan / Receipts out of the flat row
+               * (per Q1 of v0.3.0) while each item still gets full
+               * pending → success/error toast coverage via
+               * runActionWithFeedback. */}
               <Menu
                 align="end"
                 trigger={
@@ -1443,16 +1492,29 @@ export default function ThreadPage() {
                   {
                     label: `Open in ${platformLabel}`,
                     onSelect: () =>
-                      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
+                      runActionWithFeedback(
+                        apiPost(`/runner/control/thread/${thread.id}/open`, {}),
+                        {
+                          pending: `Opening in ${platformLabel}…`,
+                          success: `Opened in ${platformLabel}`,
+                          failure: `Couldn't open in ${platformLabel}`,
+                          setError
+                        }
+                      )
                   },
                   {
                     label: rescanStage ? `${rescanStage}…` : "Rescan",
                     onSelect: () => {
                       if (rescanStage) return;
-                      runAction(
+                      runActionWithFeedback(
                         apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
-                        setError,
-                        refresh
+                        {
+                          pending: `Rescanning thread with ${thread.personName}…`,
+                          success: `Rescan queued for ${thread.personName}`,
+                          failure: "Rescan failed",
+                          setError,
+                          onDone: () => refresh()
+                        }
                       );
                     }
                   },
@@ -1896,6 +1958,9 @@ export default function ThreadPage() {
                       · {voiceScore.signals[0].signal.toLowerCase()}
                     </span>
                   ) : null}
+                  {/* Voice-rewrite trigger moved to the always-available
+                   * composer toolbar below per Q7 of v0.3.0. The voice-meter
+                   * block here is now indicator-only. */}
                 </div>
               ) : null}
               <div className="mt-[12px] flex flex-wrap items-center gap-3 border-t border-hairline pt-[12px]">
@@ -1990,11 +2055,13 @@ export default function ThreadPage() {
                       })
                         .then((r) => {
                           if (r.text) setComposer(r.text);
+                          showToast({ kind: "success", title: "Rewrote in your voice" });
                         })
                         .catch((rewriteErr: unknown) => {
                           const message =
                             rewriteErr instanceof Error ? rewriteErr.message : "Rewrite failed";
                           setError(message);
+                          showToast({ kind: "error", title: "Voice rewrite failed", description: message });
                         })
                         .finally(() => setVoiceRewritePending(false));
                     }}
@@ -2157,10 +2224,15 @@ export default function ThreadPage() {
                       type="button"
                       title={s.reason}
                       onClick={() => {
-                        runAction(
+                        runActionWithFeedback(
                           apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: s.hours }),
-                          setError,
-                          refresh
+                          {
+                            pending: `Snoozing ${thread.personName} for ${s.hours}h…`,
+                            success: `Snoozed ${thread.personName} for ${s.hours}h (${s.label})`,
+                            failure: "Couldn't snooze thread",
+                            setError,
+                            onDone: () => refresh()
+                          }
                         );
                         setSnoozeMenuOpen(false);
                       }}
@@ -2178,10 +2250,15 @@ export default function ThreadPage() {
                   <button
                     type="button"
                     onClick={() => {
-                      runAction(
+                      runActionWithFeedback(
                         apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 6 }),
-                        setError,
-                        refresh
+                        {
+                          pending: `Snoozing ${thread.personName} for 6h…`,
+                          success: `Snoozed ${thread.personName} for 6h`,
+                          failure: "Couldn't snooze thread",
+                          setError,
+                          onDone: () => refresh()
+                        }
                       );
                       setSnoozeMenuOpen(false);
                     }}
@@ -2192,10 +2269,15 @@ export default function ThreadPage() {
                   <button
                     type="button"
                     onClick={() => {
-                      runAction(
+                      runActionWithFeedback(
                         apiPost(`/runner/control/thread/${thread.id}/snooze`, { hours: 24 }),
-                        setError,
-                        refresh
+                        {
+                          pending: `Snoozing ${thread.personName} for 1d…`,
+                          success: `Snoozed ${thread.personName} for 1d`,
+                          failure: "Couldn't snooze thread",
+                          setError,
+                          onDone: () => refresh()
+                        }
                       );
                       setSnoozeMenuOpen(false);
                     }}

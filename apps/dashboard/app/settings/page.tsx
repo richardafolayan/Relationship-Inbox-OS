@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
+import { showToast } from "@/lib/feedback";
 import type { AppSettings, HealthResponse, OperatorProfile } from "@/lib/types";
 import type { AiProvider } from "@inbox-os/core";
 import { Button } from "@/components/ui/button";
@@ -80,6 +81,11 @@ type Platform = (typeof PLATFORMS)[number];
 
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  // Snapshot of `settings` as last persisted by the server. Used to detect
+  // unsaved local edits in the Advanced panel (scan thresholds, AI
+  // provider, model, enabled platforms) so the operator gets a "● unsaved"
+  // chip instead of guessing whether their change is committed.
+  const [persistedSettings, setPersistedSettings] = useState<AppSettings | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
@@ -119,7 +125,10 @@ export default function SettingsPage() {
       apiGet<AiStatus>("/runner/data/ai-status").catch(() => null),
       apiGet<OperatorProfile>("/runner/data/operator-profile").catch(() => null)
     ]);
-    if (settingsData) setSettings(settingsData);
+    if (settingsData) {
+      setSettings(settingsData);
+      setPersistedSettings(settingsData);
+    }
     setAiStatus(aiData);
     if (operatorData) setOperatorProfile(operatorData);
   }, []);
@@ -165,14 +174,18 @@ export default function SettingsPage() {
     try {
       const next = await apiPost<AppSettings>("/runner/control/settings", partial);
       setSettings(next);
+      setPersistedSettings(next);
       setSavedAt(Date.now());
+      showToast({ kind: "success", title: "Settings saved" });
       // Refresh ai-status after settings change so the missing-key warning
       // reflects the active provider.
       void apiGet<AiStatus>("/runner/data/ai-status")
         .then(setAiStatus)
         .catch(() => undefined);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed");
+      const message = err instanceof Error ? err.message : "Save failed";
+      setError(message);
+      showToast({ kind: "error", title: "Couldn't save settings", description: message });
     } finally {
       setSaving(false);
     }
@@ -245,10 +258,18 @@ export default function SettingsPage() {
     }
   };
 
+  const [restarting, setRestarting] = useState(false);
   const restartRunner = async () => {
     if (!window.confirm("Restart the runner? Any in-flight scan or send will be cancelled.")) {
       return;
     }
+    setRestarting(true);
+    setError(null);
+    showToast({
+      kind: "info",
+      title: "Restarting runner…",
+      description: "Rebuilding @inbox-os/core + @inbox-os/runner. The page reloads once it's back."
+    });
     try {
       await apiPost("/runner/control/system/restart", {});
       // The runner exits ~250ms after the 202; poll back up.
@@ -264,10 +285,35 @@ export default function SettingsPage() {
         await new Promise((resolve) => setTimeout(resolve, 500));
       }
       setError("Runner did not come back within 90s.");
+      showToast({
+        kind: "error",
+        title: "Runner restart timed out",
+        description: "Health checks didn't recover within 90s — check the runner log."
+      });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Restart failed");
+      const message = err instanceof Error ? err.message : "Restart failed";
+      setError(message);
+      showToast({ kind: "error", title: "Couldn't restart runner", description: message });
+    } finally {
+      setRestarting(false);
     }
   };
+
+  // Advanced-panel dirty state: true when local edits diverge from the
+  // last server-persisted snapshot. Drives the "● unsaved changes" chip
+  // next to Save so the operator knows their tweaks aren't committed yet.
+  const advancedDirty =
+    !!settings &&
+    !!persistedSettings &&
+    (settings.scanIntervalSeconds !== persistedSettings.scanIntervalSeconds ||
+      settings.amberHours !== persistedSettings.amberHours ||
+      settings.redHours !== persistedSettings.redHours ||
+      settings.maxMessagesPerThread !== persistedSettings.maxMessagesPerThread ||
+      settings.aiProvider !== persistedSettings.aiProvider ||
+      (settings.glmModel ?? "") !== (persistedSettings.glmModel ?? "") ||
+      (settings.geminiModel ?? "") !== (persistedSettings.geminiModel ?? "") ||
+      JSON.stringify([...(settings.enabledPlatforms ?? [])].sort()) !==
+        JSON.stringify([...(persistedSettings.enabledPlatforms ?? [])].sort()));
 
   if (!settings) {
     return (
@@ -553,11 +599,19 @@ export default function SettingsPage() {
               })
             }
           >
-            Save settings
+            {saving ? "Saving…" : "Save settings"}
           </Button>
-          <Button variant="quiet" onClick={() => void restartRunner()}>
-            Restart runner
+          <Button variant="quiet" disabled={restarting} onClick={() => void restartRunner()}>
+            {restarting ? "Restarting…" : "Restart runner"}
           </Button>
+          {advancedDirty ? (
+            <span
+              className="font-mono text-[11px] uppercase tracking-[0.06em] text-risk-waiting"
+              aria-live="polite"
+            >
+              ● unsaved changes
+            </span>
+          ) : null}
         </div>
 
       </details>

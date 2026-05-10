@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { Loader2, RefreshCw, X } from "lucide-react";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import type { PersonDetailResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { ProfileSections } from "./profile-sections";
@@ -95,15 +96,20 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   const rescan = () => {
     if (!personId) return;
     setRefreshing(true);
-    runAction(
+    runActionWithFeedback(
       apiPost(`/runner/control/person/${personId}/enrich?wait=1`, {}).finally(() =>
         setRefreshing(false)
       ),
-      setError,
-      async () => {
-        if (!personId) return;
-        const fresh = await apiGet<PersonDetailResponse>(`/runner/data/person/${personId}`);
-        setDetail(fresh);
+      {
+        pending: "Rescanning profile…",
+        success: "Profile rescanned",
+        failure: "Couldn't rescan profile",
+        setError,
+        onDone: async () => {
+          if (!personId) return;
+          const fresh = await apiGet<PersonDetailResponse>(`/runner/data/person/${personId}`);
+          setDetail(fresh);
+        }
       }
     );
   };
@@ -119,9 +125,12 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       setProfileUrlInput("");
       const fresh = await apiGet<PersonDetailResponse>(`/runner/data/person/${personId}`);
       setDetail(fresh);
+      showToast({ kind: "success", title: "Profile URL saved", description: "Enrichment queued" });
       rescan();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save profile URL");
+      const message = err instanceof Error ? err.message : "Failed to save profile URL";
+      setError(message);
+      showToast({ kind: "error", title: "Couldn't save profile URL", description: message });
     } finally {
       setSavingProfileUrl(false);
     }

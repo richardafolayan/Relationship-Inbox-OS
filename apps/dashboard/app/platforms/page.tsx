@@ -80,10 +80,15 @@ export default function PlatformsPage() {
               logs.find((log) => log.platform === row.platform && log.domDumpFile)?.domDumpFile
             }
             onRunSelectorTests={() =>
-              runAction(
+              runActionWithFeedback(
                 apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                setActionError,
-                refresh
+                {
+                  pending: `Running selector tests for ${PLATFORM_DISPLAY[row.platform]}…`,
+                  success: `Selector tests queued for ${PLATFORM_DISPLAY[row.platform]}`,
+                  failure: `Selector tests failed for ${PLATFORM_DISPLAY[row.platform]}`,
+                  setError: setActionError,
+                  onDone: () => refresh()
+                }
               )
             }
             onOpenReceipts={() => setReceiptsOpen(true)}
@@ -180,10 +185,15 @@ export default function PlatformsPage() {
                           {
                             label: "Reconnect",
                             onSelect: () =>
-                              runAction(
+                              runActionWithFeedback(
                                 apiPost("/runner/control/platform/connect", { platform: row.platform }),
-                                setActionError,
-                                refresh
+                                {
+                                  pending: `Reconnecting ${PLATFORM_DISPLAY[row.platform]}…`,
+                                  success: `${PLATFORM_DISPLAY[row.platform]} reconnected`,
+                                  failure: `Couldn't reconnect ${PLATFORM_DISPLAY[row.platform]}`,
+                                  setError: setActionError,
+                                  onDone: () => refresh()
+                                }
                               )
                           }
                         ]
@@ -191,10 +201,15 @@ export default function PlatformsPage() {
                     {
                       label: "Run selector tests",
                       onSelect: () =>
-                        runAction(
+                        runActionWithFeedback(
                           apiPost("/runner/control/platform/test-selectors", { platform: row.platform }),
-                          setActionError,
-                          refresh
+                          {
+                            pending: `Running selector tests for ${PLATFORM_DISPLAY[row.platform]}…`,
+                            success: `Selector tests queued for ${PLATFORM_DISPLAY[row.platform]}`,
+                            failure: `Selector tests failed for ${PLATFORM_DISPLAY[row.platform]}`,
+                            setError: setActionError,
+                            onDone: () => refresh()
+                          }
                         )
                     },
                     {
@@ -208,10 +223,15 @@ export default function PlatformsPage() {
                         ) {
                           return;
                         }
-                        runAction(
+                        runActionWithFeedback(
                           apiPost("/runner/control/platform/reset-session", { platform: row.platform }),
-                          setActionError,
-                          refresh
+                          {
+                            pending: `Resetting ${PLATFORM_DISPLAY[row.platform]} session…`,
+                            success: `${PLATFORM_DISPLAY[row.platform]} session reset — sign in again to reconnect`,
+                            failure: `Couldn't reset ${PLATFORM_DISPLAY[row.platform]} session`,
+                            setError: setActionError,
+                            onDone: () => refresh()
+                          }
                         );
                       }
                     }

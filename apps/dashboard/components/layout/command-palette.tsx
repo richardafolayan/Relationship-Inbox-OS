@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
@@ -52,7 +53,11 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         label: "Run scan now",
         glyph: "scan",
         run: () => {
-          void apiPost("/runner/control/scan", {}).catch(() => undefined);
+          runActionWithFeedback(apiPost("/runner/control/scan", {}), {
+            pending: "Queueing scan…",
+            success: "Scan queued",
+            failure: "Couldn't queue scan"
+          });
         }
       }
     ];
