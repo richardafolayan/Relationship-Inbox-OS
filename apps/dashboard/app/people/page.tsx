@@ -30,7 +30,7 @@ export default function PeoplePage() {
   // still route through the page-level `error` banner.
   const [enrichStatus, setEnrichStatus] = useState<string | null>(null);
   const enrichStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [scanningAll, setScanningAll] = useState(false);
+  const [scanningAll, setScanningAll] = useState<"all" | "new" | null>(null);
   const [scanAllStatus, setScanAllStatus] = useState<string | null>(null);
   const [startersLoading, setStartersLoading] = useState(false);
   const [profileUrlInput, setProfileUrlInput] = useState("");
@@ -212,20 +212,23 @@ export default function PeoplePage() {
     }
   };
 
-  const scanAll = useCallback(async () => {
-    setScanningAll(true);
+  const scanAll = useCallback(async (scope: "all" | "new") => {
+    setScanningAll(scope);
     setScanAllStatus(null);
     setError(null);
     try {
       const result = await apiPost<{ status: string; count: number }>(
         "/runner/control/people/scan-all",
-        {}
+        { scope }
       );
-      setScanAllStatus(`Queued ${result.count} profile${result.count === 1 ? "" : "s"} for rescan.`);
+      const noun = scope === "new" ? "unenriched profile" : "profile";
+      setScanAllStatus(
+        `Queued ${result.count} ${noun}${result.count === 1 ? "" : "s"} for ${scope === "new" ? "scan" : "rescan"}.`
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to enqueue scan-all");
     } finally {
-      setScanningAll(false);
+      setScanningAll(null);
     }
   }, []);
 
@@ -252,8 +255,19 @@ export default function PeoplePage() {
 
       {people.length > 0 ? (
         <div className="mb-4 flex flex-wrap items-center gap-3">
-          <Button variant="quiet" disabled={scanningAll} onClick={() => void scanAll()}>
-            {scanningAll ? "Queueing…" : "Scan all"}
+          <Button
+            variant="quiet"
+            disabled={scanningAll !== null}
+            onClick={() => void scanAll("new")}
+          >
+            {scanningAll === "new" ? "Queueing…" : "Scan new"}
+          </Button>
+          <Button
+            variant="quiet"
+            disabled={scanningAll !== null}
+            onClick={() => void scanAll("all")}
+          >
+            {scanningAll === "all" ? "Queueing…" : "Rescan all"}
           </Button>
           {scanAllStatus ? (
             <span className="font-mono text-[11px] text-ink-3">{scanAllStatus}</span>
