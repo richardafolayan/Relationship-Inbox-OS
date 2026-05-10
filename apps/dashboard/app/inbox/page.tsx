@@ -11,13 +11,15 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
-type FilterMode = "all" | "unread" | "needs_reply" | "genuine" | "outreach";
+type FilterMode = "all" | "unread" | "needs_reply" | "waiting_on_them" | "genuine" | "outreach";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
+type SortMode = "recent" | "oldest" | "name";
 
 const FILTERS: { key: FilterMode; label: string }[] = [
   { key: "all", label: "All" },
   { key: "unread", label: "Unread" },
   { key: "needs_reply", label: "Needs reply" },
+  { key: "waiting_on_them", label: "Waiting on them" },
   { key: "genuine", label: "Genuine" },
   { key: "outreach", label: "Outreach" }
 ];
@@ -28,12 +30,23 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "IMESSAGE", label: "iMessage" }
 ];
 
+const SORT_MODES: { key: SortMode; label: string }[] = [
+  { key: "recent", label: "Recent first" },
+  { key: "oldest", label: "Oldest first" },
+  { key: "name", label: "By name (A-Z)" }
+];
+
 function applyFilter(row: InboxRow, mode: FilterMode): boolean {
   switch (mode) {
     case "unread":
       return row.unreadCount > 0;
     case "needs_reply":
       return row.needsReply;
+    case "waiting_on_them":
+      // Operator sent the last message and the other party hasn't replied
+      // yet. Excludes archived rows so closed-out conversations don't pile
+      // into the "I'm waiting on them" surface.
+      return row.lastMessageDirection === "OUT" && !row.archivedAt;
     case "genuine":
       return row.category === "genuine";
     case "outreach":
@@ -46,6 +59,29 @@ function applyFilter(row: InboxRow, mode: FilterMode): boolean {
 function applyPlatformFilter(row: InboxRow, platform: PlatformFilter): boolean {
   if (platform === "all") return true;
   return row.platform === platform;
+}
+
+function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
+  // Defensive copy: caller's buckets are useMemo'd; mutating in place
+  // would trip the "did this change?" check on the next render.
+  const copy = [...items];
+  switch (sort) {
+    case "oldest":
+      return copy.sort((a, b) => {
+        const aTs = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+        const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+        return aTs - bTs;
+      });
+    case "name":
+      return copy.sort((a, b) => a.personName.localeCompare(b.personName));
+    case "recent":
+    default:
+      return copy.sort((a, b) => {
+        const aTs = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
+        const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
+        return bTs - aTs;
+      });
+  }
 }
 
 // All inbox - same chrome as Today, body bucketed by risk. The runner's
@@ -68,6 +104,7 @@ export default function InboxPage() {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<FilterMode>("all");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
+  const [sortMode, setSortMode] = useState<SortMode>("recent");
 
   // Multi-select state. selectedIds preserves insertion order so
   // shift-click range can find the anchor (last selected) deterministically.
@@ -144,9 +181,18 @@ export default function InboxPage() {
     () => visible.filter((row) => !removedIds.has(row.id)),
     [visible, removedIds]
   );
-  const overdue = useMemo(() => rows.filter((r) => r.riskLevel === "RED"), [rows]);
-  const waiting = useMemo(() => rows.filter((r) => r.riskLevel === "AMBER"), [rows]);
-  const fresh = useMemo(() => rows.filter((r) => r.riskLevel === "GREEN"), [rows]);
+  const overdue = useMemo(
+    () => applySort(rows.filter((r) => r.riskLevel === "RED"), sortMode),
+    [rows, sortMode]
+  );
+  const waiting = useMemo(
+    () => applySort(rows.filter((r) => r.riskLevel === "AMBER"), sortMode),
+    [rows, sortMode]
+  );
+  const fresh = useMemo(
+    () => applySort(rows.filter((r) => r.riskLevel === "GREEN"), sortMode),
+    [rows, sortMode]
+  );
 
   const buckets = [
     { key: "overdue", label: "Overdue - they’ve waited longest", items: overdue },
@@ -322,6 +368,16 @@ export default function InboxPage() {
         >
           {PLATFORM_FILTERS.map((p) => (
             <option key={p.key} value={p.key}>{p.label}</option>
+          ))}
+        </select>
+        <select
+          value={sortMode}
+          onChange={(e) => setSortMode(e.target.value as SortMode)}
+          className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
+          aria-label="Sort threads"
+        >
+          {SORT_MODES.map((s) => (
+            <option key={s.key} value={s.key}>{s.label}</option>
           ))}
         </select>
       </div>
