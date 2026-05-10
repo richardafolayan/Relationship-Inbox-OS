@@ -2391,11 +2391,45 @@ export function createScanQueue(deps: ScanQueueDeps) {
       candidate.platformThreadId = canonicalPlatformThreadId;
     }
 
-    const existingPerson = await prisma.person.findFirst({
-      where: { displayName: candidate.displayName, platform }
-    });
     const candidateAvatarUrl = candidate.avatarUrl?.trim() || null;
     const candidateProfileUrl = candidate.profileUrl?.trim() || null;
+    // Person identity priority: profileUrl > displayName. profileUrl is a
+    // stable per-person identifier on LinkedIn; displayName-only lookups
+    // can false-positive across two LinkedIn contacts who share a name,
+    // OR produce mis-attributed threads when an upstream row-parsing bug
+    // pairs one row's displayName with another row's URL. One such
+    // thread was observed on 2026-05-06 (Kolawole Afonja's content
+    // linked to Jessica Essien's personId because the displayName-only
+    // lookup hit Jessica's existing row); see migration-log.md and the
+    // Phase 4 parser-investigation candidate.
+    let existingPerson = candidateProfileUrl
+      ? await prisma.person.findFirst({
+          where: { profileUrl: candidateProfileUrl, platform }
+        })
+      : null;
+    if (!existingPerson) {
+      existingPerson = await prisma.person.findFirst({
+        where: { displayName: candidate.displayName, platform }
+      });
+      // Defensive: if the displayName-matched existing person already
+      // has a profileUrl that differs from this candidate's, that's
+      // the row-alignment signal — treat as a new person rather than
+      // mis-link the thread to the existing personId.
+      if (
+        existingPerson &&
+        existingPerson.profileUrl &&
+        candidateProfileUrl &&
+        existingPerson.profileUrl !== candidateProfileUrl
+      ) {
+        console.warn(
+          `[scan-queue] displayName=${JSON.stringify(candidate.displayName)} ` +
+            `matches existing person ${existingPerson.id} but profileUrl differs ` +
+            `(existing=${existingPerson.profileUrl} candidate=${candidateProfileUrl}). ` +
+            "Treating as a new person to avoid mis-linking thread to wrong personId."
+        );
+        existingPerson = null;
+      }
+    }
     const person =
       existingPerson ??
       (await prisma.person.create({
