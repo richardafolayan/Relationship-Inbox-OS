@@ -7059,7 +7059,16 @@ export class LinkedInAdapter implements PlatformAdapter {
             options.onProgress?.({
               processedRows: metrics.processedRows,
               openedRows: metrics.openedRows,
-              total: maxThreads
+              // Total = rows we've actually detected so far, capped at the
+              // configured maxThreads. Operators flagged the prior `total:
+              // maxThreads` (always 200 by default) as misleading: an inbox
+              // with 47 threads showed `6/200` rather than reflecting actual
+              // progress. Using the live row-set size means the bar
+              // converges as scrolling reveals more rows; over time the
+              // ratio reflects "what we've seen vs. what we've processed",
+              // which is more useful than "what we've processed vs. an
+              // arbitrary cap we may never hit".
+              total: Math.min(maxThreads, processedRowKeys.size)
             });
 
             const candidateSignals: LinkedInStreamCandidateSignals = {
@@ -7267,7 +7276,16 @@ export class LinkedInAdapter implements PlatformAdapter {
             options.onProgress?.({
               processedRows: metrics.processedRows,
               openedRows: metrics.openedRows,
-              total: maxThreads
+              // Total = rows we've actually detected so far, capped at the
+              // configured maxThreads. Operators flagged the prior `total:
+              // maxThreads` (always 200 by default) as misleading: an inbox
+              // with 47 threads showed `6/200` rather than reflecting actual
+              // progress. Using the live row-set size means the bar
+              // converges as scrolling reveals more rows; over time the
+              // ratio reflects "what we've seen vs. what we've processed",
+              // which is more useful than "what we've processed vs. an
+              // arbitrary cap we may never hit".
+              total: Math.min(maxThreads, processedRowKeys.size)
             });
           }
 
