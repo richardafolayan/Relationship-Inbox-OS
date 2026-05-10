@@ -2402,11 +2402,21 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // linked to Jessica Essien's personId because the displayName-only
     // lookup hit Jessica's existing row); see migration-log.md and the
     // Phase 4 parser-investigation candidate.
-    let existingPerson = candidateProfileUrl
+    // Adapters that supply a stable platform-side identifier (handle)
+    // get priority — for WhatsApp this is the JID, immune to display-name
+    // collisions and renames. profileUrl-keyed and displayName-keyed
+    // lookups remain the fallback for adapters that don't (LinkedIn etc.).
+    const candidateHandle = candidate.handle?.trim() || null;
+    let existingPerson = candidateHandle
       ? await prisma.person.findFirst({
-          where: { profileUrl: candidateProfileUrl, platform }
+          where: { handle: candidateHandle, platform }
         })
       : null;
+    if (!existingPerson && candidateProfileUrl) {
+      existingPerson = await prisma.person.findFirst({
+        where: { profileUrl: candidateProfileUrl, platform }
+      });
+    }
     if (!existingPerson) {
       existingPerson = await prisma.person.findFirst({
         where: { displayName: candidate.displayName, platform }
@@ -2435,6 +2445,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       (await prisma.person.create({
         data: {
           displayName: candidate.displayName,
+          handle: candidateHandle,
           platform,
           avatarUrl: candidateAvatarUrl,
           profileUrl: candidateProfileUrl,
@@ -2510,7 +2521,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
           unreadCount: candidate.unreadCount ?? 0,
           lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
           lastMessageAt: candidateListTimestamp ?? undefined,
-          needsReply: Boolean(candidate.needsReplyFromList)
+          needsReply: Boolean(candidate.needsReplyFromList),
+          // WhatsApp groups carry isGroup / groupName / groupId on the
+          // ThreadStub. Other platforms leave them undefined; defaults in
+          // the schema handle the absence.
+          isGroup: candidate.isGroup ?? false,
+          groupName: candidate.groupName,
+          groupId: candidate.groupId
         }
       }));
 

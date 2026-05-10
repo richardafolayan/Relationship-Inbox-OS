@@ -11,11 +11,12 @@ export function toDisplayRisk(level: RunnerRisk): DisplayRisk {
   return "fresh";
 }
 
-export const PLATFORM_LABEL: Record<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE", string> = {
+export const PLATFORM_LABEL: Record<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP", string> = {
   LINKEDIN: "linkedin",
   INSTAGRAM: "instagram",
   TIKTOK: "tiktok",
-  IMESSAGE: "imessage"
+  IMESSAGE: "imessage",
+  WHATSAPP: "whatsapp"
 };
 
 export function initials(name: string): string {
