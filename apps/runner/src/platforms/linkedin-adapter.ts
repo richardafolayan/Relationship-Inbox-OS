@@ -9075,6 +9075,26 @@ export class LinkedInAdapter implements PlatformAdapter {
             messagesParsedCount: messages.length
           }
         });
+        // Propagate resolved timestamps forward across "continuation" bubbles.
+        // LinkedIn renders consecutive messages from the same sender under one
+        // visible time; only the first bubble has a <time> element. Without
+        // this, those bubbles fall back to scan-time in normalizeTimestamp
+        // below and creep forward on every rescan. Walk the messages in DOM
+        // order, and when a bubble has no parseable timestamp, inherit the
+        // previous bubble's time + 1ms (preserves conversational order).
+        let lastResolvedMs: number | null = null;
+        for (const m of messages) {
+          const parsed = m.timestamp ? Date.parse(m.timestamp) : NaN;
+          if (!Number.isNaN(parsed)) {
+            lastResolvedMs = parsed;
+          } else if (lastResolvedMs !== null) {
+            lastResolvedMs += 1;
+            m.timestamp = new Date(lastResolvedMs).toISOString();
+          }
+          // First-message-with-no-time: leave empty; normalizeTimestamp will
+          // fall back to scan-time as before. Better than fabricating a wrong
+          // anchor and propagating it.
+        }
         const baseTimestamp = Date.now() - messages.length * 1_000;
         return messages.map((message, index) => ({
           ...message,
