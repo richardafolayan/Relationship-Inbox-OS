@@ -23,10 +23,29 @@ interface EnrichmentQueueDeps {
   operationMutex: KeyedMutex;
   /** Person key to scope the browser session — defaults to "default". */
   personKey?: string;
-  /** Min ms between profile visits. Default 30s, env override at config layer. */
-  paceMs: number;
-  /** Max jobs processed in a single drain pass (defensive). Default 30. */
+  /**
+   * Inter-visit pacing, randomised uniformly in [paceMinMs, paceMaxMs].
+   * Random jitter avoids the regular-cadence pattern that LinkedIn flags
+   * as automated activity (see 2026-05-08 incident in README).
+   */
+  paceMinMs: number;
+  paceMaxMs: number;
+  /** Max jobs processed in a single drain pass (defensive). Default 6. */
   batchMax: number;
+  /**
+   * Soft cap on profile visits per rolling 24h window. Tracked in
+   * memory; resets on runner restart. When the cap is reached the
+   * worker defers all further jobs by 1h.
+   */
+  dailyCap: number;
+  /**
+   * Every N visits, take an extended idle pause uniformly in
+   * [longIdleMinMs, longIdleMaxMs] before the next visit. Breaks up
+   * sustained activity into shorter sessions.
+   */
+  longIdleEvery: number;
+  longIdleMinMs: number;
+  longIdleMaxMs: number;
   /** Stale threshold in days for periodic refresh (default 30). */
   refreshDays: number;
   /**
@@ -38,6 +57,14 @@ interface EnrichmentQueueDeps {
   sendLockKey: (platform: PlatformName) => string;
   /** Lock key used by the worker itself to serialise drain passes. */
   enrichLockKey: string;
+  /**
+   * Optional adapter hook to verify the platform session before each visit.
+   * The LinkedIn adapter's ensureConnected runs throwIfAuthRequired, which
+   * triggers the password auto-login fallback when the persistent session
+   * has expired. Without this, a logged-out runner would just see every
+   * extractProfile call return auth_required and never recover the session.
+   */
+  ensureConnected?: () => Promise<void>;
 }
 
 export interface EnrichmentQueueService {
@@ -62,6 +89,27 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
   let pendingKick: NodeJS.Timeout | null = null;
   let periodicTimer: NodeJS.Timeout | null = null;
   let lastVisitAt = 0;
+  // In-memory ring of visit timestamps used to enforce the daily cap.
+  // Pruned of entries older than 24h on every read. Resets on restart —
+  // the LinkedIn-side rate limit is the authoritative one; this is a
+  // belt-and-suspenders safeguard against the queue running unattended.
+  const recentVisits: number[] = [];
+  // Counter feeding the long-idle pause cadence. Increments on every
+  // completed visit (success or failure that hit the network).
+  let visitsSinceLongIdle = 0;
+  const DAY_MS = 24 * 60 * 60 * 1000;
+
+  function randomInRange(min: number, max: number): number {
+    if (max <= min) return min;
+    return Math.floor(min + Math.random() * (max - min));
+  }
+
+  function pruneOldVisits(): void {
+    const cutoff = Date.now() - DAY_MS;
+    while (recentVisits.length > 0 && recentVisits[0]! < cutoff) {
+      recentVisits.shift();
+    }
+  }
 
   async function recoverInflightOnStart(): Promise<void> {
     const recovered = await prisma.enrichmentJob.updateMany({
@@ -124,6 +172,14 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       return { failed: true, reason: "not_found", detail: "person has no profileUrl" };
     }
     const page = await deps.sessionManager.getManagedPage({ platform, personKey });
+    if (deps.ensureConnected) {
+      try {
+        await deps.ensureConnected();
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        return { failed: true, reason: "auth_required", detail };
+      }
+    }
     return extractProfile(page, person.profileUrl);
   }
 
@@ -189,11 +245,40 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       return { visited: false };
     }
 
-    // Pacing — wait until the configured min gap has elapsed since the
-    // last visit before kicking off the next one.
+    // Daily cap — defer all further work for an hour once the rolling
+    // 24h visit count hits the cap. The next attempt will recheck and
+    // either proceed (entries have aged out) or defer again.
+    pruneOldVisits();
+    if (recentVisits.length >= deps.dailyCap) {
+      await prisma.enrichmentJob.update({
+        where: { id: job.id },
+        data: {
+          status: "PENDING",
+          nextAttemptAt: new Date(Date.now() + 60 * 60 * 1000),
+          lastError: `deferred: daily cap reached (${deps.dailyCap}/24h)`
+        }
+      });
+      console.warn(
+        `[enrichment-queue] daily cap reached (${recentVisits.length}/${deps.dailyCap}) — deferring 1h`
+      );
+      return { visited: false };
+    }
+
+    // Pacing — randomised gap in [paceMinMs, paceMaxMs] since the last
+    // visit. After every `longIdleEvery` visits, an additional extended
+    // pause in [longIdleMinMs, longIdleMaxMs] is layered on top.
+    const baseGap = randomInRange(deps.paceMinMs, deps.paceMaxMs);
+    const longIdleGap =
+      deps.longIdleEvery > 0 && visitsSinceLongIdle >= deps.longIdleEvery
+        ? randomInRange(deps.longIdleMinMs, deps.longIdleMaxMs)
+        : 0;
+    const requiredGap = baseGap + longIdleGap;
     const elapsed = Date.now() - lastVisitAt;
-    if (lastVisitAt > 0 && elapsed < deps.paceMs) {
-      await new Promise((resolve) => setTimeout(resolve, deps.paceMs - elapsed));
+    if (lastVisitAt > 0 && elapsed < requiredGap) {
+      await new Promise((resolve) => setTimeout(resolve, requiredGap - elapsed));
+    }
+    if (longIdleGap > 0) {
+      visitsSinceLongIdle = 0;
     }
 
     await prisma.enrichmentJob.update({
@@ -220,6 +305,8 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       result = { failed: true, reason: "unknown", detail };
     }
     lastVisitAt = Date.now();
+    recentVisits.push(lastVisitAt);
+    visitsSinceLongIdle += 1;
 
     if ("failed" in result && result.failed) {
       await persistFailure(job.personId, result.reason);
@@ -277,13 +364,19 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     ) {
       return { deferred: true };
     }
+    pruneOldVisits();
+    if (recentVisits.length >= deps.dailyCap) {
+      return { deferred: true };
+    }
     const result = await visitProfile(personId);
+    lastVisitAt = Date.now();
+    recentVisits.push(lastVisitAt);
+    visitsSinceLongIdle += 1;
     if ("failed" in result && result.failed) {
       await persistFailure(personId, result.reason);
       return { failed: true, reason: result.reason };
     }
     await persistSuccess(personId, result as ExtractedProfile);
-    lastVisitAt = Date.now();
     return { ok: true, profile: result as ExtractedProfile };
   }
 

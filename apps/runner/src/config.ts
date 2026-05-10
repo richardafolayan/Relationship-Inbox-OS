@@ -79,6 +79,13 @@ export interface RunnerConfig {
    */
   linkedInUsername?: string;
   linkedInPassword?: string;
+  /**
+   * When false (the default), even if username + password are set the
+   * runner will not auto-fill the LinkedIn sign-in form. Operators must
+   * sign in manually in the controlled Chrome window. Opt in by setting
+   * LINKEDIN_AUTO_LOGIN=1 in .env once you've rebuilt account trust.
+   */
+  linkedInAutoLoginEnabled: boolean;
   linkedInScan: {
     maxThreads: number;
     stableIterations: number;
@@ -86,12 +93,30 @@ export interface RunnerConfig {
     messageBackfillAttempts: number;
   };
   /**
-   * Min ms between LinkedIn profile-enrichment visits. Default 30s.
-   * Tunable up only after observation, never down — see Phase 2 brief.
+   * Min/max ms between LinkedIn profile-enrichment visits. The queue
+   * picks a uniformly random delay in [min, max] before each visit so
+   * that the inter-visit interval doesn't form a regular cadence — fixed
+   * pacing was the proximate cause of an automated-activity restriction
+   * on 2026-05-08, see RUNNER_NOTES in README.
    */
-  enrichPaceMs: number;
-  /** Max enrichment jobs processed per drain pass. Default 30. */
+  enrichPaceMinMs: number;
+  enrichPaceMaxMs: number;
+  /** Max enrichment jobs processed per drain pass. Default 6 (was 30). */
   enrichBatchMax: number;
+  /**
+   * Soft cap on profile visits per rolling 24h window. The worker tracks
+   * recent visit timestamps in memory and defers further work once the
+   * cap is hit. Resets on runner restart.
+   */
+  enrichDailyCap: number;
+  /**
+   * Every N visits, the worker takes an extended idle pause uniformly in
+   * [longIdleMinMs, longIdleMaxMs] before continuing. Breaks up long
+   * runs of regular activity that pattern-match as automation.
+   */
+  enrichLongIdleEvery: number;
+  enrichLongIdleMinMs: number;
+  enrichLongIdleMaxMs: number;
   /** Days before an enriched profile is considered stale. Default 30. */
   enrichRefreshDays: number;
 }
@@ -285,6 +310,9 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     geminiModel: env.GEMINI_MODEL?.trim() || "gemma-4-31b-it",
     linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
     linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
+    linkedInAutoLoginEnabled:
+      (env.LINKEDIN_AUTO_LOGIN ?? "").trim().toLowerCase() === "1" ||
+      (env.LINKEDIN_AUTO_LOGIN ?? "").trim().toLowerCase() === "true",
     dbFile: resolve(dataDir, "inbox-os.sqlite"),
     profileDirs: {
       LINKEDIN: resolve(dataDir, "profiles", "linkedin"),
@@ -311,8 +339,13 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 1000),
       messageBackfillAttempts: parseIntOrDefault(env.LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS, 8)
     },
-    enrichPaceMs: parseIntOrDefault(env.ENRICH_PACE_MS, 30_000),
-    enrichBatchMax: parseIntOrDefault(env.ENRICH_BATCH_MAX, 30),
+    enrichPaceMinMs: parseIntOrDefault(env.ENRICH_PACE_MIN_MS, 60_000),
+    enrichPaceMaxMs: parseIntOrDefault(env.ENRICH_PACE_MAX_MS, 180_000),
+    enrichBatchMax: parseIntOrDefault(env.ENRICH_BATCH_MAX, 6),
+    enrichDailyCap: parseIntOrDefault(env.ENRICH_DAILY_CAP, 40),
+    enrichLongIdleEvery: parseIntOrDefault(env.ENRICH_LONG_IDLE_EVERY, 10),
+    enrichLongIdleMinMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MIN_MS, 300_000),
+    enrichLongIdleMaxMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MAX_MS, 900_000),
     enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30)
   };
 }

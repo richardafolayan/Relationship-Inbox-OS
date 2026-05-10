@@ -18,6 +18,7 @@ This guide is for:
 - [Profiles and Browser Session Model](#profiles-and-browser-session-model)
 - [API Surface (Practical Reference)](#api-surface-practical-reference)
 - [Troubleshooting](#troubleshooting)
+- [LinkedIn Rate Limiting & Restriction Recovery](#linkedin-rate-limiting--restriction-recovery)
 - [Safety, Limitations, and Behavior Guarantees](#safety-limitations-and-behavior-guarantees)
 - [Commands Cheat Sheet](#commands-cheat-sheet)
 
@@ -328,6 +329,17 @@ curl http://localhost:4001/health
 | `LINKEDIN_DEV_SCAN_DISABLE_DEEP_SCROLL` | `0` | Dev-only toggle to disable LinkedIn deep scroll and keep one visible pass. |
 | `LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Dev-only runner scheduler guard; disables background autoscan ticks by default. |
 | `LINKEDIN_DEV_LOG_STAGE_HEADLINES` | `1` | Dev-only toggle for always-visible `[LI][SCAN]` headline logs. |
+| `LINKEDIN_USERNAME` | empty | Optional fallback username for the LinkedIn auto-login codepath. Inert unless `LINKEDIN_AUTO_LOGIN=1`. |
+| `LINKEDIN_PASSWORD` | empty | Optional fallback password. Inert unless `LINKEDIN_AUTO_LOGIN=1`. |
+| `LINKEDIN_AUTO_LOGIN` | unset | Set to `1` to allow the runner to auto-fill LinkedIn's sign-in form when the persistent session expires. **Off by default** — auto-filling can re-trip an automated-activity restriction (see "LinkedIn rate limiting" section). |
+| `ENRICH_PACE_MIN_MS` | `60000` | Min jittered gap between profile-enrichment visits. |
+| `ENRICH_PACE_MAX_MS` | `180000` | Max jittered gap between profile-enrichment visits. The actual gap is uniform random in `[min, max]`. |
+| `ENRICH_BATCH_MAX` | `6` | Max enrichment jobs processed in a single drain pass before the worker yields. Was 30; lowered after the 2026-05-08 incident. |
+| `ENRICH_DAILY_CAP` | `40` | Soft cap on profile visits per rolling 24h. Tracked in memory; resets on runner restart. |
+| `ENRICH_LONG_IDLE_EVERY` | `10` | Take an extended idle pause after every N visits. `0` disables long idles. |
+| `ENRICH_LONG_IDLE_MIN_MS` | `300000` | Min duration of the long idle pause (5 min default). |
+| `ENRICH_LONG_IDLE_MAX_MS` | `900000` | Max duration of the long idle pause (15 min default). |
+| `ENRICH_REFRESH_DAYS` | `30` | Days before an enriched profile is considered stale and re-enqueued by the periodic tick. |
 | `ADMIN_RESET_TOKEN` | empty | Required token for `/admin/reset` and reset CLI guard. |
 | `ADMIN_RESET_ENABLED` | unset | Optional explicit enable in non-dev environments (`1` to allow reset route). |
 | `NEXT_PUBLIC_DISABLE_AUTOSCAN` | `1` | Dashboard autoscan gate; in dev it defaults to disabled unless explicitly set `0`. |
@@ -548,6 +560,66 @@ Actions:
 4. Run selector tests for failing platform.
 5. Re-run scan.
 6. Check Activity Log and receipts for remaining blockers.
+
+## LinkedIn Rate Limiting & Restriction Recovery
+
+LinkedIn actively detects automated activity and will restrict an account
+that exhibits regular cadences, bursty traffic, or sustained navigation
+beyond what a human session would produce. **A restriction once seen will
+be re-applied faster the second time** — recover slowly and don't re-test
+the limit immediately after it lifts.
+
+### Built-in safeguards (enrichment queue)
+
+- **Jittered pacing.** Inter-visit gap is uniform random in
+  `[ENRICH_PACE_MIN_MS, ENRICH_PACE_MAX_MS]` (default 60–180s). Fixed
+  pacing is the textbook detection signal; randomisation is non-optional.
+- **Small batch size.** `ENRICH_BATCH_MAX` defaults to **6** — the worker
+  yields between batches instead of running through 30 jobs back-to-back.
+- **Long idle pauses.** Every `ENRICH_LONG_IDLE_EVERY` visits (default
+  10) the worker sleeps an additional `[5min, 15min]` before continuing,
+  breaking sustained activity into shorter sessions.
+- **Daily soft cap.** `ENRICH_DAILY_CAP` (default 40) bounds the rolling
+  24-hour visit count. Beyond the cap the queue defers all jobs by 1h and
+  re-checks. Tracked in memory; resets on runner restart.
+- **Auto-login is off by default.** Even with `LINKEDIN_USERNAME` /
+  `LINKEDIN_PASSWORD` set, the runner will not auto-fill the sign-in form
+  unless `LINKEDIN_AUTO_LOGIN=1` is also set. Auto-fill on a freshly
+  restricted account re-trips the flag immediately.
+- **Manual cancel.** `POST /control/enrichment/cancel-pending` drains the
+  PENDING queue without restarting the runner.
+
+### If you hit a restriction
+
+1. **Stop the runner immediately.** Kill the `tsx watch src/index.ts`
+   process; the dashboard can stay up. Do not touch any LinkedIn surface
+   (scan, send, enrich) until the restriction lifts.
+2. **Drain the queue.** While the runner is still up:
+   `curl -X POST http://localhost:4001/control/enrichment/cancel-pending`.
+3. **Wait the full restriction window.** LinkedIn shows the lift time in
+   the warning message. Don't attempt a partial recovery early.
+4. **Sign in manually first.** When the restriction lifts, open the
+   controlled Chrome window and log in by hand. Confirm `/feed/` loads
+   normally before letting the runner do anything.
+5. **Keep `LINKEDIN_AUTO_LOGIN` unset** for at least a week. Any session
+   refresh during that window should be operator-driven.
+6. **Stay well below the cap.** Don't run a full Rescan-all the day after
+   recovery. Use **Scan new** for net-new contacts only and let pacing
+   spread visits across the day.
+
+### Tuning the safeguards
+
+The defaults are conservative; tighten further if you've recently been
+flagged, loosen only after extended clean operation. Plausible relaxed
+values once trust is rebuilt: `ENRICH_PACE_MIN_MS=45000`,
+`ENRICH_PACE_MAX_MS=120000`, `ENRICH_DAILY_CAP=80`. Never fall below
+30s minimum — that's the regime that triggered the original incident.
+
+### Reference incident
+
+**2026-05-08 — automated activity restriction.** Cause: scan-all enqueued
+~30 profile visits with fixed 30s pacing and no daily cap. Fix: jitter,
+lower batch, daily cap, and disabled auto-login by default (this section).
 
 ## Safety, Limitations, and Behavior Guarantees
 
