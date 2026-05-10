@@ -101,8 +101,30 @@ const eventBus = createEventBus();
 const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
 
+// WhatsApp connect-state machine. wweb.js fires `qr` repeatedly until the
+// pairing completes; we cache the latest QR string and the current state
+// so the dashboard can poll without each poll racing the next QR refresh.
+type WhatsAppConnectState = "disconnected" | "connecting" | "qr_ready" | "connected";
+let whatsappState: WhatsAppConnectState = "disconnected";
+let whatsappQr: string | null = null;
+let whatsappConnectStartedAt: number | null = null;
+
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
+  onWhatsAppQr: (qr) => {
+    whatsappQr = qr;
+  },
+  onWhatsAppStateChange: (state) => {
+    whatsappState = state;
+    if (state !== "qr_ready") {
+      // Once paired (or torn down) the QR is no use to anyone; stop
+      // serving stale ones to the polling /qr endpoint.
+      whatsappQr = null;
+    }
+    if (state === "disconnected" || state === "connected") {
+      whatsappConnectStartedAt = null;
+    }
+  },
   onConnectStep: async (input) => {
     await auditService.log({
       platform: input.platform,
@@ -148,7 +170,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -953,6 +975,92 @@ app.get("/artifacts/:type/:name", (req, res) => {
 // then attempts a benign `osascript` against Messages so the system
 // re-prompts for Automation. Also opens System Settings -> Privacy ->
 // Automation as a fallback so the operator can flip the toggle directly.
+// WhatsApp connect flow. Pairing requires a one-off QR scan from the
+// operator's phone; subsequent connections reuse the LocalAuth session
+// in runnerConfig.profileDirs.WHATSAPP.
+//
+// The dashboard card on /platforms drives this via:
+//   1. POST /control/whatsapp/connect   - fires ensureConnected() on the
+//        adapter; resolves immediately (the pairing happens asynchronously
+//        on the wweb.js event bus and is reflected via /status + /qr).
+//   2. GET  /control/whatsapp/qr        - returns the latest QR as a data
+//        URL while state === "qr_ready"; 204 when no QR is needed.
+//   3. GET  /control/whatsapp/status    - { state, hasQr } poll target.
+//   4. POST /control/whatsapp/disconnect - tears the wweb.js Client down.
+function getWhatsAppAdapter() {
+  const adapter = adapters.WHATSAPP;
+  if (!adapter) {
+    throw new Error("WhatsApp adapter not registered");
+  }
+  return adapter;
+}
+
+app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
+  if (whatsappState === "connected") {
+    res.json({ ok: true, state: whatsappState, alreadyConnected: true });
+    return;
+  }
+  if (whatsappState === "connecting" || whatsappState === "qr_ready") {
+    res.json({ ok: true, state: whatsappState, alreadyInFlight: true });
+    return;
+  }
+  whatsappConnectStartedAt = Date.now();
+  // Don't await — ensureConnected() resolves on the wweb.js "ready" event
+  // which can take seconds (Puppeteer launch + QR scan). Fire and forget;
+  // the dashboard polls /status + /qr.
+  void getWhatsAppAdapter()
+    .ensureConnected()
+    .catch((error) => {
+      console.warn(
+        `[whatsapp] ensureConnected failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+      whatsappState = "disconnected";
+      whatsappQr = null;
+      whatsappConnectStartedAt = null;
+    });
+  res.json({ ok: true, state: whatsappState });
+}));
+
+app.get("/control/whatsapp/qr", asyncRoute(async (_req, res) => {
+  if (whatsappState === "connected") {
+    res.status(204).end();
+    return;
+  }
+  if (!whatsappQr) {
+    res.status(204).end();
+    return;
+  }
+  // Lazy import so the qrcode dependency only loads when the operator
+  // actually pings this endpoint.
+  const { toDataURL } = await import("qrcode");
+  const dataUrl = await toDataURL(whatsappQr, { width: 280, margin: 1 });
+  res.json({ qrDataUrl: dataUrl, generatedAt: new Date().toISOString() });
+}));
+
+app.get("/control/whatsapp/status", asyncRoute(async (_req, res) => {
+  res.json({
+    state: whatsappState,
+    hasQr: Boolean(whatsappQr),
+    connectStartedAt: whatsappConnectStartedAt
+      ? new Date(whatsappConnectStartedAt).toISOString()
+      : null
+  });
+}));
+
+app.post("/control/whatsapp/disconnect", asyncRoute(async (_req, res) => {
+  try {
+    await getWhatsAppAdapter().closeSession("operator_disconnect");
+  } catch (error) {
+    console.warn(
+      `[whatsapp] closeSession failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  whatsappState = "disconnected";
+  whatsappQr = null;
+  whatsappConnectStartedAt = null;
+  res.json({ ok: true, state: whatsappState });
+}));
+
 app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
   if (process.platform !== "darwin") {
     res.status(400).json({ error: "macOS only" });
@@ -2741,7 +2849,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"] as PlatformName[]).map(async (platform) => {
+    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([

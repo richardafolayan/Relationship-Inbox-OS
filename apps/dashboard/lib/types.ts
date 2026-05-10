@@ -123,7 +123,7 @@ export interface OperatorProfile {
 }
 
 export interface PlatformCard {
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
   status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
   lastScanAt: string | null;
   connectedAt: string | null;
