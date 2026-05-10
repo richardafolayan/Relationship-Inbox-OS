@@ -51,6 +51,14 @@
   --accent-ink: oklch(82% 0.10 32);
 }
 
+/* Native form controls (<audio>, <video>) render their chrome based on
+ * the document's color-scheme. Without this, the audio player in voice
+ * notes shows a bright white pill in dark-mode threads. */
+[data-theme="dark"] audio,
+[data-theme="dark"] video {
+  color-scheme: dark;
+}
+
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
 body {
