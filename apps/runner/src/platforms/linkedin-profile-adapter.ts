@@ -273,6 +273,35 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
     return { failed: true, reason: "private" };
   }
 
+  // Expand any "...see more" toggle inside the About section so the full
+  // body text is in the rendered DOM before we read it. LinkedIn truncates
+  // long About sections behind a click; without this step the extracted
+  // about ends mid-sentence at the truncation point.
+  await page
+    .evaluate(() => {
+      const sections = Array.from(document.querySelectorAll("section"));
+      const aboutSection = sections.find((s) => {
+        const h2 = s.querySelector("h2") as HTMLElement | null;
+        return h2 ? (h2.innerText || "").trim() === "About" : false;
+      });
+      if (!aboutSection) return;
+      const buttons = Array.from(aboutSection.querySelectorAll("button"));
+      for (const btn of buttons) {
+        const label = ((btn as HTMLElement).innerText || btn.textContent || "")
+          .trim()
+          .toLowerCase();
+        if (/see\s+more\b/.test(label) || /\bmore\b$/.test(label)) {
+          try {
+            (btn as HTMLElement).click();
+          } catch {
+            // ignore — fall back to whatever text is already in DOM
+          }
+        }
+      }
+    })
+    .catch(() => undefined);
+  await humanDelay(150, 350);
+
   const raw = await page
     .evaluate(() => {
       function clean(value: string | null | undefined): string {
@@ -443,12 +472,32 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
       // The new UI doesn't expose the visible-text element via any stable
       // class, but the section's full text is just the h2 + body, so a
       // prefix-strip is reliable.
+      //
+      // For long About sections LinkedIn renders both a truncated visible
+      // span and a screen-reader-only span containing the full body. The
+      // pre-evaluate step clicks "see more" to reveal the full text, but
+      // we also fall back to picking whichever candidate is longest in
+      // case the click was a no-op or the structure changes.
       let aboutText: string | null = null;
       const aboutSection = findSectionByH2("About");
       if (aboutSection) {
-        const t = (aboutSection.innerText || "").trim();
-        const stripped = t.replace(/^About\s*\n?/i, "").trim();
-        if (stripped) aboutText = stripped;
+        const candidates: string[] = [];
+        const stripped = (aboutSection.innerText || "")
+          .trim()
+          .replace(/^About\s*\n?/i, "")
+          .replace(/\s*\.{2,}\s*see\s+more\s*$/i, "")
+          .replace(/\s*see\s+more\s*$/i, "")
+          .trim();
+        if (stripped) candidates.push(stripped);
+        const hiddenSpans = aboutSection.querySelectorAll<HTMLElement>(
+          'span.visually-hidden, span[class*="visually-hidden"]'
+        );
+        for (const s of Array.from(hiddenSpans)) {
+          const t = (s.textContent || "").trim();
+          if (t.length > 40 && !/^About$/i.test(t)) candidates.push(t);
+        }
+        candidates.sort((a, b) => b.length - a.length);
+        if (candidates[0]) aboutText = candidates[0];
       }
 
       // ----- Experience / Education / Skills / Licenses -----
