@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { apiPost } from "@/lib/api";
+import { showToast } from "@/lib/feedback";
 
 interface NameSuggestionPillProps {
   personId: string;
@@ -63,6 +64,16 @@ export function NameSuggestionPill({ personId, inferredName, currentName, onChan
       setOpen(false);
       setEditing(false);
       onChanged();
+      const successTitle =
+        body.action === "confirm" ? `Saved as ${body.name ?? inferredName ?? "name"}`
+        : body.action === "rename" ? `Renamed to ${body.name ?? "new name"}`
+        : "Suggestion dismissed";
+      showToast({ kind: "success", title: successTitle });
+    } catch (err) {
+      // Without this catch, errors silently propagate as unhandled rejections
+      // and the operator never finds out the rename failed.
+      const message = err instanceof Error ? err.message : "Rename failed";
+      showToast({ kind: "error", title: "Could not save name", description: message });
     } finally {
       setBusy(false);
     }

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api";
+import { showToast } from "@/lib/feedback";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
@@ -202,11 +203,14 @@ export default function PeoplePage() {
       await apiPost(`/runner/control/person/${selectedId}/profile-url`, { profileUrl: url });
       setProfileUrlInput("");
       await loadDetail(selectedId);
+      showToast({ kind: "success", title: "Profile URL saved", description: "Enrichment queued" });
       // Kick enrichment immediately so the operator sees results without
       // an extra click.
       refreshEnrichment();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save profile URL");
+      const message = err instanceof Error ? err.message : "Failed to save profile URL";
+      setError(message);
+      showToast({ kind: "error", title: "Couldn't save profile URL", description: message });
     } finally {
       setSavingProfileUrl(false);
     }
@@ -235,7 +239,23 @@ export default function PeoplePage() {
   const fetchStarters = () => {
     if (!selectedId) return;
     setStartersLoading(true);
-    void loadDetail(selectedId, true).finally(() => setStartersLoading(false));
+    setError(null);
+    // Fetch directly so a failure surfaces as an error toast. `loadDetail`
+    // swallows errors with `.catch(() => null)` for the no-detail case,
+    // which would otherwise hide a failed starter draft from the operator.
+    const personId = selectedId;
+    apiGet<PersonDetailResponse>(`/runner/data/person/${personId}?includeStarters=1`)
+      .then((data) => {
+        setDetail(data);
+        showToast({ kind: "success", title: "Conversation starters drafted" });
+      })
+      .catch((starterErr: unknown) => {
+        const message =
+          starterErr instanceof Error ? starterErr.message : "Couldn't draft conversation starters";
+        setError(message);
+        showToast({ kind: "error", title: "Couldn't draft starters", description: message });
+      })
+      .finally(() => setStartersLoading(false));
   };
 
   // Without a profileUrl on the Person row the runner's enrichment job

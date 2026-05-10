@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -95,10 +96,15 @@ export default function ArchivedPage() {
                     aria-label={`Unarchive thread with ${row.personName}`}
                     onClick={(event) => {
                       event.stopPropagation();
-                      runAction(
+                      runActionWithFeedback(
                         apiPost(`/runner/control/thread/${row.id}/unarchive`, {}),
-                        setError,
-                        refresh
+                        {
+                          pending: `Unarchiving ${row.personName}…`,
+                          success: `Unarchived ${row.personName}`,
+                          failure: "Couldn't unarchive thread",
+                          setError,
+                          onDone: () => refresh()
+                        }
                       );
                     }}
                   >

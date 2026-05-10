@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import type { HealthResponse } from "@/lib/types";
 
 // One-line summary of the runner's current state. Hidden when idle so it
@@ -209,16 +210,26 @@ export function SystemStatusBar() {
 
   const onCancel = async () => {
     if (!cancelTarget || cancelling) return;
-    setCancelling(cancelTarget);
+    const target = cancelTarget;
+    setCancelling(target);
     try {
       const path =
-        cancelTarget === "scan" ? "/runner/control/scan/abort" : "/runner/control/enrichment/cancel-pending";
+        target === "scan" ? "/runner/control/scan/abort" : "/runner/control/enrichment/cancel-pending";
       await apiPost(path, {});
       // Trigger an immediate refresh so the bar transitions out of the
       // active state without waiting for the 3s poll tick.
       await refreshRef.current();
+      showToast({
+        kind: "success",
+        title: target === "scan" ? "Scan cancelled" : "Enrichment cancelled"
+      });
     } catch (error) {
       console.warn("[status-bar] cancel failed", error);
+      showToast({
+        kind: "error",
+        title: target === "scan" ? "Couldn't cancel scan" : "Couldn't cancel enrichment",
+        description: error instanceof Error ? error.message : String(error)
+      });
     } finally {
       setCancelling(null);
     }
@@ -307,12 +318,22 @@ function isPermissionDenied(message: string): boolean {
   return /-1743|not authorized to send Apple events|grant Automation/i.test(message);
 }
 
-async function runPermissionReset(): Promise<void> {
-  try {
-    await fetch("/runner/control/imessage/permission-reset", { method: "POST" });
-  } catch {
-    // best-effort; operator can still grant via System Settings manually.
-  }
+function runPermissionReset(): void {
+  // Surface running/success/error to the operator via toasts. The previous
+  // fire-and-forget fetch swallowed every outcome, so a failed permission
+  // reset (runner offline, OS denied prompt, etc.) was invisible.
+  runActionWithFeedback(
+    fetch("/runner/control/imessage/permission-reset", { method: "POST" }).then(async (response) => {
+      if (!response.ok) throw new Error(`Permission reset returned ${response.status}`);
+      return undefined;
+    }),
+    {
+      pending: "Resetting Messages permission…",
+      success:
+        "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then retry.",
+      failure: "Couldn't reset Messages permission"
+    }
+  );
 }
 
 function platformDisplay(platform: string): string {

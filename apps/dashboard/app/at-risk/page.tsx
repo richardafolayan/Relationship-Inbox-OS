@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
+import { apiGet, apiPost, ApiRequestError } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import type { InboxResponse, InboxRow } from "@/lib/types";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
@@ -203,13 +204,26 @@ export default function AtRiskPage() {
     router.push(`/thread/${focusThread.id}`);
     setFocusOpen(false);
   };
+  const [handlingFocus, setHandlingFocus] = useState(false);
   const handleMarkHandled = async () => {
-    if (!focusThread) return;
-    await runAction(
+    if (!focusThread || handlingFocus) return;
+    const name = focusThread.personName;
+    setHandlingFocus(true);
+    runActionWithFeedback(
       apiPost(`/runner/control/thread/${focusThread.id}/archive`, {}),
-      setFocusError,
-      refresh
+      {
+        pending: `Marking ${name} as handled…`,
+        success: `Marked ${name} as handled`,
+        failure: "Couldn't mark as handled",
+        setError: setFocusError,
+        onDone: async () => {
+          await refresh();
+          setHandlingFocus(false);
+        }
+      }
     );
+    // Advance optimistically so the operator can keep moving — the toast
+    // and refresh will roll back if the server rejects.
     advance();
   };
 
