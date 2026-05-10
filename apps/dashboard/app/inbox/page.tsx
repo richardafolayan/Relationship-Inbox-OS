@@ -258,6 +258,40 @@ export default function InboxPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectMode, flatVisibleIds, clearSelection]);
 
+  const [archivingOutreach, setArchivingOutreach] = useState(false);
+
+  const archiveAllOutreach = useCallback(async () => {
+    const ids = rows.map((r) => r.id);
+    if (ids.length === 0) return;
+    const ok = window.confirm(
+      `Archive ${ids.length} outreach thread${ids.length === 1 ? "" : "s"}? You can unarchive any of them from the Archived view.`
+    );
+    if (!ok) return;
+    setArchivingOutreach(true);
+    setRemovedIds((prev) => {
+      const next = new Set(prev);
+      ids.forEach((id) => next.add(id));
+      return next;
+    });
+    const results = await Promise.allSettled(
+      ids.map((id) => apiPost(`/runner/control/thread/${id}/archive`, {}))
+    );
+    const failedIds = new Set<string>(
+      results.flatMap((r, idx) =>
+        r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
+      )
+    );
+    if (failedIds.size > 0) {
+      setRemovedIds((prev) => {
+        const next = new Set(prev);
+        failedIds.forEach((id) => next.delete(id));
+        return next;
+      });
+    }
+    setArchivingOutreach(false);
+    void refresh();
+  }, [rows, refresh]);
+
   const runBulk = useCallback(
     async (
       label: string,
@@ -380,6 +414,16 @@ export default function InboxPage() {
             <option key={s.key} value={s.key}>{s.label}</option>
           ))}
         </select>
+        {filter === "outreach" && rows.length > 0 ? (
+          <button
+            type="button"
+            disabled={!!archivingOutreach}
+            onClick={() => void archiveAllOutreach()}
+            className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 hover:bg-paper-2 disabled:opacity-50"
+          >
+            {archivingOutreach ? `Archiving ${rows.length}…` : `Archive all (${rows.length})`}
+          </button>
+        ) : null}
       </div>
 
       {degraded ? (
