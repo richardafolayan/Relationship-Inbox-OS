@@ -19,10 +19,17 @@ export const PLATFORM_LABEL: Record<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESS
 };
 
 export function initials(name: string): string {
-  return name
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, 2)
+  // Only take the first character of name parts that START with a letter.
+  // Without this filter, "Cynthia (ACS)" would render as "C(" because the
+  // second token's first char is an open paren. Unicode letter category
+  // covers accented names ("José") without needing per-locale handling.
+  // If no parts start with a letter, fall back to the first character of
+  // the first non-empty token so the avatar isn't blank for edge-case
+  // names like "(ACS)" alone.
+  const parts = name.split(/\s+/).filter(Boolean);
+  const letterParts = parts.filter((word) => /^\p{L}/u.test(word));
+  const chosen = letterParts.length > 0 ? letterParts.slice(0, 2) : parts.slice(0, 1);
+  return chosen
     .map((word) => word[0] ?? "")
     .join("")
     .toUpperCase();
