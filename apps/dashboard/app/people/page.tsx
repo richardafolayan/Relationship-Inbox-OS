@@ -75,8 +75,19 @@ export default function PeoplePage() {
   // expanding inline a default-open also fights the toggle-collapse
   // (clicking the active row would collapse → effect re-fires → first
   // row re-selects).
+  // Poll + resync subscription so new persons persisted by an in-flight
+  // scan show up without a manual reload. Mirrors the pattern used on the
+  // inbox / today pages — without it, /data/people only loaded once on
+  // mount and operators saw a stale list while a scan was running.
   useEffect(() => {
     void loadList();
+    const onResync = () => void loadList();
+    window.addEventListener("runner-resync", onResync);
+    const timer = setInterval(() => void loadList(), 10000);
+    return () => {
+      window.removeEventListener("runner-resync", onResync);
+      clearInterval(timer);
+    };
   }, [loadList]);
 
   useEffect(() => {
