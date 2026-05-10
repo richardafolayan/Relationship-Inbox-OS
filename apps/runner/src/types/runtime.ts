@@ -224,6 +224,20 @@ export interface AiService {
     displayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
   }): Promise<FriendshipSummaryOutput>;
+  /**
+   * Free-form Q&A about a person. Grounded in messages, enrichment, and
+   * operator notes / tags. Hard rule: only answers from provided context;
+   * cites specific dates from message timestamps when relevant. Empty
+   * question returns empty answer.
+   */
+  askAboutPerson(input: {
+    displayName: string;
+    question: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    contact?: ContactProfileSnapshot | null;
+    notes?: string | null;
+    tags?: string[];
+  }): Promise<{ answer: string }>;
 }
 
 export interface FriendshipSummaryOutput {

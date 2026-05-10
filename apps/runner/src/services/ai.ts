@@ -58,6 +58,10 @@ const friendshipSummarySchema = z.object({
   vibe: z.string()
 });
 
+const askAboutPersonSchema = z.object({
+  answer: z.string()
+});
+
 // Voice + style rules applied to every AI generation (summary, suggested
 // replies, transformReply, classifier). Centralised so a tweak is one edit.
 // Three constraints in particular drive the rest of the prompts in this file:
@@ -1588,6 +1592,85 @@ ${transcript}`;
     return result;
   }
 
+  /**
+   * Free-form Q&A about a person (Q10). Grounded in:
+   *   - every message across every thread the operator has with them
+   *   - their enrichment snapshot (if one exists)
+   *   - operator-supplied notes / tags
+   *
+   * Hard rules baked into the prompt:
+   *   - Only answer from the provided context. If the context doesn't
+   *     contain the answer, say so honestly ("we haven't discussed it").
+   *   - Allowed to cite specific dates from message timestamps
+   *     ("on March 4 they said..."). Verbatim quoting is fine.
+   *   - Operator vs contact attribution discipline applies (already
+   *     reinforced in SYSTEM_PROMPT).
+   */
+  async function askAboutPerson(input: {
+    displayName: string;
+    question: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    contact?: ContactProfileSnapshot | null;
+    notes?: string | null;
+    tags?: string[];
+  }): Promise<{ answer: string }> {
+    const fallback = { answer: "AI service is unavailable - try again in a moment." };
+    const trimmed = input.question.trim();
+    if (!trimmed) {
+      return { answer: "" };
+    }
+
+    const transcript =
+      input.messages.length > 0
+        ? input.messages
+            .map((m) => {
+              const speaker = m.direction === "OUT" ? "operator" : "contact";
+              return `${speaker} (${m.timestamp}): ${m.text}`;
+            })
+            .join("\n")
+        : "(no messages on record)";
+
+    const contactBlock = input.contact
+      ? `Contact enrichment (do NOT invent fields not present here):\n${JSON.stringify(
+          snapshotForPrompt(input.contact)
+        )}`
+      : "Contact enrichment: (none on record)";
+
+    const notesLine = input.notes ? `Operator notes: ${safeTruncate(input.notes, 600)}` : "Operator notes: (none)";
+    const tagsLine =
+      input.tags && input.tags.length > 0 ? `Tags: ${input.tags.join(", ")}` : "Tags: (none)";
+
+    const prompt = `Return strict JSON matching this exact shape:
+{
+  "answer": "string"
+}
+
+You are answering a question the operator is asking about this contact. Answer briefly (1-4 sentences) and use British English.
+
+HARD RULES (strict):
+- Only answer using the provided context (transcript + enrichment + notes). If the context doesn't contain the answer, say so plainly: "We haven't discussed this" or "Not on record" - do not guess or extrapolate.
+- When relevant, cite specific dates from the message timestamps in your answer, e.g. "On 4 March 2025 they said they were moving to Lagos." Pull dates from the timestamp prefix on each transcript line. Verbatim short quotes are fine.
+- Lines prefixed \`operator:\` are the operator's own words; \`contact:\` are the other person. Never paraphrase one as if it were the other.
+- Do not fabricate names, dates, jobs, locations, or any facts not in the context.
+
+Contact: ${input.displayName}
+
+${contactBlock}
+${notesLine}
+${tagsLine}
+
+Transcript (oldest first):
+${transcript}
+
+Question:
+${safeTruncate(trimmed, 1_000)}`;
+
+    const { result } = await modelJson(prompt, fallback, (value) =>
+      askAboutPersonSchema.parse(value)
+    );
+    return result;
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
@@ -1597,6 +1680,7 @@ ${transcript}`;
     generateConversationStarters,
     composeInVoice,
     suggestSnoozeTimings,
-    summarisePersonForFriendship
+    summarisePersonForFriendship,
+    askAboutPerson
   };
 }
