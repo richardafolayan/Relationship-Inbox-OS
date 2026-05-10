@@ -177,6 +177,58 @@ function DayDivider({ label }: { label: string }) {
   );
 }
 
+function ParticipantPopover({
+  handle,
+  platform,
+  onClose
+}: {
+  handle: string;
+  platform: ThreadResponse["platform"];
+  onClose: () => void;
+}) {
+  // Closes on outside-click + Escape. The wrapper sits in a relatively-
+  // positioned parent so this floats just below the sender name.
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const onPointer = (e: MouseEvent) => {
+      if (!ref.current?.contains(e.target as Node)) onClose();
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onPointer);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onPointer);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [onClose]);
+  // Search-based 1:1 navigation: there is no /people/<handle> detail
+  // route and no "find 1:1 thread by handle" endpoint yet, so the
+  // popover routes through /inbox?q=<handle>. The existing inbox search
+  // matches on personName + preview, so a saved name lands the contact's
+  // 1:1 thread directly; a raw phone/email is searchable too. Empty
+  // search results are graceful (the existing empty-state handles it).
+  const searchHref = `/inbox?q=${encodeURIComponent(handle)}`;
+  return (
+    <div
+      ref={ref}
+      role="dialog"
+      className="absolute left-0 top-[calc(100%+4px)] z-30 w-[260px] rounded-[10px] border border-hairline bg-paper p-3 shadow-card"
+    >
+      <p className="m-0 text-[12px] font-medium text-ink">{handle}</p>
+      <p className="m-0 mt-[2px] font-mono text-[11px] text-ink-3">{platform.toLowerCase()}</p>
+      <Link
+        href={searchHref}
+        className="mt-3 inline-block w-full rounded-[8px] bg-ink px-3 py-[6px] text-center text-[12px] font-medium text-paper hover:opacity-90"
+        onClick={onClose}
+      >
+        Find 1:1 thread
+      </Link>
+    </div>
+  );
+}
+
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -1005,6 +1057,21 @@ export default function ThreadPage() {
   const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
+  // Group-chat detection. There is no isGroup flag on ThreadResponse, so
+  // we infer it from the inbound message senders: if 2+ distinct names
+  // have written into the thread, it is a group. False positives on a
+  // 1:1 where the contact's display name changed mid-thread are
+  // tolerable - the popover still shows useful info either way.
+  const isGroupChat = useMemo(() => {
+    const senders = new Set<string>();
+    for (const m of visibleMessages) {
+      if (m.direction === "IN" && m.senderName) senders.add(m.senderName);
+      if (senders.size > 1) return true;
+    }
+    return false;
+  }, [visibleMessages]);
+  const [participantPopover, setParticipantPopover] = useState<string | null>(null);
+
   // Annotate each message with a date-divider flag/label so consecutive
   // messages crossing a date boundary get a centered hairline label
   // (e.g. "Tuesday, Jan 12") rendered above the bubble.
@@ -1449,9 +1516,32 @@ export default function ThreadPage() {
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     }`}
                   >
-                    <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
-                      {senderLabel}
-                    </span>
+                    {isGroupChat && message.direction === "IN" && message.senderName ? (
+                      <div className="relative mb-[4px]">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setParticipantPopover((prev) =>
+                              prev === message.senderName ? null : (message.senderName ?? null)
+                            )
+                          }
+                          className="text-[11px] font-medium tracking-[-0.005em] text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                        >
+                          {senderLabel}
+                        </button>
+                        {participantPopover === message.senderName ? (
+                          <ParticipantPopover
+                            handle={message.senderName}
+                            platform={thread.platform}
+                            onClose={() => setParticipantPopover(null)}
+                          />
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
+                        {senderLabel}
+                      </span>
+                    )}
                     {(() => {
                       const playableAttachments = (message.attachments ?? []).filter(
                         (a) => a.guid && a.kind && a.kind !== "unknown"
