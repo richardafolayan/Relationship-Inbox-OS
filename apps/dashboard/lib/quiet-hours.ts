@@ -3,7 +3,7 @@
 //   - mute the sidebar attention dot
 //   - skip the dashboard's background auto-scan tick
 // The toggle without the window only buried the dot 24/7, which the
-// operator (rightly) called out as pointless — see issue #94.
+// operator (rightly) called out as pointless - see issue #94.
 
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
 const START_HOUR = 22; // 22:00 inclusive
@@ -23,4 +23,4 @@ export function isQuietHoursActive(now: Date = new Date()): boolean {
   return isQuietHoursEnabled() && isWithinQuietWindow(now);
 }
 
-export const QUIET_HOURS_LABEL = "22:00 – 06:00 local";
+export const QUIET_HOURS_LABEL = "22:00 - 06:00 local";

@@ -7,7 +7,7 @@ import { formatRelative } from "@/lib/time";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
-// Activity log — receipts list using the same row pattern. Click any row
+// Activity log - receipts list using the same row pattern. Click any row
 // to inspect details/screenshots/DOM dumps in the receipts drawer.
 
 // Render an audit-log action key as something an operator can scan.
@@ -122,7 +122,7 @@ export default function LogsPage() {
                       dom
                     </a>
                   ) : null}
-                  {!hasArtifacts ? <span className="text-ink-4">—</span> : null}
+                  {!hasArtifacts ? <span className="text-ink-4">-</span> : null}
                 </div>
               </div>
             );

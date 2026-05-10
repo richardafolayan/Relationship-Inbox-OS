@@ -218,7 +218,7 @@ export interface ThreadMessage {
    * Provenance of an OUT message. "automation" when this runner sent it
    * via the send service. Null on inbound messages and on OUT messages
    * that were only observed via scan (could have been sent from the
-   * platform's web UI, another device, etc.) — those should not surface
+   * platform's web UI, another device, etc.) - those should not surface
    * a "Sent via automation" claim.
    */
   sentVia?: "automation" | string | null;
@@ -284,7 +284,7 @@ export interface ThreadResponse {
   suggestedRepliesStatus?: "ready" | "generating";
   /**
    * Pending scheduled sends for this thread. Surfaced so the composer can
-   * render a "scheduled for X — cancel" pill above the timeline without a
+   * render a "scheduled for X - cancel" pill above the timeline without a
    * second fetch. Empty array when nothing is scheduled.
    */
   scheduledSends?: Array<{
@@ -294,7 +294,7 @@ export interface ThreadResponse {
     createdAt: string;
   }>;
   /**
-   * Cross-thread context for the same Person — last message from each
+   * Cross-thread context for the same Person - last message from each
    * other active thread plus the Person's notes/tags. Surfaced as a
    * "memory chip" on the composer so operators see at a glance whether
    * AI / their own draft has historical context to lean on.

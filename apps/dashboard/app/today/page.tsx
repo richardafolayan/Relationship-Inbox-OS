@@ -12,14 +12,14 @@ import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 
-// "Today" — the new home. One hero card naming the most-overdue
+// "Today" - the new home. One hero card naming the most-overdue
 // conversation in plain English, then a quiet ranked stack of the rest.
 // No KPIs. No filter chips above the fold. The runner already sorts the
 // inbox; we just take row[0] as "first up".
 //
 // The hero's headline prefers the AI summary of the top thread (fetched
 // via /runner/data/thread/:id when the inbox row arrives). If that fails
-// or hasn't loaded yet, we fall back to the actual preview text — never
+// or hasn't loaded yet, we fall back to the actual preview text - never
 // the technical riskReason ("Inbound waiting Xh"), which is operator-
 // facing telemetry, not the human ask.
 
@@ -37,10 +37,10 @@ export default function TodayPage() {
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   // IDs we've optimistically removed from the local view because the
-  // operator just acted on them (sent / handled / snoozed) — server
+  // operator just acted on them (sent / handled / snoozed) - server
   // hasn't necessarily caught up yet. Cleared on every refetch.
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
-  // Brief "Sent — next up" overlay for the outgoing hero.
+  // Brief "Sent - next up" overlay for the outgoing hero.
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -54,7 +54,7 @@ export default function TodayPage() {
       setData(inbox);
       // Drop only the optimistic IDs the server has caught up on. A row
       // counts as "still pending" when it's both present AND still needs
-      // a reply — so a mark-done / snooze that flips needsReply=false
+      // a reply - so a mark-done / snooze that flips needsReply=false
       // counts as confirmed even though the row itself lingers in the
       // inbox view (the existing /data/inbox sort returns marked-done
       // rows for archive context).
@@ -114,7 +114,7 @@ export default function TodayPage() {
       setTransitioning(null);
       // Refetch in the background so server truth catches up. If the
       // runner hasn't yet confirmed (e.g. mark-done in flight), the
-      // refetch may briefly bring the row back — that's correct
+      // refetch may briefly bring the row back - that's correct
       // behaviour and matches receipts-first design.
       void refresh();
     }, 700);
@@ -128,7 +128,7 @@ export default function TodayPage() {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
       if (!detail || !detail.threadId) return;
       if (detail.type === "MESSAGE_SENT") {
-        advanceHero(detail.threadId, "Sent — next up");
+        advanceHero(detail.threadId, "Sent - next up");
       }
     };
     window.addEventListener("runner-event", handler);
@@ -145,7 +145,7 @@ export default function TodayPage() {
   // be the hero even if the runner keeps them in /data/inbox for archive
   // context. The strict `!== false` form includes legacy rows where the
   // field is undefined; the optimistic-removal Set covers in-flight actions.
-  // scheduledSendAt presence means the operator already queued a reply —
+  // scheduledSendAt presence means the operator already queued a reply -
   // suppress until the schedule fires (row vanishes naturally) or is
   // cancelled (scheduledSendAt clears, row returns).
   const rows = useMemo(
@@ -254,13 +254,13 @@ export default function TodayPage() {
       <PageHead
         eyebrow={dayLabel}
         title={`${greeting}, Richard`}
-        subtitle="One thing at a time. Reply, snooze, or handle — and Today moves on to the next."
+        subtitle="One thing at a time. Reply, snooze, or handle - and Today moves on to the next."
         meta={
           <>
             <span className="text-ink">{overdueCount}</span> overdue ·{" "}
             <span className="text-ink">{waitingCount}</span> waiting
             <br />
-            last scan {health ? formatRelative(health.lastScanAt) : "—"}
+            last scan {health ? formatRelative(health.lastScanAt) : "-"}
           </>
         }
       />
@@ -352,7 +352,7 @@ export default function TodayPage() {
                     setError,
                     refresh
                   );
-                  advanceHero(id, "Snoozed — next up");
+                  advanceHero(id, "Snoozed - next up");
                 }}
               >
                 Snooze ’til tomorrow
@@ -366,7 +366,7 @@ export default function TodayPage() {
                     setError,
                     refresh
                   );
-                  advanceHero(id, "Handled — next up");
+                  advanceHero(id, "Handled - next up");
                 }}
               >
                 Mark as handled

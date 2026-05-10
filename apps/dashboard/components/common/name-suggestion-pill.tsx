@@ -13,7 +13,7 @@ interface NameSuggestionPillProps {
    *   correct an already-confirmed name (e.g. the heuristic was wrong).
    */
   inferredName: string | null;
-  /** Current displayName — pre-fills the edit box when no inferredName is set. */
+  /** Current displayName - pre-fills the edit box when no inferredName is set. */
   currentName?: string;
   /** Called after a successful confirm/rename/dismiss so the parent can re-fetch. */
   onChanged: () => void;
@@ -25,7 +25,7 @@ interface NameSuggestionPillProps {
  *   - Edit name…           → inline text input; rename to a custom value
  *   - Reject               → dismiss; clears the inferredName silently
  *
- * Designed to render inside a clickable row (Link wrapper) — every handler
+ * Designed to render inside a clickable row (Link wrapper) - every handler
  * stops propagation and prevents default so a click on the pill never
  * navigates to the thread.
  */

@@ -46,7 +46,7 @@ export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
  *  - On success, the local error state is cleared and an optional follow-up
  *    (e.g. `refresh()`) runs.
  *  - On failure, the error message is captured into the caller's `setError`
- *    state and logged with a `[action]` tag — instead of bubbling out as an
+ *    state and logged with a `[action]` tag - instead of bubbling out as an
  *    unhandled promise rejection that Next.js's dev overlay counts toward
  *    the "X errors" badge.
  *

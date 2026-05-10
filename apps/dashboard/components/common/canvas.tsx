@@ -21,7 +21,7 @@ interface PageHeadProps {
 
 // Compact page header: title + optional one-line subtitle on the left,
 // meta on the right (same baseline as the title). Sticky + glassy, no
-// decorative bottom rule — content sections own their own dividers.
+// decorative bottom rule - content sections own their own dividers.
 export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
   return (
     <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_82%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
