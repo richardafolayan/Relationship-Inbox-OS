@@ -67,6 +67,12 @@ export const SYSTEM_PROMPT = [
   "- Keep replies to 1-2 sentences.",
   "- Match the inbound message's register. Warm if they're warm, formal if they're formal.",
   "",
+  "ATTRIBUTION DISCIPLINE (strict). When messages are presented with role labels:",
+  "- Lines / messages prefixed `operator:` were written by the OPERATOR (Richard, the person you are assisting). Never paraphrase, summarise, or attribute these to the contact.",
+  "- Lines / messages prefixed `contact:` were written by the OTHER PERSON in the thread. Never paraphrase or attribute these to the operator.",
+  "- The same rule applies if you see `direction: \"OUT\"` (operator) or `direction: \"IN\"` (contact) on a message object. \"OUT\" = the operator wrote it; \"IN\" = the contact wrote it.",
+  "- When summarising or quoting, keep the speaker straight. If the operator already said something, that is not a question the contact is asking. If the contact made a request, that is not the operator's intent.",
+  "",
   "If the inbound is a sales pitch, recruitment outreach, marketing, InMail, or cold solicitation, replace the \"Clarifying question\" reply with a \"Polite decline\" (a short, friendly \"not interested\" reply, ~1 sentence)."
 ].join("\n");
 
@@ -872,6 +878,17 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // up on a hook, return warmth where warmth is offered. The label on
     // the dashboard ("What they want") stays the same so existing rows /
     // cache keys aren't disturbed; only the content shifts.
+    // Render the message log with explicit speaker labels so the model
+    // can never confuse who-said-what. `direction: "OUT"` = operator,
+    // `direction: "IN"` = contact (the recipient). Reinforced in the
+    // system prompt's ATTRIBUTION DISCIPLINE section.
+    const transcript = input.messages
+      .map((m) => {
+        const speaker = m.direction === "OUT" ? "operator" : "contact";
+        return `${speaker} (${m.timestamp}): ${m.text}`;
+      })
+      .join("\n");
+
     const prompt = `Return strict JSON matching this exact shape:
 {
   "summary": "string — 1-2 sentence rolling summary of the relationship",
@@ -882,9 +899,12 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   "urgency_hint": "string or omit if none"
 }
 
+Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
+
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
-Messages: ${JSON.stringify(input.messages)}`;
+Transcript:
+${transcript}`;
 
     const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
     return result;
