@@ -29,7 +29,7 @@ export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
         {eyebrow ? (
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
         ) : null}
-        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+        <div className="flex flex-col gap-y-1">
           <h1 className="m-0 font-display text-[28px] font-semibold leading-[1.15] tracking-[-0.02em]">
             {title}
           </h1>
