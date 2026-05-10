@@ -3389,6 +3389,38 @@ app.post("/control/people/scan-all", asyncRoute(async (req, res) => {
   res.json({ status: "queued", count: candidates.length, scope });
 }));
 
+// AI-driven friendship summary for an iMessage contact (Q9). Aggregates
+// every message across every thread the operator has with this person
+// and asks the model for four sections: how-you-know-each-other,
+// recent-topics, inside-jokes, vibe. No caching for now; regenerated
+// each time the operator hits "Generate" in the profile drawer.
+app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  // Pull up to ~600 messages across all threads with this person, oldest
+  // first - enough to surface earliest-message context for the
+  // how-you-know-each-other section without blowing the prompt.
+  const messages = await prisma.message.findMany({
+    where: { thread: { personId } },
+    orderBy: { timestamp: "asc" },
+    take: 600,
+    select: { direction: true, text: true, timestamp: true }
+  });
+  const result = await aiService.summarisePersonForFriendship({
+    displayName: person.displayName,
+    messages: messages.map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    }))
+  });
+  res.json(result);
+}));
+
 app.post("/control/self/enrich", asyncRoute(async (req, res) => {
   const payload = z.object({ profileUrl: z.string().url() }).parse(req.body);
   try {
