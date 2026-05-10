@@ -213,6 +213,24 @@ export interface AiService {
     summary?: string | null;
     whatTheyWant?: string | null;
   }): Promise<SnoozeSuggestionsOutput>;
+  /**
+   * Per-person friendship summary - four sections covering how the
+   * operator knows the contact, recent topics, inside jokes / running
+   * threads, and the vibe of the relationship. Operates on the union of
+   * messages across every thread the operator has with this person.
+   * Used by the iMessage profile drawer.
+   */
+  summarisePersonForFriendship(input: {
+    displayName: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<FriendshipSummaryOutput>;
+}
+
+export interface FriendshipSummaryOutput {
+  how_you_know_each_other: string;
+  recent_topics: string[];
+  inside_jokes: string[];
+  vibe: string;
 }
 
 export interface SnoozeSuggestion {
