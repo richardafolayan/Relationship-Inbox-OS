@@ -200,6 +200,9 @@ export default function ThreadPage() {
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
+  // Defensive 30s ceiling on the suggestions spinner. See the
+  // `repliesGenerating` derivation below for why this exists.
+  const [suggestionsTimedOut, setSuggestionsTimedOut] = useState(false);
   // Outbound attachments staged in the composer. Cleared after a successful
   // send. Each entry holds the actual File for upload + a previewUrl for the
   // chip thumbnail (image previews; a generic icon for everything else).
@@ -440,6 +443,23 @@ export default function ThreadPage() {
       clearInterval(timer);
     };
   }, [threadId, refresh]);
+
+  // Suggestions-spinner safety timer. When the runner-side status is
+  // "generating", arm a 30s ceiling. If real chips arrive sooner the
+  // status flips and this resets. If the status hangs (missed event or
+  // a stalled AI call) we flip the local timeout flag so the spinner
+  // disappears and fallback chips render.
+  const generatingActive =
+    thread?.suggestedRepliesStatus === "generating" &&
+    (thread?.suggestedReplies.replies.length ?? 0) === 0;
+  useEffect(() => {
+    if (!generatingActive) {
+      setSuggestionsTimedOut(false);
+      return undefined;
+    }
+    const timer = setTimeout(() => setSuggestionsTimedOut(true), 30_000);
+    return () => clearTimeout(timer);
+  }, [generatingActive]);
 
   const kindFromMime = (mime: string | undefined, filename: string | undefined): string => {
     const m = (mime ?? "").toLowerCase();
@@ -1097,8 +1117,15 @@ export default function ThreadPage() {
   // `source` describing which provider produced the chips (and whether
   // fallback fired) - both surfaced inline below.
   const repliesReady = thread.suggestedReplies.replies.length > 0;
-  const repliesGenerating =
+  const serverSaysGenerating =
     thread.suggestedRepliesStatus === "generating" && !repliesReady;
+  // Defensive 30s timeout: if the runner reports "generating" but the
+  // SUGGESTED_REPLIES_UPDATED event is missed (or the AI call hangs in
+  // a way that never lands a status update), the spinner would stay
+  // pinned forever. After 30s we locally fall back to the static
+  // suggestion set so the operator isn't blocked. If the runner does
+  // eventually finish, the next thread refresh swaps in real chips.
+  const repliesGenerating = serverSaysGenerating && !suggestionsTimedOut;
   const chips = repliesReady
     ? thread.suggestedReplies.replies.slice(0, 3).map((reply) => ({
         intent: reply.intent,
