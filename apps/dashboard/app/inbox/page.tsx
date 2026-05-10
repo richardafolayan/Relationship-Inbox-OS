@@ -12,7 +12,7 @@ import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 type FilterMode = "all" | "unread" | "needs_reply" | "waiting_on_them" | "genuine" | "outreach";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
 type SortMode = "recent" | "oldest" | "name";
 
 const FILTERS: { key: FilterMode; label: string }[] = [
@@ -27,7 +27,8 @@ const FILTERS: { key: FilterMode; label: string }[] = [
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All platforms" },
   { key: "LINKEDIN", label: "LinkedIn" },
-  { key: "IMESSAGE", label: "iMessage" }
+  { key: "IMESSAGE", label: "iMessage" },
+  { key: "WHATSAPP", label: "WhatsApp" }
 ];
 
 const SORT_MODES: { key: SortMode; label: string }[] = [
