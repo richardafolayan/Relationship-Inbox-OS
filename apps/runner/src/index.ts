@@ -3421,6 +3421,69 @@ app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, 
   res.json(result);
 }));
 
+// Free-form Q&A about a person (Q10). Same context pull as friendship
+// summary - all messages across all threads with this person - plus the
+// contact's enrichment snapshot + operator notes/tags. The AI prompt
+// enforces "only answer from provided context, cite dates when relevant".
+app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const { question } = z
+    .object({ question: z.string().min(1).max(2_000) })
+    .parse(req.body ?? {});
+  const person = await prisma.person.findUnique({
+    where: { id: personId },
+    include: { enrichment: true }
+  });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  const messages = await prisma.message.findMany({
+    where: { thread: { personId } },
+    orderBy: { timestamp: "asc" },
+    take: 600,
+    select: { direction: true, text: true, timestamp: true }
+  });
+  const tags = person.tagsJson ? (JSON.parse(person.tagsJson) as string[]) : [];
+  const contactSnapshot = person.enrichment
+    ? {
+        displayName: person.displayName,
+        headline: person.enrichment.headline,
+        about: person.enrichment.about,
+        location: person.enrichment.location,
+        currentRole: person.enrichment.currentRole,
+        currentCompany: person.enrichment.currentCompany,
+        followersCount: person.enrichment.followersCount,
+        mutualCount: person.enrichment.mutualCount,
+        experience: person.enrichment.experienceJson
+          ? JSON.parse(person.enrichment.experienceJson)
+          : undefined,
+        education: person.enrichment.educationJson
+          ? JSON.parse(person.enrichment.educationJson)
+          : undefined,
+        skills: person.enrichment.skillsJson
+          ? JSON.parse(person.enrichment.skillsJson)
+          : undefined,
+        recentPosts: person.enrichment.recentPostsJson
+          ? JSON.parse(person.enrichment.recentPostsJson)
+          : undefined
+      }
+    : null;
+  const result = await aiService.askAboutPerson({
+    displayName: person.displayName,
+    question,
+    messages: messages.map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    })),
+    contact: contactSnapshot,
+    notes: person.notes,
+    tags
+  });
+  res.json(result);
+}));
+
 app.post("/control/self/enrich", asyncRoute(async (req, res) => {
   const payload = z.object({ profileUrl: z.string().url() }).parse(req.body);
   try {

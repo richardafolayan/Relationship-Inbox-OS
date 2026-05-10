@@ -29,6 +29,9 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   const [savingProfileUrl, setSavingProfileUrl] = useState(false);
   const [friendshipSummary, setFriendshipSummary] = useState<FriendshipSummary | null>(null);
   const [generatingFriendship, setGeneratingFriendship] = useState(false);
+  const [askQuestion, setAskQuestion] = useState("");
+  const [askAnswer, setAskAnswer] = useState<string | null>(null);
+  const [asking, setAsking] = useState(false);
 
   useEffect(() => {
     if (!open || !personId) return;
@@ -47,8 +50,30 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       setProfileUrlInput("");
       setError(null);
       setFriendshipSummary(null);
+      setAskQuestion("");
+      setAskAnswer(null);
     }
   }, [open]);
+
+  const askAboutPerson = async () => {
+    if (!personId) return;
+    const trimmed = askQuestion.trim();
+    if (!trimmed) return;
+    setAsking(true);
+    setAskAnswer(null);
+    setError(null);
+    try {
+      const result = await apiPost<{ answer: string }>(
+        `/runner/control/person/${personId}/ask`,
+        { question: trimmed }
+      );
+      setAskAnswer(result.answer);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to ask the AI");
+    } finally {
+      setAsking(false);
+    }
+  };
 
   const generateFriendshipSummary = async () => {
     if (!personId) return;
@@ -167,6 +192,13 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
                   onGenerate={generateFriendshipSummary}
                 />
               ) : null}
+              <AskAISection
+                question={askQuestion}
+                onQuestionChange={setAskQuestion}
+                answer={askAnswer}
+                asking={asking}
+                onAsk={askAboutPerson}
+              />
             </>
           ) : null}
         </div>
@@ -245,5 +277,54 @@ function FriendshipList({ title, items }: { title: string; items: string[] }) {
         ))}
       </ul>
     </div>
+  );
+}
+
+function AskAISection({
+  question,
+  onQuestionChange,
+  answer,
+  asking,
+  onAsk
+}: {
+  question: string;
+  onQuestionChange: (value: string) => void;
+  answer: string | null;
+  asking: boolean;
+  onAsk: () => void | Promise<void>;
+}) {
+  return (
+    <section className="mt-8 border-t border-hairline pt-6">
+      <p className="m-0 mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+        Ask the AI about them
+      </p>
+      <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
+        Free-form questions grounded in your message history, their enrichment, and your notes. The AI can cite specific dates from your conversations and will say so when something hasn't come up.
+      </p>
+      <textarea
+        value={question}
+        onChange={(event) => onQuestionChange(event.target.value)}
+        placeholder="e.g. what does she think about consulting? when did they last mention Lagos?"
+        rows={3}
+        className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+      />
+      <div className="mt-2 flex items-center gap-2">
+        <Button
+          variant="primary"
+          disabled={asking || !question.trim()}
+          onClick={() => void onAsk()}
+        >
+          {asking ? (
+            <Loader2 className="h-[14px] w-[14px] animate-spin" />
+          ) : null}
+          {asking ? "Asking…" : "Ask"}
+        </Button>
+      </div>
+      {answer ? (
+        <div className="mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink">
+          <p className="m-0 whitespace-pre-wrap">{answer}</p>
+        </div>
+      ) : null}
+    </section>
   );
 }
