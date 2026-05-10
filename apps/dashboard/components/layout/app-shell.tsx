@@ -83,7 +83,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     if (autoScanDisabled || !autoScanEnabled) return undefined;
     const timer = setInterval(() => {
       if (autoScanInFlightRef.current) return;
-      // Quiet hours pause auto-scan during the 22:00–06:00 window. The
+      // Quiet hours pause auto-scan during the 22:00-06:00 window. The
       // toggle is otherwise inert; this gives it something tangible to do
       // (#94).
       if (isQuietHoursActive()) return;
@@ -102,7 +102,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => clearInterval(timer);
   }, [autoScanDisabled, autoScanEnabled]);
 
-  // SSE event stream — kept untouched. Pages subscribe to `runner-event` /
+  // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
   // `runner-resync` window events.
   useEffect(() => {
     const previousEventId = Number(window.sessionStorage.getItem("runner_last_event_id") ?? "0");

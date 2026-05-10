@@ -50,7 +50,7 @@ export default function AtRiskPage() {
   const atRisk = useMemo(() => [...overdue, ...waiting], [overdue, waiting]);
   const total = atRisk.length;
 
-  // "Why they're at risk" — bucket by floor(waitHours). waitHours is derived
+  // "Why they're at risk" - bucket by floor(waitHours). waitHours is derived
   // from lastInboundAt (we only count threads where the operator owes a reply,
   // so lastInboundAt is the right anchor). Fall back to lastMessageAt for
   // legacy rows that haven't been re-synced yet.
@@ -101,7 +101,7 @@ export default function AtRiskPage() {
     advance();
   };
 
-  // Inline error surface in the redesign's mono-caption style — used when
+  // Inline error surface in the redesign's mono-caption style - used when
   // the initial /data/inbox load fails outright (no rows to render against).
   if (error && !data) {
     return (
@@ -149,7 +149,7 @@ export default function AtRiskPage() {
           <div>
             {overdue.length ? (
               <section>
-                <SectionDivider label="Overdue — they’ve waited longest" />
+                <SectionDivider label="Overdue - they’ve waited longest" />
                 <div className="flex flex-col">
                   {overdue.map((row) => (
                     <ThreadRow key={row.id} row={row} />

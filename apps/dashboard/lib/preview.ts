@@ -24,7 +24,7 @@ export function isPreviewPlaceholder(raw: string | null | undefined): boolean {
 // AI-generated contact summaries occasionally narrate the prompt back at
 // the operator ("The operator profile is not available, so no commonality
 // can be identified."). The runner now strips this server-side, but old
-// summaries are already in the DB — clean them on render too. See #95.
+// summaries are already in the DB - clean them on render too. See #95.
 export function cleanContactSummary(raw: string | null | undefined): string | null {
   if (!raw) return null;
   const sentences = raw.split(/(?<=[.!?])\s+/);

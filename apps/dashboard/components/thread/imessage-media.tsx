@@ -49,7 +49,7 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
   if (attachment.kind === "voice_note" || attachment.kind === "audio") {
     // Explicit width so the native audio control shows up even when the
     // parent bubble uses `flex flex-col items-end` (which has no definite
-    // width — `w-full` then resolves to 0 and the player collapses to a
+    // width - `w-full` then resolves to 0 and the player collapses to a
     // sliver). max-w-full keeps it shrinking on mobile.
     return (
       <audio

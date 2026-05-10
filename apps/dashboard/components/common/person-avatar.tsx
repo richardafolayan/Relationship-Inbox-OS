@@ -24,7 +24,7 @@ export function PersonAvatar({ name, avatarUrl, size = 32, className }: PersonAv
         className={merged}
         style={{ width: size, height: size, background: avatarTone(name) }}
       >
-        {/* Hotlinked LinkedIn avatar — URL is signed and may expire. onError
+        {/* Hotlinked LinkedIn avatar - URL is signed and may expire. onError
         falls through to the initials tile until the next scan refreshes the
         row. */}
         {/* eslint-disable-next-line @next/next/no-img-element */}

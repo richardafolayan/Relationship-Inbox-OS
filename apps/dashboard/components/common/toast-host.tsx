@@ -46,7 +46,7 @@ export function ToastHost() {
   }, []);
 
   // Mirror selected runner SSE events as toasts so background work surfaces
-  // even when no UI action triggered it. Kept narrow on purpose — the SSE
+  // even when no UI action triggered it. Kept narrow on purpose - the SSE
   // stream is noisy and we don't want every receipt becoming a toast.
   useEffect(() => {
     const handler = (event: Event) => {

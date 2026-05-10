@@ -10,7 +10,7 @@ import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
 
 interface ThreadRowProps {
   row: InboxRow;
-  /** Optional — when provided, called after a name suggestion is confirmed/edited/dismissed so the parent can refresh the inbox. */
+  /** Optional - when provided, called after a name suggestion is confirmed/edited/dismissed so the parent can refresh the inbox. */
   onPersonChanged?: () => void;
 }
 

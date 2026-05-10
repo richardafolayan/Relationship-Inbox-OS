@@ -42,11 +42,11 @@ type StatusBarState =
   | { kind: "idle" }
   | {
       kind: "scanning";
-      // From the iMessage-adapter line of work — surface which platform is
+      // From the iMessage-adapter line of work - surface which platform is
       // mid-scan when the operator is multi-platform. Null when /health
       // doesn't expose `currentScanPlatform`.
       platform?: string | null;
-      // From #133 (determinate progress bar) — populated when the LinkedIn
+      // From #133 (determinate progress bar) - populated when the LinkedIn
       // streaming scan reports row-level progress. Both shapes can coexist.
       processedRows?: number;
       total?: number;
@@ -195,13 +195,13 @@ export function SystemStatusBar() {
   // Active states (scan in flight, send in flight, enrichment queue
   // draining) get a thin indeterminate progress sweep + animated
   // trailing dots so the operator can tell at a glance the runner is
-  // still working. send_failed / send_succeeded are terminal — no
+  // still working. send_failed / send_succeeded are terminal - no
   // animation.
   const isActive =
     state.kind === "scanning" || state.kind === "sending" || state.kind === "enriching";
 
   // Cancellable tasks. Sends are intentionally not cancellable from this
-  // bar — they're typically short and partly-mid-network when this state
+  // bar - they're typically short and partly-mid-network when this state
   // is shown; aborting risks duplicate sends or an inconsistent thread.
   // Scans + enrichment-queue drains can be aborted cleanly.
   const cancelTarget: "scan" | "enrichment" | null =
@@ -258,7 +258,7 @@ export function SystemStatusBar() {
         ) : null}
       </div>
       {isActive ? (
-        // The dashboard's color tokens are `var(--ink-2)` etc. — opaque
+        // The dashboard's color tokens are `var(--ink-2)` etc. - opaque
         // CSS variables, so Tailwind's `bg-ink-2/30` opacity-channel
         // syntax doesn't apply (background ends up fully transparent).
         // Use a solid token + element-level opacity instead.
@@ -284,7 +284,7 @@ export function SystemStatusBar() {
   );
 }
 
-// Three dots that pulse in sequence — replaces the inert "…" character so
+// Three dots that pulse in sequence - replaces the inert "…" character so
 // the operator can tell at a glance the task is still running and not
 // stuck. Each dot has a staggered delay so they fade in like a wave.
 function AnimatedEllipsis() {
@@ -351,7 +351,7 @@ function stateLabel(state: StatusBarState): string {
       return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
     case "sending":
       return state.blockedByScan
-        ? `Send queued — waiting on scan before replying to ${state.personName}`
+        ? `Send queued - waiting on scan before replying to ${state.personName}`
         : `Sending reply to ${state.personName}`;
     case "send_failed":
       return `Failed to send to ${state.personName}`;

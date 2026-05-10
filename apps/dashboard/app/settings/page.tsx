@@ -17,7 +17,7 @@ interface AiStatus {
 }
 
 // Explicit ordering for the provider toggle. Don't iterate Object.keys on
-// the records below — TS doesn't guarantee insertion order at the type
+// the records below - TS doesn't guarantee insertion order at the type
 // level even when V8 does at runtime. Adding a new provider goes here
 // alongside the matching entries in the records.
 const AI_PROVIDERS: AiProvider[] = ["openai", "glm", "gemini"];
@@ -36,7 +36,7 @@ const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
 
 // Which `AppSettings` field a model-override input writes to for each
 // provider. `null` means the provider has no per-account model override
-// — the runner uses the env-default model instead. All three providers
+// - the runner uses the env-default model instead. All three providers
 // are now `null`: operators flagged the per-provider model UI as
 // confusing (Gemini and GLM had inputs but ChatGPT didn't, asymmetric).
 // To change a provider's model, set the corresponding env var
@@ -66,7 +66,7 @@ const PROVIDER_MODEL_HINT: Record<AiProvider, string> = {
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
 
-// Settings — leading with the four primary toggles in the calm row
+// Settings - leading with the four primary toggles in the calm row
 // pattern (Quiet hours, Auto-scan, Headless browser, Demo data). The
 // advanced surface (scan thresholds, AI provider, danger-zone reset,
 // runner restart) sits behind a quiet expander so it stays out of the
@@ -298,7 +298,7 @@ export default function SettingsPage() {
 
       <QuietRow
         name="Quiet hours"
-        stat="22:00 – 06:00 local: mute the sidebar dot and pause auto-scan"
+        stat="22:00 - 06:00 local: mute the sidebar dot and pause auto-scan"
         action={
           <Button variant="quiet" onClick={toggleQuietHours}>
             {quietHours ? "On" : "Off"}
@@ -309,7 +309,7 @@ export default function SettingsPage() {
         name="Auto-scan"
         stat={
           autoScanDisabled
-            ? "disabled by env — restart the dashboard after editing .env"
+            ? "disabled by env - restart the dashboard after editing .env"
             : "every 10 minutes"
         }
         action={
@@ -348,7 +348,7 @@ export default function SettingsPage() {
             </p>
             <p className="mt-1 max-w-[60ch] text-[13px] leading-[1.55] text-ink-2">
               The AI uses these two boxes when drafting suggested replies and rewriting in your
-              voice. Empty boxes are fine — they just mean nothing extra is added to the prompt.
+              voice. Empty boxes are fine - they just mean nothing extra is added to the prompt.
             </p>
           </div>
           <span
@@ -373,7 +373,7 @@ export default function SettingsPage() {
             rows={4}
             value={operatorProfile.about}
             onChange={(event) => onOperatorProfileChange("about", event.target.value)}
-            placeholder="e.g. British, peer-to-peer, conversational. I'm a software engineer working on AI relationship tools. I prefer short replies — never use em-dashes or corporate filler."
+            placeholder="e.g. British, peer-to-peer, conversational. I'm a software engineer working on AI relationship tools. I prefer short replies - never use em-dashes or corporate filler."
             className="mt-2 w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </label>
@@ -509,7 +509,7 @@ export default function SettingsPage() {
           {/* Per-provider model override input. Operators on GLM or Gemini can
               swap the runner's env-default model without restarting. The
               aiStatus warning above already covers the no-key failure mode.
-              OpenAI is set globally via OPENAI_MODEL — no field rendered. */}
+              OpenAI is set globally via OPENAI_MODEL - no field rendered. */}
           {(() => {
             const activeProvider: AiProvider = settings.aiProvider ?? "openai";
             const field = PROVIDER_MODEL_FIELD[activeProvider];
@@ -565,7 +565,7 @@ export default function SettingsPage() {
         </p>
         <QuietRow
           name="Clear LinkedIn inbox and rebuild"
-          stat="wipes LinkedIn threads/messages locally — next scan rebuilds"
+          stat="wipes LinkedIn threads/messages locally - next scan rebuilds"
           action={
             <Button
               variant="danger"

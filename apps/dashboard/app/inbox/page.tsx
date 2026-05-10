@@ -48,7 +48,7 @@ function applyPlatformFilter(row: InboxRow, platform: PlatformFilter): boolean {
   return row.platform === platform;
 }
 
-// All inbox — same chrome as Today, body bucketed by risk. The runner's
+// All inbox - same chrome as Today, body bucketed by risk. The runner's
 // /data/inbox already returns the rows pre-sorted; we just split them
 // into three sections and skip empty buckets. Search + status filter +
 // platform filter narrow the visible set before bucketing.
@@ -149,14 +149,14 @@ export default function InboxPage() {
   const fresh = useMemo(() => rows.filter((r) => r.riskLevel === "GREEN"), [rows]);
 
   const buckets = [
-    { key: "overdue", label: "Overdue — they’ve waited longest", items: overdue },
+    { key: "overdue", label: "Overdue - they’ve waited longest", items: overdue },
     { key: "waiting", label: "Waiting on you", items: waiting },
     { key: "fresh", label: "Fresh, no rush", items: fresh }
   ];
   const degraded = platforms.find((p) => p.status === "DEGRADED");
   const oldestPending = summary?.oldestPendingInboundAt
     ? formatRelative(summary.oldestPendingInboundAt)
-    : "—";
+    : "-";
 
   const flatVisibleIds = useMemo(() => rows.map((r) => r.id), [rows]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);

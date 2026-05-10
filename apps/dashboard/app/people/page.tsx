@@ -12,7 +12,7 @@ import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { ProfileSections } from "@/components/common/profile-sections";
 
-// People — relationship rows in the same calm pattern as ThreadRow. Click
+// People - relationship rows in the same calm pattern as ThreadRow. Click
 // any row to open a slim detail panel below with summary + enrichment +
 // starters. When the runner has no LinkedIn profile URL for the person
 // yet (the scan only captures display name + thread URL), surface that
@@ -24,7 +24,7 @@ export default function PeoplePage() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  // Inline status next to the Refresh enrichment button — every action
+  // Inline status next to the Refresh enrichment button - every action
   // surfaces what it's doing while it runs and briefly after, not just a
   // button-label flip. Auto-clears on success/deferred after ~4s; errors
   // still route through the page-level `error` banner.
@@ -77,7 +77,7 @@ export default function PeoplePage() {
   // row re-selects).
   // Poll + resync subscription so new persons persisted by an in-flight
   // scan show up without a manual reload. Mirrors the pattern used on the
-  // inbox / today pages — without it, /data/people only loaded once on
+  // inbox / today pages - without it, /data/people only loaded once on
   // mount and operators saw a stale list while a scan was running.
   useEffect(() => {
     void loadList();
@@ -128,7 +128,7 @@ export default function PeoplePage() {
     if (enrichStatusTimer.current) clearTimeout(enrichStatusTimer.current);
   }, []);
 
-  // Switching person mid-flight: drop the previous enrich status — it
+  // Switching person mid-flight: drop the previous enrich status - it
   // described the previous selection and would mis-attribute "saved" to
   // a person who wasn't actually refreshed.
   useEffect(() => {
@@ -176,7 +176,7 @@ export default function PeoplePage() {
       .then(async (result) => {
         setEnrichStatus(
           result.status === "deferred"
-            ? "Runner is busy — queued for next slot."
+            ? "Runner is busy - queued for next slot."
             : "Profile refreshed."
         );
         enrichStatusTimer.current = setTimeout(() => setEnrichStatus(null), 4000);
@@ -249,7 +249,7 @@ export default function PeoplePage() {
       <PageHead
         eyebrow="Relationships"
         title="People"
-        subtitle="Lightweight relationship context across every conversation — risk, last touch, notes."
+        subtitle="Lightweight relationship context across every conversation - risk, last touch, notes."
         meta={people.length > 0 ? <span>{people.length} relationships</span> : null}
       />
 
@@ -301,7 +301,7 @@ export default function PeoplePage() {
             // directly underneath it, FAQ-style. Clicking the active row
             // again collapses. Earlier shipping put a single detail card
             // at the bottom of the list which the operator had to scroll
-            // to find — issue #100 called this out specifically.
+            // to find - issue #100 called this out specifically.
             return (
               <div
                 key={person.id}
