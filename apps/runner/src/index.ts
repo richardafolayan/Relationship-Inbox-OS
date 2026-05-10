@@ -1788,6 +1788,54 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
   });
 }));
 
+// Open the operator's "open profile" link in the runner-controlled
+// Chrome session rather than the default browser. The dashboard renders
+// the link as a button that POSTs here; the runner navigates its own
+// already-authenticated Chrome tab to the profile URL. Adapters that
+// don't manage a browser session (iMessage) don't expose openProfileUrl
+// — those persons surface a clean 400 instead of dispatching nowhere.
+app.post("/control/person/:personId/open-profile", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  if (!person.profileUrl) {
+    res.status(400).json({ error: "person has no profile URL" });
+    return;
+  }
+  const adapter = requireAdapter(person.platform);
+  if (!adapter.openProfileUrl) {
+    res.status(400).json({
+      error: `${person.platform} adapter does not support opening profiles in the runner browser`
+    });
+    return;
+  }
+  await withPlatformControlLock(person.platform, async () => {
+    try {
+      await adapter.openProfileUrl!(person.profileUrl!, person.displayName);
+      await auditService.log({
+        platform: person.platform,
+        stage: "Connect",
+        action: "OPEN_PROFILE",
+        status: "OK",
+        details: { personId: person.id, profileUrl: person.profileUrl }
+      });
+      res.json({ status: "ok" });
+    } catch (error) {
+      await auditService.log({
+        platform: person.platform,
+        stage: "Connect",
+        action: "OPEN_PROFILE_FAIL",
+        status: "FAIL",
+        details: { personId: person.id, profileUrl: person.profileUrl, ...summarizeError(error) }
+      });
+      throw error;
+    }
+  });
+}));
+
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const target = await getThreadStub(threadId);

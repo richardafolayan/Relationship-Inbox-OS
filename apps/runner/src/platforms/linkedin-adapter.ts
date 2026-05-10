@@ -9241,6 +9241,22 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
+  // Navigate the existing managed page to a profile URL and surface the
+  // result. Used by the dashboard's "open profile" affordance — operator
+  // wants to land in the runner's authenticated Chrome rather than their
+  // default browser. Reuses the same auth-recovery path as openThread.
+  async openProfileUrl(url: string, displayName?: string): Promise<void> {
+    return this.runWithPlatformLease(async () => {
+      const page = await this.getPage();
+      await page.bringToFront();
+      await this.tracedGoto(page, url, {
+        stage: "open_profile",
+        note: displayName ? `open_profile:${displayName}` : "open_profile"
+      });
+      await this.throwIfAuthRequired(page, "openProfileUrl:after_navigate");
+    });
+  }
+
   async closeSession(_reason?: string): Promise<void> {
     await this.deps.sessionManager.closePlatformPage({
       platform: this.platform,
