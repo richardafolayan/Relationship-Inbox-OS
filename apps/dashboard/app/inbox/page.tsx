@@ -11,14 +11,15 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
-type FilterMode = "all" | "unread" | "needs_reply" | "genuine";
+type FilterMode = "all" | "unread" | "needs_reply" | "genuine" | "outreach";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
 
 const FILTERS: { key: FilterMode; label: string }[] = [
   { key: "all", label: "All" },
   { key: "unread", label: "Unread" },
   { key: "needs_reply", label: "Needs reply" },
-  { key: "genuine", label: "Genuine" }
+  { key: "genuine", label: "Genuine" },
+  { key: "outreach", label: "Outreach" }
 ];
 
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
@@ -35,6 +36,8 @@ function applyFilter(row: InboxRow, mode: FilterMode): boolean {
       return row.needsReply;
     case "genuine":
       return row.category === "genuine";
+    case "outreach":
+      return row.category === "outreach";
     default:
       return true;
   }
