@@ -4,7 +4,8 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
-import { ChevronDown, ChevronLeft, Clock, Loader2, Mic, Paperclip, Send, Sparkles } from "lucide-react";
+import { ChevronDown, ChevronLeft, Clock, Loader2, Mic, MoreHorizontal, Paperclip, Send, Sparkles } from "lucide-react";
+import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { IMessageMedia } from "@/components/thread/imessage-media";
@@ -1359,22 +1360,38 @@ export default function ThreadPage() {
               >
                 Mark as handled
               </Button>
-              <Button
-                variant="ghost"
-                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)}
-              >
-                Open in {platformLabel}
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={rescanStage !== null}
-                onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
-              >
-                {rescanStage ? `${rescanStage}…` : "Rescan"}
-              </Button>
-              <Button variant="ghost" onClick={() => setReceiptsOpen(true)}>
-                Receipts
-              </Button>
+              <Menu
+                align="end"
+                trigger={
+                  <Button
+                    variant="ghost"
+                    aria-label="More actions"
+                    title={rescanStage ? `Rescan: ${rescanStage}…` : "More actions"}
+                  >
+                    <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
+                    {rescanStage ? <span className="ml-2">{rescanStage}…</span> : null}
+                  </Button>
+                }
+                items={[
+                  {
+                    label: `Open in ${platformLabel}`,
+                    onSelect: () =>
+                      runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
+                  },
+                  {
+                    label: rescanStage ? `${rescanStage}…` : "Rescan",
+                    onSelect: () => {
+                      if (rescanStage) return;
+                      runAction(
+                        apiPost(`/runner/control/thread/${thread.id}/rescan`, {}),
+                        setError,
+                        refresh
+                      );
+                    }
+                  },
+                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) }
+                ]}
+              />
             </div>
           </div>
 
