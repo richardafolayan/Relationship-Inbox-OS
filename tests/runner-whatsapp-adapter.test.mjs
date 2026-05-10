@@ -425,6 +425,50 @@ test("closeSession destroys the client and emits the disconnected state", async 
   assert.equal(states[states.length - 1], "disconnected");
 });
 
+test("closeSession still emits disconnected when no client was ever constructed", async () => {
+  // Regression: previously closeSession early-returned if this.client was
+  // null, leaving the in-memory state machine stuck (e.g. mid-failed
+  // ensureConnected). Operator's only recovery was a runner restart.
+  const states = [];
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => createFakeClient(),
+    onStateChange: (s) => states.push(s)
+  });
+  // No ensureConnected — this.client is null.
+  await adapter.closeSession();
+  assert.deepEqual(states, ["disconnected"]);
+});
+
+test("closeSession allows a fresh ensureConnected to proceed after a stuck mid-connect", async () => {
+  // Without the unconditional reset, readyPromise from a stuck connect
+  // would short-circuit subsequent ensureConnected calls. Verify the
+  // state machine is fully recoverable via a reset + reconnect cycle.
+  const firstClient = createFakeClient();
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+  // Start a connect but never resolve it (stuck mid-flight).
+  const stuck = adapter.ensureConnected();
+  // Tear down without resolution.
+  await adapter.closeSession();
+  // The stuck promise needs to be settled so we don't leak it; firstClient
+  // never emitted ready, but closeSession's reject won't fire either since
+  // we cleared readyPromise. Detach it.
+  stuck.catch(() => undefined);
+  // Fresh connect should construct a NEW client and reach ready cleanly.
+  const fresh = adapter.ensureConnected();
+  setImmediate(() => secondClient.emit("ready"));
+  await fresh;
+  assert.equal(createCalls, 2);
+});
+
 test("scanUnreadThreads throws a clear error when called before ensureConnected", async () => {
   const adapter = new WhatsAppAdapter({
     ...baseDeps(),

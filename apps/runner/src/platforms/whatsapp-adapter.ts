@@ -158,16 +158,30 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async closeSession(_reason?: string): Promise<void> {
-    if (this.client) {
+    // Always clear in-memory state and emit the disconnected transition,
+    // even when this.client is null. The previous guard meant a "stuck"
+    // mid-connect (where Puppeteer launched, errored, but the cached
+    // readyPromise was never resolved/rejected) couldn't be reset by
+    // /control/whatsapp/disconnect — calling closeSession was a no-op
+    // because this.client wasn't set yet, so subsequent /connect calls
+    // saw a "connecting" state and short-circuited via the alreadyInFlight
+    // guard. Operator was effectively locked out until a runner restart.
+    const client = this.client;
+    this.client = null;
+    this.ready = false;
+    this.readyPromise = null;
+    if (client) {
       try {
-        await this.client.destroy();
-      } finally {
-        this.client = null;
-        this.ready = false;
-        this.readyPromise = null;
-        this.deps.onStateChange?.("disconnected");
+        await client.destroy();
+      } catch (error) {
+        console.warn(
+          `[whatsapp] client.destroy() failed (continuing teardown): ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
       }
     }
+    this.deps.onStateChange?.("disconnected");
   }
 
   // --- internals ---

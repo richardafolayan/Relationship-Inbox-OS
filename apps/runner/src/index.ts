@@ -124,6 +124,29 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
     if (state === "disconnected" || state === "connected") {
       whatsappConnectStartedAt = null;
     }
+    // Mirror the in-memory state to the Platform table so the dashboard's
+    // header counter ("X/N connected") and the /data/platforms row both
+    // see WhatsApp as connected. The other adapters write this row from
+    // their own connect path; WhatsApp's connect happens on the wweb.js
+    // event bus, so we do it here. Fire-and-forget — the upsert isn't on
+    // any user-blocking path.
+    if (state === "connected" || state === "disconnected") {
+      const status = state === "connected" ? "CONNECTED" : "NOT_CONNECTED";
+      const connectedAt = state === "connected" ? new Date() : null;
+      prisma.platform
+        .upsert({
+          where: { name: "WHATSAPP" },
+          create: { name: "WHATSAPP", status, connectedAt, lastError: null },
+          update: { status, connectedAt, lastError: null }
+        })
+        .catch((error) => {
+          console.warn(
+            `[whatsapp] failed to mirror state=${state} to Platform table: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        });
+    }
   },
   onConnectStep: async (input) => {
     await auditService.log({
