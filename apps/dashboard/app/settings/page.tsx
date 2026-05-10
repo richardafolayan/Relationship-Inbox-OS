@@ -99,8 +99,11 @@ export default function SettingsPage() {
 
   // Danger-zone reset modal state. Mirrors the main-branch flow: an
   // admin token + literal "RESET" string, both required before the
-  // confirm button enables.
+  // confirm button enables. `resetPlatform` switches the same modal
+  // between LinkedIn and iMessage targets so we don't duplicate the
+  // dialog markup per platform.
   const [resetOpen, setResetOpen] = useState(false);
+  const [resetPlatform, setResetPlatform] = useState<"LINKEDIN" | "IMESSAGE">("LINKEDIN");
   const [resetToken, setResetToken] = useState("");
   const [resetConfirm, setResetConfirm] = useState("");
   const [resetBusy, setResetBusy] = useState(false);
@@ -216,18 +219,18 @@ export default function SettingsPage() {
     setResetConfirm("");
   };
 
-  const submitLinkedInReset = async () => {
+  const submitReset = async () => {
     setResetBusy(true);
     setResetStatus(null);
     try {
       const result = await apiPost<unknown>(
         "/runner/admin/reset",
-        { platform: "LINKEDIN", confirm: "RESET" },
+        { platform: resetPlatform, confirm: "RESET" },
         { headers: { "x-admin-reset-token": resetToken } }
       );
       setResetStatus({
         kind: "success",
-        message: `LinkedIn inbox cleared. ${JSON.stringify(result)}`
+        message: `${resetPlatform === "LINKEDIN" ? "LinkedIn" : "iMessage"} inbox cleared. ${JSON.stringify(result)}`
       });
       setResetOpen(false);
       setResetToken("");
@@ -571,6 +574,23 @@ export default function SettingsPage() {
               variant="danger"
               onClick={() => {
                 setResetStatus(null);
+                setResetPlatform("LINKEDIN");
+                setResetOpen(true);
+              }}
+            >
+              Reset…
+            </Button>
+          }
+        />
+        <QuietRow
+          name="Clear iMessage inbox and rebuild"
+          stat="wipes iMessage threads/messages locally - next scan rebuilds"
+          action={
+            <Button
+              variant="danger"
+              onClick={() => {
+                setResetStatus(null);
+                setResetPlatform("IMESSAGE");
                 setResetOpen(true);
               }}
             >
@@ -607,10 +627,10 @@ export default function SettingsPage() {
                 Danger zone
               </p>
               <p className="mt-2 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">
-                Confirm LinkedIn reset
+                Confirm {resetPlatform === "LINKEDIN" ? "LinkedIn" : "iMessage"} reset
               </p>
               <p className="mt-2 font-mono text-[12px] text-ink-3">
-                This removes LinkedIn threads and messages from the local DB. Type{" "}
+                This removes {resetPlatform === "LINKEDIN" ? "LinkedIn" : "iMessage"} threads and messages from the local DB. Type{" "}
                 <code className="text-ink">RESET</code> and provide the admin token to proceed.
               </p>
             </div>
@@ -651,7 +671,7 @@ export default function SettingsPage() {
                 disabled={
                   resetBusy || resetConfirm !== "RESET" || resetToken.trim().length === 0
                 }
-                onClick={() => void submitLinkedInReset()}
+                onClick={() => void submitReset()}
               >
                 {resetBusy ? "Resetting…" : "Confirm reset"}
               </Button>
