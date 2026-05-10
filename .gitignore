@@ -25,3 +25,4 @@ packages/core/generated
 # Local tooling state (not part of the project)
 /.claude/
 /.codex-disabled-*/
+migration-log.md

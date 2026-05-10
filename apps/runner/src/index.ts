@@ -1864,9 +1864,26 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   // inbox path takes 30-90s on a populated inbox; opening one thread is
   // typically <5s. Wraps in the platform control lock so it serialises
   // against any in-flight scan / send / open-thread operation.
+  // Emit scoped progress events so the dashboard's Rescan button can
+  // surface "opening thread / reading messages / saving" inline rather
+  // than a static spinner. Mirrors SCAN_PROGRESS for full-inbox scans
+  // but keyed on threadId so the thread page can subscribe selectively.
+  eventBus.emit({
+    type: "SCAN_THREAD_STARTED",
+    jobId: requestId,
+    threadId: target.threadId,
+    platform: target.platform
+  });
   try {
     const result = await withPlatformControlLock(target.platform, async () => {
       const aggregate = { updatedThreads: 0, parsedMessages: 0 };
+      eventBus.emit({
+        type: "SCAN_THREAD_PROGRESS",
+        jobId: requestId,
+        threadId: target.threadId,
+        platform: target.platform,
+        stage: targets.length > 1 ? "Reading sibling threads" : "Reading messages"
+      });
       for (const t of targets) {
         const candidate: ThreadStub = {
           platformThreadId: t.platformThreadId,
@@ -1883,7 +1900,22 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         aggregate.updatedThreads += partial.updatedThreads ?? 0;
         aggregate.parsedMessages += partial.parsedMessages ?? 0;
       }
+      eventBus.emit({
+        type: "SCAN_THREAD_PROGRESS",
+        jobId: requestId,
+        threadId: target.threadId,
+        platform: target.platform,
+        stage: "Saving updates"
+      });
       return aggregate;
+    });
+    eventBus.emit({
+      type: "SCAN_THREAD_FINISHED",
+      jobId: requestId,
+      threadId: target.threadId,
+      platform: target.platform,
+      updatedThreads: result.updatedThreads,
+      parsedMessages: result.parsedMessages
     });
     await auditService.log({
       platform: target.platform,
@@ -1906,6 +1938,14 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       ...result
     });
   } catch (error) {
+    eventBus.emit({
+      type: "SCAN_THREAD_FINISHED",
+      jobId: requestId,
+      threadId: target.threadId,
+      platform: target.platform,
+      updatedThreads: 0,
+      parsedMessages: 0
+    });
     await auditService.log({
       platform: target.platform,
       stage: "Scan",

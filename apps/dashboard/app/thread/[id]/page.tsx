@@ -328,6 +328,13 @@ export default function ThreadPage() {
     });
   }, [refresh]);
 
+  // Per-thread rescan progress: shows the active stage inline next to
+  // the Rescan button while the runner is opening + parsing the thread.
+  // Cleared when SCAN_THREAD_FINISHED arrives or after a 30s defensive
+  // timeout so a missed event can never strand the UI in "rescanning".
+  const [rescanStage, setRescanStage] = useState<string | null>(null);
+  const rescanTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // SSE reconciliation for sends.
   useEffect(() => {
     const onRunnerEvent = (event: Event) => {
@@ -337,6 +344,7 @@ export default function ThreadPage() {
         clientSendId?: string;
         errorMessage?: string;
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
+        stage?: string;
       }>).detail;
       if (!detail || !threadId || detail.threadId !== threadId) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
@@ -354,10 +362,26 @@ export default function ThreadPage() {
         );
       } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
         void refresh();
+      } else if (detail.type === "SCAN_THREAD_STARTED") {
+        setRescanStage("Opening thread");
+        if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
+        rescanTimeoutRef.current = setTimeout(() => setRescanStage(null), 30_000);
+      } else if (detail.type === "SCAN_THREAD_PROGRESS" && detail.stage) {
+        setRescanStage(detail.stage);
+      } else if (detail.type === "SCAN_THREAD_FINISHED") {
+        setRescanStage(null);
+        if (rescanTimeoutRef.current) {
+          clearTimeout(rescanTimeoutRef.current);
+          rescanTimeoutRef.current = null;
+        }
+        void refresh();
       }
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
-    return () => window.removeEventListener("runner-event", onRunnerEvent as EventListener);
+    return () => {
+      window.removeEventListener("runner-event", onRunnerEvent as EventListener);
+      if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
+    };
   }, [threadId, refresh]);
 
   // Send-queue polling fallback for SSE-degraded environments.
@@ -1316,9 +1340,10 @@ export default function ThreadPage() {
               </Button>
               <Button
                 variant="ghost"
+                disabled={rescanStage !== null}
                 onClick={() => runAction(apiPost(`/runner/control/thread/${thread.id}/rescan`, {}), setError, refresh)}
               >
-                Rescan
+                {rescanStage ? `${rescanStage}…` : "Rescan"}
               </Button>
               <Button variant="ghost" onClick={() => setReceiptsOpen(true)}>
                 Receipts
