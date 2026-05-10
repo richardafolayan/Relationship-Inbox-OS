@@ -18,5 +18,14 @@ export interface PlatformAdapter {
     attachments?: OutboundAttachment[]
   ): Promise<SendReceipt>;
   openThread(thread: ThreadStub): Promise<void>;
+  /**
+   * Optional. Navigates the runner-controlled browser session to an
+   * arbitrary platform URL — used by the dashboard's "open profile" link
+   * so the operator lands on the LinkedIn profile inside the runner's
+   * already-authenticated Chrome window instead of their default
+   * browser. Adapters that don't manage a browser session (iMessage)
+   * leave this unset; callers must check before invoking.
+   */
+  openProfileUrl?(url: string, displayName?: string): Promise<void>;
   closeSession(reason?: string): Promise<void>;
 }

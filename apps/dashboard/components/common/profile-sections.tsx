@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+import { apiPost } from "@/lib/api";
 import type { PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 
@@ -29,6 +31,27 @@ function SectionHead({ children }: { children: React.ReactNode }) {
 
 export function ProfileSections({ detail, hideName = false }: ProfileSectionsProps) {
   const { person, enrichment } = detail;
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<string | null>(null);
+
+  // Routes the click through the runner so the profile lands in the
+  // runner-controlled Chrome (which is signed into LinkedIn) rather
+  // than the operator's default browser. Falls back gracefully when
+  // the runner can't reach Chrome — in that case we still open in
+  // the default browser so the operator isn't blocked.
+  const openProfileInRunner = async () => {
+    if (!person.profileUrl) return;
+    setOpening(true);
+    setOpenError(null);
+    try {
+      await apiPost(`/runner/control/person/${person.id}/open-profile`, {});
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "open failed";
+      setOpenError(message);
+    } finally {
+      setOpening(false);
+    }
+  };
 
   return (
     <div className="space-y-7">
@@ -59,14 +82,18 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
           ) : null}
           {person.profileUrl ? (
             <li>
-              <a
-                href={person.profileUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="underline-offset-2 hover:text-ink hover:underline"
+              <button
+                type="button"
+                onClick={openProfileInRunner}
+                disabled={opening}
+                className="underline-offset-2 hover:text-ink hover:underline disabled:opacity-60"
+                title="Open in the runner's Chrome (already signed in to LinkedIn)"
               >
-                open profile ↗
-              </a>
+                {opening ? "opening…" : "open profile ↗"}
+              </button>
+              {openError ? (
+                <span className="ml-2 font-mono text-[11px] text-risk-overdue">{openError}</span>
+              ) : null}
             </li>
           ) : null}
         </ul>
