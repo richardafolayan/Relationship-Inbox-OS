@@ -182,12 +182,18 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {
     // Inbound media (image / voice / sticker) is unsupported in v1. We
     // log a placeholder so the UI shows something meaningful instead of
-    // an empty bubble; the raw payload is dropped.
-    const text = msg.body && msg.body.length > 0
-      ? msg.body
-      : msg.hasMedia
-        ? "[media]"
-        : "";
+    // an empty bubble; the raw payload is dropped. Polls (`poll_creation`
+    // type) get flattened to a readable question + bullet list so they
+    // appear inline in the thread timeline rather than as empty rows.
+    // Vote tallies are not fetched — they require an extra
+    // `getPollVotes()` call per poll, mutate continuously after capture
+    // so any persisted count is stale within minutes, and the operator's
+    // primary use case here is reading what was posted, not tracking
+    // outcomes. Surfacing live tallies is queued as a follow-up.
+    // Cast: wweb.js's .d.ts declares pollOptions: string[] but at runtime
+    // each option is { name, localId } (see Message.js:329-331 in the
+    // installed library). Our renderer needs the runtime shape.
+    const text = renderMessageText(msg as unknown as WaTextMessageLike);
     let senderName: string | undefined;
     if (isGroup && !msg.fromMe && msg.author && this.client) {
       try {
@@ -206,4 +212,42 @@ export class WhatsAppAdapter implements PlatformAdapter {
       attachments: []
     };
   }
+}
+
+/**
+ * Subset of the wweb.js Message shape we read for text rendering.
+ * Defined narrowly so the helper is unit-testable without dragging in
+ * the full Message class (which carries the Puppeteer client reference).
+ */
+interface WaTextMessageLike {
+  body?: string;
+  hasMedia?: boolean;
+  type?: string;
+  pollName?: string;
+  pollOptions?: ReadonlyArray<{ name?: string }>;
+  allowMultipleAnswers?: boolean;
+}
+
+/**
+ * Flatten any wweb.js Message into the single text string we persist on
+ * Message.text. Polls become a readable question + bullet list so the
+ * thread timeline shows what was asked rather than an empty bubble; media
+ * messages become a "[media]" placeholder. Plain text passes through
+ * unchanged.
+ */
+export function renderMessageText(msg: WaTextMessageLike): string {
+  if (msg.type === "poll_creation") {
+    const question = (msg.pollName ?? "").trim();
+    const options = (msg.pollOptions ?? [])
+      .map((o) => (o?.name ?? "").trim())
+      .filter((name) => name.length > 0)
+      .map((name) => `• ${name}`)
+      .join("\n");
+    const header = msg.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
+    const body = question.length > 0 ? `${header}: ${question}` : header;
+    return options.length > 0 ? `${body}\n${options}` : body;
+  }
+  if (msg.body && msg.body.length > 0) return msg.body;
+  if (msg.hasMedia) return "[media]";
+  return "";
 }
