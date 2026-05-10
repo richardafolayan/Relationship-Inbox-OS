@@ -901,6 +901,13 @@ export function createAiService(settingsStore: SettingsStore): AiService {
 
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
 
+Open loops scope (strict):
+- Walk the WHOLE transcript and extract every distinct askable item the contact raised: every question, every topic they brought up, every hook the operator could follow up on. Be comprehensive, not just the most recent message. Six loops in a long-running thread is fine. Three short ones for a brief thread is fine. The bar is distinctness, not count.
+- EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript. If the contact asked "what are you up to this weekend?" and the operator already replied "going home for the bank holiday" three messages later, that is CLOSED, not an open loop.
+- A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
+- One loop per item. Don't merge ("their work + their move + their dog") into a single string.
+- Phrase each loop as a short follow-up prompt the operator could use, e.g. "Ask how the new role is going" / "Pick up the thread about their move to Lagos" / "Send the doc they asked about". Not as the contact's quoted question.
+
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
 Transcript:
