@@ -1789,30 +1789,6 @@ export default function ThreadPage() {
                       · {voiceScore.signals[0].signal.toLowerCase()}
                     </span>
                   ) : null}
-                  {voiceScore.band !== "green" ? (
-                    <button
-                      type="button"
-                      disabled={voiceRewritePending}
-                      onClick={() => {
-                        setVoiceRewritePending(true);
-                        apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/voice-rewrite`, {
-                          draft: composer
-                        })
-                          .then((r) => {
-                            if (r.text) setComposer(r.text);
-                          })
-                          .catch((rewriteErr: unknown) => {
-                            const message =
-                              rewriteErr instanceof Error ? rewriteErr.message : "Rewrite failed";
-                            setError(message);
-                          })
-                          .finally(() => setVoiceRewritePending(false));
-                      }}
-                      className="ml-1 underline-offset-2 hover:underline disabled:opacity-50"
-                    >
-                      {voiceRewritePending ? "rewriting…" : "rewrite in my voice"}
-                    </button>
-                  ) : null}
                 </div>
               ) : null}
               <div className="mt-[12px] flex flex-wrap items-center gap-3 border-t border-hairline pt-[12px]">
@@ -1892,6 +1868,32 @@ export default function ThreadPage() {
                     className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
                   >
                     {transforming === "MAKE_WARMER" ? "warming…" : "make warmer"}
+                  </button>
+                  {/* Voice rewrite: always-available action that polishes the
+                   * current composer text in the operator's voice. Distinct
+                   * from Compose (in the AI Assist sidebar) which takes
+                   * shorthand intent and writes a full reply. Per Q7. */}
+                  <button
+                    type="button"
+                    disabled={!composer.trim() || voiceRewritePending}
+                    onClick={() => {
+                      setVoiceRewritePending(true);
+                      apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/voice-rewrite`, {
+                        draft: composer
+                      })
+                        .then((r) => {
+                          if (r.text) setComposer(r.text);
+                        })
+                        .catch((rewriteErr: unknown) => {
+                          const message =
+                            rewriteErr instanceof Error ? rewriteErr.message : "Rewrite failed";
+                          setError(message);
+                        })
+                        .finally(() => setVoiceRewritePending(false));
+                    }}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                  >
+                    {voiceRewritePending ? "rewriting…" : "rewrite in voice"}
                   </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
@@ -2166,10 +2168,10 @@ export default function ThreadPage() {
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-              Write in my voice
+              Compose
             </p>
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              Tell the AI what you want to say. It rewrites in your voice for this thread.
+              Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the &quot;rewrite in my voice&quot; action above the composer instead.
             </p>
             <textarea
               value={composeIntent}
@@ -2189,7 +2191,7 @@ export default function ThreadPage() {
                 ) : (
                   <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.8} />
                 )}
-                {composing ? "Writing…" : "Write"}
+                {composing ? "Composing…" : "Compose"}
               </Button>
               {composeError ? (
                 <span className="font-mono text-[11px] text-risk-overdue">{composeError}</span>
