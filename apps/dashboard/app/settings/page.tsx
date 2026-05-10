@@ -23,9 +23,9 @@ interface AiStatus {
 const AI_PROVIDERS: AiProvider[] = ["openai", "glm", "gemini"];
 
 const PROVIDER_LABELS: Record<AiProvider, string> = {
-  openai: "OpenAI",
-  glm: "GLM (Z.AI)",
-  gemini: "Gemini API"
+  openai: "ChatGPT",
+  glm: "GLM",
+  gemini: "Gemini"
 };
 
 const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
@@ -36,11 +36,18 @@ const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
 
 // Which `AppSettings` field a model-override input writes to for each
 // provider. `null` means the provider has no per-account model override
-// (OpenAI is set globally via OPENAI_MODEL).
+// — the runner uses the env-default model instead. All three providers
+// are now `null`: operators flagged the per-provider model UI as
+// confusing (Gemini and GLM had inputs but ChatGPT didn't, asymmetric).
+// To change a provider's model, set the corresponding env var
+// (OPENAI_MODEL / Z_AI_MODEL / GEMINI_MODEL) and restart. Existing
+// saved values on `glmModel` / `geminiModel` columns are preserved on
+// save (the UI just doesn't expose editing them) so we don't quietly
+// blow away any operator's prior override.
 const PROVIDER_MODEL_FIELD: Record<AiProvider, "glmModel" | "geminiModel" | null> = {
   openai: null,
-  glm: "glmModel",
-  gemini: "geminiModel"
+  glm: null,
+  gemini: null
 };
 
 const PROVIDER_MODEL_PLACEHOLDER: Record<AiProvider, string> = {
