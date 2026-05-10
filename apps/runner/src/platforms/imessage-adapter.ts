@@ -84,7 +84,7 @@ export class IMessageAdapter implements PlatformAdapter {
         const isPermission = code === "EACCES" || /SQLITE_CANTOPEN|authorization/i.test(String(error));
         throw new AdapterFailure(
           isPermission
-            ? "Cannot read iMessage chat.db — grant Full Disk Access to the runner's terminal."
+            ? "Cannot read iMessage chat.db - grant Full Disk Access to the runner's terminal."
             : `Failed to open iMessage chat.db: ${(error as Error).message}`,
           {
             kind: "AUTH_REQUIRED",
@@ -204,9 +204,9 @@ export class IMessageAdapter implements PlatformAdapter {
       const isAccessibility = /osascript is not allowed to send keystrokes|\(1002\)|System Events.*not authorized/.test(stderr + message);
       throw new AdapterFailure(
         isAccessibility
-          ? "Messages.app needs Accessibility permission to deliver files — grant it under System Settings → Privacy & Security → Accessibility for your terminal app, then retry."
+          ? "Messages.app needs Accessibility permission to deliver files - grant it under System Settings > Privacy & Security > Accessibility for your terminal app, then retry."
           : isAutomation
-            ? "Messages.app rejected automation — grant Automation permission to the runner's terminal."
+            ? "Messages.app rejected automation - grant Automation permission to the runner's terminal."
             : `iMessage send failed: ${message}`,
         {
           kind: isAutomation || isAccessibility ? "AUTH_REQUIRED" : "THREAD_FETCH_FAILED",
@@ -239,7 +239,7 @@ export class IMessageAdapter implements PlatformAdapter {
           const serviceLabel = status.service ?? "?";
           const smsExplain =
             status.service === "SMS"
-              ? " — routed via SMS, but this Mac has no SMS pathway (no SIM and Text Message Forwarding from iPhone is off, OR the recipient's phone isn't iMessage-registered). Try the recipient's iMessage email instead."
+              ? " - routed via SMS, but this Mac has no SMS pathway (no SIM and Text Message Forwarding from iPhone is off, OR the recipient's phone isn't iMessage-registered). Try the recipient's iMessage email instead."
               : "";
           throw new AdapterFailure(
             `Messages.app reports send failed (chat.db error=${status.error}, service=${serviceLabel})${smsExplain}`,
