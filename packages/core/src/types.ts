@@ -127,6 +127,24 @@ export type RunnerEvent =
   | (RunnerEventBase & { type: "SCAN_STARTED"; platform?: PlatformName })
   | (RunnerEventBase & { type: "SCAN_PROGRESS"; platform: PlatformName; stage: string })
   | (RunnerEventBase & { type: "SCAN_FINISHED"; platform?: PlatformName; updatedThreads: number })
+  | (RunnerEventBase & {
+      type: "SCAN_THREAD_STARTED";
+      threadId: string;
+      platform: PlatformName;
+    })
+  | (RunnerEventBase & {
+      type: "SCAN_THREAD_PROGRESS";
+      threadId: string;
+      platform: PlatformName;
+      stage: string;
+    })
+  | (RunnerEventBase & {
+      type: "SCAN_THREAD_FINISHED";
+      threadId: string;
+      platform: PlatformName;
+      updatedThreads: number;
+      parsedMessages: number;
+    })
   | (RunnerEventBase & { type: "THREAD_UPDATED"; threadId: string })
   | (RunnerEventBase & { type: "SUGGESTED_REPLIES_UPDATED"; threadId: string })
   | (RunnerEventBase & {
