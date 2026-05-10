@@ -850,12 +850,19 @@ app.get("/events", (req, res) => {
   const sinceEventId = Number(req.query.sinceEventId ?? req.header("last-event-id") ?? 0);
   const oldest = eventBus.oldestEventId();
 
-  function writeEvent(event: unknown, eventId?: number, eventName?: string): void {
+  // Emit every event as the default ("message") SSE type. EventSource
+  // only delivers an event to `source.onmessage` when no `event:` field
+  // is set; named events fire only on per-name `addEventListener`
+  // listeners. The dashboard registers a single `onmessage` in
+  // `app-shell.tsx` and dispatches a `runner-event` window event keyed
+  // off `payload.type` from the JSON body, so the per-event-name SSE
+  // field was silently dropping every event on the floor (#127:
+  // SUGGESTED_REPLIES_UPDATED never reached the open thread; the
+  // operator only saw fresh chips after navigating away and back). Keep
+  // `id:` — that's how EventSource sets `Last-Event-ID` on reconnect.
+  function writeEvent(event: unknown, eventId?: number): void {
     if (eventId) {
       res.write(`id: ${eventId}\n`);
-    }
-    if (eventName) {
-      res.write(`event: ${eventName}\n`);
     }
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
@@ -866,16 +873,16 @@ app.get("/events", (req, res) => {
       jobId: uuid(),
       reason: "Event replay window exceeded"
     });
-    writeEvent(resyncEvent, resyncEvent.eventId, resyncEvent.type);
+    writeEvent(resyncEvent, resyncEvent.eventId);
   }
 
   const replayEvents = eventBus.listSince(sinceEventId);
   for (const event of replayEvents) {
-    writeEvent(event, event.eventId, event.type);
+    writeEvent(event, event.eventId);
   }
 
   const unsubscribe = eventBus.subscribe((event) => {
-    writeEvent(event, event.eventId, event.type);
+    writeEvent(event, event.eventId);
   });
 
   const heartbeat = setInterval(() => {
