@@ -3,10 +3,12 @@
 // without narrowing. The retry controller maintains entries for every
 // platform; the scan loop only iterates `enabledPlatforms`, so platforms
 // the operator hasn't enabled keep an empty cooldown/reload state.
+// Callers that don't use the scrape-retry path (e.g. the whatsapp-web.js
+// adapter) simply never populate their slot.
 import type { PlatformName } from "@inbox-os/core";
 export type ScanRetryPlatform = PlatformName;
 
-const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
+const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
 
 interface PlatformCooldownState {
   consecutiveFailures: number;

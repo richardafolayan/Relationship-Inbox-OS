@@ -1,9 +1,11 @@
 // IMESSAGE landed first as a schema-only declaration on main (so prisma
-// could read existing iMessage rows without throwing). This branch brings
-// the matching adapter — the runner now dispatches iMessage operations
-// for real. Removing IMESSAGE from this union without also removing the
-// underlying DB rows would break the runner's prisma reads.
-export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+// could read existing iMessage rows without throwing). The matching
+// adapter dispatches iMessage operations for real. WHATSAPP is the
+// library-driven foundation — no DOM scraping, full adapter stub
+// landing in a follow-up. Removing either from this union without
+// also removing the underlying DB rows would break the runner's
+// prisma reads.
+export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
 export type PlatformStatus = "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";

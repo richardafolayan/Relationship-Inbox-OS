@@ -52,6 +52,9 @@ export interface RunnerConfig {
     INSTAGRAM: string;
     TIKTOK: string;
     IMESSAGE: string;
+    /** whatsapp-web.js LocalAuth root. Separate from the Playwright-managed
+     * profiles above — WhatsApp uses its own Puppeteer instance. */
+    WHATSAPP: string;
   };
   imessage: {
     enabled: boolean;
@@ -318,7 +321,8 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       LINKEDIN: resolve(dataDir, "profiles", "linkedin"),
       INSTAGRAM: resolve(dataDir, "profiles", "instagram"),
       TIKTOK: resolve(dataDir, "profiles", "tiktok"),
-      IMESSAGE: resolve(dataDir, "profiles", "imessage")
+      IMESSAGE: resolve(dataDir, "profiles", "imessage"),
+      WHATSAPP: resolve(dataDir, "profiles", "whatsapp")
     },
     imessage: {
       // Mac-only adapter. Default off so Linux/CI runners don't try to open

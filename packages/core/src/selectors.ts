@@ -12,7 +12,12 @@ const SELECTOR_FILES: Partial<Record<PlatformName, string>> = {
   LINKEDIN: "linkedin.json",
   INSTAGRAM: "instagram.json",
   TIKTOK: "tiktok.json",
-  IMESSAGE: "imessage.json"
+  IMESSAGE: "imessage.json",
+  // WhatsApp is library-driven (whatsapp-web.js exposes high-level chat /
+  // message APIs, no DOM scraping). Stub file kept so the per-platform
+  // selector loader, override store, and `/platforms` selector-test page
+  // all work uniformly across platforms.
+  WHATSAPP: "whatsapp.json"
 };
 
 export function loadDefaultSelectors(platform: PlatformName, baseDir: string): SelectorRegistry {

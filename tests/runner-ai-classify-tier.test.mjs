@@ -21,7 +21,7 @@ test("selectClassifyPromptPrefix for TIKTOK returns the casual prefix", () => {
   assert.match(prefix, /messaging-app thread/);
 });
 
-test("selectClassifyPromptPrefix falls through to casual for future enum values (e.g. WHATSAPP)", () => {
+test("selectClassifyPromptPrefix for WHATSAPP returns the casual prefix", () => {
   const prefix = selectClassifyPromptPrefix("WHATSAPP");
   assert.match(prefix, /messaging-app thread/);
 });
