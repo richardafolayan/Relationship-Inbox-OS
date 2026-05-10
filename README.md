@@ -1,413 +1,234 @@
-# Relationship Inbox OS (Operator + Developer Guide)
+# Relationship Inbox
 
-Relationship Inbox OS is a local-first inbox command center for managing unread DMs across LinkedIn, Instagram, and TikTok using browser automation, risk scoring, receipts, and AI-assisted reply workflows.
+I'm bad at replying.
 
-This guide is for:
-- Operators who run the inbox daily.
-- Developers who maintain or extend the runner and dashboard.
+The pattern's the same every time. Someone sends me something on LinkedIn. I see it. I think *"I'll reply properly when I've got a moment."* Then a week passes. By the time I come back to the chat it's gone cold, and I've half-forgotten what we were even talking about. Rereading the whole thread to figure out where we left off feels like work, so I close the tab and tell myself I'll do it tomorrow.
 
-## Table of Contents
+I don't do it tomorrow.
 
-- [What This Project Is](#what-this-project-is)
-- [Feature Inventory (Current, Shipped)](#feature-inventory-current-shipped)
-- [Quick Start (Step-by-Step, First Run)](#quick-start-step-by-step-first-run)
-- [Daily Usage Workflow (Operator Runbook)](#daily-usage-workflow-operator-runbook)
-- [LinkedIn Repair CLI](#linkedin-repair-cli)
-- [Admin Reset + Artifact Cleanup](#admin-reset--artifact-cleanup)
-- [Configuration Reference](#configuration-reference)
-- [Profiles and Browser Session Model](#profiles-and-browser-session-model)
-- [API Surface (Practical Reference)](#api-surface-practical-reference)
-- [Troubleshooting](#troubleshooting)
-- [LinkedIn Rate Limiting & Restriction Recovery](#linkedin-rate-limiting--restriction-recovery)
-- [Safety, Limitations, and Behavior Guarantees](#safety-limitations-and-behavior-guarantees)
-- [Commands Cheat Sheet](#commands-cheat-sheet)
+This same thing happens to me across LinkedIn, iMessage, WhatsApp, and Instagram. Messages stranded across four apps, all aging quietly, all carrying that low-grade guilt of *"I should have replied days ago."* And every time I open one of those apps to deal with it, I get pulled into the feed instead and forget what I came for. Twenty minutes gone, three reels watched, and I still haven't replied to my mum.
 
-## What This Project Is
+So I built one place that pulls all of it together.
 
-Monorepo layout:
-- `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard`: Next.js App Router UI.
-- `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner`: Express + Playwright runner.
-- `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core`: shared types, selectors, risk logic, Prisma schema.
-- `/Users/richard/IdeaProjects/relationship-inbox-os/data`: SQLite DB, browser profiles, screenshots, DOM dumps.
+## What it does
 
-Stack:
-- Dashboard: Next.js + TypeScript + Tailwind.
-- Runner: Node + Express + Playwright + OpenAI.
-- Data: SQLite via Prisma.
+The inbox shows every conversation from every platform in one view, sorted by who's been waiting longest. Next to each conversation it tells me how long it's been since I last replied, summarises what the chat is actually about, and flags the questions I haven't answered yet. I don't have to reread anything to remember where I left off. I just see *"this person asked you X three days ago"* and I can reply.
 
-## Feature Inventory (Current, Shipped)
+When I'm not sure what to write, the AI helps. It can draft a reply based on the context of the conversation, soften something I've written too bluntly, or summarise a long back-and-forth so I can catch up at a glance.
 
-### Dashboard surfaces
+The whole thing pulls my messages without me having to open LinkedIn or Instagram. No feed. No "while you're here, look at this" distraction. Just the messages.
 
-- Inbox:
-  - Unread/at-risk KPIs and filters.
-  - Prioritized list with risk, unread count, preview, and action buttons.
-  - Degraded banner shortcuts to selector tests, receipts, and DOM dumps.
-- Thread workspace:
-  - Timeline view with message direction and timestamps.
-  - Actions: open in platform, rescan thread, save draft, snooze, mark done/manual review, archive/unarchive, open-loop reminder, send, schedule send, cancel/retry queued send.
-  - AI tools: suggested replies, shorten, make warmer, voice rewrite, predraft, compose, thread summary, reassess risk, recategorize.
-  - Receipts drawer for traceability.
-- Platforms:
-  - Connect/reconnect per platform (LinkedIn shipped; Instagram/TikTok hidden until adapter ships).
-  - Run platform scan.
-  - Open browser window.
-  - Run selector tests.
-  - Save/reset selector overrides.
-  - Reset session.
-  - Personal profile diagnostics shown inline (mode, sync mode, source dir, launch dir, resolution strategy).
-- Settings:
-  - Scan interval, amber/red SLA thresholds.
-  - Max messages per thread, recent thread sweep count.
-  - Headless toggle.
-  - Demo mode toggle.
-  - Enabled platforms.
-  - Quiet Hours toggle (suppresses scheduled-send promotion outside operating window).
-  - AI provider selection (OpenAI / GLM) and model override.
-  - Danger zone: reset platform sessions, clear LinkedIn inbox and rebuild (token + typed confirmation), clear DB, restart runner.
-- Activity Log:
-  - Receipts-first trace of scans, sends, selector checks, failures.
-  - Artifact links for screenshots and DOM dumps.
-- People view:
-  - Lightweight relationship panel with platform, last interaction, risk, tags, notes.
-  - Per-person enrichment + profile URL editing; self enrichment for sender voice.
-- Send queue + scheduled sends:
-  - Persisted send queue with idempotent `clientSendId`.
-  - Schedule sends for a future time; promoter flips `SCHEDULED` rows to `PENDING` when due.
-  - Cancel or retry queued/failed sends from the thread workspace.
-- Archive + open-loop:
-  - Archive completed threads; reopen with `unarchive`.
-  - Open-loop reminders re-surface a thread after a chosen delay.
+## When you want to start a conversation, not just maintain one
 
-### Runner capabilities
+There's a separate problem this also helps with. Wanting to reach out to someone you haven't spoken to before and not knowing how to open.
 
-- Control and data APIs for all dashboard actions.
-- SSE stream with replay window and resync support.
-- Audit logging with screenshot/DOM artifact pointers.
-- Idempotent send workflow using `clientSendId`.
-- Browser profile modes:
-  - Managed shared person context under `data/profiles/__managed_person_profiles/default`.
-  - Personal Chrome mirrored profile mode.
-- Personal mode mirror behavior:
-  - Sync mode support (`smart`, `always`, `never`).
-  - Directory-first profile resolution.
-  - Fallback behavior (`error` or `allow_isolated`).
-- Shared session lifecycle + keyed locks:
-  - One browser context per person, with one managed tab per platform.
-  - Queue-one lock policy per `person+platform` to prevent overlap.
-  - Shared reset path rebuilds the whole managed person context.
-- Abort-aware scan queue:
-  - Graceful `SCAN_ABORTED` behavior on reset/abort.
-  - Avoids false degradation from lifecycle interruptions.
-- LinkedIn reliability mode:
-  - Auth-required detection (`AUTH_REQUIRED` with `401` and platform `NOT_CONNECTED`).
-  - Deep thread list collection for virtualized/infinite inbox.
-  - Deterministic thread activation checks.
-  - Message backfill collection in thread panes.
-  - Per-thread failure receipts (`THREAD_SYNC_FAIL`) without degrading whole platform for isolated thread errors.
-- Selector test behavior:
-  - Uses the same launch pipeline as platform connect.
-  - Adaptive probing for reply-capable threads (stabilizes `composer_input` and `send_button` checks).
+You set up a small profile of yourself, what you do, what you're into, what you're working on. Then when you want to message someone, you search them on the app. It pulls what's public about them, their posts, the comments they've left on other people's posts, the things they've reacted to, and finds where their world overlaps with yours. From there it suggests an opener that's specific to them rather than the generic "Hi, hope you're well" everyone ignores.
 
-### CLI capabilities
+It saves the half hour of stalking through someone's profile to find something to mention. The system does the looking for you.
 
-- `scan`: trigger scan.
-- `connect <PLATFORM>`: connect a platform.
-- `test-selectors <PLATFORM>`: run selector tests.
-- `linkedin-smoke`: run one-thread LinkedIn unread smoke ingest.
-- `repair:linkedin-threads`: plan/apply conservative LinkedIn dedupe + recency repair.
+## Who this is for
 
-### LinkedIn Repair CLI
+If you keep meaning to reply to messages and somehow never do, this might be useful. The whole flow is built around the friction that stops me from replying, the rereading, the forgetting, the getting pulled into the feed. If those are also the things stopping you, the rest of this app will feel familiar. If you also want to start conversations with people you haven't met yet without spending an hour rehearsing what to say, the networking side covers that too.
 
-The LinkedIn repair command is conservative and defaults to dry-run.
+If none of that's your problem, this probably isn't for you, and that's completely fine.
 
-Dry-run (safe default):
+## What's actually shipped
 
-```bash
-npm run repair:linkedin-threads
-```
+LinkedIn is the one I use daily, so it's the most polished. Instagram and TikTok work but their UIs change often, and the system degrades gracefully when something breaks rather than failing silently. iMessage and WhatsApp foundations are in place but I haven't built the UI for them yet. Adding more platforms over time.
 
-Apply planned merges/recompute timestamps:
+It runs locally on your own machine. Your data lives on your laptop, not on someone's server. The only thing that leaves is API calls to your AI provider of choice (OpenAI, GLM via Z.AI, or Gemini), and you can turn AI off entirely if you'd rather draft everything yourself.
 
-```bash
-npm run repair:linkedin-threads -- --apply
-```
+## Quick start
 
-Optional explicit cleanup for unresolved zero-message placeholders:
+### What you need
 
-```bash
-npm run repair:linkedin-threads -- --apply --delete-zero-message-unresolved
-```
+Node.js 20 or newer. npm 10.8.2. Chrome installed locally if you want personal profile mode (which most people will).
 
-Every run writes an NDJSON report under `/Users/richard/IdeaProjects/relationship-inbox-os/data/repair` unless `--report <path>` is provided.
-
-## Admin Reset + Artifact Cleanup
-
-### Token-guarded LinkedIn reset
-
-- Runner route: `POST /admin/reset` (dashboard path: `/runner/admin/reset`).
-- Guard rails:
-  - Dev-only unless `ADMIN_RESET_ENABLED=1`.
-  - Requires `ADMIN_RESET_TOKEN` match (`x-admin-reset-token` header or request body `token`).
-  - Requires `confirm: "RESET"`.
-- Default scope for dashboard action: `platform: "LINKEDIN"`.
-- Deletes LinkedIn graph in FK-safe order (`sendRequests`, `drafts`, `messages`, `threads`) and then removes only truly orphan `Person` rows (`threads.none` across all platforms).
-
-CLI wrapper:
-
-```bash
-npm run db:reset:linkedin
-```
-
-Equivalent direct runner script:
-
-```bash
-npm run db:reset:linkedin --workspace @inbox-os/runner
-```
-
-### Artifact cleanup (dry-run first)
-
-Runtime artifacts are ignored by git and can be pruned safely:
-
-```bash
-npm run cleanup:artifacts
-```
-
-Apply deletion:
-
-```bash
-npm run cleanup:artifacts -- --apply
-```
-
-Defaults:
-- keep last `20` run folders
-- keep artifacts newer than `7` days
-- never touches SQLite DB files
-
-## Quick Start (Step-by-Step, First Run)
-
-### 1) Prerequisites
-
-- Node.js `20.x` or newer.
-- npm (project uses `npm@10.8.2`).
-- macOS Chrome installed for personal profile mode.
-
-### 2) Install dependencies
+### Get it running
 
 ```bash
 npm install
-```
-
-If Playwright browser binaries are missing on first run:
-
-```bash
 npx playwright install
-```
-
-### 3) Initialize database/client
-
-```bash
 npm run db:generate
 npm run db:push
 ```
 
-### 4) Configure environment
-
-Create `.env` in repo root (or copy from `.env.example`) and set at least:
+Make a `.env` file in the repo root. The minimum to get going.
 
 ```bash
 OPENAI_API_KEY=
 OPENAI_MODEL=gpt-5
 RUNNER_PORT=4001
 DASHBOARD_PORT=3100
+USE_EVENTS_PROXY=false
 BROWSER_PROFILE_MODE=isolated
 ```
 
-For personal profile mode, also configure:
+If you want to use your own Chrome profile so you stay logged in (recommended), see the personal profile config in the Reference section further down.
 
-```bash
-PERSONAL_PROFILE_FALLBACK=error
-PERSONAL_PROFILE_SYNC_MODE=smart
-PERSONAL_CHROME_USER_DATA_DIR=/Users/richard/Library/Application Support/Google/Chrome
-PERSONAL_CHROME_PROFILE_DIRECTORY=Person 1
-PERSONAL_CHROME_PROFILE_NAME=Richard Afolayan
-CONNECT_OPERATION_TIMEOUT_MS=25000
-CONNECT_OPERATION_TIMEOUT_MS_PERSONAL=90000
-```
-
-### 5) Start dashboard + runner
+Start it.
 
 ```bash
 npm run dev
 ```
 
-Expected:
-- Dashboard at `http://localhost:3100`.
-- Runner at `http://localhost:4001`.
+Dashboard at http://localhost:3100. Runner at http://localhost:4001.
 
-### 6) Verify health
+### First connection
 
-Open:
-- `http://localhost:3100/inbox`
+Open http://localhost:3100/platforms and hit Connect on LinkedIn. If you're using personal profile mode, make sure you're already signed into the right Chrome profile. Wait for the status to flip to CONNECTED.
 
-Optional runner check:
+Click Run scan. Threads start appearing in /inbox.
 
-```bash
-curl http://localhost:4001/health
-```
+Open one. Reply, either yourself or with one of the AI tools. Then check the Activity Log to confirm it actually sent.
 
-### 7) Connect first platform
+That's the loop.
 
-- Go to `http://localhost:3100/platforms`.
-- Click `Connect` on LinkedIn first.
-- In personal mode, ensure you are signed into the intended Chrome profile.
-- Wait for status to become `CONNECTED`.
+## A typical day
 
-### 8) Run first scan
+### Morning
 
-- From `/platforms`, click `Run scan` for LinkedIn, or start global scan from UI controls.
-- Confirm `Last scan` updates and rows appear in `/inbox`.
+I open /inbox first thing. The red threads at the top are the ones that have gone cold for over 48 hours. I work through those first. Reply, mark done, snooze, depending on what each one needs.
 
-### 9) Open a thread and send test reply
+If a thread is asking for something I don't have to hand (a link, a doc, a decision), I predraft a placeholder reply, snooze the thread for a few hours, and come back to it after I've sorted whatever was missing.
 
-- Open `/inbox` and click a thread row.
-- On thread page, optionally use AI suggestions/transform tools.
-- Send with `Send (Cmd+Enter)` or button.
+### Through the day
 
-### 10) Verify receipts/artifacts
+The scan runs in the background and pulls new messages as they arrive. Sometimes I'll do a manual run if I know I've been ignored on something specific.
 
-- Open Activity Log (`/logs`) or Receipts drawer.
-- Confirm send/scan receipts.
-- For failures, open linked screenshot/DOM artifacts under `/artifacts/...`.
+When the inbox starts feeling cluttered with stuff that doesn't actually need me (broadcast messages, automated notifications, threads that aren't really live), I bulk-select and clear them. The threads stay in the database, they just don't show in the active view anymore.
 
-## Daily Usage Workflow (Operator Runbook)
+### End of day
 
-### Morning loop
+I close out anything that's now waiting on the other person. Anything I want to follow up on later, I set an "open loop" reminder so it resurfaces at the right time.
 
-1. Open `/inbox` and `/platforms`.
-2. Check degraded banners first.
-3. Run scan.
-4. Prioritize `RED` then `AMBER`, then unread.
-5. Open thread, draft/transform reply, send.
-6. Mark done or snooze where needed.
-7. Confirm outcomes in Activity Log/Receipts.
+If anything's stuck in the send queue, that usually means a network blip or an auth issue. I retry or cancel and rewrite.
 
-### Recovery loop (when degraded)
+## When something breaks
 
-1. From `/platforms`, run selector tests for affected platform.
-2. If a selector fails, test override candidate.
-3. Save override if pass, otherwise reset to default.
-4. Re-run scan.
-5. If still failing, reset platform session and reconnect.
+### "Profile already in use" or lock errors
 
-## Configuration Reference
+Another Chrome process is using the same profile directory.
+
+Close any manually opened Chrome windows on the affected profile. Retry from /platforms. If you need to keep working before sorting it out, set `PERSONAL_PROFILE_FALLBACK=allow_isolated` in your env to fall back to an isolated profile temporarily.
+
+### Connect timeouts
+
+Personal mode has a longer timeout budget by default (90 seconds, vs 25 for isolated mode). If you're still hitting timeouts, bump `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` higher. Verify the auth state is valid by opening the browser window directly (not via Connect) and checking you're actually logged in.
+
+### Auth required, or LinkedIn redirects to login
+
+Open the browser window for the platform. Sign in. Retry Connect. Re-run the scan. The session cookie probably expired.
+
+### Selector failures
+
+If the selector tests show a fail on `composer_input` or `send_button`, LinkedIn's UI has shifted. Run the tests again (the adaptive probing checks multiple threads). If still failing, look at the screenshot the test produced, find the new selector that matches the current UI, save an override, and re-run.
+
+The override is per-platform and persists across scans. When LinkedIn ships a fix that matches the original selector again, you can reset the override and go back to defaults.
+
+### Dashboard errors connecting to runner
+
+The runner isn't up, or it's on a different port than the dashboard expects. Check `http://localhost:4001/health` returns OK. Confirm `RUNNER_PORT` and `DASHBOARD_PORT` match.
+
+### Port already in use
+
+Some other process is on the runner port. Either stop it or change `RUNNER_PORT` in your env and restart.
+
+### Fast reset checklist
+
+If you're stuck and want to reset to a known good state, the order is:
+
+1. Verify runner health (`/health`).
+2. Verify ports and env match.
+3. From /platforms, click Reset session, then Connect.
+4. Run selector tests for the failing platform.
+5. Re-run scan.
+6. Check Activity Log for residual blockers.
+
+The reset session step rebuilds the shared person context across all platforms, so it's the heaviest hammer available short of clearing the database.
+
+## How it's built
+
+Monorepo with three workspaces.
+
+`apps/dashboard` is the Next.js UI. App Router, TypeScript, Tailwind.
+
+`apps/runner` is the Express plus Playwright service that drives the browsers and talks to AI providers.
+
+`packages/core` holds shared types, selector definitions, risk-scoring logic, and the Prisma schema.
+
+Data sits in SQLite via Prisma. Browser profiles, screenshots, DOM dumps, and other artifacts live under `/data` in the repo root.
+
+The runner has two browser profile modes. Isolated launches a clean managed Playwright context every time. Personal mirrors your real Chrome profile so the runner sees what you see (logged-in cookies, your actual Chrome state). Personal mode is what most people want for daily use.
+
+Sending is always user-triggered. There's no autonomous send loop. The runner can scan, scrape, classify, draft, queue, and schedule, but a human has to click the button (or schedule a draft) for anything to actually leave.
+
+## Reference
 
 ### Environment variables
 
-| Variable | Default | Purpose |
+| Variable | Default | What it does |
 |---|---|---|
-| `OPENAI_API_KEY` | empty | OpenAI API key for AI summary/reply features. |
+| `OPENAI_API_KEY` | empty | OpenAI API key for AI features. |
 | `OPENAI_MODEL` | `gpt-5` | OpenAI model used by runner. |
-| `DATABASE_URL` | `file:./data/inbox-os.sqlite` | Prisma DB URL (scripts often override explicitly). |
+| `GLM_API_KEY` | empty | GLM (Z.AI) API key for AI features. |
+| `Z_AI_MODEL` | `glm-4.7-flash` | GLM model used by runner. |
+| `GEMINI_API_KEY` | empty | Gemini API key for AI features. |
+| `GEMINI_MODEL` | `gemma-4-31b-it` | Gemini/Gemma model used by runner. |
+| `DATABASE_URL` | `file:./data/inbox-os.sqlite` | Prisma DB URL. |
 | `RUNNER_PORT` | `4001` | Runner API server port. |
 | `DASHBOARD_PORT` | `3100` | Dashboard port. |
+| `USE_EVENTS_PROXY` | `false` | Use dashboard SSE proxy instead of direct rewrite stream. |
 | `BROWSER_PROFILE_MODE` | `isolated` | `isolated` or `personal`. |
-| `PERSONAL_PROFILE_FALLBACK` | `error` | In personal mode: `error` or `allow_isolated` fallback behavior. |
-| `PERSONAL_PROFILE_SYNC_MODE` | `smart` | Mirror sync mode: `smart`, `always`, `never`. |
+| `PERSONAL_PROFILE_FALLBACK` | `error` | `error` or `allow_isolated` for personal mode fallback. |
+| `PERSONAL_PROFILE_SYNC_MODE` | `smart` | `smart`, `always`, or `never`. |
 | `PERSONAL_PROFILE_MIRROR_ROOT` | empty | Optional override for mirror root. |
-| `PERSONAL_CHROME_USER_DATA_DIR` | macOS Chrome path | Source Chrome user-data directory for personal mode. |
-| `PERSONAL_CHROME_PROFILE_DIRECTORY` | `Person 1` | Profile directory key or display name (directory-first resolution). |
+| `PERSONAL_CHROME_USER_DATA_DIR` | macOS Chrome path | Source Chrome user-data directory. |
+| `PERSONAL_CHROME_PROFILE_DIRECTORY` | `Person 1` | Profile directory key or display name. |
 | `PERSONAL_CHROME_PROFILE_NAME` | `Richard Afolayan` | Display label used in diagnostics. |
-| `CONNECT_OPERATION_TIMEOUT_MS` | `25000` | Connect timeout budget for isolated mode. |
-| `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Connect timeout budget for personal mode. |
-| `LINKEDIN_SCAN_MAX_THREADS` | `200` | Max threads to collect in deep LinkedIn pass. |
-| `LINKEDIN_SCAN_STABLE_ITERATIONS` | `3` | Stop after stable no-growth iterations. |
-| `LINKEDIN_SCAN_SCROLL_WAIT_MS` | `700` | Wait between LinkedIn scroll collection iterations. |
+| `CONNECT_OPERATION_TIMEOUT_MS` | `25000` | Connect timeout for isolated mode. |
+| `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Connect timeout for personal mode. |
+| `LINKEDIN_SCAN_MAX_THREADS` | `200` | Max threads collected in deep LinkedIn pass. |
+| `LINKEDIN_SCAN_STABLE_ITERATIONS` | `3` | Stop after this many no-growth iterations. |
+| `LINKEDIN_SCAN_SCROLL_WAIT_MS` | `700` | Wait between scroll iterations. |
 | `LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS` | `8` | Max message pane backfill attempts per thread. |
-| `LINKEDIN_DEV_SCAN_MAX_THREADS` | empty | Dev-only cap for LinkedIn full scan candidate count. |
-| `LINKEDIN_DEV_SCAN_MAX_OPENS` | empty | Dev-only cap for how many LinkedIn threads are opened in one full scan. |
-| `LINKEDIN_DEV_SCAN_DISABLE_DEEP_SCROLL` | `0` | Dev-only toggle to disable LinkedIn deep scroll and keep one visible pass. |
-| `LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Dev-only runner scheduler guard; disables background autoscan ticks by default. |
-| `LINKEDIN_DEV_LOG_STAGE_HEADLINES` | `1` | Dev-only toggle for always-visible `[LI][SCAN]` headline logs. |
-| `LINKEDIN_USERNAME` | empty | Optional fallback username for the LinkedIn auto-login codepath. Inert unless `LINKEDIN_AUTO_LOGIN=1`. |
-| `LINKEDIN_PASSWORD` | empty | Optional fallback password. Inert unless `LINKEDIN_AUTO_LOGIN=1`. |
-| `LINKEDIN_AUTO_LOGIN` | unset | Set to `1` to allow the runner to auto-fill LinkedIn's sign-in form when the persistent session expires. **Off by default** — auto-filling can re-trip an automated-activity restriction (see "LinkedIn rate limiting" section). |
-| `ENRICH_PACE_MIN_MS` | `60000` | Min jittered gap between profile-enrichment visits. |
-| `ENRICH_PACE_MAX_MS` | `180000` | Max jittered gap between profile-enrichment visits. The actual gap is uniform random in `[min, max]`. |
-| `ENRICH_BATCH_MAX` | `6` | Max enrichment jobs processed in a single drain pass before the worker yields. Was 30; lowered after the 2026-05-08 incident. |
-| `ENRICH_DAILY_CAP` | `40` | Soft cap on profile visits per rolling 24h. Tracked in memory; resets on runner restart. |
-| `ENRICH_LONG_IDLE_EVERY` | `10` | Take an extended idle pause after every N visits. `0` disables long idles. |
-| `ENRICH_LONG_IDLE_MIN_MS` | `300000` | Min duration of the long idle pause (5 min default). |
-| `ENRICH_LONG_IDLE_MAX_MS` | `900000` | Max duration of the long idle pause (15 min default). |
-| `ENRICH_REFRESH_DAYS` | `30` | Days before an enriched profile is considered stale and re-enqueued by the periodic tick. |
-| `ADMIN_RESET_TOKEN` | empty | Required token for `/admin/reset` and reset CLI guard. |
-| `ADMIN_RESET_ENABLED` | unset | Optional explicit enable in non-dev environments (`1` to allow reset route). |
-| `NEXT_PUBLIC_DISABLE_AUTOSCAN` | `1` | Dashboard autoscan gate; in dev it defaults to disabled unless explicitly set `0`. |
-| `NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Legacy dashboard autoscan disable flag (still honored). |
+| `LINKEDIN_DEV_SCAN_MAX_THREADS` | empty | Dev-only cap for full-scan candidate count. |
+| `LINKEDIN_DEV_SCAN_MAX_OPENS` | empty | Dev-only cap for threads opened in one full scan. |
+| `LINKEDIN_DEV_SCAN_DISABLE_DEEP_SCROLL` | `0` | Dev-only toggle to disable deep scroll. |
+| `LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Dev-only background autoscan disable. |
+| `LINKEDIN_DEV_LOG_STAGE_HEADLINES` | `1` | Dev-only stage headline logs. |
+| `ADMIN_RESET_TOKEN` | empty | Required token for `/admin/reset` and reset CLI. |
+| `ADMIN_RESET_ENABLED` | unset | Optional explicit enable in non-dev environments. |
+| `NEXT_PUBLIC_DISABLE_AUTOSCAN` | `1` | Dashboard autoscan gate. |
+| `NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Legacy dashboard autoscan disable flag. |
 
-### Runtime settings (`/settings`)
+### Runtime settings (`/settings` page)
 
-| Setting | Meaning |
+| Setting | What it does |
 |---|---|
-| `scanIntervalSeconds` | Scheduler scan interval. |
-| `amberHours` | Hours before thread becomes AMBER risk. |
-| `redHours` | Hours before thread becomes RED risk. |
-| `maxMessagesPerThread` | Max messages fetched/considered per thread. |
-| `recentThreadSweepCount` | Additional recent thread candidate sweep size. |
-| `headless` | Browser visibility mode for automation. |
-| `demoMode` | Seed/cleanup demo dataset and demo receipts. |
-| `enabledPlatforms` | Active platform list for scheduler scans. |
-| `aiProvider` | AI provider for summary/reply features (`openai` or `glm`). Falls back to `AI_PROVIDER` env. |
-| `glmModel` | Optional GLM model id override. Falls back to `Z_AI_MODEL` env (default `glm-4.7-flash`). |
+| `scanIntervalSeconds` | How often the scheduler scans. |
+| `amberHours` | Hours before a thread becomes amber risk. |
+| `redHours` | Hours before a thread becomes red risk. |
+| `maxMessagesPerThread` | Max messages fetched per thread. |
+| `recentThreadSweepCount` | Additional recent thread sweep size. |
+| `headless` | Browser visibility for automation. |
+| `demoMode` | Seed and cleanup demo dataset. |
+| `enabledPlatforms` | Active platforms for scheduler scans. |
+| `aiProvider` | `openai`, `glm`, or `gemini`. |
+| `glmModel` | Optional GLM model override. |
+| `geminiModel` | Optional Gemini/Gemma model override. |
 
-## Profiles and Browser Session Model
+### API routes
 
-### Isolated mode
+Runner-native base is `http://localhost:4001`. Dashboard calls go through proxied endpoints under `/runner/...` and `/events`.
 
-- Launches with a shared managed person directory:
-  - `data/profiles/__managed_person_profiles/default`
-- Best for predictable automation isolation.
-
-### Personal mode
-
-- Uses your local Chrome user-data source and mirrors selected profile into the shared managed person launch dir.
-- Uses `channel: chrome` with `--profile-directory=<resolved profile>`.
-- Profile resolution is directory-first, then name match.
-
-### Mirror sync semantics
-
-- `smart`: sync only when target missing or source marker is newer.
-- `always`: always sync before launch.
-- `never`: skip sync.
-
-### Profile lock behavior and shared session ownership
-
-- Runner uses one managed context per person and coordinates actions with per-platform mutex keys.
-- Reset session acquires global reset lock, aborts scans, and recreates the managed person context.
-- Runner does not close manually opened personal Chrome windows.
-- If a personal profile is locked by external Chrome processes:
-  - with `PERSONAL_PROFILE_FALLBACK=error`: connect/test fails fast with explicit error.
-  - with `PERSONAL_PROFILE_FALLBACK=allow_isolated`: runner falls back to isolated profile launch.
-
-### Expected behavior for browser control actions
-
-- `Connect`: uses managed shared session tab, validates platform connection.
-- `Run selector tests`: uses managed shared session tab and auth-aware readiness checks.
-- `Open browser window`: opens managed shared session tab for manual interaction.
-
-## API Surface (Practical Reference)
-
-Runner-native base: `http://localhost:4001`
-
-Dashboard calls proxied endpoints under `/runner/...` and `/events`.
-
-### Health/events/artifacts
+#### Health and events
 
 - `GET /health`
 - `GET /events`
 - `GET /artifacts/:type/:name`
 
-### Control routes
+#### Control routes
 
 - `POST /control/settings`
 - `POST /control/scan`
@@ -418,7 +239,7 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/platform/open-browser`
 - `POST /control/platform/linkedin/smoke-unread`
 - `POST /control/platform/reset-session`
-- `POST /control/thread/:threadId/send` — body accepts optional `scheduledFor` (ISO 8601) for scheduled sends
+- `POST /control/thread/:threadId/send` (accepts optional `scheduledFor` ISO 8601)
 - `POST /control/thread/:threadId/cancel-send`
 - `POST /control/thread/:threadId/retry-send`
 - `POST /control/thread/:threadId/open`
@@ -446,30 +267,11 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `POST /control/system/clear-db`
 - `POST /control/system/restart`
 
-### Admin routes
+#### Admin routes
 
-- `POST /admin/reset` (dev/token/confirm guarded)
+- `POST /admin/reset` (dev-only by default, requires token plus `confirm: "RESET"`)
 
-### LinkedIn smoke unread run
-
-- `POST /control/platform/linkedin/smoke-unread`
-- `npm run linkedin:smoke`
-- Always writes smoke artifacts under the run folder:
-  - `pretty.log`
-  - `events.ndjson`
-  - `actions.csv`
-  - `list-probe.json`
-  - `list-probe.html`
-  - `list-probe.png`
-  - failure-only: `dom.html`, `failure.png`
-- Updates latest pointer: `apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt`
-- Success response shape:
-  - `{ ok: true, requestId, logDir, result: { outcome, unreadCount, name, listTimestamp, preview, messagesParsed, probeArtifacts } }`
-  - `outcome` is `INGESTED_ONE_THREAD` or `UNREAD_EMPTY`
-- Failure response shape:
-  - `{ ok: false, requestId, logDir, stage, reason, error }`
-
-### Data routes
+#### Data routes
 
 - `GET /data/settings`
 - `GET /data/ai-status`
@@ -484,152 +286,85 @@ Dashboard calls proxied endpoints under `/runner/...` and `/events`.
 - `GET /data/archived`
 - `GET /data/send-queue`
 
-## Troubleshooting
+### LinkedIn smoke run
 
-### `...profile is already in use` / lock errors
+Triggers a one-thread LinkedIn unread ingest. Useful for verifying the scan pipeline end-to-end without doing a full pass.
 
-Symptoms:
-- Selector tests/connect fail with profile lock or singleton messages.
+```bash
+npm run linkedin:smoke
+```
 
-Actions:
-1. Close all manually opened Chrome windows using the same personal profile.
-2. Retry from `/platforms`.
-3. If needed, set `PERSONAL_PROFILE_FALLBACK=allow_isolated` for temporary continuity.
-4. Reconnect platform.
+Or via the API.
 
-### `CONNECT_* timed out after ...ms`
+```bash
+POST /control/platform/linkedin/smoke-unread
+```
 
-Symptoms:
-- Connect returns timeout failure.
+Always writes artifacts under the run folder. `pretty.log`, `events.ndjson`, `actions.csv`, `list-probe.json`, `list-probe.html`, `list-probe.png`. Failures additionally drop `dom.html` and `failure.png`. Latest run pointer at `apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt`.
 
-Actions:
-1. In personal mode, use `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL=90000` or higher if needed.
-2. Verify auth state is valid in opened browser profile.
-3. Check runner logs for connect step receipts.
-4. Retry `Connect` from `/platforms`.
+Success response. `{ ok: true, requestId, logDir, result: { outcome, unreadCount, name, listTimestamp, preview, messagesParsed, probeArtifacts } }`. Outcome is `INGESTED_ONE_THREAD` or `UNREAD_EMPTY`.
 
-### `AUTH_REQUIRED` / LinkedIn redirect to login
+Failure response. `{ ok: false, requestId, logDir, stage, reason, error }`.
 
-Symptoms:
-- Connect fails with auth-required message.
-- Platform status flips to `NOT_CONNECTED`.
+### LinkedIn repair CLI
 
-Actions:
-1. Open browser window for platform.
-2. Sign in on LinkedIn in the active profile.
-3. Retry `Connect`.
-4. Re-run scan.
+Conservative dedupe and recency repair for LinkedIn threads. Defaults to dry-run.
 
-### Dashboard proxy `ECONNREFUSED` to runner
+```bash
+npm run repair:linkedin-threads
+```
 
-Symptoms:
-- Dashboard errors while calling `localhost:4001`.
+Apply the planned merges and timestamp recompute.
 
-Actions:
-1. Ensure runner process is actually up.
-2. Ensure `RUNNER_PORT` matches dashboard expectations.
-3. Restart `npm run dev`.
-4. Verify `http://localhost:4001/health`.
+```bash
+npm run repair:linkedin-threads -- --apply
+```
 
-### `EADDRINUSE :::4001`
+Optional cleanup for unresolved zero-message placeholders.
 
-Symptoms:
-- Runner fails to start because port is already in use.
+```bash
+npm run repair:linkedin-threads -- --apply --delete-zero-message-unresolved
+```
 
-Actions:
-1. Stop existing runner process using port `4001`.
-2. Or change `RUNNER_PORT` and restart both apps.
+Every run writes an NDJSON report under `data/repair` unless you pass `--report <path>`.
 
-### Selector fails for `composer_input` / `send_button`
+### Token-guarded LinkedIn reset
 
-Symptoms:
-- Selector report shows `composer_input` or `send_button` fail intermittently.
+For when you need to wipe LinkedIn and start fresh.
 
-Actions:
-1. Run selector tests again (adaptive probing now checks multiple threads).
-2. If still failing, inspect screenshot/DOM dump for current UI variant.
-3. Save an override for that selector.
-4. Re-run tests and scan.
+Runner route is `POST /admin/reset` (dashboard path: `/runner/admin/reset`).
 
-### Fast reset checklist
+Guards.
 
-1. Verify runner health (`/health`).
-2. Verify ports and env (`RUNNER_PORT`, `DASHBOARD_PORT`).
-3. On `/platforms`: `Reset session` -> `Connect`.
-   - Reset now rebuilds the shared person context for all platforms.
-4. Run selector tests for failing platform.
-5. Re-run scan.
-6. Check Activity Log and receipts for remaining blockers.
+- Dev-only unless `ADMIN_RESET_ENABLED=1`.
+- Requires `ADMIN_RESET_TOKEN` match (header `x-admin-reset-token` or body `token`).
+- Requires `confirm: "RESET"`.
 
-## LinkedIn Rate Limiting & Restriction Recovery
+Default scope from the dashboard action is `platform: "LINKEDIN"`. The reset deletes the LinkedIn graph in foreign-key-safe order (sendRequests, drafts, messages, threads) and removes only truly orphan Person rows (those with no threads anywhere).
 
-LinkedIn actively detects automated activity and will restrict an account
-that exhibits regular cadences, bursty traffic, or sustained navigation
-beyond what a human session would produce. **A restriction once seen will
-be re-applied faster the second time** — recover slowly and don't re-test
-the limit immediately after it lifts.
+CLI wrapper.
 
-### Built-in safeguards (enrichment queue)
+```bash
+npm run db:reset:linkedin
+```
 
-- **Jittered pacing.** Inter-visit gap is uniform random in
-  `[ENRICH_PACE_MIN_MS, ENRICH_PACE_MAX_MS]` (default 60–180s). Fixed
-  pacing is the textbook detection signal; randomisation is non-optional.
-- **Small batch size.** `ENRICH_BATCH_MAX` defaults to **6** — the worker
-  yields between batches instead of running through 30 jobs back-to-back.
-- **Long idle pauses.** Every `ENRICH_LONG_IDLE_EVERY` visits (default
-  10) the worker sleeps an additional `[5min, 15min]` before continuing,
-  breaking sustained activity into shorter sessions.
-- **Daily soft cap.** `ENRICH_DAILY_CAP` (default 40) bounds the rolling
-  24-hour visit count. Beyond the cap the queue defers all jobs by 1h and
-  re-checks. Tracked in memory; resets on runner restart.
-- **Auto-login is off by default.** Even with `LINKEDIN_USERNAME` /
-  `LINKEDIN_PASSWORD` set, the runner will not auto-fill the sign-in form
-  unless `LINKEDIN_AUTO_LOGIN=1` is also set. Auto-fill on a freshly
-  restricted account re-trips the flag immediately.
-- **Manual cancel.** `POST /control/enrichment/cancel-pending` drains the
-  PENDING queue without restarting the runner.
+### Artifact cleanup
 
-### If you hit a restriction
+Runtime artifacts (screenshots, DOM dumps, run folders) are gitignored and can be pruned safely. Always dry-run first.
 
-1. **Stop the runner immediately.** Kill the `tsx watch src/index.ts`
-   process; the dashboard can stay up. Do not touch any LinkedIn surface
-   (scan, send, enrich) until the restriction lifts.
-2. **Drain the queue.** While the runner is still up:
-   `curl -X POST http://localhost:4001/control/enrichment/cancel-pending`.
-3. **Wait the full restriction window.** LinkedIn shows the lift time in
-   the warning message. Don't attempt a partial recovery early.
-4. **Sign in manually first.** When the restriction lifts, open the
-   controlled Chrome window and log in by hand. Confirm `/feed/` loads
-   normally before letting the runner do anything.
-5. **Keep `LINKEDIN_AUTO_LOGIN` unset** for at least a week. Any session
-   refresh during that window should be operator-driven.
-6. **Stay well below the cap.** Don't run a full Rescan-all the day after
-   recovery. Use **Scan new** for net-new contacts only and let pacing
-   spread visits across the day.
+```bash
+npm run cleanup:artifacts
+```
 
-### Tuning the safeguards
+Apply deletion.
 
-The defaults are conservative; tighten further if you've recently been
-flagged, loosen only after extended clean operation. Plausible relaxed
-values once trust is rebuilt: `ENRICH_PACE_MIN_MS=45000`,
-`ENRICH_PACE_MAX_MS=120000`, `ENRICH_DAILY_CAP=80`. Never fall below
-30s minimum — that's the regime that triggered the original incident.
+```bash
+npm run cleanup:artifacts -- --apply
+```
 
-### Reference incident
+Defaults are: keep last 20 run folders, keep artifacts newer than 7 days. The script never touches SQLite DB files.
 
-**2026-05-08 — automated activity restriction.** Cause: scan-all enqueued
-~30 profile visits with fixed 30s pacing and no daily cap. Fix: jitter,
-lower batch, daily cap, and disabled auto-login by default (this section).
-
-## Safety, Limitations, and Behavior Guarantees
-
-- Browser automation only in v1; no official platform API integrations.
-- Sending is always user-triggered from UI. No autonomous send loop.
-- Instagram/TikTok adapters are beta and can degrade gracefully with selector diagnostics.
-- Receipts and artifacts are first-class debugging primitives and should be checked before changing selectors.
-- Shared session reset targets runner-owned managed Playwright context only.
-
-## Commands Cheat Sheet
+### Cheat sheet
 
 ```bash
 # Full local startup (db generate/push + core build + dashboard+runner dev)
@@ -669,5 +404,8 @@ npm run cleanup:artifacts
 
 ## Notes
 
-- This README is aligned to current shipped routes and UI behavior in `apps/runner/src/index.ts` and dashboard pages.
-- If you add new control/data routes or settings fields, update this README in the same PR to keep operator docs accurate.
+This README tracks shipped behaviour in `apps/runner/src/index.ts` and the dashboard pages. If you add new control routes, data routes, or settings fields, update this README in the same PR so the docs stay accurate.
+
+Browser automation only in v1. No official platform API integrations. Sending is always user-triggered. Instagram and TikTok adapters are beta and degrade gracefully via selector diagnostics. iMessage and WhatsApp foundations are in place but not yet UI-exposed.
+
+Receipts and artifacts are first-class debugging primitives. When something goes wrong, check those before changing selectors.
