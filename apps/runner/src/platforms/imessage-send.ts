@@ -42,12 +42,41 @@ const AUDIO_EXTS = new Set([".m4a", ".mp4", ".aac", ".webm", ".ogg", ".opus", ".
  *     Granted in System Settings → Privacy & Security → Accessibility
  *     for the runner's terminal app.
  */
-async function sendFileViaUiScripting(input: { filePath: string; handle: string; timeoutMs: number }): Promise<void> {
+/**
+ * Send a file attachment by remembering whatever app the operator was
+ * using, briefly activating Messages to paste + send the file, then
+ * yielding focus straight back. The Q13 "silent send" ideal isn't
+ * achievable on macOS for attachments - the documented
+ * `tell application "Messages" to send POSIX file ...` path silently
+ * fails with chat.db error=25 / "Not Delivered" because Messages drops
+ * the bubble during its iCloud upload phase. UI scripting is the
+ * workaround, but the focus-restore minimises the disruption: Messages
+ * still flashes forward (a few hundred ms), but the operator's cursor
+ * lands back where they were instead of leaving them staring at the
+ * Messages window. The runner ALSO logs a [imessage-send] warn line
+ * the dashboard can surface as a toast so the operator knows what
+ * happened.
+ */
+async function sendFileViaUiScripting(input: {
+  filePath: string;
+  handle: string;
+  timeoutMs: number;
+}): Promise<{ foregroundUsed: true }> {
   const filePath = escapeAppleScript(input.filePath);
   const handle = escapeAppleScript(input.handle);
   const script = `
 on run
   set theFile to POSIX file "${filePath}"
+  -- Capture the currently-frontmost app BEFORE we steal focus so we can
+  -- hand it back when the paste completes. Falls back to Finder when
+  -- the previous app can't be resolved (e.g. only menu bar agents
+  -- running), which at least lets Messages drop out of the foreground.
+  set previousApp to "Finder"
+  try
+    tell application "System Events"
+      set previousApp to name of first application process whose frontmost is true
+    end tell
+  end try
   -- Stage the file on the clipboard so Messages' window can paste it.
   set the clipboard to theFile
   -- Open the chat with this buddy. The imessage: URL scheme selects
@@ -75,9 +104,23 @@ on run
       keystroke return
     end tell
   end tell
+  -- Hand focus back to whatever the operator was doing. A short delay
+  -- lets Messages finish its post-send animation before we yield, so
+  -- the bubble actually lands before the window drops out of view.
+  delay 0.2
+  try
+    tell application previousApp to activate
+  end try
 end run
 `;
   await execFileAsync("osascript", ["-e", script], { timeout: input.timeoutMs });
+  // Visible from the runner's stdout; the dashboard's audit-log handler
+  // can grep for this token if it ever wants to surface the warning to
+  // the operator as a one-time "we had to bring Messages forward" toast.
+  console.warn(
+    "[imessage-send] file-send used foreground UI scripting (Messages.app momentarily activated); focus restored to previous app"
+  );
+  return { foregroundUsed: true };
 }
 
 function stageInReadableTmp(src: string): string {
