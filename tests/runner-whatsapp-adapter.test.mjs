@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { WhatsAppAdapter } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
+import { WhatsAppAdapter, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
 
 /**
  * Minimal whatsapp-web.js Client stub. Wweb.js Client extends EventEmitter
@@ -288,6 +288,76 @@ test("fetchThreadMessages populates senderName for inbound group messages via ms
     10
   );
   assert.equal(msgs[0].senderName, "Bob");
+});
+
+test("renderMessageText flattens a poll_creation message into question + bullet list", () => {
+  const text = renderMessageText({
+    type: "poll_creation",
+    pollName: "Are you coming Friday?",
+    pollOptions: [{ name: "Yes" }, { name: "No" }, { name: "Maybe" }]
+  });
+  assert.match(text, /^📊 Poll: Are you coming Friday\?/);
+  assert.match(text, /• Yes/);
+  assert.match(text, /• No/);
+  assert.match(text, /• Maybe/);
+});
+
+test("renderMessageText marks multi-select polls", () => {
+  const text = renderMessageText({
+    type: "poll_creation",
+    pollName: "Pick toppings",
+    pollOptions: [{ name: "Pepperoni" }, { name: "Mushroom" }],
+    allowMultipleAnswers: true
+  });
+  assert.match(text, /^📊 Poll \(multi-select\): Pick toppings/);
+});
+
+test("renderMessageText handles polls with no question", () => {
+  const text = renderMessageText({
+    type: "poll_creation",
+    pollOptions: [{ name: "Option A" }]
+  });
+  assert.equal(text, "📊 Poll\n• Option A");
+});
+
+test("renderMessageText falls through to media / body / empty for non-poll types", () => {
+  assert.equal(renderMessageText({ body: "hi" }), "hi");
+  assert.equal(renderMessageText({ hasMedia: true }), "[media]");
+  assert.equal(renderMessageText({}), "");
+  // body wins over hasMedia
+  assert.equal(renderMessageText({ body: "caption", hasMedia: true }), "caption");
+});
+
+test("fetchThreadMessages renders a poll_creation message via renderMessageText", async () => {
+  const fakeChat = {
+    fetchMessages: async () => [
+      {
+        id: { _serialized: "m-poll" },
+        body: "",
+        timestamp: 1700000000,
+        fromMe: false,
+        hasMedia: false,
+        type: "poll_creation",
+        pollName: "When are we meeting?",
+        pollOptions: [{ name: "Tuesday" }, { name: "Wednesday" }]
+      }
+    ]
+  };
+  const client = createFakeClient({ getChatById: async () => fakeChat });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  const msgs = await adapter.fetchThreadMessages(
+    { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+    1
+  );
+  assert.match(msgs[0].text, /When are we meeting\?/);
+  assert.match(msgs[0].text, /• Tuesday/);
+  assert.match(msgs[0].text, /• Wednesday/);
 });
 
 test("fetchThreadMessages substitutes [media] placeholder for messages with hasMedia and no body", async () => {
