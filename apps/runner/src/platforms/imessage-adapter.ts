@@ -43,24 +43,28 @@ export class IMessageAdapter implements PlatformAdapter {
   }
 
   /**
-   * Best-effort name resolution: if the contacts vcf has a name for any of
-   * the chat's participants, use it; otherwise keep the chat.db-provided
-   * displayName (phone/email/group name).
+   * Best-effort name resolution. Priority:
+   *   1. Operator-set chat name from chat.db (`row.userSetName`) — never
+   *      override this, even for groups; the operator chose it.
+   *   2. For 1:1: vCard lookup on `chatIdentifier`, fall back to the
+   *      raw identifier.
+   *   3. For groups: per-participant vCard lookup with raw-handle
+   *      fallback PER participant. Earlier this was all-or-nothing —
+   *      if any one participant didn't resolve, the whole group fell
+   *      back to chat.db's auto string (typically a comma-joined list
+   *      of raw numbers). Now partial resolution surfaces the names
+   *      that did match while leaving unmatched handles raw, which is
+   *      strictly more informative than what chat.db would have done.
    */
   private resolveDisplayName(row: IMessageThreadRow): string {
+    if (row.userSetName) return row.userSetName;
     if (!row.isGroup) {
-      const direct = this.contactResolver.resolve(row.chatIdentifier);
-      if (direct) return direct;
-    } else {
-      // For groups: if every participant resolves to a name, render as
-      // "Alice, Bob, Charlie". Otherwise fall back to whatever chat.db had.
-      const resolved = row.participants.map((p) => this.contactResolver.resolve(p) ?? p);
-      const allResolved = resolved.every((name, i) => name !== row.participants[i]);
-      if (allResolved && resolved.length > 0) {
-        return resolved.join(", ");
-      }
+      return this.contactResolver.resolve(row.chatIdentifier) ?? row.displayName;
     }
-    return row.displayName;
+    if (row.participants.length === 0) return row.displayName;
+    return row.participants
+      .map((p) => this.contactResolver.resolve(p) ?? p)
+      .join(", ");
   }
 
   private getDb(): IMessageDb {

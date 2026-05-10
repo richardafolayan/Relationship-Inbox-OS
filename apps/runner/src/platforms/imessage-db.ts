@@ -138,7 +138,23 @@ export function appleTimeToIso(value: number | bigint | null): string | undefine
 export interface IMessageThreadRow {
   guid: string;
   chatId: number;
+  /**
+   * Final display string with chat.db's auto-fallbacks already applied:
+   * either the user-set name, or `participants.join(", ")` for groups, or
+   * the raw chatIdentifier for 1:1s. Callers that want to know whether
+   * the name was operator-set (vs. auto-derived) should look at
+   * `userSetName` instead.
+   */
   displayName: string;
+  /**
+   * The literal `chat.display_name` value from chat.db. Non-null only when
+   * the operator named the chat in iMessage (e.g. "Family Chat"). Null
+   * when chat.db left it empty and the displayName above was synthesised
+   * from participants/identifier. Lets the adapter decide whether to
+   * preserve the operator's choice or apply per-participant vCard
+   * resolution for groups.
+   */
+  userSetName: string | null;
   chatIdentifier: string;
   service: string | null;
   isGroup: boolean;
@@ -396,12 +412,14 @@ export class IMessageDb {
         ? r.lastText
         : IMessageDb.decodeAttributedBody(r.lastBody);
       const previewText = decodedPreview || (r.lastBody && r.lastBody.length > 0 ? "[reaction or attachment]" : "");
-      const display = (r.displayName && r.displayName.trim()) ||
+      const userSetName = (r.displayName && r.displayName.trim()) || null;
+      const display = userSetName ||
         (isGroup ? participants.join(", ") || "Group chat" : r.chatIdentifier);
       return {
         guid: r.guid,
         chatId: r.chatId,
         displayName: display,
+        userSetName,
         chatIdentifier: r.chatIdentifier,
         service: r.service,
         isGroup,
