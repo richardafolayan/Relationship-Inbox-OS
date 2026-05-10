@@ -1057,7 +1057,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 platform
               }
             });
-            const cooldownMessage = `collect_threads · cooldown_active · request ${job.jobId}: Cooling down — next retry in ${cooldown.retryAfterSeconds}s`;
+            const cooldownMessage = `collect_threads · cooldown_active · request ${job.jobId}: Cooling down - next retry in ${cooldown.retryAfterSeconds}s`;
             await setPlatformStatus({
               platform,
               status: "DEGRADED",
@@ -1471,7 +1471,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
                       runLogger.logDecision({
                         stage: "open_thread",
                         decision:
-                          "Pre-open streak hit unchangedStreakLimit — requesting cooperative scan exit",
+                          "Pre-open streak hit unchangedStreakLimit - requesting cooperative scan exit",
                         details: {
                           unchangedStreakCount,
                           unchangedStreakLimit,
