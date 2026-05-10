@@ -8,6 +8,7 @@ import type {
   ContactProfileSnapshot,
   ConversationStartersOutput,
   ConversationStarterCitedField,
+  FriendshipSummaryOutput,
   OperatorProfile,
   SettingsStore
 } from "../types/runtime";
@@ -48,6 +49,13 @@ const repliesSchema = z.object({
 
 const categorySchema = z.object({
   category: z.enum(["outreach", "genuine"])
+});
+
+const friendshipSummarySchema = z.object({
+  how_you_know_each_other: z.string(),
+  recent_topics: z.array(z.string()).default([]),
+  inside_jokes: z.array(z.string()).default([]),
+  vibe: z.string()
 });
 
 // Voice + style rules applied to every AI generation (summary, suggested
@@ -1509,6 +1517,69 @@ If the message has no time hint, return { "suggestions": [] }.`;
     }
   }
 
+  /**
+   * Per-person friendship summary for iMessage contacts. Operates on the
+   * union of messages across every thread the operator has with this
+   * person. Produces four sections per Q9 of v0.3.0:
+   *   - how_you_know_each_other (from earliest messages, 1-2 sentences)
+   *   - recent_topics (last 30 days, bullet list)
+   *   - inside_jokes (recurring references / running threads)
+   *   - vibe (tone summary of the relationship)
+   *
+   * Empty / very short transcripts collapse gracefully: the model is told
+   * to return short honest answers ("not enough history yet") rather than
+   * fabricating context. The attribution-discipline reminder applies the
+   * same way it does in updateThreadSummary - operator: vs contact: in
+   * the rendered transcript.
+   */
+  async function summarisePersonForFriendship(input: {
+    displayName: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<FriendshipSummaryOutput> {
+    const fallback: FriendshipSummaryOutput = {
+      how_you_know_each_other: "Not enough message history yet to summarise.",
+      recent_topics: [],
+      inside_jokes: [],
+      vibe: "Not enough message history yet to characterise."
+    };
+
+    if (input.messages.length === 0) {
+      return fallback;
+    }
+
+    const transcript = input.messages
+      .map((m) => {
+        const speaker = m.direction === "OUT" ? "operator" : "contact";
+        return `${speaker} (${m.timestamp}): ${m.text}`;
+      })
+      .join("\n");
+
+    const prompt = `Return strict JSON matching this exact shape:
+{
+  "how_you_know_each_other": "string — 1-2 sentences about how the operator knows this contact, inferred from the earliest messages in the transcript",
+  "recent_topics": ["string", ...] — bullet list of distinct topics they've discussed in roughly the last 30 days. 3-6 items typical. Use plain noun phrases (e.g. \\"Their move to Lagos\\", \\"The book they recommended\\"). Empty array if nothing substantive in that window.",
+  "inside_jokes": ["string", ...] — short list of recurring references, running jokes, or inside threads (a recurring nickname, a private bit, a callback that reappears across messages). Empty array if there aren't any clear ones - do not invent.",
+  "vibe": "string — 1-2 sentences on the tone and feel of the relationship as it shows up in this transcript. Honest, not flattering."
+}
+
+Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
+
+Hard rules:
+- Stick to what is literally in the transcript. Do not invent context.
+- If the history is thin, say so. "Not enough yet" beats fabrication.
+- British English, calm and direct.
+
+Recipient: ${input.displayName}
+
+Transcript:
+${transcript}`;
+
+    const { result } = await modelJson(prompt, fallback, (value) =>
+      friendshipSummarySchema.parse(value)
+    );
+    return result;
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
@@ -1517,6 +1588,7 @@ If the message has no time hint, return { "suggestions": [] }.`;
     generateContactSummary,
     generateConversationStarters,
     composeInVoice,
-    suggestSnoozeTimings
+    suggestSnoozeTimings,
+    summarisePersonForFriendship
   };
 }

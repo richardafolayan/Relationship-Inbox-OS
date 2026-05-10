@@ -7,6 +7,13 @@ import type { PersonDetailResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { ProfileSections } from "./profile-sections";
 
+interface FriendshipSummary {
+  how_you_know_each_other: string;
+  recent_topics: string[];
+  inside_jokes: string[];
+  vibe: string;
+}
+
 interface ProfileDrawerProps {
   open: boolean;
   personId: string | null;
@@ -20,6 +27,8 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   const [error, setError] = useState<string | null>(null);
   const [profileUrlInput, setProfileUrlInput] = useState("");
   const [savingProfileUrl, setSavingProfileUrl] = useState(false);
+  const [friendshipSummary, setFriendshipSummary] = useState<FriendshipSummary | null>(null);
+  const [generatingFriendship, setGeneratingFriendship] = useState(false);
 
   useEffect(() => {
     if (!open || !personId) return;
@@ -37,8 +46,26 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       setDetail(null);
       setProfileUrlInput("");
       setError(null);
+      setFriendshipSummary(null);
     }
   }, [open]);
+
+  const generateFriendshipSummary = async () => {
+    if (!personId) return;
+    setGeneratingFriendship(true);
+    setError(null);
+    try {
+      const result = await apiPost<FriendshipSummary>(
+        `/runner/control/person/${personId}/friendship-summary`,
+        {}
+      );
+      setFriendshipSummary(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to generate friendship summary");
+    } finally {
+      setGeneratingFriendship(false);
+    }
+  };
 
   const rescan = () => {
     if (!personId) return;
@@ -133,10 +160,90 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
                   </Button>
                 </div>
               ) : null}
+              {detail.person.platform === "IMESSAGE" ? (
+                <FriendshipSummarySection
+                  summary={friendshipSummary}
+                  generating={generatingFriendship}
+                  onGenerate={generateFriendshipSummary}
+                />
+              ) : null}
             </>
           ) : null}
         </div>
       </div>
+    </div>
+  );
+}
+
+function FriendshipSummarySection({
+  summary,
+  generating,
+  onGenerate
+}: {
+  summary: FriendshipSummary | null;
+  generating: boolean;
+  onGenerate: () => void | Promise<void>;
+}) {
+  return (
+    <section className="mt-8 border-t border-hairline pt-6">
+      <div className="mb-3 flex items-center justify-between gap-3">
+        <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+          Friendship summary
+        </p>
+        <Button
+          variant="quiet"
+          disabled={generating}
+          onClick={() => void onGenerate()}
+        >
+          {generating ? (
+            <Loader2 className="h-[14px] w-[14px] animate-spin" />
+          ) : null}
+          {generating ? "Generating…" : summary ? "Regenerate" : "Generate"}
+        </Button>
+      </div>
+      {!summary && !generating ? (
+        <p className="m-0 text-[13px] text-ink-3">
+          AI-written profile based on your iMessage history with this person. Four sections covering how you know each other, recent topics, inside jokes, and the vibe.
+        </p>
+      ) : null}
+      {summary ? (
+        <div className="flex flex-col gap-5">
+          <FriendshipBlock title="How you know each other" body={summary.how_you_know_each_other} />
+          {summary.recent_topics.length > 0 ? (
+            <FriendshipList title="Recent topics" items={summary.recent_topics} />
+          ) : null}
+          {summary.inside_jokes.length > 0 ? (
+            <FriendshipList title="Inside jokes / running threads" items={summary.inside_jokes} />
+          ) : null}
+          <FriendshipBlock title="Their vibe with you" body={summary.vibe} />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function FriendshipBlock({ title, body }: { title: string; body: string }) {
+  return (
+    <div>
+      <p className="m-0 mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+        {title}
+      </p>
+      <p className="m-0 whitespace-pre-wrap text-[13.5px] leading-[1.55] text-ink">{body}</p>
+    </div>
+  );
+}
+
+function FriendshipList({ title, items }: { title: string; items: string[] }) {
+  return (
+    <div>
+      <p className="m-0 mb-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+        {title}
+      </p>
+      <ul className="m-0 list-disc pl-5 text-[13.5px] leading-[1.55] text-ink">
+        {items.map((item, idx) => (
+          <li key={idx}>{item}</li>
+        ))}
+      </ul>
     </div>
   );
 }
