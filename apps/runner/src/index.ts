@@ -3276,7 +3276,7 @@ app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
     not_found: "We don't have a LinkedIn profile URL for this person yet.",
     auth_required: "LinkedIn session needs re-authenticating in the runner.",
     selectors_outdated:
-      "LinkedIn changed their page layout — the profile parser needs an update before enrichment can run.",
+      "LinkedIn changed their page layout - the profile parser needs an update before enrichment can run.",
     unknown: "LinkedIn profile fetch failed; check the runner logs."
   };
   const message =
@@ -3908,7 +3908,7 @@ app.post("/control/system/restart", asyncRoute(async (_req, res) => {
   res.status(202).json({
     ok: true,
     message:
-      "Runner restart scheduled — rebuilding @inbox-os/core + @inbox-os/runner and relaunching. " +
+      "Runner restart scheduled - rebuilding @inbox-os/core + @inbox-os/runner and relaunching. " +
       "Tail /tmp/runner-restart.log if the dashboard times out waiting."
   });
 

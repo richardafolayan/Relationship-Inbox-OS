@@ -7138,7 +7138,7 @@ export class LinkedInAdapter implements PlatformAdapter {
                 metrics.skippedUnchangedRows += 1;
                 this.logTraceDecision({
                   stage: "open_thread",
-                  decision: "Skipping stream candidate — unchanged since last scan",
+                  decision: "Skipping stream candidate - unchanged since last scan",
                   details: {
                     rowKey: row.rowKey,
                     displayName: row.displayName,
