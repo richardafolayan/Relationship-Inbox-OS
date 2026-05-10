@@ -2751,7 +2751,17 @@ export function createScanQueue(deps: ScanQueueDeps) {
     await prisma.thread.update({
       where: { id: thread.id },
       data: {
-        personId: person.id,
+        // personId is intentionally omitted from the update. For newly-
+        // created threads it was set above in `prisma.thread.create`. For
+        // existing threads the established link is the source of truth —
+        // re-asserting from `person` (resolved freshly from
+        // candidate.displayName / candidate.profileUrl) can revert correct
+        // links when the candidate carries stale or wrong identity. The
+        // rescan endpoint at index.ts rebuilds candidate from the thread's
+        // currently-linked person's displayName, so unconditional writes
+        // here meant any out-of-band personId repair (or a later parser
+        // fix) would get reverted on the next rescan. PR #151's profileUrl-
+        // first resolution still applies on first creation.
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
         lastMessagePreview: resolvedLastMessagePreview || null,
