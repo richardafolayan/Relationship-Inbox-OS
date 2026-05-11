@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
-import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
+import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, PlatformName } from "@/lib/types";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { SelectableThreadRow } from "@/components/common/selectable-thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
@@ -12,7 +12,11 @@ import { formatRelative } from "@/lib/time";
 import { cn } from "@/lib/utils";
 
 type FilterMode = "all" | "unread" | "needs_reply" | "waiting_on_them" | "genuine" | "outreach";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
+// "all" + every PlatformName the runner knows about. Filter dropdown
+// options below are the operator-facing slice (we hide INSTAGRAM /
+// TIKTOK because their adapters are still scaffolds), but the type
+// stays wide so future platforms route through here cleanly.
+type PlatformFilter = "all" | PlatformName;
 type SortMode = "recent" | "oldest" | "name";
 
 const FILTERS: { key: FilterMode; label: string }[] = [
