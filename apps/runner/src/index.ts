@@ -335,9 +335,14 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(globalResetLockKey(), work);
 }
 
+// Single source of truth for the runtime platform enum used by every
+// /control endpoint's request validator. Keep this list in sync with
+// PlatformName in @inbox-os/core (and the Prisma enum) — adding a
+// platform should be a one-line change here, not a 13-site sweep.
+const platformEnum = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]);
+
 function parsePlatform(value: unknown): PlatformName {
-  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).parse(value);
-  return parsed;
+  return platformEnum.parse(value);
 }
 
 interface ControlTraceContext {
@@ -350,10 +355,11 @@ interface ControlTraceContext {
 }
 
 function maybeParsePlatform(value: unknown): PlatformName | undefined {
-  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK" && value !== "IMESSAGE") {
-    return undefined;
-  }
-  return value;
+  // Try-parse via the same shared enum so this helper stays correct as
+  // platforms are added (the previous explicit string-comparison guard
+  // silently rejected WHATSAPP because nobody updated all four checks).
+  const parsed = platformEnum.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function normalizeOptionalPositiveNumber(value: number | null | undefined): number | undefined {
@@ -704,7 +710,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).default("LINKEDIN"),
+      platform: platformEnum.default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -1206,7 +1212,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"])).optional(),
+      enabledPlatforms: z.array(platformEnum).optional(),
       demoMode: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
       aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
@@ -1279,7 +1285,7 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
 app.post("/control/scan", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).optional(),
+      platform: platformEnum.optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional()
@@ -1343,7 +1349,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]) }).parse(req.body);
+  const payload = z.object({ platform: platformEnum }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
@@ -1509,7 +1515,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]),
+      platform: platformEnum,
       key: z
         .enum([
           "thread_list",
@@ -1614,7 +1620,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 app.post("/control/platform/save-selector-override", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]),
+      platform: platformEnum,
       key: z.enum([
         "thread_list",
         "thread_item",
@@ -1637,7 +1643,7 @@ app.post("/control/platform/save-selector-override", asyncRoute(async (req, res)
 app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]),
+      platform: platformEnum,
       key: z.enum([
         "thread_list",
         "thread_item",
@@ -2872,7 +2878,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"] as PlatformName[]).map(async (platform) => {
+    allPlatforms.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
@@ -3666,7 +3672,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]) }).parse(req.body);
+  const payload = z.object({ platform: platformEnum }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     // The zod payload restricts platform to the three with adapters today,
     // but the adapters map is now Partial — narrow via requireAdapter to
@@ -4080,7 +4086,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).optional() }).parse(req.body ?? {});
+  const payload = z.object({ platform: platformEnum.optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");

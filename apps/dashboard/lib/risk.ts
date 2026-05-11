@@ -11,7 +11,9 @@ export function toDisplayRisk(level: RunnerRisk): DisplayRisk {
   return "fresh";
 }
 
-export const PLATFORM_LABEL: Record<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP", string> = {
+import type { PlatformName } from "@inbox-os/core";
+
+export const PLATFORM_LABEL: Record<PlatformName, string> = {
   LINKEDIN: "linkedin",
   INSTAGRAM: "instagram",
   TIKTOK: "tiktok",
