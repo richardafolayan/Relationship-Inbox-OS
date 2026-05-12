@@ -230,6 +230,15 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     return 24 * 60 * 60 * 1000;
   }
 
+  // Reasons that won't resolve by retrying: the person row is missing /
+  // has no profileUrl, LinkedIn returned a not-found page, or the profile
+  // is private. Without this, jobs against profile-less people sit in
+  // PENDING with nextAttemptAt in the past and keep the "Enriching N
+  // profiles" banner glued on between attempts.
+  function isPermanentFailure(reason: string): boolean {
+    return reason === "not_found" || reason === "private";
+  }
+
   async function processJob(job: { id: string; personId: string; attempts: number }): Promise<{ visited: boolean }> {
     const platform: PlatformName = "LINKEDIN";
     const scanLock = deps.scanLockKey(platform);
@@ -311,7 +320,8 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if ("failed" in result && result.failed) {
       await persistFailure(job.personId, result.reason);
       const attempts = job.attempts + 1;
-      const giveUp = attempts >= 3;
+      const permanent = isPermanentFailure(result.reason);
+      const giveUp = permanent || attempts >= 3;
       await prisma.enrichmentJob.update({
         where: { id: job.id },
         data: {
@@ -321,7 +331,7 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
         }
       });
       console.warn(
-        `[enrichment-queue] job=${job.id} person=${job.personId} failed reason=${result.reason} attempts=${attempts} giveUp=${giveUp}`
+        `[enrichment-queue] job=${job.id} person=${job.personId} failed reason=${result.reason} attempts=${attempts} giveUp=${giveUp}${permanent ? " (permanent)" : ""}`
       );
       return { visited: true };
     }
