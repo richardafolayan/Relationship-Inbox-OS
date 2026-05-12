@@ -229,9 +229,12 @@ export default function TodayPage() {
         : `fresh · ${formatRelative(hero.lastInboundAt)}`;
 
   // Hero headline: AI summary if we got one, otherwise the latest
-  // preview as a stand-in. Truncate to the first sentence and cap at
-  // ~100 chars so the 36px display type doesn't waterfall down the
-  // hero card. Strip a trailing period for cleaner type.
+  // preview as a stand-in. Take only the first sentence and hard-cap
+  // at 62 chars — the h2 (max-w-22ch, 36px display) fits ~31 chars per
+  // line, so 62 keeps the headline to two lines and stops it
+  // waterfalling down the card (issue #193). The AI side targets
+  // ≤ 60 chars so this branch should rarely trigger ellipsis; the
+  // preview fallback is the more common consumer.
   const heroHeadlineRaw =
     heroSummary && heroSummary.id === hero?.id && heroSummary.summary
       ? heroSummary.summary
@@ -240,11 +243,10 @@ export default function TodayPage() {
     if (!heroHeadlineRaw) return "";
     const firstSentence = heroHeadlineRaw.split(/(?<=[.!?])\s+/)[0] ?? heroHeadlineRaw;
     const trimmed = firstSentence.replace(/[.!?]\s*$/, "").trim();
-    if (trimmed.length <= 110) return trimmed;
-    // Hard cap with an ellipsis so a single run-on sentence still fits.
-    const cut = trimmed.slice(0, 107);
+    if (trimmed.length <= 62) return trimmed;
+    const cut = trimmed.slice(0, 59);
     const lastSpace = cut.lastIndexOf(" ");
-    return `${(lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+    return `${(lastSpace > 30 ? cut.slice(0, lastSpace) : cut).trim()}…`;
   })();
 
   const heroIsTransitioning = transitioning && hero && transitioning.id === hero.id;

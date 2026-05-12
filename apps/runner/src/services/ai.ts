@@ -871,7 +871,11 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       // bisect an emoji's surrogate pair. Without it, a message ending in
       // an emoji at the boundary corrupts every subsequent prisma.thread
       // .update — see Sarah Nwisi sync-fail bug.
-      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 140) : "No clear ask yet.",
+      // Hard-capped at 60 chars so the Today hero headline (max-w-22ch,
+       // 36px display type) renders cleanly in two lines. Longer text
+       // waterfalls down the card and pushes the rest of the hero off
+       // its intended proportions — see issue #193.
+       what_they_want: lastInbound ? safeTruncate(lastInbound.text, 60) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",
@@ -905,7 +909,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const prompt = `Return strict JSON matching this exact shape:
 {
   "summary": "string — 1-2 sentence rolling summary of the relationship",
-  "what_they_want": "string — what would deepen this connection or make a great reply. If they made an explicit ask (book a call, share a date, answer a question), that goes here. Otherwise, name what's worth acknowledging or following up on (a thing they shared, a hook in their last message, the warmth they extended). One or two short sentences, plain prose, British English.",
+  "what_they_want": "string — one short sentence, STRICTLY 60 CHARACTERS OR FEWER, plain prose, British English. This headlines the Today hero card so it must fit in two lines of 36px display type. Name the single most useful thing the operator could acknowledge or follow up on (an explicit ask if there is one, otherwise a thing they shared / a hook from their last message). No trailing period. No preamble like 'They want…' — just the ask itself in imperative or noun-phrase form. Examples: 'Confirm Friday lunch at Towpath', 'Ask how the Lagos move is going', 'Thank them for the Stripe intro'.",
   "open_loops": ["string", ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
@@ -927,6 +931,12 @@ Transcript:
 ${transcript}`;
 
     const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
+    // Hard cap. The prompt asks for ≤ 60 chars but the model occasionally
+    // returns longer prose; this guarantees the Today hero headline never
+    // overflows its allotted two-line space (issue #193).
+    if (result.what_they_want.length > 60) {
+      result.what_they_want = safeTruncate(result.what_they_want, 60);
+    }
     return result;
   }
 
