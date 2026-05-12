@@ -867,15 +867,15 @@ export function createAiService(settingsStore: SettingsStore): AiService {
 
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
-      // safeTruncate splits on Unicode code points so a 140-char cut won't
-      // bisect an emoji's surrogate pair. Without it, a message ending in
-      // an emoji at the boundary corrupts every subsequent prisma.thread
+      // safeTruncate splits on Unicode code points so the cut won't bisect
+      // an emoji's surrogate pair. Without it, a message ending in an
+      // emoji at the boundary corrupts every subsequent prisma.thread
       // .update — see Sarah Nwisi sync-fail bug.
-      // Hard-capped at 60 chars so the Today hero headline (max-w-22ch,
-       // 36px display type) renders cleanly in two lines. Longer text
-       // waterfalls down the card and pushes the rest of the hero off
-       // its intended proportions — see issue #193.
-       what_they_want: lastInbound ? safeTruncate(lastInbound.text, 60) : "No clear ask yet.",
+      // 120-char cap matches the Today hero headline's 4-line budget
+      // (max-w-22ch, 36px display, ~31 chars/line). Staying within budget
+      // means the operator reads the full fallback rather than an
+      // ellipsis truncation (issue #193).
+      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",
@@ -909,7 +909,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const prompt = `Return strict JSON matching this exact shape:
 {
   "summary": "string — 1-2 sentence rolling summary of the relationship",
-  "what_they_want": "string — one short sentence, STRICTLY 60 CHARACTERS OR FEWER, plain prose, British English. This headlines the Today hero card so it must fit in two lines of 36px display type. Name the single most useful thing the operator could acknowledge or follow up on (an explicit ask if there is one, otherwise a thing they shared / a hook from their last message). No trailing period. No preamble like 'They want…' — just the ask itself in imperative or noun-phrase form. Examples: 'Confirm Friday lunch at Towpath', 'Ask how the Lagos move is going', 'Thank them for the Stripe intro'.",
+  "what_they_want": "string — 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER in total, plain prose, British English, no trailing ellipsis. This headlines the Today 'First up' hero card: recap what the last couple of messages have been about and name what the contact is waiting on the operator to address next, so the operator instantly remembers the thread on opening Today. Write it as a brief reminder to the operator, not the contact's quoted words. Examples: 'She shared photos from Lagos and asked when you're free for dinner.', 'Carlos confirmed Friday lunch — he's waiting on you to pick a time.', 'They sent the Stripe intro you asked for; owes them a thank-you and your next step.'",
   "open_loops": ["string", ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
@@ -931,11 +931,12 @@ Transcript:
 ${transcript}`;
 
     const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
-    // Hard cap. The prompt asks for ≤ 60 chars but the model occasionally
-    // returns longer prose; this guarantees the Today hero headline never
-    // overflows its allotted two-line space (issue #193).
-    if (result.what_they_want.length > 60) {
-      result.what_they_want = safeTruncate(result.what_they_want, 60);
+    // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
+    // returns longer prose; this keeps the Today hero headline within its
+    // 4-line budget. safeTruncate trims at the code-point boundary and
+    // does not append an ellipsis (issue #193).
+    if (result.what_they_want.length > 120) {
+      result.what_they_want = safeTruncate(result.what_they_want, 120);
     }
     return result;
   }
