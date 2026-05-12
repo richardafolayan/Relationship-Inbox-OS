@@ -5,7 +5,7 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import { runActionWithFeedback } from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { PLATFORM_LABEL } from "@/lib/risk";
+import { IMPLEMENTED_PLATFORMS, PLATFORM_LABEL } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
 import { Menu } from "@/components/ui/menu";
 import { Canvas, PageHead } from "@/components/common/canvas";
@@ -23,8 +23,10 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
 // surfaced as actionable rows. Instagram and TikTok still flow through the
 // runner so settings + future work can re-enable them, but the operator
 // shouldn't see them as "Connect" rows on the main view yet.
-const VISIBLE_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["LINKEDIN", "IMESSAGE"];
-const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = ["INSTAGRAM", "TIKTOK"];
+const VISIBLE_PLATFORMS = IMPLEMENTED_PLATFORMS;
+const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = (
+  ["INSTAGRAM", "TIKTOK", "LINKEDIN", "IMESSAGE"] as const
+).filter((p) => !IMPLEMENTED_PLATFORMS.includes(p));
 
 // Platforms: quiet rows for each platform we ship to operators. Name
 // (title-case display), `last scan Xm ago` mono caption, status pill
