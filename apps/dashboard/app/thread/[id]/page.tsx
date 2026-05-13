@@ -177,9 +177,9 @@ function formatScheduledFor(iso: string | null | undefined): string {
   });
 }
 
-function DayDivider({ label }: { label: string }) {
+function DayDivider({ label, className }: { label: string; className?: string }) {
   return (
-    <div className="my-3 flex items-center gap-3 self-stretch">
+    <div className={`my-3 flex items-center gap-3 self-stretch transition-all duration-300 ${className ?? ""}`}>
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
@@ -1770,15 +1770,14 @@ export default function ThreadPage() {
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? (
-                    <div
-                      className={`contents transition-all duration-300 ${
+                    <DayDivider
+                      label={dayLabel}
+                      className={
                         focusedIdSet && !dividerInFocusedRange
-                          ? "opacity-0 max-h-0 overflow-hidden -mt-[18px] pointer-events-none"
+                          ? "opacity-0 max-h-0 overflow-hidden my-0 -mt-[18px] pointer-events-none"
                           : ""
-                      }`}
-                    >
-                      <DayDivider label={dayLabel} />
-                    </div>
+                      }
+                    />
                   ) : null}
                   <div
                     data-message-id={message.id}
