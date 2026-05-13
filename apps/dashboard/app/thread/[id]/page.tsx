@@ -249,6 +249,10 @@ export default function ThreadPage() {
   const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
+  // Focused thread: cuid of the parent message whose thread we're zoomed
+  // into. Declared up here because the send callback closes over it.
+  // Cleared on Esc, the chip ×, or when navigating threads (effect below).
+  const [focusedThreadParentId, setFocusedThreadParentId] = useState<string | null>(null);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
@@ -548,11 +552,15 @@ export default function ThreadPage() {
     setError(null);
     stickToBottomRef.current = true;
     try {
+      // Snapshot the focused-thread parent at send time so the post-send
+      // exit-focus doesn't race the network call and drop the linkage.
+      const replyToMessageId = focusedThreadParentId ?? undefined;
       if (attachmentsToSend.length > 0) {
         // Multipart upload - needed for binary file payloads.
         const form = new FormData();
         form.append("text", text);
         form.append("clientSendId", clientSendId);
+        if (replyToMessageId) form.append("replyToMessageId", replyToMessageId);
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
         }
@@ -567,7 +575,8 @@ export default function ThreadPage() {
       } else {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
-          clientSendId
+          clientSendId,
+          ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
     } catch (sendError) {
@@ -583,7 +592,7 @@ export default function ThreadPage() {
     } finally {
       setSending(false);
     }
-  }, [composer, composerAttachments, sending, thread]);
+  }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files);
@@ -1067,24 +1076,77 @@ export default function ThreadPage() {
   const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
-  // iMessage threaded-reply lookup. Children carry their parent's chat.db
-  // guid on `raw.replyToGuid`; we map by `platformMessageKey` so a reply
-  // bubble can quote the parent text inline, and a parent can show "N
-  // Replies" under its timestamp. Built from `visibleMessages` so older
-  // history that isn't paginated in yet doesn't appear linked — the user
-  // can scroll up to reveal the parent and the link materialises.
-  const { messageByPlatformKey, replyCountByParentKey } = useMemo(() => {
+  // Threaded-reply lookups — unifies two sources:
+  //   (1) Apple-native: child carries `raw.replyToGuid` from chat.db's
+  //       `thread_originator_guid`, resolved against another row's
+  //       `platformMessageKey`.
+  //   (2) App-level: child carries `replyToMessageId` (a Message.id cuid)
+  //       set by the dashboard's focused-thread composer.
+  // Either way we end up with a parent cuid → child cuids map plus a
+  // per-child parent pointer the render code consumes uniformly.
+  const { messageById, replyCountByParentId, replyChildIdsByParentId, parentIdOf } = useMemo(() => {
     const byKey = new Map<string, ThreadMessage>();
-    const counts = new Map<string, number>();
+    const byId = new Map<string, ThreadMessage>();
     for (const m of visibleMessages) {
+      byId.set(m.id, m);
       if (m.platformMessageKey) byKey.set(m.platformMessageKey, m);
     }
+    const parentOf = new Map<string, string>();
+    const counts = new Map<string, number>();
+    const children = new Map<string, string[]>();
     for (const m of visibleMessages) {
-      const parentGuid = (m.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
-      if (parentGuid) counts.set(parentGuid, (counts.get(parentGuid) ?? 0) + 1);
+      let parentId: string | undefined;
+      if (m.replyToMessageId && byId.has(m.replyToMessageId)) {
+        parentId = m.replyToMessageId;
+      } else {
+        const parentGuid = (m.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
+        if (parentGuid) {
+          const parent = byKey.get(parentGuid);
+          if (parent) parentId = parent.id;
+        }
+      }
+      if (parentId) {
+        parentOf.set(m.id, parentId);
+        counts.set(parentId, (counts.get(parentId) ?? 0) + 1);
+        const list = children.get(parentId) ?? [];
+        list.push(m.id);
+        children.set(parentId, list);
+      }
     }
-    return { messageByPlatformKey: byKey, replyCountByParentKey: counts };
+    return {
+      messageById: byId,
+      replyCountByParentId: counts,
+      replyChildIdsByParentId: children,
+      parentIdOf: parentOf
+    };
   }, [visibleMessages]);
+
+  // Focused thread: see state declaration up top (lifted there so the
+  // send callback closes over it). The derived state below depends on
+  // `messageById` which is only available after `visibleMessages` is
+  // computed, so it stays here.
+  const focusedParentMessage = focusedThreadParentId
+    ? (messageById.get(focusedThreadParentId) ?? null)
+    : null;
+  const displayedMessages = useMemo(() => {
+    if (!focusedThreadParentId) return visibleMessages;
+    const childIds = replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
+    const allowed = new Set<string>([focusedThreadParentId, ...childIds]);
+    return visibleMessages.filter((m) => allowed.has(m.id));
+  }, [visibleMessages, focusedThreadParentId, replyChildIdsByParentId]);
+  useEffect(() => {
+    // Clear focused thread when navigating to a different thread so the
+    // user doesn't carry stale focus across conversations.
+    setFocusedThreadParentId(null);
+  }, [thread?.id]);
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocusedThreadParentId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusedThreadParentId]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
@@ -1537,7 +1599,20 @@ export default function ThreadPage() {
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
-            {hasOlder ? (
+            {focusedThreadParentId ? (
+              <div className="flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper-2/60 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} replies</span>
+                <button
+                  type="button"
+                  onClick={() => setFocusedThreadParentId(null)}
+                  className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                  title="Esc"
+                >
+                  back to conversation
+                </button>
+              </div>
+            ) : null}
+            {hasOlder && !focusedThreadParentId ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
@@ -1554,13 +1629,13 @@ export default function ThreadPage() {
                   </button>
                 )}
               </div>
-            ) : (
+            ) : focusedThreadParentId ? null : (
               <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
                 start of conversation
               </div>
             )}
-            {visibleMessages.map((message, idx) => {
-              const prev = visibleMessages[idx - 1];
+            {displayedMessages.map((message, idx) => {
+              const prev = displayedMessages[idx - 1];
               const dayLabel = dayDividerLabel(prev?.timestamp, message.timestamp);
               if (message.text.trim() === "[system event]") {
                 return (
@@ -1582,11 +1657,9 @@ export default function ThreadPage() {
                 message.direction === "OUT"
                   ? "You"
                   : (message.senderName ?? firstName);
-              const replyToGuid = (message.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
-              const parentMessage = replyToGuid ? messageByPlatformKey.get(replyToGuid) : undefined;
-              const replyCount = message.platformMessageKey
-                ? (replyCountByParentKey.get(message.platformMessageKey) ?? 0)
-                : 0;
+              const parentMessageId = parentIdOf.get(message.id);
+              const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
+              const replyCount = replyCountByParentId.get(message.id) ?? 0;
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? <DayDivider label={dayLabel} /> : null}
@@ -1595,7 +1668,7 @@ export default function ThreadPage() {
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     }`}
                   >
-                    {replyToGuid ? (
+                    {parentMessageId ? (
                       <div
                         className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 ${
                           message.direction === "OUT" ? "self-end" : "self-start"
@@ -1698,9 +1771,14 @@ export default function ThreadPage() {
                         <span className="text-ink-4">· sent via automation ✓</span>
                       ) : null}
                       {replyCount > 0 ? (
-                        <span className="text-ink-2">
+                        <button
+                          type="button"
+                          onClick={() => setFocusedThreadParentId(message.id)}
+                          className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                          title="Focus this thread"
+                        >
                           · {replyCount} {replyCount === 1 ? "Reply" : "Replies"}
-                        </span>
+                        </button>
                       ) : null}
                     </span>
                   </div>
@@ -1931,6 +2009,25 @@ export default function ThreadPage() {
               </div>
             ) : null}
             <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+              {focusedParentMessage ? (
+                <div className="mb-3 flex items-start gap-2 rounded-[12px] border border-hairline bg-paper-2/60 px-3 py-2 text-[12px] leading-snug text-ink-2">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                    Replying to
+                  </span>
+                  <span className="flex-1 italic line-clamp-2">
+                    {focusedParentMessage.text.slice(0, 160) || "(media)"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFocusedThreadParentId(null)}
+                    className="text-ink-3 hover:text-ink"
+                    aria-label="Exit thread"
+                    title="Exit thread (Esc)"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
               {composerSource === "predraft" ? (
                 <div
                   data-testid="ai-predraft-badge"
