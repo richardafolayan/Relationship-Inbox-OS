@@ -2470,6 +2470,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // generateSuggestedReplies enough context to spot when the operator has
   // already engaged on the topic (e.g. operator said "yhh why?" then the
   // contact clarified). Drawn from the same pageMessages already fetched.
+  // Doubles as per-thread voice calibration — the model picks up register,
+  // vocabulary, and punctuation habits from the operator's own OUT entries.
   const RECENT_TURN_WINDOW = 6;
   const recentMessages = pageMessages
     .slice(-RECENT_TURN_WINDOW)
@@ -2492,6 +2494,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
     recentMessages,
     needsReply: aiNeedsReply,
+    // Drives the voice tier (LinkedIn → formal; everything else → casual)
+    // so the suggested-reply chips run on the right register, not just
+    // the generic SYSTEM_PROMPT.
+    platform: thread.platform as PlatformName,
     // Drives the "Polite decline" reply variant when the thread is outreach.
     category: (thread.category ?? null) as "outreach" | "genuine" | null,
     // Late-reply detection: when the last inbound is much older than the
@@ -2530,12 +2536,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // so a new turn in the exchange invalidates the cached replies. Mode
   // flag (needsReply) is included separately so a flip between active
   // and reopen mode also busts the cache even if the recent window text
-  // hasn't otherwise changed.
+  // hasn't otherwise changed. Platform is folded in so a voice-tier
+  // change (LinkedIn → formal vs casual) also invalidates.
   const recentSignature = aiInputs.recentMessages
     .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
     .join("|");
   const cacheKey = createHash("sha256")
-    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
+    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
     .digest("hex");
 
   let suggested: SuggestedRepliesOutput | undefined;
@@ -3609,6 +3616,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
     recentMessages,
     needsReply: aiNeedsReply,
+    platform: thread.platform as PlatformName,
     category: (thread.category as "outreach" | "genuine" | null) ?? null,
     lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
@@ -3628,12 +3636,13 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return "n";
   })();
   // Mirror the inline /data/thread cacheKey shape so a predraft pre-warm
-  // and a subsequent /data/thread fetch hit the same cache row.
+  // and a subsequent /data/thread fetch hit the same cache row. Platform
+  // is folded in so a voice-tier change also invalidates.
   const recentSignature = aiInputs.recentMessages
     .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
     .join("|");
   const cacheKey = createHash("sha256")
-    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
+    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
     .digest("hex");
 
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
