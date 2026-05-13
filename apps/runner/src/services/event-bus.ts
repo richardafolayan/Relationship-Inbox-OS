@@ -25,8 +25,20 @@ export function createEventBus(): EventBus {
       events.shift();
     }
 
+    // Isolate listener failures. One throwing subscriber (e.g. an SSE writer
+    // on a half-closed socket) would otherwise propagate out of emit() and
+    // back into whoever called it — meaning a single broken client could
+    // kill a scan-queue job mid-flight. Log + continue instead.
     for (const listener of subscribers) {
-      listener(event);
+      try {
+        listener(event);
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          "[event-bus] subscriber threw",
+          error instanceof Error ? error.message : error
+        );
+      }
     }
 
     return event;

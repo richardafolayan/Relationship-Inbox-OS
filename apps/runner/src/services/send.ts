@@ -398,30 +398,78 @@ export function createSendService(deps: SendServiceDeps) {
         domDumpFile: adapterError?.domDumpFile
       });
 
-      await prisma.sendRequest.update({
-        where: { clientSendId: input.clientSendId },
-        data: {
-          status: "FAILED",
-          errorJson: JSON.stringify({
-            message: errorMessage,
-            errorKind,
-            screenshotFile: adapterError?.screenshotFile,
-            domDumpFile: adapterError?.domDumpFile,
-            logId
-          })
+      // Auto-retry TRANSIENT errors up to MAX_TRANSIENT_RETRIES. Re-uses the
+      // scheduled-send-promoter by flipping the row back to SCHEDULED with a
+      // backoff timestamp — the promoter picks it up after the delay and
+      // moves it to PENDING, where the send-queue worker drains it through
+      // this same path. Attempt count is stashed on errorJson so we don't
+      // need a schema migration. Non-transient kinds (AUTH_REQUIRED,
+      // SELECTOR_FAIL, PROFILE_LOCKED, UNKNOWN) still go straight to FAILED
+      // — those need operator attention, not a quiet retry.
+      const MAX_TRANSIENT_RETRIES = 2; // total of 3 attempts
+      const TRANSIENT_RETRY_BACKOFF_MS = [30_000, 120_000];
+      const previousAttempts = (() => {
+        const raw = sendRequest.errorJson;
+        if (!raw) return 0;
+        try {
+          const parsed = JSON.parse(raw) as { attempts?: number };
+          return typeof parsed.attempts === "number" ? parsed.attempts : 0;
+        } catch {
+          return 0;
         }
+      })();
+      const nextAttempt = previousAttempts + 1;
+      const willRetry =
+        errorKind === "TRANSIENT" && nextAttempt <= MAX_TRANSIENT_RETRIES;
+      const errorPayload = JSON.stringify({
+        message: errorMessage,
+        errorKind,
+        screenshotFile: adapterError?.screenshotFile,
+        domDumpFile: adapterError?.domDumpFile,
+        logId,
+        attempts: nextAttempt
       });
 
-      deps.eventBus.emit({
-        type: "MESSAGE_SEND_FAILED",
-        jobId,
-        threadId: thread.id,
-        platform: thread.platform as PlatformName,
-        logId,
-        clientSendId: input.clientSendId,
-        errorMessage,
-        errorKind
-      });
+      if (willRetry) {
+        const backoffMs =
+          TRANSIENT_RETRY_BACKOFF_MS[Math.min(previousAttempts, TRANSIENT_RETRY_BACKOFF_MS.length - 1)] ?? 60_000;
+        await prisma.sendRequest.update({
+          where: { clientSendId: input.clientSendId },
+          data: {
+            status: "SCHEDULED",
+            scheduledFor: new Date(Date.now() + backoffMs),
+            errorJson: errorPayload
+          }
+        });
+        // Emit a queue-state event so the dashboard's status bar reflects the
+        // retry without waiting for a poll. We deliberately DON'T emit
+        // MESSAGE_SEND_FAILED yet — the dashboard's optimistic-send bar would
+        // surface a red banner the operator never asked for.
+        deps.eventBus.emit({
+          type: "SEND_QUEUE_UPDATED",
+          jobId,
+          activeCount: await prisma.sendRequest.count({ where: { status: "PENDING" } })
+        });
+      } else {
+        await prisma.sendRequest.update({
+          where: { clientSendId: input.clientSendId },
+          data: {
+            status: "FAILED",
+            errorJson: errorPayload
+          }
+        });
+
+        deps.eventBus.emit({
+          type: "MESSAGE_SEND_FAILED",
+          jobId,
+          threadId: thread.id,
+          platform: thread.platform as PlatformName,
+          logId,
+          clientSendId: input.clientSendId,
+          errorMessage,
+          errorKind
+        });
+      }
 
       // Don't rethrow — the worker already logged FAILED state. Rethrowing
       // would crash the worker loop; we want it to pick up the next pending
