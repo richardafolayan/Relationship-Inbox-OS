@@ -16,6 +16,7 @@ import type { HealthResponse, InboxResponse } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 const linkedInAutoScanIntervalMs = 600_000;
+const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
@@ -24,6 +25,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const autoScanInFlightRef = useRef(false);
   const autoScanDisabled = useMemo(
     () =>
@@ -76,6 +78,15 @@ export function AppShell({ children }: { children: ReactNode }) {
       })
     );
   }, [autoScanDisabled]);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(sidebarCollapsedStorageKey);
+    if (stored === "true") setSidebarCollapsed(true);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(sidebarCollapsedStorageKey, sidebarCollapsed ? "true" : "false");
+  }, [sidebarCollapsed]);
 
   useEffect(() => {
     if (autoScanDisabled) return;
@@ -150,6 +161,24 @@ export function AppShell({ children }: { children: ReactNode }) {
         if (pathname.startsWith("/thread/")) {
           router.push("/today");
         }
+        return;
+      }
+      // `[` collapses/expands the main nav sidebar. Skipped when typing
+      // in inputs/textareas/contenteditable so it doesn't fight the
+      // composer or any search field.
+      if (event.key === "[") {
+        const target = event.target as HTMLElement | null;
+        const tag = target?.tagName;
+        if (
+          tag === "INPUT" ||
+          tag === "TEXTAREA" ||
+          tag === "SELECT" ||
+          target?.isContentEditable
+        ) {
+          return;
+        }
+        event.preventDefault();
+        setSidebarCollapsed((prev) => !prev);
       }
     };
     window.addEventListener("keydown", onKeydown);
@@ -179,12 +208,19 @@ export function AppShell({ children }: { children: ReactNode }) {
   const sidebarAttention = isQuietHoursActive() ? 0 : attentionCount;
 
   return (
-    <div className="grid h-screen grid-cols-[200px_1fr] overflow-hidden bg-paper text-ink">
+    <div
+      className="grid h-screen overflow-hidden bg-paper text-ink"
+      style={{
+        gridTemplateColumns: sidebarCollapsed ? "56px 1fr" : "200px 1fr"
+      }}
+    >
       <Sidebar
         health={health}
         attentionCount={sidebarAttention}
         userInitials={userInitials}
         onOpenSearch={() => setPaletteOpen(true)}
+        collapsed={sidebarCollapsed}
+        onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
       />
       <div className="flex h-screen min-h-0 flex-col">
         <RunnerTopStrip />
