@@ -4,6 +4,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
+import { AnimatePresence } from "framer-motion";
 import { ChevronDown, ChevronLeft, Clock, Loader2, Mic, MoreHorizontal, Paperclip, Send, Sparkles } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
@@ -17,6 +18,9 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
+import { SentBubble } from "@/components/motion/sent-bubble";
+import { ParallaxBubble } from "@/components/motion/parallax-bubble";
+import { ComposerFlash } from "@/components/motion/composer-flash";
 
 // Thread workspace - landscape layout.
 //
@@ -263,6 +267,11 @@ export default function ThreadPage() {
     setFocusTrigger((n) => n + 1);
   }, []);
   const [composer, setComposer] = useState("");
+  // Counter that bumps each time the operator hits Send. Drives the
+  // ripple-radial parallax shift on nearby existing bubbles and the
+  // composer's drain flash. Plain number (not a timestamp) so React
+  // can equality-check it cheaply and skip re-renders when unchanged.
+  const [parallaxPulse, setParallaxPulse] = useState(0);
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
@@ -560,6 +569,12 @@ export default function ThreadPage() {
     setSending(true);
     setError(null);
     stickToBottomRef.current = true;
+    // Centerpiece animation trigger. Bumping here (rather than in a
+    // useEffect on pendingSends.length) fires the ripple + parallax
+    // exactly when the operator commits to the send, not when the
+    // optimistic row paints. Also keeps the source of truth in one
+    // place: the onSend handler.
+    setParallaxPulse((p) => p + 1);
     try {
       // Snapshot the focused-thread parent at send time so the post-send
       // exit-focus doesn't race the network call and drop the linkage.
@@ -1764,6 +1779,12 @@ export default function ThreadPage() {
               const dividerInFocusedRange =
                 !dimmedByFocus &&
                 (idx === 0 || (prev && focusedIdSet ? focusedIdSet.has(prev.id) : true));
+              // Distance from the to-be-sent bubble (which renders at the
+              // bottom of the list). 0 = the bubble immediately above the
+              // pending row, 1 = next up, etc. ParallaxBubble internally
+              // ignores depths ≥ 3, so only the three closest neighbours
+              // actually animate; the rest are no-op wrappers.
+              const parallaxDepth = visibleMessages.length - 1 - idx;
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? (
@@ -1776,7 +1797,9 @@ export default function ThreadPage() {
                       }
                     />
                   ) : null}
-                  <div
+                  <ParallaxBubble
+                    pulse={parallaxPulse}
+                    depth={parallaxDepth}
                     data-message-id={message.id}
                     data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
                     className={`flex max-w-[72%] flex-col transition-all duration-300 ease-out ${
@@ -1910,7 +1933,7 @@ export default function ThreadPage() {
                         </button>
                       ) : null}
                     </span>
-                  </div>
+                  </ParallaxBubble>
                 </div>
               );
             })}
@@ -2013,9 +2036,11 @@ export default function ThreadPage() {
               );
             })}
 
+            <AnimatePresence initial={false} mode="popLayout">
             {pendingSends.map((pending) => (
-              <div
+              <SentBubble
                 key={`pending-${pending.clientSendId}`}
+                failed={pending.failed ?? false}
                 className="flex max-w-[72%] flex-col items-end self-end"
               >
                 <div
@@ -2074,8 +2099,9 @@ export default function ThreadPage() {
                     {pending.errorMessage}
                   </p>
                 ) : null}
-              </div>
+              </SentBubble>
             ))}
+            </AnimatePresence>
           </div>
         </div>
 
@@ -2179,28 +2205,30 @@ export default function ThreadPage() {
                   </button>
                 </div>
               ) : null}
-              <textarea
-                placeholder={`Reply to ${firstName}…`}
-                value={composer}
-                onChange={(event) => {
-                  setComposer(event.target.value);
-                  if (composerSource === "predraft" || composerSource === "empty") {
-                    setComposerSource("user");
-                  }
-                }}
-                onKeyDown={(event) => {
-                  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-                    event.preventDefault();
-                    // #65: stop the native window-level keydown listener
-                    // (still in scope for global shortcuts) so onSend
-                    // doesn't fire twice when the composer has focus.
-                    event.nativeEvent.stopImmediatePropagation();
-                    void onSend();
-                  }
-                }}
-                rows={3}
-                className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.55] text-ink outline-none placeholder:text-ink-4"
-              />
+              <ComposerFlash pulse={parallaxPulse}>
+                <textarea
+                  placeholder={`Reply to ${firstName}…`}
+                  value={composer}
+                  onChange={(event) => {
+                    setComposer(event.target.value);
+                    if (composerSource === "predraft" || composerSource === "empty") {
+                      setComposerSource("user");
+                    }
+                  }}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+                      event.preventDefault();
+                      // #65: stop the native window-level keydown listener
+                      // (still in scope for global shortcuts) so onSend
+                      // doesn't fire twice when the composer has focus.
+                      event.nativeEvent.stopImmediatePropagation();
+                      void onSend();
+                    }
+                  }}
+                  rows={3}
+                  className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.55] text-ink outline-none placeholder:text-ink-4"
+                />
+              </ComposerFlash>
               {composer.trim().length >= 20 && voiceCorpus.sampleCount >= 2 ? (
                 <div
                   data-testid="voice-meter"
