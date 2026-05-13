@@ -334,7 +334,14 @@ export class BetaAdapter implements PlatformAdapter {
             return {
               platformMessageKey: root.getAttribute("data-id") || root.getAttribute("id") || `beta-${index}`,
               direction: inbound ? "IN" : "OUT",
-              timestamp: new Date().toISOString(),
+              // Beta IG/TikTok scrapers don't parse the per-message timestamp
+              // out of the DOM yet (relative-time strings like "5m"/"2d" + a
+              // hover-only datetime attribute that varies per layout). Omit
+              // the field so scan-queue stamps each NEW message with first-seen
+              // time and leaves existing rows alone — avoids the bug where
+              // every scrape advanced every message to "now" and inflated
+              // freshness across the inbox (issue #245).
+              timestamp: undefined,
               text,
               senderName: senderName?.trim() || undefined,
               raw: {
