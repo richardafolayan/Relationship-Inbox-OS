@@ -26,6 +26,7 @@ import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
+import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
@@ -4141,6 +4142,29 @@ async function start(): Promise<void> {
   await ensureRuntimeDirs();
   await settingsStore.getSettings();
   scanQueue.startScheduler();
+
+  if (runnerConfig.imessage.enabled) {
+    const watcher = createIMessageWatcher({
+      dbPath: runnerConfig.imessage.dbPath,
+      debounceMs: runnerConfig.imessage.watchDebounceMs,
+      onChange: (reason) => {
+        const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+        void auditService.log({
+          platform: "IMESSAGE",
+          stage: "Scan",
+          action: "IMESSAGE_WATCH_TRIGGER",
+          status: result.ok ? "OK" : "FAIL",
+          details: {
+            reason,
+            ...(result.ok
+              ? { jobId: result.jobId, status: result.status }
+              : { blocked: result.blocked, blockReason: result.reason })
+          }
+        });
+      }
+    });
+    watcher.start();
+  }
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(runnerConfig.port, () => {
