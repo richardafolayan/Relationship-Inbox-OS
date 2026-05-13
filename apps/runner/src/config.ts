@@ -1,7 +1,16 @@
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import dotenv from "dotenv";
+
+// Single source of truth for the operator's home directory. We previously
+// fell back to a literal "/Users/richard" string when HOME was unset, which
+// broke CI / Docker / any non-macOS environment. `os.homedir()` returns the
+// platform-correct path and only falls back to an env when neither is set.
+function resolveHomeDir(env: NodeJS.ProcessEnv = process.env): string {
+  return env.HOME ?? env.USERPROFILE ?? homedir();
+}
 
 dotenv.config({ path: resolve(process.cwd(), ".env") });
 
@@ -230,8 +239,12 @@ function parseTimeoutOrDefault(value: string | undefined, fallback: number): num
 }
 
 function parseIntOrDefault(value: string | undefined, fallback: number): number {
+  // Accept any finite non-negative integer including 0 — 0 is a legitimate
+  // "disable this loop" signal for several settings. Previously a `> 0`
+  // gate replaced 0 with the default, making it impossible to disable
+  // intervals via env.
   const parsed = Number.parseInt(value ?? "", 10);
-  if (Number.isFinite(parsed) && parsed > 0) {
+  if (Number.isFinite(parsed) && parsed >= 0) {
     return parsed;
   }
   return fallback;
@@ -244,7 +257,7 @@ export function resolveConnectTimeoutMs(profileMode: BrowserProfileMode, env: No
 }
 
 export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env): BrowserProfileConfig {
-  const homeDir = env.HOME ?? "/Users/richard";
+  const homeDir = resolveHomeDir(env);
   const defaultChromeUserDataDir = resolve(homeDir, "Library", "Application Support", "Google", "Chrome");
   const mode = env.BROWSER_PROFILE_MODE?.toLowerCase() === "personal" ? "personal" : "isolated";
   const fallbackRaw = env.PERSONAL_PROFILE_FALLBACK?.toLowerCase();
@@ -272,7 +285,11 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
     personalProfileMirrorRoot,
     personalChromeUserDataDir,
     personalChromeProfileDirectory: profileDirectoryResolution.profileDirectory,
-    personalChromeProfileName: env.PERSONAL_CHROME_PROFILE_NAME ?? "Richard Afolayan",
+    // PERSONAL_CHROME_PROFILE_NAME is the human-readable label Chrome shows
+    // for the profile (e.g. "Person 1", "Work"). Used purely for diagnostic
+    // strings; auth/session resolution uses the profile directory, not this
+    // label. Falls back to the configured directory name when unset.
+    personalChromeProfileName: env.PERSONAL_CHROME_PROFILE_NAME ?? configuredProfileDirectory,
     personalChromeProfileResolutionStrategy: profileDirectoryResolution.resolutionStrategy
   };
 }
@@ -335,7 +352,7 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // a non-existent chat.db. Set IMESSAGE_ENABLED=true on a Mac with
       // Full Disk Access granted to the runner's parent process.
       enabled: env.IMESSAGE_ENABLED === "true" && process.platform === "darwin",
-      dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
+      dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(resolveHomeDir(env), "Library", "Messages", "chat.db"),
       watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
     },

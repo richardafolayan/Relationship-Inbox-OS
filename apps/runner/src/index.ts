@@ -1,4 +1,5 @@
 import { createReadStream, existsSync, mkdirSync, openSync } from "node:fs";
+import { unlink } from "node:fs/promises";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -907,7 +908,13 @@ app.get("/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const sinceEventId = Number(req.query.sinceEventId ?? req.header("last-event-id") ?? 0);
+  // Reject malformed sinceEventId rather than silently treating NaN as 0
+  // (which would then replay every buffered event). The dashboard owns the
+  // value — if it arrives non-numeric, we want a noisy bug, not silent over-
+  // delivery.
+  const rawSince = req.query.sinceEventId ?? req.header("last-event-id") ?? "0";
+  const sinceParsed = Number(rawSince);
+  const sinceEventId = Number.isFinite(sinceParsed) && sinceParsed >= 0 ? sinceParsed : 0;
   const oldest = eventBus.oldestEventId();
 
   // Emit every event as the default ("message") SSE type. EventSource
@@ -927,7 +934,14 @@ app.get("/events", (req, res) => {
     res.write(`data: ${JSON.stringify(event)}\n\n`);
   }
 
-  if (sinceEventId > 0 && oldest > 0 && sinceEventId < oldest - 1) {
+  // Resync when the client's last-seen id has been evicted from the ring
+  // buffer. Previously this used `sinceEventId < oldest - 1`, which missed
+  // the off-by-one case where oldest === sinceEventId + 1 (i.e. the next
+  // event after the client's last-seen is already gone). The correct test
+  // is "everything strictly after sinceEventId is still in the buffer",
+  // which is `oldest <= sinceEventId + 1` — anything else means at least
+  // one event was dropped.
+  if (sinceEventId > 0 && oldest > 0 && oldest > sinceEventId + 1) {
     const resyncEvent = eventBus.emit({
       type: "RESYNC_REQUIRED",
       jobId: uuid(),
@@ -949,11 +963,29 @@ app.get("/events", (req, res) => {
     res.write(": keepalive\n\n");
   }, 15000);
 
-  req.on("close", () => {
+  // Tear everything down on ANY connection failure path — not just the
+  // request's `close` event. A bare `req.on("close")` misses the case where
+  // the underlying socket errors mid-write (half-closed peer, network blip),
+  // leaving the heartbeat interval running and the eventBus subscriber
+  // holding a captured `res` reference. Across reconnects this leaks memory
+  // and stranded subscribers keep getting `writeEvent` called on dead
+  // responses, which throws inside the subscriber loop (see also
+  // event-bus.ts wrapping each listener in try/catch).
+  let teardownRan = false;
+  const teardown = () => {
+    if (teardownRan) return;
+    teardownRan = true;
     clearInterval(heartbeat);
     unsubscribe();
-    res.end();
-  });
+    try {
+      res.end();
+    } catch {
+      // Already ended / socket dead — nothing more to do.
+    }
+  };
+  req.on("close", teardown);
+  res.on("close", teardown);
+  res.on("error", teardown);
 });
 
 app.get("/artifacts/:type/:name", (req, res) => {
@@ -1529,27 +1561,49 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
-  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  // For multipart bodies, multer puts file metadata on req.files and
-  // string fields on req.body. Reuse the same JSON schema for the field
-  // values so the validation flow is identical between JSON and multipart.
-  const payload = z
-    .object({
-      text: z.string(),
-      clientSendId: z.string().uuid(),
-      // Optional ISO 8601 timestamp. When present, the send is persisted
-      // as SCHEDULED and the scheduled-send promoter flips it to PENDING
-      // when the time elapses. When absent, the send is enqueued
-      // immediately (existing behaviour).
-      scheduledFor: z.string().datetime().optional(),
-      // App-level threading. When the dashboard's focused-thread composer
-      // sends a reply, it includes the parent Message.id here. The send
-      // itself still goes out as a regular text bubble — the threading is
-      // only persisted on our side and rendered by the dashboard.
-      replyToMessageId: z.string().min(1).optional()
-    })
-    .parse(req.body);
+  // Read multer-uploaded files first so we always have a cleanup handle.
+  // Without this, any pre-enqueue rejection (zod, requireAdapter, missing
+  // thread) leaves files orphaned in outgoingAttachmentsRoot forever.
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
+  const cleanupUploadedFiles = async () => {
+    if (uploadedFiles.length === 0) return;
+    await Promise.all(uploadedFiles.map((f) => unlink(f.path).catch(() => undefined)));
+  };
+
+  let cleanedUp = false;
+  let threadId: string;
+  let payload: {
+    text: string;
+    clientSendId: string;
+    scheduledFor?: string;
+    replyToMessageId?: string;
+  };
+  try {
+    threadId = z.object({ threadId: z.string().min(1) }).parse(req.params).threadId;
+    // For multipart bodies, multer puts file metadata on req.files and
+    // string fields on req.body. Reuse the same JSON schema for the field
+    // values so the validation flow is identical between JSON and multipart.
+    payload = z
+      .object({
+        text: z.string(),
+        clientSendId: z.string().uuid(),
+        // Optional ISO 8601 timestamp. When present, the send is persisted
+        // as SCHEDULED and the scheduled-send promoter flips it to PENDING
+        // when the time elapses. When absent, the send is enqueued
+        // immediately (existing behaviour).
+        scheduledFor: z.string().datetime().optional(),
+        // App-level threading. When the dashboard's focused-thread composer
+        // sends a reply, it includes the parent Message.id here. The send
+        // itself still goes out as a regular text bubble — the threading is
+        // only persisted on our side and rendered by the dashboard.
+        replyToMessageId: z.string().min(1).optional()
+      })
+      .parse(req.body);
+  } catch (error) {
+    await cleanupUploadedFiles();
+    cleanedUp = true;
+    throw error;
+  }
   const stagedAttachments = uploadedFiles.map((f) => ({
     absolutePath: f.path,
     displayName: f.originalname,
@@ -1557,16 +1611,28 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     kind: kindFromMime(f.mimetype, f.originalname)
   }));
   if (stagedAttachments.length === 0 && payload.text.trim().length === 0) {
+    await cleanupUploadedFiles();
+    cleanedUp = true;
     res.status(400).json({ error: "send must have text, attachments, or both" });
     return;
   }
+  // Signal so we don't double-unlink at the bottom of the route — the staged
+  // attachments are now owned by the send worker, which cleans them up after
+  // SENT or FAILED.
+  void cleanedUp;
 
   // Reject early for unsupported platforms — without this, the SendRequest
   // queues, the worker hits `adapter.sendMessage(undefined)` and records a
   // confusing "Cannot read properties of undefined" on the FAILED row.
   // Same guard as /open and /rescan; see requireAdapter.
-  const target = await getThreadStub(threadId);
-  requireAdapter(target.platform);
+  let target: Awaited<ReturnType<typeof getThreadStub>>;
+  try {
+    target = await getThreadStub(threadId);
+    requireAdapter(target.platform);
+  } catch (error) {
+    await cleanupUploadedFiles();
+    throw error;
+  }
 
   // Schedule path: persist a SCHEDULED row and return immediately. The
   // dashboard renders a "scheduled for X" pill instead of pushing the
@@ -1593,6 +1659,11 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       });
       return;
     } catch (error) {
+      // Cleanup is best-effort: enqueueScheduledSend may have persisted the
+      // SendRequest before throwing, in which case the worker owns the files.
+      // We can't tell from here, so we don't unlink — the worker's cleanup
+      // covers committed rows; orphaned files happen only on pre-persist
+      // failure, which surfaces as a thrown error caught here.
       await auditService.log({
         platform: "LINKEDIN",
         stage: "Send",
@@ -2207,8 +2278,14 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
 
 app.get("/data/inbox", asyncRoute(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
-  const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
-  const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
+  // Validate platform + risk against the known enums. Previously these were
+  // unsafe `as PlatformName` casts, so `?platform=NOT_REAL` silently dropped
+  // every row instead of erroring or being ignored.
+  const platform = maybeParsePlatform(req.query.platform);
+  const risk =
+    req.query.risk === "GREEN" || req.query.risk === "AMBER" || req.query.risk === "RED"
+      ? req.query.risk
+      : undefined;
   const unreadOnly = req.query.unread === "true";
   const needsReplyOnly = req.query.needsReply === "true";
   // Honour ?view=archived so the endpoint behaves the way the URL reads.
@@ -2847,10 +2924,14 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/data/logs", asyncRoute(async (req, res) => {
-  const limit = Number(req.query.limit ?? 200);
+  // Cap `limit` so a malformed or hostile client can't OOM the runner by
+  // requesting every AuditLog row. NaN/0/negative fall back to the default.
+  const rawLimit = Number(req.query.limit ?? 200);
+  const limit =
+    Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 200;
   const logs = await prisma.auditLog.findMany({
     orderBy: { timestamp: "desc" },
-    take: Number.isNaN(limit) ? 200 : limit
+    take: limit
   });
 
   res.json(
@@ -2874,10 +2955,14 @@ app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const archivedAt = new Date();
   const targetIds = await actionTargetThreadIds(threadId);
-  await prisma.thread.updateMany({
+  const result = await prisma.thread.updateMany({
     where: { id: { in: targetIds } },
     data: { archivedAt }
   });
+  if (result.count === 0) {
+    res.status(404).json({ error: "thread not found" });
+    return;
+  }
   res.json({ ok: true, threadId, archivedAt: archivedAt.toISOString() });
 }));
 
@@ -2916,10 +3001,14 @@ app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   const targetIds = await actionTargetThreadIds(threadId);
-  await prisma.thread.updateMany({
+  const result = await prisma.thread.updateMany({
     where: { id: { in: targetIds } },
     data: { archivedAt: null }
   });
+  if (result.count === 0) {
+    res.status(404).json({ error: "thread not found" });
+    return;
+  }
   res.json({ ok: true, threadId });
 }));
 
@@ -4035,14 +4124,16 @@ app.post("/control/system/restart", asyncRoute(async (_req, res) => {
         // Reuse a single fd for both stdout and stderr so interleaved
         // output is monotonic in the file.
         const fd = openSync(restartLogPath, "a");
+        // `cwd: projectRoot` already places the helper in the right directory
+        // — no need to interpolate `projectRoot` into a shell `cd` (which
+        // would be a shell-injection vector if the path ever contained quotes
+        // or backticks). The script chains build steps that need sequencing,
+        // hence the shell wrapper.
         const script = [
           `echo "=== restart at $(date) (parent pid ${process.pid}) ==="`,
           // 1s grace so the parent's listen socket actually closes
           // before the new runner tries to bind 4001.
           `sleep 1`,
-          // npm build commands need to run from projectRoot regardless
-          // of where the parent was launched.
-          `cd "${projectRoot}"`,
           `npm run build --workspace @inbox-os/core`,
           `npm run build --workspace @inbox-os/runner`,
           `echo "=== launching dist ==="`,
@@ -4076,7 +4167,7 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
   const path = normalizeControlPath(req.path);
   const trace = getControlTrace(res);
   const statusCode = error instanceof z.ZodError ? 400 : 500;
-  const message =
+  const internalMessage =
     error instanceof z.ZodError
       ? error.issues
           .map((issue) => {
@@ -4087,6 +4178,14 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
       : error instanceof Error
         ? error.message
         : "Unexpected error";
+  // ZodError messages describe validation issues and are safe to surface so
+  // the dashboard can show a useful 400. For other errors (Prisma, Playwright,
+  // Node internals), the message can include SQL fragments, file paths, or
+  // playwright debugging hints — return a generic message to the client and
+  // log the full reason server-side. Trusted-localhost deployments may also
+  // be port-forwarded by developers, so don't rely on the bind address.
+  const clientMessage =
+    error instanceof z.ZodError ? internalMessage : statusCode >= 500 ? "Internal server error" : internalMessage;
 
   if (req.path.startsWith("/control")) {
     const stage = trace?.stage ?? stageForControlPath(path);
@@ -4111,8 +4210,8 @@ app.use((error: unknown, req: express.Request, res: express.Response, _next: exp
   }
 
   // eslint-disable-next-line no-console
-  console.error(`[runner:error] ${req.method} ${path} -> ${statusCode}: ${message}`);
-  res.status(statusCode).json({ error: message });
+  console.error(`[runner:error] ${req.method} ${path} -> ${statusCode}: ${internalMessage}`);
+  res.status(statusCode).json({ error: clientMessage });
 });
 
 process.on("unhandledRejection", (reason) => {

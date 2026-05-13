@@ -18,12 +18,13 @@ function createFakePrisma(initialRows) {
       },
       async updateMany({ where, data }) {
         const ids = new Set(where.id.in);
+        const statusGuard = where.status; // optional — mirrors prod query
         let count = 0;
         for (const r of rows) {
-          if (ids.has(r.id)) {
-            r.status = data.status;
-            count += 1;
-          }
+          if (!ids.has(r.id)) continue;
+          if (statusGuard && r.status !== statusGuard) continue;
+          r.status = data.status;
+          count += 1;
         }
         return { count };
       },

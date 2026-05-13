@@ -324,7 +324,12 @@ export class BetaAdapter implements PlatformAdapter {
           return nodes.map((node, index) => {
             const root = node as HTMLElement;
             const className = root.className || "";
-            const inbound = /other|left|incoming|receive/i.test(className);
+            // Token-boundary match on inbound classnames — previously
+            // `/other|left|incoming|receive/i` matched any substring
+            // including unrelated tokens (`brother`, `received-icon`,
+            // `relevant`). Anchor at word boundaries so a future class
+            // rename doesn't silently invert direction.
+            const inbound = /\b(other|left|incoming|received?|incoming-bubble)\b/i.test(className);
             const text = root.querySelector(selectors.message_text)?.textContent || root.textContent || "";
             const senderName =
               root.querySelector("[role='link']")?.textContent ||
@@ -386,7 +391,22 @@ export class BetaAdapter implements PlatformAdapter {
     }
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
+  ): Promise<SendReceipt> {
+    // The Beta adapter (Instagram / TikTok) ships text only — the web
+    // composers don't have a stable file-attach affordance the runner can
+    // drive without per-platform UI scripting. Previously the parameter was
+    // missing entirely, which meant `send.ts:248` silently dropped any
+    // attachments without telling the caller. Throw so the operator sees a
+    // clear FAILED row instead of a "sent text only" surprise.
+    if (attachments && attachments.length > 0) {
+      throw new Error(
+        `${this.platform} adapter does not support attachments yet (got ${attachments.length}). Send text only or use the iMessage / LinkedIn adapter.`
+      );
+    }
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
 

@@ -14,11 +14,16 @@ export interface ScheduledSendPromoterPrisma {
       select: { id: true; clientSendId: true };
     }): Promise<Array<{ id: string; clientSendId: string }>>;
     updateMany(args: {
-      where: { id: { in: string[] } };
+      where: { id: { in: string[] }; status: "SCHEDULED" };
       data: { status: "PENDING" };
     }): Promise<{ count: number }>;
     count(args: { where: { status: "PENDING" } }): Promise<number>;
   };
+  // Typed as `unknown` to avoid colliding with the real PrismaClient's
+  // overloaded $transaction signature (which has both array + callback
+  // forms). The promoter only ever invokes the callback form via a
+  // narrowing helper, so we typecheck call-sites locally instead.
+  $transaction: unknown;
 }
 
 interface ScheduledSendPromoterDeps {
@@ -59,21 +64,41 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
     if (running) return { promoted: 0 };
     running = true;
     try {
-      const due = await prisma.sendRequest.findMany({
-        where: {
-          status: "SCHEDULED",
-          scheduledFor: { lte: new Date() }
-        },
-        orderBy: { scheduledFor: "asc" },
-        select: { id: true, clientSendId: true }
-      });
-      if (due.length === 0) return { promoted: 0 };
-
-      const ids = due.map((r) => r.id);
-      await prisma.sendRequest.updateMany({
-        where: { id: { in: ids } },
-        data: { status: "PENDING" }
-      });
+      // findMany + updateMany used to run separately; an admin script or a
+      // second runner could race the same SCHEDULED row through PENDING.
+      // Wrap them in a $transaction (when the prisma client provides one)
+      // so the SELECT and UPDATE are atomic, and narrow the UPDATE's WHERE
+      // clause to status=SCHEDULED so a concurrent promotion can't flip an
+      // already-PENDING/SENT row back. Test fakes omit $transaction —
+      // fall back to running both queries directly against the same client
+      // when it's missing (no atomicity guarantee, but the tests don't
+      // exercise concurrent access).
+      type TxCallback = <R>(cb: (tx: ScheduledSendPromoterPrisma) => Promise<R>) => Promise<R>;
+      const runBatch = async (tx: ScheduledSendPromoterPrisma) => {
+        const found = await tx.sendRequest.findMany({
+          where: {
+            status: "SCHEDULED",
+            scheduledFor: { lte: new Date() }
+          },
+          orderBy: { scheduledFor: "asc" },
+          select: { id: true, clientSendId: true }
+        });
+        if (found.length === 0) {
+          return { due: found, count: 0 };
+        }
+        const ids = found.map((r) => r.id);
+        const updated = await tx.sendRequest.updateMany({
+          where: { id: { in: ids }, status: "SCHEDULED" },
+          data: { status: "PENDING" }
+        });
+        return { due: found, count: updated.count };
+      };
+      const txFn = typeof prisma.$transaction === "function"
+        ? (prisma.$transaction as TxCallback)
+        : null;
+      const { due, count } = txFn ? await txFn(runBatch) : await runBatch(prisma);
+      if (count === 0) return { promoted: 0 };
+      void due; // surfaced for diagnostics if needed; logging hooks may consume later.
 
       // Tell the dashboard right away that the queue moved — the SystemStatusBar
       // shouldn't have to wait for its 3-second poll to notice the promotion.
@@ -97,7 +122,7 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
         );
       }
 
-      return { promoted: due.length };
+      return { promoted: count };
     } finally {
       running = false;
     }
