@@ -133,13 +133,39 @@ export default function AtRiskPage() {
   }, [refresh]);
 
   const rows = data?.rows ?? [];
+  // Hide threads whose last inbound is older than this from the active
+  // at-risk view. They aren't "going cold" anymore — they ARE cold, and
+  // they dominate the burn-down / triage count without being actionable
+  // in the same session. The thread is still reachable via Inbox /
+  // People; we just stop treating it as live SLA work (issue #203).
+  const ANCIENT_DAYS = 90;
+  const ancientCutoffMs = ANCIENT_DAYS * 24 * 60 * 60 * 1000;
+  const isAncient = useCallback(
+    (row: InboxRow) => {
+      const ts = row.lastInboundAt ? Date.parse(row.lastInboundAt) : NaN;
+      return Number.isFinite(ts) && Date.now() - ts > ancientCutoffMs;
+    },
+    [ancientCutoffMs]
+  );
+  const ancient = useMemo(
+    () =>
+      rows.filter(
+        (row) =>
+          !removedIds.has(row.id) &&
+          (row.riskLevel === "RED" || row.riskLevel === "AMBER") &&
+          isAncient(row)
+      ),
+    [rows, removedIds, isAncient]
+  );
   const atRisk = useMemo(
     () =>
       rows.filter(
         (row) =>
-          !removedIds.has(row.id) && (row.riskLevel === "RED" || row.riskLevel === "AMBER")
+          !removedIds.has(row.id) &&
+          (row.riskLevel === "RED" || row.riskLevel === "AMBER") &&
+          !isAncient(row)
       ),
-    [rows, removedIds]
+    [rows, removedIds, isAncient]
   );
 
   const sortedAtRisk = useMemo(() => {
@@ -288,6 +314,17 @@ export default function AtRiskPage() {
             <span>
               <span className="text-ink">{overdue.length}</span> overdue ·{" "}
               <span className="text-ink">{waiting.length}</span> waiting
+              {ancient.length > 0 ? (
+                <>
+                  {" "}·{" "}
+                  <span
+                    className="text-ink-3"
+                    title={`Threads with no inbound activity in more than ${ANCIENT_DAYS} days are hidden from active triage. See Inbox to act on them.`}
+                  >
+                    {ancient.length} ancient hidden
+                  </span>
+                </>
+              ) : null}
             </span>
             {total > 0 ? (
               <>
