@@ -2640,7 +2640,7 @@ export default function ThreadPage() {
               {/* Split button: primary action + a chevron to flip the mode.
                   Keeps the default action one click away while the mode is
                   always visible on the label. */}
-              <div className="inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
+              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
                 <button
                   type="button"
                   disabled={composing || !composeIntent.trim()}
@@ -2662,53 +2662,51 @@ export default function ThreadPage() {
                       ? "Compose"
                       : "Ask"}
                 </button>
-                <div className="relative flex">
-                  <span className="my-[6px] w-px bg-paper/20" aria-hidden />
-                  <button
-                    type="button"
-                    onClick={() => setComposeModeMenuOpen((v) => !v)}
-                    disabled={composing}
-                    aria-haspopup="menu"
-                    aria-expanded={composeModeMenuOpen}
-                    title="Switch mode"
-                    className="grid place-items-center rounded-r-pill bg-transparent px-2 disabled:cursor-not-allowed disabled:opacity-50"
-                  >
-                    <ChevronDown
-                      className={`h-[14px] w-[14px] transition-transform duration-calm ${composeModeMenuOpen ? "rotate-180" : ""}`}
-                      strokeWidth={1.8}
-                    />
-                  </button>
-                  {composeModeMenuOpen ? (
-                    <div className="absolute bottom-[calc(100%+6px)] right-0 z-20 w-[240px] overflow-hidden rounded-row border border-hairline bg-paper p-1 shadow-pop">
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setComposeMode("write");
-                          setComposeModeMenuOpen(false);
-                        }}
-                        className={`block w-full rounded-[8px] px-3 py-2 text-left transition-colors duration-calm hover:bg-paper-2 ${composeMode === "write" ? "bg-paper-2" : ""}`}
-                      >
-                        <p className="m-0 text-[13px] font-medium text-ink">Compose</p>
-                        <p className="m-0 mt-0.5 text-[11px] text-ink-3">
-                          AI writes a sendable draft in your voice
-                        </p>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setComposeMode("ask");
-                          setComposeModeMenuOpen(false);
-                        }}
-                        className={`block w-full rounded-[8px] px-3 py-2 text-left transition-colors duration-calm hover:bg-paper-2 ${composeMode === "ask" ? "bg-paper-2" : ""}`}
-                      >
-                        <p className="m-0 text-[13px] font-medium text-ink">Ask</p>
-                        <p className="m-0 mt-0.5 text-[11px] text-ink-3">
-                          AI answers from the thread context (no draft)
-                        </p>
-                      </button>
-                    </div>
-                  ) : null}
-                </div>
+                <span className="my-[6px] w-px bg-paper/20" aria-hidden />
+                <button
+                  type="button"
+                  onClick={() => setComposeModeMenuOpen((v) => !v)}
+                  disabled={composing}
+                  aria-haspopup="menu"
+                  aria-expanded={composeModeMenuOpen}
+                  title="Switch mode"
+                  className="grid place-items-center rounded-r-pill bg-transparent px-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ChevronDown
+                    className={`h-[14px] w-[14px] transition-transform duration-calm ${composeModeMenuOpen ? "rotate-180" : ""}`}
+                    strokeWidth={1.8}
+                  />
+                </button>
+                {composeModeMenuOpen ? (
+                  <div className="absolute bottom-[calc(100%+6px)] left-0 z-20 w-[240px] overflow-hidden rounded-row border border-hairline bg-paper p-1 shadow-pop">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setComposeMode("write");
+                        setComposeModeMenuOpen(false);
+                      }}
+                      className={`block w-full rounded-[8px] px-3 py-2 text-left transition-colors duration-calm hover:bg-paper-2 ${composeMode === "write" ? "bg-paper-2" : ""}`}
+                    >
+                      <p className="m-0 text-[13px] font-medium text-ink">Compose</p>
+                      <p className="m-0 mt-0.5 text-[11px] text-ink-3">
+                        AI writes a sendable draft in your voice
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setComposeMode("ask");
+                        setComposeModeMenuOpen(false);
+                      }}
+                      className={`block w-full rounded-[8px] px-3 py-2 text-left transition-colors duration-calm hover:bg-paper-2 ${composeMode === "ask" ? "bg-paper-2" : ""}`}
+                    >
+                      <p className="m-0 text-[13px] font-medium text-ink">Ask</p>
+                      <p className="m-0 mt-0.5 text-[11px] text-ink-3">
+                        AI answers from the thread context (no draft)
+                      </p>
+                    </button>
+                  </div>
+                ) : null}
               </div>
               {composeError ? (
                 <span className="font-mono text-[11px] text-risk-overdue">{composeError}</span>
