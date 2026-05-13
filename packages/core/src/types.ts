@@ -71,7 +71,13 @@ export interface AttachmentPlaceholder {
 export interface NormalizedMessage {
   platformMessageKey?: string;
   direction: Direction;
-  timestamp: string;
+  /**
+   * The platform-reported send time as an ISO string. Adapters that
+   * cannot parse the real per-message timestamp (currently beta IG/TikTok)
+   * can omit this — scan-queue stamps new rows with first-seen time and
+   * leaves existing rows untouched, so re-scrapes don't drift the timestamp.
+   */
+  timestamp?: string;
   text: string;
   senderName?: string;
   raw?: Record<string, unknown>;

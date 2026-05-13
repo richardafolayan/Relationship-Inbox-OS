@@ -180,9 +180,9 @@ function formatScheduledFor(iso: string | null | undefined): string {
   });
 }
 
-function DayDivider({ label }: { label: string }) {
+function DayDivider({ label, className }: { label: string; className?: string }) {
   return (
-    <div className="my-3 flex items-center gap-3 self-stretch">
+    <div className={`my-3 flex items-center gap-3 self-stretch transition-all duration-300 ${className ?? ""}`}>
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
@@ -261,7 +261,17 @@ export default function ThreadPage() {
   // whose parent is already the current focus (re-centring after the
   // user scrolled around).
   const [focusTrigger, setFocusTrigger] = useState(0);
+  // Snapshot of the timeline's scrollTop just before entering focus
+  // mode. Restored on exit so the operator lands back in the same
+  // spot they were before they clicked the chip, regardless of how
+  // they scrolled inside the focused stack.
+  const preFocusScrollTopRef = useRef<number | null>(null);
   const focusOnParent = useCallback((parentId: string) => {
+    if (timelineRef.current && preFocusScrollTopRef.current === null) {
+      // Only capture once per focus session — repeated chip clicks
+      // (focus swaps) keep the same "where we came from" anchor.
+      preFocusScrollTopRef.current = timelineRef.current.scrollTop;
+    }
     setFocusedThreadParentId(parentId);
     setFocusTrigger((n) => n + 1);
   }, []);
@@ -1192,6 +1202,42 @@ export default function ThreadPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedThreadParentId]);
+  // Click-outside-to-exit. Anything that isn't a focused bubble, the
+  // composer, the sticky "FOCUSED THREAD" pill, or another "Focus
+  // thread" chip (which should swap focus, not dismiss) exits focused
+  // mode — Messages.app's tap-outside model.
+  // We use `click` (not `mousedown`) so the focusOnParent handler that
+  // activates focus has already updated state by the time we arrive,
+  // and we use `setTimeout(..., 0)` to push the listener attachment
+  // past the current click's bubbling phase — otherwise the same
+  // click that activated focus would also dismiss it.
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    let cancelled = false;
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const focusedBubble = target.closest('[data-focused-bubble="true"]');
+      const composer = target.closest('[data-thread-composer="true"]');
+      const pill = target.closest('[data-focused-pill="true"]');
+      const focusSwap = target.closest('button[title^="Focus"]');
+      if (focusedBubble || composer || pill || focusSwap) return;
+      setFocusedThreadParentId(null);
+    };
+    // Delay listener arming so the focusing click itself doesn't
+    // immediately dismiss. 200ms covers test-runner / extension
+    // emulated event sequences that fire a trailing synthetic event
+    // after the React click handler runs.
+    const handle = setTimeout(() => {
+      if (cancelled) return;
+      document.addEventListener("click", onClick);
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+      document.removeEventListener("click", onClick);
+    };
+  }, [focusedThreadParentId]);
   // Bring the focused parent into view when the focus changes. Two
   // pieces of timing care:
   //   1. Flip `stickToBottomRef` off so the global timeline
@@ -1207,27 +1253,35 @@ export default function ThreadPage() {
   // class applies, so users see them animate together rather than the
   // dim happen, pause, then the scroll yank.
   useLayoutEffect(() => {
+    const container = timelineRef.current;
     if (!focusedThreadParentId) {
       stickToBottomRef.current = true;
+      // Exit: restore the operator's pre-focus scroll position. The
+      // non-focused bubbles have just expanded back to their natural
+      // heights, so the same scrollTop value puts the timeline exactly
+      // where it was before the chip click.
+      if (container && preFocusScrollTopRef.current !== null) {
+        container.scrollTop = preFocusScrollTopRef.current;
+        preFocusScrollTopRef.current = null;
+      }
       return;
     }
     stickToBottomRef.current = false;
-    const container = timelineRef.current;
     const target = container?.querySelector(
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
     const containerRect = container.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
-    // Centre the focused parent in the visible chat column.
+    // With non-focused bubbles collapsed to height 0, the focused
+    // stack is the entire scrollable content. Centring the parent
+    // gives breathing room above when the stack is short, and lets
+    // the operator scroll the stack within the column when the stack
+    // is taller than the viewport. Direct scrollTop assignment (not
+    // smooth scroll) so we don't race React's commit phase.
     const delta = (targetRect.top - containerRect.top)
       - (containerRect.height / 2)
       + (targetRect.height / 2);
-    // Direct scrollTop assignment instead of scrollTo({behavior:"smooth"})
-    // because smooth scroll was getting cancelled by React's commit
-    // phase before it could complete on Retina/external-display setups.
-    // The slight jank is worth the reliability — CSS transitions on the
-    // dim/blur classes still provide a smooth visual.
     container.scrollTop = container.scrollTop + delta;
     // `focusTrigger` is included so clicking a chip whose parent is
     // already the current focus re-centres rather than no-opping.
@@ -1317,6 +1371,12 @@ export default function ThreadPage() {
   }, [visibleMessages, pendingSends.length, loading]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    // In focused-thread mode, suppress both the bottom-stickiness
+    // tracking and the load-older trigger. Scroll inside the focused
+    // stack is naturally bounded by the collapsed background, and
+    // pulling in new history would shift the underlying timeline so
+    // exit-focus lands the operator far from where they started.
+    if (focusedThreadParentId) return;
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
@@ -1717,7 +1777,10 @@ export default function ThreadPage() {
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
             {focusedThreadParentId ? (
-              <div className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur">
+              <div
+                data-focused-pill="true"
+                className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur"
+              >
                 <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
                 <button
                   type="button"
@@ -1729,7 +1792,7 @@ export default function ThreadPage() {
                 </button>
               </div>
             ) : null}
-            {hasOlder ? (
+            {hasOlder && !focusedThreadParentId ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
@@ -1782,19 +1845,42 @@ export default function ThreadPage() {
               // Messages.app's overlay. Pointer events off prevents
               // accidental clicks on the dimmed background.
               const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
+              // A day divider between two focused messages stays; a divider
+              // between collapsed bubbles needs to collapse too (otherwise
+              // the focused stack gets random "Yesterday" headers from
+              // dates that no focused message even touches).
+              const dividerInFocusedRange =
+                !dimmedByFocus &&
+                (idx === 0 || (prev && focusedIdSet ? focusedIdSet.has(prev.id) : true));
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? (
-                    <div className={`contents ${dimmedByFocus ? "opacity-30" : ""} transition-opacity duration-300`}>
-                      <DayDivider label={dayLabel} />
-                    </div>
+                    <DayDivider
+                      label={dayLabel}
+                      className={
+                        focusedIdSet && !dividerInFocusedRange
+                          ? "opacity-0 max-h-0 overflow-hidden my-0 -mt-[18px] pointer-events-none"
+                          : ""
+                      }
+                    />
                   ) : null}
                   <div
                     data-message-id={message.id}
-                    className={`flex max-w-[72%] flex-col transition-[opacity,filter] duration-300 ease-out ${
+                    data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
+                    className={`flex max-w-[72%] flex-col transition-all duration-300 ease-out ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
-                      dimmedByFocus ? "opacity-20 blur-[3px] pointer-events-none" : ""
+                      dimmedByFocus
+                        // Collapse non-focused bubbles to zero height so the
+                        // focused thread members visually come together —
+                        // matches Messages.app's overlay where the focused
+                        // bubbles stack tight. Negative margin cancels the
+                        // parent's gap-[18px] so the collapse is total.
+                        // Kept in the DOM (no display:none) so the
+                        // layout-effect-driven scroll-into-view can still
+                        // find adjacent anchors.
+                        ? "max-h-0 opacity-0 overflow-hidden -mt-[18px] pointer-events-none"
+                        : ""
                     }`}
                   >
                     {parentMessageId ? (
@@ -2146,7 +2232,10 @@ export default function ThreadPage() {
                 ) : null}
               </div>
             ) : null}
-            <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+            <div
+              data-thread-composer="true"
+              className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card"
+            >
               {focusedParentMessage ? (
                 <div className="mb-3 flex items-start gap-2 rounded-[12px] border border-hairline bg-paper-2/60 px-3 py-2 text-[12px] leading-snug text-ink-2">
                   <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
