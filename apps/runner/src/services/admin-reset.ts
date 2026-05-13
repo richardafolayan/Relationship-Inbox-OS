@@ -45,6 +45,7 @@ interface AdminResetPrisma {
     findMany: (args: unknown) => Promise<Array<{ id: string }>>;
     deleteMany: (args: unknown) => Promise<{ count: number }>;
   };
+  $transaction?: <R>(callback: (tx: AdminResetPrisma) => Promise<R>) => Promise<R>;
 }
 
 let prismaRef: AdminResetPrisma | null = null;
@@ -63,6 +64,14 @@ function clean(value: string | null | undefined): string {
 }
 
 export function isAdminResetEnabled(): boolean {
+  // Two-factor model: the reset endpoint is enabled in dev by default
+  // (so the operator can iterate locally without touching env vars), and
+  // an explicit `ADMIN_RESET_ENABLED=true` is required everywhere else.
+  // The mandatory `ADMIN_RESET_TOKEN` check in validateAdminResetGuards
+  // is the actual access gate; this flag is just the "should this code
+  // path be reachable at all" switch. The runner is intended to run
+  // local-only (binds 127.0.0.1) so the dev-default is acceptable —
+  // production-style deployments still need both env vars set.
   const explicit = process.env.ADMIN_RESET_ENABLED;
   if (explicit !== undefined) {
     return envBool("ADMIN_RESET_ENABLED", false);
@@ -101,40 +110,31 @@ export async function resetPlatformInboxGraph(
   prismaClient?: AdminResetPrisma
 ): Promise<AdminResetResult> {
   const client = prismaClient ?? (await resolvePrismaClient());
-  const matchedThreadIds = await client.thread.findMany({
-    where: { platform },
-    select: { id: true }
-  });
-  const threadIds = matchedThreadIds.map((entry) => entry.id);
+  // Wrap the four deletes in a transaction so a partial failure (e.g. DB
+  // contention mid-batch) can't leave the graph half-cleared — sendRequests
+  // gone but their parent threads still alive, etc. The previous
+  // `Promise.all` issued four independent deletes; with cascade rules in
+  // place it usually worked, but the moment one delete failed the others
+  // had already committed.
+  const runDeletes = async (tx: AdminResetPrisma) => {
+    const matched = await tx.thread.findMany({
+      where: { platform },
+      select: { id: true }
+    });
+    const threadIds = matched.map((entry) => entry.id);
+    const [sendRequests, drafts, messages, threads] = [
+      await tx.sendRequest.deleteMany({ where: { thread: { platform } } }),
+      await tx.draft.deleteMany({ where: { thread: { platform } } }),
+      await tx.message.deleteMany({ where: { thread: { platform } } }),
+      await tx.thread.deleteMany({ where: { platform } })
+    ];
+    return { threadIds, sendRequests, drafts, messages, threads };
+  };
 
-  const [sendRequests, drafts, messages, threads] = await Promise.all([
-    client.sendRequest.deleteMany({
-      where: {
-        thread: {
-          platform
-        }
-      }
-    }),
-    client.draft.deleteMany({
-      where: {
-        thread: {
-          platform
-        }
-      }
-    }),
-    client.message.deleteMany({
-      where: {
-        thread: {
-          platform
-        }
-      }
-    }),
-    client.thread.deleteMany({
-      where: {
-        platform
-      }
-    })
-  ]);
+  const batchResult = client.$transaction
+    ? await client.$transaction(runDeletes)
+    : await runDeletes(client);
+  const { threadIds, sendRequests, drafts, messages, threads } = batchResult;
 
   const orphanPeople = await client.person.findMany({
     where: {

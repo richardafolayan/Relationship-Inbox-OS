@@ -321,20 +321,34 @@ export class BetaAdapter implements PlatformAdapter {
             (document.querySelector("main, div[role='main']") as HTMLElement | null) ??
             document.body;
           const nodes = Array.from(container.querySelectorAll(selectors.message_item));
+          const scrapedAt = Date.now();
           return nodes.map((node, index) => {
             const root = node as HTMLElement;
             const className = root.className || "";
-            const inbound = /other|left|incoming|receive/i.test(className);
+            // Token-boundary match on inbound classnames — previously
+            // `/other|left|incoming|receive/i` matched any substring
+            // including unrelated tokens (`brother`, `received-icon`,
+            // `relevant`). Anchor at word boundaries so a future class
+            // rename doesn't silently invert direction.
+            const inbound = /\b(other|left|incoming|received?|incoming-bubble)\b/i.test(className);
             const text = root.querySelector(selectors.message_text)?.textContent || root.textContent || "";
             const senderName =
               root.querySelector("[role='link']")?.textContent ||
               root.querySelector("h3, h4, strong")?.textContent ||
               undefined;
             const attachmentCount = root.querySelectorAll("img, video, svg, a[download]").length;
+            // Spread the scrape-time timestamp by 1ms per bubble so a single
+            // scrape produces monotonically increasing timestamps. Previously
+            // every bubble got `new Date().toISOString()` at exec time, which
+            // collapsed to the same wall-clock millisecond for fast scrapes
+            // and broke any "order by timestamp" assumption downstream. Real
+            // platform timestamps are extracted in a separate `time_attr`
+            // pass when available; this is the scrape-time fallback.
+            const ts = new Date(scrapedAt + index).toISOString();
             return {
               platformMessageKey: root.getAttribute("data-id") || root.getAttribute("id") || `beta-${index}`,
               direction: inbound ? "IN" : "OUT",
-              timestamp: new Date().toISOString(),
+              timestamp: ts,
               text,
               senderName: senderName?.trim() || undefined,
               raw: {
@@ -379,7 +393,22 @@ export class BetaAdapter implements PlatformAdapter {
     }
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
+  ): Promise<SendReceipt> {
+    // The Beta adapter (Instagram / TikTok) ships text only — the web
+    // composers don't have a stable file-attach affordance the runner can
+    // drive without per-platform UI scripting. Previously the parameter was
+    // missing entirely, which meant `send.ts:248` silently dropped any
+    // attachments without telling the caller. Throw so the operator sees a
+    // clear FAILED row instead of a "sent text only" surprise.
+    if (attachments && attachments.length > 0) {
+      throw new Error(
+        `${this.platform} adapter does not support attachments yet (got ${attachments.length}). Send text only or use the iMessage / LinkedIn adapter.`
+      );
+    }
     const selectors = await this.deps.resolveSelectors();
     const page = await this.getPage();
 

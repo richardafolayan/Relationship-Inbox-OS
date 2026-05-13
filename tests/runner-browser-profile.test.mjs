@@ -50,7 +50,12 @@ test("resolveBrowserProfileConfig defaults to isolated mode and Person 1 profile
   assert.equal(config.personalProfileMirrorRoot, resolve(dataDir, "profiles"));
   assert.equal(config.personalChromeUserDataDir, "/tmp/chrome-user-data-default");
   assert.equal(config.personalChromeProfileDirectory, "Person 1");
-  assert.equal(config.personalChromeProfileName, "Richard Afolayan");
+  // When PERSONAL_CHROME_PROFILE_NAME isn't set, fall back to the
+  // configured profile directory name. Previously this defaulted to a
+  // hardcoded operator name; that meant a fresh dev install in CI / Docker
+  // / another developer's box would log the maintainer's name as the
+  // "profile owner" even though the actual Chrome profile was unrelated.
+  assert.equal(config.personalChromeProfileName, "Person 1");
   assert.equal(config.personalChromeProfileResolutionStrategy, "local_state_missing");
 });
 
