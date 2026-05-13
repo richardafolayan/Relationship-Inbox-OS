@@ -1591,7 +1591,7 @@ export async function extractLinkedInSmokeMessages(
     const className = await readAttr(row, "class");
     const inbound =
       className.includes("msg-s-event-listitem--other") ||
-      /other|received|incoming/i.test(className);
+      /(?:^|[\s-_])(other|received|incoming)(?:$|[\s-_])/i.test(className);
     const senderName = await readText(row.locator(linkedInSmokeMessageSenderSelector));
     const timestamp =
       (await readAttr(row.locator(linkedInSmokeMessageTimestampSelector), "datetime")) ||
@@ -3546,7 +3546,13 @@ export class LinkedInAdapter implements PlatformAdapter {
           ""
       );
       const preview = cleanText(
-        (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
+        // Honour the configured `thread_snippet` selector before falling
+        // through to the hardcoded defaults so operator overrides in
+        // packages/core/selectors/linkedin.json actually take effect. Both
+        // fallbacks remain in place so a missing/empty override keeps
+        // working with LinkedIn's current DOM.
+        (selectors.thread_snippet ? await readText(scope.locator(selectors.thread_snippet)) : null) ??
+          (await readText(scope.locator(".msg-conversation-card__message-snippet"))) ??
           (await readText(scope.locator("p.msg-conversation-card__message-snippet"))) ??
           ""
       ).slice(0, 220);
@@ -3571,8 +3577,17 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(unreadContainer)) ??
           ""
       );
-      const unreadMatch = unreadText.match(/\d+/);
-      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : unreadContainerExists ? 1 : 0;
+      // `\d` only matches ASCII 0-9; LinkedIn's i18n badges can render
+      // Arabic-Indic (٠-٩), Bengali, Devanagari etc. `\p{Nd}` with the `u`
+      // flag covers every Unicode decimal digit. Normalise the matched
+      // substring through `Number(<digit-chars>)` after stripping the
+      // non-ASCII variants so the count is still a plain JS number.
+      const unreadMatch = unreadText.match(/[\d٠-٩۰-۹]+|\p{Nd}+/u);
+      const unreadDigits = unreadMatch
+        ? unreadMatch[0].replace(/[٠-٩]/g, (c) => String(c.charCodeAt(0) - 0x0660))
+            .replace(/[۰-۹]/g, (c) => String(c.charCodeAt(0) - 0x06F0))
+        : null;
+      const unreadCount = unreadDigits && /^\d+$/.test(unreadDigits) ? Number(unreadDigits) : unreadMatch ? 1 : unreadContainerExists ? 1 : 0;
 
       const urnToken =
         (await readAttr(scope, "data-conversation-urn")) ??
@@ -5470,25 +5485,31 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async captureVisibleRowsForStreaming(
     page: Page,
-    listRoot: ElementHandle<Element>
+    listRoot: ElementHandle<Element>,
+    selectors?: SelectorRegistry
   ): Promise<LinkedInVisibleRowSnapshot[]> {
+    const snippetOverride = selectors?.thread_snippet ?? null;
     const rawRows = await this.runTracedPageAction({
       page,
       stage: "collect_threads",
       action: "visible_rows_snapshot",
-      run: async () => this.snapshotStreamingRows(listRoot)
+      run: async () => this.snapshotStreamingRows(listRoot, snippetOverride)
     }).catch(() => [] as LinkedInStreamingRowRawSnapshot[]);
 
     return this.mapStreamingRawRowsToSnapshots(rawRows, page.url());
   }
 
-  private async snapshotStreamingRows(listRoot: ElementHandle<Element>): Promise<LinkedInStreamingRowRawSnapshot[]> {
+  private async snapshotStreamingRows(
+    listRoot: ElementHandle<Element>,
+    snippetSelectorOverride?: string | null
+  ): Promise<LinkedInStreamingRowRawSnapshot[]> {
     type StreamingSnapshotEvalInput = {
       rowRootSelector: string;
       rowClickSelector: string;
+      snippetSelectorOverride: string | null;
     };
     return listRoot.evaluate((root: Element, input: StreamingSnapshotEvalInput) => {
-      const { rowRootSelector, rowClickSelector } = input;
+      const { rowRootSelector, rowClickSelector, snippetSelectorOverride } = input;
       const clean = (value: string | null | undefined): string =>
         (value ?? "")
           .replace(/\s+/g, " ")
@@ -5558,7 +5579,9 @@ export class LinkedInAdapter implements PlatformAdapter {
               readText("h3 span.truncate") ||
               readText("h3"),
             previewSnippet:
-              readText(".msg-conversation-card__message-snippet") || readText("p.msg-conversation-card__message-snippet"),
+              (snippetSelectorOverride ? readText(snippetSelectorOverride) : "") ||
+              readText(".msg-conversation-card__message-snippet") ||
+              readText("p.msg-conversation-card__message-snippet"),
             listTimestamp: readText("time.msg-conversation-listitem__time-stamp") || readText("time"),
             unreadText:
               readText(".msg-conversation-card__unread-count .notification-badge__count") ||
@@ -5581,7 +5604,8 @@ export class LinkedInAdapter implements PlatformAdapter {
         .filter((entry) => Boolean(entry)) as LinkedInStreamingRowRawSnapshot[];
     }, {
       rowRootSelector: linkedInStreamingRowRootSelector,
-      rowClickSelector: linkedInStreamingRowClickTargetSelector
+      rowClickSelector: linkedInStreamingRowClickTargetSelector,
+      snippetSelectorOverride: snippetSelectorOverride ?? null
     });
   }
 
@@ -5591,8 +5615,22 @@ export class LinkedInAdapter implements PlatformAdapter {
   ): LinkedInVisibleRowSnapshot[] {
     const snapshots: LinkedInVisibleRowSnapshot[] = [];
     for (const row of rawRows) {
-      const unreadMatch = row.unreadText.match(/\d+/);
-      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : row.unreadContainerPresent ? 1 : 0;
+      // `\d` only matches ASCII 0-9; mirror the non-ASCII handling from
+      // collectThreadCandidates so i18n badges (٠-٩, ۰-۹, Devanagari …)
+      // produce a real count rather than silently falling back to "1".
+      const unreadMatchStreaming = row.unreadText.match(/[\d٠-٩۰-۹]+|\p{Nd}+/u);
+      const unreadDigitsStreaming = unreadMatchStreaming
+        ? unreadMatchStreaming[0].replace(/[٠-٩]/g, (c) => String(c.charCodeAt(0) - 0x0660))
+            .replace(/[۰-۹]/g, (c) => String(c.charCodeAt(0) - 0x06F0))
+        : null;
+      const unreadCount =
+        unreadDigitsStreaming && /^\d+$/.test(unreadDigitsStreaming)
+          ? Number(unreadDigitsStreaming)
+          : unreadMatchStreaming
+            ? 1
+            : row.unreadContainerPresent
+              ? 1
+              : 0;
       const threadUrl = resolveSmokeThreadUrl(row.href ?? "", pageUrl);
       const rowKey = resolveLinkedInRowKey({
         id: row.id,
@@ -5857,8 +5895,17 @@ export class LinkedInAdapter implements PlatformAdapter {
         }
         clickTargets.push(target);
       };
-      pushClickTarget(await rowHandle.$("div.msg-conversation-listitem__link"));
+      // Real `<a href>` first — the docstring near line 352 explicitly warns
+      // that clicking the div wrapper `div.msg-conversation-listitem__link`
+      // sometimes only fires a LinkedIn tracking event without navigating.
+      // The previous order (`div`, then `<a>`) reversed that priority and
+      // hit the tracking-only path first on every row. Anchor variants are
+      // listed before the click-handler div so the navigating element is
+      // always attempted before the analytics shim.
       pushClickTarget(await rowHandle.$("a.msg-conversation-card__conversation-link"));
+      pushClickTarget(await rowHandle.$("a[href*='/messaging/thread/']"));
+      pushClickTarget(await rowHandle.$("a[href*='/messaging/']"));
+      pushClickTarget(await rowHandle.$("div.msg-conversation-listitem__link"));
       pushClickTarget(await rowHandle.$("[data-control-name*='conversation_item']"));
       const rowListItemHandle = await rowHandle
         .evaluateHandle((node) =>
@@ -6160,7 +6207,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               return;
             }
             const direction: "IN" | "OUT" =
-              className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className)
+              className.includes("msg-s-event-listitem--other") || /(?:^|[\s-_])(other|received|incoming)(?:$|[\s-_])/i.test(className)
                 ? "IN"
                 : "OUT";
             // Walk up to the enclosing message-group LI to find its date heading.
@@ -6209,16 +6256,19 @@ export class LinkedInAdapter implements PlatformAdapter {
               bubbleEl.querySelector(".msg-s-message-group__profile-link") ??
               bubbleEl.querySelector(".msg-s-message-group__name");
             const senderName = clean(senderEl?.textContent ?? "");
-            // Element.id returns "" (empty string), not null/undefined, so
-            // a bare `?? fallback` never reaches the index suffix when the
-            // element has no id attribute. `|| fallback` (or an explicit
-            // empty check) is what we actually want — otherwise messages
-            // without data-event-urn/data-id/id collapse to a shared empty
-            // key and clobber each other during dedupe.
+            // `getAttribute` returns "" (not null) for declared-but-empty
+            // attrs, and `Element.id` is always a string ("" when unset). A
+            // bare `?? fallback` therefore treats an empty data-event-urn
+            // as "present", and every such message collides on the empty
+            // string during dedupe. Use `||` consistently so empty/missing
+            // both fall through to the next candidate, ending at the
+            // synthetic `li-msg-<index>` key which is at least unique
+            // within the page.
             const platformMessageKey =
-              bubbleEl.getAttribute("data-event-urn") ??
-              bubbleEl.getAttribute("data-id") ??
-              (bubbleEl.id || `li-msg-${index}`);
+              bubbleEl.getAttribute("data-event-urn") ||
+              bubbleEl.getAttribute("data-id") ||
+              bubbleEl.id ||
+              `li-msg-${index}`;
             out.push({
               platformMessageKey,
               className,
@@ -7875,11 +7925,33 @@ export class LinkedInAdapter implements PlatformAdapter {
       for (let index = 0; index < initialCount; index += 1) {
         const root = messageNodes.nth(index);
         const className = (await readAttr(root, "class")) ?? "";
-        const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
-        const attachmentCount = await root
-          .locator("img, video, svg, a[download], a[href*='attachment']")
-          .count()
-          .catch(() => 0);
+        const inbound = className.includes("msg-s-event-listitem--other") || /(?:^|[\s-_])(other|received|incoming)(?:$|[\s-_])/i.test(className);
+        // Count real attachments, scoped to the bubble body, while
+        // excluding LinkedIn's avatar / presence / profile-link scopes —
+        // previously the broad `"img, video, svg, …"` selector matched
+        // sender/recipient avatars and UI icons too, tagging every text-
+        // only bubble as having an attachment. Keep `img` / `svg` for
+        // legitimate inline images but reject any match inside an avatar
+        // wrapper.
+        const attachmentCount = await root.evaluate((el: Element) => {
+          const scope =
+            el.querySelector(".msg-s-event-listitem__message-bubble") ?? el;
+          const matches = scope.querySelectorAll(
+            "img, video, svg, a[download], a[href*='attachment'], .msg-s-event-listitem__attachment, .msg-s-event-listitem__inline-image"
+          );
+          let count = 0;
+          matches.forEach((node) => {
+            if (
+              node.closest(
+                ".msg-s-event-listitem__profile-picture, .presence-entity__image, .msg-s-message-group__profile-link"
+              )
+            ) {
+              return;
+            }
+            count += 1;
+          });
+          return count;
+        }).catch(() => 0);
         const rawBodyParts = await readAllTextParts(root.locator(selectors.message_text));
         const textParts = rawBodyParts.length > 0 ? rawBodyParts : [attachmentCount > 0 ? "[non-text message]" : "[system event]"];
         const senderName = clean(
@@ -7932,16 +8004,26 @@ export class LinkedInAdapter implements PlatformAdapter {
           if (combined) {
             timestamp = combined.toISOString();
           } else {
-            // Fall through to raw text so downstream normalizeTimestamp
-            // can still try its own parsing path.
-            timestamp = bubbleTimeData.timeText;
+            // Couldn't parse a real timestamp — leave it empty so downstream
+            // `normalizeTimestamp` runs its own parsing path with the raw
+            // text in hand. Previously we wrote `bubbleTimeData.timeText`
+            // here, which then flowed into `Date.parse(timestamp)` below
+            // and returned NaN, collapsing every continuation body-part to
+            // the same un-parsed text and breaking the partIndex-based
+            // ordering tiebreaker.
+            timestamp = "";
           }
         }
         const basePlatformMessageKey = await readMessageKey(root, index);
+        // Capture a scan-time anchor so continuation body-parts get a
+        // monotonically-increasing fallback when we couldn't resolve a real
+        // bubble timestamp at all. Outer loop's clock is fine here — every
+        // bubble in the same backfill pass shares a wall-clock window.
+        const fallbackAnchorMs = Date.now();
         textParts.forEach((text, partIndex) => {
-          const parsedTimestampMs = Date.parse(timestamp);
+          const parsedTimestampMs = timestamp ? Date.parse(timestamp) : NaN;
           const partTimestamp = Number.isNaN(parsedTimestampMs)
-            ? timestamp
+            ? new Date(fallbackAnchorMs + partIndex).toISOString()
             : new Date(parsedTimestampMs + partIndex).toISOString();
           messages.push({
             platformMessageKey:
@@ -9193,7 +9275,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     const last = nodes.nth(count - 1);
     const className = (await last.getAttribute("class", { timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ?? "";
-    const inbound = /other|received|incoming/i.test(className);
+    const inbound = /(?:^|[\s-_])(other|received|incoming)(?:$|[\s-_])/i.test(className);
     const timeNode = last.locator("time").first();
     const timestampRaw =
       (await timeNode.getAttribute("datetime", { timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
