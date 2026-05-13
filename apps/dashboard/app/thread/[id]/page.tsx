@@ -258,7 +258,17 @@ export default function ThreadPage() {
   // whose parent is already the current focus (re-centring after the
   // user scrolled around).
   const [focusTrigger, setFocusTrigger] = useState(0);
+  // Snapshot of the timeline's scrollTop just before entering focus
+  // mode. Restored on exit so the operator lands back in the same
+  // spot they were before they clicked the chip, regardless of how
+  // they scrolled inside the focused stack.
+  const preFocusScrollTopRef = useRef<number | null>(null);
   const focusOnParent = useCallback((parentId: string) => {
+    if (timelineRef.current && preFocusScrollTopRef.current === null) {
+      // Only capture once per focus session — repeated chip clicks
+      // (focus swaps) keep the same "where we came from" anchor.
+      preFocusScrollTopRef.current = timelineRef.current.scrollTop;
+    }
     setFocusedThreadParentId(parentId);
     setFocusTrigger((n) => n + 1);
   }, []);
@@ -1211,27 +1221,35 @@ export default function ThreadPage() {
   // class applies, so users see them animate together rather than the
   // dim happen, pause, then the scroll yank.
   useLayoutEffect(() => {
+    const container = timelineRef.current;
     if (!focusedThreadParentId) {
       stickToBottomRef.current = true;
+      // Exit: restore the operator's pre-focus scroll position. The
+      // non-focused bubbles have just expanded back to their natural
+      // heights, so the same scrollTop value puts the timeline exactly
+      // where it was before the chip click.
+      if (container && preFocusScrollTopRef.current !== null) {
+        container.scrollTop = preFocusScrollTopRef.current;
+        preFocusScrollTopRef.current = null;
+      }
       return;
     }
     stickToBottomRef.current = false;
-    const container = timelineRef.current;
     const target = container?.querySelector(
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
     const containerRect = container.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
-    // Centre the focused parent in the visible chat column.
+    // With non-focused bubbles collapsed to height 0, the focused
+    // stack is the entire scrollable content. Centring the parent
+    // gives breathing room above when the stack is short, and lets
+    // the operator scroll the stack within the column when the stack
+    // is taller than the viewport. Direct scrollTop assignment (not
+    // smooth scroll) so we don't race React's commit phase.
     const delta = (targetRect.top - containerRect.top)
       - (containerRect.height / 2)
       + (targetRect.height / 2);
-    // Direct scrollTop assignment instead of scrollTo({behavior:"smooth"})
-    // because smooth scroll was getting cancelled by React's commit
-    // phase before it could complete on Retina/external-display setups.
-    // The slight jank is worth the reliability — CSS transitions on the
-    // dim/blur classes still provide a smooth visual.
     container.scrollTop = container.scrollTop + delta;
     // `focusTrigger` is included so clicking a chip whose parent is
     // already the current focus re-centres rather than no-opping.
@@ -1321,6 +1339,12 @@ export default function ThreadPage() {
   }, [visibleMessages, pendingSends.length, loading]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    // In focused-thread mode, suppress both the bottom-stickiness
+    // tracking and the load-older trigger. Scroll inside the focused
+    // stack is naturally bounded by the collapsed background, and
+    // pulling in new history would shift the underlying timeline so
+    // exit-focus lands the operator far from where they started.
+    if (focusedThreadParentId) return;
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
@@ -1704,7 +1728,7 @@ export default function ThreadPage() {
                 </button>
               </div>
             ) : null}
-            {hasOlder ? (
+            {hasOlder && !focusedThreadParentId ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
