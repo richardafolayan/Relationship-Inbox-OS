@@ -112,6 +112,14 @@ export function SelectableThreadRow({
               · needs reply
             </span>
           ) : null}
+          {row.personThreadCount && row.personThreadCount > 1 ? (
+            <span
+              className="font-mono text-[11px] tracking-[0.02em] text-ink-3"
+              title="Same contact has multiple separate conversations visible"
+            >
+              · {row.personThreadCount} threads
+            </span>
+          ) : null}
         </span>
         <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>
       </span>
