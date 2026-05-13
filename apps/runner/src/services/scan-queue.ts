@@ -8,6 +8,7 @@ import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
+import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
   ScanRetryController,
@@ -2631,32 +2632,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
         }
       }
 
-      const write = prisma.message.upsert({
-        where: {
-          threadId_platformMessageKey: {
-            threadId: thread.id,
-            platformMessageKey: key
-          }
-        },
-        update: {
-          text: messageText,
-          direction: message.direction,
-          timestamp: safeTimestamp,
-          attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
-          senderName: message.senderName ?? null,
-          rawJson: message.raw ? JSON.stringify(message.raw) : null
-        },
-        create: {
-          threadId: thread.id,
-          platformMessageKey: key,
-          direction: message.direction,
-          timestamp: safeTimestamp,
-          text: messageText,
-          attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
-          senderName: message.senderName ?? null,
-          rawJson: message.raw ? JSON.stringify(message.raw) : null
-        }
+      const upsertPayload = buildMessageUpsertPayload({
+        threadId: thread.id,
+        platformMessageKey: key,
+        direction: message.direction,
+        adapterReportedTimestamp: Boolean(message.timestamp),
+        safeTimestamp,
+        text: messageText,
+        senderName: message.senderName ?? null,
+        attachmentsJson: message.attachments.length ? JSON.stringify(message.attachments) : null,
+        rawJson: message.raw ? JSON.stringify(message.raw) : null
       });
+      const write = prisma.message.upsert(upsertPayload);
       if (message.direction === "OUT") {
         await write;
       } else {
