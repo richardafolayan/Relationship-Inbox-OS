@@ -1167,8 +1167,6 @@ export default function ThreadPage() {
   // dim happen, pause, then the scroll yank.
   useLayoutEffect(() => {
     if (!focusedThreadParentId) {
-      // On exit, restore natural bottom-stickiness so new messages
-      // continue to follow the operator's view.
       stickToBottomRef.current = true;
       return;
     }
@@ -1716,7 +1714,7 @@ export default function ThreadPage() {
                     className={`flex max-w-[72%] flex-col transition-[opacity,filter] duration-300 ease-out ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
-                      dimmedByFocus ? "opacity-30 blur-[2px] pointer-events-none" : ""
+                      dimmedByFocus ? "opacity-20 blur-[3px] pointer-events-none" : ""
                     }`}
                   >
                     {parentMessageId ? (
