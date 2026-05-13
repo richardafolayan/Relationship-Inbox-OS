@@ -58,7 +58,6 @@ enum EnrichmentJobStatus {
   RUNNING
   DONE
   FAILED
-  DEFERRED
 }
 
 model Platform {

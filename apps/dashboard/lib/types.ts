@@ -178,32 +178,6 @@ export interface PlatformCard {
   };
 }
 
-export interface ScanControlQueuedResponse {
-  ok: true;
-  jobId: string;
-  status: "queued" | "running";
-  requestId: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-}
-
-export interface ScanControlBlockedResponse {
-  ok: false;
-  blocked: true;
-  reason: "cooldown_active" | "in_flight";
-  retryAfterSeconds: number;
-  requestId: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-}
-
-export interface ScanControlRequest {
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-  maxThreads?: number | null;
-  maxOpens?: number | null;
-  forceFallback?: boolean | null;
-}
-
-export type ScanControlResponse = ScanControlQueuedResponse | ScanControlBlockedResponse;
-
 export interface AuditLogRow {
   id: string;
   timestamp: string;
@@ -380,41 +354,3 @@ export interface AppSettings {
   geminiModel?: string;
 }
 
-export interface SelectorTestReceipt {
-  stage: "connect" | "navigate" | "auth_check" | "open_thread" | "evaluate" | "screenshot" | "persist";
-  status: "OK" | "FAIL";
-  startedAt: string;
-  completedAt: string;
-  durationMs: number;
-  details?: Record<string, unknown>;
-}
-
-export interface SelectorTestFailurePayload {
-  ok: false;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-  stage: SelectorTestReceipt["stage"];
-  error: string;
-  requestId: string;
-  reason?: string;
-  receipts?: SelectorTestReceipt[];
-  artifacts?: {
-    screenshot?: string;
-    domDump?: string;
-  };
-}
-
-export interface SelectorTestSuccessPayload {
-  ok: true;
-  reportId: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-  startedAt: string;
-  completedAt: string;
-  results: Array<{
-    key: string;
-    selector: string;
-    count: number;
-    status: "PASS" | "FAIL";
-    screenshotFile?: string;
-  }>;
-  receipts?: SelectorTestReceipt[];
-}
