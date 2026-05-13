@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { onToast, type Toast } from "@/lib/feedback";
 
 const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: string }> = {
@@ -30,19 +30,41 @@ interface RunnerEventDetail {
 
 export function ToastHost() {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Map of toast id -> dismiss timer. feedback.ts intentionally reuses
+  // `pendingId` for the success/error toast that replaces a "running…"
+  // toast, so the dispatcher can fire a second toast with the same id
+  // while the first's expiry timer is still armed. Without clearing the
+  // old timer, it fires and removes the second toast prematurely.
+  // `window.setTimeout` returns `number` in the DOM lib (and `Timeout` in
+  // node@types). Either way `clearTimeout` accepts the value back, so type
+  // the map with the actual return type to keep TS happy in both contexts.
+  const dismissTimers = useRef<Map<string, number>>(new Map());
 
   // Subscribe to in-app toast events.
   useEffect(() => {
+    const timersMap = dismissTimers.current;
     const off = onToast((toast) => {
       setToasts((prev) => {
         const filtered = prev.filter((t) => t.id !== toast.id);
         return [...filtered, toast].slice(-5);
       });
-      window.setTimeout(() => {
+      const existing = timersMap.get(toast.id);
+      if (existing) {
+        window.clearTimeout(existing);
+      }
+      const timer = window.setTimeout(() => {
+        timersMap.delete(toast.id);
         setToasts((prev) => prev.filter((t) => t.id !== toast.id));
-      }, toast.durationMs);
+      }, toast.durationMs) as unknown as number;
+      timersMap.set(toast.id, timer);
     });
-    return off;
+    return () => {
+      off();
+      for (const timer of timersMap.values()) {
+        window.clearTimeout(timer);
+      }
+      timersMap.clear();
+    };
   }, []);
 
   // Mirror selected runner SSE events as toasts so background work surfaces

@@ -74,34 +74,6 @@ export default function TodayPage() {
     setLoaded(true);
   }, []);
 
-  useEffect(() => {
-    void refresh();
-    const onResync = () => void refresh();
-    const onRunnerEvent = (event: Event) => {
-      // Today's "first up" hero must drop a thread the moment the operator
-      // replies to it. Without this, MESSAGE_SENT only updates the thread
-      // page; Today keeps pinning the just-replied conversation at the top
-      // until the next 8s status-bar tick coincidentally triggers a refresh
-      // through some other path.
-      const detail = (event as CustomEvent<{ type?: string }>).detail;
-      const type = detail?.type;
-      if (
-        type === "MESSAGE_SENT" ||
-        type === "MESSAGE_SEND_FAILED" ||
-        type === "THREAD_UPDATED" ||
-        type === "SCAN_FINISHED"
-      ) {
-        void refresh();
-      }
-    };
-    window.addEventListener("runner-resync", onResync);
-    window.addEventListener("runner-event", onRunnerEvent as EventListener);
-    return () => {
-      window.removeEventListener("runner-resync", onResync);
-      window.removeEventListener("runner-event", onRunnerEvent as EventListener);
-    };
-  }, [refresh]);
-
   const advanceHero = useCallback((id: string, label: string) => {
     setTransitioning({ id, label });
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
@@ -120,20 +92,44 @@ export default function TodayPage() {
     }, 700);
   }, [refresh]);
 
-  // Listen for runner-side confirmations. MESSAGE_SENT means the platform
-  // accepted the reply; that thread is no longer "first up". THREAD_UPDATED
-  // covers snooze/mark-done that other clients trigger.
   useEffect(() => {
-    const handler = (event: Event) => {
+    void refresh();
+    const onResync = () => void refresh();
+    // Single consolidated runner-event handler. The previous implementation
+    // had two separate listeners on the same event — one triggered a full
+    // refresh, the other called advanceHero (which also schedules a refresh
+    // 700ms later). On a successful MESSAGE_SENT that produced three back-
+    // to-back updates: optimistic local removal, the listener-1 refresh
+    // running immediately, and listener-2's delayed refresh. Coalesce into
+    // one handler that calls advanceHero for MESSAGE_SENT (which itself
+    // already refreshes) and a single refresh for the other event types.
+    const onRunnerEvent = (event: Event) => {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
-      if (!detail || !detail.threadId) return;
-      if (detail.type === "MESSAGE_SENT") {
-        advanceHero(detail.threadId, "Sent - next up");
+      const type = detail?.type;
+      if (!type) return;
+      if (type === "MESSAGE_SENT") {
+        if (detail.threadId) {
+          advanceHero(detail.threadId, "Sent - next up");
+        } else {
+          void refresh();
+        }
+        return;
+      }
+      if (
+        type === "MESSAGE_SEND_FAILED" ||
+        type === "THREAD_UPDATED" ||
+        type === "SCAN_FINISHED"
+      ) {
+        void refresh();
       }
     };
-    window.addEventListener("runner-event", handler);
-    return () => window.removeEventListener("runner-event", handler);
-  }, [advanceHero]);
+    window.addEventListener("runner-resync", onResync);
+    window.addEventListener("runner-event", onRunnerEvent as EventListener);
+    return () => {
+      window.removeEventListener("runner-resync", onResync);
+      window.removeEventListener("runner-event", onRunnerEvent as EventListener);
+    };
+  }, [refresh, advanceHero]);
 
   useEffect(() => () => {
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
