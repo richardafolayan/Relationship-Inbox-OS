@@ -1128,12 +1128,16 @@ export default function ThreadPage() {
   const focusedParentMessage = focusedThreadParentId
     ? (messageById.get(focusedThreadParentId) ?? null)
     : null;
-  const displayedMessages = useMemo(() => {
-    if (!focusedThreadParentId) return visibleMessages;
+  // The set of message ids that are "in focus" — the parent + every
+  // reply linked to it. Used by the render to bright-light those bubbles
+  // and dim/blur everything else, matching Messages.app's focused-thread
+  // overlay. When no focus, the set is null and every bubble renders at
+  // full opacity.
+  const focusedIdSet = useMemo<Set<string> | null>(() => {
+    if (!focusedThreadParentId) return null;
     const childIds = replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
-    const allowed = new Set<string>([focusedThreadParentId, ...childIds]);
-    return visibleMessages.filter((m) => allowed.has(m.id));
-  }, [visibleMessages, focusedThreadParentId, replyChildIdsByParentId]);
+    return new Set<string>([focusedThreadParentId, ...childIds]);
+  }, [focusedThreadParentId, replyChildIdsByParentId]);
   useEffect(() => {
     // Clear focused thread when navigating to a different thread so the
     // user doesn't carry stale focus across conversations.
@@ -1146,6 +1150,23 @@ export default function ThreadPage() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
+  }, [focusedThreadParentId]);
+  // Bring the focused parent into view when the focus changes. Without
+  // this, clicking "N Replies" on a bubble that's already at the bottom
+  // of the viewport works fine, but clicking the "↳" quote chip on a
+  // reply where the parent is scrolled offscreen leaves the user staring
+  // at a dimmed empty area.
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    // Defer one frame so the CSS opacity/blur transition starts before
+    // the scroll begins — feels less janky than a simultaneous yank.
+    const handle = requestAnimationFrame(() => {
+      const el = document.querySelector(`[data-message-id="${focusedThreadParentId}"]`);
+      if (el && "scrollIntoView" in el) {
+        (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    });
+    return () => cancelAnimationFrame(handle);
   }, [focusedThreadParentId]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
@@ -1600,19 +1621,19 @@ export default function ThreadPage() {
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
             {focusedThreadParentId ? (
-              <div className="flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper-2/60 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} replies</span>
+              <div className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur">
+                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
                 <button
                   type="button"
                   onClick={() => setFocusedThreadParentId(null)}
                   className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
                   title="Esc"
                 >
-                  back to conversation
+                  exit
                 </button>
               </div>
             ) : null}
-            {hasOlder && !focusedThreadParentId ? (
+            {hasOlder ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
@@ -1629,13 +1650,13 @@ export default function ThreadPage() {
                   </button>
                 )}
               </div>
-            ) : focusedThreadParentId ? null : (
-              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
+            ) : (
+              <div className={`self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4 transition-opacity duration-300 ${focusedThreadParentId ? "opacity-30" : ""}`}>
                 start of conversation
               </div>
             )}
-            {displayedMessages.map((message, idx) => {
-              const prev = displayedMessages[idx - 1];
+            {visibleMessages.map((message, idx) => {
+              const prev = visibleMessages[idx - 1];
               const dayLabel = dayDividerLabel(prev?.timestamp, message.timestamp);
               if (message.text.trim() === "[system event]") {
                 return (
@@ -1660,28 +1681,42 @@ export default function ThreadPage() {
               const parentMessageId = parentIdOf.get(message.id);
               const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
               const replyCount = replyCountByParentId.get(message.id) ?? 0;
+              // In focused mode, bubbles outside the parent+replies set
+              // fade + blur so the focused thread "pops out" like
+              // Messages.app's overlay. Pointer events off prevents
+              // accidental clicks on the dimmed background.
+              const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
               return (
                 <div key={message.id} className="contents">
-                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {dayLabel ? (
+                    <div className={`contents ${dimmedByFocus ? "opacity-30" : ""} transition-opacity duration-300`}>
+                      <DayDivider label={dayLabel} />
+                    </div>
+                  ) : null}
                   <div
-                    className={`flex max-w-[72%] flex-col ${
+                    data-message-id={message.id}
+                    className={`flex max-w-[72%] flex-col transition-[opacity,filter] duration-300 ease-out ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
+                    } ${
+                      dimmedByFocus ? "opacity-30 blur-[2px] pointer-events-none" : ""
                     }`}
                   >
                     {parentMessageId ? (
-                      <div
-                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 ${
+                      <button
+                        type="button"
+                        onClick={() => setFocusedThreadParentId(parentMessageId)}
+                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 ${
                           message.direction === "OUT" ? "self-end" : "self-start"
                         }`}
-                        title={parentMessage?.text ?? "Replying to an earlier message"}
+                        title={`Focus thread: ${parentMessage?.text ?? "earlier message"}`}
                       >
                         <span className="text-ink-4" aria-hidden="true">↳</span>
-                        <span className="line-clamp-2 italic">
+                        <span className="line-clamp-2 italic text-left">
                           {parentMessage
                             ? parentMessage.text.slice(0, 120) || "(media)"
                             : "Replying to an earlier message"}
                         </span>
-                      </div>
+                      </button>
                     ) : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
