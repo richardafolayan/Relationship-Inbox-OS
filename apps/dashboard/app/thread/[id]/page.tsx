@@ -1187,9 +1187,20 @@ export default function ThreadPage() {
     if (!container || !target) return;
     const containerRect = container.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
-    // Centre the focused parent in the visible chat column.
+    // The timeline container has a sticky header (~120px tall on the
+    // current layout) that covers the top of its scroll viewport. Without
+    // accounting for it, "centred" lands the focused parent under the
+    // header. Subtract the header's actual rendered height so the parent
+    // lands in the centre of the *visible* area, not the geometric centre
+    // of the scroll container.
+    const stickyHeader = container.querySelector<HTMLElement>("[data-focus-sticky-header]");
+    const headerOffset = stickyHeader?.getBoundingClientRect().height ?? 0;
+    // Centre the focused parent in the VISIBLE chat column (excluding the
+    // sticky header).
+    const visibleHeight = containerRect.height - headerOffset;
     const delta = (targetRect.top - containerRect.top)
-      - (containerRect.height / 2)
+      - headerOffset
+      - (visibleHeight / 2)
       + (targetRect.height / 2);
     // Direct scrollTop assignment instead of scrollTo({behavior:"smooth"})
     // because smooth scroll was getting cancelled by React's commit
@@ -1216,31 +1227,12 @@ export default function ThreadPage() {
   }, [visibleMessages]);
   const [participantPopover, setParticipantPopover] = useState<string | null>(null);
 
-  // Annotate each message with a date-divider flag/label so consecutive
-  // messages crossing a date boundary get a centered hairline label
-  // (e.g. "Tuesday, Jan 12") rendered above the bubble.
-  const dateLabelFormatter = useMemo(
-    () =>
-      new Intl.DateTimeFormat(undefined, {
-        weekday: "long",
-        month: "short",
-        day: "numeric"
-      }),
-    []
-  );
-  const timelineRows = useMemo(() => {
-    let lastDate = "";
-    return visibleMessages.map((message) => {
-      const dateKey = new Date(message.timestamp).toDateString();
-      const showDivider = dateKey !== lastDate;
-      lastDate = dateKey;
-      return {
-        message,
-        showDivider,
-        dividerLabel: showDivider ? dateLabelFormatter.format(new Date(message.timestamp)) : ""
-      };
-    });
-  }, [visibleMessages, dateLabelFormatter]);
+  // (Previously: `dateLabelFormatter` + `timelineRows` built a per-message
+  // divider list. The render at L1690 still uses the older `dayDividerLabel`
+  // helper inline, so this useMemo block was unused dead work running on
+  // every render. Removed — if a future refactor wants Intl-style dividers,
+  // wire them through `dayDividerLabel` directly so there's a single
+  // source of truth for the timeline-date format.)
 
   // Sibling-thread list: surface the operator's other open conversations
   // alongside the current thread so they can jump between them without
@@ -1482,8 +1474,11 @@ export default function ThreadPage() {
         >
           {/* Glassy sticky header. Sits inside the scroll container so the
               timeline scrolls visibly behind it - matches the iOS / Apple
-              translucent-bar aesthetic the rest of the redesign nods at. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-12 pb-4 pt-9">
+              translucent-bar aesthetic the rest of the redesign nods at.
+              `data-focus-sticky-header` lets the focus-scroll effect at
+              L1196 subtract this header's height when centering a focused
+              parent message — without it the parent lands under the header. */}
+          <div data-focus-sticky-header className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-12 pb-4 pt-9">
             <button
               type="button"
               onClick={() => router.push("/today")}

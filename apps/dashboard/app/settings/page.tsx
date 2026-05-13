@@ -44,24 +44,11 @@ const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
 // saved values on `glmModel` / `geminiModel` columns are preserved on
 // save (the UI just doesn't expose editing them) so we don't quietly
 // blow away any operator's prior override.
-const PROVIDER_MODEL_FIELD: Record<AiProvider, "glmModel" | "geminiModel" | null> = {
-  openai: null,
-  glm: null,
-  gemini: null
-};
-
-const PROVIDER_MODEL_PLACEHOLDER: Record<AiProvider, string> = {
-  openai: "",
-  glm: "glm-4.7-flash",
-  gemini: "gemma-4-31b-it"
-};
-
-const PROVIDER_MODEL_HINT: Record<AiProvider, string> = {
-  openai: "",
-  glm: "Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.",
-  gemini:
-    "Leave blank to use the GEMINI_MODEL env default (gemma-4-31b-it). Also works: gemini-3-flash-preview. Gemma is set up to work cleanly without extra config."
-};
+// (Previously: per-provider model lookup tables drove a settings input
+// the operator flagged as confusing. The tables now all resolve to null
+// so the input never rendered, but the dead lookup + IIFE + save-body
+// passthroughs were still walked on every render. Removed entirely —
+// operators now change a provider's model via env vars and a restart.)
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
@@ -509,31 +496,10 @@ export default function SettingsPage() {
           <p className="mt-2 font-mono text-[11px] text-ink-3">
             Saved with the rest of advanced settings. Instagram and TikTok are coming later.
           </p>
-          {/* Per-provider model override input. Operators on GLM or Gemini can
-              swap the runner's env-default model without restarting. The
-              aiStatus warning above already covers the no-key failure mode.
-              OpenAI is set globally via OPENAI_MODEL - no field rendered. */}
-          {(() => {
-            const activeProvider: AiProvider = settings.aiProvider ?? "openai";
-            const field = PROVIDER_MODEL_FIELD[activeProvider];
-            if (!field) return null;
-            return (
-              <div className="mt-3">
-                <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                  {PROVIDER_LABELS[activeProvider]} model
-                </p>
-                <Input
-                  type="text"
-                  placeholder={PROVIDER_MODEL_PLACEHOLDER[activeProvider]}
-                  value={settings[field] ?? ""}
-                  onChange={(event) => setSettings({ ...settings, [field]: event.target.value })}
-                />
-                <p className="mt-1 font-mono text-[11px] text-ink-3">
-                  {PROVIDER_MODEL_HINT[activeProvider]}
-                </p>
-              </div>
-            );
-          })()}
+          {/* Per-provider model override was removed (PROVIDER_MODEL_FIELD
+              entries all resolved to null). To change a provider's model,
+              set OPENAI_MODEL / Z_AI_MODEL / GEMINI_MODEL in .env and restart
+              via the button below. */}
         </div>
 
         <div className="mt-6 flex items-center gap-3">
@@ -547,9 +513,13 @@ export default function SettingsPage() {
                 redHours: settings.redHours,
                 maxMessagesPerThread: settings.maxMessagesPerThread,
                 enabledPlatforms: settings.enabledPlatforms,
-                aiProvider: settings.aiProvider,
-                glmModel: settings.glmModel?.trim() ? settings.glmModel.trim() : undefined,
-                geminiModel: settings.geminiModel?.trim() ? settings.geminiModel.trim() : undefined
+                aiProvider: settings.aiProvider
+                // glmModel / geminiModel are no longer editable from the UI
+                // (see the comment above next to PROVIDER_MODEL_FIELD's
+                // removal). The runner echoes whatever was last saved, so
+                // omitting them here preserves the existing value without
+                // entrenching whatever the dead UI happened to have on
+                // first save.
               })
             }
           >

@@ -105,8 +105,20 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => clearInterval(timer);
   }, [autoScanDisabled, autoScanEnabled]);
 
-  // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
-  // `runner-resync` window events.
+  // SSE event stream. Pages subscribe to `runner-event` / `runner-resync`
+  // window events.
+  //
+  // Dep list intentionally OMITS `pathname`. Previously this effect re-ran
+  // on every route change, tearing down and re-opening the SSE connection
+  // — which lost in-flight events, incremented the runner's connection
+  // count, and triggered a fresh sinceEventId replay on every navigation.
+  // The dispatched window events reach every page regardless of pathname,
+  // so there's no reason to recreate the source per route. Stash
+  // `refreshMeta` in a ref so the effect doesn't need it as a dep.
+  const refreshMetaRef = useRef(refreshMeta);
+  useEffect(() => {
+    refreshMetaRef.current = refreshMeta;
+  }, [refreshMeta]);
   useEffect(() => {
     const previousEventId = Number(window.sessionStorage.getItem("runner_last_event_id") ?? "0");
     const eventUrl = previousEventId > 0 ? `/events?sinceEventId=${previousEventId}` : "/events";
@@ -120,7 +132,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         window.dispatchEvent(new CustomEvent("runner-event", { detail: payload }));
         if (payload.type === "RESYNC_REQUIRED") {
           window.dispatchEvent(new CustomEvent("runner-resync"));
-          void refreshMeta();
+          void refreshMetaRef.current();
         }
       } catch {
         // Ignore malformed event payloads.
@@ -130,7 +142,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       // Let EventSource auto-reconnect.
     };
     return () => source.close();
-  }, [refreshMeta, pathname]);
+  }, []);
 
   // ⌘K toggles the palette. Esc closes the palette and, when there is no
   // palette open, navigates back from a thread to /today (matches the
