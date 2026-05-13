@@ -272,11 +272,21 @@ export function createSendService(deps: SendServiceDeps) {
       // next refresh. The send itself goes out as a normal text bubble
       // — the recipient on Messages.app sees no threading at all.
       const replyToMessageId = sendRequest.replyToMessageId ?? null;
+      // Prefer the platform-side stable id when the adapter could
+      // recover it (iMessage polls chat.db post-send for the row's
+      // guid). Falling back to a synthetic stableHash for adapters
+      // that can't observe the real id (LinkedIn web UI, group chats
+      // without a delivery-status path). Aligning the key with what a
+      // later scan writes is how we avoid the same outbound message
+      // showing up twice in the timeline.
+      const platformMessageKey =
+        receipt.platformMessageKey ??
+        stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`);
       await prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
             threadId: thread.id,
-            platformMessageKey: stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`)
+            platformMessageKey
           }
         },
         update: {
@@ -289,7 +299,7 @@ export function createSendService(deps: SendServiceDeps) {
         },
         create: {
           threadId: thread.id,
-          platformMessageKey: stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`),
+          platformMessageKey,
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
           text: input.text,
