@@ -7,7 +7,8 @@ import type { AppSettings, HealthResponse, OperatorProfile } from "@/lib/types";
 import type { AiProvider } from "@inbox-os/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Canvas, PageHead, QuietRow } from "@/components/common/canvas";
+import { Canvas, PageHead } from "@/components/common/canvas";
+import { cn } from "@/lib/utils";
 
 interface AiStatus {
   activeProvider: AiProvider;
@@ -16,10 +17,6 @@ interface AiStatus {
   activeProviderConfigured: boolean;
 }
 
-// Explicit ordering for the provider toggle. Don't iterate Object.keys on
-// the records below - TS doesn't guarantee insertion order at the type
-// level even when V8 does at runtime. Adding a new provider goes here
-// alongside the matching entries in the records.
 const AI_PROVIDERS: AiProvider[] = ["openai", "glm", "gemini"];
 
 const PROVIDER_LABELS: Record<AiProvider, string> = {
@@ -34,16 +31,6 @@ const PROVIDER_KEY_ENV: Record<AiProvider, string> = {
   gemini: "GEMINI_API_KEY"
 };
 
-// Which `AppSettings` field a model-override input writes to for each
-// provider. `null` means the provider has no per-account model override
-// - the runner uses the env-default model instead. All three providers
-// are now `null`: operators flagged the per-provider model UI as
-// confusing (Gemini and GLM had inputs but ChatGPT didn't, asymmetric).
-// To change a provider's model, set the corresponding env var
-// (OPENAI_MODEL / Z_AI_MODEL / GEMINI_MODEL) and restart. Existing
-// saved values on `glmModel` / `geminiModel` columns are preserved on
-// save (the UI just doesn't expose editing them) so we don't quietly
-// blow away any operator's prior override.
 const PROVIDER_MODEL_FIELD: Record<AiProvider, "glmModel" | "geminiModel" | null> = {
   openai: null,
   glm: null,
@@ -58,26 +45,19 @@ const PROVIDER_MODEL_PLACEHOLDER: Record<AiProvider, string> = {
 
 const PROVIDER_MODEL_HINT: Record<AiProvider, string> = {
   openai: "",
-  glm: "Leave blank to use the Z_AI_MODEL env default. Free-tier flash variants: glm-4.7-flash, glm-4.5-flash.",
-  gemini:
-    "Leave blank to use the GEMINI_MODEL env default (gemma-4-31b-it). Also works: gemini-3-flash-preview. Gemma is set up to work cleanly without extra config."
+  glm: "Leave blank to use the Z_AI_MODEL env default.",
+  gemini: "Leave blank to use the GEMINI_MODEL env default."
 };
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
 
-// Settings - leading with the four primary toggles in the calm row
-// pattern (Quiet hours, Auto-scan, Headless browser, Demo data). The
-// advanced surface (scan thresholds, AI provider, danger-zone reset,
-// runner restart) sits behind a quiet expander so it stays out of the
-// way until the operator asks for it.
-//
-// Only LinkedIn is shipped today. Instagram/TikTok still flow through
-// the runner so their settings can persist, but we don't render toggles
-// for them on this page until the adapter work lands (issue #93).
 const PLATFORMS = ["LINKEDIN"] as const;
 type Platform = (typeof PLATFORMS)[number];
 
+// Settings - grouped by intent (Capture / Privacy / AI & output / Danger).
+// Real toggles instead of "On" pill-buttons. Danger zone is visually
+// quarantined at the bottom. Section 09 of the redesign doc.
 export default function SettingsPage() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
@@ -89,19 +69,10 @@ export default function SettingsPage() {
   const [savedAt, setSavedAt] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  // Operator self-description. Two free-text fields the AI prompts read
-  // (apps/runner/src/services/ai.ts → operatorProfileFragment) so suggested
-  // replies and voice rewrites stay in the operator's domain. Saved with
-  // the same debounce-then-PATCH pattern Notes uses on the People page.
   const [operatorProfile, setOperatorProfile] = useState<OperatorProfile>({ about: "", interests: "" });
   const [operatorProfileStatus, setOperatorProfileStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const operatorProfileSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Danger-zone reset modal state. Mirrors the main-branch flow: an
-  // admin token + literal "RESET" string, both required before the
-  // confirm button enables. `resetPlatform` switches the same modal
-  // between LinkedIn and iMessage targets so we don't duplicate the
-  // dialog markup per platform.
   const [resetOpen, setResetOpen] = useState(false);
   const [resetPlatform, setResetPlatform] = useState<"LINKEDIN" | "IMESSAGE">("LINKEDIN");
   const [resetToken, setResetToken] = useState("");
@@ -124,7 +95,6 @@ export default function SettingsPage() {
     if (operatorData) setOperatorProfile(operatorData);
   }, []);
 
-  // Tear down the debounce timer if the page unmounts mid-save.
   useEffect(() => () => {
     if (operatorProfileSaveTimer.current) clearTimeout(operatorProfileSaveTimer.current);
   }, []);
@@ -166,8 +136,6 @@ export default function SettingsPage() {
       const next = await apiPost<AppSettings>("/runner/control/settings", partial);
       setSettings(next);
       setSavedAt(Date.now());
-      // Refresh ai-status after settings change so the missing-key warning
-      // reflects the active provider.
       void apiGet<AiStatus>("/runner/data/ai-status")
         .then(setAiStatus)
         .catch(() => undefined);
@@ -251,7 +219,6 @@ export default function SettingsPage() {
     }
     try {
       await apiPost("/runner/control/system/restart", {});
-      // The runner exits ~250ms after the 202; poll back up.
       const startedAt = Date.now();
       while (Date.now() - startedAt < 90_000) {
         const ok = await apiGet<HealthResponse>("/runner/health")
@@ -272,11 +239,7 @@ export default function SettingsPage() {
   if (!settings) {
     return (
       <Canvas>
-        <PageHead
-          eyebrow="Preferences"
-          title="Settings"
-          subtitle="Configure scan cadence, SLAs, and runtime behaviour for the local runner."
-        />
+        <PageHead eyebrow="Preferences" title="Settings" />
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
       </Canvas>
     );
@@ -287,11 +250,12 @@ export default function SettingsPage() {
       <PageHead
         eyebrow="Preferences"
         title="Settings"
-        subtitle="Configure scan cadence, SLAs, and runtime behaviour for the local runner."
         meta={
           savedAt && Date.now() - savedAt < 4000 ? (
             <span className="text-ink">saved</span>
-          ) : null
+          ) : (
+            <span>synced to local profile</span>
+          )
         }
       />
 
@@ -299,46 +263,60 @@ export default function SettingsPage() {
         <p className="mb-4 font-mono text-[11px] text-risk-overdue">{error}</p>
       ) : null}
 
-      <QuietRow
-        name="Quiet hours"
-        stat="22:00 - 06:00 local: mute the sidebar dot and pause auto-scan"
-        action={
-          <Button variant="quiet" onClick={toggleQuietHours}>
-            {quietHours ? "On" : "Off"}
-          </Button>
-        }
-      />
-      <QuietRow
-        name="Auto-scan"
-        stat={
-          autoScanDisabled
-            ? "disabled by env - restart the dashboard after editing .env"
-            : "every 10 minutes"
-        }
-        action={
-          <Button variant="quiet" disabled={autoScanDisabled} onClick={toggleAutoScan}>
-            {autoScan && !autoScanDisabled ? "On" : "Off"}
-          </Button>
-        }
-      />
-      <QuietRow
-        name="Headless browser"
-        stat="scan invisibly in the background"
-        action={
-          <Button variant="quiet" disabled={saving} onClick={toggleHeadless}>
-            {settings.headless ? "On" : "Off"}
-          </Button>
-        }
-      />
-      <QuietRow
-        name="Demo data"
-        stat="seed sample threads & receipts"
-        action={
-          <Button variant="quiet" disabled={saving} onClick={toggleDemo}>
-            {settings.demoMode ? "On" : "Off"}
-          </Button>
-        }
-      />
+      <SettingsGroup head="Capture">
+        <SettingRow
+          name="Auto-scan"
+          desc="Pull new messages from every connected platform on a fixed cadence."
+          trailing={
+            <div className="flex items-center gap-[10px]">
+              <span className="font-mono text-[11px] text-ink-3">every 10 min</span>
+              <Toggle
+                on={autoScan && !autoScanDisabled}
+                disabled={autoScanDisabled}
+                onChange={toggleAutoScan}
+                label="Auto-scan"
+              />
+            </div>
+          }
+        />
+        <SettingRow
+          name="Headless browser"
+          desc="Run scans invisibly in the background. Disable to watch the runner work in a visible window."
+          trailing={
+            <Toggle
+              on={settings.headless}
+              disabled={saving}
+              onChange={toggleHeadless}
+              label="Headless browser"
+            />
+          }
+        />
+        <SettingRow
+          name="Demo data"
+          desc="Seed sample threads and receipts. Useful when running offline."
+          trailing={
+            <Toggle
+              on={settings.demoMode}
+              disabled={saving}
+              onChange={toggleDemo}
+              label="Demo data"
+            />
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup head="Privacy">
+        <SettingRow
+          name="Quiet hours"
+          desc="After 22:00, mute the attention dot and pause auto-scan."
+          trailing={
+            <div className="flex items-center gap-[10px]">
+              <span className="font-mono text-[11px] text-ink-3">22:00–06:00</span>
+              <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
+            </div>
+          }
+        />
+      </SettingsGroup>
 
       <section
         data-testid="operator-profile"
@@ -400,11 +378,11 @@ export default function SettingsPage() {
         onToggle={(event) => setAdvancedOpen((event.target as HTMLDetailsElement).open)}
         className="mt-10"
       >
-        <summary className="cursor-pointer list-none font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3 hover:text-ink">
-          Advanced
+        <summary className="cursor-pointer list-none font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 hover:text-ink">
+          AI &amp; output · advanced
         </summary>
 
-        <div className="mt-6 grid grid-cols-2 gap-4">
+        <div className="mt-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
           <label className="block">
             <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
               Scan interval (seconds)
@@ -466,7 +444,6 @@ export default function SettingsPage() {
           <div className="flex flex-wrap items-center gap-2">
             {AI_PROVIDERS.map((provider) => {
               const active = (settings.aiProvider ?? "openai") === provider;
-              const configured = aiStatus?.configuredProviders.includes(provider) ?? true;
               return (
                 <Button
                   key={provider}
@@ -474,7 +451,6 @@ export default function SettingsPage() {
                   onClick={() => setSettings({ ...settings, aiProvider: provider })}
                 >
                   {PROVIDER_LABELS[provider]}
-                  {configured ? null : " ·"}
                 </Button>
               );
             })}
@@ -506,13 +482,6 @@ export default function SettingsPage() {
               );
             })}
           </div>
-          <p className="mt-2 font-mono text-[11px] text-ink-3">
-            Saved with the rest of advanced settings. Instagram and TikTok are coming later.
-          </p>
-          {/* Per-provider model override input. Operators on GLM or Gemini can
-              swap the runner's env-default model without restarting. The
-              aiStatus warning above already covers the no-key failure mode.
-              OpenAI is set globally via OPENAI_MODEL - no field rendered. */}
           {(() => {
             const activeProvider: AiProvider = settings.aiProvider ?? "openai";
             const field = PROVIDER_MODEL_FIELD[activeProvider];
@@ -559,43 +528,40 @@ export default function SettingsPage() {
             Restart runner
           </Button>
         </div>
-
       </details>
 
-      <section className="mt-12 border-t border-hairline pt-6">
-        <p className="mb-4 font-mono text-[11px] uppercase tracking-[0.08em] text-[oklch(45%_0.18_28)]">
+      <section className="mt-12">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-risk-overdue">
           Danger zone
         </p>
-        <QuietRow
-          name="Clear LinkedIn inbox and rebuild"
-          stat="wipes LinkedIn threads/messages locally - next scan rebuilds"
+        <DangerRow
+          name="Wipe LinkedIn inbox and rebuild"
+          desc="Wipes LinkedIn threads and messages locally. Next scan rebuilds. Cannot be undone."
           action={
-            <Button
-              variant="danger"
+            <DangerButton
               onClick={() => {
                 setResetStatus(null);
                 setResetPlatform("LINKEDIN");
                 setResetOpen(true);
               }}
             >
-              Reset…
-            </Button>
+              Wipe
+            </DangerButton>
           }
         />
-        <QuietRow
-          name="Clear iMessage inbox and rebuild"
-          stat="wipes iMessage threads/messages locally - next scan rebuilds"
+        <DangerRow
+          name="Wipe iMessage inbox and rebuild"
+          desc="Wipes iMessage threads and messages locally. Next scan rebuilds. Cannot be undone."
           action={
-            <Button
-              variant="danger"
+            <DangerButton
               onClick={() => {
                 setResetStatus(null);
                 setResetPlatform("IMESSAGE");
                 setResetOpen(true);
               }}
             >
-              Reset…
-            </Button>
+              Wipe
+            </DangerButton>
           }
         />
         {resetStatus ? (
@@ -623,7 +589,7 @@ export default function SettingsPage() {
             onClick={(event) => event.stopPropagation()}
           >
             <div>
-              <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-[oklch(45%_0.18_28)]">
+              <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-risk-overdue">
                 Danger zone
               </p>
               <p className="mt-2 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">
@@ -684,5 +650,114 @@ export default function SettingsPage() {
         </div>
       ) : null}
     </Canvas>
+  );
+}
+
+function SettingsGroup({ head, children }: { head: string; children: React.ReactNode }) {
+  return (
+    <section className="mb-9">
+      <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{head}</p>
+      <div className="border-b border-hairline">{children}</div>
+    </section>
+  );
+}
+
+function SettingRow({
+  name,
+  desc,
+  trailing
+}: {
+  name: string;
+  desc?: string;
+  trailing: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_auto] items-center gap-6 border-t border-hairline px-1 py-[16px]">
+      <div>
+        <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">{name}</p>
+        {desc ? (
+          <p className="m-0 max-w-[54ch] text-[12.5px] leading-[1.5] text-ink-3" style={{ textWrap: "pretty" }}>
+            {desc}
+          </p>
+        ) : null}
+      </div>
+      <div>{trailing}</div>
+    </div>
+  );
+}
+
+function DangerRow({
+  name,
+  desc,
+  action
+}: {
+  name: string;
+  desc: string;
+  action: React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-[1fr_auto] items-center gap-6 border-t border-hairline px-1 py-[16px] last:border-b last:border-hairline">
+      <div>
+        <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">{name}</p>
+        <p className="m-0 max-w-[54ch] text-[12.5px] leading-[1.5] text-ink-3" style={{ textWrap: "pretty" }}>
+          {desc}
+        </p>
+      </div>
+      <div>{action}</div>
+    </div>
+  );
+}
+
+function Toggle({
+  on,
+  onChange,
+  disabled,
+  label
+}: {
+  on: boolean;
+  onChange: () => void;
+  disabled?: boolean;
+  label: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={on}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onChange}
+      className={cn(
+        "relative h-[20px] w-[36px] rounded-pill transition-colors duration-calm",
+        on ? "bg-ink" : "bg-hairline",
+        disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
+      )}
+    >
+      <span
+        aria-hidden
+        className={cn(
+          "absolute top-[2px] h-[16px] w-[16px] rounded-full bg-paper shadow-[0_1px_3px_rgba(0,0,0,0.15)] transition-transform duration-calm",
+          on ? "translate-x-[18px]" : "translate-x-[2px]"
+        )}
+      />
+    </button>
+  );
+}
+
+function DangerButton({
+  onClick,
+  children
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="rounded-pill border border-[color-mix(in_oklch,var(--risk-overdue)_40%,var(--hairline))] bg-transparent px-[14px] py-[7px] font-mono text-[12px] text-risk-overdue transition-colors duration-calm hover:bg-[color-mix(in_oklch,var(--risk-overdue)_8%,var(--paper))]"
+    >
+      {children}
+    </button>
   );
 }

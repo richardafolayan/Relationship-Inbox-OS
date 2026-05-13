@@ -5,29 +5,23 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost } from "@/lib/api";
 import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { cleanContactSummary } from "@/lib/preview";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
-import { ProfileSections } from "@/components/common/profile-sections";
 
-// People - relationship rows in the same calm pattern as ThreadRow. Click
-// any row to open a slim detail panel below with summary + enrichment +
-// starters. When the runner has no LinkedIn profile URL for the person
-// yet (the scan only captures display name + thread URL), surface that
-// explicitly with a paste-URL input instead of looping on a "Refresh
-// enrichment" button that always 502s with `reason: "not_found"`.
+// People - list of relationship rows. Clicking a row expands an inline
+// two-column profile beneath it: a sticky `id-card` (avatar + name + role
+// + last contact + facts + primary actions) on the left, and a `ctx`
+// column on the right that carries about / mutual chips / opener grid /
+// notes. Mirrors section 01 of the redesign doc.
 export default function PeoplePage() {
   const router = useRouter();
   const [people, setPeople] = useState<PeopleRow[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<PersonDetailResponse | null>(null);
   const [refreshing, setRefreshing] = useState(false);
-  // Inline status next to the Refresh enrichment button - every action
-  // surfaces what it's doing while it runs and briefly after, not just a
-  // button-label flip. Auto-clears on success/deferred after ~4s; errors
-  // still route through the page-level `error` banner.
   const [enrichStatus, setEnrichStatus] = useState<string | null>(null);
   const enrichStatusTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [scanningAll, setScanningAll] = useState<"all" | "new" | null>(null);
@@ -36,16 +30,11 @@ export default function PeoplePage() {
   const [profileUrlInput, setProfileUrlInput] = useState("");
   const [savingProfileUrl, setSavingProfileUrl] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Local draft so the textarea is fully controlled. The Notes column on
-  // people lives off the API, but keystrokes go to local state and we
-  // debounce a PATCH-equivalent POST to /runner/control/person/:id/notes.
   const [notesDraft, setNotesDraft] = useState<string>("");
   const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedNotesAtRef = useRef<number>(0);
 
-  // Load list with explicit error surfacing (#74 pattern). Stays a
-  // useCallback so dependencies in effects below don't churn between renders.
   const loadList = useCallback(async (): Promise<PeopleRow[]> => {
     try {
       const data = await apiGet<PeopleRow[]>("/runner/data/people");
@@ -69,16 +58,6 @@ export default function PeoplePage() {
     []
   );
 
-  // No auto-select on load: the inline accordion makes the list itself
-  // the entry point. Auto-expanding the first row used to be required
-  // because the detail card lived at the bottom of the page; with rows
-  // expanding inline a default-open also fights the toggle-collapse
-  // (clicking the active row would collapse → effect re-fires → first
-  // row re-selects).
-  // Poll + resync subscription so new persons persisted by an in-flight
-  // scan show up without a manual reload. Mirrors the pattern used on the
-  // inbox / today pages - without it, /data/people only loaded once on
-  // mount and operators saw a stale list while a scan was running.
   useEffect(() => {
     void loadList();
     const onResync = () => void loadList();
@@ -98,8 +77,6 @@ export default function PeoplePage() {
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
-  // Reset the per-person input whenever the selection changes so a stale
-  // profile URL from the previous person doesn't stick around.
   useEffect(() => {
     setProfileUrlInput("");
     setError(null);
@@ -110,9 +87,6 @@ export default function PeoplePage() {
     [people, selectedId]
   );
 
-  // Whenever the selected person changes, hydrate the notes draft from the
-  // server-side value. Cancel any in-flight debounce so we don't write the
-  // previous person's notes onto the new one.
   useEffect(() => {
     if (notesSaveTimer.current) {
       clearTimeout(notesSaveTimer.current);
@@ -122,15 +96,11 @@ export default function PeoplePage() {
     setNotesStatus("idle");
   }, [selectedId, selected?.notes]);
 
-  // Tear down the timer if the page unmounts mid-debounce.
   useEffect(() => () => {
     if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
     if (enrichStatusTimer.current) clearTimeout(enrichStatusTimer.current);
   }, []);
 
-  // Switching person mid-flight: drop the previous enrich status - it
-  // described the previous selection and would mis-attribute "saved" to
-  // a person who wasn't actually refreshed.
   useEffect(() => {
     if (enrichStatusTimer.current) {
       clearTimeout(enrichStatusTimer.current);
@@ -150,9 +120,6 @@ export default function PeoplePage() {
         await apiPost(`/runner/control/person/${personId}/notes`, { notes: value });
         savedNotesAtRef.current = Date.now();
         setNotesStatus("saved");
-        // Refresh the people list so the next selectedId switch sees the
-        // updated notes value (selected.notes is sourced from people, not
-        // detail).
         void loadList();
       } catch {
         setNotesStatus("error");
@@ -190,7 +157,7 @@ export default function PeoplePage() {
         setEnrichStatus(null);
       })
       .finally(() => setRefreshing(false));
-  }, [selectedId, loadList, loadDetail]);
+  }, [selectedId, loadList, loadDetail, detail?.person.platform]);
 
   const saveProfileUrlAndEnrich = async () => {
     if (!selectedId) return;
@@ -202,8 +169,6 @@ export default function PeoplePage() {
       await apiPost(`/runner/control/person/${selectedId}/profile-url`, { profileUrl: url });
       setProfileUrlInput("");
       await loadDetail(selectedId);
-      // Kick enrichment immediately so the operator sees results without
-      // an extra click.
       refreshEnrichment();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save profile URL");
@@ -238,18 +203,13 @@ export default function PeoplePage() {
     void loadDetail(selectedId, true).finally(() => setStartersLoading(false));
   };
 
-  // Without a profileUrl on the Person row the runner's enrichment job
-  // has nothing to visit, so "Refresh enrichment" silently fails every
-  // time. Detect the missing-URL case directly and ask the operator to
-  // paste one instead of showing "Not enriched yet" forever.
   const profileUrlMissing = !!detail && !detail.person.profileUrl;
 
   return (
     <Canvas>
       <PageHead
-        eyebrow="Relationships"
+        eyebrow="Relationships · People"
         title="People"
-        subtitle="Lightweight relationship context across every conversation - risk, last touch, notes."
         meta={people.length > 0 ? <span>{people.length} relationships</span> : null}
       />
 
@@ -285,23 +245,12 @@ export default function PeoplePage() {
         <div className="flex flex-col">
           {people.map((person) => {
             const risk = toDisplayRisk(person.risk);
-            const dot =
-              risk === "overdue"
-                ? "bg-risk-overdue"
-                : risk === "waiting"
-                  ? "bg-risk-waiting"
-                  : "bg-risk-fresh";
             const active = person.id === selectedId;
             const headlineLine =
               person.headline ??
               [person.currentRole, person.currentCompany].filter(Boolean).join(" at ") ??
               "no profile yet";
             const detailId = `person-detail-${person.id}`;
-            // Inline accordion: clicking a row expands the detail panel
-            // directly underneath it, FAQ-style. Clicking the active row
-            // again collapses. Earlier shipping put a single detail card
-            // at the bottom of the list which the operator had to scroll
-            // to find - issue #100 called this out specifically.
             return (
               <div
                 key={person.id}
@@ -350,121 +299,27 @@ export default function PeoplePage() {
                   </span>
                 </button>
 
-                {active ? (
-                  <section
-                    id={detailId}
-                    data-testid="person-detail-panel"
-                    className="animate-accordion-down border-t border-hairline bg-paper-2/40 px-1 pb-8 pt-6 sm:px-6"
-                  >
-                    <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                      {PLATFORM_LABEL[person.platform]} · last contact{" "}
-                      {formatRelative(person.lastInteractionAt)}
-                    </p>
-
-                    <p className="max-w-[58ch] text-[15px] leading-[1.55] text-ink-2">
-                      {cleanContactSummary(detail?.summary) ??
-                        (detail?.enrichment
-                          ? "No summary yet. Refresh to generate one."
-                          : profileUrlMissing
-                            ? "We don't have a LinkedIn profile URL for this person yet. Paste it below to enrich."
-                            : "Not enriched yet. Refresh to fetch the LinkedIn profile.")}
-                    </p>
-
-                    {profileUrlMissing ? (
-                      <div className="mt-4 flex flex-wrap items-center gap-2">
-                        <input
-                          type="url"
-                          value={profileUrlInput}
-                          onChange={(event) => setProfileUrlInput(event.target.value)}
-                          placeholder="https://www.linkedin.com/in/…"
-                          className="w-[360px] max-w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
-                        />
-                        <Button
-                          variant="quiet"
-                          disabled={!profileUrlInput.trim() || savingProfileUrl || refreshing}
-                          onClick={() => void saveProfileUrlAndEnrich()}
-                        >
-                          {savingProfileUrl || refreshing ? "Saving…" : "Save & enrich"}
-                        </Button>
-                      </div>
-                    ) : null}
-
-                    {detail ? (
-                      <div className="mt-6">
-                        <ProfileSections detail={detail} hideName />
-                      </div>
-                    ) : null}
-
-                    {detail?.starters && detail.starters.starters.length > 0 ? (
-                      <div className="mt-6 border-t border-hairline pt-5">
-                        <p className="mb-3 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                          Suggested openers
-                        </p>
-                        <div className="space-y-3">
-                          {detail.starters.starters.map((starter, idx) => (
-                            <div key={idx} className="rounded-row border border-hairline p-4 text-[14px]">
-                              <p className="mb-1 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                                {starter.angle} · cited {starter.citedField}
-                              </p>
-                              <p className="text-ink">{starter.text}</p>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ) : null}
-
-                    <div className="mt-6 rounded-card border border-hairline bg-paper px-4 py-3">
-                      <div className="flex items-center justify-between">
-                        <p className="m-0 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                          Notes
-                        </p>
-                        <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
-                          {notesStatus === "saving"
-                            ? "saving…"
-                            : notesStatus === "saved"
-                              ? "saved"
-                              : notesStatus === "error"
-                                ? <span className="text-risk-overdue">failed to save</span>
-                                : ""}
-                        </span>
-                      </div>
-                      <textarea
-                        rows={6}
-                        value={notesDraft}
-                        onChange={(event) => onNotesChange(event.target.value)}
-                        placeholder="Internal relationship notes..."
-                        className="mt-2 w-full resize-none border-0 bg-transparent text-[14px] leading-[1.5] text-ink outline-none placeholder:text-ink-4"
-                      />
-                    </div>
-
-                    <div className="mt-6 flex flex-wrap items-center gap-3">
-                      <Button variant="quiet" disabled={refreshing} onClick={refreshEnrichment}>
-                        {refreshing ? "Refreshing…" : "Refresh enrichment"}
-                      </Button>
-                      {enrichStatus ? (
-                        <span
-                          className="font-mono text-[11px] text-ink-3"
-                          aria-live="polite"
-                        >
-                          {enrichStatus}
-                        </span>
-                      ) : null}
-                      <Button
-                        variant="quiet"
-                        disabled={!detail?.enrichment || startersLoading}
-                        onClick={fetchStarters}
-                      >
-                        {startersLoading ? "Drafting…" : "Start a conversation"}
-                      </Button>
-                      <button
-                        type="button"
-                        onClick={() => router.push(`/inbox?person=${person.id}`)}
-                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                      >
-                        open in inbox
-                      </button>
-                    </div>
-                  </section>
+                {active && selected ? (
+                  <ProfilePanel
+                    detailId={detailId}
+                    person={selected}
+                    risk={risk}
+                    detail={detail}
+                    refreshing={refreshing}
+                    enrichStatus={enrichStatus}
+                    profileUrlMissing={profileUrlMissing}
+                    profileUrlInput={profileUrlInput}
+                    onProfileUrlInputChange={setProfileUrlInput}
+                    onSaveProfileUrl={() => void saveProfileUrlAndEnrich()}
+                    savingProfileUrl={savingProfileUrl}
+                    onRefreshEnrichment={refreshEnrichment}
+                    onStartConversation={fetchStarters}
+                    startersLoading={startersLoading}
+                    onOpenInInbox={() => router.push(`/inbox?person=${person.id}`)}
+                    notesDraft={notesDraft}
+                    onNotesChange={onNotesChange}
+                    notesStatus={notesStatus}
+                  />
                 ) : null}
               </div>
             );
@@ -472,5 +327,341 @@ export default function PeoplePage() {
         </div>
       )}
     </Canvas>
+  );
+}
+
+interface ProfilePanelProps {
+  detailId: string;
+  person: PeopleRow;
+  risk: DisplayRisk;
+  detail: PersonDetailResponse | null;
+  refreshing: boolean;
+  enrichStatus: string | null;
+  profileUrlMissing: boolean;
+  profileUrlInput: string;
+  onProfileUrlInputChange: (value: string) => void;
+  onSaveProfileUrl: () => void;
+  savingProfileUrl: boolean;
+  onRefreshEnrichment: () => void;
+  onStartConversation: () => void;
+  startersLoading: boolean;
+  onOpenInInbox: () => void;
+  notesDraft: string;
+  onNotesChange: (value: string) => void;
+  notesStatus: "idle" | "saving" | "saved" | "error";
+}
+
+// Two-column profile: left is sticky id-card, right is context blocks.
+// Mirrors section 01 of the redesign doc - "left = who, right = context".
+function ProfilePanel({
+  detailId,
+  person,
+  risk,
+  detail,
+  refreshing,
+  enrichStatus,
+  profileUrlMissing,
+  profileUrlInput,
+  onProfileUrlInputChange,
+  onSaveProfileUrl,
+  savingProfileUrl,
+  onRefreshEnrichment,
+  onStartConversation,
+  startersLoading,
+  onOpenInInbox,
+  notesDraft,
+  onNotesChange,
+  notesStatus
+}: ProfilePanelProps) {
+  const headline = detail?.enrichment?.headline ?? person.headline ?? null;
+  const subtitleLine =
+    [detail?.enrichment?.currentRole ?? person.currentRole, detail?.enrichment?.currentCompany ?? person.currentCompany]
+      .filter(Boolean)
+      .join(" at ") || null;
+  const location = detail?.enrichment?.location ?? person.location ?? null;
+  const mutualCount = detail?.enrichment?.mutualCount ?? null;
+  const mutualNames = detail?.enrichment?.mutualNames ?? [];
+  const enrichedRelative = detail?.person.enrichedAt
+    ? formatRelative(detail.person.enrichedAt)
+    : null;
+  const lastTouchLabel = person.lastInteractionAt
+    ? `${formatRelative(person.lastInteractionAt)}`
+    : "no contact yet";
+  const aboutText = cleanContactSummary(detail?.summary) ?? detail?.enrichment?.about ?? null;
+  const starters = detail?.starters?.starters ?? [];
+  const riskDotClass =
+    risk === "overdue"
+      ? "bg-risk-overdue"
+      : risk === "waiting"
+        ? "bg-risk-waiting"
+        : "bg-risk-fresh";
+
+  return (
+    <section
+      id={detailId}
+      data-testid="person-detail-panel"
+      className="animate-accordion-down border-t border-hairline bg-paper-2/40 px-1 py-8 sm:px-6"
+    >
+      <div className="grid grid-cols-1 gap-10 md:grid-cols-[280px_1fr]">
+        {/* LEFT: id-card */}
+        <aside className="md:sticky md:top-[60px] md:self-start rounded-card border border-hairline bg-paper p-[22px] shadow-card">
+          <PersonAvatar
+            name={person.name}
+            avatarUrl={person.avatarUrl}
+            size={56}
+            className="mb-[14px] text-[20px]"
+          />
+          <h2 className="m-0 mb-[4px] text-balance font-display text-[20px] font-semibold leading-[1.2] tracking-[-0.018em] text-ink">
+            {person.name}
+          </h2>
+          {(headline || subtitleLine) ? (
+            <p className="m-0 mb-[18px] text-[13px] text-ink-3" style={{ textWrap: "pretty" }}>
+              {headline ?? subtitleLine}
+            </p>
+          ) : null}
+
+          <div className="mb-[18px] flex items-center gap-2 rounded-[10px] bg-paper-2 px-3 py-[9px] font-mono text-[11px] text-ink-2">
+            <span className={`h-[6px] w-[6px] rounded-full ${riskDotClass}`} aria-hidden />
+            Last contact
+            <span className="ml-auto text-ink-3">{lastTouchLabel}</span>
+          </div>
+
+          <dl className="mb-[20px] grid grid-cols-[max-content_1fr] gap-x-[14px] gap-y-[9px] text-[13px]">
+            <dt className="m-0 self-center font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">Channel</dt>
+            <dd className="m-0 leading-[1.4] text-ink-2">
+              {PLATFORM_LABEL[person.platform]}
+              {detail?.person.profileUrl ? (
+                <>
+                  {" · "}
+                  <a
+                    href={detail.person.profileUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-accent-ink underline decoration-[color-mix(in_oklch,var(--accent)_30%,transparent)] decoration-1 underline-offset-[3px]"
+                  >
+                    open profile ↗
+                  </a>
+                </>
+              ) : null}
+            </dd>
+            {location ? (
+              <>
+                <dt className="m-0 self-center font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">Location</dt>
+                <dd className="m-0 leading-[1.4] text-ink-2">{location}</dd>
+              </>
+            ) : null}
+            {detail?.enrichment && detail.enrichment.education.length > 0 ? (
+              <>
+                <dt className="m-0 self-center font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">School</dt>
+                <dd className="m-0 leading-[1.4] text-ink-2">
+                  {detail.enrichment.education[0]?.institution ?? "-"}
+                </dd>
+              </>
+            ) : null}
+            {typeof mutualCount === "number" ? (
+              <>
+                <dt className="m-0 self-center font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">Mutuals</dt>
+                <dd className="m-0 leading-[1.4] text-ink-2">{mutualCount} shared</dd>
+              </>
+            ) : null}
+            {enrichedRelative ? (
+              <>
+                <dt className="m-0 self-center font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">Enriched</dt>
+                <dd className="m-0 leading-[1.4] text-ink-2">{enrichedRelative} · {detail?.person.profileUrlSource ?? "auto"}</dd>
+              </>
+            ) : null}
+          </dl>
+
+          <div className="flex flex-col gap-2">
+            <Button
+              variant="primary"
+              className="justify-center px-[14px] py-[10px]"
+              disabled={!detail?.enrichment || startersLoading}
+              onClick={onStartConversation}
+            >
+              {startersLoading ? "Drafting…" : "Start a conversation"}
+            </Button>
+            <Button variant="quiet" className="justify-center px-[14px] py-[10px]" onClick={onOpenInInbox}>
+              Open in inbox
+            </Button>
+          </div>
+        </aside>
+
+        {/* RIGHT: context */}
+        <div className="flex min-w-0 flex-col gap-7">
+          {profileUrlMissing ? (
+            <CtxBlock label="Profile URL · missing">
+              <p className="m-0 text-[14.5px] leading-[1.55] text-ink-2">
+                We don&rsquo;t have a {PLATFORM_LABEL[person.platform]} profile URL for this person yet. Paste it below to enrich.
+              </p>
+              <div className="mt-4 flex flex-wrap items-center gap-2">
+                <input
+                  type="url"
+                  value={profileUrlInput}
+                  onChange={(event) => onProfileUrlInputChange(event.target.value)}
+                  placeholder="https://www.linkedin.com/in/…"
+                  className="w-[360px] max-w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+                />
+                <Button
+                  variant="quiet"
+                  disabled={!profileUrlInput.trim() || savingProfileUrl || refreshing}
+                  onClick={onSaveProfileUrl}
+                >
+                  {savingProfileUrl || refreshing ? "Saving…" : "Save & enrich"}
+                </Button>
+              </div>
+            </CtxBlock>
+          ) : null}
+
+          <CtxBlock
+            label={aboutText ? "About · cited from headline" : "About"}
+            right={
+              aboutText && enrichStatus ? (
+                <span className="font-mono text-[10.5px] text-ink-3">{enrichStatus}</span>
+              ) : null
+            }
+          >
+            {aboutText ? (
+              <p
+                className="m-0 text-[14.5px] leading-[1.55] text-ink-2"
+                style={{ textWrap: "pretty" }}
+              >
+                {aboutText}
+              </p>
+            ) : (
+              <p className="m-0 text-[14.5px] leading-[1.55] text-ink-3">
+                {detail?.enrichment
+                  ? "No summary yet. Refresh to generate one."
+                  : "Not enriched yet. Refresh to fetch the profile."}
+              </p>
+            )}
+          </CtxBlock>
+
+          {mutualNames.length > 0 ? (
+            <CtxBlock label={`Mutual connections · ${mutualCount ?? mutualNames.length}`}>
+              <div className="flex flex-wrap items-center gap-[6px]">
+                {mutualNames.slice(0, 5).map((name) => (
+                  <span
+                    key={name}
+                    className="inline-flex items-center gap-[7px] rounded-pill border border-hairline py-[4px] pl-[4px] pr-[10px] text-[12.5px] text-ink-2"
+                  >
+                    <span
+                      className="grid h-[20px] w-[20px] place-items-center rounded-full font-display text-[9.5px] font-semibold text-white"
+                      style={{
+                        background:
+                          "linear-gradient(135deg, oklch(74% 0.07 220), oklch(58% 0.09 240))"
+                      }}
+                    >
+                      {name.charAt(0).toUpperCase()}
+                    </span>
+                    {name}
+                  </span>
+                ))}
+                {mutualNames.length > 5 ? (
+                  <span className="inline-flex items-center rounded-pill px-3 py-[4px] font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                    +{mutualNames.length - 5} more
+                  </span>
+                ) : null}
+              </div>
+            </CtxBlock>
+          ) : null}
+
+          {starters.length > 0 ? (
+            <CtxBlock label="Suggested openers">
+              <div className="grid grid-cols-1 gap-[10px] sm:grid-cols-2">
+                {starters.slice(0, 4).map((starter, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    className="group flex w-full flex-col gap-2 rounded-[14px] border border-hairline bg-paper p-[14px_16px] text-left transition-[border-color,background-color] duration-calm hover:border-hairline-strong hover:bg-paper-2"
+                  >
+                    <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink">
+                      {starter.angle} · cited {starter.citedField}
+                    </span>
+                    <span
+                      className="text-[13.5px] leading-[1.5] text-ink-2"
+                      style={{
+                        display: "-webkit-box",
+                        WebkitLineClamp: 3,
+                        WebkitBoxOrient: "vertical",
+                        overflow: "hidden",
+                        textWrap: "pretty"
+                      }}
+                    >
+                      {starter.text}
+                    </span>
+                    <span className="mt-auto flex items-center justify-between pt-1 font-mono text-[10.5px] text-ink-3">
+                      <span>{starter.angle}</span>
+                      <span className="text-accent-ink opacity-0 transition-opacity duration-calm group-hover:opacity-100">
+                        use ↵
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </CtxBlock>
+          ) : null}
+
+          <CtxBlock
+            label="Internal notes"
+            right={
+              <span className="font-mono text-[10.5px] text-ink-3" aria-live="polite">
+                {notesStatus === "saving"
+                  ? "saving…"
+                  : notesStatus === "saved"
+                    ? "saved"
+                    : notesStatus === "error"
+                      ? <span className="text-risk-overdue">failed to save</span>
+                      : ""}
+              </span>
+            }
+          >
+            <textarea
+              rows={notesDraft ? 5 : 2}
+              value={notesDraft}
+              onChange={(event) => onNotesChange(event.target.value)}
+              placeholder={`Click to add a note about ${person.name.split(" ")[0] ?? person.name}…`}
+              className="w-full resize-none rounded-[12px] border border-dashed border-hairline-strong bg-transparent px-[14px] py-[12px] text-[13px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-3 hover:border-ink-4 focus:border-ink-4"
+            />
+          </CtxBlock>
+
+          <div className="flex flex-wrap items-center gap-3 border-t border-hairline pt-5">
+            <Button variant="quiet" disabled={refreshing} onClick={onRefreshEnrichment}>
+              {refreshing ? "Refreshing…" : "Refresh enrichment"}
+            </Button>
+            {enrichStatus && !aboutText ? (
+              <span
+                className="font-mono text-[11px] text-ink-3"
+                aria-live="polite"
+              >
+                {enrichStatus}
+              </span>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CtxBlock({
+  label,
+  right,
+  children
+}: {
+  label: string;
+  right?: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section>
+      <div className="mb-[10px] flex items-center gap-2">
+        <span className="font-mono text-[10.5px] uppercase tracking-[0.08em] text-ink-3">
+          {label}
+        </span>
+        {right ? <span className="ml-auto">{right}</span> : null}
+      </div>
+      {children}
+    </section>
   );
 }

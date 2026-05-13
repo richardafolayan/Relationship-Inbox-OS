@@ -1,0 +1,460 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { MoreHorizontal } from "lucide-react";
+import { apiGet, apiPost } from "@/lib/api";
+import { Menu } from "@/components/ui/menu";
+import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
+import { useRouter } from "next/navigation";
+import type { HealthResponse, PlatformCard } from "@/lib/types";
+
+// Single 44px status row. Replaces the two competing strips (Connected /
+// Restart runner band + the multi-line scanning/sending bar) with one
+// flat line:
+//
+//   [● 2/4 connected] · [activity ticker with inline progress + cancel]
+//   ───────────────────────────────── (right) [scan Xm ago] [⋯]
+//
+// The kebab carries Restart runner / Pause all scans / Force re-enrich /
+// View logs / Disconnect platform. Section 04 of the redesign doc.
+
+const POLL_INTERVAL_MS = 5000;
+const RECENT_FRESHNESS_MS = 8000;
+const RESTART_MAX_WAIT_MS = 90_000;
+const RESTART_POLL_INTERVAL_MS = 500;
+
+const RESTART_CONFIRM_MESSAGE =
+  "Restart the runner? Any in-flight scan or send will be cancelled. " +
+  "Sends queued in the database (PENDING SendRequests) survive and resume after restart. " +
+  "The restart rebuilds @inbox-os/core + @inbox-os/runner before relaunching, so it picks up any new code.";
+
+interface SendQueueItem {
+  clientSendId: string;
+  threadId: string;
+  personName: string;
+  platform: string;
+  status: "PENDING" | "SENT" | "FAILED";
+  requestText?: string;
+  enqueuedAt: string;
+  queuePosition: number;
+}
+
+interface SendQueueRecentItem {
+  clientSendId: string;
+  threadId: string;
+  personName: string;
+  platform: string;
+  status: "SENT" | "FAILED";
+  completedAt: string;
+  errorMessage?: string;
+}
+
+interface SendQueueResponse {
+  activeCount: number;
+  active: SendQueueItem[];
+  recent: SendQueueRecentItem[];
+}
+
+type TickerState =
+  | { kind: "idle" }
+  | {
+      kind: "scanning";
+      platform?: string | null;
+      processedRows?: number;
+      total?: number;
+      percent?: number;
+      etaSeconds?: number | null;
+    }
+  | { kind: "enriching"; total: number; running: number }
+  | {
+      kind: "sending";
+      personName: string;
+      blockedByScan: boolean;
+      queuedBehind: number;
+    }
+  | { kind: "send_failed"; personName: string; message: string }
+  | { kind: "send_succeeded"; personName: string };
+
+function formatRelativeScan(lastScanAt: string | null): string {
+  if (!lastScanAt) return "scan never";
+  const ts = Date.parse(lastScanAt);
+  if (!Number.isFinite(ts)) return "scan never";
+  const diffMs = Date.now() - ts;
+  if (diffMs < 0) return "scan now";
+  const seconds = Math.floor(diffMs / 1000);
+  if (seconds < 60) return `scan ${seconds}s ago`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `scan ${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `scan ${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `scan ${days}d ago`;
+}
+
+function pipToneFor(connected: number, total: number): string {
+  if (total === 0) return "bg-ink-3";
+  if (connected === 0) return "bg-risk-overdue";
+  if (connected < total) return "bg-risk-waiting";
+  return "bg-risk-fresh";
+}
+
+function platformDisplay(platform: string): string {
+  switch (platform) {
+    case "LINKEDIN":
+      return "linkedin";
+    case "IMESSAGE":
+      return "imessage";
+    case "INSTAGRAM":
+      return "instagram";
+    case "TIKTOK":
+      return "tiktok";
+    default:
+      return platform.toLowerCase();
+  }
+}
+
+function computeTicker(input: {
+  health: HealthResponse | null;
+  queue: SendQueueResponse | null;
+}): TickerState {
+  const queueActive = input.queue?.active ?? [];
+  const head = queueActive[0];
+  const blockedByScan = input.health?.runnerStatus === "SCANNING";
+  if (head) {
+    return {
+      kind: "sending",
+      personName: head.personName,
+      blockedByScan,
+      queuedBehind: Math.max(0, queueActive.length - 1)
+    };
+  }
+  const recentest = input.queue?.recent[0];
+  if (recentest) {
+    const completedAt = Date.parse(recentest.completedAt);
+    const age = Date.now() - completedAt;
+    if (Number.isFinite(age) && age < RECENT_FRESHNESS_MS) {
+      if (recentest.status === "FAILED") {
+        return {
+          kind: "send_failed",
+          personName: recentest.personName,
+          message: recentest.errorMessage ?? "Send failed"
+        };
+      }
+      return { kind: "send_succeeded", personName: recentest.personName };
+    }
+  }
+  if (blockedByScan) {
+    const platform = input.health?.currentScanPlatform ?? null;
+    const progress = input.health?.scanProgress;
+    if (progress) {
+      return {
+        kind: "scanning",
+        platform,
+        processedRows: progress.processedRows,
+        total: progress.total,
+        percent: progress.percent,
+        etaSeconds: progress.etaSeconds
+      };
+    }
+    return { kind: "scanning", platform };
+  }
+  const enrichmentTotal = input.health?.enrichmentQueue?.total ?? 0;
+  if (enrichmentTotal > 0) {
+    return {
+      kind: "enriching",
+      total: enrichmentTotal,
+      running: input.health?.enrichmentQueue?.running ?? 0
+    };
+  }
+  return { kind: "idle" };
+}
+
+function tickerLabel(state: TickerState): string {
+  switch (state.kind) {
+    case "scanning": {
+      const platformLabel = state.platform ? platformDisplay(state.platform) : "linkedin";
+      if (
+        typeof state.processedRows === "number" &&
+        typeof state.total === "number" &&
+        state.total > 0
+      ) {
+        return `Scanning ${platformLabel} · ${state.processedRows}/${state.total}`;
+      }
+      return `Scanning ${platformLabel}`;
+    }
+    case "enriching":
+      return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
+    case "sending":
+      return state.blockedByScan
+        ? `Send queued · waiting on scan to reply to ${state.personName}`
+        : `Sending to ${state.personName}`;
+    case "send_failed":
+      return `Failed to send to ${state.personName}`;
+    case "send_succeeded":
+      return `Sent to ${state.personName}`;
+    default:
+      return "";
+  }
+}
+
+function tickerDetail(state: TickerState): string | null {
+  if (state.kind === "sending" && state.queuedBehind > 0) {
+    return `${state.queuedBehind} more queued`;
+  }
+  if (state.kind === "enriching" && state.running > 0) {
+    return `${state.running} in flight`;
+  }
+  if (state.kind === "scanning" && typeof state.etaSeconds === "number") {
+    if (state.etaSeconds <= 0) return "wrapping up…";
+    if (state.etaSeconds < 60) return `~${state.etaSeconds}s left`;
+    return `~${Math.round(state.etaSeconds / 60)}m left`;
+  }
+  return null;
+}
+
+function isPermissionDenied(message: string): boolean {
+  return /-1743|not authorized to send Apple events|grant Automation/i.test(message);
+}
+
+async function runPermissionReset(): Promise<void> {
+  try {
+    await fetch("/runner/control/imessage/permission-reset", { method: "POST" });
+  } catch {
+    // best-effort
+  }
+}
+
+export function TopStatus() {
+  const router = useRouter();
+  const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [queue, setQueue] = useState<SendQueueResponse | null>(null);
+  const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState<"scan" | "enrichment" | null>(null);
+  const [, setTick] = useState(0);
+
+  const refresh = useCallback(async () => {
+    const [healthData, queueData, platformData] = await Promise.all([
+      apiGet<HealthResponse>("/runner/health").catch(() => null),
+      apiGet<SendQueueResponse>("/runner/data/send-queue").catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => null)
+    ]);
+    if (healthData) setHealth(healthData);
+    if (queueData) setQueue(queueData);
+    if (platformData) setPlatforms(platformData);
+  }, []);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  useEffect(() => {
+    void refresh();
+    const timer = setInterval(() => void refreshRef.current(), POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
+  // Tick once a second so the "scan Xm ago" caption stays current.
+  useEffect(() => {
+    const timer = setInterval(() => setTick((n) => n + 1), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    const onEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      const t = detail?.type;
+      if (
+        t === "MESSAGE_SENT" ||
+        t === "MESSAGE_SEND_FAILED" ||
+        t === "SCAN_STARTED" ||
+        t === "SCAN_FINISHED" ||
+        t === "THREAD_UPDATED"
+      ) {
+        void refreshRef.current();
+      }
+    };
+    window.addEventListener("runner-event", onEvent as EventListener);
+    return () => window.removeEventListener("runner-event", onEvent as EventListener);
+  }, []);
+
+  const implemented = platforms?.filter((p) => IMPLEMENTED_PLATFORMS.includes(p.platform)) ?? null;
+  const total = implemented?.length ?? IMPLEMENTED_PLATFORMS.length;
+  const connected =
+    implemented?.filter((p) => p.status === "CONNECTED").length ??
+    health?.connectedPlatforms ??
+    0;
+  const pip = pipToneFor(connected, total);
+
+  const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
+
+  const ticker = computeTicker({ health, queue });
+  const tickerIsActive =
+    ticker.kind === "scanning" || ticker.kind === "sending" || ticker.kind === "enriching";
+  const cancelTarget: "scan" | "enrichment" | null =
+    ticker.kind === "scanning" ? "scan" : ticker.kind === "enriching" ? "enrichment" : null;
+
+  const onCancelTicker = async () => {
+    if (!cancelTarget || cancelling) return;
+    setCancelling(cancelTarget);
+    try {
+      const path =
+        cancelTarget === "scan"
+          ? "/runner/control/scan/abort"
+          : "/runner/control/enrichment/cancel-pending";
+      await apiPost(path, {});
+      await refreshRef.current();
+    } catch (error) {
+      console.warn("[top-status] cancel failed", error);
+    } finally {
+      setCancelling(null);
+    }
+  };
+
+  const onRestartRunner = useCallback(async () => {
+    if (restarting) return;
+    if (!window.confirm(RESTART_CONFIRM_MESSAGE)) return;
+    setRestartError(null);
+    setRestarting(true);
+    try {
+      await apiPost("/runner/control/system/restart", {});
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to ask runner to restart";
+      setRestartError(message);
+      setRestarting(false);
+      return;
+    }
+
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < RESTART_MAX_WAIT_MS) {
+      const ok = await apiGet<HealthResponse>("/runner/health")
+        .then((data) => data?.runnerStatus === "ONLINE")
+        .catch(() => false);
+      if (ok) {
+        window.location.reload();
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
+    }
+
+    setRestartError(
+      "Runner did not come back within 90s. Tail /tmp/runner-restart.log to see whether the rebuild errored or the relaunch is still in progress."
+    );
+    setRestarting(false);
+  }, [restarting]);
+
+  const onPauseAllScans = useCallback(() => {
+    void apiPost("/runner/control/scan/abort", {})
+      .catch(() => undefined)
+      .finally(() => void refreshRef.current());
+  }, []);
+
+  const tickerHeading = tickerLabel(ticker);
+  const tickerSub = tickerDetail(ticker);
+  const tickerTone =
+    ticker.kind === "send_failed"
+      ? "text-risk-overdue"
+      : ticker.kind === "send_succeeded"
+        ? "text-risk-fresh"
+        : "text-ink-2";
+
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      className="sticky top-0 z-30 flex h-[44px] items-center gap-3 border-b border-hairline bg-paper/95 px-6 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur"
+    >
+      <span className="inline-flex items-center gap-[6px]" title={`${connected}/${total} platforms connected`}>
+        <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
+        <span className="text-ink-2">
+          {connected}/{total} connected
+        </span>
+      </span>
+
+      {tickerIsActive || ticker.kind === "send_failed" || ticker.kind === "send_succeeded" ? (
+        <>
+          <span aria-hidden className="text-ink-3/60">·</span>
+          <span className="inline-flex min-w-0 items-center gap-[8px]">
+            {ticker.kind === "send_succeeded" ? (
+              <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" aria-hidden />
+            ) : ticker.kind === "send_failed" ? (
+              <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-overdue" aria-hidden />
+            ) : null}
+            <span className={`truncate ${tickerTone}`}>{tickerHeading}</span>
+            {tickerIsActive ? (
+              <span
+                aria-hidden
+                className="relative inline-block h-[2px] w-[56px] overflow-hidden rounded-full bg-hairline"
+              >
+                {ticker.kind === "scanning" && typeof ticker.percent === "number" ? (
+                  <span
+                    className="absolute inset-0 rounded-full bg-accent transition-[width] duration-300"
+                    style={{ width: `${ticker.percent}%` }}
+                  />
+                ) : (
+                  <span
+                    className="absolute inset-y-0 w-[40%] rounded-full bg-accent animate-progress-sweep"
+                    style={{ left: 0 }}
+                  />
+                )}
+              </span>
+            ) : null}
+            {tickerSub ? <span className="text-ink-3">· {tickerSub}</span> : null}
+            {cancelTarget ? (
+              <button
+                type="button"
+                disabled={!!cancelling}
+                onClick={() => void onCancelTicker()}
+                className="ml-1 font-mono text-[10.5px] text-ink-4 hover:text-ink disabled:opacity-50"
+              >
+                {cancelling ? "cancelling…" : "cancel"}
+              </button>
+            ) : null}
+            {ticker.kind === "send_failed" && isPermissionDenied(ticker.message) ? (
+              <button
+                type="button"
+                onClick={() => void runPermissionReset()}
+                className="ml-1 rounded-row border border-hairline bg-paper px-2 py-[1px] font-mono text-[10.5px] text-ink-2 hover:border-hairline-strong hover:text-ink"
+              >
+                grant access
+              </button>
+            ) : null}
+          </span>
+        </>
+      ) : null}
+
+      <div className="ml-auto flex items-center gap-3">
+        <span>{scanLabel}</span>
+        {restarting ? <span className="text-ink-2">restarting…</span> : null}
+        {restartError && !restarting ? (
+          <span className="text-risk-overdue" role="alert" title={restartError}>
+            restart failed
+          </span>
+        ) : null}
+        <Menu
+          align="end"
+          trigger={
+            <button
+              type="button"
+              aria-label="More"
+              title="More"
+              className="grid h-[22px] w-[22px] place-items-center rounded-[6px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+            >
+              <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={2} />
+            </button>
+          }
+          items={[
+            { label: "Restart runner", onSelect: () => void onRestartRunner() },
+            { label: "Pause all scans", onSelect: onPauseAllScans },
+            {
+              label: "Force re-enrich all",
+              onSelect: () =>
+                void apiPost("/runner/control/people/scan-all", { scope: "all" }).catch(() => undefined)
+            },
+            { label: "View logs", onSelect: () => router.push("/logs") },
+            { label: "Manage platforms…", onSelect: () => router.push("/platforms") }
+          ]}
+        />
+      </div>
+    </div>
+  );
+}
