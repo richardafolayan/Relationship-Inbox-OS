@@ -95,16 +95,24 @@ export default function PlatformsPage() {
       {rows
         .filter((row) => VISIBLE_PLATFORMS.includes(row.platform))
         .map((row) => {
-        const statusClass =
-          row.status === "CONNECTED"
+        // When the operator has disabled this platform in settings, the
+        // platform row's `status` (CONNECTED, lastScanAt) is leftover
+        // from before the toggle — the scanner won't run it again until
+        // it's re-enabled. Show "Disabled" instead of a stale "Connected"
+        // pill so the dashboard never claims a paused platform is live
+        // (issue #202).
+        const statusClass = !row.enabled
+          ? "bg-paper-2 text-ink-3"
+          : row.status === "CONNECTED"
             ? "bg-risk-fresh/15 text-risk-fresh"
             : row.status === "DEGRADED"
               ? "bg-risk-waiting/15 text-risk-waiting"
               : row.status === "ERROR"
                 ? "bg-risk-overdue/15 text-risk-overdue"
                 : "bg-paper-2 text-ink-3";
-        const label =
-          row.status === "CONNECTED"
+        const label = !row.enabled
+          ? "Disabled"
+          : row.status === "CONNECTED"
             ? "Connected"
             : row.status === "DEGRADED"
               ? "Needs a look"
@@ -132,7 +140,13 @@ export default function PlatformsPage() {
                   </span>
                 </div>
                 <p className="mt-1 font-mono text-[12px] text-ink-3">
-                  {row.lastScanAt ? `last scan ${formatRelative(row.lastScanAt)}` : row.lastError ?? "sign in to enable"}
+                  {!row.enabled && row.lastScanAt
+                    ? `paused in settings · last scan ${formatRelative(row.lastScanAt)}`
+                    : !row.enabled
+                      ? "paused in settings"
+                      : row.lastScanAt
+                        ? `last scan ${formatRelative(row.lastScanAt)}`
+                        : row.lastError ?? "sign in to enable"}
                   {report ? ` · selectors ${passes}/${total} passing` : ""}
                 </p>
               </div>
