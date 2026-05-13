@@ -179,7 +179,7 @@ const FORMAL_VOICE_PROMPT = [
   "",
   "- Don't introduce deliberate typos. Richard's real messages have typos because he types fast. You shouldn't fake them. But also don't over-polish, keep the conversational register.",
   "- HARD RULE — sentence starts get a capital letter. After every full stop, question mark, or exclamation mark, the very next character that starts the next sentence MUST be uppercase. Lowercase \"i\" as a pronoun mid-sentence is fine, but \". sounds like\" or \"? what are you\" is a fail, that's bad grammar, not voice. Read your output back and check this before returning.",
-  "- Prefer comma chains over full stops in mid-message flow. One long comma-chained run feels closer to his actual style than back-to-back short sentences. The Reiss-style shape is one opener, one comma chain, optional question at the end, not three separate sentences glued together.",
+  "- Prefer comma chains over full stops in mid-message flow. One long comma-chained run feels closer to his actual style than back-to-back short sentences. The Reiss-style shape is one opener, one comma chain, optional question at the end, not three separate sentences glued together. Aim for at most ONE full stop in a typical 1-3 sentence reply, and skip the trailing full stop on short single-line replies (\"Hey, really appreciate that man\" not \"Hey, really appreciate that man.\"). Trailing full stop is fine on longer multi-sentence messages where the last sentence is a clear close.",
   "- Don't end with a question if the situation doesn't warrant one. Cold decline is ack-only, no follow-up question.",
   "- When unsure how long the reply should be, err shorter. Long replies should feel earned by the depth of what they said.",
   "- No em dashes, en dashes, semicolons, or colons.",
@@ -313,8 +313,10 @@ This profile applies when the platform is WhatsApp, iMessage, Instagram DMs, or 
 
 PUNCTUATION AND STRUCTURE
 - Comma chains over full stops. Run-on style for casual flow.
-- Full stops basically absent at the end of casual messages. End with emoji or "?" if it is a question. No emoji at all is fine too.
+- Full stops basically absent. Do NOT end a casual message with a full stop. End with emoji or "?" if it is a question, or just end. Mid-message full stops are also rare — prefer a comma chain. If you find yourself writing two short sentences glued by a full stop, join them with a comma instead.
+- "Hey", "Bet", "Yhh fairs" — no trailing full stop, ever. "Yhh i'm down, what time you thinking" — no trailing full stop. This is the most consistent tell of off-voice text.
 - Capitals at message start. Lowercase or capital "i" pronoun both fine.
+- HARD RULE — sentence starts get a capital letter. After a question mark, full stop, or exclamation mark, the next character that starts the next sentence MUST be uppercase. "Hey, you good? things have been wild" is WRONG, the "t" must be a capital. Mid-sentence lowercase "i" pronoun is fine and natural to Richard, that rule is only about sentence starts.
 - Repeated letters for vibe (Yhh, Calmm, Bonjourr, againnnn, Niceeeeeee).
 
 ADDRESS TERMS
@@ -548,6 +550,69 @@ export function applyVoiceRules(text: string): string {
     .trim();
 }
 
+// Enforce sentence-start capitalisation after . ? !. The voice prompts
+// both ask for this but the model still slips ("hope you're good? things
+// have been..." → should be "Things"). Belt-and-braces, applied to every
+// text-producing AI call alongside applyVoiceRules.
+//
+// Rules:
+//   - Looks for [.?!] followed by whitespace + a lowercase ASCII letter,
+//     uppercases that letter. Standalone "?", "!" without trailing
+//     whitespace are not sentence boundaries (they could be inside a
+//     quoted phrase, emoji, or url) and are left alone.
+//   - Lowercase "i" as a pronoun is uppercased to "I" when it lands at
+//     sentence start — that's grammar, not voice. Mid-sentence "i" is
+//     untouched.
+//   - The very first character of the message is also capitalised, to
+//     mirror the "capitals at message start" rule in both voice prompts.
+//
+// Examples:
+//   "hope you're good? things have been..." → "hope you're good? Things have been..."
+//   "Bet. Catch you later"                  → "Bet. Catch you later" (already capital, no-op)
+//   "yhh i'm down, what time you thinking"  → "Yhh i'm down, what time you thinking"
+//   "Damn fairs bro, you good? wanna talk"  → "Damn fairs bro, you good? Wanna talk"
+export function enforceSentenceStartCapitals(text: string): string {
+  if (!text) return text;
+  let result = text.replace(/([.?!])(\s+)([a-z])/g, (_match, p1, p2, p3) => `${p1}${p2}${(p3 as string).toUpperCase()}`);
+  // First-character capitalisation. Skip when the message starts with an
+  // emoji / number / punctuation — only kicks in when the leading char is
+  // a lowercase ASCII letter, which is the case we actually want to fix.
+  if (/^[a-z]/.test(result)) {
+    result = result.charAt(0).toUpperCase() + result.slice(1);
+  }
+  return result;
+}
+
+// Soft trailing-period strip for short casual messages. The casual prompt
+// says "Full stops basically absent" but the model still slips one in at
+// the very end of a one-line reply. Only fires when the result is short
+// and reads as a single thought — never strips when the message ends in
+// "...", a question, an exclamation, an emoji, or contains multiple
+// sentence-terminating marks (those carry meaning). Keeps the hard rules
+// in applyVoiceRules pure and platform-agnostic.
+//
+// Examples:
+//   "Hey, really appreciate that man." → "Hey, really appreciate that man"
+//   "Yhh i'm down, what time you thinking." → "Yhh i'm down, what time you thinking"
+//   "Bet." → "Bet"
+//   "Hey. Hope you're good." → unchanged (two sentences, intentional shape)
+//   "Sorry it's been a while. Things have been hectic, glad to hear from you" → unchanged
+export function softenCasualTrailingPeriod(text: string): string {
+  if (!text) return text;
+  const trimmed = text.trim();
+  if (!trimmed.endsWith(".") || trimmed.endsWith("...") || trimmed.endsWith("..")) return text;
+  // Count sentence-final marks inside the body (excluding the trailing one
+  // we're considering stripping). If there's already a "." mid-message,
+  // this is a multi-sentence reply where the closing period is intentional.
+  const body = trimmed.slice(0, -1);
+  if (/[.!?]/.test(body)) return text;
+  // Don't strip from longer prose — keep the rule scoped to one-line texts
+  // and short two-clause replies, where Richard's actual messages don't
+  // carry a trailing period.
+  if (body.length > 140) return text;
+  return text.replace(/\.\s*$/, "");
+}
+
 // Models occasionally narrate the prompt back to the operator ("the
 // operator profile is not available, so no commonality can be identified").
 // Strip any sentence that admits missing operator data — see issue #95.
@@ -732,7 +797,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     providerId: AiProvider,
     model: string,
     prompt: string,
-    parser: (value: unknown) => T
+    parser: (value: unknown) => T,
+    systemContent: string = SYSTEM_PROMPT
   ): Promise<{ ok: true; result: T } | { ok: false; classification: AiErrorClassification | null }> {
     const entry = providerRegistry[providerId];
     const { client } = resolveProvider(providerId);
@@ -749,7 +815,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
             ? { response_format: { type: "json_object" as const } }
             : {}),
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: systemContent },
             { role: "user", content: reinforceJsonPrompt(prompt, model) }
           ],
           ...providerOptions(providerId, model),
@@ -798,7 +864,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   async function modelJson<T>(
     prompt: string,
     fallback: T,
-    parser: (value: unknown) => T
+    parser: (value: unknown) => T,
+    systemContent?: string
   ): Promise<{ result: T; source: AiSource | null }> {
     const { provider: activeId, model: activeModel } = await resolveActive();
     const chain: AiProvider[] = [activeId, ...fallbackChain.filter((id) => id !== activeId)];
@@ -811,7 +878,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       // Active provider honours the user's model override from settings;
       // fallback providers use the runtime config default.
       const model = isActive ? activeModel : resolveProvider(providerId).model;
-      const outcome = await tryProvider(providerId, model, prompt, parser);
+      const outcome = await tryProvider(providerId, model, prompt, parser, systemContent);
       if (outcome.ok) {
         const entry = providerRegistry[providerId];
         const source: AiSource = {
@@ -1004,6 +1071,28 @@ ${transcript}`;
      */
     needsReply: boolean;
     /**
+     * Drives the voice tier (LinkedIn → formal; everything else → casual)
+     * so the suggested replies sit in the right register. Optional for
+     * backwards compatibility with older callers; when omitted, the
+     * generic SYSTEM_PROMPT is used and no voice-tier prompt is added.
+     */
+    platform?: PlatformName | null;
+    /**
+     * Recent outbound messages on THIS thread, oldest first. Calibrates
+     * register and warmth to how the operator actually talks to this
+     * specific contact (formal with mentors, banter with mates). Empty
+     * is fine — the few-shot examples in the voice prompt are the
+     * primary reference.
+     */
+    voiceSamples?: string[];
+    /**
+     * Recent inbound messages on THIS thread, oldest first (excluding
+     * the very latest, which is passed as lastInboundMessage). Shows the
+     * model the recipient's voice across the conversation so the reply
+     * can match their tempo rather than reacting only to the last line.
+     */
+    recipientSamples?: string[];
+    /**
      * Thread classification. When "outreach", the third reply slot is a
      * "Polite decline" instead of a "Clarifying question" — short friendly
      * "not interested" wording per the operator's voice rules.
@@ -1070,7 +1159,9 @@ ${transcript}`;
     // already engaged with a short reply, the model would still generate
     // replies as if responding to a cold ask. Now it sees the back-and-
     // forth and can produce a reply that fits the actual conversational
-    // turn.
+    // turn. The operator's own entries here also serve as per-thread
+    // voice calibration — register, vocabulary, length, punctuation
+    // habits to mirror.
     const recentExchange = input.recentMessages
       .map((m) => {
         const speaker = m.direction === "OUT" ? "operator" : "contact";
@@ -1156,14 +1247,35 @@ Open loops: ${JSON.stringify(input.openLoops)}
 Recent exchange (oldest first):
 ${recentExchange || "(no recent messages)"}`;
 
-    const { result: parsed, source } = await modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
+    // Voice-tier system prompt — was missing here previously, so suggested
+    // replies ran on the generic SYSTEM_PROMPT only and read flatter than
+    // composeInVoice output. When platform is set, layer the appropriate
+    // voice profile on top so register matches the channel (LinkedIn
+    // formal peer-to-peer; WhatsApp / iMessage / IG / TikTok casual-MLE).
+    const systemContent = input.platform
+      ? `${SYSTEM_PROMPT}\n\n${selectVoicePrompt(input.platform)}`
+      : SYSTEM_PROMPT;
+    const tier = input.platform ? getVoiceTier(input.platform) : null;
+
+    const { result: parsed, source } = await modelJson(
+      prompt,
+      fallback,
+      (value) => repliesSchema.parse(value),
+      systemContent
+    );
     // Defensive scrub of em-dashes, semicolons, colons — see applyVoiceRules.
+    // For casual platforms, also strip trailing periods on short replies
+    // since Richard's actual texts don't carry them.
     return {
       ...parsed,
-      replies: parsed.replies.map((r) => ({
-        ...r,
-        text: applyVoiceRules(r.text)
-      })),
+      replies: parsed.replies.map((r) => {
+        let cleaned = applyVoiceRules(r.text);
+        cleaned = enforceSentenceStartCapitals(cleaned);
+        return {
+          ...r,
+          text: tier === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned
+        };
+      }),
       source
     };
   }
@@ -1193,7 +1305,7 @@ ${recentExchange || "(no recent messages)"}`;
       });
 
       const raw = response.choices[0]?.message?.content?.trim() || input.text;
-      return applyVoiceRules(raw);
+      return enforceSentenceStartCapitals(applyVoiceRules(raw));
     } catch (error) {
       console.warn(
         `[ai] transformReply failed (provider=${provider}, model=${model}, mode=${input.mode}); returning original text. ${classifyLlmError(error, provider)}`
@@ -1470,6 +1582,16 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       .filter((sample) => sample.length > 0)
       .slice(-6); // Last 6 outbound messages — enough to learn voice without bloating the prompt.
 
+    // Recipient's recent messages, oldest first, capped at 4. Shows the
+    // model the conversation rhythm from THEIR side — how long their
+    // messages run, how they punctuate, what register they sit in. Lets
+    // the rewrite match their tempo rather than only the last line.
+    const recipientSamples = input.threadMessages
+      .filter((m) => m.direction === "IN")
+      .map((m) => m.text.trim())
+      .filter((t) => t.length > 0)
+      .slice(-4);
+
     const lastInbound = [...input.threadMessages].reverse().find((m) => m.direction === "IN");
     const lastOutbound = [...input.threadMessages].reverse().find((m) => m.direction === "OUT");
     // Acknowledge a long gap if the operator is replying weeks/months
@@ -1531,6 +1653,7 @@ Recipient: ${input.displayName}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
+${recipientSamples.length > 0 ? `\nRecipient's recent messages on this thread (oldest first — match their tempo, length, and warmth, not just the last line):\n${recipientSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n")}` : ""}
 ${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${
   input.contact
     ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
@@ -1555,7 +1678,9 @@ Return strict JSON: { "text": "string" }`;
       const content = response.choices[0]?.message?.content;
       if (!content) return trimmed;
       const parsed = z.object({ text: z.string().min(1) }).parse(parseAiJson(content, model));
-      return applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+      let cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+      cleaned = enforceSentenceStartCapitals(cleaned);
+      return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
     } catch (error) {
       console.warn(
         `[ai] composeInVoice failed (provider=${provider}, model=${model}); returning raw intent. ${classifyLlmError(error, provider)}`
