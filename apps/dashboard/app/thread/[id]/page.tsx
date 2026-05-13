@@ -1170,11 +1170,25 @@ export default function ThreadPage() {
     stickToBottomRef.current = false;
     // Defer one frame so the CSS opacity/blur transition starts before
     // the scroll begins — feels less janky than a simultaneous yank.
+    // We compute the scroll target manually against the timeline
+    // container instead of using element.scrollIntoView, because the
+    // page has two nested scroll contexts (the chat column AND the
+    // window) and the implicit "nearest scrollable ancestor" logic
+    // sometimes picks the wrong one, leaving the focused parent off
+    // the timeline's visible window.
     const handle = requestAnimationFrame(() => {
-      const el = document.querySelector(`[data-message-id="${focusedThreadParentId}"]`);
-      if (el && "scrollIntoView" in el) {
-        (el as HTMLElement).scrollIntoView({ behavior: "smooth", block: "center" });
-      }
+      const container = timelineRef.current;
+      const target = container?.querySelector(
+        `[data-message-id="${focusedThreadParentId}"]`
+      ) as HTMLElement | null;
+      if (!container || !target) return;
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      // Centre the focused parent in the visible chat column.
+      const delta = (targetRect.top - containerRect.top)
+        - (containerRect.height / 2)
+        + (targetRect.height / 2);
+      container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
     });
     return () => cancelAnimationFrame(handle);
   }, [focusedThreadParentId]);
