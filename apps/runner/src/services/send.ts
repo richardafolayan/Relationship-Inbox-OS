@@ -80,43 +80,6 @@ function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
-async function waitForSendRequestResolution(input: {
-  clientSendId: string;
-  threadId: string;
-  timeoutMs?: number;
-}): Promise<SendResult> {
-  const deadline = Date.now() + (input.timeoutMs ?? 30000);
-
-  while (Date.now() < deadline) {
-    const existing = await prisma.sendRequest.findUnique({
-      where: { clientSendId: input.clientSendId }
-    });
-
-    if (!existing) {
-      throw new Error("Previous send request was not found");
-    }
-
-    if (existing.threadId !== input.threadId) {
-      throw new Error("clientSendId is already linked to another thread");
-    }
-
-    if (existing.status === "SENT" && existing.receiptJson) {
-      return {
-        ...parseReceipt(existing.receiptJson),
-        replayed: true
-      };
-    }
-
-    if (existing.status === "FAILED") {
-      throw new Error(parseFailedSendMessage(existing.errorJson));
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  throw new Error("Send request is already in progress. Retry in a moment.");
-}
-
 export interface EnqueueSendResult {
   clientSendId: string;
   status: "PENDING" | "SENT" | "FAILED";
