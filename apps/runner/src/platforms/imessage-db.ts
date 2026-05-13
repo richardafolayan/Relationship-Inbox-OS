@@ -662,7 +662,15 @@ export class IMessageDb {
    *                   common for SMS-fallback when there's no SMS pathway)
    */
   findOutboundDeliveryStatus(chatGuid: string, afterUnixMs: number):
-    | { rowId: number; guid: string; service: string | null; isSent: boolean; isDelivered: boolean; error: number }
+    | {
+        rowId: number;
+        guid: string;
+        service: string | null;
+        isSent: boolean;
+        isDelivered: boolean;
+        error: number;
+        timestamp: string;
+      }
     | undefined {
     const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
       | { chatId: number }
@@ -672,7 +680,8 @@ export class IMessageDb {
     const row = this.db
       .prepare(
         `SELECT m.ROWID AS rowId, m.guid AS guid, m.service AS service,
-                m.is_sent AS isSent, m.is_delivered AS isDelivered, m.error AS error
+                m.is_sent AS isSent, m.is_delivered AS isDelivered, m.error AS error,
+                m.date AS appleDate
            FROM message m
            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
           WHERE cmj.chat_id = ?
@@ -682,16 +691,30 @@ export class IMessageDb {
           LIMIT 1`
       )
       .get(chat.chatId, afterAppleNs) as
-      | { rowId: number; guid: string; service: string | null; isSent: number; isDelivered: number; error: number | null }
+      | {
+          rowId: number;
+          guid: string;
+          service: string | null;
+          isSent: number;
+          isDelivered: number;
+          error: number | null;
+          appleDate: number;
+        }
       | undefined;
     if (!row) return undefined;
+    // chat.db stores dates as nanoseconds since the Apple epoch
+    // (2001-01-01). Convert to a unix-ms ISO string so the adapter can
+    // surface it as the send receipt timestamp directly, avoiding the
+    // extra findOutboundSince round-trip the adapter used to fall back to.
+    const unixMs = Math.round(row.appleDate / 1e6 + APPLE_EPOCH_OFFSET_MS);
     return {
       rowId: row.rowId,
       guid: row.guid,
       service: row.service,
       isSent: row.isSent === 1,
       isDelivered: row.isDelivered === 1,
-      error: row.error ?? 0
+      error: row.error ?? 0,
+      timestamp: new Date(unixMs).toISOString()
     };
   }
 
