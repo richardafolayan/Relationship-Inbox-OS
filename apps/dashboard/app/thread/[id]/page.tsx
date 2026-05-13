@@ -1191,7 +1191,12 @@ export default function ThreadPage() {
     const delta = (targetRect.top - containerRect.top)
       - (containerRect.height / 2)
       + (targetRect.height / 2);
-    container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
+    // Direct scrollTop assignment instead of scrollTo({behavior:"smooth"})
+    // because smooth scroll was getting cancelled by React's commit
+    // phase before it could complete on Retina/external-display setups.
+    // The slight jank is worth the reliability — CSS transitions on the
+    // dim/blur classes still provide a smooth visual.
+    container.scrollTop = container.scrollTop + delta;
     // `focusTrigger` is included so clicking a chip whose parent is
     // already the current focus re-centres rather than no-opping.
   }, [focusedThreadParentId, focusTrigger]);
