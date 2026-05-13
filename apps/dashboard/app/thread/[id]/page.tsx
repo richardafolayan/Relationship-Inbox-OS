@@ -1156,8 +1156,18 @@ export default function ThreadPage() {
   // of the viewport works fine, but clicking the "↳" quote chip on a
   // reply where the parent is scrolled offscreen leaves the user staring
   // at a dimmed empty area.
+  //
+  // We also flip `stickToBottomRef` off so the surrounding useLayoutEffect
+  // doesn't immediately snap the timeline back to the bottom after our
+  // scroll — that's what was happening before this guard was added.
   useEffect(() => {
-    if (!focusedThreadParentId) return;
+    if (!focusedThreadParentId) {
+      // On exit, restore the natural bottom-stickiness so new messages
+      // continue to follow the operator's view.
+      stickToBottomRef.current = true;
+      return;
+    }
+    stickToBottomRef.current = false;
     // Defer one frame so the CSS opacity/blur transition starts before
     // the scroll begins — feels less janky than a simultaneous yank.
     const handle = requestAnimationFrame(() => {
