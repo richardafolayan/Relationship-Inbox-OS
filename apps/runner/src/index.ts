@@ -30,6 +30,7 @@ import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
+import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
@@ -611,6 +612,10 @@ async function siblingThreadIds(platform: PlatformName, personId: string): Promi
     select: { id: true }
   });
   return rows.map((r) => r.id);
+}
+
+async function actionTargetThreadIds(threadId: string): Promise<string[]> {
+  return resolveActionTargetThreadIds(prisma, threadId);
 }
 
 // The adapters map is `Partial<Record<PlatformName, PlatformAdapter>>` —
@@ -2869,11 +2874,13 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
 // default Inbox/At Risk/People views and only shows in the Archived view.
 app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const thread = await prisma.thread.update({
-    where: { id: threadId },
-    data: { archivedAt: new Date() }
+  const archivedAt = new Date();
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
+    data: { archivedAt }
   });
-  res.json({ ok: true, threadId: thread.id, archivedAt: thread.archivedAt?.toISOString() });
+  res.json({ ok: true, threadId, archivedAt: archivedAt.toISOString() });
 }));
 
 // Toggle whether an open-loop string is dismissed for a thread. The dashboard
@@ -2910,11 +2917,12 @@ app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
 // Unarchive — clears archivedAt so the thread returns to the active Inbox.
 app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const thread = await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: { archivedAt: null }
   });
-  res.json({ ok: true, threadId: thread.id });
+  res.json({ ok: true, threadId });
 }));
 
 // Archived view counterpart to /data/inbox — same shape, only archived rows.
@@ -3815,8 +3823,9 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const operatorHasNotReplied = !existing?.lastOutboundAt || inbound > outbound;
   const shouldArchive = operatorHasNotReplied && !existing?.archivedAt;
 
-  await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       needsReply: false,
       unreadCount: 0,
@@ -3831,7 +3840,7 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
     action: "MARK_DONE",
     stage: "Send",
     status: "OK",
-    details: { threadId, archived: shouldArchive }
+    details: { threadId, archived: shouldArchive, propagatedTo: targetIds.length }
   });
 
   res.json({ status: "ok", archived: shouldArchive });
@@ -3879,8 +3888,9 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
   const payload = z.object({ hours: z.number().int().min(1).max(72) }).parse(req.body);
   const due = new Date(Date.now() + payload.hours * 60 * 60 * 1000);
 
-  await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       slaDueAt: due,
       snoozedUntil: due,
@@ -3892,7 +3902,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
     action: "SNOOZE",
     stage: "Scan",
     status: "OK",
-    details: { threadId, hours: payload.hours }
+    details: { threadId, hours: payload.hours, propagatedTo: targetIds.length }
   });
 
   res.json({ status: "ok", dueAt: due.toISOString(), snoozedUntil: due.toISOString() });
@@ -3901,8 +3911,9 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
 
-  await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       snoozedUntil: null,
       riskReason: null
@@ -3913,7 +3924,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
     action: "UNSNOOZE",
     stage: "Scan",
     status: "OK",
-    details: { threadId }
+    details: { threadId, propagatedTo: targetIds.length }
   });
 
   res.json({ status: "ok", threadId });
