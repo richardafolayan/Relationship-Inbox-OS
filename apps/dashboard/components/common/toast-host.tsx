@@ -52,8 +52,12 @@ export function ToastHost() {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
       if (!detail || typeof detail.type !== "string") return;
+      // Event-type names must match what the runner emits in
+      // packages/core/src/types.ts and apps/runner/src/services/send.ts.
+      // The old "SEND_FAILED" / "SEND_CONFIRMED" labels never fired
+      // because send.ts emits MESSAGE_SEND_FAILED / MESSAGE_SENT.
       switch (detail.type) {
-        case "SEND_FAILED":
+        case "MESSAGE_SEND_FAILED":
           setToasts((prev) => [
             ...prev,
             {
@@ -66,7 +70,7 @@ export function ToastHost() {
             }
           ]);
           break;
-        case "SEND_CONFIRMED":
+        case "MESSAGE_SENT":
           setToasts((prev) => [
             ...prev,
             {
