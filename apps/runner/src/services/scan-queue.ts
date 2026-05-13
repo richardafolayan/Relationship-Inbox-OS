@@ -1407,6 +1407,17 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   }
                 },
                 shouldOpenCandidate: async (signals) => {
+                  // Honour the cancel button. The LinkedIn stream scan
+                  // can sit on a single thread for tens of seconds during
+                  // deep DOM reads; without an in-loop abort check the
+                  // operator's cancel doesn't take effect until the next
+                  // markAborted() checkpoint in the outer loop, which
+                  // arrives only between platform-level phases (issue
+                  // #131). Returning `stopScan: true` here is the
+                  // adapter's cooperative early-exit hook.
+                  if (shouldAbort()) {
+                    return { open: false, mode: "delta", reason: "aborted", stopScan: true };
+                  }
                   // We can only consult the DB if the row anchor gave us a
                   // canonical thread ID. Without one, fall back to "open in
                   // delta mode" — the post-open canonicalisation step will
