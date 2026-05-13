@@ -81,11 +81,18 @@ export interface AiService {
     whatTheyWant: string;
     openLoops: string[];
     /** Last ~6 turns oldest-first. Lets the model see the operator's own recent
-     *  replies and respond to the actual conversational turn. */
+     *  replies and respond to the actual conversational turn. Also calibrates
+     *  voice register against the operator's recent OUT entries here. */
     recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     /** False = no pending reply; the prompt switches to "reopen mode" and
      *  generates conversation starters grounded in transcript details. */
     needsReply: boolean;
+    /**
+     * Drives the voice tier (LinkedIn → formal; everything else → casual)
+     * so suggested replies sit in the right register. When omitted, the
+     * generic SYSTEM_PROMPT is used without a voice-tier overlay.
+     */
+    platform?: PlatformName | null;
     /** When "outreach", reply C is a Polite decline instead of a Clarifying question. */
     category?: "outreach" | "genuine" | null;
     /**
