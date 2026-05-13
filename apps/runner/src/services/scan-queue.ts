@@ -2703,11 +2703,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // changes — every stored hash mismatches and re-summary fires on next
     // scan. Without a bump, quiet threads keep their old cached
     // `whatTheyWant` indefinitely because the inbound message hasn't
-    // changed.
-    const SUMMARY_VERSION = "v2-120ch-recap";
+    // changed. The hash also folds in `needsReply` because the same
+    // transcript produces different summaries in active-reply vs reopen
+    // mode — the cache has to invalidate when the operator's reply flips
+    // a thread from active to dormant (or vice versa).
+    const SUMMARY_VERSION = "v3-mode-aware";
+    const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
-          `${SUMMARY_VERSION}|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+          `${SUMMARY_VERSION}|${needsReplyToken}|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
         )
       : null;
 
@@ -2727,7 +2731,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           direction: message.direction,
           text: message.text,
           timestamp: message.timestamp.toISOString()
-        }))
+        })),
+        needsReply: resolvedNeedsReply
       });
 
       // Defensive sanitiser: AI output (or its fallback path) can contain

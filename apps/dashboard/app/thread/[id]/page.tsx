@@ -1215,12 +1215,29 @@ export default function ThreadPage() {
     ? thread.suggestedReplies.source
     : null;
 
+  // Right-rail framing splits on `needsReply`:
+  // - active reply (contact's message is newest): rail surfaces what they're
+  //   waiting on + topical open loops + reply chips
+  // - reopen (operator already replied or thread dormant): rail surfaces a
+  //   warm reconnect hook + transcript-grounded callbacks + conversation
+  //   starters in the chips
+  // The fields themselves (whatTheyWant, openLoops, suggestedReplies) are
+  // generated mode-aware on the server. The dashboard only adjusts headers
+  // and helper copy. `trimmedSummary` (the durable rolling relationship
+  // summary) shows as a muted subline so the operator gets the relationship
+  // shorthand without it crowding the per-turn ask.
   const trimmedSummary = thread.summary?.trim() ?? "";
   const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
-  const askDuplicatesSummary =
+  const summaryDuplicatesAsk =
     trimmedAsk && trimmedSummary &&
     (trimmedSummary.includes(trimmedAsk) || trimmedAsk.includes(trimmedSummary));
-  const showAsk = trimmedAsk && !askDuplicatesSummary;
+  const showRelationshipContext = trimmedSummary && !summaryDuplicatesAsk;
+  const isReopenMode = thread.needsReply === false;
+  const askHeading = isReopenMode ? "Reconnect hook" : "What they want";
+  const loopsHeading = isReopenMode ? "Conversation hooks" : "Open loops";
+  const composeHelper = isReopenMode
+    ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
+    : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
@@ -1840,7 +1857,7 @@ export default function ThreadPage() {
                   className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
                 >
                   <Sparkles className="h-[12px] w-[12px]" />
-                  AI predraft - review before sending
+                  {isReopenMode ? "AI opener - review before sending" : "AI predraft - review before sending"}
                   <button
                     type="button"
                     onClick={() => {
@@ -2223,33 +2240,35 @@ export default function ThreadPage() {
       {/* ───── Context rail ───── */}
       <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
         <div className="flex flex-col gap-7 px-7 py-10">
-          {trimmedSummary || trimmedAsk ? (
+          {trimmedAsk || trimmedSummary ? (
             <section>
               <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                What they want
+                {askHeading}
               </p>
               <p className="m-0 text-balance text-[14px] leading-[1.55] text-ink">
-                {trimmedSummary || trimmedAsk}
+                {trimmedAsk || trimmedSummary}
               </p>
-              {showAsk && trimmedSummary ? (
+              {showRelationshipContext && trimmedAsk ? (
                 <p className="mt-3 border-t border-hairline pt-3 text-[13px] leading-[1.55] text-ink-3">
                   <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                    the ask ·{" "}
+                    context ·{" "}
                   </span>
-                  {trimmedAsk}
+                  {trimmedSummary}
                 </p>
               ) : null}
             </section>
           ) : null}
 
-          {/* Open loops - active rows render with an unchecked box; ticking
+          {/* Loops - active rows render with an unchecked box; ticking
               dismisses the loop (#62). Dismissed loops still render below
               in a muted, struck-through form so the operator can restore
-              one by un-ticking. */}
+              one by un-ticking. Heading flips to "Conversation hooks" in
+              reopen mode where the items are warm callbacks rather than
+              pending asks. */}
           {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
             <section>
               <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                Open loops
+                {loopsHeading}
               </p>
               <ul className="m-0 list-none space-y-[6px] p-0">
                 {thread.openLoops.map((item) => (
@@ -2288,12 +2307,12 @@ export default function ThreadPage() {
               Compose
             </p>
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the &quot;rewrite in my voice&quot; action above the composer instead.
+              {composeHelper}
             </p>
             <textarea
               value={composeIntent}
               onChange={(event) => setComposeIntent(event.target.value)}
-              placeholder="e.g. ask if free for a quick coffee next week"
+              placeholder={isReopenMode ? "e.g. ask how exams went" : "e.g. ask if free for a quick coffee next week"}
               rows={3}
               className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
             />
