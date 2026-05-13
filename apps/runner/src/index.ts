@@ -2711,6 +2711,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     relationshipMemory,
     messages: pageMessages.map((message) => ({
       id: message.id,
+      platformMessageKey: message.platformMessageKey,
       direction: message.direction,
       timestamp: message.timestamp.toISOString(),
       text: message.text,
