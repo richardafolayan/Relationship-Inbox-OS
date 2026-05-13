@@ -2,6 +2,8 @@
 // RED/AMBER/GREEN; the UI speaks overdue/waiting/fresh. Centralizing the
 // translation keeps every page in one voice.
 
+import type { PlatformName } from "@inbox-os/core";
+
 export type RunnerRisk = "RED" | "AMBER" | "GREEN";
 export type DisplayRisk = "overdue" | "waiting" | "fresh";
 
@@ -11,20 +13,23 @@ export function toDisplayRisk(level: RunnerRisk): DisplayRisk {
   return "fresh";
 }
 
-export const PLATFORM_LABEL: Record<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE", string> = {
+// Keyed off the canonical `PlatformName` from `@inbox-os/core` so a future
+// platform addition (e.g. WHATSAPP) gives a compile error here instead of
+// silently producing `undefined` strings at runtime when an inbox row from
+// the new platform reaches the dashboard.
+export const PLATFORM_LABEL: Record<PlatformName, string> = {
   LINKEDIN: "linkedin",
   INSTAGRAM: "instagram",
   TIKTOK: "tiktok",
-  IMESSAGE: "imessage"
+  IMESSAGE: "imessage",
+  WHATSAPP: "whatsapp"
 };
 
 // Platforms whose adapter is live in the runner. The "X/N connected"
 // denominator and the platforms list both key off this so adding a new
-// adapter only requires updating one place.
-export const IMPLEMENTED_PLATFORMS: ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE"> = [
-  "LINKEDIN",
-  "IMESSAGE"
-];
+// adapter only requires updating one place. WhatsApp is enum-only today;
+// flip it to live once the adapter ships.
+export const IMPLEMENTED_PLATFORMS: ReadonlyArray<PlatformName> = ["LINKEDIN", "IMESSAGE"];
 
 export function initials(name: string): string {
   // Only take the first character of name parts that START with a letter.

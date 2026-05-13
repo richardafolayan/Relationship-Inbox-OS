@@ -35,7 +35,25 @@ export async function apiGet<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+    // Mirror apiPost's error-body parsing so structured runner errors
+    // (`{ error }`, `{ reason }`, `{ message }`) actually surface in the
+    // dashboard. Previously every GET failure produced the generic
+    // "Request failed: 502" — losing the underlying "not_found" /
+    // "auth_required" / "platform_disabled" detail the runner returns.
+    const parsed = await parseErrorPayload(response);
+    const payload =
+      typeof parsed.payload === "object" && parsed.payload
+        ? (parsed.payload as Record<string, unknown>)
+        : null;
+    const stringField = (key: string): string | undefined =>
+      payload && typeof payload[key] === "string" ? (payload[key] as string) : undefined;
+    const message =
+      stringField("error") ??
+      stringField("message") ??
+      stringField("reason") ??
+      parsed.rawText ??
+      `Request failed: ${response.status}`;
+    throw new ApiRequestError(message, response.status, parsed.payload, parsed.rawText);
   }
 
   return (await response.json()) as T;

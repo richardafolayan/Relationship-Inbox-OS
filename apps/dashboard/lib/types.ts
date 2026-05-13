@@ -1,4 +1,15 @@
-import type { AiErrorKind, AiProvider } from "@inbox-os/core";
+import type { AiErrorKind, AiProvider, PlatformName } from "@inbox-os/core";
+
+/**
+ * Re-export so dashboard code can import the platform union from a single
+ * place. Previously the dashboard hard-coded `"LINKEDIN" | "INSTAGRAM" |
+ * "TIKTOK" | "IMESSAGE"` in 10+ locations, drifting from core (which has
+ * added `WHATSAPP`). When the WhatsApp adapter ships, every row read from
+ * Prisma whose `platform = "WHATSAPP"` would have failed type assignment in
+ * the dashboard. This alias re-exports the canonical union so a future
+ * platform addition flows through automatically.
+ */
+export type DashboardPlatform = PlatformName;
 
 export interface InboxRow {
   id: string;
@@ -12,7 +23,7 @@ export interface InboxRow {
    */
   personInferredName?: string | null;
   personAvatarUrl?: string | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   preview: string;
   /**
    * "OUT" when the latest message was sent by the operator (preview should
@@ -71,7 +82,7 @@ export interface InboxResponse {
 export interface PeopleRow {
   id: string;
   name: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   avatarUrl?: string | null;
   notes?: string | null;
   tags: string[];
@@ -92,7 +103,7 @@ export interface PersonDetailResponse {
   person: {
     id: string;
     name: string;
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+    platform: PlatformName;
     profileUrl: string | null;
     profileUrlSource: "auto" | "manual" | null;
     enrichedAt: string | null;
@@ -138,7 +149,7 @@ export interface OperatorProfile {
 }
 
 export interface PlatformCard {
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
   lastScanAt: string | null;
   connectedAt: string | null;
@@ -163,7 +174,7 @@ export interface PlatformCard {
     | null;
   latestSelectorReport?: {
     reportId: string;
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+    platform: PlatformName;
     startedAt: string;
     completedAt: string;
     results: Array<{
@@ -188,7 +199,7 @@ export interface PlatformCard {
 export interface AuditLogRow {
   id: string;
   timestamp: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform?: PlatformName;
   stage?: string;
   action: string;
   status: "OK" | "FAIL";
@@ -245,7 +256,7 @@ export interface ThreadResponse {
   personId: string;
   personName: string;
   personAvatarUrl?: string | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;
   /** ISO timestamp until which this thread is snoozed; null when active. */
@@ -310,7 +321,7 @@ export interface ThreadResponse {
     otherThreadCount: number;
     recentExchanges: Array<{
       threadId: string;
-      platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+      platform: PlatformName;
       lastMessageAt: string | null;
       preview: string | null;
       whatTheyWant: string | null;
@@ -332,7 +343,7 @@ export interface HealthResponse {
    * instead of always claiming linkedin. Optional so older runner builds
    * still parse cleanly.
    */
-  currentScanPlatform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | null;
+  currentScanPlatform?: PlatformName | null;
   /**
    * Background enrichment queue depth. Drives the status bar's
    * "Enriching N profiles" indicator while a Scan-all bulk run drains.
@@ -371,7 +382,7 @@ export interface AppSettings {
   redHours: number;
   headless: boolean;
   maxMessagesPerThread: number;
-  enabledPlatforms: Array<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE">;
+  enabledPlatforms: Array<PlatformName>;
   demoMode: boolean;
   recentThreadSweepCount: number;
   aiProvider?: AiProvider;
