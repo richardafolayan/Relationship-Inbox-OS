@@ -1626,17 +1626,25 @@ export default function ThreadPage() {
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
-                            <span
-                              className={`absolute -top-3 ${
-                                message.direction === "OUT" ? "-left-2" : "-right-2"
-                              } flex items-center gap-[2px] rounded-full border border-hairline bg-paper px-[6px] py-[2px] text-[11px] shadow-sm`}
+                            <div
+                              className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
+                                message.direction === "OUT" ? "-left-[10px]" : "-right-[10px]"
+                              }`}
                             >
                               {reactions.map((r, i) => (
-                                <span key={`${r.kind}-${r.direction}-${i}`} title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}>
+                                <span
+                                  key={`${r.kind}-${r.direction}-${i}`}
+                                  title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}
+                                  className={`flex h-[24px] w-[24px] items-center justify-center rounded-full border-2 border-paper text-[13px] leading-none shadow-sm ${
+                                    r.direction === "OUT"
+                                      ? "bg-ink text-paper"
+                                      : "bg-paper-2 text-ink"
+                                  }`}
+                                >
                                   {r.emoji}
                                 </span>
                               ))}
-                            </span>
+                            </div>
                           ) : null}
                         </div>
                       );
