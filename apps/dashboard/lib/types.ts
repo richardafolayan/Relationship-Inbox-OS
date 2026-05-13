@@ -199,6 +199,14 @@ export interface AuditLogRow {
 
 export interface ThreadMessage {
   id: string;
+  /**
+   * Platform-side stable id (iMessage guid, LinkedIn message id). Sent
+   * alongside the internal cuid so the timeline can resolve cross-message
+   * references — today's only consumer is iMessage threaded replies,
+   * where a child's `raw.replyToGuid` matches another row's
+   * `platformMessageKey`.
+   */
+  platformMessageKey?: string;
   direction: "IN" | "OUT";
   timestamp: string;
   text: string;

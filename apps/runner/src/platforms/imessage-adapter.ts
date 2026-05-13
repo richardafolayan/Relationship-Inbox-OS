@@ -138,22 +138,31 @@ export class IMessageAdapter implements PlatformAdapter {
     // proper scroll-back without re-scanning.
     const effectiveLimit = Math.max(limit, 500);
     const rows = db.fetchMessages(thread.platformThreadId, effectiveLimit);
-    return rows.map((r) => ({
-      platformMessageKey: r.guid,
-      direction: r.direction,
-      timestamp: r.timestamp ?? new Date().toISOString(),
-      text: r.text,
-      senderName: r.senderHandle,
-      raw: r.reactions.length > 0 ? { reactions: r.reactions } : undefined,
-      attachments: r.attachments.map((a) => ({
-        type: a.kind,
-        manualReview: a.kind === "unknown",
-        rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
-        guid: a.guid || undefined,
-        kind: a.kind,
-        byteSize: a.totalBytes ?? undefined
-      }))
-    }));
+    return rows.map((r) => {
+      // Persist reactions + reply parent on rawJson. Both fields are read
+      // back by the dashboard's thread page; absent fields stay omitted so
+      // we don't write empty {} for plain bubbles (keeps rawJson nullable
+      // for the existing "no metadata" code path).
+      const raw: Record<string, unknown> = {};
+      if (r.reactions.length > 0) raw.reactions = r.reactions;
+      if (r.replyToGuid) raw.replyToGuid = r.replyToGuid;
+      return {
+        platformMessageKey: r.guid,
+        direction: r.direction,
+        timestamp: r.timestamp ?? new Date().toISOString(),
+        text: r.text,
+        senderName: r.senderHandle,
+        raw: Object.keys(raw).length > 0 ? raw : undefined,
+        attachments: r.attachments.map((a) => ({
+          type: a.kind,
+          manualReview: a.kind === "unknown",
+          rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
+          guid: a.guid || undefined,
+          kind: a.kind,
+          byteSize: a.totalBytes ?? undefined
+        }))
+      };
+    });
   }
 
   async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
