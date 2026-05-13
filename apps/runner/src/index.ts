@@ -4159,18 +4159,36 @@ async function start(): Promise<void> {
       dbPath: runnerConfig.imessage.dbPath,
       debounceMs: runnerConfig.imessage.watchDebounceMs,
       onChange: (reason) => {
-        const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
-        void auditService.log({
-          platform: "IMESSAGE",
-          stage: "Scan",
-          action: "IMESSAGE_WATCH_TRIGGER",
-          status: result.ok ? "OK" : "FAIL",
-          details: {
-            reason,
-            ...(result.ok
-              ? { jobId: result.jobId, status: result.status }
-              : { blocked: result.blocked, blockReason: result.reason })
+        // Honour the operator-facing settings toggle. The chat.db watcher
+        // is gated by the env-level imessage.enabled flag (does this host
+        // even have iMessage?), but settings.enabledPlatforms is the
+        // user-facing "scan iMessage" switch the dashboard renders. If
+        // the operator has it off we must not enqueue scans — otherwise
+        // /data/platforms shows iMessage disabled while the runner is
+        // happily scanning it in the background (issue #202).
+        void settingsStore.getSettings().then((currentSettings) => {
+          if (!currentSettings.enabledPlatforms.includes("IMESSAGE")) {
+            return auditService.log({
+              platform: "IMESSAGE",
+              stage: "Scan",
+              action: "IMESSAGE_WATCH_TRIGGER",
+              status: "OK",
+              details: { reason, skipped: "disabled_in_settings" }
+            });
           }
+          const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+          return auditService.log({
+            platform: "IMESSAGE",
+            stage: "Scan",
+            action: "IMESSAGE_WATCH_TRIGGER",
+            status: result.ok ? "OK" : "FAIL",
+            details: {
+              reason,
+              ...(result.ok
+                ? { jobId: result.jobId, status: result.status }
+                : { blocked: result.blocked, blockReason: result.reason })
+            }
+          });
         });
       }
     });
