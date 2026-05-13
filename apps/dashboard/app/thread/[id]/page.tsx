@@ -1067,6 +1067,25 @@ export default function ThreadPage() {
   const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
+  // iMessage threaded-reply lookup. Children carry their parent's chat.db
+  // guid on `raw.replyToGuid`; we map by `platformMessageKey` so a reply
+  // bubble can quote the parent text inline, and a parent can show "N
+  // Replies" under its timestamp. Built from `visibleMessages` so older
+  // history that isn't paginated in yet doesn't appear linked — the user
+  // can scroll up to reveal the parent and the link materialises.
+  const { messageByPlatformKey, replyCountByParentKey } = useMemo(() => {
+    const byKey = new Map<string, ThreadMessage>();
+    const counts = new Map<string, number>();
+    for (const m of visibleMessages) {
+      if (m.platformMessageKey) byKey.set(m.platformMessageKey, m);
+    }
+    for (const m of visibleMessages) {
+      const parentGuid = (m.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
+      if (parentGuid) counts.set(parentGuid, (counts.get(parentGuid) ?? 0) + 1);
+    }
+    return { messageByPlatformKey: byKey, replyCountByParentKey: counts };
+  }, [visibleMessages]);
+
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
   // have written into the thread, it is a group. False positives on a
@@ -1563,6 +1582,11 @@ export default function ThreadPage() {
                 message.direction === "OUT"
                   ? "You"
                   : (message.senderName ?? firstName);
+              const replyToGuid = (message.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
+              const parentMessage = replyToGuid ? messageByPlatformKey.get(replyToGuid) : undefined;
+              const replyCount = message.platformMessageKey
+                ? (replyCountByParentKey.get(message.platformMessageKey) ?? 0)
+                : 0;
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? <DayDivider label={dayLabel} /> : null}
@@ -1571,6 +1595,21 @@ export default function ThreadPage() {
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     }`}
                   >
+                    {replyToGuid ? (
+                      <div
+                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 ${
+                          message.direction === "OUT" ? "self-end" : "self-start"
+                        }`}
+                        title={parentMessage?.text ?? "Replying to an earlier message"}
+                      >
+                        <span className="text-ink-4" aria-hidden="true">↳</span>
+                        <span className="line-clamp-2 italic">
+                          {parentMessage
+                            ? parentMessage.text.slice(0, 120) || "(media)"
+                            : "Replying to an earlier message"}
+                        </span>
+                      </div>
+                    ) : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
                         <button
@@ -1626,17 +1665,25 @@ export default function ThreadPage() {
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
-                            <span
-                              className={`absolute -top-3 ${
-                                message.direction === "OUT" ? "-left-2" : "-right-2"
-                              } flex items-center gap-[2px] rounded-full border border-hairline bg-paper px-[6px] py-[2px] text-[11px] shadow-sm`}
+                            <div
+                              className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
+                                message.direction === "OUT" ? "-left-[10px]" : "-right-[10px]"
+                              }`}
                             >
                               {reactions.map((r, i) => (
-                                <span key={`${r.kind}-${r.direction}-${i}`} title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}>
+                                <span
+                                  key={`${r.kind}-${r.direction}-${i}`}
+                                  title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}
+                                  className={`flex h-[24px] w-[24px] items-center justify-center rounded-full border-2 border-paper text-[13px] leading-none shadow-sm ${
+                                    r.direction === "OUT"
+                                      ? "bg-ink text-paper"
+                                      : "bg-paper-2 text-ink"
+                                  }`}
+                                >
                                   {r.emoji}
                                 </span>
                               ))}
-                            </span>
+                            </div>
                           ) : null}
                         </div>
                       );
@@ -1649,6 +1696,11 @@ export default function ThreadPage() {
                           indicator from #61 was dishonest. */}
                       {message.direction === "OUT" && message.sentVia === "automation" ? (
                         <span className="text-ink-4">· sent via automation ✓</span>
+                      ) : null}
+                      {replyCount > 0 ? (
+                        <span className="text-ink-2">
+                          · {replyCount} {replyCount === 1 ? "Reply" : "Replies"}
+                        </span>
                       ) : null}
                     </span>
                   </div>
