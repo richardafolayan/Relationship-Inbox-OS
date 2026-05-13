@@ -1161,31 +1161,39 @@ export default function ThreadPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedThreadParentId]);
   // Click-outside-to-exit. Anything that isn't a focused bubble, the
-  // composer, the sticky "FOCUSED THREAD" pill, or the sidebar /
-  // header chrome dismisses focus — Messages.app's tap-outside model.
-  // We attach to the document mousedown so a single click both
-  // dismisses and (if it landed on a different parent's chip) focuses
-  // the new one, without an intermediate render hiding the chip target.
+  // composer, the sticky "FOCUSED THREAD" pill, or another "Focus
+  // thread" chip (which should swap focus, not dismiss) exits focused
+  // mode — Messages.app's tap-outside model.
+  // We use `click` (not `mousedown`) so the focusOnParent handler that
+  // activates focus has already updated state by the time we arrive,
+  // and we use `setTimeout(..., 0)` to push the listener attachment
+  // past the current click's bubbling phase — otherwise the same
+  // click that activated focus would also dismiss it.
   useEffect(() => {
     if (!focusedThreadParentId) return;
-    const onMouseDown = (e: MouseEvent) => {
+    let cancelled = false;
+    const onClick = (e: MouseEvent) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      // Allowed regions: any element under a focused bubble, the
-      // composer, or the focused-thread sticky pill. Everything else
-      // counts as "outside".
-      const focusedBubble = target.closest("[data-focused-bubble='true']");
-      const composer = target.closest("[data-thread-composer='true']");
-      const pill = target.closest("[data-focused-pill='true']");
-      // Reply chip buttons re-focus on a different parent — treat them
-      // as a focus-swap, not an exit. We detect via the existing button
-      // markup (the title attribute starts with "Focus thread").
-      const focusSwap = target.closest('button[title^="Focus thread"]');
+      const focusedBubble = target.closest('[data-focused-bubble="true"]');
+      const composer = target.closest('[data-thread-composer="true"]');
+      const pill = target.closest('[data-focused-pill="true"]');
+      // Both pill variants ("Focus this thread" on the parent + "Focus
+      // thread: <text>" on a reply chip) act as focus swaps. The title
+      // starts with "Focus" for both so a single prefix matches.
+      const focusSwap = target.closest('button[title^="Focus"]');
       if (focusedBubble || composer || pill || focusSwap) return;
       setFocusedThreadParentId(null);
     };
-    document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
+    const handle = setTimeout(() => {
+      if (cancelled) return;
+      document.addEventListener("click", onClick);
+    }, 0);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+      document.removeEventListener("click", onClick);
+    };
   }, [focusedThreadParentId]);
   // Bring the focused parent into view when the focus changes. Two
   // pieces of timing care:
