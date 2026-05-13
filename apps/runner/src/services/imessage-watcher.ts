@@ -41,11 +41,27 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingReason: string | null = null;
   let stopped = false;
+  // Track every scheduled re-arm so `stop()` can cancel them. Previously a
+  // pending `setTimeout(attach, 1000)` would still fire after `stop()` set
+  // `stopped=true`, installing a fresh watcher the caller could never see
+  // to clean up. The check at the top of attach() now also looks at
+  // `stopped` but cancelling the timer is the defence in depth.
+  const pendingTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  function scheduleAttach(delayMs: number): void {
+    if (stopped) return;
+    const timer = setTimeout(() => {
+      pendingTimers.delete(timer);
+      attach();
+    }, delayMs);
+    pendingTimers.add(timer);
+  }
 
   function fireDebounced(): void {
     const reason = pendingReason ?? "unknown";
     pendingReason = null;
     debounceTimer = null;
+    if (stopped) return;
     try {
       deps.onChange(reason);
     } catch (error) {
@@ -54,6 +70,7 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
   }
 
   function armDebounce(reason: string): void {
+    if (stopped) return;
     pendingReason = reason;
     if (debounceTimer) {
       clearTimeout(debounceTimer);
@@ -73,12 +90,12 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
         log(`[imessage-watcher] watcher error: ${error.message}; re-arming in 1s`);
         watcher?.close();
         watcher = undefined;
-        setTimeout(attach, 1_000);
+        scheduleAttach(1_000);
       });
       log(`[imessage-watcher] armed on ${watchDir} (debounce ${deps.debounceMs}ms)`);
     } catch (error) {
       log(`[imessage-watcher] failed to arm watcher: ${(error as Error).message}; retrying in 5s`);
-      setTimeout(attach, 5_000);
+      scheduleAttach(5_000);
     }
   }
 
@@ -90,6 +107,10 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
     },
     stop(): void {
       stopped = true;
+      // Cancel any scheduled re-arms so a watcher can't be installed AFTER
+      // the caller asked us to stop.
+      for (const timer of pendingTimers) clearTimeout(timer);
+      pendingTimers.clear();
       if (debounceTimer) {
         clearTimeout(debounceTimer);
         debounceTimer = null;

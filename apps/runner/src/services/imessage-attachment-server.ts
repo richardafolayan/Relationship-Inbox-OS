@@ -82,14 +82,51 @@ function pipeFile(path: string, contentType: string, res: Response, downloadName
   res.setHeader("Content-Type", contentType);
   res.setHeader("Content-Length", String(stat.size));
   res.setHeader("Cache-Control", "private, max-age=86400");
-  res.setHeader("Content-Disposition", `inline; filename="${downloadName.replace(/"/g, "")}"`);
-  createReadStream(path).pipe(res);
+  // Strip both quotes (would terminate the header value) and CR/LF (would
+  // allow header injection if `transferName` ever came from an untrusted
+  // source — chat.db is trusted today, but defence in depth).
+  const safeDownloadName = downloadName.replace(/["\r\n]/g, "");
+  res.setHeader("Content-Disposition", `inline; filename="${safeDownloadName}"`);
+  const stream = createReadStream(path);
+  // Without these handlers, if the file is unlinked mid-stream (Messages.app
+  // attachment cleanup, OS upgrade) the unhandled `error` event crashes the
+  // Express process. Best-effort cleanup: end the response if it hasn't been
+  // sent yet, otherwise just destroy the stream and let the client retry.
+  stream.on("error", (err) => {
+    console.warn(`[imessage-attachment] stream error for ${path}: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "stream read failed" });
+    } else {
+      try {
+        res.destroy(err);
+      } catch {
+        // Already torn down — nothing to do.
+      }
+    }
+  });
+  // If the client disconnects (closed browser tab, dashboard navigation),
+  // destroy the read stream so we don't keep reading the file into a
+  // socket that will never accept data.
+  res.on("close", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+  stream.pipe(res);
 }
 
 /**
  * Convert `src` once and cache the result keyed by source path + mtime.
  * Returns the converted file path on success, or null when conversion fails.
+ *
+ * In-flight de-duplication: two concurrent requests for the same uncached
+ * key both used to spawn `afconvert` / `sips` against the same destination
+ * path, racing on the final write. The first to `existsSync(dst)` won, but
+ * the second's transcode could overlap and corrupt the file mid-pipe to
+ * the dashboard. The shared `inflight` map below ensures only one conversion
+ * runs per (src, mtime, outExt) tuple; subsequent callers await the same
+ * promise and pick up the cached output once it lands.
  */
+const inflight = new Map<string, Promise<string | null>>();
+
 async function convertOnce(
   src: string,
   outExt: string,
@@ -99,11 +136,27 @@ async function convertOnce(
   const key = createHash("sha1").update(`${src}|${stat.mtimeMs}|${outExt}`).digest("hex");
   const dst = join(CACHE_DIR, `${key}.${outExt}`);
   if (existsSync(dst)) return dst;
-  try {
-    await run(src, dst);
-    if (existsSync(dst)) return dst;
-    return null;
-  } catch {
-    return null;
-  }
+  const existing = inflight.get(key);
+  if (existing) return existing;
+  const promise = (async () => {
+    try {
+      // Re-check the cache after taking the slot — a previous promise may
+      // have completed between the cache check and this point.
+      if (existsSync(dst)) return dst;
+      await run(src, dst);
+      if (existsSync(dst)) return dst;
+      return null;
+    } catch (error) {
+      console.warn(
+        `[imessage-attachment] convert failed (${outExt}): ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+      return null;
+    } finally {
+      inflight.delete(key);
+    }
+  })();
+  inflight.set(key, promise);
+  return promise;
 }
