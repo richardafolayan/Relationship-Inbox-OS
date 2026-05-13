@@ -1183,7 +1183,8 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
       platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
-      forceFallback: z.boolean().nullable().optional()
+      forceFallback: z.boolean().nullable().optional(),
+      scope: z.enum(["update", "full"]).optional()
     })
     .parse(req.body ?? {});
 
@@ -1197,7 +1198,8 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     respectCooldown: true,
     maxThreads,
     maxOpens,
-    forceFallback
+    forceFallback,
+    scope: payload.scope ?? "update"
   });
   const traceMeta = {
     runTraceEnabled: scanQueue.isRunTraceEnabled(),

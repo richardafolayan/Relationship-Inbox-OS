@@ -52,7 +52,15 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         label: "Run scan now",
         glyph: "scan",
         run: () => {
-          void apiPost("/runner/control/scan", {}).catch(() => undefined);
+          void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined);
+        }
+      },
+      {
+        id: "scan-full",
+        label: "Full LinkedIn rescan",
+        glyph: "scan",
+        run: () => {
+          void apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" }).catch(() => undefined);
         }
       }
     ];
