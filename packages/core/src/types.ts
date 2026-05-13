@@ -79,6 +79,19 @@ export interface SendReceipt {
   screenshotFile?: string;
   verifiedBy: VerificationMethod;
   /**
+   * The platform-side stable id of the newly-sent message, when the
+   * adapter can recover it post-send (iMessage adapter polls chat.db
+   * for the new row's guid). The send service uses this as the Message
+   * row's `platformMessageKey` so that a subsequent scan, which writes
+   * by the same guid, recognises the row as already-persisted and
+   * updates it instead of inserting a duplicate.
+   *
+   * Optional: adapters that can't observe the real id (LinkedIn web UI,
+   * group iMessage chats without a delivery-status poll path) leave it
+   * unset, and the send service falls back to a stableHash key.
+   */
+  platformMessageKey?: string;
+  /**
    * Attachments the platform actually persisted on the outbound message,
    * for adapters that send media (e.g. iMessage voice notes / photos).
    * The runner stores these on the Message row so the dashboard can
