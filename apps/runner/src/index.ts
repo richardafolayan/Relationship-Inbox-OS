@@ -3711,6 +3711,21 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
 
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  // If the operator hasn't replied to the latest inbound, "Mark as
+  // handled" really means "I'm done with this conversation, take it
+  // out of my view" — so we archive the thread alongside clearing the
+  // needs-reply / risk fields. When the operator already replied,
+  // mark-done is just a confirmation and we leave the archive state
+  // alone (issue #246).
+  const existing = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { lastInboundAt: true, lastOutboundAt: true, archivedAt: true }
+  });
+  const inbound = existing?.lastInboundAt?.getTime() ?? 0;
+  const outbound = existing?.lastOutboundAt?.getTime() ?? 0;
+  const operatorHasNotReplied = !existing?.lastOutboundAt || inbound > outbound;
+  const shouldArchive = operatorHasNotReplied && !existing?.archivedAt;
+
   await prisma.thread.update({
     where: { id: threadId },
     data: {
@@ -3718,7 +3733,8 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
       unreadCount: 0,
       riskLevel: "GREEN",
       riskReason: "Marked done manually",
-      slaDueAt: null
+      slaDueAt: null,
+      ...(shouldArchive ? { archivedAt: new Date() } : {})
     }
   });
 
@@ -3726,10 +3742,10 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
     action: "MARK_DONE",
     stage: "Send",
     status: "OK",
-    details: { threadId }
+    details: { threadId, archived: shouldArchive }
   });
 
-  res.json({ status: "ok" });
+  res.json({ status: "ok", archived: shouldArchive });
 }));
 
 app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) => {
