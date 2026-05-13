@@ -110,6 +110,7 @@ model Person {
   enrichment  PersonEnrichment?
   enrichmentJobs EnrichmentJob[]
 
+  @@unique([platform, profileUrl])
   @@index([displayName])
   @@map("people")
 }
@@ -301,7 +302,10 @@ model Message {
   replyToMessageId   String?
   createdAt          DateTime  @default(now())
 
-  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  thread            Thread        @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  replyTo           Message?      @relation("MessageReplyChain", fields: [replyToMessageId], references: [id], onDelete: SetNull)
+  replies           Message[]     @relation("MessageReplyChain")
+  pendingReplySends SendRequest[] @relation("SendRequestReplyTarget")
 
   @@unique([threadId, platformMessageKey])
   @@index([threadId, timestamp])
@@ -311,14 +315,13 @@ model Message {
 
 model Draft {
   id        String   @id @default(cuid())
-  threadId  String
+  threadId  String   @unique
   text      String
   updatedAt DateTime @updatedAt
   createdAt DateTime @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
-  @@index([threadId])
   @@map("drafts")
 }
 
@@ -334,6 +337,8 @@ model AuditLog {
   domDumpFile    String?
 
   @@index([timestamp, platform, action, status])
+  @@index([action, timestamp])
+  @@index([status, timestamp])
   @@map("audit_logs")
 }
 
@@ -376,7 +381,8 @@ model SendRequest {
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 
-  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  thread  Thread   @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  replyTo Message? @relation("SendRequestReplyTarget", fields: [replyToMessageId], references: [id], onDelete: SetNull)
 
   @@index([threadId, status])
   @@index([status, scheduledFor])
