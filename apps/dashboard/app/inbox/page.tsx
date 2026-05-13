@@ -1,23 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
 import { Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
-import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
-import { SelectableThreadRow } from "@/components/common/selectable-thread-row";
+import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import { PersonAvatar } from "@/components/common/person-avatar";
 import { formatRelative } from "@/lib/time";
+import { normalizePreview } from "@/lib/preview";
+import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { cn } from "@/lib/utils";
 
-type FilterMode = "all" | "unread" | "needs_reply" | "waiting_on_them" | "genuine" | "outreach";
+type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "snoozed";
+type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
-type SortMode = "recent" | "oldest" | "name";
+type SortMode = "oldest" | "recent" | "name";
 
-const FILTERS: { key: FilterMode; label: string }[] = [
+const TABS: { key: RiskTab; label: string }[] = [
   { key: "all", label: "All" },
-  { key: "unread", label: "Unread" },
+  { key: "overdue", label: "Overdue" },
+  { key: "waiting", label: "Waiting" },
+  { key: "fresh", label: "Fresh" },
+  { key: "snoozed", label: "Snoozed" }
+];
+
+const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
+  { key: "any", label: "Any kind" },
   { key: "needs_reply", label: "Needs reply" },
   { key: "waiting_on_them", label: "Waiting on them" },
   { key: "genuine", label: "Genuine" },
@@ -25,27 +36,39 @@ const FILTERS: { key: FilterMode; label: string }[] = [
 ];
 
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
-  { key: "all", label: "All platforms" },
+  { key: "all", label: "Any platform" },
   { key: "LINKEDIN", label: "LinkedIn" },
   { key: "IMESSAGE", label: "iMessage" }
 ];
 
 const SORT_MODES: { key: SortMode; label: string }[] = [
-  { key: "recent", label: "Recent first" },
-  { key: "oldest", label: "Oldest first" },
-  { key: "name", label: "By name (A-Z)" }
+  { key: "oldest", label: "oldest wait" },
+  { key: "recent", label: "most recent" },
+  { key: "name", label: "name A–Z" }
 ];
 
-function applyFilter(row: InboxRow, mode: FilterMode): boolean {
-  switch (mode) {
-    case "unread":
-      return row.unreadCount > 0;
+const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
+  LINKEDIN: "in",
+  IMESSAGE: "iM",
+  INSTAGRAM: "ig",
+  TIKTOK: "tt"
+};
+
+function applyTab(row: InboxRow, tab: RiskTab): boolean {
+  if (tab === "all") return !row.scheduledSendAt;
+  if (tab === "snoozed") return !!row.scheduledSendAt;
+  if (row.scheduledSendAt) return false;
+  if (tab === "overdue") return row.riskLevel === "RED";
+  if (tab === "waiting") return row.riskLevel === "AMBER";
+  if (tab === "fresh") return row.riskLevel === "GREEN";
+  return true;
+}
+
+function applyCategory(row: InboxRow, kind: CategoryFilter): boolean {
+  switch (kind) {
     case "needs_reply":
       return row.needsReply;
     case "waiting_on_them":
-      // Operator sent the last message and the other party hasn't replied
-      // yet. Excludes archived rows so closed-out conversations don't pile
-      // into the "I'm waiting on them" surface.
       return row.lastMessageDirection === "OUT" && !row.archivedAt;
     case "genuine":
       return row.category === "genuine";
@@ -56,44 +79,52 @@ function applyFilter(row: InboxRow, mode: FilterMode): boolean {
   }
 }
 
-function applyPlatformFilter(row: InboxRow, platform: PlatformFilter): boolean {
-  if (platform === "all") return true;
-  return row.platform === platform;
+function applyPlatform(row: InboxRow, platform: PlatformFilter): boolean {
+  return platform === "all" ? true : row.platform === platform;
 }
 
 function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
-  // Defensive copy: caller's buckets are useMemo'd; mutating in place
-  // would trip the "did this change?" check on the next render.
   const copy = [...items];
   switch (sort) {
-    case "oldest":
-      return copy.sort((a, b) => {
-        const aTs = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
-        const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
-        return aTs - bTs;
-      });
     case "name":
       return copy.sort((a, b) => a.personName.localeCompare(b.personName));
     case "recent":
-    default:
       return copy.sort((a, b) => {
         const aTs = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
         const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
         return bTs - aTs;
       });
+    case "oldest":
+    default:
+      return copy.sort((a, b) => {
+        const aTs = a.lastInboundAt ?? a.lastMessageAt;
+        const bTs = b.lastInboundAt ?? b.lastMessageAt;
+        return (aTs ? Date.parse(aTs) : 0) - (bTs ? Date.parse(bTs) : 0);
+      });
   }
 }
 
-// All inbox - same chrome as Today, body bucketed by risk. The runner's
-// /data/inbox already returns the rows pre-sorted; we just split them
-// into three sections and skip empty buckets. Search + status filter +
-// platform filter narrow the visible set before bucketing.
-//
-// Multi-select: cmd/ctrl-click any row to enter select mode and toggle
-// selection (or use the explicit Select button). While ≥1 row is
-// selected, a sticky bottom action bar surfaces bulk Mark done / Snooze
-// / Rescan / Clear. Esc clears selection. Cmd/Ctrl+A selects all
-// currently-visible rows (post-filter).
+function rightLabelFor(row: InboxRow): { text: string; tone: string } {
+  const risk = toDisplayRisk(row.riskLevel);
+  const rel = formatRelative(row.lastInboundAt ?? row.lastMessageAt);
+  if (risk === "overdue")
+    return { text: `${rel} overdue`, tone: "text-risk-overdue font-medium" };
+  if (risk === "waiting")
+    return { text: rel, tone: "text-risk-waiting font-medium" };
+  return { text: rel, tone: "text-ink-2" };
+}
+
+function dotFor(row: InboxRow): string {
+  const risk = toDisplayRisk(row.riskLevel);
+  if (risk === "overdue") return "bg-risk-overdue";
+  if (risk === "waiting") return "bg-risk-waiting";
+  return "bg-risk-fresh";
+}
+
+// All inbox - filter tabs (replacing stacked risk sections), platform
+// glyph column, sort + secondary filters on the right of the tab bar.
+// Search input lives above the tabs. Multi-select + bulk-action bar
+// unchanged.
 export default function InboxPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
@@ -102,19 +133,14 @@ export default function InboxPage() {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [query, setQuery] = useState("");
-  const [filter, setFilter] = useState<FilterMode>("all");
+  const [tab, setTab] = useState<RiskTab>("all");
+  const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
-  const [sortMode, setSortMode] = useState<SortMode>("recent");
+  const [sortMode, setSortMode] = useState<SortMode>("oldest");
 
-  // Multi-select state. selectedIds preserves insertion order so
-  // shift-click range can find the anchor (last selected) deterministically.
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  // Toggle to put the row list into checkbox-and-toggle mode without
-  // requiring a modifier-click; useful when discovering the feature.
   const [forceSelectMode, setForceSelectMode] = useState(false);
   const lastToggledRef = useRef<string | null>(null);
-  // Removed-locally so bulk actions feel instant; reconciled against
-  // server data on the next refresh, mirroring /today.
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [bulkPending, setBulkPending] = useState<string | null>(null);
   const [bulkResult, setBulkResult] = useState<string | null>(null);
@@ -127,7 +153,6 @@ export default function InboxPage() {
     ]);
     if (inbox) {
       setData(inbox);
-      // Drop optimistic IDs the server has caught up on (same logic as /today).
       const stillPending = new Set(
         inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
       );
@@ -156,53 +181,40 @@ export default function InboxPage() {
   }, [refresh]);
 
   const allRows = data?.rows ?? [];
-  const summary = data?.summary;
 
-  // Filter chain: query + status + platform produce `visible`; bulk
-  // optimistic-removal further narrows to `rows`. Buckets, flatVisibleIds,
-  // and select-all all derive from `rows` so selection respects both
-  // filters and in-flight bulk actions. Empty-state detection uses
-  // `visible` (not `rows`) so a mid-flight bulk removal doesn't briefly
-  // flip the page to "Nothing matches".
+  // Per-tab counts, computed against the full data set so the tab badges
+  // don't shift as the operator filters by platform / search / category.
+  const counts = useMemo(() => {
+    const live = allRows.filter((row) => !row.scheduledSendAt);
+    return {
+      all: live.length,
+      overdue: live.filter((r) => r.riskLevel === "RED").length,
+      waiting: live.filter((r) => r.riskLevel === "AMBER").length,
+      fresh: live.filter((r) => r.riskLevel === "GREEN").length,
+      snoozed: allRows.filter((r) => !!r.scheduledSendAt).length
+    };
+  }, [allRows]);
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return allRows.filter((row) => {
-      if (!applyPlatformFilter(row, platformFilter)) return false;
-      if (!applyFilter(row, filter)) return false;
+      if (!applyTab(row, tab)) return false;
+      if (!applyCategory(row, category)) return false;
+      if (!applyPlatform(row, platformFilter)) return false;
       if (!q) return true;
       return (
         row.personName.toLowerCase().includes(q) ||
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, filter, platformFilter]);
+  }, [allRows, query, tab, category, platformFilter]);
 
   const rows = useMemo(
-    () => visible.filter((row) => !removedIds.has(row.id)),
-    [visible, removedIds]
-  );
-  const overdue = useMemo(
-    () => applySort(rows.filter((r) => r.riskLevel === "RED"), sortMode),
-    [rows, sortMode]
-  );
-  const waiting = useMemo(
-    () => applySort(rows.filter((r) => r.riskLevel === "AMBER"), sortMode),
-    [rows, sortMode]
-  );
-  const fresh = useMemo(
-    () => applySort(rows.filter((r) => r.riskLevel === "GREEN"), sortMode),
-    [rows, sortMode]
+    () => applySort(visible.filter((row) => !removedIds.has(row.id)), sortMode),
+    [visible, removedIds, sortMode]
   );
 
-  const buckets = [
-    { key: "overdue", label: "Overdue - they’ve waited longest", items: overdue },
-    { key: "waiting", label: "Waiting on you", items: waiting },
-    { key: "fresh", label: "Fresh, no rush", items: fresh }
-  ];
   const degraded = platforms.find((p) => p.status === "DEGRADED");
-  const oldestPending = summary?.oldestPendingInboundAt
-    ? formatRelative(summary.oldestPendingInboundAt)
-    : "-";
 
   const flatVisibleIds = useMemo(() => rows.map((r) => r.id), [rows]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
@@ -213,7 +225,6 @@ export default function InboxPage() {
       setSelectedIds((prev) => {
         const set = new Set(prev);
         if (opts.shiftKey && lastToggledRef.current && lastToggledRef.current !== id) {
-          // Range select between anchor and target on the visible flat list.
           const anchor = lastToggledRef.current;
           const a = flatVisibleIds.indexOf(anchor);
           const b = flatVisibleIds.indexOf(id);
@@ -224,11 +235,8 @@ export default function InboxPage() {
             return Array.from(set);
           }
         }
-        if (set.has(id)) {
-          set.delete(id);
-        } else {
-          set.add(id);
-        }
+        if (set.has(id)) set.delete(id);
+        else set.add(id);
         lastToggledRef.current = id;
         return Array.from(set);
       });
@@ -242,7 +250,6 @@ export default function InboxPage() {
     lastToggledRef.current = null;
   }, []);
 
-  // ⌘A / ctrl-A selects all visible rows when in select mode; Esc clears.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && selectMode) {
@@ -258,40 +265,6 @@ export default function InboxPage() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectMode, flatVisibleIds, clearSelection]);
 
-  const [archivingOutreach, setArchivingOutreach] = useState(false);
-
-  const archiveAllOutreach = useCallback(async () => {
-    const ids = rows.map((r) => r.id);
-    if (ids.length === 0) return;
-    const ok = window.confirm(
-      `Archive ${ids.length} outreach thread${ids.length === 1 ? "" : "s"}? You can unarchive any of them from the Archived view.`
-    );
-    if (!ok) return;
-    setArchivingOutreach(true);
-    setRemovedIds((prev) => {
-      const next = new Set(prev);
-      ids.forEach((id) => next.add(id));
-      return next;
-    });
-    const results = await Promise.allSettled(
-      ids.map((id) => apiPost(`/runner/control/thread/${id}/archive`, {}))
-    );
-    const failedIds = new Set<string>(
-      results.flatMap((r, idx) =>
-        r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
-      )
-    );
-    if (failedIds.size > 0) {
-      setRemovedIds((prev) => {
-        const next = new Set(prev);
-        failedIds.forEach((id) => next.delete(id));
-        return next;
-      });
-    }
-    setArchivingOutreach(false);
-    void refresh();
-  }, [rows, refresh]);
-
   const runBulk = useCallback(
     async (
       label: string,
@@ -302,7 +275,6 @@ export default function InboxPage() {
       if (ids.length === 0) return;
       setBulkPending(label);
       setBulkResult(null);
-      // Optimistically hide the affected rows.
       setRemovedIds((prev) => {
         const next = new Set(prev);
         ids.forEach((id) => next.add(id));
@@ -314,12 +286,6 @@ export default function InboxPage() {
       const failed = results.filter((r) => r.status === "rejected");
       const succeeded = ids.length - failed.length;
       if (failed.length > 0) {
-        // Restore the failed ids to the visible list.
-        // Map each rejected result back to its source id by sharing the
-        // index between `results` and `ids` (Promise.allSettled preserves
-        // input order). The original implementation used findIndex on
-        // `results`, which only ever found the first rejection and so
-        // mis-restored ids when ≥2 calls failed.
         const failedIds = new Set<string>(
           results.flatMap((r, idx) =>
             r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
@@ -345,85 +311,106 @@ export default function InboxPage() {
     [selectedIds, clearSelection, refresh]
   );
 
+  const sortLabel = SORT_MODES.find((s) => s.key === sortMode)?.label ?? "oldest wait";
+
   return (
     <Canvas>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
-        subtitle="Every active thread, sectioned by urgency. Search and filter to find one fast."
         meta={
           selectMode ? (
             <span data-testid="inbox-select-count">{selectedIds.length} selected</span>
           ) : (
-            <span>{visible.length} of {allRows.length} threads</span>
+            <span>
+              <strong className="font-medium text-ink">{visible.length}</strong> of {counts.all} threads
+            </span>
           )
         }
       />
 
-      {summary ? (
-        <div className="mb-6 grid grid-cols-3 gap-3">
-          <KpiTile label="Unread" value={summary.unreadThreads} />
-          <KpiTile label="At risk" value={summary.atRiskThreads} tone={summary.atRiskThreads > 0 ? "warn" : "ok"} />
-          <KpiTile label="Oldest pending inbound" value={oldestPending} small />
-        </div>
-      ) : null}
+      <div className="mb-[14px] flex items-center gap-2 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-ink-3">
+        <Search className="h-[14px] w-[14px]" strokeWidth={1.6} />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search people, keywords…"
+          className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
+        />
+      </div>
 
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <label className="relative flex min-w-0 flex-1 items-center">
-          <Search className="absolute left-3 h-[14px] w-[14px] text-ink-3" strokeWidth={1.6} />
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search people, keywords…"
-            className="w-full rounded-[10px] border border-hairline bg-paper py-[8px] pl-9 pr-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-ink-3 focus:outline-none"
-          />
-        </label>
-        <div className="flex shrink-0 rounded-[10px] border border-hairline bg-paper p-[2px]">
-          {FILTERS.map((f) => (
+      <div className="mb-[18px] flex flex-wrap items-center gap-[2px] border-b border-hairline">
+        {TABS.map((entry) => {
+          const active = tab === entry.key;
+          const count = counts[entry.key];
+          const tone =
+            entry.key === "overdue"
+              ? "text-risk-overdue"
+              : entry.key === "waiting"
+                ? "text-risk-waiting"
+                : "text-ink-4";
+          return (
             <button
-              key={f.key}
+              key={entry.key}
               type="button"
-              onClick={() => setFilter(f.key)}
+              onClick={() => setTab(entry.key)}
               className={cn(
-                "rounded-[8px] px-3 py-[6px] text-[12px] tracking-[-0.005em] transition-colors duration-calm",
-                filter === f.key ? "bg-ink text-paper font-medium" : "text-ink-2 hover:text-ink"
+                "relative -mb-px px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                active ? "font-medium text-ink" : "text-ink-3 hover:text-ink"
               )}
             >
-              {f.label}
+              {entry.label}
+              <span className={cn("ml-[5px] font-mono text-[10px]", active ? "text-ink-2" : tone)}>
+                {count}
+              </span>
+              {active ? (
+                <span
+                  aria-hidden
+                  className="absolute bottom-[-1px] left-[14px] right-[14px] h-[2px] bg-ink"
+                />
+              ) : null}
             </button>
-          ))}
-        </div>
-        <select
-          value={platformFilter}
-          onChange={(e) => setPlatformFilter(e.target.value as PlatformFilter)}
-          className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
-          aria-label="Filter by platform"
-        >
-          {PLATFORM_FILTERS.map((p) => (
-            <option key={p.key} value={p.key}>{p.label}</option>
-          ))}
-        </select>
-        <select
-          value={sortMode}
-          onChange={(e) => setSortMode(e.target.value as SortMode)}
-          className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
-          aria-label="Sort threads"
-        >
-          {SORT_MODES.map((s) => (
-            <option key={s.key} value={s.key}>{s.label}</option>
-          ))}
-        </select>
-        {filter === "outreach" && rows.length > 0 ? (
-          <button
-            type="button"
-            disabled={!!archivingOutreach}
-            onClick={() => void archiveAllOutreach()}
-            className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 hover:bg-paper-2 disabled:opacity-50"
+          );
+        })}
+        <div className="ml-auto flex items-center gap-3 pr-1 font-mono text-[11px] text-ink-3">
+          <select
+            value={platformFilter}
+            onChange={(e) => setPlatformFilter(e.target.value as PlatformFilter)}
+            aria-label="Platform"
+            className="bg-transparent text-ink-2 outline-none hover:text-ink"
           >
-            {archivingOutreach ? `Archiving ${rows.length}…` : `Archive all (${rows.length})`}
-          </button>
-        ) : null}
+            {PLATFORM_FILTERS.map((p) => (
+              <option key={p.key} value={p.key}>{p.label}</option>
+            ))}
+          </select>
+          <span aria-hidden className="text-ink-3/60">·</span>
+          <select
+            value={category}
+            onChange={(e) => setCategory(e.target.value as CategoryFilter)}
+            aria-label="Kind"
+            className="bg-transparent text-ink-2 outline-none hover:text-ink"
+          >
+            {CATEGORY_FILTERS.map((c) => (
+              <option key={c.key} value={c.key}>{c.label}</option>
+            ))}
+          </select>
+          <span aria-hidden className="text-ink-3/60">·</span>
+          <span>
+            sort:{" "}
+            <select
+              value={sortMode}
+              onChange={(e) => setSortMode(e.target.value as SortMode)}
+              aria-label="Sort"
+              className="bg-transparent text-ink-2 outline-none hover:text-ink"
+            >
+              {SORT_MODES.map((s) => (
+                <option key={s.key} value={s.key}>{s.label} ↓</option>
+              ))}
+            </select>
+            <span className="sr-only">{sortLabel}</span>
+          </span>
+        </div>
       </div>
 
       {degraded ? (
@@ -461,8 +448,8 @@ export default function InboxPage() {
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
       ) : visible.length === 0 ? (
         <CaughtUp
-          title={query || filter !== "all" ? "Nothing matches that filter." : "You’re caught up."}
-          body={query || filter !== "all" ? "Clear the filter or try a different search." : "No conversations need you right now."}
+          title={query || tab !== "all" || category !== "any" ? "Nothing matches that filter." : "You’re caught up."}
+          body={query || tab !== "all" || category !== "any" ? "Clear the filter or try a different search." : "No conversations need you right now."}
         />
       ) : (
         <>
@@ -484,25 +471,17 @@ export default function InboxPage() {
               </button>
             </div>
           ) : null}
-          {buckets.map((bucket) =>
-            bucket.items.length ? (
-              <section key={bucket.key}>
-                <SectionDivider label={bucket.label} />
-                <div className="flex flex-col">
-                  {bucket.items.map((row) => (
-                    <SelectableThreadRow
-                      key={row.id}
-                      row={row}
-                      selectMode={selectMode}
-                      selected={selectedSet.has(row.id)}
-                      onToggle={toggleId}
-                      onPersonChanged={() => void refresh()}
-                    />
-                  ))}
-                </div>
-              </section>
-            ) : null
-          )}
+          <div className="flex flex-col">
+            {rows.map((row) => (
+              <InboxRowItem
+                key={row.id}
+                row={row}
+                selectMode={selectMode}
+                selected={selectedSet.has(row.id)}
+                onToggle={toggleId}
+              />
+            ))}
+          </div>
         </>
       )}
 
@@ -564,29 +543,55 @@ export default function InboxPage() {
   );
 }
 
-function KpiTile({
-  label,
-  value,
-  small,
-  tone = "ok"
-}: {
-  label: string;
-  value: number | string;
-  small?: boolean;
-  tone?: "ok" | "warn";
-}) {
+interface InboxRowItemProps {
+  row: InboxRow;
+  selectMode: boolean;
+  selected: boolean;
+  onToggle: (id: string, opts: { shiftKey: boolean }) => void;
+}
+
+function InboxRowItem({ row, selectMode, selected, onToggle }: InboxRowItemProps) {
+  const right = rightLabelFor(row);
+  const dot = dotFor(row);
+  const cleanPreview = normalizePreview(row.preview);
+  const previewBody =
+    row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
+
+  const onClick = (event: React.MouseEvent) => {
+    if (event.metaKey || event.ctrlKey || selectMode) {
+      event.preventDefault();
+      onToggle(row.id, { shiftKey: event.shiftKey });
+    }
+  };
+
   return (
-    <div className="rounded-card border border-hairline bg-paper px-4 py-3">
-      <p className="m-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{label}</p>
-      <p
-        className={cn(
-          "m-0 mt-[2px] font-display font-semibold tracking-[-0.02em]",
-          small ? "text-[18px]" : "text-[26px]",
-          tone === "warn" ? "text-risk-overdue" : "text-ink"
-        )}
-      >
-        {value}
-      </p>
-    </div>
+    <Link
+      href={`/thread/${row.id}`}
+      onClick={onClick}
+      className={cn(
+        "grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        selected ? "bg-paper-2" : ""
+      )}
+    >
+      <PersonAvatar
+        name={row.personName}
+        avatarUrl={row.personAvatarUrl}
+        size={28}
+        className="text-[11px]"
+      />
+      <span className="rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3">
+        {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
+      </span>
+      <span className="flex min-w-0 items-baseline gap-[10px]">
+        <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+          {row.personName}
+        </span>
+        <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
+      </span>
+      <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
+        <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${dot}`} />
+        <span className={right.tone}>{right.text}</span>
+      </span>
+    </Link>
   );
 }

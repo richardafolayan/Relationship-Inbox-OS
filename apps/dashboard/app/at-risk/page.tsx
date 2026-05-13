@@ -1,32 +1,26 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { InboxResponse, InboxRow } from "@/lib/types";
-import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
-import { ThreadRow } from "@/components/common/thread-row";
+import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
+import { PersonAvatar } from "@/components/common/person-avatar";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { cn } from "@/lib/utils";
 
-// At-risk page: overdue + waiting threads with the operator owing a reply.
-// v0.3.0 investments per Q3:
-//   - Aggregate burn-down: groups visible threads into four wait-time
-//     buckets and renders a stacked bar so the operator sees the shape
-//     of the backlog at a glance ("most of the at-risk pile is in the
-//     24-72h zone, push through that").
-//   - Suggested triage order: sort dropdown with "Oldest first" as the
-//     default. The intent is to clear the longest-waiting threads first
-//     because every additional day of silence amplifies the perception
-//     of being ghosted.
-//   - Batch SLA actions: alongside Reply Focus Mode, expose
-//     "Snooze visible 24h" and "Archive visible" buttons so the operator
-//     can act on the whole at-risk set in one stroke when they decide a
-//     batch is unrecoverable or worth deferring.
-//   - Reply Focus Mode: kept intact - one-thread-at-a-time modal that
-//     walks through every at-risk thread.
+// At-risk - threads where the operator owes a reply, framed as relationship
+// decay rather than ops triage. Stat trio (Critical / At risk / Watch)
+// over a decay-meter list with a one-click "Warm up ↗" CTA. Batch actions
+// and Reply Focus Mode stay accessible from the header.
+//
+// The runner returns thread-level wait times, not person-level dormancy.
+// Buckets here therefore measure "hours since they last messaged you" -
+// the closest signal we have to "relationship decay" without a separate
+// last-contact-per-person query.
 
 type TriageSort = "oldest" | "newest";
 
@@ -35,19 +29,38 @@ const SORT_OPTIONS: { key: TriageSort; label: string }[] = [
   { key: "newest", label: "Newest first" }
 ];
 
+type DecayTone = "critical" | "atrisk" | "watch";
+
 interface Bucket {
-  key: string;
+  key: DecayTone;
   label: string;
+  sub: string;
   minHours: number;
   maxHours: number | null;
-  tone: "amber" | "orange" | "red" | "deep";
 }
 
 const BUCKETS: Bucket[] = [
-  { key: "<24h", label: "Last 24h", minHours: 0, maxHours: 24, tone: "amber" },
-  { key: "24-72h", label: "24-72h", minHours: 24, maxHours: 72, tone: "orange" },
-  { key: "72h-7d", label: "72h - 7d", minHours: 72, maxHours: 24 * 7, tone: "red" },
-  { key: ">7d", label: "Over 7d", minHours: 24 * 7, maxHours: null, tone: "deep" }
+  {
+    key: "critical",
+    label: "Critical · 7d+",
+    sub: "cold, considered lost without effort",
+    minHours: 24 * 7,
+    maxHours: null
+  },
+  {
+    key: "atrisk",
+    label: "At risk · 3–7d",
+    sub: "drifting — easy to recover",
+    minHours: 24 * 3,
+    maxHours: 24 * 7
+  },
+  {
+    key: "watch",
+    label: "Watch · <3d",
+    sub: "trending quiet, not urgent yet",
+    minHours: 0,
+    maxHours: 24 * 3
+  }
 ];
 
 function waitHoursFor(row: InboxRow): number | null {
@@ -60,29 +73,57 @@ function waitHoursFor(row: InboxRow): number | null {
 
 function bucketFor(hours: number): Bucket {
   for (const bucket of BUCKETS) {
-    if (
-      hours >= bucket.minHours &&
-      (bucket.maxHours === null || hours < bucket.maxHours)
-    ) {
+    if (hours >= bucket.minHours && (bucket.maxHours === null || hours < bucket.maxHours)) {
       return bucket;
     }
   }
-  // Fallback to last bucket - shouldn't happen because the last bucket
-  // has maxHours = null.
   return BUCKETS[BUCKETS.length - 1] as Bucket;
 }
 
-function bucketTone(tone: Bucket["tone"]): string {
+function decayDotClass(tone: DecayTone): string {
   switch (tone) {
-    case "amber":
-      return "bg-risk-waiting";
-    case "orange":
-      return "bg-[oklch(72%_0.16_60)]";
-    case "red":
+    case "critical":
       return "bg-risk-overdue";
-    case "deep":
-      return "bg-[oklch(45%_0.18_28)]";
+    case "atrisk":
+      return "bg-risk-waiting";
+    case "watch":
+      return "bg-ink-4";
   }
+}
+
+function decayFillClass(tone: DecayTone): string {
+  switch (tone) {
+    case "critical":
+      return "bg-risk-overdue";
+    case "atrisk":
+      return "bg-risk-waiting";
+    case "watch":
+      return "bg-ink-4";
+  }
+}
+
+function decayNumClass(tone: DecayTone): string {
+  switch (tone) {
+    case "critical":
+      return "text-risk-overdue";
+    case "atrisk":
+      return "text-risk-waiting";
+    case "watch":
+      return "text-ink";
+  }
+}
+
+function formatDecay(hours: number): string {
+  if (hours < 24) return `${Math.max(1, Math.round(hours))}h`;
+  const days = Math.round(hours / 24);
+  return `${days}d`;
+}
+
+// Decay meter fill: scaled against a 14-day "definitely cold" baseline.
+// 7d → 50%, 14d+ → 100%. Watch bucket fills below 50%.
+function meterPct(hours: number): number {
+  const pct = (hours / (24 * 14)) * 100;
+  return Math.max(8, Math.min(100, pct));
 }
 
 export default function AtRiskPage() {
@@ -95,9 +136,6 @@ export default function AtRiskPage() {
   const [triageSort, setTriageSort] = useState<TriageSort>("oldest");
   const [batchPending, setBatchPending] = useState<"snooze" | "archive" | null>(null);
   const [batchResult, setBatchResult] = useState<string | null>(null);
-  // Optimistic-removal: rows we just acted on disappear instantly. The
-  // next /data/inbox refresh reconciles - if the server didn't catch
-  // up, the row stays gone until poll.
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const router = useRouter();
 
@@ -106,7 +144,6 @@ export default function AtRiskPage() {
       const inbox = await apiGet<InboxResponse>("/runner/data/inbox");
       setData(inbox);
       setError(null);
-      // Drop optimistically-removed ids the server has caught up on.
       const stillPending = new Set(
         inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
       );
@@ -152,36 +189,19 @@ export default function AtRiskPage() {
     return copy;
   }, [atRisk, triageSort]);
 
-  const overdue = useMemo(
-    () => sortedAtRisk.filter((row) => row.riskLevel === "RED"),
-    [sortedAtRisk]
-  );
-  const waiting = useMemo(
-    () => sortedAtRisk.filter((row) => row.riskLevel === "AMBER"),
-    [sortedAtRisk]
-  );
-  const total = sortedAtRisk.length;
-
-  // Burn-down: count per time bucket. Used both for the small stacked
-  // bar at the top of the sidebar and for the per-bucket count rows
-  // underneath. Buckets are static so empty buckets render with 0 -
-  // preserves the shape "<24h | 24-72h | 72h-7d | >7d" the operator
-  // can scan against over time.
   const bucketCounts = useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const bucket of BUCKETS) counts.set(bucket.key, 0);
+    const counts = new Map<DecayTone, number>();
+    BUCKETS.forEach((b) => counts.set(b.key, 0));
     for (const row of sortedAtRisk) {
       const hours = waitHoursFor(row);
       if (hours === null) continue;
       const bucket = bucketFor(hours);
       counts.set(bucket.key, (counts.get(bucket.key) ?? 0) + 1);
     }
-    return BUCKETS.map((bucket) => ({
-      ...bucket,
-      count: counts.get(bucket.key) ?? 0
-    }));
+    return BUCKETS.map((bucket) => ({ ...bucket, count: counts.get(bucket.key) ?? 0 }));
   }, [sortedAtRisk]);
 
+  const total = sortedAtRisk.length;
   const focusThread: InboxRow | undefined = sortedAtRisk[focusIndex];
   const focusDone = focusOpen && !focusThread;
 
@@ -213,23 +233,21 @@ export default function AtRiskPage() {
     advance();
   };
 
-  // Batch SLA actions. Operate on the currently-visible at-risk set
-  // (post-sort, post-removed). All actions are confirm-gated because
-  // they touch every visible row at once.
   const runBatch = async (
     label: "snooze" | "archive",
     buildPath: (id: string) => string,
     body: Record<string, unknown> = {}
   ) => {
     if (sortedAtRisk.length === 0) return;
-    const verb = label === "snooze" ? `Snooze ${sortedAtRisk.length} visible threads for 24h?` : `Archive ${sortedAtRisk.length} visible threads?`;
+    const verb =
+      label === "snooze"
+        ? `Snooze ${sortedAtRisk.length} visible threads for 24h?`
+        : `Archive ${sortedAtRisk.length} visible threads?`;
     const ok = window.confirm(`${verb} You can unarchive any of them from the Archived view.`);
     if (!ok) return;
     setBatchPending(label);
     setBatchResult(null);
     const ids = sortedAtRisk.map((row) => row.id);
-    // Optimistic removal so the list clears instantly. Failed ids
-    // restore below if the server complains.
     setRemovedIds((prev) => {
       const next = new Set(prev);
       ids.forEach((id) => next.add(id));
@@ -264,11 +282,7 @@ export default function AtRiskPage() {
   if (error && !data) {
     return (
       <Canvas>
-        <PageHead
-          eyebrow="Needs you"
-          title="At risk"
-          subtitle="Threads breaching your reply SLA. Clear these first to stop relationships going cold."
-        />
+        <PageHead eyebrow="Relationship health" title="At risk" />
         <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-risk-overdue">
           Could not load at-risk threads
         </p>
@@ -280,57 +294,54 @@ export default function AtRiskPage() {
   return (
     <Canvas>
       <PageHead
-        eyebrow="Needs you"
-        title="At risk"
-        subtitle="Threads breaching your reply SLA. Clear these first to stop relationships going cold."
+        eyebrow="Relationship health"
+        title="At Risk"
         meta={
-          <div className="flex flex-wrap items-center justify-end gap-3">
-            <span>
-              <span className="text-ink">{overdue.length}</span> overdue ·{" "}
-              <span className="text-ink">{waiting.length}</span> waiting
-            </span>
-            {total > 0 ? (
-              <>
-                <select
-                  value={triageSort}
-                  onChange={(event) => setTriageSort(event.target.value as TriageSort)}
-                  className="shrink-0 rounded-[10px] border border-hairline bg-paper px-2 py-[6px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
-                  aria-label="Triage order"
-                >
-                  {SORT_OPTIONS.map((option) => (
-                    <option key={option.key} value={option.key}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-                <Button
-                  variant="quiet"
-                  disabled={!!batchPending}
-                  onClick={() =>
-                    void runBatch("snooze", (id) => `/runner/control/thread/${id}/snooze`, { hours: 24 })
-                  }
-                  className="px-[14px] py-[7px] text-[12px]"
-                >
-                  {batchPending === "snooze" ? "Snoozing…" : "Snooze visible 24h"}
-                </Button>
-                <Button
-                  variant="quiet"
-                  disabled={!!batchPending}
-                  onClick={() =>
-                    void runBatch("archive", (id) => `/runner/control/thread/${id}/archive`)
-                  }
-                  className="px-[14px] py-[7px] text-[12px]"
-                >
-                  {batchPending === "archive" ? "Archiving…" : "Archive visible"}
-                </Button>
-                <Button variant="quiet" onClick={openFocus} className="px-[14px] py-[7px] text-[12px]">
-                  Reply focus mode
-                </Button>
-              </>
-            ) : null}
-          </div>
+          <span>
+            across <strong className="font-medium text-ink">{total}</strong> threads
+          </span>
         }
       />
+
+      {total > 0 ? (
+        <div className="mb-6 flex flex-wrap items-center gap-3">
+          <select
+            value={triageSort}
+            onChange={(event) => setTriageSort(event.target.value as TriageSort)}
+            className="shrink-0 rounded-[10px] border border-hairline bg-paper px-2 py-[6px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
+            aria-label="Triage order"
+          >
+            {SORT_OPTIONS.map((option) => (
+              <option key={option.key} value={option.key}>
+                {option.label}
+              </option>
+            ))}
+          </select>
+          <Button
+            variant="quiet"
+            disabled={!!batchPending}
+            onClick={() =>
+              void runBatch("snooze", (id) => `/runner/control/thread/${id}/snooze`, { hours: 24 })
+            }
+            className="px-[14px] py-[7px] text-[12px]"
+          >
+            {batchPending === "snooze" ? "Snoozing…" : "Snooze visible 24h"}
+          </Button>
+          <Button
+            variant="quiet"
+            disabled={!!batchPending}
+            onClick={() =>
+              void runBatch("archive", (id) => `/runner/control/thread/${id}/archive`)
+            }
+            className="px-[14px] py-[7px] text-[12px]"
+          >
+            {batchPending === "archive" ? "Archiving…" : "Archive visible"}
+          </Button>
+          <Button variant="quiet" onClick={openFocus} className="px-[14px] py-[7px] text-[12px]">
+            Reply focus mode
+          </Button>
+        </div>
+      ) : null}
 
       {batchResult ? (
         <p className="mb-3 font-mono text-[11px] text-ink-3">{batchResult}</p>
@@ -341,57 +352,73 @@ export default function AtRiskPage() {
       ) : total === 0 ? (
         <CaughtUp title="You're caught up." body="Nothing is at risk right now." />
       ) : (
-        <div className="grid grid-cols-1 gap-12 lg:grid-cols-[1fr_280px]">
-          <div>
-            {overdue.length ? (
-              <section>
-                <SectionDivider label="Overdue - they've waited longest" />
-                <div className="flex flex-col">
-                  {overdue.map((row) => (
-                    <ThreadRow key={row.id} row={row} />
-                  ))}
-                </div>
-              </section>
-            ) : null}
-            {waiting.length ? (
-              <section>
-                <SectionDivider label="Waiting on you" />
-                <div className="flex flex-col">
-                  {waiting.map((row) => (
-                    <ThreadRow key={row.id} row={row} />
-                  ))}
-                </div>
-              </section>
-            ) : null}
+        <>
+          <div className="mb-[28px] grid grid-cols-1 gap-[12px] sm:grid-cols-3">
+            {bucketCounts.map((bucket) => (
+              <div
+                key={bucket.key}
+                className="rounded-[14px] border border-hairline bg-paper px-[20px] py-[18px]"
+              >
+                <p className="mb-[10px] flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                  <span className={cn("inline-block h-[7px] w-[7px] rounded-full", decayDotClass(bucket.key))} />
+                  {bucket.label}
+                </p>
+                <p
+                  className={cn(
+                    "m-0 mb-[6px] font-display text-[32px] font-semibold leading-[1] tracking-[-0.022em]",
+                    decayNumClass(bucket.key)
+                  )}
+                >
+                  {bucket.count}
+                </p>
+                <p className="m-0 font-mono text-[11px] text-ink-3">{bucket.sub}</p>
+              </div>
+            ))}
           </div>
 
-          <aside className="lg:pt-[18px]">
-            <SectionDivider label="Burn-down" />
-            <BurnDownBar buckets={bucketCounts} total={total} />
-            <div className="mt-4 flex flex-col">
-              {bucketCounts.map((bucket) => (
-                <div
-                  key={bucket.key}
-                  className="flex items-center justify-between border-t border-hairline px-1 py-[12px] last:border-b last:border-hairline"
+          <div className="flex flex-col">
+            {sortedAtRisk.map((row) => {
+              const hours = waitHoursFor(row) ?? 0;
+              const bucket = bucketFor(hours);
+              return (
+                <Link
+                  key={row.id}
+                  href={`/thread/${row.id}`}
+                  className="group grid grid-cols-[36px_1fr_minmax(140px,180px)_auto] items-center gap-[18px] border-b border-hairline px-1 py-[14px] transition-colors duration-calm hover:bg-paper-2"
                 >
-                  <span className="flex items-center gap-2 text-[13px] text-ink-2">
-                    <span
-                      className={cn(
-                        "inline-block h-[8px] w-[8px] rounded-full",
-                        bucketTone(bucket.tone)
-                      )}
-                    />
-                    {bucket.label}
+                  <PersonAvatar
+                    name={row.personName}
+                    avatarUrl={row.personAvatarUrl}
+                    size={36}
+                    className="text-[13px]"
+                  />
+                  <div className="min-w-0">
+                    <p className="m-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+                      {row.personName}
+                    </p>
+                    <p className="m-0 mt-[1px] truncate text-[12px] text-ink-3">
+                      {PLATFORM_LABEL[row.platform]}
+                      {row.preview ? ` · ${normalizePreview(row.preview)}` : ""}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
+                    <span className="shrink-0">last touch</span>
+                    <span className="relative h-[3px] flex-1 overflow-hidden rounded-pill bg-hairline">
+                      <span
+                        className={cn("absolute inset-y-0 left-0 rounded-pill", decayFillClass(bucket.key))}
+                        style={{ width: `${meterPct(hours)}%` }}
+                      />
+                    </span>
+                    <span className="shrink-0 tabular-nums text-ink-2">{formatDecay(hours)}</span>
+                  </div>
+                  <span className="inline-flex items-center gap-[6px] rounded-pill border border-hairline px-3 py-[7px] text-[12px] text-ink-2 transition-colors duration-calm group-hover:border-ink group-hover:text-ink">
+                    Warm up ↗
                   </span>
-                  <span className="font-mono text-[12px] text-ink-3">{bucket.count}</span>
-                </div>
-              ))}
-            </div>
-            <p className="mt-3 m-0 text-[12px] leading-[1.55] text-ink-3">
-              Recommended order: clear the right-most (oldest) buckets first. Every additional day of silence amplifies the perception of being ghosted.
-            </p>
-          </aside>
-        </div>
+                </Link>
+              );
+            })}
+          </div>
+        </>
       )}
 
       {focusOpen ? (
@@ -407,9 +434,7 @@ export default function AtRiskPage() {
           >
             <div className="mb-4 flex items-center justify-between">
               <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                {focusDone
-                  ? "Reply focus mode"
-                  : `Thread ${focusIndex + 1} of ${total}`}
+                {focusDone ? "Reply focus mode" : `Thread ${focusIndex + 1} of ${total}`}
               </p>
               <button
                 type="button"
@@ -426,7 +451,7 @@ export default function AtRiskPage() {
                   All done.
                 </h3>
                 <p className="m-0 text-[14px] text-ink-3">
-                  You've worked through every at-risk thread.
+                  You&rsquo;ve worked through every at-risk thread.
                 </p>
                 <div className="mt-6 flex justify-center">
                   <Button variant="quiet" onClick={closeFocus}>done</Button>
@@ -467,31 +492,5 @@ export default function AtRiskPage() {
         </div>
       ) : null}
     </Canvas>
-  );
-}
-
-function BurnDownBar({
-  buckets,
-  total
-}: {
-  buckets: Array<Bucket & { count: number }>;
-  total: number;
-}) {
-  if (total === 0) return null;
-  return (
-    <div className="mt-3 flex h-[6px] w-full overflow-hidden rounded-full bg-paper-2">
-      {buckets.map((bucket) => {
-        const pct = bucket.count === 0 ? 0 : (bucket.count / total) * 100;
-        if (pct === 0) return null;
-        return (
-          <div
-            key={bucket.key}
-            className={cn("h-full", bucketTone(bucket.tone))}
-            style={{ width: `${pct}%` }}
-            title={`${bucket.label}: ${bucket.count}`}
-          />
-        );
-      })}
-    </div>
   );
 }
