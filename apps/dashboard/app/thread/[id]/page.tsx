@@ -1178,9 +1178,6 @@ export default function ThreadPage() {
       const focusedBubble = target.closest('[data-focused-bubble="true"]');
       const composer = target.closest('[data-thread-composer="true"]');
       const pill = target.closest('[data-focused-pill="true"]');
-      // Both pill variants ("Focus this thread" on the parent + "Focus
-      // thread: <text>" on a reply chip) act as focus swaps. The title
-      // starts with "Focus" for both so a single prefix matches.
       const focusSwap = target.closest('button[title^="Focus"]');
       if (focusedBubble || composer || pill || focusSwap) return;
       setFocusedThreadParentId(null);
