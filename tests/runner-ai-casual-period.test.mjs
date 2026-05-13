@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { softenCasualTrailingPeriod, applyVoiceRules } from "../apps/runner/dist/services/ai.js";
+import {
+  softenCasualTrailingPeriod,
+  applyVoiceRules,
+  enforceSentenceStartCapitals
+} from "../apps/runner/dist/services/ai.js";
 
 test("softenCasualTrailingPeriod strips a trailing period from a short single-clause reply", () => {
   assert.equal(
@@ -49,4 +53,55 @@ test("applyVoiceRules still strips em-dashes / semicolons / colons", () => {
     applyVoiceRules("Hey — quick thought; let me know: works?"),
     "Hey , quick thought. let me know, works?"
   );
+});
+
+test("enforceSentenceStartCapitals capitalises after a question mark", () => {
+  assert.equal(
+    enforceSentenceStartCapitals("hope you're good? things have been wild"),
+    "Hope you're good? Things have been wild"
+  );
+});
+
+test("enforceSentenceStartCapitals capitalises after a full stop", () => {
+  assert.equal(
+    enforceSentenceStartCapitals("Bet. catch you later"),
+    "Bet. Catch you later"
+  );
+});
+
+test("enforceSentenceStartCapitals capitalises the first character of the message", () => {
+  assert.equal(
+    enforceSentenceStartCapitals("yhh fairs bro"),
+    "Yhh fairs bro"
+  );
+});
+
+test("enforceSentenceStartCapitals leaves mid-sentence lowercase 'i' alone", () => {
+  assert.equal(
+    enforceSentenceStartCapitals("yhh i'm down, what time you thinking"),
+    "Yhh i'm down, what time you thinking"
+  );
+});
+
+test("enforceSentenceStartCapitals is a no-op when sentences are already capitalised", () => {
+  const input = "Hey, hope you're good? Things have been wild. Catch you soon";
+  assert.equal(enforceSentenceStartCapitals(input), input);
+});
+
+test("enforceSentenceStartCapitals doesn't touch messages starting with an emoji", () => {
+  assert.equal(
+    enforceSentenceStartCapitals("🌚 you serious"),
+    "🌚 you serious"
+  );
+});
+
+test("enforceSentenceStartCapitals handles multiple sentence boundaries", () => {
+  assert.equal(
+    enforceSentenceStartCapitals("Damn fairs bro, you good? wanna talk? lmk"),
+    "Damn fairs bro, you good? Wanna talk? Lmk"
+  );
+});
+
+test("enforceSentenceStartCapitals is a no-op on empty input", () => {
+  assert.equal(enforceSentenceStartCapitals(""), "");
 });

@@ -316,6 +316,7 @@ PUNCTUATION AND STRUCTURE
 - Full stops basically absent. Do NOT end a casual message with a full stop. End with emoji or "?" if it is a question, or just end. Mid-message full stops are also rare — prefer a comma chain. If you find yourself writing two short sentences glued by a full stop, join them with a comma instead.
 - "Hey", "Bet", "Yhh fairs" — no trailing full stop, ever. "Yhh i'm down, what time you thinking" — no trailing full stop. This is the most consistent tell of off-voice text.
 - Capitals at message start. Lowercase or capital "i" pronoun both fine.
+- HARD RULE — sentence starts get a capital letter. After a question mark, full stop, or exclamation mark, the next character that starts the next sentence MUST be uppercase. "Hey, you good? things have been wild" is WRONG, the "t" must be a capital. Mid-sentence lowercase "i" pronoun is fine and natural to Richard, that rule is only about sentence starts.
 - Repeated letters for vibe (Yhh, Calmm, Bonjourr, againnnn, Niceeeeeee).
 
 ADDRESS TERMS
@@ -547,6 +548,39 @@ export function applyVoiceRules(text: string): string {
     .replace(/:/g, ",")   // colon → comma
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+// Enforce sentence-start capitalisation after . ? !. The voice prompts
+// both ask for this but the model still slips ("hope you're good? things
+// have been..." → should be "Things"). Belt-and-braces, applied to every
+// text-producing AI call alongside applyVoiceRules.
+//
+// Rules:
+//   - Looks for [.?!] followed by whitespace + a lowercase ASCII letter,
+//     uppercases that letter. Standalone "?", "!" without trailing
+//     whitespace are not sentence boundaries (they could be inside a
+//     quoted phrase, emoji, or url) and are left alone.
+//   - Lowercase "i" as a pronoun is uppercased to "I" when it lands at
+//     sentence start — that's grammar, not voice. Mid-sentence "i" is
+//     untouched.
+//   - The very first character of the message is also capitalised, to
+//     mirror the "capitals at message start" rule in both voice prompts.
+//
+// Examples:
+//   "hope you're good? things have been..." → "hope you're good? Things have been..."
+//   "Bet. Catch you later"                  → "Bet. Catch you later" (already capital, no-op)
+//   "yhh i'm down, what time you thinking"  → "Yhh i'm down, what time you thinking"
+//   "Damn fairs bro, you good? wanna talk"  → "Damn fairs bro, you good? Wanna talk"
+export function enforceSentenceStartCapitals(text: string): string {
+  if (!text) return text;
+  let result = text.replace(/([.?!])(\s+)([a-z])/g, (_match, p1, p2, p3) => `${p1}${p2}${(p3 as string).toUpperCase()}`);
+  // First-character capitalisation. Skip when the message starts with an
+  // emoji / number / punctuation — only kicks in when the leading char is
+  // a lowercase ASCII letter, which is the case we actually want to fix.
+  if (/^[a-z]/.test(result)) {
+    result = result.charAt(0).toUpperCase() + result.slice(1);
+  }
+  return result;
 }
 
 // Soft trailing-period strip for short casual messages. The casual prompt
@@ -1235,7 +1269,8 @@ ${recentExchange || "(no recent messages)"}`;
     return {
       ...parsed,
       replies: parsed.replies.map((r) => {
-        const cleaned = applyVoiceRules(r.text);
+        let cleaned = applyVoiceRules(r.text);
+        cleaned = enforceSentenceStartCapitals(cleaned);
         return {
           ...r,
           text: tier === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned
@@ -1270,7 +1305,7 @@ ${recentExchange || "(no recent messages)"}`;
       });
 
       const raw = response.choices[0]?.message?.content?.trim() || input.text;
-      return applyVoiceRules(raw);
+      return enforceSentenceStartCapitals(applyVoiceRules(raw));
     } catch (error) {
       console.warn(
         `[ai] transformReply failed (provider=${provider}, model=${model}, mode=${input.mode}); returning original text. ${classifyLlmError(error, provider)}`
@@ -1643,7 +1678,8 @@ Return strict JSON: { "text": "string" }`;
       const content = response.choices[0]?.message?.content;
       if (!content) return trimmed;
       const parsed = z.object({ text: z.string().min(1) }).parse(parseAiJson(content, model));
-      const cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+      let cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+      cleaned = enforceSentenceStartCapitals(cleaned);
       return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
     } catch (error) {
       console.warn(
