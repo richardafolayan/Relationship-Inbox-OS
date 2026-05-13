@@ -867,11 +867,15 @@ export function createAiService(settingsStore: SettingsStore): AiService {
 
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
-      // safeTruncate splits on Unicode code points so a 140-char cut won't
-      // bisect an emoji's surrogate pair. Without it, a message ending in
-      // an emoji at the boundary corrupts every subsequent prisma.thread
+      // safeTruncate splits on Unicode code points so the cut won't bisect
+      // an emoji's surrogate pair. Without it, a message ending in an
+      // emoji at the boundary corrupts every subsequent prisma.thread
       // .update — see Sarah Nwisi sync-fail bug.
-      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 140) : "No clear ask yet.",
+      // 120-char cap matches the Today hero headline's 4-line budget
+      // (max-w-22ch, 36px display, ~31 chars/line). Staying within budget
+      // means the operator reads the full fallback rather than an
+      // ellipsis truncation (issue #193).
+      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",
@@ -905,7 +909,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const prompt = `Return strict JSON matching this exact shape:
 {
   "summary": "string — 1-2 sentence rolling summary of the relationship",
-  "what_they_want": "string — what would deepen this connection or make a great reply. If they made an explicit ask (book a call, share a date, answer a question), that goes here. Otherwise, name what's worth acknowledging or following up on (a thing they shared, a hook in their last message, the warmth they extended). One or two short sentences, plain prose, British English.",
+  "what_they_want": "string — 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER in total, plain prose, British English, no trailing ellipsis. This headlines the Today 'First up' hero card: recap what the last couple of messages have been about and name what the contact is waiting on the operator to address next, so the operator instantly remembers the thread on opening Today. Write it as a brief reminder to the operator, not the contact's quoted words. Examples: 'She shared photos from Lagos and asked when you're free for dinner.', 'Carlos confirmed Friday lunch — he's waiting on you to pick a time.', 'They sent the Stripe intro you asked for; owes them a thank-you and your next step.'",
   "open_loops": ["string", ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
@@ -927,6 +931,13 @@ Transcript:
 ${transcript}`;
 
     const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
+    // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
+    // returns longer prose; this keeps the Today hero headline within its
+    // 4-line budget. safeTruncate trims at the code-point boundary and
+    // does not append an ellipsis (issue #193).
+    if (result.what_they_want.length > 120) {
+      result.what_they_want = safeTruncate(result.what_they_want, 120);
+    }
     return result;
   }
 
