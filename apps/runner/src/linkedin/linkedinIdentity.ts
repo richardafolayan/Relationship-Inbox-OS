@@ -150,11 +150,14 @@ export function normalizeCanonicalLinkedInThreadId(input: {
   return null;
 }
 
+// rowIndex was previously in this signature but never used. Including it
+// would actually be wrong — the whole point of the temporary candidate id
+// is stable identity across scans, so a position-dependent component would
+// hurt dedupe rather than help it.
 export function buildTemporaryCandidateId(input: {
   displayName: string;
   preview: string;
   listTimestamp: string;
-  rowIndex?: number;
 }): string {
   const displayName = clean(input.displayName).toLowerCase();
   const preview = clean(input.preview).toLowerCase();

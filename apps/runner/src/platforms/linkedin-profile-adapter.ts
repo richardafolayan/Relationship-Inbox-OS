@@ -98,8 +98,7 @@ const PHASE_B_TIMEOUT_MS = 8_000;
 export async function extractProfile(page: Page, profileUrl: string): Promise<ProfileExtractionResult> {
   const phaseA = await runWithTimeout(
     PHASE_A_TIMEOUT_MS,
-    () => extractMainProfile(page, profileUrl),
-    "phase_a"
+    () => extractMainProfile(page, profileUrl)
   );
   if (phaseA.kind === "timeout") {
     return { failed: true, reason: "timeout", detail: "phase_a" };
@@ -115,8 +114,7 @@ export async function extractProfile(page: Page, profileUrl: string): Promise<Pr
 
   const phaseB = await runWithTimeout(
     PHASE_B_TIMEOUT_MS,
-    () => extractRecentPosts(page, profileUrl),
-    "phase_b"
+    () => extractRecentPosts(page, profileUrl)
   );
   if (phaseB.kind === "ok") {
     profile.recentPosts = phaseB.value;
@@ -131,8 +129,7 @@ export async function extractProfile(page: Page, profileUrl: string): Promise<Pr
 
   const phaseB2 = await runWithTimeout(
     PHASE_B_TIMEOUT_MS,
-    () => extractRecentComments(page, profileUrl),
-    "phase_b2"
+    () => extractRecentComments(page, profileUrl)
   );
   if (phaseB2.kind === "ok") {
     profile.recentComments = phaseB2.value;
@@ -147,8 +144,7 @@ export async function extractProfile(page: Page, profileUrl: string): Promise<Pr
 
   const phaseB3 = await runWithTimeout(
     PHASE_B_TIMEOUT_MS,
-    () => extractRecentReactions(page, profileUrl),
-    "phase_b3"
+    () => extractRecentReactions(page, profileUrl)
   );
   if (phaseB3.kind === "ok") {
     profile.recentReactions = phaseB3.value;
@@ -171,10 +167,8 @@ type WrappedResult<T> =
 
 async function runWithTimeout<T>(
   ms: number,
-  work: () => Promise<T>,
-  label: string
+  work: () => Promise<T>
 ): Promise<WrappedResult<T>> {
-  void label;
   let timer: ReturnType<typeof setTimeout> | null = null;
   const timeoutPromise = new Promise<WrappedResult<T>>((resolve) => {
     timer = setTimeout(() => resolve({ kind: "timeout" }), ms);
