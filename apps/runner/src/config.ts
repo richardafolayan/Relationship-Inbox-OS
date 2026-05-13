@@ -137,6 +137,12 @@ export interface RunnerConfig {
     /** Max sends across all WhatsApp threads in a rolling 24h window. Default 30. */
     dailyCap: number;
   };
+  /** Filesystem dir where the WhatsApp adapter persists downloaded media
+   *  (images, videos, voice notes, stickers). The dashboard streams from
+   *  here via /data/whatsapp-attachment/:guid. Separate from the iMessage
+   *  attachments dir because chat.db owns the iMessage files; WhatsApp's
+   *  media is base64 over the wweb.js socket and has to land somewhere. */
+  whatsappMediaDir: string;
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -369,7 +375,10 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     whatsappSend: {
       minIntervalMs: parseIntOrDefault(env.WHATSAPP_SEND_INTERVAL_MS, 30_000),
       dailyCap: parseIntOrDefault(env.WHATSAPP_DAILY_CAP, 30)
-    }
+    },
+    whatsappMediaDir: env.WHATSAPP_MEDIA_DIR?.trim()
+      ? resolve(env.WHATSAPP_MEDIA_DIR.trim())
+      : resolve(dataDir, "whatsapp_media")
   };
 }
 

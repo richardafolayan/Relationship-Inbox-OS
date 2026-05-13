@@ -25,6 +25,7 @@ import { extractFailureUrl, resolveConnectFailureResponse } from "./services/fai
 import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
+import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
 import { createScanQueue } from "./services/scan-queue";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
@@ -1210,6 +1211,27 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
   } finally {
     db.close();
   }
+}));
+
+// WhatsApp media streaming endpoint. Mirrors the iMessage one, but reads
+// from the runner-managed whatsappMediaDir where the adapter persists
+// downloaded payloads at scan time. The guid is the wweb.js
+// msg.id._serialized after filename-safe sanitisation (see
+// safeIdForFilename in platforms/whatsapp/media.ts) so the dashboard can
+// quote it verbatim from the AttachmentPlaceholder.guid field.
+app.get("/data/whatsapp-attachment/:guid", asyncRoute(async (req, res) => {
+  const { guid } = z.object({ guid: z.string().min(4).max(220) }).parse(req.params);
+  const meta = await findWhatsAppMediaByGuid(guid, runnerConfig.whatsappMediaDir);
+  if (!meta) {
+    res.status(404).json({ error: "whatsapp media not found on disk" });
+    return;
+  }
+  await streamWhatsAppMedia({
+    absolutePath: meta.absolutePath,
+    mimetype: meta.mimetype,
+    byteSize: meta.byteSize,
+    res
+  });
 }));
 
 app.get("/data/settings", asyncRoute(async (_req, res) => {

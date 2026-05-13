@@ -10,6 +10,8 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
 import { IMessageMedia } from "@/components/thread/imessage-media";
+import { WhatsAppMedia } from "@/components/thread/whatsapp-media";
+import { WhatsAppText } from "@/components/thread/whatsapp-text";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -1846,6 +1848,7 @@ export default function ThreadPage() {
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
                       const reactions = (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                      const isWhatsApp = thread.platform === "WHATSAPP";
                       return (
                         <div className="relative">
                           <div
@@ -1857,13 +1860,19 @@ export default function ThreadPage() {
                           >
                             {hasInlineMedia ? (
                               <div className="flex flex-col gap-2">
-                                {playableAttachments.map((a, attIdx) => (
-                                  <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
-                                ))}
+                                {playableAttachments.map((a, attIdx) =>
+                                  isWhatsApp ? (
+                                    <WhatsAppMedia key={a.guid ?? attIdx} attachment={a} />
+                                  ) : (
+                                    <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                                  )
+                                )}
                               </div>
                             ) : null}
                             {showText ? (
-                              <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                              <span className="text-balance whitespace-pre-wrap">
+                                {isWhatsApp ? <WhatsAppText text={message.text} /> : message.text}
+                              </span>
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
@@ -2402,7 +2411,7 @@ export default function ThreadPage() {
                       </div>
                     ) : null}
                   </div>
-                  {thread.platform === "IMESSAGE" ? (
+                  {thread.platform === "IMESSAGE" || thread.platform === "WHATSAPP" ? (
                     <>
                       <input
                         type="file"

@@ -17,22 +17,30 @@
 //   rate limit, rolling 24h cap.
 
 import type {
+  AttachmentPlaceholder,
   NormalizedMessage,
+  OutboundAttachment,
   PlatformAdapter,
   PlatformName,
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
-import type { Client, Chat, Message as WaMessage } from "whatsapp-web.js";
+import type { Client, Message as WaMessage } from "whatsapp-web.js";
 import { createWhatsAppClient } from "./whatsapp/client";
 import { chatToThreadStub } from "./whatsapp/groupResolver";
 import { checkSendGuard, type SendGuardConfig, type SendGuardPrisma } from "./whatsapp/sendGuard";
 import { epochSecondsToIso } from "./whatsapp/whatsappTime";
 import { isGroupJid } from "./whatsapp/whatsappIdentity";
+import { mapWhatsAppKind, persistWhatsAppMedia, safeIdForFilename, type WhatsAppMessageMedia } from "./whatsapp/media";
+import { copyFile, mkdir } from "node:fs/promises";
+import { extname, resolve, join } from "node:path";
 
 export interface WhatsAppAdapterDeps {
   /** Filesystem dir for the LocalAuth session (runnerConfig.profileDirs.WHATSAPP). */
   authDir: string;
+  /** Filesystem dir where downloaded media is persisted (runnerConfig.whatsappMediaDir).
+   *  The dashboard streams from here via /data/whatsapp-attachment/:guid. */
+  mediaDir: string;
   /** Send-guard rate limits (runnerConfig.whatsappSend). */
   sendGuardConfig: SendGuardConfig;
   /** Prisma client used by the send guard for cap / interval queries. */
@@ -128,7 +136,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return Promise.all(messages.map((m) => this.normaliseMessage(m, isGroup)));
   }
 
-  async sendMessage(thread: ThreadStub, text: string): Promise<SendReceipt> {
+  async sendMessage(
+    thread: ThreadStub,
+    text: string,
+    attachments?: OutboundAttachment[]
+  ): Promise<SendReceipt> {
     const client = this.requireClient();
     const guard = await checkSendGuard(
       {
@@ -141,10 +153,97 @@ export class WhatsAppAdapter implements PlatformAdapter {
     if (!guard.allowed) {
       throw new Error(`WhatsApp send blocked: ${guard.reason}`);
     }
-    const sent = await client.sendMessage(thread.platformThreadId, text);
+
+    // No attachments → original text-only path. wweb.js's sendMessage
+    // returns the sent Message object, whose timestamp we mirror.
+    const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
+    if (media.length === 0) {
+      const sent = await client.sendMessage(thread.platformThreadId, text);
+      return {
+        sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
+        verifiedBy: "best_effort"
+      };
+    }
+
+    // With attachments → first media gets the caption (matches WhatsApp
+    // UX where you can attach a photo + type a caption in one send).
+    // Remaining attachments go as separate sends without a caption so
+    // we don't duplicate the text. Each call is gated by the same
+    // send-guard min-interval indirectly via the rolling-24h cap; we
+    // don't re-check the per-recipient interval between the media sends
+    // because they're all part of one operator action.
+    const sentAttachments: AttachmentPlaceholder[] = [];
+    let firstSentTs: number | undefined;
+    for (let i = 0; i < media.length; i++) {
+      const a = media[i]!;
+      let payload: unknown;
+      try {
+        // MessageMedia.fromFilePath is a static factory on the wweb.js
+        // export. The dynamic require here avoids importing fs at the
+        // top of the file (the helper itself does fs.readFileSync).
+        const { MessageMedia: MM } = (await import("whatsapp-web.js")) as unknown as {
+          MessageMedia: {
+            fromFilePath: (path: string) => unknown;
+          };
+        };
+        payload = MM.fromFilePath(a.absolutePath);
+      } catch (err) {
+        throw new Error(
+          `WhatsApp attachment unreadable (${a.displayName}): ${err instanceof Error ? err.message : String(err)}`
+        );
+      }
+      // wweb.js's options bag accepts `caption` (for image/video) and
+      // `sendMediaAsDocument` / `sendAudioAsVoice` flags. Voice notes
+      // become PTT (push-to-talk) so the recipient sees the waveform UI.
+      const opts: Record<string, unknown> = {};
+      if (i === 0 && text && text.length > 0) opts.caption = text;
+      if (a.kind === "voice_note") opts.sendAudioAsVoice = true;
+      const sent = await (client as unknown as {
+        sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<{ timestamp: number; id: { _serialized: string } }>;
+      }).sendMessage(thread.platformThreadId, payload, opts);
+      if (firstSentTs === undefined) firstSentTs = sent.timestamp;
+      const rawGuid = sent.id?._serialized ?? "";
+      const safeGuid = rawGuid ? safeIdForFilename(rawGuid) : "";
+
+      // Mirror the staged file under whatsappMediaDir keyed by the sent
+      // message guid so the dashboard's <img>/<video> tags can stream it
+      // back from the same /data/whatsapp-attachment/:guid endpoint that
+      // serves inbound media. Without this copy the OUT bubble would
+      // render as a download chip because the streamer can't find the
+      // file in mediaDir (multer staged it elsewhere).
+      if (safeGuid) {
+        try {
+          const ext = extname(a.absolutePath).toLowerCase() || ".bin";
+          await mkdir(this.deps.mediaDir, { recursive: true });
+          const dst = resolve(join(this.deps.mediaDir, `${safeGuid}${ext}`));
+          await copyFile(a.absolutePath, dst);
+        } catch (err) {
+          console.warn(
+            `[whatsapp] could not mirror outbound media for ${safeGuid}: ${
+              err instanceof Error ? err.message : String(err)
+            }`
+          );
+        }
+      }
+
+      sentAttachments.push({
+        type: a.mimeType ?? a.kind ?? "unknown",
+        manualReview: false,
+        rawLabel: a.displayName,
+        kind: (a.kind as AttachmentPlaceholder["kind"]) ?? "unknown",
+        // The wweb.js message guid is the stable id the dashboard uses
+        // to fetch the file from /data/whatsapp-attachment/:guid. We
+        // sanitise it through safeIdForFilename so the streamer's
+        // readdir prefix-match finds it.
+        guid: safeGuid || undefined
+      });
+    }
     return {
-      sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
-      verifiedBy: "best_effort"
+      sentAt:
+        epochSecondsToIso(firstSentTs ?? Math.floor(Date.now() / 1000)) ??
+        new Date().toISOString(),
+      verifiedBy: "best_effort",
+      attachments: sentAttachments
     };
   }
 
@@ -194,16 +293,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {
-    // Inbound media (image / voice / sticker) is unsupported in v1. We
-    // log a placeholder so the UI shows something meaningful instead of
-    // an empty bubble; the raw payload is dropped. Polls (`poll_creation`
-    // type) get flattened to a readable question + bullet list so they
-    // appear inline in the thread timeline rather than as empty rows.
-    // Vote tallies are not fetched — they require an extra
-    // `getPollVotes()` call per poll, mutate continuously after capture
-    // so any persisted count is stale within minutes, and the operator's
-    // primary use case here is reading what was posted, not tracking
-    // outcomes. Surfacing live tallies is queued as a follow-up.
+    // Polls (`poll_creation` type) get flattened to a readable question +
+    // bullet list so they appear inline in the thread timeline rather
+    // than as empty rows. Vote tallies are not fetched — they require an
+    // extra `getPollVotes()` call per poll and mutate continuously after
+    // capture, so any persisted count is stale within minutes. Surfacing
+    // live tallies is queued as a follow-up.
     // Cast: wweb.js's .d.ts declares pollOptions: string[] but at runtime
     // each option is { name, localId } (see Message.js:329-331 in the
     // installed library). Our renderer needs the runtime shape.
@@ -217,13 +312,59 @@ export class WhatsAppAdapter implements PlatformAdapter {
         // Contact lookup can fail for left-the-group authors — leave undefined.
       }
     }
+
+    // Media (images, videos, GIFs, voice notes, stickers, documents)
+    // gets downloaded to disk on first sight so the dashboard can stream
+    // the file inline. We swallow download failures — wweb.js can fail
+    // on expired media on the recipient side, and that's not actionable
+    // by the operator. The message still lands with a "[media]"
+    // placeholder text so the timeline shows something.
+    const attachments: AttachmentPlaceholder[] = [];
+    if (msg.hasMedia) {
+      const rawId = msg.id?._serialized ?? "";
+      const kind = mapWhatsAppKind(msg.type, { isGif: Boolean((msg as unknown as { isGif?: boolean }).isGif) });
+      try {
+        const media = (await msg.downloadMedia()) as unknown as WhatsAppMessageMedia | undefined;
+        if (media && media.data && media.mimetype && rawId) {
+          const meta = await persistWhatsAppMedia(rawId, media, {
+            mediaDir: this.deps.mediaDir
+          });
+          attachments.push({
+            type: meta.mimetype,
+            manualReview: false,
+            rawLabel: media.filename ?? undefined,
+            guid: meta.guid,
+            kind,
+            byteSize: meta.byteSize
+          });
+        } else if (rawId) {
+          // Couldn't download (expired / not RESOLVED) — still record a
+          // placeholder so the UI can render a chip pointing at the kind.
+          attachments.push({
+            type: msg.type ?? "unknown",
+            manualReview: true,
+            kind
+          });
+        }
+      } catch (err) {
+        console.warn(
+          `[whatsapp] media download failed for ${rawId}: ${err instanceof Error ? err.message : String(err)}`
+        );
+        attachments.push({
+          type: msg.type ?? "unknown",
+          manualReview: true,
+          kind
+        });
+      }
+    }
+
     return {
       platformMessageKey: msg.id?._serialized,
       direction: msg.fromMe ? "OUT" : "IN",
       timestamp: epochSecondsToIso(msg.timestamp) ?? new Date().toISOString(),
       text,
       senderName,
-      attachments: []
+      attachments
     };
   }
 }

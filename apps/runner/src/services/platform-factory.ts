@@ -117,6 +117,7 @@ export function createAdapters(input: {
     }),
     WHATSAPP: new WhatsAppAdapter({
       authDir: runnerConfig.profileDirs.WHATSAPP,
+      mediaDir: runnerConfig.whatsappMediaDir,
       sendGuardConfig: runnerConfig.whatsappSend,
       prisma,
       onQr: input.onWhatsAppQr,
