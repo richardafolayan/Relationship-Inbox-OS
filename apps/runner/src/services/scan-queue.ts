@@ -2607,30 +2607,117 @@ export function createScanQueue(deps: ScanQueueDeps) {
       if (message.direction === "OUT") {
         await flushBatchedMessageWrites();
         const windowMs = 5 * 60 * 1000;
+
+        // For iMessage, the same physical message can be persisted into a
+        // different Prisma thread than the one chat.db ends up storing the
+        // row in: contacts who have both a phone and an iMessage email get
+        // a separate Prisma thread per handle, and send.ts writes to whichever
+        // thread was active in the dashboard while pickBestSendHandle routes
+        // the actual send through the email-handle chat. The dashboard then
+        // merges siblings on render and the same bubble shows twice. To
+        // dedup, the twin lookup expands to every sibling thread of the
+        // same person.
+        let twinThreadIds: string[] = [thread.id];
+        if (thread.platform === "IMESSAGE" && thread.personId) {
+          const siblings = await prisma.thread.findMany({
+            where: { platform: "IMESSAGE", personId: thread.personId },
+            select: { id: true }
+          });
+          if (siblings.length > 1) {
+            twinThreadIds = siblings.map((s) => s.id);
+          }
+        }
+
         const [twins, canonical] = await Promise.all([
           prisma.message.findMany({
             where: {
-              threadId: thread.id,
+              threadId: { in: twinThreadIds },
               direction: "OUT",
               text: messageText,
               timestamp: {
                 gte: new Date(safeTimestamp.getTime() - windowMs),
                 lte: new Date(safeTimestamp.getTime() + windowMs)
               },
-              platformMessageKey: { not: key }
+              // Exclude the row we're about to upsert as canonical so it
+              // doesn't show up in its own twin list.
+              NOT: { AND: [{ threadId: thread.id }, { platformMessageKey: key }] }
             },
-            select: { id: true, platformMessageKey: true, text: true, timestamp: true }
+            select: {
+              id: true,
+              threadId: true,
+              platformMessageKey: true,
+              text: true,
+              timestamp: true,
+              sentVia: true,
+              replyToMessageId: true
+            }
           }),
           prisma.message.findUnique({
             where: { threadId_platformMessageKey: { threadId: thread.id, platformMessageKey: key } },
-            select: { id: true, platformMessageKey: true, text: true, timestamp: true }
+            select: {
+              id: true,
+              platformMessageKey: true,
+              text: true,
+              timestamp: true,
+              sentVia: true,
+              replyToMessageId: true
+            }
           })
         ]);
+
+        const sameThreadTwins = twins.filter((t) => t.threadId === thread.id);
+        const crossSiblingTwins = twins.filter((t) => t.threadId !== thread.id);
+
+        // Cross-sibling dedup — chat.db says this message belongs to the
+        // current thread, so any same-content row in a sibling thread is
+        // a stale send-side persistence that should be collapsed. Carry
+        // forward sentVia=automation and replyToMessageId since the
+        // sibling row was almost always the send-side one.
+        if (crossSiblingTwins.length > 0) {
+          const automationTwin = crossSiblingTwins.find((t) => t.sentVia === "automation");
+          const replyToTwin = crossSiblingTwins.find((t) => t.replyToMessageId);
+
+          if (!canonical && sameThreadTwins.length === 0) {
+            // No row yet in current thread — migrate one cross-sibling twin
+            // into place (preserves its metadata in one write) and delete
+            // the rest. The upcoming upsert will then UPDATE (not INSERT).
+            const seed = automationTwin ?? crossSiblingTwins[0]!;
+            await prisma.message.update({
+              where: { id: seed.id },
+              data: { threadId: thread.id, platformMessageKey: key, timestamp: safeTimestamp }
+            });
+            for (const twin of crossSiblingTwins) {
+              if (twin.id !== seed.id) {
+                await prisma.message.delete({ where: { id: twin.id } });
+              }
+            }
+          } else {
+            // Canonical (or a same-thread twin) already in current thread —
+            // delete all cross-sibling twins, copying useful metadata onto
+            // the canonical first if it doesn't have it yet.
+            for (const twin of crossSiblingTwins) {
+              await prisma.message.delete({ where: { id: twin.id } });
+            }
+            if (canonical) {
+              const updates: { sentVia?: string; replyToMessageId?: string } = {};
+              if (automationTwin && canonical.sentVia !== "automation") {
+                updates.sentVia = "automation";
+              }
+              if (replyToTwin?.replyToMessageId && !canonical.replyToMessageId) {
+                updates.replyToMessageId = replyToTwin.replyToMessageId;
+              }
+              if (Object.keys(updates).length > 0) {
+                await prisma.message.update({ where: { id: canonical.id }, data: updates });
+              }
+            }
+          }
+        }
+
         const decision = decideOutboundDedup({
           newKey: key,
           newTimestamp: safeTimestamp,
           newText: messageText,
-          existingTwins: twins,
+          existingTwins: sameThreadTwins,
           existingCanonical: canonical
         });
         if (decision.kind === "delete_twin") {
