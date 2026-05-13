@@ -918,6 +918,77 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
+  /**
+   * Plain-text equivalent of modelJson: walks the active provider through
+   * each entry in fallbackChain, retrying transient failures per provider's
+   * `maxAttempts` budget. Returns the trimmed assistant content or `null` if
+   * every provider failed. Use for non-JSON generations
+   * (transformReply / composeInVoice / classifier / summary / starters)
+   * where modelJson's schema constraints don't apply.
+   */
+  async function modelText(args: {
+    systemPrompt: string;
+    userPrompt: string;
+    /**
+     * When set, the helper will only request `response_format: json_object`
+     * for providers that support it (mirrors shouldUseJsonResponseFormat).
+     * Default false — most callers want raw text.
+     */
+    jsonResponseFormat?: boolean;
+  }): Promise<{ text: string; provider: AiProvider; model: string } | null> {
+    const { provider: activeId, model: activeModel } = await resolveActive();
+    const chain: AiProvider[] = [activeId, ...fallbackChain.filter((id) => id !== activeId)];
+
+    for (let i = 0; i < chain.length; i++) {
+      const providerId = chain[i]!;
+      const isActive = i === 0;
+      const entry = providerRegistry[providerId];
+      const client = isActive ? (await resolveActive()).client : resolveProvider(providerId).client;
+      if (!client) {
+        continue;
+      }
+      const model = isActive ? activeModel : resolveProvider(providerId).model;
+      let lastClass: AiErrorClassification | null = null;
+      for (let attempt = 1; attempt <= entry.maxAttempts; attempt++) {
+        try {
+          const response = await client.chat.completions.create({
+            model,
+            messages: [
+              { role: "system", content: args.systemPrompt },
+              { role: "user", content: args.userPrompt }
+            ],
+            ...(args.jsonResponseFormat && shouldUseJsonResponseFormat(providerId, model)
+              ? { response_format: { type: "json_object" as const } }
+              : {}),
+            ...providerOptions(providerId, model),
+            ...geminiExtraBody(providerId, model)
+          });
+          const raw = response.choices[0]?.message?.content?.trim();
+          if (raw) {
+            return { text: raw, provider: providerId, model };
+          }
+          lastClass = {
+            kind: "empty_content",
+            message: `${providerId} returned empty content (model=${model}, attempt ${attempt}/${entry.maxAttempts})`,
+            retriable: true
+          };
+          console.warn(`[ai] ${lastClass.message}`);
+        } catch (error) {
+          lastClass = entry.classifyError(error);
+          console.warn(
+            `[ai] ${providerId} text call failed (model=${model}, attempt ${attempt}/${entry.maxAttempts}). Reason: ${lastClass.message}`
+          );
+        }
+        if (lastClass?.retriable && attempt < entry.maxAttempts) {
+          await sleep(entry.baseBackoffMs * attempt + Math.random() * 1500);
+          continue;
+        }
+        break;
+      }
+    }
+    return null;
+  }
+
   async function updateThreadSummary(input: {
     displayName: string;
     previousSummary?: string;
@@ -1281,37 +1352,24 @@ ${recentExchange || "(no recent messages)"}`;
   }
 
   async function transformReply(input: { mode: "SHORTEN" | "MAKE_WARMER"; text: string }): Promise<string> {
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
+    const instruction =
+      input.mode === "SHORTEN"
+        ? "Shorten this message to <= 160 characters while preserving intent."
+        : "Make this message warmer while preserving intent and keeping it concise.";
+
+    // Walks the active provider, then the fallback chain. The previous
+    // implementation only tried the active provider — an OpenAI outage would
+    // drop every transformReply / composeInVoice request even though GLM /
+    // Gemini would have served.
+    const outcome = await modelText({
+      systemPrompt: SYSTEM_PROMPT,
+      userPrompt: `${instruction}\n\n${input.text}`
+    });
+    if (!outcome) {
+      console.warn(`[ai] transformReply: all providers exhausted; returning original text. mode=${input.mode}`);
       return input.text;
     }
-
-    try {
-      const instruction =
-        input.mode === "SHORTEN"
-          ? "Shorten this message to <= 160 characters while preserving intent."
-          : "Make this message warmer while preserving intent and keeping it concise.";
-
-      const response = await client.chat.completions.create({
-        model,
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: `${instruction}\n\n${input.text}` }
-        ],
-        // No response_format: this returns plain text. The voice-rule
-        // post-processor handles em-dash / semicolon / colon scrubbing.
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-
-      const raw = response.choices[0]?.message?.content?.trim() || input.text;
-      return enforceSentenceStartCapitals(applyVoiceRules(raw));
-    } catch (error) {
-      console.warn(
-        `[ai] transformReply failed (provider=${provider}, model=${model}, mode=${input.mode}); returning original text. ${classifyLlmError(error, provider)}`
-      );
-      return input.text;
-    }
+    return enforceSentenceStartCapitals(applyVoiceRules(outcome.text));
   }
 
   /**
@@ -1341,11 +1399,6 @@ ${recentExchange || "(no recent messages)"}`;
     summary?: string | null;
     whatTheyWant?: string | null;
   }): Promise<"outreach" | "genuine" | null> {
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return null;
-    }
-
     const inboundMessages = input.messages
       .filter((m) => m.direction === "IN")
       .slice(0, 5)
@@ -1371,26 +1424,20 @@ ${whatTheyWantLine}
 Inbound messages (oldest first):
 ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
 
+    // modelJson walks the fallback chain (active → glm → gemini → openai)
+    // and reuses the per-provider retry budget. The previous direct call to
+    // the active client dropped the request entirely on a single-provider
+    // outage.
     try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return null;
-      const parsed = categorySchema.parse(parseAiJson(content, model));
-      return parsed.category;
+      const { result } = await modelJson(
+        prompt,
+        null as "outreach" | "genuine" | null,
+        (value) => categorySchema.parse(value).category
+      );
+      return result;
     } catch (error) {
       console.warn(
-        `[ai] classifyThreadCategory failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+        `[ai] classifyThreadCategory: chain exhausted; returning null. ${error instanceof Error ? error.message : String(error)}`
       );
       return null;
     }
@@ -1407,11 +1454,6 @@ ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
     contact: ContactProfileSnapshot;
     self: ContactProfileSnapshot | null;
   }): Promise<string | null> {
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return null;
-    }
-
     const contactPayload = snapshotForPrompt(input.contact);
     const selfPayload = snapshotForPrompt(input.self);
     const hasOperatorProfile = selfPayload !== null;
@@ -1435,25 +1477,18 @@ Return strict JSON: { "summary": "string" }
 Contact profile: ${JSON.stringify(contactPayload)}${operatorBlock}`;
 
     try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return null;
-      const parsed = z.object({ summary: z.string().min(1) }).parse(parseAiJson(content, model));
-      return stripOperatorMetaTalk(applyVoiceRules(stripUnpairedSurrogates(parsed.summary)));
+      const { result } = await modelJson(
+        prompt,
+        null as string | null,
+        (value) => {
+          const parsed = z.object({ summary: z.string().min(1) }).parse(value);
+          return stripOperatorMetaTalk(applyVoiceRules(stripUnpairedSurrogates(parsed.summary)));
+        }
+      );
+      return result;
     } catch (error) {
       console.warn(
-        `[ai] generateContactSummary failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+        `[ai] generateContactSummary: chain exhausted; returning null. ${error instanceof Error ? error.message : String(error)}`
       );
       return null;
     }
@@ -1482,10 +1517,6 @@ Contact profile: ${JSON.stringify(contactPayload)}${operatorBlock}`;
     if (getVoiceTier(input.platform) !== "formal") {
       return null;
     }
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return null;
-    }
 
     const contactPayload = snapshotForPrompt(input.contact);
     const selfPayload = snapshotForPrompt(input.self);
@@ -1507,31 +1538,24 @@ Contact profile: ${JSON.stringify(contactPayload)}
 Operator profile: ${JSON.stringify(selfPayload)}`;
 
     try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return null;
-      const parsed = startersSchema.parse(parseAiJson(content, model));
-      return {
-        starters: parsed.starters.map((s) => ({
-          angle: applyVoiceRules(s.angle),
-          citedField: s.citedField as ConversationStarterCitedField,
-          text: applyVoiceRules(stripUnpairedSurrogates(s.text))
-        }))
-      };
+      const { result } = await modelJson(
+        prompt,
+        null as ConversationStartersOutput | null,
+        (value) => {
+          const parsed = startersSchema.parse(value);
+          return {
+            starters: parsed.starters.map((s) => ({
+              angle: applyVoiceRules(s.angle),
+              citedField: s.citedField as ConversationStarterCitedField,
+              text: applyVoiceRules(stripUnpairedSurrogates(s.text))
+            }))
+          };
+        }
+      );
+      return result;
     } catch (error) {
       console.warn(
-        `[ai] generateConversationStarters failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+        `[ai] generateConversationStarters: chain exhausted; returning null. ${error instanceof Error ? error.message : String(error)}`
       );
       return null;
     }
@@ -1572,10 +1596,6 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
   }): Promise<string> {
     const trimmed = input.intent.trim();
     if (!trimmed) return "";
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return trimmed;
-    }
 
     const cleanedSamples = input.voiceSamples
       .map((sample) => sample.trim())
@@ -1663,27 +1683,23 @@ ${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text,
 Return strict JSON: { "text": "string" }`;
 
     try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: selectVoicePrompt(input.platform) },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return trimmed;
-      const parsed = z.object({ text: z.string().min(1) }).parse(parseAiJson(content, model));
-      let cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
-      cleaned = enforceSentenceStartCapitals(cleaned);
-      return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
+      const { result } = await modelJson(
+        prompt,
+        trimmed,
+        (value) => {
+          const parsed = z.object({ text: z.string().min(1) }).parse(value);
+          let cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+          cleaned = enforceSentenceStartCapitals(cleaned);
+          return getVoiceTier(input.platform) === "casual"
+            ? softenCasualTrailingPeriod(cleaned)
+            : cleaned;
+        },
+        selectVoicePrompt(input.platform)
+      );
+      return result;
     } catch (error) {
       console.warn(
-        `[ai] composeInVoice failed (provider=${provider}, model=${model}); returning raw intent. ${classifyLlmError(error, provider)}`
+        `[ai] composeInVoice: chain exhausted; returning raw intent. ${error instanceof Error ? error.message : String(error)}`
       );
       return trimmed;
     }
@@ -1704,8 +1720,6 @@ Return strict JSON: { "text": "string" }`;
   }): Promise<{ suggestions: Array<{ label: string; hours: number; reason: string }> }> {
     const inbound = input.lastInboundText.trim();
     if (!inbound) return { suggestions: [] };
-    const { client, model, provider } = await resolveActive();
-    if (!client) return { suggestions: [] };
 
     const referenceIso = input.lastInboundAt ?? new Date().toISOString();
     const prompt = `You are a calendar assistant. Read the last message from a contact and decide whether the operator should snooze the conversation. ONLY suggest a snooze when the message contains an explicit time hint ("let's chat next Tuesday", "I'm OOO until the 15th", "ping me Friday morning"). When there is no clear time hint, return an empty list. Do not invent.
@@ -1727,37 +1741,28 @@ Return strict JSON: { "suggestions": [{ "label": "string", "hours": 1-168, "reas
 If the message has no time hint, return { "suggestions": [] }.`;
 
     try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return { suggestions: [] };
-      const parsed = z
-        .object({
-          suggestions: z
-            .array(
-              z.object({
-                label: z.string().min(1).max(40),
-                hours: z.number().int().min(1).max(72),
-                reason: z.string().min(1).max(220)
-              })
-            )
-            .max(3)
-        })
-        .parse(parseAiJson(content, model));
-      return parsed;
+      const { result } = await modelJson(
+        prompt,
+        { suggestions: [] } as { suggestions: Array<{ label: string; hours: number; reason: string }> },
+        (value) =>
+          z
+            .object({
+              suggestions: z
+                .array(
+                  z.object({
+                    label: z.string().min(1).max(40),
+                    hours: z.number().int().min(1).max(72),
+                    reason: z.string().min(1).max(220)
+                  })
+                )
+                .max(3)
+            })
+            .parse(value)
+      );
+      return result;
     } catch (error) {
       console.warn(
-        `[ai] suggestSnoozeTimings failed (provider=${provider}, model=${model}); returning empty list. ${classifyLlmError(error, provider)}`
+        `[ai] suggestSnoozeTimings: chain exhausted; returning empty list. ${error instanceof Error ? error.message : String(error)}`
       );
       return { suggestions: [] };
     }
