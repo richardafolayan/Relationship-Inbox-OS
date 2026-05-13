@@ -285,12 +285,27 @@ model Message {
   // UI directly, from another device, or from a previous version of this
   // system, so we cannot honestly claim "Sent via automation" for them.
   sentVia            String?
+  /**
+   * App-level threading: when the operator hits "Reply" in the dashboard
+   * focused-thread view, we set this to the parent Message.id (cuid). The
+   * message itself sends as a normal text bubble via the existing
+   * AppleScript verb — no native iMessage thread linkage on the wire — so
+   * the recipient on Messages.app sees a plain bubble. Dashboard users
+   * see the threading because we render off this column (alongside the
+   * Apple-native chat.db `thread_originator_guid` we stash on rawJson).
+   *
+   * Nullable: standalone messages and Apple-native replies (where the
+   * parent is captured via rawJson.replyToGuid → platformMessageKey)
+   * leave this null.
+   */
+  replyToMessageId   String?
   createdAt          DateTime  @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
   @@unique([threadId, platformMessageKey])
   @@index([threadId, timestamp])
+  @@index([replyToMessageId])
   @@map("messages")
 }
 
@@ -350,6 +365,14 @@ model SendRequest {
   // (iMessage today; LinkedIn cap at text-only). Cleaned up by the send
   // worker after the row reaches SENT or FAILED.
   attachmentsJson String?
+  /**
+   * App-level threading: when the operator hits "Reply" in the dashboard
+   * focused-thread view, the SendRequest carries the parent Message.id
+   * (cuid). The send worker copies it onto the resulting Message row so
+   * the dashboard renders the new bubble inline under its parent on the
+   * next refresh. Null on regular standalone sends.
+   */
+  replyToMessageId String?
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

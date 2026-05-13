@@ -207,6 +207,14 @@ export interface ThreadMessage {
    * `platformMessageKey`.
    */
   platformMessageKey?: string;
+  /**
+   * App-level threading. When the operator sent this message from the
+   * dashboard's focused-thread composer, it carries the parent's
+   * `Message.id` (cuid). Preferred over `raw.replyToGuid` (the
+   * Apple-native field, captured for inbound replies) when both are
+   * present.
+   */
+  replyToMessageId?: string | null;
   direction: "IN" | "OUT";
   timestamp: string;
   text: string;

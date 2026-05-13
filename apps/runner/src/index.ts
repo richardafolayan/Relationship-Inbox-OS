@@ -1539,7 +1539,12 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
       // when the time elapses. When absent, the send is enqueued
       // immediately (existing behaviour).
-      scheduledFor: z.string().datetime().optional()
+      scheduledFor: z.string().datetime().optional(),
+      // App-level threading. When the dashboard's focused-thread composer
+      // sends a reply, it includes the parent Message.id here. The send
+      // itself still goes out as a regular text bubble — the threading is
+      // only persisted on our side and rendered by the dashboard.
+      replyToMessageId: z.string().min(1).optional()
     })
     .parse(req.body);
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
@@ -1613,7 +1618,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       threadId,
       text: payload.text,
       clientSendId: payload.clientSendId,
-      attachments: stagedAttachments
+      attachments: stagedAttachments,
+      replyToMessageId: payload.replyToMessageId
     });
     res.json(queueResult);
   } catch (error) {
@@ -2717,6 +2723,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       text: message.text,
       senderName: message.senderName ?? null,
       sentVia: message.sentVia ?? null,
+      // App-level reply parent (cuid). The dashboard prefers this over the
+      // Apple-native `raw.replyToGuid` when both are present so threads
+      // started from the dashboard's focused composer reconcile correctly.
+      replyToMessageId: message.replyToMessageId ?? null,
       raw: message.rawJson ? JSON.parse(message.rawJson) : null,
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
     })),

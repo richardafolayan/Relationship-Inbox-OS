@@ -36,6 +36,12 @@ export interface SendQueueService {
     text: string;
     clientSendId: string;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    /**
+     * App-level threading. Forwarded to sendService.enqueueSend → persisted
+     * on the SendRequest, then copied onto the resulting Message row so the
+     * dashboard renders the new bubble inline under its parent.
+     */
+    replyToMessageId?: string;
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
@@ -125,6 +131,12 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     // field is silently dropped by any future refactor that relies on
     // the inferred parameter type.
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    /**
+     * App-level threading. Forwarded to sendService.enqueueSend → persisted
+     * on the SendRequest, then copied onto the resulting Message row so the
+     * dashboard renders the new bubble inline under its parent.
+     */
+    replyToMessageId?: string;
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
