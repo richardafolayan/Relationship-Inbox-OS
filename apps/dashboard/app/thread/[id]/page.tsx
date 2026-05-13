@@ -1160,6 +1160,33 @@ export default function ThreadPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedThreadParentId]);
+  // Click-outside-to-exit. Anything that isn't a focused bubble, the
+  // composer, the sticky "FOCUSED THREAD" pill, or the sidebar /
+  // header chrome dismisses focus — Messages.app's tap-outside model.
+  // We attach to the document mousedown so a single click both
+  // dismisses and (if it landed on a different parent's chip) focuses
+  // the new one, without an intermediate render hiding the chip target.
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      // Allowed regions: any element under a focused bubble, the
+      // composer, or the focused-thread sticky pill. Everything else
+      // counts as "outside".
+      const focusedBubble = target.closest("[data-focused-bubble='true']");
+      const composer = target.closest("[data-thread-composer='true']");
+      const pill = target.closest("[data-focused-pill='true']");
+      // Reply chip buttons re-focus on a different parent — treat them
+      // as a focus-swap, not an exit. We detect via the existing button
+      // markup (the title attribute starts with "Focus thread").
+      const focusSwap = target.closest('button[title^="Focus thread"]');
+      if (focusedBubble || composer || pill || focusSwap) return;
+      setFocusedThreadParentId(null);
+    };
+    document.addEventListener("mousedown", onMouseDown);
+    return () => document.removeEventListener("mousedown", onMouseDown);
+  }, [focusedThreadParentId]);
   // Bring the focused parent into view when the focus changes. Two
   // pieces of timing care:
   //   1. Flip `stickToBottomRef` off so the global timeline
@@ -1653,7 +1680,10 @@ export default function ThreadPage() {
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
             {focusedThreadParentId ? (
-              <div className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur">
+              <div
+                data-focused-pill="true"
+                className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur"
+              >
                 <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
                 <button
                   type="button"
@@ -1718,19 +1748,43 @@ export default function ThreadPage() {
               // Messages.app's overlay. Pointer events off prevents
               // accidental clicks on the dimmed background.
               const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
+              // A day divider between two focused messages stays; a divider
+              // between collapsed bubbles needs to collapse too (otherwise
+              // the focused stack gets random "Yesterday" headers from
+              // dates that no focused message even touches).
+              const dividerInFocusedRange =
+                !dimmedByFocus &&
+                (idx === 0 || (prev && focusedIdSet ? focusedIdSet.has(prev.id) : true));
               return (
                 <div key={message.id} className="contents">
                   {dayLabel ? (
-                    <div className={`contents ${dimmedByFocus ? "opacity-30" : ""} transition-opacity duration-300`}>
+                    <div
+                      className={`contents transition-all duration-300 ${
+                        focusedIdSet && !dividerInFocusedRange
+                          ? "opacity-0 max-h-0 overflow-hidden -mt-[18px] pointer-events-none"
+                          : ""
+                      }`}
+                    >
                       <DayDivider label={dayLabel} />
                     </div>
                   ) : null}
                   <div
                     data-message-id={message.id}
-                    className={`flex max-w-[72%] flex-col transition-[opacity,filter] duration-300 ease-out ${
+                    data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
+                    className={`flex max-w-[72%] flex-col transition-all duration-300 ease-out ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
-                      dimmedByFocus ? "opacity-20 blur-[3px] pointer-events-none" : ""
+                      dimmedByFocus
+                        // Collapse non-focused bubbles to zero height so the
+                        // focused thread members visually come together —
+                        // matches Messages.app's overlay where the focused
+                        // bubbles stack tight. Negative margin cancels the
+                        // parent's gap-[18px] so the collapse is total.
+                        // Kept in the DOM (no display:none) so the
+                        // layout-effect-driven scroll-into-view can still
+                        // find adjacent anchors.
+                        ? "max-h-0 opacity-0 overflow-hidden -mt-[18px] pointer-events-none"
+                        : ""
                     }`}
                   >
                     {parentMessageId ? (
@@ -2075,7 +2129,10 @@ export default function ThreadPage() {
                 ) : null}
               </div>
             ) : null}
-            <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+            <div
+              data-thread-composer="true"
+              className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card"
+            >
               {focusedParentMessage ? (
                 <div className="mb-3 flex items-start gap-2 rounded-[12px] border border-hairline bg-paper-2/60 px-3 py-2 text-[12px] leading-snug text-ink-2">
                   <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
