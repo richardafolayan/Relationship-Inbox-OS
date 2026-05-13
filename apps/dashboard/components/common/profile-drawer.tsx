@@ -35,12 +35,29 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
 
   useEffect(() => {
     if (!open || !personId) return;
+    // Drop the response if the drawer is closed (or switched to a
+    // different person) before the fetch resolves — otherwise a slow
+    // load can briefly flash stale data when the operator reopens the
+    // drawer for a different contact.
+    let cancelled = false;
     setLoading(true);
     setError(null);
     apiGet<PersonDetailResponse>(`/runner/data/person/${personId}`)
-      .then((data) => setDetail(data))
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load profile"))
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (cancelled) return;
+        setDetail(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load profile");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open, personId]);
 
   // Reset transient state when the drawer closes so the next open starts clean.

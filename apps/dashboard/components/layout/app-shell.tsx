@@ -12,7 +12,7 @@ import { RunnerTopStrip } from "@/components/layout/runner-top-strip";
 import { apiGet, apiPost } from "@/lib/api";
 import { initials } from "@/lib/risk";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
-import type { AppSettings, HealthResponse, InboxResponse } from "@/lib/types";
+import type { HealthResponse, InboxResponse } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 const linkedInAutoScanIntervalMs = 600_000;
@@ -21,7 +21,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
@@ -35,15 +34,19 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
+  // refreshMeta drops the /runner/data/settings poll the shell used to
+  // perform every 8s. The setSettings result was only `void`-discarded —
+  // pages that genuinely need settings (/settings, /platforms) fetch
+  // their own copy, so the AppShell poll was a wasted round-trip on
+  // every tick. /health and /data/inbox still fire because the sidebar
+  // and attention-count badge depend on them.
   const refreshMeta = useCallback(async () => {
-    const [healthData, settingsData, inboxData] = await Promise.all([
+    const [healthData, inboxData] = await Promise.all([
       apiGet<HealthResponse>("/runner/health").catch(() => null),
-      apiGet<AppSettings>("/runner/data/settings").catch(() => null),
       apiGet<InboxResponse>("/runner/data/inbox").catch(() => null)
     ]);
 
     if (healthData) setHealth(healthData);
-    if (settingsData) setSettings(settingsData);
     if (inboxData) {
       const count = inboxData.rows.filter(
         (row) => row.riskLevel === "RED" || row.riskLevel === "AMBER"
@@ -174,11 +177,6 @@ export function AppShell({ children }: { children: ReactNode }) {
   // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan
   // (gated above). Keeps the toggle honest with its label (#94).
   const sidebarAttention = isQuietHoursActive() ? 0 : attentionCount;
-
-  // Suppress unused-warning for settings; pages that need it (Settings,
-  // Platforms) fetch their own copy. We hold it here so a future toolbar
-  // could read it without re-fetching.
-  void settings;
 
   return (
     <div className="grid h-screen grid-cols-[200px_1fr] overflow-hidden bg-paper text-ink">

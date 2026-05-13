@@ -229,9 +229,13 @@ export default function AtRiskPage() {
     router.push(`/thread/${focusThread.id}`);
     setFocusOpen(false);
   };
-  const handleMarkHandled = async () => {
+  const handleMarkHandled = () => {
     if (!focusThread) return;
-    await runAction(
+    // runAction returns void, so the previous `await runAction(...)` was a
+    // no-op — advance() fires immediately either way. Make the optimistic
+    // advance explicit: move to the next thread now, let the archive POST
+    // and refresh resolve in the background.
+    runAction(
       apiPost(`/runner/control/thread/${focusThread.id}/archive`, {}),
       setFocusError,
       refresh
