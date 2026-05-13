@@ -83,7 +83,17 @@ function formatDayLabel(date: Date): string {
     a.getDate() === b.getDate();
   if (sameDay(date, today)) return "Today";
   if (sameDay(date, yesterday)) return "Yesterday";
-  return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  // Append the year only when the message isn't from the current year.
+  // Keeps recent dividers clean ("Mon, May 12") while making it obvious
+  // that an older thread reaches into a prior year ("Mon, May 12, 2025"),
+  // so the operator never has to guess which May 12 they're looking at.
+  const includeYear = date.getFullYear() !== today.getFullYear();
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    ...(includeYear ? { year: "numeric" } : {})
+  });
 }
 
 // Build the standard list of schedule-send presets relative to `now`.
