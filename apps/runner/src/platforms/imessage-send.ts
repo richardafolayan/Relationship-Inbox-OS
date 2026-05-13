@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { copyFileSync, existsSync, mkdirSync, statSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -128,17 +129,29 @@ end run
   return { foregroundUsed: true };
 }
 
-function stageInReadableTmp(src: string): string {
-  if (!existsSync(src)) return src;
+/**
+ * Copy `src` into a UUID-namespaced subdir under `inbox-os-imessage-outgoing`
+ * so Messages.app can read it. Returns `{ path, cleanup }` — callers MUST
+ * await `cleanup()` once the bubble has been delivered so we don't leak
+ * staging directories into `/tmp` indefinitely (previously every send left
+ * its UUID dir behind forever).
+ */
+function stageInReadableTmp(src: string): { path: string; cleanup: () => Promise<void> } {
+  if (!existsSync(src)) return { path: src, cleanup: async () => undefined };
   const stagingRoot = join(tmpdir(), "inbox-os-imessage-outgoing");
   const dir = join(stagingRoot, randomUUID());
   mkdirSync(dir, { recursive: true });
   const dst = join(dir, basename(src));
   try {
     copyFileSync(src, dst);
-    return dst;
+    return {
+      path: dst,
+      cleanup: async () => {
+        await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+      }
+    };
   } catch {
-    return src;
+    return { path: src, cleanup: async () => undefined };
   }
 }
 
@@ -147,7 +160,12 @@ async function maybeTranscodeAudioToCaf(absolutePath: string): Promise<string> {
   const ext = extname(absolutePath).toLowerCase();
   if (ext === ".caf") return absolutePath;
   if (!AUDIO_EXTS.has(ext)) return absolutePath;
-  const dst = join(dirname(absolutePath), "Audio Message.caf");
+  // Per-call unique filename so two concurrent sends in the same staging
+  // directory don't clobber each other's `.caf` mid-transcode. Previously
+  // the fixed name "Audio Message.caf" meant the second send overwrote
+  // the first's transcoded file while it was still being read by the
+  // AppleScript bubble loop.
+  const dst = join(dirname(absolutePath), `audio-message-${randomUUID()}.caf`);
   try {
     // ima4 / caff matches Apple's voice-memo encoding most closely.
     // afconvert reads aiff/wav/m4a/aac/mp3/caf natively. webm/opus may
@@ -156,18 +174,59 @@ async function maybeTranscodeAudioToCaf(absolutePath: string): Promise<string> {
     // bouncing.
     await execFileAsync("afconvert", [absolutePath, dst, "-d", "ima4", "-f", "caff"], { timeout: 30_000 });
     if (existsSync(dst) && statSync(dst).size > 0) return dst;
-  } catch {
-    // fall through — send as-is
+  } catch (error) {
+    // Best-effort transcode. If it fails, fall through and ship the
+    // original — Messages will at least surface a generic audio bubble
+    // rather than bouncing. Surface a warn so operators see a pattern of
+    // failures during a Chrome / OS update.
+    console.warn(
+      `[imessage-send] afconvert failed; shipping original. ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
   }
   return absolutePath;
 }
 
 /**
  * Escape a string for embedding in an AppleScript double-quoted literal.
- * Backslash and double-quote are the only special chars inside `"..."`.
+ *
+ * Inside `"..."` we need to escape:
+ *   - backslash (becomes `\\`)
+ *   - double-quote (becomes `\"`)
+ *   - **newline / CR** — AppleScript literals can't contain raw newlines,
+ *     so a multi-line message terminates the string mid-script and the
+ *     osascript invocation fails with a parse error. Previously this
+ *     escape only handled `\` and `"`, so any send with `\n` in the
+ *     body silently broke. Rebuild multi-line strings as a chained
+ *     concatenation using AppleScript's `return` constant: `"foo" &
+ *     return & "bar"`. That keeps the build-up valid and preserves line
+ *     breaks in the delivered message.
+ *
+ * Returns either a single quoted literal (no newlines) or a chained
+ * expression with no leading/trailing quotes — callers pass the result
+ * directly into the AppleScript source without wrapping it again.
  */
 function escapeAppleScript(value: string): string {
-  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const escapedBackslashAndQuote = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  // Normalise CR/LF/CRLF to a single splitter, then rejoin with `& return &`
+  // around quoted segments. A value with no newlines round-trips unchanged.
+  if (!/[\r\n]/.test(escapedBackslashAndQuote)) {
+    return escapedBackslashAndQuote;
+  }
+  return escapedBackslashAndQuote
+    .split(/\r\n|\r|\n/)
+    .map((segment) => `"${segment}"`)
+    .join(" & return & ");
+}
+
+/**
+ * Returns true when the escaped value is a multi-line chained expression
+ * (already includes its own quoting). Callers that previously wrapped the
+ * result in `"..."` use this to know whether to skip the wrap.
+ */
+function isPreQuotedAppleScript(value: string): boolean {
+  return value.startsWith('"') && value.includes(" & return & ");
 }
 
 export interface SendIMessageOptions {
@@ -201,21 +260,31 @@ export async function sendIMessage(opts: SendIMessageOptions): Promise<void> {
     // voice-memo container is .caf with ima4 codec — transcode to that
     // when possible so delivery doesn't bounce.
     const transcoded = await maybeTranscodeAudioToCaf(rawPath);
-    const path = stageInReadableTmp(transcoded);
-    await sendFileViaUiScripting({
-      filePath: path,
-      handle: opts.handle,
-      timeoutMs: timeout
-    });
+    const staged = stageInReadableTmp(transcoded);
+    try {
+      await sendFileViaUiScripting({
+        filePath: staged.path,
+        handle: opts.handle,
+        timeoutMs: timeout
+      });
+    } finally {
+      // Always tear down the per-attachment staging dir so /tmp doesn't
+      // accumulate one UUID directory per send forever.
+      await staged.cleanup();
+    }
   }
 
   if (opts.text.trim().length > 0) {
     const text = escapeAppleScript(opts.text);
+    // Multi-line bodies come back as a chained `"foo" & return & "bar"`
+    // expression with its own quoting; single-line bodies still need
+    // `"..."` wrapped around the escaped value.
+    const sendArg = isPreQuotedAppleScript(text) ? text : `"${text}"`;
     const script = [
       `tell application "Messages"`,
       `  set targetService to 1st service whose service type = ${service}`,
       `  set targetBuddy to buddy "${handle}" of targetService`,
-      `  send "${text}" to targetBuddy`,
+      `  send ${sendArg} to targetBuddy`,
       `end tell`
     ].join("\n");
     await execFileAsync("osascript", ["-e", script], { timeout });

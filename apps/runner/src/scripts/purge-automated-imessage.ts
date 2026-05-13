@@ -14,22 +14,21 @@ import { IMessageDb, looksLikeAutomatedSender } from "../platforms/imessage-db";
 
 async function main(): Promise<void> {
   const db = new IMessageDb(runnerConfig.imessage.dbPath);
-  // Precompute chat-identifier per chat.db guid for fast lookup.
-  const chats = db.listThreads(2000, { unreadOnly: false });
-  // listThreads already filters out automated, so the easier route:
-  // walk chat.db separately for the lookup we need.
-  // Use a side query through the underlying sqlite handle by re-listing
-  // without the filter — quickest is a direct SQL query.
-
+  // Walk chat.db directly to enumerate every chat (no automated filter).
+  // listThreads is the filtered/public path; this maintenance script
+  // needs unfiltered rows so it can decide what to purge from MY DB.
+  //
+  // FIXME: this reaches into a private `db` field on IMessageDb via an
+  // `unknown` cast. If that internal name changes the script silently
+  // breaks. Migrate to a dedicated `IMessageDb.listChatIdentifiers()`
+  // helper when it becomes worth touching the public surface.
   const allRows: Array<{ guid: string; chatIdentifier: string }> = [];
-  // Re-open chat.db for the unfiltered query.
   const sqlite = (db as unknown as { db: { prepare(sql: string): { all(): unknown[] } } }).db;
   const rawRows = sqlite.prepare("SELECT guid, chat_identifier AS chatIdentifier FROM chat").all() as Array<{
     guid: string;
     chatIdentifier: string;
   }>;
   for (const r of rawRows) allRows.push(r);
-  void chats;
 
   const automatedGuids = new Set(
     allRows.filter((r) => looksLikeAutomatedSender(r.chatIdentifier ?? "")).map((r) => r.guid)
