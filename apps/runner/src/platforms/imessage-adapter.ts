@@ -253,6 +253,7 @@ export class IMessageAdapter implements PlatformAdapter {
           );
         }
         receiptGuid = status.guid;
+        receiptTs = status.timestamp;
         if (status.isDelivered) {
           isDelivered = true;
           break;
@@ -261,8 +262,9 @@ export class IMessageAdapter implements PlatformAdapter {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     if (!receiptTs && receiptGuid) {
-      // We have a guid but the delivery poll didn't grab the timestamp;
-      // fall back to the legacy lookup for the row's date.
+      // Defensive fallback: the delivery-status row should always carry
+      // a timestamp now, but keep the legacy lookup as a safety net for
+      // unusual chat.db states (e.g. corrupted date column).
       const fallback = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
     }
