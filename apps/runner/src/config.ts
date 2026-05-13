@@ -128,6 +128,15 @@ export interface RunnerConfig {
   enrichLongIdleMaxMs: number;
   /** Days before an enriched profile is considered stale. Default 30. */
   enrichRefreshDays: number;
+  /** WhatsApp send guards. Conservative defaults to keep automation
+   *  inside personal-use boundaries; raise only by setting the env
+   *  vars explicitly. */
+  whatsappSend: {
+    /** Min ms between consecutive sends to the SAME recipient. Default 30s. */
+    minIntervalMs: number;
+    /** Max sends across all WhatsApp threads in a rolling 24h window. Default 30. */
+    dailyCap: number;
+  };
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -356,7 +365,11 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     enrichLongIdleEvery: parseIntOrDefault(env.ENRICH_LONG_IDLE_EVERY, 10),
     enrichLongIdleMinMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MIN_MS, 300_000),
     enrichLongIdleMaxMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MAX_MS, 900_000),
-    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30)
+    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30),
+    whatsappSend: {
+      minIntervalMs: parseIntOrDefault(env.WHATSAPP_SEND_INTERVAL_MS, 30_000),
+      dailyCap: parseIntOrDefault(env.WHATSAPP_DAILY_CAP, 30)
+    }
   };
 }
 

@@ -104,8 +104,53 @@ const eventBus = createEventBus();
 const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
 
+// WhatsApp connect-state machine. wweb.js fires `qr` repeatedly until the
+// pairing completes; we cache the latest QR string and the current state
+// so the dashboard can poll without each poll racing the next QR refresh.
+type WhatsAppConnectState = "disconnected" | "connecting" | "qr_ready" | "connected";
+let whatsappState: WhatsAppConnectState = "disconnected";
+let whatsappQr: string | null = null;
+let whatsappConnectStartedAt: number | null = null;
+
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
+  onWhatsAppQr: (qr) => {
+    whatsappQr = qr;
+  },
+  onWhatsAppStateChange: (state) => {
+    whatsappState = state;
+    if (state !== "qr_ready") {
+      // Once paired (or torn down) the QR is no use to anyone; stop
+      // serving stale ones to the polling /qr endpoint.
+      whatsappQr = null;
+    }
+    if (state === "disconnected" || state === "connected") {
+      whatsappConnectStartedAt = null;
+    }
+    // Mirror the in-memory state to the Platform table so the dashboard's
+    // header counter ("X/N connected") and the /data/platforms row both
+    // see WhatsApp as connected. The other adapters write this row from
+    // their own connect path; WhatsApp's connect happens on the wweb.js
+    // event bus, so we do it here. Fire-and-forget — the upsert isn't on
+    // any user-blocking path.
+    if (state === "connected" || state === "disconnected") {
+      const status = state === "connected" ? "CONNECTED" : "NOT_CONNECTED";
+      const connectedAt = state === "connected" ? new Date() : null;
+      prisma.platform
+        .upsert({
+          where: { name: "WHATSAPP" },
+          create: { name: "WHATSAPP", status, connectedAt, lastError: null },
+          update: { status, connectedAt, lastError: null }
+        })
+        .catch((error) => {
+          console.warn(
+            `[whatsapp] failed to mirror state=${state} to Platform table: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+        });
+    }
+  },
   onConnectStep: async (input) => {
     await auditService.log({
       platform: input.platform,
@@ -151,7 +196,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -313,9 +358,14 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(globalResetLockKey(), work);
 }
 
+// Single source of truth for the runtime platform enum used by every
+// /control endpoint's request validator. Keep this list in sync with
+// PlatformName in @inbox-os/core (and the Prisma enum) — adding a
+// platform should be a one-line change here, not a 13-site sweep.
+const platformEnum = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]);
+
 function parsePlatform(value: unknown): PlatformName {
-  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).parse(value);
-  return parsed;
+  return platformEnum.parse(value);
 }
 
 interface ControlTraceContext {
@@ -328,10 +378,11 @@ interface ControlTraceContext {
 }
 
 function maybeParsePlatform(value: unknown): PlatformName | undefined {
-  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK" && value !== "IMESSAGE") {
-    return undefined;
-  }
-  return value;
+  // Try-parse via the same shared enum so this helper stays correct as
+  // platforms are added (the previous explicit string-comparison guard
+  // silently rejected WHATSAPP because nobody updated all four checks).
+  const parsed = platformEnum.safeParse(value);
+  return parsed.success ? parsed.data : undefined;
 }
 
 function normalizeOptionalPositiveNumber(value: number | null | undefined): number | undefined {
@@ -690,7 +741,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).default("LINKEDIN"),
+      platform: platformEnum.default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -995,6 +1046,92 @@ app.get("/artifacts/:type/:name", (req, res) => {
 // then attempts a benign `osascript` against Messages so the system
 // re-prompts for Automation. Also opens System Settings -> Privacy ->
 // Automation as a fallback so the operator can flip the toggle directly.
+// WhatsApp connect flow. Pairing requires a one-off QR scan from the
+// operator's phone; subsequent connections reuse the LocalAuth session
+// in runnerConfig.profileDirs.WHATSAPP.
+//
+// The dashboard card on /platforms drives this via:
+//   1. POST /control/whatsapp/connect   - fires ensureConnected() on the
+//        adapter; resolves immediately (the pairing happens asynchronously
+//        on the wweb.js event bus and is reflected via /status + /qr).
+//   2. GET  /control/whatsapp/qr        - returns the latest QR as a data
+//        URL while state === "qr_ready"; 204 when no QR is needed.
+//   3. GET  /control/whatsapp/status    - { state, hasQr } poll target.
+//   4. POST /control/whatsapp/disconnect - tears the wweb.js Client down.
+function getWhatsAppAdapter() {
+  const adapter = adapters.WHATSAPP;
+  if (!adapter) {
+    throw new Error("WhatsApp adapter not registered");
+  }
+  return adapter;
+}
+
+app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
+  if (whatsappState === "connected") {
+    res.json({ ok: true, state: whatsappState, alreadyConnected: true });
+    return;
+  }
+  if (whatsappState === "connecting" || whatsappState === "qr_ready") {
+    res.json({ ok: true, state: whatsappState, alreadyInFlight: true });
+    return;
+  }
+  whatsappConnectStartedAt = Date.now();
+  // Don't await — ensureConnected() resolves on the wweb.js "ready" event
+  // which can take seconds (Puppeteer launch + QR scan). Fire and forget;
+  // the dashboard polls /status + /qr.
+  void getWhatsAppAdapter()
+    .ensureConnected()
+    .catch((error) => {
+      console.warn(
+        `[whatsapp] ensureConnected failed: ${error instanceof Error ? error.message : String(error)}`
+      );
+      whatsappState = "disconnected";
+      whatsappQr = null;
+      whatsappConnectStartedAt = null;
+    });
+  res.json({ ok: true, state: whatsappState });
+}));
+
+app.get("/control/whatsapp/qr", asyncRoute(async (_req, res) => {
+  if (whatsappState === "connected") {
+    res.status(204).end();
+    return;
+  }
+  if (!whatsappQr) {
+    res.status(204).end();
+    return;
+  }
+  // Lazy import so the qrcode dependency only loads when the operator
+  // actually pings this endpoint.
+  const { toDataURL } = await import("qrcode");
+  const dataUrl = await toDataURL(whatsappQr, { width: 280, margin: 1 });
+  res.json({ qrDataUrl: dataUrl, generatedAt: new Date().toISOString() });
+}));
+
+app.get("/control/whatsapp/status", asyncRoute(async (_req, res) => {
+  res.json({
+    state: whatsappState,
+    hasQr: Boolean(whatsappQr),
+    connectStartedAt: whatsappConnectStartedAt
+      ? new Date(whatsappConnectStartedAt).toISOString()
+      : null
+  });
+}));
+
+app.post("/control/whatsapp/disconnect", asyncRoute(async (_req, res) => {
+  try {
+    await getWhatsAppAdapter().closeSession("operator_disconnect");
+  } catch (error) {
+    console.warn(
+      `[whatsapp] closeSession failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+  whatsappState = "disconnected";
+  whatsappQr = null;
+  whatsappConnectStartedAt = null;
+  res.json({ ok: true, state: whatsappState });
+}));
+
 app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
   if (process.platform !== "darwin") {
     res.status(400).json({ error: "macOS only" });
@@ -1117,7 +1254,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"])).optional(),
+      enabledPlatforms: z.array(platformEnum).optional(),
       demoMode: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
       aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
@@ -1189,7 +1326,7 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
 app.post("/control/scan", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
+      platform: platformEnum.optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional(),
@@ -1259,7 +1396,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
+  const payload = z.object({ platform: platformEnum }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
@@ -1425,7 +1562,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
+      platform: platformEnum,
       key: z
         .enum([
           "thread_list",
@@ -2764,7 +2901,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"] as PlatformName[]).map(async (platform) => {
+    allPlatforms.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
@@ -3447,7 +3584,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
+  const payload = z.object({ platform: platformEnum }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     // The zod payload restricts platform to the three with adapters today,
     // but the adapters map is now Partial — narrow via requireAdapter to
@@ -3920,7 +4057,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional() }).parse(req.body ?? {});
+  const payload = z.object({ platform: platformEnum.optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");

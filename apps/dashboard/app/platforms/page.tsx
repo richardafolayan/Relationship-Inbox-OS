@@ -16,17 +16,190 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "Linkedin",
   INSTAGRAM: "Instagram",
   TIKTOK: "Tiktok",
-  IMESSAGE: "iMessage"
+  IMESSAGE: "iMessage",
+  WHATSAPP: "WhatsApp"
 };
 
 // Only platforms whose adapter has been hardened against the live UI are
 // surfaced as actionable rows. Instagram and TikTok still flow through the
 // runner so settings + future work can re-enable them, but the operator
 // shouldn't see them as "Connect" rows on the main view yet.
-const VISIBLE_PLATFORMS = IMPLEMENTED_PLATFORMS;
+//
+// WhatsApp gets a dedicated card above the generic loop because its connect
+// flow is QR-based, not "Open browser" — it lives in its own component
+// rather than being templated into the existing card layout.
+const VISIBLE_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = IMPLEMENTED_PLATFORMS.filter(
+  (p) => p !== "WHATSAPP"
+);
 const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = (
   ["INSTAGRAM", "TIKTOK", "LINKEDIN", "IMESSAGE"] as const
 ).filter((p) => !IMPLEMENTED_PLATFORMS.includes(p));
+
+type WhatsAppConnectState = "disconnected" | "connecting" | "qr_ready" | "connected";
+
+interface WhatsAppStatus {
+  state: WhatsAppConnectState;
+  hasQr: boolean;
+  connectStartedAt: string | null;
+}
+
+function WhatsAppConnectCard({ setError }: { setError: (msg: string | null) => void }) {
+  const [status, setStatus] = useState<WhatsAppStatus>({
+    state: "disconnected",
+    hasQr: false,
+    connectStartedAt: null
+  });
+  const [qrDataUrl, setQrDataUrl] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Poll status every 2s while not connected. The runner's connect flow is
+  // event-driven (wweb.js fires "qr" then "ready" asynchronously) so the
+  // UI can't subscribe directly without an SSE topic — polling is fine
+  // for the narrow connect window.
+  useEffect(() => {
+    let cancelled = false;
+    const tick = async () => {
+      try {
+        const next = await apiGet<WhatsAppStatus>("/runner/control/whatsapp/status");
+        if (cancelled || !next) return;
+        setStatus(next);
+        if (next.hasQr) {
+          const qr = await apiGet<{ qrDataUrl: string }>("/runner/control/whatsapp/qr").catch(() => null);
+          if (!cancelled && qr) setQrDataUrl(qr.qrDataUrl);
+        } else {
+          setQrDataUrl(null);
+        }
+      } catch {
+        // Swallow — the dashboard already surfaces runner-down state via
+        // its global health bar; double-toasting here is noise.
+      }
+    };
+    void tick();
+    const handle = window.setInterval(() => {
+      if (status.state !== "connected") void tick();
+    }, 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(handle);
+    };
+  }, [status.state]);
+
+  const onConnect = useCallback(async () => {
+    setBusy(true);
+    try {
+      await runActionWithFeedback(
+        apiPost("/runner/control/whatsapp/connect", {}),
+        {
+          pending: "Starting WhatsApp connect…",
+          success: "WhatsApp connect started — scan the QR with your phone",
+          failure: "Couldn't start WhatsApp connect",
+          setError
+        }
+      );
+    } finally {
+      setBusy(false);
+    }
+  }, [setError]);
+
+  const onDisconnect = useCallback(async () => {
+    if (!window.confirm("Disconnect WhatsApp? You'll need to scan the QR again next time.")) return;
+    setBusy(true);
+    try {
+      await runActionWithFeedback(
+        apiPost("/runner/control/whatsapp/disconnect", {}),
+        {
+          pending: "Disconnecting WhatsApp…",
+          success: "WhatsApp disconnected",
+          failure: "Couldn't disconnect WhatsApp",
+          setError
+        }
+      );
+      setStatus({ state: "disconnected", hasQr: false, connectStartedAt: null });
+      setQrDataUrl(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [setError]);
+
+  const statusLabel =
+    status.state === "connected"
+      ? "Connected"
+      : status.state === "qr_ready"
+        ? "Scan QR"
+        : status.state === "connecting"
+          ? "Connecting"
+          : "Not connected";
+  const statusClass =
+    status.state === "connected"
+      ? "bg-risk-fresh/15 text-risk-fresh"
+      : status.state === "qr_ready" || status.state === "connecting"
+        ? "bg-risk-waiting/15 text-risk-waiting"
+        : "bg-paper-2 text-ink-3";
+
+  return (
+    <details
+      open={status.state === "qr_ready" || status.state === "connecting"}
+      className="group border-t border-hairline px-1 py-[18px] last:border-b last:border-hairline"
+    >
+      <summary className="grid cursor-pointer list-none grid-cols-[1fr_auto_auto] items-center gap-6">
+        <div>
+          <div className="flex items-center gap-3">
+            <p className="m-0 font-display text-[18px] font-medium tracking-[-0.012em] text-ink">WhatsApp</p>
+            <span
+              className={`inline-flex items-center rounded-[6px] px-[8px] py-[2px] text-[11px] font-medium uppercase tracking-[0.04em] ${statusClass}`}
+            >
+              {statusLabel}
+            </span>
+          </div>
+          <p className="mt-1 font-mono text-[12px] text-ink-3">
+            {status.state === "connected"
+              ? "linked device — sessions persist across runner restarts"
+              : status.state === "qr_ready"
+                ? "open WhatsApp on your phone → Settings → Linked Devices → Link a Device"
+                : status.state === "connecting"
+                  ? "spinning up Puppeteer…"
+                  : "library-driven · no DOM scraping"}
+          </p>
+        </div>
+        <div className="flex items-center gap-1 text-[12px] text-ink-3 group-open:text-ink">
+          <span className="hover:text-ink">Details ▾</span>
+        </div>
+        <div className="flex items-center gap-2" onClick={(e) => e.preventDefault()}>
+          {status.state === "connected" ? (
+            <Button variant="quiet" disabled={busy} onClick={onDisconnect}>
+              Disconnect
+            </Button>
+          ) : (
+            <Button variant="quiet" disabled={busy} onClick={onConnect}>
+              {status.state === "connecting" || status.state === "qr_ready" ? "Connecting…" : "Connect"}
+            </Button>
+          )}
+        </div>
+      </summary>
+
+      <div className="mt-4 grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 font-mono text-[12px] text-ink-2">
+        {qrDataUrl ? (
+          <>
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src={qrDataUrl}
+              alt="WhatsApp QR code — scan with your phone"
+              className="h-[200px] w-[200px] rounded-md border border-hairline bg-white p-2"
+            />
+            <div className="self-center">
+              <p className="m-0 text-ink">Open WhatsApp on your phone, tap <span className="text-ink">Settings → Linked Devices → Link a Device</span>, then scan this code.</p>
+              <p className="mt-2 text-ink-3">Sessions persist across restarts. The QR refreshes every ~30s; this card always shows the latest one.</p>
+            </div>
+          </>
+        ) : status.state === "connected" ? (
+          <p className="col-span-2 m-0 text-ink-2">WhatsApp is paired. Threads will appear in the inbox after the next scan.</p>
+        ) : (
+          <p className="col-span-2 m-0 text-ink-3">No QR available yet. Click Connect to start the pairing flow — the QR will render here once the wweb.js client emits one (usually 1-3 seconds after launch).</p>
+        )}
+      </div>
+    </details>
+  );
+}
 
 // Platforms: quiet rows for each platform we ship to operators. Name
 // (title-case display), `last scan Xm ago` mono caption, status pill
@@ -96,6 +269,8 @@ export default function PlatformsPage() {
             onOpenReceipts={() => setReceiptsOpen(true)}
           />
         ))}
+
+      <WhatsAppConnectCard setError={setActionError} />
 
       {rows
         .filter((row) => VISIBLE_PLATFORMS.includes(row.platform))

@@ -25,6 +25,14 @@ export interface ThreadStub {
    * "auto"` so a manually-pasted URL is never overwritten.
    */
   profileUrl?: string;
+  /**
+   * Stable platform-side identifier for the Person. Used by scan-queue
+   * for the lookup-or-create on Person when present (vs falling back to
+   * the displayName-keyed lookup, which is fragile when names collide
+   * or change). LinkedIn doesn't populate this today; WhatsApp uses the
+   * contact / group JID so renames don't fork the Person row.
+   */
+  handle?: string;
   unreadCount?: number;
   lastMessagePreview: string;
   lastMessageAt?: string;
@@ -32,6 +40,15 @@ export interface ThreadStub {
   needsReplyFromList?: boolean;
   isUnreadCandidate?: boolean;
   isRecentCandidate?: boolean;
+  /**
+   * WhatsApp group identity (only set for group chats). When isGroup is
+   * true, scan-queue persists groupName / groupId on the Thread row and
+   * uses `handle` as the synthetic Person identity. Per-message senders
+   * land on Message.senderName, populated by the adapter from msg.author.
+   */
+  isGroup?: boolean;
+  groupName?: string;
+  groupId?: string;
 }
 
 export interface AttachmentPlaceholder {

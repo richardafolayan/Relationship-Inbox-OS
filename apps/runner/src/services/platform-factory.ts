@@ -2,12 +2,16 @@ import { resolveSelectors } from "@inbox-os/core";
 import type { PlatformAdapter, PlatformName, SelectorRegistry } from "@inbox-os/core";
 import { resolve, dirname } from "node:path";
 import { runnerConfig } from "../config";
+import { prisma } from "../db";
 import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
 import { BetaAdapter } from "../platforms/beta-adapter";
 import { IMessageAdapter } from "../platforms/imessage-adapter";
+import { WhatsAppAdapter } from "../platforms/whatsapp-adapter";
 import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "../platforms/browser-launch";
 import { createSessionManager } from "./session-manager";
+
+export type WhatsAppConnectState = "qr_ready" | "connecting" | "connected" | "disconnected";
 
 /**
  * Lazy-throwing adapter shell used while a platform is in scaffolding.
@@ -36,6 +40,12 @@ export function createAdapters(input: {
   settingsStore: SettingsStore;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
+  /** WhatsApp QR string from wweb.js. The control endpoints in
+   *  apps/runner/src/index.ts cache this and serve it as a data URL to
+   *  the dashboard's /platforms page. */
+  onWhatsAppQr?: (qr: string) => void;
+  /** WhatsApp connect-state machine transitions. */
+  onWhatsAppStateChange?: (state: WhatsAppConnectState) => void;
 }): {
   // `Partial` because not every PlatformName has an adapter on main today.
   // IMESSAGE was added to PlatformName so prisma can read existing iMessage
@@ -105,13 +115,13 @@ export function createAdapters(input: {
       dbPath: runnerConfig.imessage.dbPath,
       contactsVcfPath: runnerConfig.imessage.contactsVcfPath
     }),
-    // WhatsApp is wired in Phase B (whatsapp-web.js adapter). Phase A only
-    // adds the platform value + schema columns + plumbing. The stub
-    // implements the PlatformAdapter contract without doing any DOM /
-    // network work, so the runner boots cleanly with WHATSAPP enabled but
-    // any operator-triggered scan / send / open against it surfaces a
-    // clear error instead of silently launching Chrome at the wrong target.
-    WHATSAPP: createNotImplementedAdapter("WHATSAPP")
+    WHATSAPP: new WhatsAppAdapter({
+      authDir: runnerConfig.profileDirs.WHATSAPP,
+      sendGuardConfig: runnerConfig.whatsappSend,
+      prisma,
+      onQr: input.onWhatsAppQr,
+      onStateChange: input.onWhatsAppStateChange
+    })
   };
 
   return {
