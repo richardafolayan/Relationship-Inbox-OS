@@ -792,13 +792,20 @@ app.use("/control", (req, res, next) => {
 });
 
 app.get("/health", asyncRoute(async (_req, res) => {
+  // Mirror the picker's eligibility filter in enrichment-queue.ts so the
+  // status-bar count matches what the worker would actually pick up next.
+  // A job rescheduled with nextAttemptAt 6h in the future is asleep, not
+  // "in flight" — counting it sticks the banner on for hours after every
+  // failed run and trains the operator to mash the cancel button.
+  const now = new Date();
   const [platforms, enrichmentPending, enrichmentRunning] = await Promise.all([
     prisma.platform.findMany(),
-    // PENDING + RUNNING surface as "in flight" to the dashboard. DEFERRED
-    // (waiting on scan/send lock) is technically active too — a busy
-    // platform can leave a job DEFERRED for ~minute — so include it. DONE
-    // and FAILED stay out of the count.
-    prisma.enrichmentJob.count({ where: { status: { in: ["PENDING", "DEFERRED"] } } }),
+    prisma.enrichmentJob.count({
+      where: {
+        status: "PENDING",
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+      }
+    }),
     prisma.enrichmentJob.count({ where: { status: "RUNNING" } })
   ]);
   const lastScanAt = platforms
@@ -1132,14 +1139,13 @@ app.post("/control/scan/abort", asyncRoute(async (_req, res) => {
   res.json({ status: wasScanning ? "aborting" : "idle" });
 }));
 
-// Cancel every queued (PENDING + DEFERRED) enrichment job. The currently
-// RUNNING job (if any) is left to finish — killing it mid-page would
-// leave the playwright context in a wedged state, and the next job
-// would likely fail. One outstanding job is acceptable cancel
-// semantics. Returns the count of rows transitioned to FAILED.
+// Cancel every queued PENDING enrichment job, including ones rescheduled
+// far in the future. The currently RUNNING job (if any) is left to finish —
+// killing it mid-page would leave the playwright context in a wedged state.
+// Returns the count of rows transitioned to FAILED.
 app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
   const result = await prisma.enrichmentJob.updateMany({
-    where: { status: { in: ["PENDING", "DEFERRED"] } },
+    where: { status: "PENDING" },
     data: { status: "FAILED", lastError: "cancelled by operator", nextAttemptAt: null }
   });
   res.json({ status: "ok", cancelled: result.count });
