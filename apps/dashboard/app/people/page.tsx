@@ -292,9 +292,14 @@ export default function PeoplePage() {
                   ? "bg-risk-waiting"
                   : "bg-risk-fresh";
             const active = person.id === selectedId;
+            // Previous version used `??` between the join and the fallback,
+            // but `.filter(Boolean).join("...")` returns `""` (empty string),
+            // not null/undefined, so `"" ?? "no profile yet"` evaluated to
+            // `""` and the "no profile yet" copy never rendered. Switch to
+            // `||` so falsy strings (including empty) fall through.
             const headlineLine =
-              person.headline ??
-              [person.currentRole, person.currentCompany].filter(Boolean).join(" at ") ??
+              person.headline ||
+              [person.currentRole, person.currentCompany].filter(Boolean).join(" at ") ||
               "no profile yet";
             const detailId = `person-detail-${person.id}`;
             // Inline accordion: clicking a row expands the detail panel

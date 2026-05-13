@@ -1319,14 +1319,26 @@ export default function ThreadPage() {
     if (!container || !target) return;
     const containerRect = container.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
-    // With non-focused bubbles collapsed to height 0, the focused
-    // stack is the entire scrollable content. Centring the parent
-    // gives breathing room above when the stack is short, and lets
-    // the operator scroll the stack within the column when the stack
-    // is taller than the viewport. Direct scrollTop assignment (not
-    // smooth scroll) so we don't race React's commit phase.
+    // With non-focused bubbles collapsed to height 0, the focused stack
+    // is the entire scrollable content; centring the parent gives breathing
+    // room above when the stack is short and lets the operator scroll the
+    // stack within the column when it's taller than the viewport.
+    //
+    // The timeline container also has a sticky header (~120px on the
+    // current layout) that covers the top of its scroll viewport. Without
+    // accounting for it, "centred" lands the focused parent under the
+    // header. Subtract the header's actual rendered height so the parent
+    // lands in the centre of the *visible* area, not the geometric centre
+    // of the scroll container.
+    //
+    // Direct scrollTop assignment (not smooth scroll) so we don't race
+    // React's commit phase on Retina/external-display setups.
+    const stickyHeader = container.querySelector<HTMLElement>("[data-focus-sticky-header]");
+    const headerOffset = stickyHeader?.getBoundingClientRect().height ?? 0;
+    const visibleHeight = containerRect.height - headerOffset;
     const delta = (targetRect.top - containerRect.top)
-      - (containerRect.height / 2)
+      - headerOffset
+      - (visibleHeight / 2)
       + (targetRect.height / 2);
     container.scrollTop = container.scrollTop + delta;
     // `focusTrigger` is included so clicking a chip whose parent is
@@ -1348,31 +1360,12 @@ export default function ThreadPage() {
   }, [visibleMessages]);
   const [participantPopover, setParticipantPopover] = useState<string | null>(null);
 
-  // Annotate each message with a date-divider flag/label so consecutive
-  // messages crossing a date boundary get a centered hairline label
-  // (e.g. "Tuesday, Jan 12") rendered above the bubble.
-  const dateLabelFormatter = useMemo(
-    () =>
-      new Intl.DateTimeFormat(undefined, {
-        weekday: "long",
-        month: "short",
-        day: "numeric"
-      }),
-    []
-  );
-  const timelineRows = useMemo(() => {
-    let lastDate = "";
-    return visibleMessages.map((message) => {
-      const dateKey = new Date(message.timestamp).toDateString();
-      const showDivider = dateKey !== lastDate;
-      lastDate = dateKey;
-      return {
-        message,
-        showDivider,
-        dividerLabel: showDivider ? dateLabelFormatter.format(new Date(message.timestamp)) : ""
-      };
-    });
-  }, [visibleMessages, dateLabelFormatter]);
+  // (Previously: `dateLabelFormatter` + `timelineRows` built a per-message
+  // divider list. The render at L1690 still uses the older `dayDividerLabel`
+  // helper inline, so this useMemo block was unused dead work running on
+  // every render. Removed — if a future refactor wants Intl-style dividers,
+  // wire them through `dayDividerLabel` directly so there's a single
+  // source of truth for the timeline-date format.)
 
   // Sibling-thread list: surface the operator's other open conversations
   // alongside the current thread so they can jump between them without
@@ -1678,8 +1671,12 @@ export default function ThreadPage() {
           {/* Glassy sticky header. Sits inside the scroll container so the
               timeline scrolls visibly behind it - matches the iOS / Apple
               translucent-bar aesthetic the rest of the redesign nods at.
-              Single-row layout keeps vertical real estate for the chat. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
+              Single-row layout keeps vertical real estate for the chat.
+              `data-focus-sticky-header` lets the focus-scroll effect at
+              L1196 subtract this header's height when centering a focused
+              parent message — without it the parent lands under the
+              header. */}
+          <div data-focus-sticky-header className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
             <header className="flex items-center gap-2">
               <button
                 type="button"
