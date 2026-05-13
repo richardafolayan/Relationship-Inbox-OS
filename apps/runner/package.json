@@ -20,7 +20,8 @@
     "imessage:dedupe-people": "tsx src/scripts/dedupe-imessage-people.ts",
     "imessage:reset-permissions": "tsx src/scripts/imessage-permission-reset.ts",
     "imessage:purge-automated": "tsx src/scripts/purge-automated-imessage.ts",
-    "imessage:keep-voice-notes": "tsx src/scripts/imessage-keep-voice-notes.ts"
+    "imessage:keep-voice-notes": "tsx src/scripts/imessage-keep-voice-notes.ts",
+    "imessage:repair-send-keys": "tsx src/scripts/repair-imessage-send-keys.ts"
   },
   "dependencies": {
     "@inbox-os/core": "0.1.0",
