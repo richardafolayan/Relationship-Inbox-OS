@@ -2276,13 +2276,20 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
   const unreadOnly = req.query.unread === "true";
   const needsReplyOnly = req.query.needsReply === "true";
+  // Honour ?view=archived so the endpoint behaves the way the URL reads.
+  // Previously this param was silently ignored and the active inbox came
+  // back unchanged — misleading for any external script that guessed at
+  // the URL (issue #204). The dashboard still calls /data/archived
+  // directly; this just stops the alternative from quietly lying.
+  const view = typeof req.query.view === "string" ? req.query.view : undefined;
+  const archivedView = view === "archived";
 
   const today = new Date();
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
   const [visibleRows, outboundLast7DaysCount, sentToday, scheduledSends] = await Promise.all([
-    loadVisibleThreadRows(),
+    loadVisibleThreadRows(archivedView ? { archived: true } : undefined),
     prisma.message.count({
       where: {
         direction: "OUT",
