@@ -856,6 +856,14 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     previousSummary?: string;
     previousOpenLoops: string[];
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /**
+     * True when the contact's last message is newer than the operator's —
+     * i.e. an active ask is pending. False when the operator already
+     * replied (or the thread is fresh), in which case the summary switches
+     * to "reconnect mode": what_they_want and open_loops become hooks for
+     * reopening the conversation rather than items to address.
+     */
+    needsReply: boolean;
   }): Promise<SummaryOutput> {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
@@ -901,10 +909,49 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       })
       .join("\n");
 
+    // The summary now operates in one of two modes, switched on
+    // `needsReply`. Active-reply mode (contact's message is newest) asks
+    // for a recap of the current exchange + loops adjacent to the active
+    // topic. Reconnect mode (operator already replied or thread is
+    // dormant) asks for warm callbacks the operator could use to reopen —
+    // remembered details, things the contact said they'd do, hooks worth
+    // bringing up. The data shape is identical so the dashboard renders
+    // it the same way; only the content adapts.
+    const modeBlock = input.needsReply
+      ? `MODE: ACTIVE REPLY. The contact is waiting on the operator.
+
+what_they_want guidance (active reply):
+- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
+- Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
+- Examples: "Sultan asked if you've watched the MJ movie — he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch — he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
+
+open_loops guidance (active reply):
+- Focus on items adjacent to the CURRENT active topic. The most recent 2-3 inbound messages define what's live.
+- DROP any older loops where the conversation has clearly moved on to an unrelated topic. If the recent exchange is about a movie and the old loops are about a months-old logistics request, do not surface those — they're stale.
+- EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript.
+- A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
+- 0-4 loops is fine. Quality over volume. The bar is "would the operator genuinely want to pick this up right now, given what's being discussed".
+- Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".`
+      : `MODE: RECONNECT. The operator has the floor — the contact is not currently waiting on anything specific. The summary's job here is to help the operator reopen the conversation warmly, not to surface tasks.
+
+what_they_want guidance (reconnect):
+- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- Frame as: "what's the warmest, most natural way for the operator to reopen this thread, grounded in something specific the contact has shared." Reference a real detail from the transcript — something they mentioned doing, a thing they were working through, a small life update.
+- Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
+- Examples: "Sultan mentioned exam stress last month — a 'how'd they go?' check-in is natural.", "She was deciding between two job offers — worth asking how that landed.", "He said he'd send the doc but went quiet; a light nudge would land well."
+
+open_loops guidance (reconnect):
+- These become "warm callbacks" — small specific things from the transcript that would feel good to bring up. Things the contact shared, mentioned, or said they'd do. Things the operator could genuinely remember and ask about.
+- Lean on specificity. "Ask how the new role is going" beats "Catch up on work". "Follow up on whether they found Tolu" beats "Check in on logistics".
+- DROP anything where bringing it up would feel like dredging up an awkward stale request. If the transcript moved past a topic months ago, leave it.
+- 0-5 callbacks is fine.
+- Phrase each as a short prompt the operator could act on: "Ask how the move to Lagos went" / "Mention you finally watched the MJ doc" / "Check in on the new role".`;
+
     const prompt = `Return strict JSON matching this exact shape:
 {
-  "summary": "string — 1-2 sentence rolling summary of the relationship",
-  "what_they_want": "string — 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER in total, plain prose, British English, no trailing ellipsis. This headlines the Today 'First up' hero card: recap what the last couple of messages have been about and name what the contact is waiting on the operator to address next, so the operator instantly remembers the thread on opening Today. Write it as a brief reminder to the operator, not the contact's quoted words. Examples: 'She shared photos from Lagos and asked when you're free for dinner.', 'Carlos confirmed Friday lunch — he's waiting on you to pick a time.', 'They sent the Stripe intro you asked for; owes them a thank-you and your next step.'",
+  "summary": "string — 1-2 sentence rolling summary of the relationship (durable across turns)",
+  "what_they_want": "string — see mode-specific guidance below",
   "open_loops": ["string", ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
@@ -913,12 +960,12 @@ export function createAiService(settingsStore: SettingsStore): AiService {
 
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
 
-Open loops scope (strict):
-- Walk the WHOLE transcript and extract every distinct askable item the contact raised: every question, every topic they brought up, every hook the operator could follow up on. Be comprehensive, not just the most recent message. Six loops in a long-running thread is fine. Three short ones for a brief thread is fine. The bar is distinctness, not count.
-- EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript. If the contact asked "what are you up to this weekend?" and the operator already replied "going home for the bank holiday" three messages later, that is CLOSED, not an open loop.
-- A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
+${modeBlock}
+
+General rules (both modes):
 - One loop per item. Don't merge ("their work + their move + their dog") into a single string.
-- Phrase each loop as a short follow-up prompt the operator could use, e.g. "Ask how the new role is going" / "Pick up the thread about their move to Lagos" / "Send the doc they asked about". Not as the contact's quoted question.
+- Phrase loops as actions the operator can take, never as the contact's quoted question.
+- The "summary" field stays stable — it's the durable relationship description, not the mode-specific recap. Update it only when the relationship itself shifts (new shared context, role change, etc.).
 
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
@@ -940,7 +987,22 @@ ${transcript}`;
     summary: string;
     whatTheyWant: string;
     openLoops: string[];
-    lastInboundMessage: string;
+    /**
+     * Last 6 turns of the transcript (oldest first). Replaces the previous
+     * single-string `lastInboundMessage`: the model needs the back-and-
+     * forth to spot when the operator has already engaged on the topic
+     * (e.g. operator said "yhh why?" then the contact clarified — the
+     * reply must respond to the clarification, not treat it as a cold
+     * ask). Each entry includes the speaker direction.
+     */
+    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /**
+     * True when the contact's last message is newer than the operator's.
+     * When false, the prompt switches to "reopen mode": generates three
+     * conversation starters grounded in transcript details rather than
+     * direct replies to a pending message.
+     */
+    needsReply: boolean;
     /**
      * Thread classification. When "outreach", the third reply slot is a
      * "Polite decline" instead of a "Clarifying question" — short friendly
@@ -1002,20 +1064,32 @@ ${transcript}`;
       ]
     };
 
-    const prompt = `Return strict JSON matching this exact shape:
-{
-  "replies": [
-    { "label": "A", "intent": "<short noun phrase>", "text": "..." },
-    { "label": "B", "intent": "<short noun phrase>", "text": "..." },
-    { "label": "C", "intent": "<short noun phrase>", "text": "..." }
-  ],
-  "needs_user_input": ["string", ...]
-}
+    // Render the recent exchange so the model can see who said what.
+    // Previous prompt only passed `lastInboundMessage` as a string, which
+    // hid the operator's own most recent turn — if the operator had
+    // already engaged with a short reply, the model would still generate
+    // replies as if responding to a cold ask. Now it sees the back-and-
+    // forth and can produce a reply that fits the actual conversational
+    // turn.
+    const recentExchange = input.recentMessages
+      .map((m) => {
+        const speaker = m.direction === "OUT" ? "operator" : "contact";
+        return `${speaker}: ${m.text}`;
+      })
+      .join("\n");
 
-Each reply text must be a complete, sendable message under 280 characters,
-1-2 sentences, British English. No em dashes, en dashes, semicolons, or
-colons. Match the inbound message's register: warm if they're warm,
-formal if they're formal.
+    // Mode switches the whole framing. In reply mode the model produces
+    // three responses to the contact's pending message. In reopen mode
+    // the operator chose to reach out into a quiet thread, so the model
+    // produces three conversation starters grounded in concrete details
+    // from the transcript (warm callbacks, "wow you remembered" moments,
+    // small things the contact mentioned that would feel good to bring
+    // up). The output shape is identical so the dashboard renders both
+    // the same way.
+    const modeBlock = input.needsReply
+      ? `MODE: REPLY. The contact's last message is waiting on a response.
+
+What to generate: three sendable replies to the most recent contact message, accounting for the full recent exchange above. If the operator already responded to part of the topic earlier in this exchange, the replies must build on that — do NOT treat the contact's last message as a cold ask when the operator has already engaged.
 
 INTENT LABELS — pick three intents that genuinely fit THIS conversation.
 Each intent is a 2-4 word noun phrase describing the angle of that reply.
@@ -1036,13 +1110,41 @@ Hard rules:
 - Each intent describes WHAT THIS REPLY DOES, in this thread's context —
   e.g. "Acknowledge their move", "Suggest a time", "Match their warmth",
   "Offer a small update", "Decline gently", "Ask about timeline". Make
-  them specific to what was actually said.
+  them specific to what was actually said.${
+    isOutreach
+      ? `\n- This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C MUST be a friendly Polite decline (~1 sentence, no commitment, no follow-up question), labelled with intent "Polite decline". Replies A and B can still pick intents that fit.`
+      : ""
+  }`
+      : `MODE: REOPEN. The operator is reaching back into a thread where nothing is currently pending — there's no message waiting on a reply. Generate three conversation starters the operator could send right now to reopen warmly.
 
-${
-  isOutreach
-    ? `This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C MUST be a friendly Polite decline (~1 sentence, no commitment, no follow-up question), labelled with intent "Polite decline". Replies A and B can still pick intents that fit.`
-    : ""
-}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
+What to generate: three OPENERS the operator could send into this quiet thread. Each one must:
+- Reference something SPECIFIC from the transcript above (a thing the contact mentioned, shared, said they'd do, was working through, complained about, was excited by). Cite the concrete detail — "the move to Lagos", "the new role", "exam stress", "the doc you owed them" — not a generic "catch up".
+- Land as a "wow, you remembered" moment if possible. Small specific recall beats grand re-greetings.
+- Be sendable as a first message into a quiet thread — no "in reply to your last…" framing.
+- Sit in the operator's voice.
+
+Hard rules:
+- The three openers must reference three DIFFERENT details. Don't generate three variations on the same callback.
+- Do NOT invent details that aren't in the transcript. If you can't ground a third opener in a real detail, return only two replies and put a note in needs_user_input.
+- No generic "hey how have you been" filler unless there's literally nothing else in the transcript. In that case one slot can be a warm "hey how are things" but the other two must still ground in something real.
+- Each intent describes the callback: "Ask about the Lagos move", "Follow up on exam stress", "Mention you watched the doc". Avoid "Clarifying question" — there's nothing to clarify in reopen mode.`;
+
+    const prompt = `Return strict JSON matching this exact shape:
+{
+  "replies": [
+    { "label": "A", "intent": "<short noun phrase>", "text": "..." },
+    { "label": "B", "intent": "<short noun phrase>", "text": "..." },
+    { "label": "C", "intent": "<short noun phrase>", "text": "..." }
+  ],
+  "needs_user_input": ["string", ...]
+}
+
+Each reply text must be a complete, sendable message under 280 characters,
+1-2 sentences, British English. No em dashes, en dashes, semicolons, or
+colons. Match the conversation's register: warm if it's warm, formal if
+it's formal.
+
+${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -1051,7 +1153,8 @@ ${
 Summary: ${input.summary}
 What they want: ${input.whatTheyWant}
 Open loops: ${JSON.stringify(input.openLoops)}
-Last inbound: ${input.lastInboundMessage}`;
+Recent exchange (oldest first):
+${recentExchange || "(no recent messages)"}`;
 
     const { result: parsed, source } = await modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
     // Defensive scrub of em-dashes, semicolons, colons — see applyVoiceRules.

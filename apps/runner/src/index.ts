@@ -1987,6 +1987,14 @@ async function resummarizeThreadById(threadId: string): Promise<
     return { ok: false, reason: "not_found" };
   }
 
+  // Resummarize is driven by the operator clicking "Reassess" or by the
+  // stale-summary self-heal path. Recompute needsReply from the thread's
+  // own message ordering so the mode-aware prompt picks the right
+  // framing (active reply vs reopen).
+  const computedNeedsReply = Boolean(
+    thread.lastInboundAt &&
+      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
+  );
   const summary = await aiService.updateThreadSummary({
     displayName: thread.person.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
@@ -1995,7 +2003,8 @@ async function resummarizeThreadById(threadId: string): Promise<
       direction: message.direction as "IN" | "OUT",
       text: message.text,
       timestamp: message.timestamp.toISOString()
-    }))
+    })),
+    needsReply: computedNeedsReply
   });
 
   await prisma.thread.update({
@@ -2457,11 +2466,32 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
   ]);
 
+  // Recent exchange: oldest-first window of the last ~6 turns. Gives
+  // generateSuggestedReplies enough context to spot when the operator has
+  // already engaged on the topic (e.g. operator said "yhh why?" then the
+  // contact clarified). Drawn from the same pageMessages already fetched.
+  const RECENT_TURN_WINDOW = 6;
+  const recentMessages = pageMessages
+    .slice(-RECENT_TURN_WINDOW)
+    .map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    }));
+  // needsReply mirrors scan-queue's derivation: the contact's last message
+  // is newer than the operator's. When false, generateSuggestedReplies
+  // switches to "reopen mode" — conversation starters grounded in
+  // transcript details, not replies to a pending ask.
+  const aiNeedsReply = Boolean(
+    lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
+  );
+
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    lastInboundMessage: lastInbound?.text ?? "",
+    recentMessages,
+    needsReply: aiNeedsReply,
     // Drives the "Polite decline" reply variant when the thread is outreach.
     category: (thread.category ?? null) as "outreach" | "genuine" | null,
     // Late-reply detection: when the last inbound is much older than the
@@ -2496,8 +2526,16 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     if (gapDays >= 14) return "short";
     return "n";
   })();
+  // Cache key folds in the full recent-message window (timestamp + text)
+  // so a new turn in the exchange invalidates the cached replies. Mode
+  // flag (needsReply) is included separately so a flip between active
+  // and reopen mode also busts the cache even if the recent window text
+  // hasn't otherwise changed.
+  const recentSignature = aiInputs.recentMessages
+    .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
+    .join("|");
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
+    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
     .digest("hex");
 
   let suggested: SuggestedRepliesOutput | undefined;
@@ -3540,21 +3578,37 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return;
   }
 
-  const [lastInbound, operatorProfile, contactSnapshot] = await Promise.all([
-    prisma.message.findFirst({
-      where: { threadId, direction: "IN" },
-      orderBy: { timestamp: "desc" },
-      select: { text: true }
+  // Fetch the last ~6 turns to mirror the /data/thread call site. Pulling
+  // the full recent window means a predraft pre-warm builds the same
+  // recentSignature, so the cacheKey matches and the operator's next
+  // /data/thread fetch reuses the warmed cache row.
+  const RECENT_TURN_WINDOW = 6;
+  const [recentTurnsDesc, operatorProfile, contactSnapshot] = await Promise.all([
+    prisma.message.findMany({
+      where: { threadId },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: RECENT_TURN_WINDOW,
+      select: { direction: true, text: true, timestamp: true }
     }),
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
   ]);
+  const recentMessages = [...recentTurnsDesc].reverse().map((m) => ({
+    direction: m.direction as "IN" | "OUT",
+    text: m.text,
+    timestamp: m.timestamp.toISOString()
+  }));
+  const aiNeedsReply = Boolean(
+    thread.lastInboundAt &&
+      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
+  );
 
   const aiInputs = {
     summary: thread.rollingSummary ?? "",
     whatTheyWant: thread.whatTheyWant ?? "",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    lastInboundMessage: lastInbound?.text ?? "",
+    recentMessages,
+    needsReply: aiNeedsReply,
     category: (thread.category as "outreach" | "genuine" | null) ?? null,
     lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
@@ -3575,8 +3629,11 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   })();
   // Mirror the inline /data/thread cacheKey shape so a predraft pre-warm
   // and a subsequent /data/thread fetch hit the same cache row.
+  const recentSignature = aiInputs.recentMessages
+    .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
+    .join("|");
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
+    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
     .digest("hex");
 
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
