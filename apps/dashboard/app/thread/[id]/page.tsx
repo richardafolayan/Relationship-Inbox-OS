@@ -1151,46 +1151,40 @@ export default function ThreadPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedThreadParentId]);
-  // Bring the focused parent into view when the focus changes. Without
-  // this, clicking "N Replies" on a bubble that's already at the bottom
-  // of the viewport works fine, but clicking the "↳" quote chip on a
-  // reply where the parent is scrolled offscreen leaves the user staring
-  // at a dimmed empty area.
-  //
-  // We also flip `stickToBottomRef` off so the surrounding useLayoutEffect
-  // doesn't immediately snap the timeline back to the bottom after our
-  // scroll — that's what was happening before this guard was added.
-  useEffect(() => {
+  // Bring the focused parent into view when the focus changes. Two
+  // pieces of timing care:
+  //   1. Flip `stickToBottomRef` off so the global timeline
+  //      useLayoutEffect doesn't immediately snap scrollTop back to
+  //      scrollHeight after our scroll (it fires on every
+  //      visibleMessages re-creation).
+  //   2. Scroll the timeline container EXPLICITLY rather than relying
+  //      on element.scrollIntoView's "nearest scrollable ancestor"
+  //      heuristic, which picks the wrong context on multi-monitor /
+  //      Retina setups and silently no-ops.
+  // We use a useLayoutEffect so the scroll happens synchronously after
+  // DOM update, before the browser paints — same frame as the dim/blur
+  // class applies, so users see them animate together rather than the
+  // dim happen, pause, then the scroll yank.
+  useLayoutEffect(() => {
     if (!focusedThreadParentId) {
-      // On exit, restore the natural bottom-stickiness so new messages
+      // On exit, restore natural bottom-stickiness so new messages
       // continue to follow the operator's view.
       stickToBottomRef.current = true;
       return;
     }
     stickToBottomRef.current = false;
-    // Defer one frame so the CSS opacity/blur transition starts before
-    // the scroll begins — feels less janky than a simultaneous yank.
-    // We compute the scroll target manually against the timeline
-    // container instead of using element.scrollIntoView, because the
-    // page has two nested scroll contexts (the chat column AND the
-    // window) and the implicit "nearest scrollable ancestor" logic
-    // sometimes picks the wrong one, leaving the focused parent off
-    // the timeline's visible window.
-    const handle = requestAnimationFrame(() => {
-      const container = timelineRef.current;
-      const target = container?.querySelector(
-        `[data-message-id="${focusedThreadParentId}"]`
-      ) as HTMLElement | null;
-      if (!container || !target) return;
-      const containerRect = container.getBoundingClientRect();
-      const targetRect = target.getBoundingClientRect();
-      // Centre the focused parent in the visible chat column.
-      const delta = (targetRect.top - containerRect.top)
-        - (containerRect.height / 2)
-        + (targetRect.height / 2);
-      container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
-    });
-    return () => cancelAnimationFrame(handle);
+    const container = timelineRef.current;
+    const target = container?.querySelector(
+      `[data-message-id="${focusedThreadParentId}"]`
+    ) as HTMLElement | null;
+    if (!container || !target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    // Centre the focused parent in the visible chat column.
+    const delta = (targetRect.top - containerRect.top)
+      - (containerRect.height / 2)
+      + (targetRect.height / 2);
+    container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
   }, [focusedThreadParentId]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
