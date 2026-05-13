@@ -264,7 +264,7 @@ export default function TodayPage() {
     rows.length === 0 && (cleared.RED + cleared.AMBER + cleared.GREEN) > 0;
 
   return (
-    <Canvas>
+    <Canvas className="max-w-[1240px] pb-10">
       <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_82%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
         <div className="min-w-0">
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
@@ -306,14 +306,14 @@ export default function TodayPage() {
         <p className="mb-6 font-mono text-[11px] text-risk-overdue">{error}</p>
       ) : null}
 
-      <div className="grid grid-cols-1 gap-8 lg:grid-cols-[1fr_230px]">
+      <div className="grid min-h-[calc(100vh-140px)] grid-cols-1 gap-8 lg:grid-cols-[1fr_260px]">
         {/* Hero column */}
-        <div>
+        <div className="flex flex-col">
           {hero ? (
             <article
               ref={heroRef}
               data-testid="today-hero"
-              className={`relative mb-4 cursor-pointer overflow-hidden rounded-card border border-hairline bg-paper px-9 pb-7 pt-9 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-4 flex min-h-[calc(100vh-180px)] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               <div
@@ -324,7 +324,7 @@ export default function TodayPage() {
                     "radial-gradient(ellipse at 100% 0%, color-mix(in oklch, var(--accent) 12%, transparent), transparent 55%)"
                 }}
               />
-              <div className="relative">
+              <div className="relative flex flex-1 flex-col">
                 <p className="mb-[20px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
                   <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
                   {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up · 1 of ${rows.length}`}
@@ -353,7 +353,7 @@ export default function TodayPage() {
                   <span className="font-medium text-ink">{hero.personName}</span>
                   <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
                 </div>
-                <p className="m-0 mb-7 max-w-[58ch] text-balance border-l-2 border-hairline-strong pl-4 text-[17px] leading-[1.55] text-ink-2">
+                <p className="m-0 mb-7 max-w-[68ch] flex-1 text-balance border-l-2 border-hairline-strong pl-5 text-[17px] leading-[1.55] text-ink-2">
                   {normalizePreview(hero.preview)}
                 </p>
                 <div
@@ -456,7 +456,7 @@ export default function TodayPage() {
 
         {/* Right rail: day outline */}
         <aside className="hidden lg:block">
-          <div className="sticky top-[18px] rounded-[16px] border border-hairline bg-paper p-[18px]">
+          <div className="sticky top-[110px] rounded-[16px] border border-hairline bg-paper p-[18px]">
             <h5 className="m-0 mb-[14px] font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">
               Tonight’s outline
             </h5>
@@ -466,14 +466,14 @@ export default function TodayPage() {
                 done={cleared.RED}
                 total={totalRed}
                 pct={overduePct}
-                tone="accent"
+                tone="overdue"
               />
               <OutlineRow
                 label="Waiting on you"
                 done={cleared.AMBER}
                 total={totalAmber}
                 pct={waitingPct}
-                tone="accent"
+                tone="waiting"
               />
               <OutlineRow
                 label="Fresh, no rush"
@@ -483,7 +483,10 @@ export default function TodayPage() {
                 tone="fresh"
               />
               <li className={`flex items-center gap-[10px] ${allDone ? "" : "opacity-50"}`}>
-                <span className="relative block h-[3px] w-[24px] overflow-hidden rounded-[2px] bg-hairline">
+                <span
+                  className={`inline-block h-[8px] w-[8px] rounded-full ${allDone ? "bg-risk-fresh" : "bg-hairline-strong"}`}
+                />
+                <span className="relative block h-[3px] w-[28px] overflow-hidden rounded-[2px] bg-hairline">
                   {allDone ? <span className="absolute inset-0 bg-risk-fresh" /> : null}
                 </span>
                 <span>Done · sleep</span>
@@ -508,12 +511,14 @@ function OutlineRow({
   done: number;
   total: number;
   pct: number;
-  tone: "accent" | "fresh";
+  tone: "overdue" | "waiting" | "fresh";
 }) {
-  const fillClass = tone === "fresh" ? "bg-risk-fresh" : "bg-accent";
+  const fillClass =
+    tone === "overdue" ? "bg-risk-overdue" : tone === "waiting" ? "bg-risk-waiting" : "bg-risk-fresh";
   return (
     <li className="flex items-center gap-[10px]">
-      <span className="relative block h-[3px] w-[24px] overflow-hidden rounded-[2px] bg-hairline">
+      <span className={`inline-block h-[8px] w-[8px] rounded-full ${fillClass}`} />
+      <span className="relative block h-[3px] w-[28px] overflow-hidden rounded-[2px] bg-hairline">
         <span
           className={`absolute inset-y-0 left-0 ${fillClass}`}
           style={{ width: `${pct}%` }}
