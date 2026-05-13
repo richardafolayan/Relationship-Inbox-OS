@@ -55,7 +55,7 @@ export interface InboxResponse {
   summary: {
     unreadThreads: number;
     atRiskThreads: number;
-    averageReplyTimeHours: number;
+    averageReplyTimeHours: number | null;
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
