@@ -2679,7 +2679,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
       resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
     );
     const resolvedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
-    const lastMessage = latestRealMessage ?? latestMessagesDesc[0];
+    // latestRealMessage already excludes system-event placeholders. The
+    // previous fallback `?? latestMessagesDesc[0]` could surface a
+    // "[system event]" row as lastMessageDirection/Text on threads where
+    // the most-recent row is e.g. "X turned on read receipts" — exactly
+    // the case the notSystemEvent filter is meant to suppress. Drop the
+    // fallback so threads with only system events leave the existing
+    // thread.lastMessage* fields unchanged.
+    const lastMessage = latestRealMessage;
     const resolvedLastMessagePreview = cleanText(
       candidate.lastMessagePreview ?? lastMessage?.text ?? thread.lastMessagePreview ?? ""
     );
