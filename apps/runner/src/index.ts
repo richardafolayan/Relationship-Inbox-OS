@@ -1217,6 +1217,10 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
       }
     });
 
+    // Returns 200 with `{ ok: false, reason, retryAfterSeconds }` so the
+    // dashboard's structured cooldown UI in app/platforms/page.tsx can
+    // surface retry-after info inline. Don't change to 4xx without also
+    // updating the dashboard to read ApiRequestError.payload.
     res.status(200).json({
       ...queued,
       ...traceMeta
@@ -2116,6 +2120,10 @@ app.post("/control/resummarize-stale", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
+  // Validate the path param even though the handler doesn't currently
+  // need the thread row. Without this, any string in the path was
+  // accepted, which silently let bad URLs reach the AI service.
+  z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z
     .object({
       mode: z.enum(["SHORTEN", "MAKE_WARMER"]),
@@ -2281,15 +2289,15 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  const [visibleRows, outboundLast7DaysCount, sentToday, scheduledSends] = await Promise.all([
+  const [visibleRows, recentMessages, sentToday, scheduledSends] = await Promise.all([
     loadVisibleThreadRows(),
-    prisma.message.count({
-      where: {
-        direction: "OUT",
-        timestamp: {
-          gte: sevenDaysAgo
-        }
-      }
+    // Pull all messages across the last 7 days in one query so we can
+    // compute averageReplyTimeHours from real inbound→outbound deltas
+    // rather than the hardcoded placeholder this used to return.
+    prisma.message.findMany({
+      where: { timestamp: { gte: sevenDaysAgo } },
+      select: { threadId: true, direction: true, timestamp: true },
+      orderBy: { timestamp: "asc" }
     }),
     prisma.message.count({
       where: {
@@ -2304,6 +2312,37 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
       select: { threadId: true, scheduledFor: true }
     })
   ]);
+
+  // Walk messages per-thread, in chronological order. Every inbound is a
+  // candidate "ball in our court"; the next outbound after it (still
+  // inside the 7-day window) gives a real reply latency. Average across
+  // all such pairs. Null when nothing replied in the window — better than
+  // pretending with a placeholder.
+  const repliesByThread = new Map<string, { lastInbound: Date | null }>();
+  const replyLatenciesMs: number[] = [];
+  for (const msg of recentMessages) {
+    let state = repliesByThread.get(msg.threadId);
+    if (!state) {
+      state = { lastInbound: null };
+      repliesByThread.set(msg.threadId, state);
+    }
+    if (msg.direction === "IN") {
+      state.lastInbound = msg.timestamp;
+    } else if (msg.direction === "OUT" && state.lastInbound) {
+      const delta = msg.timestamp.getTime() - state.lastInbound.getTime();
+      if (delta >= 0) replyLatenciesMs.push(delta);
+      state.lastInbound = null;
+    }
+  }
+  const averageReplyTimeHours =
+    replyLatenciesMs.length > 0
+      ? Math.round(
+          (replyLatenciesMs.reduce((sum, ms) => sum + ms, 0) /
+            replyLatenciesMs.length /
+            3_600_000) *
+            10
+        ) / 10
+      : null;
 
   // Earliest SCHEDULED scheduledFor per thread — Today uses this to skip
   // threads the operator has already queued a reply for.
@@ -2385,7 +2424,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const summary = {
     unreadThreads: rows.filter((row) => row.unreadCount > 0).length,
     atRiskThreads: rows.filter((row) => row.riskLevel !== "GREEN").length,
-    averageReplyTimeHours: outboundLast7DaysCount ? 4.2 : 0,
+    averageReplyTimeHours,
     oldestPendingInboundAt: oldestPending?.lastInboundAt ?? null,
     messagesSentToday: sentToday
   };
