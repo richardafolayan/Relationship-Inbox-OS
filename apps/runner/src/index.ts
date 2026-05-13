@@ -47,6 +47,8 @@ import {
 import { AdapterFailure } from "./platforms/utils";
 import type { LinkedInSmokeIngestResult, LinkedInSmokePersistInput } from "./platforms/linkedin-adapter";
 import {
+  personThreadCountKey,
+  personThreadCounts,
   shapeThreadRows,
   toInboxRow,
   type ThreadRowSource
@@ -2284,8 +2286,10 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
     }
   }
 
+  const visibleCounts = personThreadCounts(visibleRows);
   const dedupedRows = visibleRows.map((row) => {
-    const shaped = toInboxRow(row);
+    const count = visibleCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
+    const shaped = toInboxRow(row, count);
     const scheduledFor = scheduledSendByThread.get(shaped.id);
     return {
       ...shaped,
@@ -2981,8 +2985,10 @@ app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
 
 // Archived view counterpart to /data/inbox — same shape, only archived rows.
 app.get("/data/archived", asyncRoute(async (_req, res) => {
-  const rows = (await loadVisibleThreadRows({ archived: true }))
-    .map((row) => toInboxRow(row))
+  const archivedRows = await loadVisibleThreadRows({ archived: true });
+  const archivedCounts = personThreadCounts(archivedRows);
+  const rows = archivedRows
+    .map((row) => toInboxRow(row, archivedCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1))
     .sort((a, b) => {
       const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
       const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
@@ -3106,9 +3112,11 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
     });
   }
 
+  const peopleCounts = personThreadCounts(visibleThreadGroups);
   const groupedByPerson = new Map<string, ReturnType<typeof toInboxRow>[]>();
   for (const group of visibleThreadGroups) {
-    const shaped = toInboxRow(group);
+    const count = peopleCounts.get(personThreadCountKey(group.source.platform, group.source.personId)) ?? 1;
+    const shaped = toInboxRow(group, count);
     const bucket = groupedByPerson.get(shaped.personId) ?? [];
     bucket.push(shaped);
     groupedByPerson.set(shaped.personId, bucket);

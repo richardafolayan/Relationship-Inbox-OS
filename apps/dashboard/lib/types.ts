@@ -40,6 +40,14 @@ export interface InboxRow {
    * existing scheduled pill.
    */
   scheduledSendAt?: string | null;
+  /**
+   * Number of inbox rows currently visible for the same person+platform.
+   * 1 in the normal case. >1 when the contact has multiple distinct
+   * conversations (typically LinkedIn recruiters pitching different
+   * candidates in separate 1:1 threads). The dashboard shows a small
+   * "N threads" badge so repeat names don't read as duplicates.
+   */
+  personThreadCount?: number;
 }
 
 export interface InboxResponse {
