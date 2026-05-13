@@ -220,7 +220,12 @@ export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
     lastInboundAt: source.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: source.lastOutboundAt?.toISOString() ?? null,
     riskReason: source.riskReason,
-    slaCountdown: formatSlaCountdown(source.slaDueAt),
+    // `row.needsReply` is recomputed from lastInboundAt vs lastOutboundAt;
+    // `source.slaDueAt` is the raw DB value written by the last risk scan.
+    // If the operator has replied since that scan, slaDueAt is stale and
+    // would render as "Overdue Xh" on a row that no longer needs a reply
+    // (issue #200). Suppress the countdown when nothing is owed.
+    slaCountdown: row.needsReply ? formatSlaCountdown(source.slaDueAt) : "",
     identityWarning: row.identityWarning,
     messageCount: row.messageCount,
     category: source.category ?? null,
