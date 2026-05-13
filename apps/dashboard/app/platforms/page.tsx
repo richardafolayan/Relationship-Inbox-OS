@@ -178,14 +178,28 @@ export default function PlatformsPage() {
                   }
                   items={[
                     {
-                      label: "Scan now",
+                      label: "Scan for updates",
                       onSelect: () =>
                         runActionWithFeedback(
-                          apiPost("/runner/control/scan", { platform: row.platform }),
+                          apiPost("/runner/control/scan", { platform: row.platform, scope: "update" }),
                           {
-                            pending: `Scanning ${PLATFORM_DISPLAY[row.platform]}…`,
-                            success: `${PLATFORM_DISPLAY[row.platform]} scan queued`,
-                            failure: `${PLATFORM_DISPLAY[row.platform]} scan failed`,
+                            pending: `Updating ${PLATFORM_DISPLAY[row.platform]}…`,
+                            success: `${PLATFORM_DISPLAY[row.platform]} update queued`,
+                            failure: `${PLATFORM_DISPLAY[row.platform]} update failed`,
+                            setError: setActionError,
+                            onDone: () => refresh()
+                          }
+                        )
+                    },
+                    {
+                      label: "Full rescan",
+                      onSelect: () =>
+                        runActionWithFeedback(
+                          apiPost("/runner/control/scan", { platform: row.platform, scope: "full" }),
+                          {
+                            pending: `Full ${PLATFORM_DISPLAY[row.platform]} rescan…`,
+                            success: `${PLATFORM_DISPLAY[row.platform]} full rescan queued`,
+                            failure: `${PLATFORM_DISPLAY[row.platform]} full rescan failed`,
                             setError: setActionError,
                             onDone: () => refresh()
                           }

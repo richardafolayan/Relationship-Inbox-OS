@@ -96,8 +96,8 @@ export function AppShell({ children }: { children: ReactNode }) {
       // serializes them per-platform; iMessage will usually finish in
       // under a second while LinkedIn is still going.
       Promise.all([
-        apiPost("/runner/control/scan", { platform: "LINKEDIN" }).catch(() => undefined),
-        apiPost("/runner/control/scan", { platform: "IMESSAGE" }).catch(() => undefined)
+        apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "update" }).catch(() => undefined),
+        apiPost("/runner/control/scan", { platform: "IMESSAGE", scope: "update" }).catch(() => undefined)
       ]).finally(() => {
         autoScanInFlightRef.current = false;
       });

@@ -62,12 +62,24 @@ interface ScanQueueDeps {
   onNewPerson?: (input: { personId: string; trigger: "first_seen" }) => void;
 }
 
+/**
+ * - "update": the cheap default. Walks the inbox top-down and stops once
+ *   we've seen `LINKEDIN_UNCHANGED_STREAK_LIMIT` (default 5) consecutive
+ *   rows whose list-side signals haven't moved since our last scan. iMessage
+ *   and the WAL watcher always use this — chat.db reads are essentially free.
+ * - "full": disables the streak short-circuit. The adapter walks every row
+ *   in the inbox up to `maxThreads`. Use for the first scan against a fresh
+ *   account, or when the operator suspects state drift.
+ */
+export type ScanScope = "update" | "full";
+
 type ScanJob = {
   jobId: string;
   platform?: PlatformName;
   maxThreads?: number;
   maxOpens?: number;
   forceFallback?: boolean;
+  scope: ScanScope;
 };
 
 interface TraceAwareAdapter {
@@ -166,6 +178,8 @@ type EnqueueScanOptions = {
   maxThreads?: number;
   maxOpens?: number;
   forceFallback?: boolean;
+  /** Default "update". See ScanScope for what each value means. */
+  scope?: ScanScope;
 };
 
 type LinkedInFallbackDecision = {
@@ -782,7 +796,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
       platform,
       maxThreads: normalizePositiveScanCap(options?.maxThreads),
       maxOpens: normalizePositiveScanCap(options?.maxOpens),
-      forceFallback: shouldUseForceFallback(options?.forceFallback)
+      forceFallback: shouldUseForceFallback(options?.forceFallback),
+      scope: options?.scope ?? "update"
     };
 
     queue.push(job);
@@ -1018,6 +1033,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
             requestId: job.jobId,
             platform,
             scope: job.platform ?? "ALL",
+            scanScope: job.scope,
             queueDepth: getQueueDepth()
           }
         });
@@ -1342,18 +1358,34 @@ export function createScanQueue(deps: ScanQueueDeps) {
               // tolerate LinkedIn's occasional list-side reordering, but
               // tight enough to noticeably shorten "everything is up to
               // date" scans.
-              const unchangedStreakLimit = (() => {
-                const raw = process.env.LINKEDIN_UNCHANGED_STREAK_LIMIT;
-                const parsed = raw ? Number(raw) : NaN;
-                if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 50) return parsed;
-                return 5;
-              })();
+              // "full" scope disables the early-exit entirely — the operator
+              // explicitly wants to walk every row. We still let the
+              // per-thread skip-if-unchanged path skip opens, so unchanged
+              // threads don't waste a click, but `stopScan` is never raised.
+              const unchangedStreakLimit = job.scope === "full"
+                ? Number.POSITIVE_INFINITY
+                : (() => {
+                    const raw = process.env.LINKEDIN_UNCHANGED_STREAK_LIMIT;
+                    const parsed = raw ? Number(raw) : NaN;
+                    if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 50) return parsed;
+                    return 5;
+                  })();
               let unchangedStreakCount = 0;
+              // Baseline = the LinkedIn thread count we've ever persisted.
+              // Drives the status bar so the operator sees "3/167" rather
+              // than "3/3" (issue #170). The adapter's `total` is the live
+              // row-set size, which is uninformative when most of the inbox
+              // hasn't been scrolled into view yet. We bump the baseline on
+              // overflow when the scan exposes new threads beyond what we
+              // had stored.
+              const baselineThreadTotal = await prisma.thread.count({
+                where: { platform: "LINKEDIN" }
+              });
               currentScanProgress = {
                 platform: "LINKEDIN",
                 processedRows: 0,
                 openedRows: 0,
-                total: effectiveMaxThreads ?? 0,
+                total: baselineThreadTotal,
                 startedAt: Date.now()
               };
               const streamMetrics = await linkedInAdapter.scanInboxThreadsStream({
@@ -1366,10 +1398,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   if (currentScanProgress) {
                     currentScanProgress.processedRows = snap.processedRows;
                     currentScanProgress.openedRows = snap.openedRows;
-                    // The adapter resolves a real `maxThreads` when the
-                    // queue passes undefined (uses the adapter dep cap),
-                    // so trust the adapter's number for the live total.
-                    currentScanProgress.total = snap.total;
+                    // Hold the baseline as long as the scan stays within it.
+                    // Once the adapter reports more rows than we had stored
+                    // (a brand-new chat appeared, or the persisted count
+                    // drifted), bump up so the bar never reads >100%.
+                    currentScanProgress.total = Math.max(baselineThreadTotal, snap.processedRows);
                   }
                 },
                 shouldOpenCandidate: async (signals) => {
