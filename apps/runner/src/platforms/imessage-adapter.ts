@@ -146,12 +146,20 @@ export class IMessageAdapter implements PlatformAdapter {
       const raw: Record<string, unknown> = {};
       if (r.reactions.length > 0) raw.reactions = r.reactions;
       if (r.replyToGuid) raw.replyToGuid = r.replyToGuid;
+      // Resolve raw chat.db handles (phone numbers / emails) to real
+      // contact names via the operator's vCard. Without this, group-chat
+      // bubbles surface "+15551234567" as the sender label even when the
+      // contact is in the address book (issue #144). Falls back to the
+      // raw handle when no match — unknown senders still get *something*
+      // human-readable to label by.
+      const resolvedSender =
+        r.senderHandle ? this.contactResolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
       return {
         platformMessageKey: r.guid,
         direction: r.direction,
         timestamp: r.timestamp ?? new Date().toISOString(),
         text: r.text,
-        senderName: r.senderHandle,
+        senderName: resolvedSender,
         raw: Object.keys(raw).length > 0 ? raw : undefined,
         attachments: r.attachments.map((a) => ({
           type: a.kind,
@@ -293,6 +301,13 @@ export class IMessageAdapter implements PlatformAdapter {
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
+      // chat.db's row guid for the message we just sent. send.ts uses
+      // this as the persisted Message.platformMessageKey so a later
+      // scan, which also keys by guid, dedups against this row instead
+      // of inserting a duplicate. Without it, the same iMessage ends
+      // up as two Message rows: one from the send-side stableHash and
+      // one from the scan-side guid.
+      platformMessageKey: receiptGuid,
       // "bubble_detected" if Messages.app confirmed delivery; else
       // "best_effort" — the bubble exists but the recipient hasn't
       // acked yet (offline, slow, etc.).

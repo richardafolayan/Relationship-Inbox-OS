@@ -26,9 +26,11 @@ import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
+import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
+import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
@@ -610,6 +612,10 @@ async function siblingThreadIds(platform: PlatformName, personId: string): Promi
     select: { id: true }
   });
   return rows.map((r) => r.id);
+}
+
+async function actionTargetThreadIds(threadId: string): Promise<string[]> {
+  return resolveActionTargetThreadIds(prisma, threadId);
 }
 
 // The adapters map is `Partial<Record<PlatformName, PlatformAdapter>>` —
@@ -2868,11 +2874,13 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
 // default Inbox/At Risk/People views and only shows in the Archived view.
 app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const thread = await prisma.thread.update({
-    where: { id: threadId },
-    data: { archivedAt: new Date() }
+  const archivedAt = new Date();
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
+    data: { archivedAt }
   });
-  res.json({ ok: true, threadId: thread.id, archivedAt: thread.archivedAt?.toISOString() });
+  res.json({ ok: true, threadId, archivedAt: archivedAt.toISOString() });
 }));
 
 // Toggle whether an open-loop string is dismissed for a thread. The dashboard
@@ -2909,11 +2917,12 @@ app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
 // Unarchive — clears archivedAt so the thread returns to the active Inbox.
 app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const thread = await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: { archivedAt: null }
   });
-  res.json({ ok: true, threadId: thread.id });
+  res.json({ ok: true, threadId });
 }));
 
 // Archived view counterpart to /data/inbox — same shape, only archived rows.
@@ -3814,8 +3823,9 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const operatorHasNotReplied = !existing?.lastOutboundAt || inbound > outbound;
   const shouldArchive = operatorHasNotReplied && !existing?.archivedAt;
 
-  await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       needsReply: false,
       unreadCount: 0,
@@ -3830,7 +3840,7 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
     action: "MARK_DONE",
     stage: "Send",
     status: "OK",
-    details: { threadId, archived: shouldArchive }
+    details: { threadId, archived: shouldArchive, propagatedTo: targetIds.length }
   });
 
   res.json({ status: "ok", archived: shouldArchive });
@@ -3878,8 +3888,9 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
   const payload = z.object({ hours: z.number().int().min(1).max(72) }).parse(req.body);
   const due = new Date(Date.now() + payload.hours * 60 * 60 * 1000);
 
-  await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       slaDueAt: due,
       snoozedUntil: due,
@@ -3891,7 +3902,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
     action: "SNOOZE",
     stage: "Scan",
     status: "OK",
-    details: { threadId, hours: payload.hours }
+    details: { threadId, hours: payload.hours, propagatedTo: targetIds.length }
   });
 
   res.json({ status: "ok", dueAt: due.toISOString(), snoozedUntil: due.toISOString() });
@@ -3900,8 +3911,9 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
 
-  await prisma.thread.update({
-    where: { id: threadId },
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
     data: {
       snoozedUntil: null,
       riskReason: null
@@ -3912,7 +3924,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
     action: "UNSNOOZE",
     stage: "Scan",
     status: "OK",
-    details: { threadId }
+    details: { threadId, propagatedTo: targetIds.length }
   });
 
   res.json({ status: "ok", threadId });
@@ -4141,6 +4153,47 @@ async function start(): Promise<void> {
   await ensureRuntimeDirs();
   await settingsStore.getSettings();
   scanQueue.startScheduler();
+
+  if (runnerConfig.imessage.enabled) {
+    const watcher = createIMessageWatcher({
+      dbPath: runnerConfig.imessage.dbPath,
+      debounceMs: runnerConfig.imessage.watchDebounceMs,
+      onChange: (reason) => {
+        // Honour the operator-facing settings toggle. The chat.db watcher
+        // is gated by the env-level imessage.enabled flag (does this host
+        // even have iMessage?), but settings.enabledPlatforms is the
+        // user-facing "scan iMessage" switch the dashboard renders. If
+        // the operator has it off we must not enqueue scans — otherwise
+        // /data/platforms shows iMessage disabled while the runner is
+        // happily scanning it in the background (issue #202).
+        void settingsStore.getSettings().then((currentSettings) => {
+          if (!currentSettings.enabledPlatforms.includes("IMESSAGE")) {
+            return auditService.log({
+              platform: "IMESSAGE",
+              stage: "Scan",
+              action: "IMESSAGE_WATCH_TRIGGER",
+              status: "OK",
+              details: { reason, skipped: "disabled_in_settings" }
+            });
+          }
+          const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+          return auditService.log({
+            platform: "IMESSAGE",
+            stage: "Scan",
+            action: "IMESSAGE_WATCH_TRIGGER",
+            status: result.ok ? "OK" : "FAIL",
+            details: {
+              reason,
+              ...(result.ok
+                ? { jobId: result.jobId, status: result.status }
+                : { blocked: result.blocked, blockReason: result.reason })
+            }
+          });
+        });
+      }
+    });
+    watcher.start();
+  }
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(runnerConfig.port, () => {
