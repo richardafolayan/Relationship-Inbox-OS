@@ -273,6 +273,17 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       return { visited: false };
     }
 
+    // Mark the row RUNNING BEFORE the pacing sleep. If the runner crashes
+    // mid-sleep, recoverInflightOnStart will transition the row back to
+    // PENDING on next boot. The previous order (sleep, then mark RUNNING)
+    // let a crash-during-pace drop the in-memory recentVisits ring, so the
+    // very next boot could fire a visit immediately and bypass the
+    // automation-detection guard the pacing is supposed to provide.
+    await prisma.enrichmentJob.update({
+      where: { id: job.id },
+      data: { status: "RUNNING", attempts: job.attempts + 1 }
+    });
+
     // Pacing — randomised gap in [paceMinMs, paceMaxMs] since the last
     // visit. After every `longIdleEvery` visits, an additional extended
     // pause in [longIdleMinMs, longIdleMaxMs] is layered on top.
@@ -289,11 +300,6 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if (longIdleGap > 0) {
       visitsSinceLongIdle = 0;
     }
-
-    await prisma.enrichmentJob.update({
-      where: { id: job.id },
-      data: { status: "RUNNING", attempts: job.attempts + 1 }
-    });
 
     let result: ProfileExtractionResult;
     try {
@@ -378,7 +384,16 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if (recentVisits.length >= deps.dailyCap) {
       return { deferred: true };
     }
-    const result = await visitProfile(personId);
+    // Acquire the enrich lock so a concurrent drain pass can't collide on
+    // the same managed page. Defer if the lock is held — the caller will
+    // fall back to enqueue and the worker drains it normally.
+    const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
+      visitProfile(personId)
+    );
+    if (!acquired.acquired) {
+      return { deferred: true };
+    }
+    const result = acquired.value;
     lastVisitAt = Date.now();
     recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
@@ -414,12 +429,18 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
 
   function start(): void {
     stopped = false;
+    // Always kick — even if recovery throws — so any pre-existing PENDING
+    // rows are picked up on next boot. Otherwise a flaky DB read at start
+    // could leave the queue idle for up to a full periodicTimer interval
+    // (1h) before the next chance to drain.
     void recoverInflightOnStart()
-      .then(() => kick())
       .catch((error) => {
         console.warn(
           `[enrichment-queue] recover failed: ${error instanceof Error ? error.message : String(error)}`
         );
+      })
+      .finally(() => {
+        if (!stopped) kick();
       });
     if (!periodicTimer) {
       periodicTimer = setInterval(() => {
