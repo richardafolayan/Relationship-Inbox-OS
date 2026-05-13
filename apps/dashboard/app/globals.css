@@ -35,6 +35,14 @@
   --radius-card: 22px;
   --radius-row: 16px;
   --radius-pill: 999px;
+
+  /* Send-ripple tint. Paper-coloured glow rather than the brand
+   * accent — the wave on the surrounding bubbles communicates the
+   * impact; the ripple is just a near-invisible halo behind it.
+   * Lighter in light mode (12% white reads as a soft warm wash on
+   * cream paper), much subtler in dark mode (6% so it doesn't
+   * compete with the bubble's own brightness). */
+  --ripple-tint: rgba(255, 255, 255, 0.12);
 }
 
 [data-theme="dark"] {
@@ -49,6 +57,7 @@
   --hairline-strong: oklch(36% 0.014 260);
   --accent-soft: oklch(28% 0.07 32);
   --accent-ink: oklch(82% 0.10 32);
+  --ripple-tint: rgba(255, 255, 255, 0.06);
 }
 
 /* Native form controls (<audio>, <video>) render their chrome based on

@@ -8,14 +8,20 @@ import {
   useReducedMotion
 } from "framer-motion";
 import { SPRING } from "@/lib/motion";
+// SentBubble uses the bouncy spring so the bubble overshoots slightly
+// before settling - reads as a real drop into rest rather than a
+// soft fade. The gentle spring (used elsewhere) felt apologetic.
+const ENTRY_SPRING = SPRING.bouncy;
 import { cn } from "@/lib/utils";
 import { SendRipple } from "./send-ripple";
 
-// Ripple total lifetime: longest radial (delay 0.12s + duration 0.7s)
-// = 0.82s. Add a small buffer so the final frame paints. After this
-// the ripple unmounts to keep the DOM tidy (long chat sessions
-// shouldn't accumulate dozens of invisible ripple spans).
-const RIPPLE_LIFETIME_MS = 900;
+// Ripple total lifetime: longest radial (delay 0.13s + duration 0.85s)
+// = 0.98s. Add a small buffer so the final frame paints and the
+// neighbour-bubble wave (which propagates over ~770 ms from depth 0
+// to depth 4) has finished too. After this the ripple unmounts to
+// keep the DOM tidy - long chat sessions shouldn't accumulate
+// dozens of invisible ripple spans.
+const RIPPLE_LIFETIME_MS = 1100;
 
 interface SentBubbleProps {
   // Has the optimistic send come back as failed? Drives the shake +
@@ -77,7 +83,7 @@ export function SentBubble({
       opacity: 1,
       y: 0,
       scale: 1,
-      transition: SPRING.gentle
+      transition: ENTRY_SPRING
     });
     // controls is a stable reference from framer-motion, no need to
     // include in deps. Run-once intentionally.
@@ -117,10 +123,12 @@ export function SentBubble({
   return (
     <motion.div
       // `relative` so the ripple radials (absolute) anchor to this
-      // wrapper. Original layout classes (flex column, self-end, etc.)
-      // pass through unchanged - merged via cn() so callers can also
-      // override if needed.
-      className={cn("relative", className)}
+      // wrapper. `isolate` makes this a stacking context so the
+      // ripple's `-z-10` sits behind the static bubble children
+      // without falling behind the chat background. Original layout
+      // classes (flex column, self-end, etc.) pass through unchanged
+      // - merged via cn() so callers can also override if needed.
+      className={cn("relative isolate", className)}
       // No `layout` prop here on purpose. With layout="position",
       // framer-motion claims ownership of `transform` and silently
       // overrides our `initial`/`animate` y + scale values - the
@@ -129,7 +137,11 @@ export function SentBubble({
       // near-identical (same text, same right alignment), so the
       // small position jump on reconciliation is acceptable.
       animate={controls}
-      initial={reduced ? { opacity: 0 } : { opacity: 0, y: -2, scale: 1.02 }}
+      // Bigger lift (y: -8, scale: 1.06) so the bouncy spring
+      // actually reads as a drop into rest. The previous values
+      // (y: -2, scale: 1.02) were too timid - the bubble seemed
+      // to fade in rather than land.
+      initial={reduced ? { opacity: 0 } : { opacity: 0, y: -8, scale: 1.06 }}
       exit={
         reduced
           ? { opacity: 0, transition: { duration: 0.08 } }
