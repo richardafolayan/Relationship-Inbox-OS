@@ -111,6 +111,13 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    /**
+     * App-level threading: when set, the resulting Message row links back
+     * to the parent (a Message.id cuid in the same thread). The send still
+     * goes out as a normal text bubble — the threading is rendered purely
+     * by the dashboard.
+     */
+    replyToMessageId?: string;
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -154,7 +161,8 @@ export function createSendService(deps: SendServiceDeps) {
           status: "PENDING",
           attachmentsJson: input.attachments && input.attachments.length > 0
             ? JSON.stringify(input.attachments)
-            : null
+            : null,
+          replyToMessageId: input.replyToMessageId ?? null
         }
       });
     } catch (error) {
@@ -257,6 +265,13 @@ export function createSendService(deps: SendServiceDeps) {
         receipt.attachments && receipt.attachments.length > 0
           ? JSON.stringify(receipt.attachments)
           : null;
+      // App-level threading: when the operator hit "Reply" in the
+      // focused-thread view, the SendRequest row carries the parent
+      // Message.id. Copy it onto the resulting outbound row so the
+      // dashboard renders the new bubble inline under its parent on the
+      // next refresh. The send itself goes out as a normal text bubble
+      // — the recipient on Messages.app sees no threading at all.
+      const replyToMessageId = sendRequest.replyToMessageId ?? null;
       await prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
@@ -269,7 +284,8 @@ export function createSendService(deps: SendServiceDeps) {
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
           sentVia: "automation",
-          attachmentsJson
+          attachmentsJson,
+          replyToMessageId
         },
         create: {
           threadId: thread.id,
@@ -278,7 +294,8 @@ export function createSendService(deps: SendServiceDeps) {
           timestamp: new Date(receipt.sentAt),
           text: input.text,
           sentVia: "automation",
-          attachmentsJson
+          attachmentsJson,
+          replyToMessageId
         }
       });
 
