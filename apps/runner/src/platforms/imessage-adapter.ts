@@ -293,6 +293,13 @@ export class IMessageAdapter implements PlatformAdapter {
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
+      // chat.db's row guid for the message we just sent. send.ts uses
+      // this as the persisted Message.platformMessageKey so a later
+      // scan, which also keys by guid, dedups against this row instead
+      // of inserting a duplicate. Without it, the same iMessage ends
+      // up as two Message rows: one from the send-side stableHash and
+      // one from the scan-side guid.
+      platformMessageKey: receiptGuid,
       // "bubble_detected" if Messages.app confirmed delivery; else
       // "best_effort" — the bubble exists but the recipient hasn't
       // acked yet (offline, slow, etc.).
