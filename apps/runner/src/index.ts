@@ -632,10 +632,17 @@ async function loadVisibleThreadRows(options?: {
   /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
   archived?: boolean;
 }): Promise<ReturnType<typeof shapeThreadRows>> {
+  const now = new Date();
   const threads = await prisma.thread.findMany({
     where: options?.archived
       ? { archivedAt: { not: null } }
-      : { archivedAt: null },
+      : {
+          archivedAt: null,
+          // Hide snoozed threads from active views until the timer expires.
+          // The dashboard polls every 10s, so threads resurface naturally
+          // within that window once snoozedUntil <= now.
+          OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }]
+        },
     select: {
       id: true,
       platform: true,
@@ -653,6 +660,7 @@ async function loadVisibleThreadRows(options?: {
       riskLevel: true,
       riskReason: true,
       slaDueAt: true,
+      snoozedUntil: true,
       whatTheyWant: true,
       rollingSummary: true,
       archivedAt: true,
@@ -2685,6 +2693,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     platform: thread.platform,
     riskLevel: thread.riskLevel,
     riskReason: thread.riskReason,
+    snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
     unreadCount: thread.unreadCount,
     needsReply: thread.needsReply,
     summary: thread.rollingSummary,
@@ -3862,6 +3871,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
     where: { id: threadId },
     data: {
       slaDueAt: due,
+      snoozedUntil: due,
       riskReason: "Snoozed for " + payload.hours + "h"
     }
   });
@@ -3873,7 +3883,28 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
     details: { threadId, hours: payload.hours }
   });
 
-  res.json({ status: "ok", dueAt: due.toISOString() });
+  res.json({ status: "ok", dueAt: due.toISOString(), snoozedUntil: due.toISOString() });
+}));
+
+app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  await prisma.thread.update({
+    where: { id: threadId },
+    data: {
+      snoozedUntil: null,
+      riskReason: null
+    }
+  });
+
+  await auditService.log({
+    action: "UNSNOOZE",
+    stage: "Scan",
+    status: "OK",
+    details: { threadId }
+  });
+
+  res.json({ status: "ok", threadId });
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
