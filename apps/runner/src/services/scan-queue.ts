@@ -2699,8 +2699,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
       redHours: settings.redHours
     });
 
+    // Bump SUMMARY_VERSION whenever the summary prompt or output shape
+    // changes — every stored hash mismatches and re-summary fires on next
+    // scan. Without a bump, quiet threads keep their old cached
+    // `whatTheyWant` indefinitely because the inbound message hasn't
+    // changed.
+    const SUMMARY_VERSION = "v2-120ch-recap";
     const lastInboundHash = lastInboundMessage
-      ? stableHash(`${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`)
+      ? stableHash(
+          `${SUMMARY_VERSION}|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+        )
       : null;
 
     const shouldRefreshSummary = !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
