@@ -84,7 +84,17 @@ function formatDayLabel(date: Date): string {
     a.getDate() === b.getDate();
   if (sameDay(date, today)) return "Today";
   if (sameDay(date, yesterday)) return "Yesterday";
-  return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  // Append the year only when the message isn't from the current year.
+  // Keeps recent dividers clean ("Mon, May 12") while making it obvious
+  // that an older thread reaches into a prior year ("Mon, May 12, 2025"),
+  // so the operator never has to guess which May 12 they're looking at.
+  const includeYear = date.getFullYear() !== today.getFullYear();
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    ...(includeYear ? { year: "numeric" } : {})
+  });
 }
 
 // Build the standard list of schedule-send presets relative to `now`.
@@ -240,6 +250,19 @@ export default function ThreadPage() {
   const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
+  // Focused thread: cuid of the parent message whose thread we're zoomed
+  // into. Declared up here because the send callback closes over it.
+  // Cleared on Esc, the chip ×, or when navigating threads (effect below).
+  const [focusedThreadParentId, setFocusedThreadParentId] = useState<string | null>(null);
+  // Bumped on every chip / N-Replies click so the focus useLayoutEffect
+  // re-fires its scroll-into-view even when the operator clicks a chip
+  // whose parent is already the current focus (re-centring after the
+  // user scrolled around).
+  const [focusTrigger, setFocusTrigger] = useState(0);
+  const focusOnParent = useCallback((parentId: string) => {
+    setFocusedThreadParentId(parentId);
+    setFocusTrigger((n) => n + 1);
+  }, []);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
@@ -539,11 +562,15 @@ export default function ThreadPage() {
     setError(null);
     stickToBottomRef.current = true;
     try {
+      // Snapshot the focused-thread parent at send time so the post-send
+      // exit-focus doesn't race the network call and drop the linkage.
+      const replyToMessageId = focusedThreadParentId ?? undefined;
       if (attachmentsToSend.length > 0) {
         // Multipart upload - needed for binary file payloads.
         const form = new FormData();
         form.append("text", text);
         form.append("clientSendId", clientSendId);
+        if (replyToMessageId) form.append("replyToMessageId", replyToMessageId);
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
         }
@@ -558,7 +585,8 @@ export default function ThreadPage() {
       } else {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
-          clientSendId
+          clientSendId,
+          ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
     } catch (sendError) {
@@ -574,7 +602,7 @@ export default function ThreadPage() {
     } finally {
       setSending(false);
     }
-  }, [composer, composerAttachments, sending, thread]);
+  }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files);
@@ -1087,6 +1115,122 @@ export default function ThreadPage() {
   const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
+  // Threaded-reply lookups — unifies two sources:
+  //   (1) Apple-native: child carries `raw.replyToGuid` from chat.db's
+  //       `thread_originator_guid`, resolved against another row's
+  //       `platformMessageKey`.
+  //   (2) App-level: child carries `replyToMessageId` (a Message.id cuid)
+  //       set by the dashboard's focused-thread composer.
+  // Either way we end up with a parent cuid → child cuids map plus a
+  // per-child parent pointer the render code consumes uniformly.
+  const { messageById, replyCountByParentId, replyChildIdsByParentId, parentIdOf } = useMemo(() => {
+    const byKey = new Map<string, ThreadMessage>();
+    const byId = new Map<string, ThreadMessage>();
+    for (const m of visibleMessages) {
+      byId.set(m.id, m);
+      if (m.platformMessageKey) byKey.set(m.platformMessageKey, m);
+    }
+    const parentOf = new Map<string, string>();
+    const counts = new Map<string, number>();
+    const children = new Map<string, string[]>();
+    for (const m of visibleMessages) {
+      let parentId: string | undefined;
+      if (m.replyToMessageId && byId.has(m.replyToMessageId)) {
+        parentId = m.replyToMessageId;
+      } else {
+        const parentGuid = (m.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
+        if (parentGuid) {
+          const parent = byKey.get(parentGuid);
+          if (parent) parentId = parent.id;
+        }
+      }
+      if (parentId) {
+        parentOf.set(m.id, parentId);
+        counts.set(parentId, (counts.get(parentId) ?? 0) + 1);
+        const list = children.get(parentId) ?? [];
+        list.push(m.id);
+        children.set(parentId, list);
+      }
+    }
+    return {
+      messageById: byId,
+      replyCountByParentId: counts,
+      replyChildIdsByParentId: children,
+      parentIdOf: parentOf
+    };
+  }, [visibleMessages]);
+
+  // Focused thread: see state declaration up top (lifted there so the
+  // send callback closes over it). The derived state below depends on
+  // `messageById` which is only available after `visibleMessages` is
+  // computed, so it stays here.
+  const focusedParentMessage = focusedThreadParentId
+    ? (messageById.get(focusedThreadParentId) ?? null)
+    : null;
+  // The set of message ids that are "in focus" — the parent + every
+  // reply linked to it. Used by the render to bright-light those bubbles
+  // and dim/blur everything else, matching Messages.app's focused-thread
+  // overlay. When no focus, the set is null and every bubble renders at
+  // full opacity.
+  const focusedIdSet = useMemo<Set<string> | null>(() => {
+    if (!focusedThreadParentId) return null;
+    const childIds = replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
+    return new Set<string>([focusedThreadParentId, ...childIds]);
+  }, [focusedThreadParentId, replyChildIdsByParentId]);
+  useEffect(() => {
+    // Clear focused thread when navigating to a different thread so the
+    // user doesn't carry stale focus across conversations.
+    setFocusedThreadParentId(null);
+  }, [thread?.id]);
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocusedThreadParentId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusedThreadParentId]);
+  // Bring the focused parent into view when the focus changes. Two
+  // pieces of timing care:
+  //   1. Flip `stickToBottomRef` off so the global timeline
+  //      useLayoutEffect doesn't immediately snap scrollTop back to
+  //      scrollHeight after our scroll (it fires on every
+  //      visibleMessages re-creation).
+  //   2. Scroll the timeline container EXPLICITLY rather than relying
+  //      on element.scrollIntoView's "nearest scrollable ancestor"
+  //      heuristic, which picks the wrong context on multi-monitor /
+  //      Retina setups and silently no-ops.
+  // We use a useLayoutEffect so the scroll happens synchronously after
+  // DOM update, before the browser paints — same frame as the dim/blur
+  // class applies, so users see them animate together rather than the
+  // dim happen, pause, then the scroll yank.
+  useLayoutEffect(() => {
+    if (!focusedThreadParentId) {
+      stickToBottomRef.current = true;
+      return;
+    }
+    stickToBottomRef.current = false;
+    const container = timelineRef.current;
+    const target = container?.querySelector(
+      `[data-message-id="${focusedThreadParentId}"]`
+    ) as HTMLElement | null;
+    if (!container || !target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    // Centre the focused parent in the visible chat column.
+    const delta = (targetRect.top - containerRect.top)
+      - (containerRect.height / 2)
+      + (targetRect.height / 2);
+    // Direct scrollTop assignment instead of scrollTo({behavior:"smooth"})
+    // because smooth scroll was getting cancelled by React's commit
+    // phase before it could complete on Retina/external-display setups.
+    // The slight jank is worth the reliability — CSS transitions on the
+    // dim/blur classes still provide a smooth visual.
+    container.scrollTop = container.scrollTop + delta;
+    // `focusTrigger` is included so clicking a chip whose parent is
+    // already the current focus re-centres rather than no-opping.
+  }, [focusedThreadParentId, focusTrigger]);
+
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
   // have written into the thread, it is a group. False positives on a
@@ -1235,12 +1379,29 @@ export default function ThreadPage() {
     ? thread.suggestedReplies.source
     : null;
 
+  // Right-rail framing splits on `needsReply`:
+  // - active reply (contact's message is newest): rail surfaces what they're
+  //   waiting on + topical open loops + reply chips
+  // - reopen (operator already replied or thread dormant): rail surfaces a
+  //   warm reconnect hook + transcript-grounded callbacks + conversation
+  //   starters in the chips
+  // The fields themselves (whatTheyWant, openLoops, suggestedReplies) are
+  // generated mode-aware on the server. The dashboard only adjusts headers
+  // and helper copy. `trimmedSummary` (the durable rolling relationship
+  // summary) shows as a muted subline so the operator gets the relationship
+  // shorthand without it crowding the per-turn ask.
   const trimmedSummary = thread.summary?.trim() ?? "";
   const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
-  const askDuplicatesSummary =
+  const summaryDuplicatesAsk =
     trimmedAsk && trimmedSummary &&
     (trimmedSummary.includes(trimmedAsk) || trimmedAsk.includes(trimmedSummary));
-  const showAsk = trimmedAsk && !askDuplicatesSummary;
+  const showRelationshipContext = trimmedSummary && !summaryDuplicatesAsk;
+  const isReopenMode = thread.needsReply === false;
+  const askHeading = isReopenMode ? "Reconnect hook" : "What they want";
+  const loopsHeading = isReopenMode ? "Conversation hooks" : "Open loops";
+  const composeHelper = isReopenMode
+    ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
+    : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
@@ -1399,6 +1560,17 @@ export default function ThreadPage() {
                       {platformLabel}
                     </span>{" "}
                     <span className="text-ink-3">· {riskLabel}</span>
+                    {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                      <>
+                        {" "}
+                        <span
+                          className="ml-1 rounded-full bg-[oklch(94%_0.03_85)] px-2 py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-[oklch(45%_0.10_60)]"
+                          title={`Hidden from active inbox until ${new Date(thread.snoozedUntil).toLocaleString()}`}
+                        >
+                          Snoozed · wakes {formatScheduledFor(thread.snoozedUntil)}
+                        </span>
+                      </>
+                    ) : null}
                   </p>
                 </div>
               </button>
@@ -1436,25 +1608,42 @@ export default function ThreadPage() {
               >
                 Save draft
               </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  // Toggle the AI snooze menu, lazily fetching once. The
-                  // popover renders above this row when `snoozeMenuOpen`.
-                  if (!snoozeMenuOpen && !snoozeSuggestions) {
-                    setSnoozeSuggestions({ loading: true, items: [] });
-                    void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
-                      `/runner/control/thread/${thread.id}/suggest-snooze`
+              {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+                      setError,
+                      refresh
                     )
-                      .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
-                      .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
                   }
-                  setSnoozeMenuOpen((prev) => !prev);
-                }}
-                aria-expanded={snoozeMenuOpen}
-              >
-                Snooze
-              </Button>
+                  title="Bring this thread back into the active inbox now"
+                >
+                  Wake up
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    // Toggle the AI snooze menu, lazily fetching once. The
+                    // popover renders above this row when `snoozeMenuOpen`.
+                    if (!snoozeMenuOpen && !snoozeSuggestions) {
+                      setSnoozeSuggestions({ loading: true, items: [] });
+                      void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
+                        `/runner/control/thread/${thread.id}/suggest-snooze`
+                      )
+                        .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
+                        .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                    }
+                    setSnoozeMenuOpen((prev) => !prev);
+                  }}
+                  aria-expanded={snoozeMenuOpen}
+                  title="Hide from active inbox until later"
+                >
+                  Snooze
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 onClick={() =>
@@ -1525,6 +1714,19 @@ export default function ThreadPage() {
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
+            {focusedThreadParentId ? (
+              <div className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur">
+                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
+                <button
+                  type="button"
+                  onClick={() => setFocusedThreadParentId(null)}
+                  className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                  title="Esc"
+                >
+                  exit
+                </button>
+              </div>
+            ) : null}
             {hasOlder ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
@@ -1543,7 +1745,7 @@ export default function ThreadPage() {
                 )}
               </div>
             ) : (
-              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
+              <div className={`self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4 transition-opacity duration-300 ${focusedThreadParentId ? "opacity-30" : ""}`}>
                 start of conversation
               </div>
             )}
@@ -1570,14 +1772,46 @@ export default function ThreadPage() {
                 message.direction === "OUT"
                   ? "You"
                   : (message.senderName ?? firstName);
+              const parentMessageId = parentIdOf.get(message.id);
+              const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
+              const replyCount = replyCountByParentId.get(message.id) ?? 0;
+              // In focused mode, bubbles outside the parent+replies set
+              // fade + blur so the focused thread "pops out" like
+              // Messages.app's overlay. Pointer events off prevents
+              // accidental clicks on the dimmed background.
+              const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
               return (
                 <div key={message.id} className="contents">
-                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {dayLabel ? (
+                    <div className={`contents ${dimmedByFocus ? "opacity-30" : ""} transition-opacity duration-300`}>
+                      <DayDivider label={dayLabel} />
+                    </div>
+                  ) : null}
                   <div
-                    className={`flex max-w-[72%] flex-col ${
+                    data-message-id={message.id}
+                    className={`flex max-w-[72%] flex-col transition-[opacity,filter] duration-300 ease-out ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
+                    } ${
+                      dimmedByFocus ? "opacity-20 blur-[3px] pointer-events-none" : ""
                     }`}
                   >
+                    {parentMessageId ? (
+                      <button
+                        type="button"
+                        onClick={() => focusOnParent(parentMessageId)}
+                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 ${
+                          message.direction === "OUT" ? "self-end" : "self-start"
+                        }`}
+                        title={`Focus thread: ${parentMessage?.text ?? "earlier message"}`}
+                      >
+                        <span className="text-ink-4" aria-hidden="true">↳</span>
+                        <span className="line-clamp-2 italic text-left">
+                          {parentMessage
+                            ? parentMessage.text.slice(0, 120) || "(media)"
+                            : "Replying to an earlier message"}
+                        </span>
+                      </button>
+                    ) : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
                         <button
@@ -1633,17 +1867,25 @@ export default function ThreadPage() {
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
-                            <span
-                              className={`absolute -top-3 ${
-                                message.direction === "OUT" ? "-left-2" : "-right-2"
-                              } flex items-center gap-[2px] rounded-full border border-hairline bg-paper px-[6px] py-[2px] text-[11px] shadow-sm`}
+                            <div
+                              className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
+                                message.direction === "OUT" ? "-left-[10px]" : "-right-[10px]"
+                              }`}
                             >
                               {reactions.map((r, i) => (
-                                <span key={`${r.kind}-${r.direction}-${i}`} title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}>
+                                <span
+                                  key={`${r.kind}-${r.direction}-${i}`}
+                                  title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}
+                                  className={`flex h-[24px] w-[24px] items-center justify-center rounded-full border-2 border-paper text-[13px] leading-none shadow-sm ${
+                                    r.direction === "OUT"
+                                      ? "bg-ink text-paper"
+                                      : "bg-paper-2 text-ink"
+                                  }`}
+                                >
                                   {r.emoji}
                                 </span>
                               ))}
-                            </span>
+                            </div>
                           ) : null}
                         </div>
                       );
@@ -1656,6 +1898,16 @@ export default function ThreadPage() {
                           indicator from #61 was dishonest. */}
                       {message.direction === "OUT" && message.sentVia === "automation" ? (
                         <span className="text-ink-4">· sent via automation ✓</span>
+                      ) : null}
+                      {replyCount > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => focusOnParent(message.id)}
+                          className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                          title="Focus this thread"
+                        >
+                          · {replyCount} {replyCount === 1 ? "Reply" : "Replies"}
+                        </button>
                       ) : null}
                     </span>
                   </div>
@@ -1886,13 +2138,32 @@ export default function ThreadPage() {
               </div>
             ) : null}
             <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+              {focusedParentMessage ? (
+                <div className="mb-3 flex items-start gap-2 rounded-[12px] border border-hairline bg-paper-2/60 px-3 py-2 text-[12px] leading-snug text-ink-2">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                    Replying to
+                  </span>
+                  <span className="flex-1 italic line-clamp-2">
+                    {focusedParentMessage.text.slice(0, 160) || "(media)"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFocusedThreadParentId(null)}
+                    className="text-ink-3 hover:text-ink"
+                    aria-label="Exit thread"
+                    title="Exit thread (Esc)"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
               {composerSource === "predraft" ? (
                 <div
                   data-testid="ai-predraft-badge"
                   className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
                 >
                   <Sparkles className="h-[12px] w-[12px]" />
-                  AI predraft - review before sending
+                  {isReopenMode ? "AI opener - review before sending" : "AI predraft - review before sending"}
                   <button
                     type="button"
                     onClick={() => {
@@ -2295,33 +2566,35 @@ export default function ThreadPage() {
       {/* ───── Context rail ───── */}
       <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
         <div className="flex flex-col gap-7 px-7 py-10">
-          {trimmedSummary || trimmedAsk ? (
+          {trimmedAsk || trimmedSummary ? (
             <section>
               <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                What they want
+                {askHeading}
               </p>
               <p className="m-0 text-balance text-[14px] leading-[1.55] text-ink">
-                {trimmedSummary || trimmedAsk}
+                {trimmedAsk || trimmedSummary}
               </p>
-              {showAsk && trimmedSummary ? (
+              {showRelationshipContext && trimmedAsk ? (
                 <p className="mt-3 border-t border-hairline pt-3 text-[13px] leading-[1.55] text-ink-3">
                   <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                    the ask ·{" "}
+                    context ·{" "}
                   </span>
-                  {trimmedAsk}
+                  {trimmedSummary}
                 </p>
               ) : null}
             </section>
           ) : null}
 
-          {/* Open loops - active rows render with an unchecked box; ticking
+          {/* Loops - active rows render with an unchecked box; ticking
               dismisses the loop (#62). Dismissed loops still render below
               in a muted, struck-through form so the operator can restore
-              one by un-ticking. */}
+              one by un-ticking. Heading flips to "Conversation hooks" in
+              reopen mode where the items are warm callbacks rather than
+              pending asks. */}
           {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
             <section>
               <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                Open loops
+                {loopsHeading}
               </p>
               <ul className="m-0 list-none space-y-[6px] p-0">
                 {thread.openLoops.map((item) => (
@@ -2360,12 +2633,12 @@ export default function ThreadPage() {
               Compose
             </p>
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the &quot;rewrite in my voice&quot; action above the composer instead.
+              {composeHelper}
             </p>
             <textarea
               value={composeIntent}
               onChange={(event) => setComposeIntent(event.target.value)}
-              placeholder="e.g. ask if free for a quick coffee next week"
+              placeholder={isReopenMode ? "e.g. ask how exams went" : "e.g. ask if free for a quick coffee next week"}
               rows={3}
               className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
             />

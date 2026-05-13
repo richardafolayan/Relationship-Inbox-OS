@@ -34,12 +34,27 @@ export interface InboxRow {
   category?: string | null;
   archivedAt?: string | null;
   /**
+   * ISO timestamp until which the operator has snoozed this thread. Active
+   * inbox views filter rows where snoozedUntil is in the future; when set
+   * the thread page renders an "Asleep until …" badge with an unsnooze
+   * action. Null when the thread is not currently snoozed.
+   */
+  snoozedUntil?: string | null;
+  /**
    * ISO timestamp of the earliest SCHEDULED outbound send for this thread,
    * or null when none. Today uses this to suppress threads the operator
    * has already queued a reply for; Inbox still lists them with the
    * existing scheduled pill.
    */
   scheduledSendAt?: string | null;
+  /**
+   * Number of inbox rows currently visible for the same person+platform.
+   * 1 in the normal case. >1 when the contact has multiple distinct
+   * conversations (typically LinkedIn recruiters pitching different
+   * candidates in separate 1:1 threads). The dashboard shows a small
+   * "N threads" badge so repeat names don't read as duplicates.
+   */
+  personThreadCount?: number;
 }
 
 export interface InboxResponse {
@@ -47,7 +62,7 @@ export interface InboxResponse {
   summary: {
     unreadThreads: number;
     atRiskThreads: number;
-    averageReplyTimeHours: number;
+    averageReplyTimeHours: number | null;
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
@@ -170,32 +185,6 @@ export interface PlatformCard {
   };
 }
 
-export interface ScanControlQueuedResponse {
-  ok: true;
-  jobId: string;
-  status: "queued" | "running";
-  requestId: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-}
-
-export interface ScanControlBlockedResponse {
-  ok: false;
-  blocked: true;
-  reason: "cooldown_active" | "in_flight";
-  retryAfterSeconds: number;
-  requestId: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-}
-
-export interface ScanControlRequest {
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-  maxThreads?: number | null;
-  maxOpens?: number | null;
-  forceFallback?: boolean | null;
-}
-
-export type ScanControlResponse = ScanControlQueuedResponse | ScanControlBlockedResponse;
-
 export interface AuditLogRow {
   id: string;
   timestamp: string;
@@ -210,6 +199,22 @@ export interface AuditLogRow {
 
 export interface ThreadMessage {
   id: string;
+  /**
+   * Platform-side stable id (iMessage guid, LinkedIn message id). Sent
+   * alongside the internal cuid so the timeline can resolve cross-message
+   * references — today's only consumer is iMessage threaded replies,
+   * where a child's `raw.replyToGuid` matches another row's
+   * `platformMessageKey`.
+   */
+  platformMessageKey?: string;
+  /**
+   * App-level threading. When the operator sent this message from the
+   * dashboard's focused-thread composer, it carries the parent's
+   * `Message.id` (cuid). Preferred over `raw.replyToGuid` (the
+   * Apple-native field, captured for inbound replies) when both are
+   * present.
+   */
+  replyToMessageId?: string | null;
   direction: "IN" | "OUT";
   timestamp: string;
   text: string;
@@ -243,6 +248,8 @@ export interface ThreadResponse {
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;
+  /** ISO timestamp until which this thread is snoozed; null when active. */
+  snoozedUntil?: string | null;
   unreadCount: number;
   needsReply: boolean;
   summary?: string;
@@ -372,41 +379,3 @@ export interface AppSettings {
   geminiModel?: string;
 }
 
-export interface SelectorTestReceipt {
-  stage: "connect" | "navigate" | "auth_check" | "open_thread" | "evaluate" | "screenshot" | "persist";
-  status: "OK" | "FAIL";
-  startedAt: string;
-  completedAt: string;
-  durationMs: number;
-  details?: Record<string, unknown>;
-}
-
-export interface SelectorTestFailurePayload {
-  ok: false;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-  stage: SelectorTestReceipt["stage"];
-  error: string;
-  requestId: string;
-  reason?: string;
-  receipts?: SelectorTestReceipt[];
-  artifacts?: {
-    screenshot?: string;
-    domDump?: string;
-  };
-}
-
-export interface SelectorTestSuccessPayload {
-  ok: true;
-  reportId: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
-  startedAt: string;
-  completedAt: string;
-  results: Array<{
-    key: string;
-    selector: string;
-    count: number;
-    status: "PASS" | "FAIL";
-    screenshotFile?: string;
-  }>;
-  receipts?: SelectorTestReceipt[];
-}

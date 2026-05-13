@@ -73,12 +73,26 @@ export interface AiService {
     previousSummary?: string;
     previousOpenLoops: string[];
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /** Drives mode-aware framing: when false, what_they_want and open_loops are reframed as reconnect hooks. */
+    needsReply: boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
     summary: string;
     whatTheyWant: string;
     openLoops: string[];
-    lastInboundMessage: string;
+    /** Last ~6 turns oldest-first. Lets the model see the operator's own recent
+     *  replies and respond to the actual conversational turn. Also calibrates
+     *  voice register against the operator's recent OUT entries here. */
+    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /** False = no pending reply; the prompt switches to "reopen mode" and
+     *  generates conversation starters grounded in transcript details. */
+    needsReply: boolean;
+    /**
+     * Drives the voice tier (LinkedIn → formal; everything else → casual)
+     * so suggested replies sit in the right register. When omitted, the
+     * generic SYSTEM_PROMPT is used without a voice-tier overlay.
+     */
+    platform?: PlatformName | null;
     /** When "outreach", reply C is a Polite decline instead of a Clarifying question. */
     category?: "outreach" | "genuine" | null;
     /**

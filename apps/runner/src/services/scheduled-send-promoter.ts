@@ -84,7 +84,18 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
         activeCount: remaining
       });
 
-      deps.sendQueue.kick();
+      // Kick AFTER the event emit so a downstream emit failure doesn't
+      // skip the kick. Wrap in its own try/catch so kick failures don't
+      // mask the real promotion result.
+      try {
+        deps.sendQueue.kick();
+      } catch (error) {
+        console.warn(
+          `[scheduled-send-promoter] sendQueue.kick() failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
 
       return { promoted: due.length };
     } finally {

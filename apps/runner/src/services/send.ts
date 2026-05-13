@@ -80,43 +80,6 @@ function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
-async function waitForSendRequestResolution(input: {
-  clientSendId: string;
-  threadId: string;
-  timeoutMs?: number;
-}): Promise<SendResult> {
-  const deadline = Date.now() + (input.timeoutMs ?? 30000);
-
-  while (Date.now() < deadline) {
-    const existing = await prisma.sendRequest.findUnique({
-      where: { clientSendId: input.clientSendId }
-    });
-
-    if (!existing) {
-      throw new Error("Previous send request was not found");
-    }
-
-    if (existing.threadId !== input.threadId) {
-      throw new Error("clientSendId is already linked to another thread");
-    }
-
-    if (existing.status === "SENT" && existing.receiptJson) {
-      return {
-        ...parseReceipt(existing.receiptJson),
-        replayed: true
-      };
-    }
-
-    if (existing.status === "FAILED") {
-      throw new Error(parseFailedSendMessage(existing.errorJson));
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 250));
-  }
-
-  throw new Error("Send request is already in progress. Retry in a moment.");
-}
-
 export interface EnqueueSendResult {
   clientSendId: string;
   status: "PENDING" | "SENT" | "FAILED";
@@ -148,6 +111,13 @@ export function createSendService(deps: SendServiceDeps) {
     text: string;
     clientSendId: string;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    /**
+     * App-level threading: when set, the resulting Message row links back
+     * to the parent (a Message.id cuid in the same thread). The send still
+     * goes out as a normal text bubble — the threading is rendered purely
+     * by the dashboard.
+     */
+    replyToMessageId?: string;
   }): Promise<EnqueueSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -191,7 +161,8 @@ export function createSendService(deps: SendServiceDeps) {
           status: "PENDING",
           attachmentsJson: input.attachments && input.attachments.length > 0
             ? JSON.stringify(input.attachments)
-            : null
+            : null,
+          replyToMessageId: input.replyToMessageId ?? null
         }
       });
     } catch (error) {
@@ -294,11 +265,28 @@ export function createSendService(deps: SendServiceDeps) {
         receipt.attachments && receipt.attachments.length > 0
           ? JSON.stringify(receipt.attachments)
           : null;
+      // App-level threading: when the operator hit "Reply" in the
+      // focused-thread view, the SendRequest row carries the parent
+      // Message.id. Copy it onto the resulting outbound row so the
+      // dashboard renders the new bubble inline under its parent on the
+      // next refresh. The send itself goes out as a normal text bubble
+      // — the recipient on Messages.app sees no threading at all.
+      const replyToMessageId = sendRequest.replyToMessageId ?? null;
+      // Prefer the platform-side stable id when the adapter could
+      // recover it (iMessage polls chat.db post-send for the row's
+      // guid). Falling back to a synthetic stableHash for adapters
+      // that can't observe the real id (LinkedIn web UI, group chats
+      // without a delivery-status path). Aligning the key with what a
+      // later scan writes is how we avoid the same outbound message
+      // showing up twice in the timeline.
+      const platformMessageKey =
+        receipt.platformMessageKey ??
+        stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`);
       await prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
             threadId: thread.id,
-            platformMessageKey: stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`)
+            platformMessageKey
           }
         },
         update: {
@@ -306,16 +294,18 @@ export function createSendService(deps: SendServiceDeps) {
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
           sentVia: "automation",
-          attachmentsJson
+          attachmentsJson,
+          replyToMessageId
         },
         create: {
           threadId: thread.id,
-          platformMessageKey: stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`),
+          platformMessageKey,
           direction: "OUT",
           timestamp: new Date(receipt.sentAt),
           text: input.text,
           sentVia: "automation",
-          attachmentsJson
+          attachmentsJson,
+          replyToMessageId
         }
       });
 
@@ -334,6 +324,10 @@ export function createSendService(deps: SendServiceDeps) {
           riskLevel: risk.level,
           riskReason: risk.riskReason,
           slaDueAt: risk.slaDueAt,
+          // Operator replied — the thread no longer needs to be hidden.
+          // Clearing snoozedUntil keeps the active inbox honest about
+          // whether the conversation is still in deferred state.
+          snoozedUntil: null,
           lastOutboundAt: new Date(receipt.sentAt),
           lastMessageAt: new Date(receipt.sentAt),
           unreadCount: 0,

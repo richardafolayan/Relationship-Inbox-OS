@@ -81,7 +81,12 @@ on run
   set the clipboard to theFile
   -- Open the chat with this buddy. The imessage: URL scheme selects
   -- (or creates) the conversation and brings Messages forward.
-  do shell script "open 'imessage:${handle}'"
+  -- Build the imessage: URL inside AppleScript and wrap with
+  -- "quoted form of" so a handle containing single quotes / $ / ;
+  -- can't escape the inner shell command. escapeAppleScript only
+  -- covers AppleScript string-literal escaping, not POSIX shell.
+  set imessageURL to "imessage:${handle}"
+  do shell script "open " & quoted form of imessageURL
   delay 0.9
   tell application "Messages" to activate
   delay 0.4

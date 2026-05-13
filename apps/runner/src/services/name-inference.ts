@@ -24,8 +24,8 @@ const STOPWORDS = new Set([
   "january", "february", "march", "april", "may", "june", "july", "august",
   "september", "october", "november", "december",
   "amen", "amennn", "yh", "yhh", "yhhh", "rn", "tbh", "imo", "btw", "idk", "tn", "tmr", "atm",
-  "ye", "yee", "good", "great", "fine", "alright", "cool", "nice", "wait", "wut", "what",
-  "soon", "later", "today", "tomorrow", "back", "home", "ok", "okay", "kk"
+  "yee", "good", "great", "fine", "alright", "cool", "nice", "wait", "wut", "what",
+  "soon", "later", "today", "tomorrow", "back", "home", "kk"
 ]);
 
 /**

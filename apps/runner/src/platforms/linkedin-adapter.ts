@@ -316,13 +316,6 @@ export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
 const linkedInAllPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='ALL']";
 const linkedInSmokeEntryUrl = "https://www.linkedin.com/messaging/?filter=unread";
-const linkedInSmokeThreadRowSelector = ".msg-conversation-listitem";
-const linkedInSmokeThreadLinkSelector = ".msg-conversation-listitem__link";
-const linkedInSmokeThreadRowFallbackSelector = [
-  "ul.msg-conversations-container__conversations-list li:has(.msg-conversation-listitem__link)",
-  "ul.msg-conversations-container__conversations-list li:has(a[href*='/messaging/thread/'])",
-  "ul.msg-conversations-container__conversations-list li:has(a[href*='/messaging/'])"
-].join(", ");
 const linkedInSmokeParticipantSelector = ".msg-conversation-listitem__participant-names";
 const linkedInSmokeListTimestampSelector = "time.msg-conversation-listitem__time-stamp";
 const linkedInSmokePreviewSelector = ".msg-conversation-card__message-snippet";
@@ -405,8 +398,6 @@ const linkedInSmokeBlockedModalSelectors = [
   "[role='dialog'][aria-modal='true']"
 ];
 const linkedInSmokeEmptyStatePatterns = [/no unread/i, /you're all caught up/i, /no messages match/i];
-const linkedInSmokeSelectorMismatchError =
-  "Selector mismatch: Unread view shows list structure/counters but 0 detectable conversation rows. See list-probe.* in LOG_DIR.";
 const linkedInSmokeRowMismatchMessage =
   "Selector mismatch: list has X direct li children but 0 real rows (has participant+link).";
 const linkedInLoadingSpinnerSelector = [
@@ -969,8 +960,7 @@ async function getConversationRowCandidatesWithContainer(
         buildTemporaryCandidateId({
           displayName: entry.participantName,
           preview: entry.previewSnippet ?? "",
-          listTimestamp: entry.listTimestamp ?? "",
-          rowIndex: entry.liIndex
+          listTimestamp: entry.listTimestamp ?? ""
         });
       return {
         liIndex: entry.liIndex,
@@ -2996,18 +2986,20 @@ export class LinkedInAdapter implements PlatformAdapter {
         `[auth-recovery] auto-login not active (need LINKEDIN_AUTO_LOGIN=1 with LINKEDIN_USERNAME and LINKEDIN_PASSWORD set in .env) — surfacing AUTH_REQUIRED context=${context}`
       );
     }
-    if (this.deps.linkedInCredentials?.username && this.deps.linkedInCredentials?.password) {
+    if (credsConfigured) {
       const lastAttempt = this.lastAutoLoginAttemptAt ?? 0;
       const sinceLast = Date.now() - lastAttempt;
       if (sinceLast <= 60_000) {
         console.warn(
           `[auth-recovery] throttled — last attempt ${sinceLast}ms ago, need >60000ms — surfacing AUTH_REQUIRED context=${context}`
         );
-      }
-      if (sinceLast > 60_000) {
+      } else {
+        // credsConfigured is true here, so linkedInCredentials.username is
+        // a string — but TypeScript can't narrow through the boolean.
+        const username = this.deps.linkedInCredentials?.username ?? "";
         this.lastAutoLoginAttemptAt = Date.now();
         console.warn(
-          `[auth-recovery] attempting password auto-login context=${context} username=${this.deps.linkedInCredentials.username}`
+          `[auth-recovery] attempting password auto-login context=${context} username=${username}`
         );
         const loginResult = await this.attemptPasswordLogin(page).catch(
           (error): { ok: false; reason: string; details?: Record<string, unknown> } => ({
@@ -3599,8 +3591,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         buildTemporaryCandidateId({
           displayName,
           preview,
-          listTimestamp: lastMessageAt,
-          rowIndex: index
+          listTimestamp: lastMessageAt
         });
       const needsReplyFromList = needsReplyFromPreview(preview);
       const includeCandidate = unreadCount > 0 || needsReplyFromList;
@@ -6218,11 +6209,16 @@ export class LinkedInAdapter implements PlatformAdapter {
               bubbleEl.querySelector(".msg-s-message-group__profile-link") ??
               bubbleEl.querySelector(".msg-s-message-group__name");
             const senderName = clean(senderEl?.textContent ?? "");
+            // Element.id returns "" (empty string), not null/undefined, so
+            // a bare `?? fallback` never reaches the index suffix when the
+            // element has no id attribute. `|| fallback` (or an explicit
+            // empty check) is what we actually want — otherwise messages
+            // without data-event-urn/data-id/id collapse to a shared empty
+            // key and clobber each other during dedupe.
             const platformMessageKey =
               bubbleEl.getAttribute("data-event-urn") ??
               bubbleEl.getAttribute("data-id") ??
-              bubbleEl.id ??
-              `li-msg-${index}`;
+              (bubbleEl.id || `li-msg-${index}`);
             out.push({
               platformMessageKey,
               className,
@@ -9074,9 +9070,12 @@ export class LinkedInAdapter implements PlatformAdapter {
         if (canonicalPlatformThreadId) {
           thread.platformThreadId = canonicalPlatformThreadId;
         }
-        if (activeDescriptor.threadUrl ?? page.url()) {
-          thread.threadUrl = activeDescriptor.threadUrl ?? page.url();
-        }
+        // page.url() is always a non-empty string, so the previous
+        // `if (activeDescriptor.threadUrl ?? page.url())` guard was a
+        // no-op around an unconditional overwrite. Match
+        // normalizeCanonicalLinkedInThreadId above by always picking the
+        // best available URL, but drop the dead guard.
+        thread.threadUrl = activeDescriptor.threadUrl ?? page.url();
         if (activeDescriptor.displayName) {
           thread.displayName = activeDescriptor.displayName;
         }

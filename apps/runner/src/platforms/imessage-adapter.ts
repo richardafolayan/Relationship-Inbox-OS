@@ -138,22 +138,31 @@ export class IMessageAdapter implements PlatformAdapter {
     // proper scroll-back without re-scanning.
     const effectiveLimit = Math.max(limit, 500);
     const rows = db.fetchMessages(thread.platformThreadId, effectiveLimit);
-    return rows.map((r) => ({
-      platformMessageKey: r.guid,
-      direction: r.direction,
-      timestamp: r.timestamp ?? new Date().toISOString(),
-      text: r.text,
-      senderName: r.senderHandle,
-      raw: r.reactions.length > 0 ? { reactions: r.reactions } : undefined,
-      attachments: r.attachments.map((a) => ({
-        type: a.kind,
-        manualReview: a.kind === "unknown",
-        rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
-        guid: a.guid || undefined,
-        kind: a.kind,
-        byteSize: a.totalBytes ?? undefined
-      }))
-    }));
+    return rows.map((r) => {
+      // Persist reactions + reply parent on rawJson. Both fields are read
+      // back by the dashboard's thread page; absent fields stay omitted so
+      // we don't write empty {} for plain bubbles (keeps rawJson nullable
+      // for the existing "no metadata" code path).
+      const raw: Record<string, unknown> = {};
+      if (r.reactions.length > 0) raw.reactions = r.reactions;
+      if (r.replyToGuid) raw.replyToGuid = r.replyToGuid;
+      return {
+        platformMessageKey: r.guid,
+        direction: r.direction,
+        timestamp: r.timestamp ?? new Date().toISOString(),
+        text: r.text,
+        senderName: r.senderHandle,
+        raw: Object.keys(raw).length > 0 ? raw : undefined,
+        attachments: r.attachments.map((a) => ({
+          type: a.kind,
+          manualReview: a.kind === "unknown",
+          rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
+          guid: a.guid || undefined,
+          kind: a.kind,
+          byteSize: a.totalBytes ?? undefined
+        }))
+      };
+    });
   }
 
   async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
@@ -253,6 +262,7 @@ export class IMessageAdapter implements PlatformAdapter {
           );
         }
         receiptGuid = status.guid;
+        receiptTs = status.timestamp;
         if (status.isDelivered) {
           isDelivered = true;
           break;
@@ -261,8 +271,9 @@ export class IMessageAdapter implements PlatformAdapter {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     if (!receiptTs && receiptGuid) {
-      // We have a guid but the delivery poll didn't grab the timestamp;
-      // fall back to the legacy lookup for the row's date.
+      // Defensive fallback: the delivery-status row should always carry
+      // a timestamp now, but keep the legacy lookup as a safety net for
+      // unusual chat.db states (e.g. corrupted date column).
       const fallback = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
     }
@@ -282,6 +293,13 @@ export class IMessageAdapter implements PlatformAdapter {
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
+      // chat.db's row guid for the message we just sent. send.ts uses
+      // this as the persisted Message.platformMessageKey so a later
+      // scan, which also keys by guid, dedups against this row instead
+      // of inserting a duplicate. Without it, the same iMessage ends
+      // up as two Message rows: one from the send-side stableHash and
+      // one from the scan-side guid.
+      platformMessageKey: receiptGuid,
       // "bubble_detected" if Messages.app confirmed delivery; else
       // "best_effort" — the bubble exists but the recipient hasn't
       // acked yet (offline, slow, etc.).

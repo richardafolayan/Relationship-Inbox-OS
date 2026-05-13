@@ -27,6 +27,7 @@ export interface ThreadRowSource {
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason: string | null;
   slaDueAt: Date | null;
+  snoozedUntil: Date | null;
   whatTheyWant: string | null;
   rollingSummary: string | null;
   archivedAt: Date | null;
@@ -76,6 +77,16 @@ export interface ShapedThreadRow {
   messageCount: number;
   category: string | null;
   archivedAt: string | null;
+  snoozedUntil: string | null;
+  /**
+   * How many surviving inbox rows belong to the same person+platform.
+   * 1 for the normal case; >1 when a contact has multiple distinct
+   * conversations visible (typically LinkedIn recruiters pitching
+   * different candidates in separate 1:1 threads). The dashboard
+   * surfaces a "N threads" badge so the operator doesn't read repeat
+   * names as accidental duplicates (issue #201).
+   */
+  personThreadCount: number;
 }
 
 export interface ShapedThreadGroupRow {
@@ -193,7 +204,10 @@ function prefersCandidate(current: ShapedThreadGroupRow, next: ShapedThreadGroup
   return next.source.id > current.source.id;
 }
 
-export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
+export function toInboxRow(
+  row: ShapedThreadGroupRow,
+  personThreadCount: number = 1
+): ShapedThreadRow {
   const source = row.source;
   // Prefer the latest-message text (which respects direction) over the
   // legacy lastMessagePreview field (which only tracks inbound). Falls
@@ -220,10 +234,36 @@ export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
     lastInboundAt: source.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: source.lastOutboundAt?.toISOString() ?? null,
     riskReason: source.riskReason,
-    slaCountdown: formatSlaCountdown(source.slaDueAt),
+    // `row.needsReply` is recomputed from lastInboundAt vs lastOutboundAt;
+    // `source.slaDueAt` is the raw DB value written by the last risk scan.
+    // If the operator has replied since that scan, slaDueAt is stale and
+    // would render as "Overdue Xh" on a row that no longer needs a reply
+    // (issue #200). Suppress the countdown when nothing is owed.
+    slaCountdown: row.needsReply ? formatSlaCountdown(source.slaDueAt) : "",
     identityWarning: row.identityWarning,
     messageCount: row.messageCount,
     category: source.category ?? null,
-    archivedAt: source.archivedAt?.toISOString() ?? null
+    archivedAt: source.archivedAt?.toISOString() ?? null,
+    snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
+    personThreadCount
   };
+}
+
+// Count surviving rows per person+platform so the dashboard can flag
+// rows where the same contact has multiple distinct conversations (issue
+// #201). LinkedIn recruiters frequently start a separate 1:1 thread per
+// candidate they pitch — these look like duplicate name rows but
+// actually carry distinct content. Collapsing them would hide pitches
+// the operator still needs to act on.
+export function personThreadCounts(rows: ShapedThreadGroupRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = `${row.source.platform}:${row.source.personId}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export function personThreadCountKey(platform: PlatformName, personId: string): string {
+  return `${platform}:${personId}`;
 }

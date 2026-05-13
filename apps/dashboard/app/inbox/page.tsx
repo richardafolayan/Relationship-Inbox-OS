@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import { runActionWithFeedback } from "@/lib/feedback";
@@ -96,13 +97,35 @@ function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
 // / Rescan / Clear. Esc clears selection. Cmd/Ctrl+A selects all
 // currently-visible rows (post-filter).
 export default function InboxPage() {
+  // Next.js requires useSearchParams consumers to sit under a Suspense
+  // boundary so the static prerender doesn't error on /inbox.
+  return (
+    <Suspense fallback={null}>
+      <InboxPageContent />
+    </Suspense>
+  );
+}
+
+function InboxPageContent() {
+  const searchParams = useSearchParams();
+  // Inbound deep-links from other pages:
+  //   /inbox?q=<text>      pre-fills the search box (used by the thread
+  //                        participant popover to look up other 1:1 threads).
+  //   /inbox?person=<id>   filters to threads belonging to a single person
+  //                        (used by the people list "open in inbox" link).
+  // Both URLs were silently no-ops before this page started reading the
+  // query string.
+  const initialQuery = searchParams?.get("q") ?? "";
+  const initialPersonId = searchParams?.get("person") ?? null;
+
   const [data, setData] = useState<InboxResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [loaded, setLoaded] = useState(false);
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
+  const [personFilter, setPersonFilter] = useState<string | null>(initialPersonId);
   const [filter, setFilter] = useState<FilterMode>("all");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("recent");
@@ -168,6 +191,11 @@ export default function InboxPage() {
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return allRows.filter((row) => {
+      // Person-filter from /inbox?person=<id> takes precedence over other
+      // filters so a deep-link from the People list shows exactly that
+      // person's threads. The filter chip can be cleared in the UI to fall
+      // back to normal filtering.
+      if (personFilter && row.personId !== personFilter) return false;
       if (!applyPlatformFilter(row, platformFilter)) return false;
       if (!applyFilter(row, filter)) return false;
       if (!q) return true;
@@ -176,7 +204,12 @@ export default function InboxPage() {
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, filter, platformFilter]);
+  }, [allRows, query, filter, platformFilter, personFilter]);
+
+  const personFilterName = useMemo(() => {
+    if (!personFilter) return null;
+    return allRows.find((row) => row.personId === personFilter)?.personName ?? null;
+  }, [allRows, personFilter]);
 
   const rows = useMemo(
     () => visible.filter((row) => !removedIds.has(row.id)),
@@ -366,6 +399,21 @@ export default function InboxPage() {
           <KpiTile label="Unread" value={summary.unreadThreads} />
           <KpiTile label="At risk" value={summary.atRiskThreads} tone={summary.atRiskThreads > 0 ? "warn" : "ok"} />
           <KpiTile label="Oldest pending inbound" value={oldestPending} small />
+        </div>
+      ) : null}
+
+      {personFilter && personFilterName ? (
+        <div className="mb-2 flex items-center gap-2 text-[12px] text-ink-3">
+          <span>Filtered to threads with</span>
+          <button
+            type="button"
+            onClick={() => setPersonFilter(null)}
+            className="inline-flex items-center gap-1 rounded-[8px] border border-hairline bg-paper px-2 py-[2px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink"
+            aria-label={`Clear filter for ${personFilterName}`}
+          >
+            {personFilterName}
+            <span aria-hidden>×</span>
+          </button>
         </div>
       ) : null}
 

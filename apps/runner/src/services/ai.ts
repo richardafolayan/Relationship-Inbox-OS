@@ -179,7 +179,7 @@ const FORMAL_VOICE_PROMPT = [
   "",
   "- Don't introduce deliberate typos. Richard's real messages have typos because he types fast. You shouldn't fake them. But also don't over-polish, keep the conversational register.",
   "- HARD RULE — sentence starts get a capital letter. After every full stop, question mark, or exclamation mark, the very next character that starts the next sentence MUST be uppercase. Lowercase \"i\" as a pronoun mid-sentence is fine, but \". sounds like\" or \"? what are you\" is a fail, that's bad grammar, not voice. Read your output back and check this before returning.",
-  "- Prefer comma chains over full stops in mid-message flow. One long comma-chained run feels closer to his actual style than back-to-back short sentences. The Reiss-style shape is one opener, one comma chain, optional question at the end, not three separate sentences glued together.",
+  "- Prefer comma chains over full stops in mid-message flow. One long comma-chained run feels closer to his actual style than back-to-back short sentences. The Reiss-style shape is one opener, one comma chain, optional question at the end, not three separate sentences glued together. Aim for at most ONE full stop in a typical 1-3 sentence reply, and skip the trailing full stop on short single-line replies (\"Hey, really appreciate that man\" not \"Hey, really appreciate that man.\"). Trailing full stop is fine on longer multi-sentence messages where the last sentence is a clear close.",
   "- Don't end with a question if the situation doesn't warrant one. Cold decline is ack-only, no follow-up question.",
   "- When unsure how long the reply should be, err shorter. Long replies should feel earned by the depth of what they said.",
   "- No em dashes, en dashes, semicolons, or colons.",
@@ -313,8 +313,10 @@ This profile applies when the platform is WhatsApp, iMessage, Instagram DMs, or 
 
 PUNCTUATION AND STRUCTURE
 - Comma chains over full stops. Run-on style for casual flow.
-- Full stops basically absent at the end of casual messages. End with emoji or "?" if it is a question. No emoji at all is fine too.
+- Full stops basically absent. Do NOT end a casual message with a full stop. End with emoji or "?" if it is a question, or just end. Mid-message full stops are also rare — prefer a comma chain. If you find yourself writing two short sentences glued by a full stop, join them with a comma instead.
+- "Hey", "Bet", "Yhh fairs" — no trailing full stop, ever. "Yhh i'm down, what time you thinking" — no trailing full stop. This is the most consistent tell of off-voice text.
 - Capitals at message start. Lowercase or capital "i" pronoun both fine.
+- HARD RULE — sentence starts get a capital letter. After a question mark, full stop, or exclamation mark, the next character that starts the next sentence MUST be uppercase. "Hey, you good? things have been wild" is WRONG, the "t" must be a capital. Mid-sentence lowercase "i" pronoun is fine and natural to Richard, that rule is only about sentence starts.
 - Repeated letters for vibe (Yhh, Calmm, Bonjourr, againnnn, Niceeeeeee).
 
 ADDRESS TERMS
@@ -537,7 +539,6 @@ function shouldUseJsonResponseFormat(_provider: AiProvider, _model: string): boo
 // with the rule in the system message, GPT-5 sometimes slips in an em-dash
 // or a colon. Apply to every text-producing AI call before persisting /
 // returning to the dashboard.
-const FORBIDDEN_PUNCTUATION_RE = /[—–]|;|:/g;
 export function applyVoiceRules(text: string): string {
   if (!text) return text;
   return text
@@ -547,6 +548,69 @@ export function applyVoiceRules(text: string): string {
     .replace(/:/g, ",")   // colon → comma
     .replace(/\s{2,}/g, " ")
     .trim();
+}
+
+// Enforce sentence-start capitalisation after . ? !. The voice prompts
+// both ask for this but the model still slips ("hope you're good? things
+// have been..." → should be "Things"). Belt-and-braces, applied to every
+// text-producing AI call alongside applyVoiceRules.
+//
+// Rules:
+//   - Looks for [.?!] followed by whitespace + a lowercase ASCII letter,
+//     uppercases that letter. Standalone "?", "!" without trailing
+//     whitespace are not sentence boundaries (they could be inside a
+//     quoted phrase, emoji, or url) and are left alone.
+//   - Lowercase "i" as a pronoun is uppercased to "I" when it lands at
+//     sentence start — that's grammar, not voice. Mid-sentence "i" is
+//     untouched.
+//   - The very first character of the message is also capitalised, to
+//     mirror the "capitals at message start" rule in both voice prompts.
+//
+// Examples:
+//   "hope you're good? things have been..." → "hope you're good? Things have been..."
+//   "Bet. Catch you later"                  → "Bet. Catch you later" (already capital, no-op)
+//   "yhh i'm down, what time you thinking"  → "Yhh i'm down, what time you thinking"
+//   "Damn fairs bro, you good? wanna talk"  → "Damn fairs bro, you good? Wanna talk"
+export function enforceSentenceStartCapitals(text: string): string {
+  if (!text) return text;
+  let result = text.replace(/([.?!])(\s+)([a-z])/g, (_match, p1, p2, p3) => `${p1}${p2}${(p3 as string).toUpperCase()}`);
+  // First-character capitalisation. Skip when the message starts with an
+  // emoji / number / punctuation — only kicks in when the leading char is
+  // a lowercase ASCII letter, which is the case we actually want to fix.
+  if (/^[a-z]/.test(result)) {
+    result = result.charAt(0).toUpperCase() + result.slice(1);
+  }
+  return result;
+}
+
+// Soft trailing-period strip for short casual messages. The casual prompt
+// says "Full stops basically absent" but the model still slips one in at
+// the very end of a one-line reply. Only fires when the result is short
+// and reads as a single thought — never strips when the message ends in
+// "...", a question, an exclamation, an emoji, or contains multiple
+// sentence-terminating marks (those carry meaning). Keeps the hard rules
+// in applyVoiceRules pure and platform-agnostic.
+//
+// Examples:
+//   "Hey, really appreciate that man." → "Hey, really appreciate that man"
+//   "Yhh i'm down, what time you thinking." → "Yhh i'm down, what time you thinking"
+//   "Bet." → "Bet"
+//   "Hey. Hope you're good." → unchanged (two sentences, intentional shape)
+//   "Sorry it's been a while. Things have been hectic, glad to hear from you" → unchanged
+export function softenCasualTrailingPeriod(text: string): string {
+  if (!text) return text;
+  const trimmed = text.trim();
+  if (!trimmed.endsWith(".") || trimmed.endsWith("...") || trimmed.endsWith("..")) return text;
+  // Count sentence-final marks inside the body (excluding the trailing one
+  // we're considering stripping). If there's already a "." mid-message,
+  // this is a multi-sentence reply where the closing period is intentional.
+  const body = trimmed.slice(0, -1);
+  if (/[.!?]/.test(body)) return text;
+  // Don't strip from longer prose — keep the rule scoped to one-line texts
+  // and short two-clause replies, where Richard's actual messages don't
+  // carry a trailing period.
+  if (body.length > 140) return text;
+  return text.replace(/\.\s*$/, "");
 }
 
 // Models occasionally narrate the prompt back to the operator ("the
@@ -565,10 +629,6 @@ export function stripOperatorMetaTalk(text: string): string {
   const cleaned = kept.join(" ").replace(/\s{2,}/g, " ").trim();
   return cleaned.length > 0 ? cleaned : text;
 }
-// Static analysis would flag FORBIDDEN_PUNCTUATION_RE as unused; keep it
-// exported only via the side-effect of being referenced in tests if added.
-void FORBIDDEN_PUNCTUATION_RE;
-
 const startersSchema = z.object({
   starters: z
     .array(
@@ -737,7 +797,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     providerId: AiProvider,
     model: string,
     prompt: string,
-    parser: (value: unknown) => T
+    parser: (value: unknown) => T,
+    systemContent: string = SYSTEM_PROMPT
   ): Promise<{ ok: true; result: T } | { ok: false; classification: AiErrorClassification | null }> {
     const entry = providerRegistry[providerId];
     const { client } = resolveProvider(providerId);
@@ -754,7 +815,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
             ? { response_format: { type: "json_object" as const } }
             : {}),
           messages: [
-            { role: "system", content: SYSTEM_PROMPT },
+            { role: "system", content: systemContent },
             { role: "user", content: reinforceJsonPrompt(prompt, model) }
           ],
           ...providerOptions(providerId, model),
@@ -803,7 +864,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   async function modelJson<T>(
     prompt: string,
     fallback: T,
-    parser: (value: unknown) => T
+    parser: (value: unknown) => T,
+    systemContent?: string
   ): Promise<{ result: T; source: AiSource | null }> {
     const { provider: activeId, model: activeModel } = await resolveActive();
     const chain: AiProvider[] = [activeId, ...fallbackChain.filter((id) => id !== activeId)];
@@ -816,7 +878,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       // Active provider honours the user's model override from settings;
       // fallback providers use the runtime config default.
       const model = isActive ? activeModel : resolveProvider(providerId).model;
-      const outcome = await tryProvider(providerId, model, prompt, parser);
+      const outcome = await tryProvider(providerId, model, prompt, parser, systemContent);
       if (outcome.ok) {
         const entry = providerRegistry[providerId];
         const source: AiSource = {
@@ -861,17 +923,29 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     previousSummary?: string;
     previousOpenLoops: string[];
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /**
+     * True when the contact's last message is newer than the operator's —
+     * i.e. an active ask is pending. False when the operator already
+     * replied (or the thread is fresh), in which case the summary switches
+     * to "reconnect mode": what_they_want and open_loops become hooks for
+     * reopening the conversation rather than items to address.
+     */
+    needsReply: boolean;
   }): Promise<SummaryOutput> {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
 
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
-      // safeTruncate splits on Unicode code points so a 140-char cut won't
-      // bisect an emoji's surrogate pair. Without it, a message ending in
-      // an emoji at the boundary corrupts every subsequent prisma.thread
+      // safeTruncate splits on Unicode code points so the cut won't bisect
+      // an emoji's surrogate pair. Without it, a message ending in an
+      // emoji at the boundary corrupts every subsequent prisma.thread
       // .update — see Sarah Nwisi sync-fail bug.
-      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 140) : "No clear ask yet.",
+      // 120-char cap matches the Today hero headline's 4-line budget
+      // (max-w-22ch, 36px display, ~31 chars/line). Staying within budget
+      // means the operator reads the full fallback rather than an
+      // ellipsis truncation (issue #193).
+      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",
@@ -902,10 +976,49 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       })
       .join("\n");
 
+    // The summary now operates in one of two modes, switched on
+    // `needsReply`. Active-reply mode (contact's message is newest) asks
+    // for a recap of the current exchange + loops adjacent to the active
+    // topic. Reconnect mode (operator already replied or thread is
+    // dormant) asks for warm callbacks the operator could use to reopen —
+    // remembered details, things the contact said they'd do, hooks worth
+    // bringing up. The data shape is identical so the dashboard renders
+    // it the same way; only the content adapts.
+    const modeBlock = input.needsReply
+      ? `MODE: ACTIVE REPLY. The contact is waiting on the operator.
+
+what_they_want guidance (active reply):
+- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
+- Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
+- Examples: "Sultan asked if you've watched the MJ movie — he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch — he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
+
+open_loops guidance (active reply):
+- Focus on items adjacent to the CURRENT active topic. The most recent 2-3 inbound messages define what's live.
+- DROP any older loops where the conversation has clearly moved on to an unrelated topic. If the recent exchange is about a movie and the old loops are about a months-old logistics request, do not surface those — they're stale.
+- EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript.
+- A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
+- 0-4 loops is fine. Quality over volume. The bar is "would the operator genuinely want to pick this up right now, given what's being discussed".
+- Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".`
+      : `MODE: RECONNECT. The operator has the floor — the contact is not currently waiting on anything specific. The summary's job here is to help the operator reopen the conversation warmly, not to surface tasks.
+
+what_they_want guidance (reconnect):
+- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- Frame as: "what's the warmest, most natural way for the operator to reopen this thread, grounded in something specific the contact has shared." Reference a real detail from the transcript — something they mentioned doing, a thing they were working through, a small life update.
+- Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
+- Examples: "Sultan mentioned exam stress last month — a 'how'd they go?' check-in is natural.", "She was deciding between two job offers — worth asking how that landed.", "He said he'd send the doc but went quiet; a light nudge would land well."
+
+open_loops guidance (reconnect):
+- These become "warm callbacks" — small specific things from the transcript that would feel good to bring up. Things the contact shared, mentioned, or said they'd do. Things the operator could genuinely remember and ask about.
+- Lean on specificity. "Ask how the new role is going" beats "Catch up on work". "Follow up on whether they found Tolu" beats "Check in on logistics".
+- DROP anything where bringing it up would feel like dredging up an awkward stale request. If the transcript moved past a topic months ago, leave it.
+- 0-5 callbacks is fine.
+- Phrase each as a short prompt the operator could act on: "Ask how the move to Lagos went" / "Mention you finally watched the MJ doc" / "Check in on the new role".`;
+
     const prompt = `Return strict JSON matching this exact shape:
 {
-  "summary": "string — 1-2 sentence rolling summary of the relationship",
-  "what_they_want": "string — what would deepen this connection or make a great reply. If they made an explicit ask (book a call, share a date, answer a question), that goes here. Otherwise, name what's worth acknowledging or following up on (a thing they shared, a hook in their last message, the warmth they extended). One or two short sentences, plain prose, British English.",
+  "summary": "string — 1-2 sentence rolling summary of the relationship (durable across turns)",
+  "what_they_want": "string — see mode-specific guidance below",
   "open_loops": ["string", ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
@@ -914,12 +1027,12 @@ export function createAiService(settingsStore: SettingsStore): AiService {
 
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
 
-Open loops scope (strict):
-- Walk the WHOLE transcript and extract every distinct askable item the contact raised: every question, every topic they brought up, every hook the operator could follow up on. Be comprehensive, not just the most recent message. Six loops in a long-running thread is fine. Three short ones for a brief thread is fine. The bar is distinctness, not count.
-- EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript. If the contact asked "what are you up to this weekend?" and the operator already replied "going home for the bank holiday" three messages later, that is CLOSED, not an open loop.
-- A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
+${modeBlock}
+
+General rules (both modes):
 - One loop per item. Don't merge ("their work + their move + their dog") into a single string.
-- Phrase each loop as a short follow-up prompt the operator could use, e.g. "Ask how the new role is going" / "Pick up the thread about their move to Lagos" / "Send the doc they asked about". Not as the contact's quoted question.
+- Phrase loops as actions the operator can take, never as the contact's quoted question.
+- The "summary" field stays stable — it's the durable relationship description, not the mode-specific recap. Update it only when the relationship itself shifts (new shared context, role change, etc.).
 
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
@@ -927,6 +1040,13 @@ Transcript:
 ${transcript}`;
 
     const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
+    // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
+    // returns longer prose; this keeps the Today hero headline within its
+    // 4-line budget. safeTruncate trims at the code-point boundary and
+    // does not append an ellipsis (issue #193).
+    if (result.what_they_want.length > 120) {
+      result.what_they_want = safeTruncate(result.what_they_want, 120);
+    }
     return result;
   }
 
@@ -934,7 +1054,44 @@ ${transcript}`;
     summary: string;
     whatTheyWant: string;
     openLoops: string[];
-    lastInboundMessage: string;
+    /**
+     * Last 6 turns of the transcript (oldest first). Replaces the previous
+     * single-string `lastInboundMessage`: the model needs the back-and-
+     * forth to spot when the operator has already engaged on the topic
+     * (e.g. operator said "yhh why?" then the contact clarified — the
+     * reply must respond to the clarification, not treat it as a cold
+     * ask). Each entry includes the speaker direction.
+     */
+    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /**
+     * True when the contact's last message is newer than the operator's.
+     * When false, the prompt switches to "reopen mode": generates three
+     * conversation starters grounded in transcript details rather than
+     * direct replies to a pending message.
+     */
+    needsReply: boolean;
+    /**
+     * Drives the voice tier (LinkedIn → formal; everything else → casual)
+     * so the suggested replies sit in the right register. Optional for
+     * backwards compatibility with older callers; when omitted, the
+     * generic SYSTEM_PROMPT is used and no voice-tier prompt is added.
+     */
+    platform?: PlatformName | null;
+    /**
+     * Recent outbound messages on THIS thread, oldest first. Calibrates
+     * register and warmth to how the operator actually talks to this
+     * specific contact (formal with mentors, banter with mates). Empty
+     * is fine — the few-shot examples in the voice prompt are the
+     * primary reference.
+     */
+    voiceSamples?: string[];
+    /**
+     * Recent inbound messages on THIS thread, oldest first (excluding
+     * the very latest, which is passed as lastInboundMessage). Shows the
+     * model the recipient's voice across the conversation so the reply
+     * can match their tempo rather than reacting only to the last line.
+     */
+    recipientSamples?: string[];
     /**
      * Thread classification. When "outreach", the third reply slot is a
      * "Polite decline" instead of a "Clarifying question" — short friendly
@@ -996,20 +1153,34 @@ ${transcript}`;
       ]
     };
 
-    const prompt = `Return strict JSON matching this exact shape:
-{
-  "replies": [
-    { "label": "A", "intent": "<short noun phrase>", "text": "..." },
-    { "label": "B", "intent": "<short noun phrase>", "text": "..." },
-    { "label": "C", "intent": "<short noun phrase>", "text": "..." }
-  ],
-  "needs_user_input": ["string", ...]
-}
+    // Render the recent exchange so the model can see who said what.
+    // Previous prompt only passed `lastInboundMessage` as a string, which
+    // hid the operator's own most recent turn — if the operator had
+    // already engaged with a short reply, the model would still generate
+    // replies as if responding to a cold ask. Now it sees the back-and-
+    // forth and can produce a reply that fits the actual conversational
+    // turn. The operator's own entries here also serve as per-thread
+    // voice calibration — register, vocabulary, length, punctuation
+    // habits to mirror.
+    const recentExchange = input.recentMessages
+      .map((m) => {
+        const speaker = m.direction === "OUT" ? "operator" : "contact";
+        return `${speaker}: ${m.text}`;
+      })
+      .join("\n");
 
-Each reply text must be a complete, sendable message under 280 characters,
-1-2 sentences, British English. No em dashes, en dashes, semicolons, or
-colons. Match the inbound message's register: warm if they're warm,
-formal if they're formal.
+    // Mode switches the whole framing. In reply mode the model produces
+    // three responses to the contact's pending message. In reopen mode
+    // the operator chose to reach out into a quiet thread, so the model
+    // produces three conversation starters grounded in concrete details
+    // from the transcript (warm callbacks, "wow you remembered" moments,
+    // small things the contact mentioned that would feel good to bring
+    // up). The output shape is identical so the dashboard renders both
+    // the same way.
+    const modeBlock = input.needsReply
+      ? `MODE: REPLY. The contact's last message is waiting on a response.
+
+What to generate: three sendable replies to the most recent contact message, accounting for the full recent exchange above. If the operator already responded to part of the topic earlier in this exchange, the replies must build on that — do NOT treat the contact's last message as a cold ask when the operator has already engaged.
 
 INTENT LABELS — pick three intents that genuinely fit THIS conversation.
 Each intent is a 2-4 word noun phrase describing the angle of that reply.
@@ -1030,13 +1201,41 @@ Hard rules:
 - Each intent describes WHAT THIS REPLY DOES, in this thread's context —
   e.g. "Acknowledge their move", "Suggest a time", "Match their warmth",
   "Offer a small update", "Decline gently", "Ask about timeline". Make
-  them specific to what was actually said.
+  them specific to what was actually said.${
+    isOutreach
+      ? `\n- This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C MUST be a friendly Polite decline (~1 sentence, no commitment, no follow-up question), labelled with intent "Polite decline". Replies A and B can still pick intents that fit.`
+      : ""
+  }`
+      : `MODE: REOPEN. The operator is reaching back into a thread where nothing is currently pending — there's no message waiting on a reply. Generate three conversation starters the operator could send right now to reopen warmly.
 
-${
-  isOutreach
-    ? `This thread is OUTREACH (sales pitch, recruitment, InMail, cold solicitation). Reply C MUST be a friendly Polite decline (~1 sentence, no commitment, no follow-up question), labelled with intent "Polite decline". Replies A and B can still pick intents that fit.`
-    : ""
-}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
+What to generate: three OPENERS the operator could send into this quiet thread. Each one must:
+- Reference something SPECIFIC from the transcript above (a thing the contact mentioned, shared, said they'd do, was working through, complained about, was excited by). Cite the concrete detail — "the move to Lagos", "the new role", "exam stress", "the doc you owed them" — not a generic "catch up".
+- Land as a "wow, you remembered" moment if possible. Small specific recall beats grand re-greetings.
+- Be sendable as a first message into a quiet thread — no "in reply to your last…" framing.
+- Sit in the operator's voice.
+
+Hard rules:
+- The three openers must reference three DIFFERENT details. Don't generate three variations on the same callback.
+- Do NOT invent details that aren't in the transcript. If you can't ground a third opener in a real detail, return only two replies and put a note in needs_user_input.
+- No generic "hey how have you been" filler unless there's literally nothing else in the transcript. In that case one slot can be a warm "hey how are things" but the other two must still ground in something real.
+- Each intent describes the callback: "Ask about the Lagos move", "Follow up on exam stress", "Mention you watched the doc". Avoid "Clarifying question" — there's nothing to clarify in reopen mode.`;
+
+    const prompt = `Return strict JSON matching this exact shape:
+{
+  "replies": [
+    { "label": "A", "intent": "<short noun phrase>", "text": "..." },
+    { "label": "B", "intent": "<short noun phrase>", "text": "..." },
+    { "label": "C", "intent": "<short noun phrase>", "text": "..." }
+  ],
+  "needs_user_input": ["string", ...]
+}
+
+Each reply text must be a complete, sendable message under 280 characters,
+1-2 sentences, British English. No em dashes, en dashes, semicolons, or
+colons. Match the conversation's register: warm if it's warm, formal if
+it's formal.
+
+${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -1045,16 +1244,38 @@ ${
 Summary: ${input.summary}
 What they want: ${input.whatTheyWant}
 Open loops: ${JSON.stringify(input.openLoops)}
-Last inbound: ${input.lastInboundMessage}`;
+Recent exchange (oldest first):
+${recentExchange || "(no recent messages)"}`;
 
-    const { result: parsed, source } = await modelJson(prompt, fallback, (value) => repliesSchema.parse(value));
+    // Voice-tier system prompt — was missing here previously, so suggested
+    // replies ran on the generic SYSTEM_PROMPT only and read flatter than
+    // composeInVoice output. When platform is set, layer the appropriate
+    // voice profile on top so register matches the channel (LinkedIn
+    // formal peer-to-peer; WhatsApp / iMessage / IG / TikTok casual-MLE).
+    const systemContent = input.platform
+      ? `${SYSTEM_PROMPT}\n\n${selectVoicePrompt(input.platform)}`
+      : SYSTEM_PROMPT;
+    const tier = input.platform ? getVoiceTier(input.platform) : null;
+
+    const { result: parsed, source } = await modelJson(
+      prompt,
+      fallback,
+      (value) => repliesSchema.parse(value),
+      systemContent
+    );
     // Defensive scrub of em-dashes, semicolons, colons — see applyVoiceRules.
+    // For casual platforms, also strip trailing periods on short replies
+    // since Richard's actual texts don't carry them.
     return {
       ...parsed,
-      replies: parsed.replies.map((r) => ({
-        ...r,
-        text: applyVoiceRules(r.text)
-      })),
+      replies: parsed.replies.map((r) => {
+        let cleaned = applyVoiceRules(r.text);
+        cleaned = enforceSentenceStartCapitals(cleaned);
+        return {
+          ...r,
+          text: tier === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned
+        };
+      }),
       source
     };
   }
@@ -1084,7 +1305,7 @@ Last inbound: ${input.lastInboundMessage}`;
       });
 
       const raw = response.choices[0]?.message?.content?.trim() || input.text;
-      return applyVoiceRules(raw);
+      return enforceSentenceStartCapitals(applyVoiceRules(raw));
     } catch (error) {
       console.warn(
         `[ai] transformReply failed (provider=${provider}, model=${model}, mode=${input.mode}); returning original text. ${classifyLlmError(error, provider)}`
@@ -1361,6 +1582,16 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       .filter((sample) => sample.length > 0)
       .slice(-6); // Last 6 outbound messages — enough to learn voice without bloating the prompt.
 
+    // Recipient's recent messages, oldest first, capped at 4. Shows the
+    // model the conversation rhythm from THEIR side — how long their
+    // messages run, how they punctuate, what register they sit in. Lets
+    // the rewrite match their tempo rather than only the last line.
+    const recipientSamples = input.threadMessages
+      .filter((m) => m.direction === "IN")
+      .map((m) => m.text.trim())
+      .filter((t) => t.length > 0)
+      .slice(-4);
+
     const lastInbound = [...input.threadMessages].reverse().find((m) => m.direction === "IN");
     const lastOutbound = [...input.threadMessages].reverse().find((m) => m.direction === "OUT");
     // Acknowledge a long gap if the operator is replying weeks/months
@@ -1422,6 +1653,7 @@ Recipient: ${input.displayName}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
+${recipientSamples.length > 0 ? `\nRecipient's recent messages on this thread (oldest first — match their tempo, length, and warmth, not just the last line):\n${recipientSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n")}` : ""}
 ${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${
   input.contact
     ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
@@ -1446,7 +1678,9 @@ Return strict JSON: { "text": "string" }`;
       const content = response.choices[0]?.message?.content;
       if (!content) return trimmed;
       const parsed = z.object({ text: z.string().min(1) }).parse(parseAiJson(content, model));
-      return applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+      let cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
+      cleaned = enforceSentenceStartCapitals(cleaned);
+      return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
     } catch (error) {
       console.warn(
         `[ai] composeInVoice failed (provider=${provider}, model=${model}); returning raw intent. ${classifyLlmError(error, provider)}`

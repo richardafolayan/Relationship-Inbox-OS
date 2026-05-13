@@ -229,23 +229,27 @@ export default function TodayPage() {
         ? `waiting · ${formatRelative(hero.lastInboundAt)}`
         : `fresh · ${formatRelative(hero.lastInboundAt)}`;
 
-  // Hero headline: AI summary if we got one, otherwise the latest
-  // preview as a stand-in. Truncate to the first sentence and cap at
-  // ~100 chars so the 36px display type doesn't waterfall down the
-  // hero card. Strip a trailing period for cleaner type.
+  // Hero headline: a 1-2 sentence recap of the recent conversation that
+  // reminds the operator what's hanging in the air and what the contact
+  // is waiting on them to address. Prefer the AI summary; if it hasn't
+  // landed yet, fall back to the raw preview as a stand-in. The h2
+  // (max-w-22ch, 36px display, ~31 chars/line) gives a 4-line budget of
+  // ~124 chars; the AI side targets ≤ 120 so its full text renders
+  // without truncation. The preview fallback can be arbitrarily long,
+  // so it gets a word-boundary trim near 120 chars — still no ellipsis,
+  // since the operator can read the rest one tap away on the thread
+  // page (issue #193).
   const heroHeadlineRaw =
     heroSummary && heroSummary.id === hero?.id && heroSummary.summary
       ? heroSummary.summary
       : normalizePreview(hero?.preview);
   const heroHeadline = (() => {
     if (!heroHeadlineRaw) return "";
-    const firstSentence = heroHeadlineRaw.split(/(?<=[.!?])\s+/)[0] ?? heroHeadlineRaw;
-    const trimmed = firstSentence.replace(/[.!?]\s*$/, "").trim();
-    if (trimmed.length <= 110) return trimmed;
-    // Hard cap with an ellipsis so a single run-on sentence still fits.
-    const cut = trimmed.slice(0, 107);
+    const trimmed = heroHeadlineRaw.trim();
+    if (trimmed.length <= 120) return trimmed;
+    const cut = trimmed.slice(0, 120);
     const lastSpace = cut.lastIndexOf(" ");
-    return `${(lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim()}…`;
+    return (lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim();
   })();
 
   const heroIsTransitioning = transitioning && hero && transitioning.id === hero.id;

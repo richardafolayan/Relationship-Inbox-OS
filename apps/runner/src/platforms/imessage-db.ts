@@ -187,6 +187,13 @@ export interface IMessageMessageRow {
   attachments: IMessageAttachment[];
   /** Tapbacks the other party (or you) sent on this message, latest-state aggregated. */
   reactions: IMessageReaction[];
+  /**
+   * When this message is an inline reply (a "Reply" in Messages.app, not a
+   * tapback), the guid of the parent message being replied to. Cleaned of
+   * Apple's `p:0/` / `bp:` prefix — just the bare guid that matches another
+   * row's `guid`. Undefined for standalone messages.
+   */
+  replyToGuid?: string;
 }
 
 /**
@@ -570,6 +577,7 @@ export class IMessageDb {
            m.cache_has_attachments       AS hasAttachments,
            m.associated_message_type     AS associatedType,
            m.associated_message_guid     AS associatedGuid,
+           m.thread_originator_guid      AS threadOriginatorGuid,
            h.id                          AS handleId
          FROM message m
          JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
@@ -588,6 +596,7 @@ export class IMessageDb {
         hasAttachments: number;
         associatedType: number | null;
         associatedGuid: string | null;
+        threadOriginatorGuid: string | null;
         handleId: string | null;
       }>;
 
@@ -608,6 +617,12 @@ export class IMessageDb {
       // dashboard renders "[Voice note]" instead of an empty bubble.
       const hasMeaningfulText = decodedText && decodedText.replace(/￼/g, "").trim().length > 0;
       const text = hasMeaningfulText ? decodedText : describeAttachments(attachments);
+      // thread_originator_guid is stored as the bare guid (no p:0/ or bp:
+      // prefix, unlike associated_message_guid). Normalise defensively
+      // anyway so a future macOS version that adds a prefix still parses.
+      const replyToGuid = r.threadOriginatorGuid
+        ? r.threadOriginatorGuid.replace(/^(?:p:\d+\/|bp:)/, "")
+        : undefined;
       return {
         guid: r.guid,
         rowId: r.rowId,
@@ -617,7 +632,8 @@ export class IMessageDb {
         senderHandle: r.handleId ?? undefined,
         hasAttachments: r.hasAttachments === 1,
         attachments,
-        reactions: reactionsByGuid.get(r.guid) ?? []
+        reactions: reactionsByGuid.get(r.guid) ?? [],
+        replyToGuid
       };
     });
   }
@@ -662,7 +678,15 @@ export class IMessageDb {
    *                   common for SMS-fallback when there's no SMS pathway)
    */
   findOutboundDeliveryStatus(chatGuid: string, afterUnixMs: number):
-    | { rowId: number; guid: string; service: string | null; isSent: boolean; isDelivered: boolean; error: number }
+    | {
+        rowId: number;
+        guid: string;
+        service: string | null;
+        isSent: boolean;
+        isDelivered: boolean;
+        error: number;
+        timestamp: string;
+      }
     | undefined {
     const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
       | { chatId: number }
@@ -672,7 +696,8 @@ export class IMessageDb {
     const row = this.db
       .prepare(
         `SELECT m.ROWID AS rowId, m.guid AS guid, m.service AS service,
-                m.is_sent AS isSent, m.is_delivered AS isDelivered, m.error AS error
+                m.is_sent AS isSent, m.is_delivered AS isDelivered, m.error AS error,
+                m.date AS appleDate
            FROM message m
            JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
           WHERE cmj.chat_id = ?
@@ -682,16 +707,30 @@ export class IMessageDb {
           LIMIT 1`
       )
       .get(chat.chatId, afterAppleNs) as
-      | { rowId: number; guid: string; service: string | null; isSent: number; isDelivered: number; error: number | null }
+      | {
+          rowId: number;
+          guid: string;
+          service: string | null;
+          isSent: number;
+          isDelivered: number;
+          error: number | null;
+          appleDate: number;
+        }
       | undefined;
     if (!row) return undefined;
+    // chat.db stores dates as nanoseconds since the Apple epoch
+    // (2001-01-01). Convert to a unix-ms ISO string so the adapter can
+    // surface it as the send receipt timestamp directly, avoiding the
+    // extra findOutboundSince round-trip the adapter used to fall back to.
+    const unixMs = Math.round(row.appleDate / 1e6 + APPLE_EPOCH_OFFSET_MS);
     return {
       rowId: row.rowId,
       guid: row.guid,
       service: row.service,
       isSent: row.isSent === 1,
       isDelivered: row.isDelivered === 1,
-      error: row.error ?? 0
+      error: row.error ?? 0,
+      timestamp: new Date(unixMs).toISOString()
     };
   }
 

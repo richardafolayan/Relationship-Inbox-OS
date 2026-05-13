@@ -26,6 +26,7 @@ import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
+import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
@@ -47,6 +48,8 @@ import {
 import { AdapterFailure } from "./platforms/utils";
 import type { LinkedInSmokeIngestResult, LinkedInSmokePersistInput } from "./platforms/linkedin-adapter";
 import {
+  personThreadCountKey,
+  personThreadCounts,
   shapeThreadRows,
   toInboxRow,
   type ThreadRowSource
@@ -239,6 +242,26 @@ scheduledSendPromoter.start();
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
 const threadSummaryRefreshInFlight = new Map<string, Promise<void>>();
+
+// Safety net for the AI bookkeeping maps above. If the underlying
+// provider hangs (no resolve, no reject), the `.finally` cleanup in the
+// caller never runs, and the slot stays glued to a thread id forever.
+// Race the work against a hard ceiling so the map always evicts. The
+// rejection here propagates into the existing `.catch` block so the
+// caller surfaces a normal failure path.
+const AI_IN_FLIGHT_MAX_MS = 120_000;
+function withInFlightTimeout<T>(work: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} exceeded ${AI_IN_FLIGHT_MAX_MS}ms; abandoning in-flight slot`)),
+      AI_IN_FLIGHT_MAX_MS
+    );
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 const emptySuggestedReplies: SuggestedRepliesOutput = {
   replies: [],
   needs_user_input: []
@@ -610,10 +633,17 @@ async function loadVisibleThreadRows(options?: {
   /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
   archived?: boolean;
 }): Promise<ReturnType<typeof shapeThreadRows>> {
+  const now = new Date();
   const threads = await prisma.thread.findMany({
     where: options?.archived
       ? { archivedAt: { not: null } }
-      : { archivedAt: null },
+      : {
+          archivedAt: null,
+          // Hide snoozed threads from active views until the timer expires.
+          // The dashboard polls every 10s, so threads resurface naturally
+          // within that window once snoozedUntil <= now.
+          OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }]
+        },
     select: {
       id: true,
       platform: true,
@@ -631,6 +661,7 @@ async function loadVisibleThreadRows(options?: {
       riskLevel: true,
       riskReason: true,
       slaDueAt: true,
+      snoozedUntil: true,
       whatTheyWant: true,
       rollingSummary: true,
       archivedAt: true,
@@ -685,7 +716,11 @@ app.post("/admin/reset", asyncRoute(async (req, res) => {
   const requestId = uuid();
   const resetResult = await withGlobalResetLock(async () => {
     scanQueue.requestAbort(`admin_reset:${payload.platform.toLowerCase()}`);
+    // Drop every in-flight bookkeeping map so a wedged AI call from
+    // pre-reset state can't keep stale thread ids glued to slots.
     connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
     try {
       for (const platform of allPlatforms) {
         await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
@@ -792,13 +827,20 @@ app.use("/control", (req, res, next) => {
 });
 
 app.get("/health", asyncRoute(async (_req, res) => {
+  // Mirror the picker's eligibility filter in enrichment-queue.ts so the
+  // status-bar count matches what the worker would actually pick up next.
+  // A job rescheduled with nextAttemptAt 6h in the future is asleep, not
+  // "in flight" — counting it sticks the banner on for hours after every
+  // failed run and trains the operator to mash the cancel button.
+  const now = new Date();
   const [platforms, enrichmentPending, enrichmentRunning] = await Promise.all([
     prisma.platform.findMany(),
-    // PENDING + RUNNING surface as "in flight" to the dashboard. DEFERRED
-    // (waiting on scan/send lock) is technically active too — a busy
-    // platform can leave a job DEFERRED for ~minute — so include it. DONE
-    // and FAILED stay out of the count.
-    prisma.enrichmentJob.count({ where: { status: { in: ["PENDING", "DEFERRED"] } } }),
+    prisma.enrichmentJob.count({
+      where: {
+        status: "PENDING",
+        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+      }
+    }),
     prisma.enrichmentJob.count({ where: { status: "RUNNING" } })
   ]);
   const lastScanAt = platforms
@@ -1132,14 +1174,13 @@ app.post("/control/scan/abort", asyncRoute(async (_req, res) => {
   res.json({ status: wasScanning ? "aborting" : "idle" });
 }));
 
-// Cancel every queued (PENDING + DEFERRED) enrichment job. The currently
-// RUNNING job (if any) is left to finish — killing it mid-page would
-// leave the playwright context in a wedged state, and the next job
-// would likely fail. One outstanding job is acceptable cancel
-// semantics. Returns the count of rows transitioned to FAILED.
+// Cancel every queued PENDING enrichment job, including ones rescheduled
+// far in the future. The currently RUNNING job (if any) is left to finish —
+// killing it mid-page would leave the playwright context in a wedged state.
+// Returns the count of rows transitioned to FAILED.
 app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
   const result = await prisma.enrichmentJob.updateMany({
-    where: { status: { in: ["PENDING", "DEFERRED"] } },
+    where: { status: "PENDING" },
     data: { status: "FAILED", lastError: "cancelled by operator", nextAttemptAt: null }
   });
   res.json({ status: "ok", cancelled: result.count });
@@ -1151,7 +1192,8 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
       platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
-      forceFallback: z.boolean().nullable().optional()
+      forceFallback: z.boolean().nullable().optional(),
+      scope: z.enum(["update", "full"]).optional()
     })
     .parse(req.body ?? {});
 
@@ -1165,7 +1207,8 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
     respectCooldown: true,
     maxThreads,
     maxOpens,
-    forceFallback
+    forceFallback,
+    scope: payload.scope ?? "update"
   });
   const traceMeta = {
     runTraceEnabled: scanQueue.isRunTraceEnabled(),
@@ -1185,6 +1228,10 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
       }
     });
 
+    // Returns 200 with `{ ok: false, reason, retryAfterSeconds }` so the
+    // dashboard's structured cooldown UI in app/platforms/page.tsx can
+    // surface retry-after info inline. Don't change to 4xx without also
+    // updating the dashboard to read ApiRequestError.payload.
     res.status(200).json({
       ...queued,
       ...traceMeta
@@ -1480,51 +1527,6 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   });
 }));
 
-app.post("/control/platform/save-selector-override", asyncRoute(async (req, res) => {
-  const payload = z
-    .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
-      key: z.enum([
-        "thread_list",
-        "thread_item",
-        "unread_badge",
-        "thread_snippet",
-        "message_container",
-        "message_item",
-        "message_text",
-        "composer_input",
-        "send_button"
-      ]),
-      selector: z.string().min(1)
-    })
-    .parse(req.body);
-
-  await settingsStore.saveSelectorOverride(payload.platform, payload.key as keyof SelectorRegistry, payload.selector);
-  res.json({ status: "ok" });
-}));
-
-app.post("/control/platform/reset-selector-override", asyncRoute(async (req, res) => {
-  const payload = z
-    .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
-      key: z.enum([
-        "thread_list",
-        "thread_item",
-        "unread_badge",
-        "thread_snippet",
-        "message_container",
-        "message_item",
-        "message_text",
-        "composer_input",
-        "send_button"
-      ])
-    })
-    .parse(req.body);
-
-  await settingsStore.resetSelectorOverride(payload.platform, payload.key as keyof SelectorRegistry);
-  res.json({ status: "ok" });
-}));
-
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   // For multipart bodies, multer puts file metadata on req.files and
@@ -1538,7 +1540,12 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
       // when the time elapses. When absent, the send is enqueued
       // immediately (existing behaviour).
-      scheduledFor: z.string().datetime().optional()
+      scheduledFor: z.string().datetime().optional(),
+      // App-level threading. When the dashboard's focused-thread composer
+      // sends a reply, it includes the parent Message.id here. The send
+      // itself still goes out as a regular text bubble — the threading is
+      // only persisted on our side and rendered by the dashboard.
+      replyToMessageId: z.string().min(1).optional()
     })
     .parse(req.body);
   const uploadedFiles = (req.files as Express.Multer.File[] | undefined) ?? [];
@@ -1612,7 +1619,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
       threadId,
       text: payload.text,
       clientSendId: payload.clientSendId,
-      attachments: stagedAttachments
+      attachments: stagedAttachments,
+      replyToMessageId: payload.replyToMessageId
     });
     res.json(queueResult);
   } catch (error) {
@@ -1996,6 +2004,14 @@ async function resummarizeThreadById(threadId: string): Promise<
     return { ok: false, reason: "not_found" };
   }
 
+  // Resummarize is driven by the operator clicking "Reassess" or by the
+  // stale-summary self-heal path. Recompute needsReply from the thread's
+  // own message ordering so the mode-aware prompt picks the right
+  // framing (active reply vs reopen).
+  const computedNeedsReply = Boolean(
+    thread.lastInboundAt &&
+      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
+  );
   const summary = await aiService.updateThreadSummary({
     displayName: thread.person.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
@@ -2004,7 +2020,8 @@ async function resummarizeThreadById(threadId: string): Promise<
       direction: message.direction as "IN" | "OUT",
       text: message.text,
       timestamp: message.timestamp.toISOString()
-    }))
+    })),
+    needsReply: computedNeedsReply
   });
 
   await prisma.thread.update({
@@ -2026,64 +2043,11 @@ async function resummarizeThreadById(threadId: string): Promise<
   };
 }
 
-// Re-run AI summarization against the messages already in the DB. Useful
-// when the persisted summary was generated by a previous run that fell back
-// (e.g. quota was exhausted, model was wrong) — we don't need to hit the
-// platform again, just re-summarize the local message history.
-app.post("/control/thread/:threadId/resummarize", asyncRoute(async (req, res) => {
-  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const result = await resummarizeThreadById(threadId);
-  if (!result.ok) {
-    res.status(404).json({ error: "Thread not found" });
-    return;
-  }
-  res.json({
-    ok: true,
-    threadId,
-    summary: result.summary,
-    whatTheyWant: result.whatTheyWant,
-    openLoops: result.openLoops,
-    needsReply: result.needsReply
-  });
-}));
-
-// Bulk resummarize every thread whose persisted summary still matches the
-// static fallback (i.e. the AI call had failed when the row was last
-// written). One-off cleanup tool for accounts that ran without quota /
-// with a wrong model — no platform calls, just re-summarises local message
-// history. Cap concurrency at 1 to avoid swamping OpenAI rate limits.
-app.post("/control/resummarize-stale", asyncRoute(async (_req, res) => {
-  const stale = await prisma.thread.findMany({
-    where: {
-      OR: [
-        { rollingSummary: null },
-        { rollingSummary: { startsWith: "Conversation with " } }
-      ]
-    },
-    select: { id: true, rollingSummary: true, person: { select: { displayName: true } } }
-  });
-
-  // Filter to TRULY stale rows. The startsWith filter above is necessary
-  // (Prisma can't compare a column against a computed string), but we want
-  // to skip false positives — e.g. a thread whose name legitimately starts
-  // with "Conversation with " is unlikely but possible.
-  const targets = stale.filter((row) => isStaleSummary(row.rollingSummary, row.person.displayName));
-
-  let ok = 0;
-  let failed = 0;
-  for (const target of targets) {
-    const result = await resummarizeThreadById(target.id).catch(() => ({ ok: false as const, reason: "exception" as const }));
-    if (result.ok) {
-      ok += 1;
-    } else {
-      failed += 1;
-    }
-  }
-
-  res.json({ ok: true, total: targets.length, refreshed: ok, failed });
-}));
-
 app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
+  // Validate the path param even though the handler doesn't currently
+  // need the thread row. Without this, any string in the path was
+  // accepted, which silently let bad URLs reach the AI service.
+  z.object({ threadId: z.string().min(1) }).parse(req.params);
   const payload = z
     .object({
       mode: z.enum(["SHORTEN", "MAKE_WARMER"]),
@@ -2244,20 +2208,27 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
   const unreadOnly = req.query.unread === "true";
   const needsReplyOnly = req.query.needsReply === "true";
+  // Honour ?view=archived so the endpoint behaves the way the URL reads.
+  // Previously this param was silently ignored and the active inbox came
+  // back unchanged — misleading for any external script that guessed at
+  // the URL (issue #204). The dashboard still calls /data/archived
+  // directly; this just stops the alternative from quietly lying.
+  const view = typeof req.query.view === "string" ? req.query.view : undefined;
+  const archivedView = view === "archived";
 
   const today = new Date();
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
   const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  const [visibleRows, outboundLast7DaysCount, sentToday, scheduledSends] = await Promise.all([
-    loadVisibleThreadRows(),
-    prisma.message.count({
-      where: {
-        direction: "OUT",
-        timestamp: {
-          gte: sevenDaysAgo
-        }
-      }
+  const [visibleRows, recentMessages, sentToday, scheduledSends] = await Promise.all([
+    loadVisibleThreadRows(archivedView ? { archived: true } : undefined),
+    // Pull all messages across the last 7 days in one query so we can
+    // compute averageReplyTimeHours from real inbound→outbound deltas
+    // rather than the hardcoded placeholder this used to return.
+    prisma.message.findMany({
+      where: { timestamp: { gte: sevenDaysAgo } },
+      select: { threadId: true, direction: true, timestamp: true },
+      orderBy: { timestamp: "asc" }
     }),
     prisma.message.count({
       where: {
@@ -2273,6 +2244,37 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
     })
   ]);
 
+  // Walk messages per-thread, in chronological order. Every inbound is a
+  // candidate "ball in our court"; the next outbound after it (still
+  // inside the 7-day window) gives a real reply latency. Average across
+  // all such pairs. Null when nothing replied in the window — better than
+  // pretending with a placeholder.
+  const repliesByThread = new Map<string, { lastInbound: Date | null }>();
+  const replyLatenciesMs: number[] = [];
+  for (const msg of recentMessages) {
+    let state = repliesByThread.get(msg.threadId);
+    if (!state) {
+      state = { lastInbound: null };
+      repliesByThread.set(msg.threadId, state);
+    }
+    if (msg.direction === "IN") {
+      state.lastInbound = msg.timestamp;
+    } else if (msg.direction === "OUT" && state.lastInbound) {
+      const delta = msg.timestamp.getTime() - state.lastInbound.getTime();
+      if (delta >= 0) replyLatenciesMs.push(delta);
+      state.lastInbound = null;
+    }
+  }
+  const averageReplyTimeHours =
+    replyLatenciesMs.length > 0
+      ? Math.round(
+          (replyLatenciesMs.reduce((sum, ms) => sum + ms, 0) /
+            replyLatenciesMs.length /
+            3_600_000) *
+            10
+        ) / 10
+      : null;
+
   // Earliest SCHEDULED scheduledFor per thread — Today uses this to skip
   // threads the operator has already queued a reply for.
   const scheduledSendByThread = new Map<string, Date>();
@@ -2284,8 +2286,10 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
     }
   }
 
+  const visibleCounts = personThreadCounts(visibleRows);
   const dedupedRows = visibleRows.map((row) => {
-    const shaped = toInboxRow(row);
+    const count = visibleCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
+    const shaped = toInboxRow(row, count);
     const scheduledFor = scheduledSendByThread.get(shaped.id);
     return {
       ...shaped,
@@ -2351,7 +2355,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const summary = {
     unreadThreads: rows.filter((row) => row.unreadCount > 0).length,
     atRiskThreads: rows.filter((row) => row.riskLevel !== "GREEN").length,
-    averageReplyTimeHours: outboundLast7DaysCount ? 4.2 : 0,
+    averageReplyTimeHours,
     oldestPendingInboundAt: oldestPending?.lastInboundAt ?? null,
     messagesSentToday: sentToday
   };
@@ -2407,7 +2411,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   if (isStaleSummary(thread.rollingSummary, thread.person.displayName)) {
     const inFlightKey = thread.id;
     if (!threadSummaryRefreshInFlight.has(inFlightKey)) {
-      const inFlight = resummarizeThreadById(thread.id)
+      const inFlight = withInFlightTimeout(
+        resummarizeThreadById(thread.id),
+        `threadSummaryRefresh(${thread.id})`
+      )
         .then((refreshed) => {
           if (refreshed.ok) {
             eventBus.emit({
@@ -2476,11 +2483,38 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
   ]);
 
+  // Recent exchange: oldest-first window of the last ~6 turns. Gives
+  // generateSuggestedReplies enough context to spot when the operator has
+  // already engaged on the topic (e.g. operator said "yhh why?" then the
+  // contact clarified). Drawn from the same pageMessages already fetched.
+  // Doubles as per-thread voice calibration — the model picks up register,
+  // vocabulary, and punctuation habits from the operator's own OUT entries.
+  const RECENT_TURN_WINDOW = 6;
+  const recentMessages = pageMessages
+    .slice(-RECENT_TURN_WINDOW)
+    .map((m) => ({
+      direction: m.direction as "IN" | "OUT",
+      text: m.text,
+      timestamp: m.timestamp.toISOString()
+    }));
+  // needsReply mirrors scan-queue's derivation: the contact's last message
+  // is newer than the operator's. When false, generateSuggestedReplies
+  // switches to "reopen mode" — conversation starters grounded in
+  // transcript details, not replies to a pending ask.
+  const aiNeedsReply = Boolean(
+    lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
+  );
+
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    lastInboundMessage: lastInbound?.text ?? "",
+    recentMessages,
+    needsReply: aiNeedsReply,
+    // Drives the voice tier (LinkedIn → formal; everything else → casual)
+    // so the suggested-reply chips run on the right register, not just
+    // the generic SYSTEM_PROMPT.
+    platform: thread.platform as PlatformName,
     // Drives the "Polite decline" reply variant when the thread is outreach.
     category: (thread.category ?? null) as "outreach" | "genuine" | null,
     // Late-reply detection: when the last inbound is much older than the
@@ -2515,8 +2549,17 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     if (gapDays >= 14) return "short";
     return "n";
   })();
+  // Cache key folds in the full recent-message window (timestamp + text)
+  // so a new turn in the exchange invalidates the cached replies. Mode
+  // flag (needsReply) is included separately so a flip between active
+  // and reopen mode also busts the cache even if the recent window text
+  // hasn't otherwise changed. Platform is folded in so a voice-tier
+  // change (LinkedIn → formal vs casual) also invalidates.
+  const recentSignature = aiInputs.recentMessages
+    .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
+    .join("|");
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
+    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
     .digest("hex");
 
   let suggested: SuggestedRepliesOutput | undefined;
@@ -2532,7 +2575,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   if (!suggested) {
     const inFlightKey = `${thread.id}:${cacheKey}`;
     if (!suggestedRepliesInFlight.has(inFlightKey)) {
-      const inFlight = aiService.generateSuggestedReplies(aiInputs)
+      const inFlight = withInFlightTimeout(
+        aiService.generateSuggestedReplies(aiInputs),
+        `generateSuggestedReplies(${thread.id})`
+      )
         .then(async (generated) => {
           await prisma.thread.update({
             where: { id: thread.id },
@@ -2654,6 +2700,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     platform: thread.platform,
     riskLevel: thread.riskLevel,
     riskReason: thread.riskReason,
+    snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
     unreadCount: thread.unreadCount,
     needsReply: thread.needsReply,
     summary: thread.rollingSummary,
@@ -2671,11 +2718,16 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     relationshipMemory,
     messages: pageMessages.map((message) => ({
       id: message.id,
+      platformMessageKey: message.platformMessageKey,
       direction: message.direction,
       timestamp: message.timestamp.toISOString(),
       text: message.text,
       senderName: message.senderName ?? null,
       sentVia: message.sentVia ?? null,
+      // App-level reply parent (cuid). The dashboard prefers this over the
+      // Apple-native `raw.replyToGuid` when both are present so threads
+      // started from the dashboard's focused composer reconcile correctly.
+      replyToMessageId: message.replyToMessageId ?? null,
       raw: message.rawJson ? JSON.parse(message.rawJson) : null,
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
     })),
@@ -2703,35 +2755,6 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       domDumpFile: log.domDumpFile
     }))
   });
-}));
-
-app.get("/data/receipts", asyncRoute(async (req, res) => {
-  const threadId = typeof req.query.threadId === "string" ? req.query.threadId : undefined;
-  const limit = Number(req.query.limit ?? 100);
-
-  const logs = await prisma.auditLog.findMany({
-    where: threadId
-      ? {
-          OR: [{ detailsJson: { contains: threadId } }]
-        }
-      : undefined,
-    orderBy: { timestamp: "desc" },
-    take: Number.isNaN(limit) ? 100 : limit
-  });
-
-  res.json(
-    logs.map((log) => ({
-      id: log.id,
-      timestamp: log.timestamp.toISOString(),
-      platform: log.platform,
-      stage: log.stage,
-      action: log.action,
-      status: log.status,
-      details: log.detailsJson ? JSON.parse(log.detailsJson) : null,
-      screenshotFile: log.screenshotFile,
-      domDumpFile: log.domDumpFile
-    }))
-  );
 }));
 
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
@@ -2842,91 +2865,6 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
   );
 }));
 
-// Manual category override. Lets the operator flip a thread's verdict from
-// the dashboard when the classifier got it wrong (e.g. peer-to-peer industry
-// chat that resembles a pitch). The runner does no AI work here — just
-// writes the column and trusts the operator's judgement.
-app.post("/control/thread/:threadId/recategorize", asyncRoute(async (req, res) => {
-  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-  const payload = z
-    .object({
-      category: z.enum(["outreach", "genuine"]).nullable()
-    })
-    .parse(req.body);
-  const thread = await prisma.thread.update({
-    where: { id: threadId },
-    data: {
-      category: payload.category,
-      // Bust the suggested-replies cache so the third reply slot's intent
-      // (Clarifying question vs Polite decline) regenerates next /data/thread fetch.
-      suggestedRepliesCacheKey: null,
-      suggestedRepliesJson: null
-    }
-  });
-  res.json({ ok: true, threadId: thread.id, category: thread.category });
-}));
-
-// Bulk-classify any threads that don't have a category yet. Reuses the
-// AI service's classifyThreadCategory helper. Decoupled from the scan
-// flow so the operator can backfill existing threads without re-scanning
-// LinkedIn — important after the Phase 3 schema rollout when 76+ threads
-// already exist with category=null.
-app.post("/control/classify-uncategorized", asyncRoute(async (req, res) => {
-  // Optional `force: true` body re-classifies EVERY thread regardless of
-  // existing category. Useful after a classifier prompt change to clear out
-  // verdicts from the older, weaker version. Default is the additive
-  // behaviour: only categorise threads that don't yet have a verdict.
-  const payload = z
-    .object({ force: z.boolean().optional() })
-    .parse(req.body ?? {});
-  const targets = await prisma.thread.findMany({
-    where: payload.force ? {} : { category: null },
-    include: {
-      person: true,
-      messages: {
-        orderBy: { timestamp: "asc" },
-        take: 10
-      }
-    }
-  });
-
-  let classified = 0;
-  let skipped = 0;
-  let failed = 0;
-  for (const target of targets) {
-    if (target.messages.length === 0) {
-      skipped += 1;
-      continue;
-    }
-    try {
-      const category = await aiService.classifyThreadCategory({
-        platform: target.platform as PlatformName,
-        displayName: target.person.displayName,
-        messages: target.messages.map((m) => ({
-          direction: m.direction as "IN" | "OUT",
-          text: m.text,
-          timestamp: m.timestamp.toISOString()
-        })),
-        summary: target.rollingSummary ?? null,
-        whatTheyWant: target.whatTheyWant ?? null
-      });
-      if (category) {
-        await prisma.thread.update({
-          where: { id: target.id },
-          data: { category }
-        });
-        classified += 1;
-      } else {
-        skipped += 1;
-      }
-    } catch {
-      failed += 1;
-    }
-  }
-
-  res.json({ ok: true, total: targets.length, classified, skipped, failed });
-}));
-
 // Archive a thread. Sets archivedAt to now; the thread disappears from the
 // default Inbox/At Risk/People views and only shows in the Archived view.
 app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
@@ -2981,8 +2919,10 @@ app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
 
 // Archived view counterpart to /data/inbox — same shape, only archived rows.
 app.get("/data/archived", asyncRoute(async (_req, res) => {
-  const rows = (await loadVisibleThreadRows({ archived: true }))
-    .map((row) => toInboxRow(row))
+  const archivedRows = await loadVisibleThreadRows({ archived: true });
+  const archivedCounts = personThreadCounts(archivedRows);
+  const rows = archivedRows
+    .map((row) => toInboxRow(row, archivedCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1))
     .sort((a, b) => {
       const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
       const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
@@ -3106,9 +3046,11 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
     });
   }
 
+  const peopleCounts = personThreadCounts(visibleThreadGroups);
   const groupedByPerson = new Map<string, ReturnType<typeof toInboxRow>[]>();
   for (const group of visibleThreadGroups) {
-    const shaped = toInboxRow(group);
+    const count = peopleCounts.get(personThreadCountKey(group.source.platform, group.source.personId)) ?? 1;
+    const shaped = toInboxRow(group, count);
     const bucket = groupedByPerson.get(shaped.personId) ?? [];
     bucket.push(shaped);
     groupedByPerson.set(shaped.personId, bucket);
@@ -3484,36 +3426,6 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
   res.json(result);
 }));
 
-app.post("/control/self/enrich", asyncRoute(async (req, res) => {
-  const payload = z.object({ profileUrl: z.string().url() }).parse(req.body);
-  try {
-    const record = await selfProfileService.refresh({ profileUrl: payload.profileUrl });
-    res.json({
-      status: "ok",
-      profileUrl: record.profileUrl,
-      headline: record.headline,
-      currentRole: record.currentRole,
-      currentCompany: record.currentCompany,
-      location: record.location,
-      fetchedAt: record.fetchedAt
-    });
-  } catch (error) {
-    res.status(502).json({
-      status: "failed",
-      reason: error instanceof Error ? error.message : String(error)
-    });
-  }
-}));
-
-app.get("/data/self", asyncRoute(async (_req, res) => {
-  const record = await selfProfileService.load();
-  if (!record) {
-    res.json({ self: null });
-    return;
-  }
-  res.json({ self: record });
-}));
-
 // Operator's free-text self-description — what they care about and how
 // they write. Distinct from /data/self (LinkedIn-derived). The AI prompts
 // (suggested replies + composeInVoice) read this so drafts sound like the
@@ -3696,21 +3608,38 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return;
   }
 
-  const [lastInbound, operatorProfile, contactSnapshot] = await Promise.all([
-    prisma.message.findFirst({
-      where: { threadId, direction: "IN" },
-      orderBy: { timestamp: "desc" },
-      select: { text: true }
+  // Fetch the last ~6 turns to mirror the /data/thread call site. Pulling
+  // the full recent window means a predraft pre-warm builds the same
+  // recentSignature, so the cacheKey matches and the operator's next
+  // /data/thread fetch reuses the warmed cache row.
+  const RECENT_TURN_WINDOW = 6;
+  const [recentTurnsDesc, operatorProfile, contactSnapshot] = await Promise.all([
+    prisma.message.findMany({
+      where: { threadId },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: RECENT_TURN_WINDOW,
+      select: { direction: true, text: true, timestamp: true }
     }),
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
   ]);
+  const recentMessages = [...recentTurnsDesc].reverse().map((m) => ({
+    direction: m.direction as "IN" | "OUT",
+    text: m.text,
+    timestamp: m.timestamp.toISOString()
+  }));
+  const aiNeedsReply = Boolean(
+    thread.lastInboundAt &&
+      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
+  );
 
   const aiInputs = {
     summary: thread.rollingSummary ?? "",
     whatTheyWant: thread.whatTheyWant ?? "",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    lastInboundMessage: lastInbound?.text ?? "",
+    recentMessages,
+    needsReply: aiNeedsReply,
+    platform: thread.platform as PlatformName,
     category: (thread.category as "outreach" | "genuine" | null) ?? null,
     lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
@@ -3730,9 +3659,13 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return "n";
   })();
   // Mirror the inline /data/thread cacheKey shape so a predraft pre-warm
-  // and a subsequent /data/thread fetch hit the same cache row.
+  // and a subsequent /data/thread fetch hit the same cache row. Platform
+  // is folded in so a voice-tier change also invalidates.
+  const recentSignature = aiInputs.recentMessages
+    .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
+    .join("|");
   const cacheKey = createHash("sha256")
-    .update(`${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.lastInboundMessage}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}`)
+    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
     .digest("hex");
 
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
@@ -3867,6 +3800,21 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
 
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  // If the operator hasn't replied to the latest inbound, "Mark as
+  // handled" really means "I'm done with this conversation, take it
+  // out of my view" — so we archive the thread alongside clearing the
+  // needs-reply / risk fields. When the operator already replied,
+  // mark-done is just a confirmation and we leave the archive state
+  // alone (issue #246).
+  const existing = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { lastInboundAt: true, lastOutboundAt: true, archivedAt: true }
+  });
+  const inbound = existing?.lastInboundAt?.getTime() ?? 0;
+  const outbound = existing?.lastOutboundAt?.getTime() ?? 0;
+  const operatorHasNotReplied = !existing?.lastOutboundAt || inbound > outbound;
+  const shouldArchive = operatorHasNotReplied && !existing?.archivedAt;
+
   await prisma.thread.update({
     where: { id: threadId },
     data: {
@@ -3874,7 +3822,8 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
       unreadCount: 0,
       riskLevel: "GREEN",
       riskReason: "Marked done manually",
-      slaDueAt: null
+      slaDueAt: null,
+      ...(shouldArchive ? { archivedAt: new Date() } : {})
     }
   });
 
@@ -3882,10 +3831,10 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
     action: "MARK_DONE",
     stage: "Send",
     status: "OK",
-    details: { threadId }
+    details: { threadId, archived: shouldArchive }
   });
 
-  res.json({ status: "ok" });
+  res.json({ status: "ok", archived: shouldArchive });
 }));
 
 app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) => {
@@ -3934,6 +3883,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
     where: { id: threadId },
     data: {
       slaDueAt: due,
+      snoozedUntil: due,
       riskReason: "Snoozed for " + payload.hours + "h"
     }
   });
@@ -3945,7 +3895,28 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
     details: { threadId, hours: payload.hours }
   });
 
-  res.json({ status: "ok", dueAt: due.toISOString() });
+  res.json({ status: "ok", dueAt: due.toISOString(), snoozedUntil: due.toISOString() });
+}));
+
+app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+
+  await prisma.thread.update({
+    where: { id: threadId },
+    data: {
+      snoozedUntil: null,
+      riskReason: null
+    }
+  });
+
+  await auditService.log({
+    action: "UNSNOOZE",
+    stage: "Scan",
+    status: "OK",
+    details: { threadId }
+  });
+
+  res.json({ status: "ok", threadId });
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
@@ -3953,7 +3924,11 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");
+    // Drop AI bookkeeping along with connect promises so a hung pre-reset
+    // call can't keep a thread id slot occupied across the reset.
     connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
 
     for (const platform of allPlatforms) {
       await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
@@ -3999,12 +3974,6 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
       personKey: summary.personKey,
       profileDir: summary.profileDir
     });
-  });
-}));
-
-app.post("/control/system/clear-db", asyncRoute(async (_req, res) => {
-  res.status(410).json({
-    error: "Deprecated endpoint. Use POST /admin/reset with x-admin-reset-token and confirm=RESET."
   });
 }));
 
@@ -4173,6 +4142,29 @@ async function start(): Promise<void> {
   await ensureRuntimeDirs();
   await settingsStore.getSettings();
   scanQueue.startScheduler();
+
+  if (runnerConfig.imessage.enabled) {
+    const watcher = createIMessageWatcher({
+      dbPath: runnerConfig.imessage.dbPath,
+      debounceMs: runnerConfig.imessage.watchDebounceMs,
+      onChange: (reason) => {
+        const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+        void auditService.log({
+          platform: "IMESSAGE",
+          stage: "Scan",
+          action: "IMESSAGE_WATCH_TRIGGER",
+          status: result.ok ? "OK" : "FAIL",
+          details: {
+            reason,
+            ...(result.ok
+              ? { jobId: result.jobId, status: result.status }
+              : { blocked: result.blocked, blockReason: result.reason })
+          }
+        });
+      }
+    });
+    watcher.start();
+  }
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(runnerConfig.port, () => {

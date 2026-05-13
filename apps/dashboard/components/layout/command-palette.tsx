@@ -53,11 +53,26 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         label: "Run scan now",
         glyph: "scan",
         run: () => {
-          runActionWithFeedback(apiPost("/runner/control/scan", {}), {
+          runActionWithFeedback(apiPost("/runner/control/scan", { scope: "update" }), {
             pending: "Queueing scan…",
             success: "Scan queued",
             failure: "Couldn't queue scan"
           });
+        }
+      },
+      {
+        id: "scan-full",
+        label: "Full LinkedIn rescan",
+        glyph: "scan",
+        run: () => {
+          runActionWithFeedback(
+            apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" }),
+            {
+              pending: "Queueing full LinkedIn rescan…",
+              success: "Full LinkedIn rescan queued",
+              failure: "Couldn't queue full rescan"
+            }
+          );
         }
       }
     ];
