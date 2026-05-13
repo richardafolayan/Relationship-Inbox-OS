@@ -316,13 +316,6 @@ export interface LinkedInStreamScanOptions extends LinkedInFullScanOptions {
 const linkedInUnreadPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='UNREAD']";
 const linkedInAllPillSelector = "button[data-test-messaging-inbox-filters__filter-pill='ALL']";
 const linkedInSmokeEntryUrl = "https://www.linkedin.com/messaging/?filter=unread";
-const linkedInSmokeThreadRowSelector = ".msg-conversation-listitem";
-const linkedInSmokeThreadLinkSelector = ".msg-conversation-listitem__link";
-const linkedInSmokeThreadRowFallbackSelector = [
-  "ul.msg-conversations-container__conversations-list li:has(.msg-conversation-listitem__link)",
-  "ul.msg-conversations-container__conversations-list li:has(a[href*='/messaging/thread/'])",
-  "ul.msg-conversations-container__conversations-list li:has(a[href*='/messaging/'])"
-].join(", ");
 const linkedInSmokeParticipantSelector = ".msg-conversation-listitem__participant-names";
 const linkedInSmokeListTimestampSelector = "time.msg-conversation-listitem__time-stamp";
 const linkedInSmokePreviewSelector = ".msg-conversation-card__message-snippet";
@@ -405,8 +398,6 @@ const linkedInSmokeBlockedModalSelectors = [
   "[role='dialog'][aria-modal='true']"
 ];
 const linkedInSmokeEmptyStatePatterns = [/no unread/i, /you're all caught up/i, /no messages match/i];
-const linkedInSmokeSelectorMismatchError =
-  "Selector mismatch: Unread view shows list structure/counters but 0 detectable conversation rows. See list-probe.* in LOG_DIR.";
 const linkedInSmokeRowMismatchMessage =
   "Selector mismatch: list has X direct li children but 0 real rows (has participant+link).";
 const linkedInLoadingSpinnerSelector = [
