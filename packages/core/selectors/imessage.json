@@ -1,11 +1,12 @@
 {
+  "_comment": "iMessage is a native macOS adapter (Messages.app + chat.db), NOT a web scraper, so the runner never runs CSS selectors against a DOM for this platform. The selector-test endpoint and the SelectorRegistry contract still require entries; setting them to '*' (a valid CSS selector that matches the document root) ensures `document.querySelectorAll('*')` returns a sensible count and never throws SyntaxError. Previously every entry was 'n/a' (invalid CSS), which broke selectorTest's evaluateSelectorCounts when an operator ran it against IMESSAGE.",
   "inbox_url": "imessage://",
-  "thread_list": "n/a",
-  "thread_item": "n/a",
-  "unread_badge": "n/a",
-  "message_container": "n/a",
-  "message_item": "n/a",
-  "message_text": "n/a",
-  "composer_input": "n/a",
-  "send_button": "n/a"
+  "thread_list": "*",
+  "thread_item": "*",
+  "unread_badge": "*",
+  "message_container": "*",
+  "message_item": "*",
+  "message_text": "*",
+  "composer_input": "*",
+  "send_button": "*"
 }
