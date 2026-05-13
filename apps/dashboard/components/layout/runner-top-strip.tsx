@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { Button } from "@/components/ui/button";
+import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Sticky top strip that re-surfaces the controls dropped from the original
@@ -109,12 +110,13 @@ export function RunnerTopStrip() {
     setRestarting(false);
   }, [restarting]);
 
-  const total = platforms?.length ?? 0;
+  const implemented = platforms?.filter((p) => IMPLEMENTED_PLATFORMS.includes(p.platform)) ?? null;
+  const total = implemented?.length ?? IMPLEMENTED_PLATFORMS.length;
   const connected =
-    platforms?.filter((p) => p.status === "CONNECTED").length ??
+    implemented?.filter((p) => p.status === "CONNECTED").length ??
     health?.connectedPlatforms ??
     0;
-  const dot = dotClassFor(connected, total || 3);
+  const dot = dotClassFor(connected, total);
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
 
   return (
@@ -122,7 +124,7 @@ export function RunnerTopStrip() {
       <span className="flex items-center gap-1.5">
         <span className={`h-1.5 w-1.5 rounded-full ${dot}`} aria-hidden />
         <span>
-          {connected}/{total || 3} connected
+          {connected}/{total} connected
         </span>
       </span>
       <span aria-hidden className="text-ink-3/60">·</span>
