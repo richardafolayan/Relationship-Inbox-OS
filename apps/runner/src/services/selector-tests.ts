@@ -577,7 +577,25 @@ export function createSelectorTestService(deps: SelectorTestServiceDeps) {
           const isActive = ((await unreadPill.getAttribute("aria-pressed")) ?? "").toLowerCase() === "true";
           if (isActive) {
             await unreadPill.click({ timeout: 3000 }).catch(() => undefined);
-            await page!.waitForTimeout(250);
+            // Wait for the pill's aria-pressed flip OR a bounded settle
+            // before sampling counts. The previous 250ms fixed wait was
+            // shorter than the observed LinkedIn list rehydrate (BUG-011
+            // / BUG-018), so post-click counts could read 0 and falsely
+            // flag thread_item as broken when the list populated a
+            // moment later.
+            await Promise.race([
+              page!
+                .waitForFunction(
+                  (sel) => {
+                    const el = document.querySelector(sel) as HTMLElement | null;
+                    return el ? (el.getAttribute("aria-pressed") ?? "").toLowerCase() !== "true" : true;
+                  },
+                  linkedInUnreadPillSelector,
+                  { timeout: 1_500 }
+                )
+                .catch(() => undefined),
+              page!.waitForTimeout(1_500)
+            ]);
           }
         }
       }
