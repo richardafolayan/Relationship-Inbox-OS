@@ -241,6 +241,26 @@ scheduledSendPromoter.start();
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
 const threadSummaryRefreshInFlight = new Map<string, Promise<void>>();
+
+// Safety net for the AI bookkeeping maps above. If the underlying
+// provider hangs (no resolve, no reject), the `.finally` cleanup in the
+// caller never runs, and the slot stays glued to a thread id forever.
+// Race the work against a hard ceiling so the map always evicts. The
+// rejection here propagates into the existing `.catch` block so the
+// caller surfaces a normal failure path.
+const AI_IN_FLIGHT_MAX_MS = 120_000;
+function withInFlightTimeout<T>(work: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} exceeded ${AI_IN_FLIGHT_MAX_MS}ms; abandoning in-flight slot`)),
+      AI_IN_FLIGHT_MAX_MS
+    );
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 const emptySuggestedReplies: SuggestedRepliesOutput = {
   replies: [],
   needs_user_input: []
@@ -687,7 +707,11 @@ app.post("/admin/reset", asyncRoute(async (req, res) => {
   const requestId = uuid();
   const resetResult = await withGlobalResetLock(async () => {
     scanQueue.requestAbort(`admin_reset:${payload.platform.toLowerCase()}`);
+    // Drop every in-flight bookkeeping map so a wedged AI call from
+    // pre-reset state can't keep stale thread ids glued to slots.
     connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
     try {
       for (const platform of allPlatforms) {
         await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
@@ -2417,7 +2441,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   if (isStaleSummary(thread.rollingSummary, thread.person.displayName)) {
     const inFlightKey = thread.id;
     if (!threadSummaryRefreshInFlight.has(inFlightKey)) {
-      const inFlight = resummarizeThreadById(thread.id)
+      const inFlight = withInFlightTimeout(
+        resummarizeThreadById(thread.id),
+        `threadSummaryRefresh(${thread.id})`
+      )
         .then((refreshed) => {
           if (refreshed.ok) {
             eventBus.emit({
@@ -2542,7 +2569,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   if (!suggested) {
     const inFlightKey = `${thread.id}:${cacheKey}`;
     if (!suggestedRepliesInFlight.has(inFlightKey)) {
-      const inFlight = aiService.generateSuggestedReplies(aiInputs)
+      const inFlight = withInFlightTimeout(
+        aiService.generateSuggestedReplies(aiInputs),
+        `generateSuggestedReplies(${thread.id})`
+      )
         .then(async (generated) => {
           await prisma.thread.update({
             where: { id: thread.id },
@@ -3967,7 +3997,11 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");
+    // Drop AI bookkeeping along with connect promises so a hung pre-reset
+    // call can't keep a thread id slot occupied across the reset.
     connectInFlight.clear();
+    suggestedRepliesInFlight.clear();
+    threadSummaryRefreshInFlight.clear();
 
     for (const platform of allPlatforms) {
       await operationMutex.runExclusive(platformLockKey(platform), async () => undefined);
