@@ -1185,10 +1185,14 @@ export default function ThreadPage() {
       if (focusedBubble || composer || pill || focusSwap) return;
       setFocusedThreadParentId(null);
     };
+    // Delay listener arming so the focusing click itself doesn't
+    // immediately dismiss. 200ms covers test-runner / extension
+    // emulated event sequences that fire a trailing synthetic event
+    // after the React click handler runs.
     const handle = setTimeout(() => {
       if (cancelled) return;
       document.addEventListener("click", onClick);
-    }, 0);
+    }, 200);
     return () => {
       cancelled = true;
       clearTimeout(handle);
