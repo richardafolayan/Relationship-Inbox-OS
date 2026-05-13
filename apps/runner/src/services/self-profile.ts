@@ -24,8 +24,8 @@ export interface SelfProfileService {
   loadAsContactSnapshot(displayName?: string): Promise<ContactProfileSnapshot | null>;
   /**
    * Visit the operator's LinkedIn profile and persist a fresh extraction.
-   * Throws on failure so the manual /control/self/enrich endpoint can
-   * surface the reason to the dashboard.
+   * Throws on failure so the caller can surface the reason to the
+   * dashboard.
    */
   refresh(input: { profileUrl: string }): Promise<SelfProfileRecord>;
 }

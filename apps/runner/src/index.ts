@@ -359,11 +359,7 @@ function stageForControlPath(path: string): string {
   if (path.startsWith("/platform/connect") || path.startsWith("/platform/open-browser") || path.startsWith("/platform/reset-session")) {
     return "Connect";
   }
-  if (
-    path.startsWith("/platform/test-selectors") ||
-    path.startsWith("/platform/save-selector-override") ||
-    path.startsWith("/platform/reset-selector-override")
-  ) {
+  if (path.startsWith("/platform/test-selectors")) {
     return "Scan";
   }
   if (path.startsWith("/thread/") && path.endsWith("/transform")) {
@@ -1988,9 +1984,11 @@ function isStaleSummary(rollingSummary: string | null | undefined, displayName: 
   return rollingSummary === `Conversation with ${displayName}.`;
 }
 
-// Shared body for both /resummarize and /resummarize-stale. Fetches the
-// thread, calls updateThreadSummary, persists the result. Returns false if
-// the thread was missing.
+// Resummarize a thread end-to-end: fetch + AI call + persist. Returns
+// false if the thread was missing. Called from the /data/thread
+// self-heal path when a stored summary still matches the fallback
+// updateThreadSummary writes on AI failure (no API key / quota /
+// model error).
 async function resummarizeThreadById(threadId: string): Promise<
   | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
   | { ok: false; reason: "not_found" }
@@ -3278,7 +3276,7 @@ app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
 // profile URL from the inbox sidebar, so people created from a scan land
 // without one and the enrichment queue can't visit them. This endpoint
 // lets the operator paste a known profile URL onto a person row so the
-// next enrichment run has a target. Mirrors the shape of /control/self/enrich.
+// next enrichment run has a target.
 app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
   const payload = z
