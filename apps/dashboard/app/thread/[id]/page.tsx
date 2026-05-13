@@ -253,6 +253,15 @@ export default function ThreadPage() {
   // into. Declared up here because the send callback closes over it.
   // Cleared on Esc, the chip ×, or when navigating threads (effect below).
   const [focusedThreadParentId, setFocusedThreadParentId] = useState<string | null>(null);
+  // Bumped on every chip / N-Replies click so the focus useLayoutEffect
+  // re-fires its scroll-into-view even when the operator clicks a chip
+  // whose parent is already the current focus (re-centring after the
+  // user scrolled around).
+  const [focusTrigger, setFocusTrigger] = useState(0);
+  const focusOnParent = useCallback((parentId: string) => {
+    setFocusedThreadParentId(parentId);
+    setFocusTrigger((n) => n + 1);
+  }, []);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
@@ -1183,7 +1192,9 @@ export default function ThreadPage() {
       - (containerRect.height / 2)
       + (targetRect.height / 2);
     container.scrollTo({ top: container.scrollTop + delta, behavior: "smooth" });
-  }, [focusedThreadParentId]);
+    // `focusTrigger` is included so clicking a chip whose parent is
+    // already the current focus re-centres rather than no-opping.
+  }, [focusedThreadParentId, focusTrigger]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
@@ -1720,7 +1731,7 @@ export default function ThreadPage() {
                     {parentMessageId ? (
                       <button
                         type="button"
-                        onClick={() => setFocusedThreadParentId(parentMessageId)}
+                        onClick={() => focusOnParent(parentMessageId)}
                         className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 ${
                           message.direction === "OUT" ? "self-end" : "self-start"
                         }`}
@@ -1824,7 +1835,7 @@ export default function ThreadPage() {
                       {replyCount > 0 ? (
                         <button
                           type="button"
-                          onClick={() => setFocusedThreadParentId(message.id)}
+                          onClick={() => focusOnParent(message.id)}
                           className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
                           title="Focus this thread"
                         >
