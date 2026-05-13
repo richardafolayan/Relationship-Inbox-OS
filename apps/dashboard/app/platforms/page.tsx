@@ -12,11 +12,16 @@ import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
+// Brand-correct casing — previously rendered as "Linkedin"/"Tiktok", which
+// is grammatically wrong on every platform's own marketing. iMessage uses a
+// lowercase first letter intentionally (Apple's product name); the others
+// follow the platforms' own conventions.
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
-  LINKEDIN: "Linkedin",
+  LINKEDIN: "LinkedIn",
   INSTAGRAM: "Instagram",
-  TIKTOK: "Tiktok",
-  IMESSAGE: "iMessage"
+  TIKTOK: "TikTok",
+  IMESSAGE: "iMessage",
+  WHATSAPP: "WhatsApp"
 };
 
 // Only platforms whose adapter has been hardened against the live UI are
@@ -25,7 +30,7 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
 // shouldn't see them as "Connect" rows on the main view yet.
 const VISIBLE_PLATFORMS = IMPLEMENTED_PLATFORMS;
 const HIDDEN_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = (
-  ["INSTAGRAM", "TIKTOK", "LINKEDIN", "IMESSAGE"] as const
+  ["INSTAGRAM", "TIKTOK", "LINKEDIN", "IMESSAGE", "WHATSAPP"] as const
 ).filter((p) => !IMPLEMENTED_PLATFORMS.includes(p));
 
 // Platforms: quiet rows for each platform we ship to operators. Name
