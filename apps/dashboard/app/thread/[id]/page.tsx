@@ -1391,6 +1391,17 @@ export default function ThreadPage() {
                       {platformLabel}
                     </span>{" "}
                     <span className="text-ink-3">· {riskLabel}</span>
+                    {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                      <>
+                        {" "}
+                        <span
+                          className="ml-1 rounded-full bg-[oklch(94%_0.03_85)] px-2 py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-[oklch(45%_0.10_60)]"
+                          title={`Hidden from active inbox until ${new Date(thread.snoozedUntil).toLocaleString()}`}
+                        >
+                          Snoozed · wakes {formatScheduledFor(thread.snoozedUntil)}
+                        </span>
+                      </>
+                    ) : null}
                   </p>
                 </div>
               </button>
@@ -1423,25 +1434,42 @@ export default function ThreadPage() {
               >
                 Save draft
               </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  // Toggle the AI snooze menu, lazily fetching once. The
-                  // popover renders above this row when `snoozeMenuOpen`.
-                  if (!snoozeMenuOpen && !snoozeSuggestions) {
-                    setSnoozeSuggestions({ loading: true, items: [] });
-                    void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
-                      `/runner/control/thread/${thread.id}/suggest-snooze`
+              {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+                      setError,
+                      refresh
                     )
-                      .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
-                      .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
                   }
-                  setSnoozeMenuOpen((prev) => !prev);
-                }}
-                aria-expanded={snoozeMenuOpen}
-              >
-                Snooze
-              </Button>
+                  title="Bring this thread back into the active inbox now"
+                >
+                  Wake up
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    // Toggle the AI snooze menu, lazily fetching once. The
+                    // popover renders above this row when `snoozeMenuOpen`.
+                    if (!snoozeMenuOpen && !snoozeSuggestions) {
+                      setSnoozeSuggestions({ loading: true, items: [] });
+                      void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
+                        `/runner/control/thread/${thread.id}/suggest-snooze`
+                      )
+                        .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
+                        .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                    }
+                    setSnoozeMenuOpen((prev) => !prev);
+                  }}
+                  aria-expanded={snoozeMenuOpen}
+                  title="Hide from active inbox until later"
+                >
+                  Snooze
+                </Button>
+              )}
               <Button
                 variant="ghost"
                 onClick={() =>

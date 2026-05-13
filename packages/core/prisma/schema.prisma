@@ -246,6 +246,11 @@ model Thread {
   // in the Archived view. Unarchive flips this back to null.
   archivedAt DateTime?
 
+  // Set when the operator snoozes a thread. Threads with snoozedUntil in the
+  // future are hidden from active views (Today / Inbox / At Risk) and
+  // resurface automatically once the timestamp passes. Cleared on unsnooze.
+  snoozedUntil DateTime?
+
   // Coarse classification: "outreach" (cold pitches, sales, recruitment,
   // marketing, InMails) vs "genuine" (peer chats, ongoing relationships).
   // Set by the AI service on first scan-time persist of a thread; null until

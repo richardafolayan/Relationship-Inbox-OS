@@ -2799,6 +2799,15 @@ export function createScanQueue(deps: ScanQueueDeps) {
         lastInboundAt: resolvedLastInboundAt,
         lastOutboundAt: resolvedLastOutboundAt,
         lastInboundHash,
+        // Clear snooze when a new inbound arrives on a snoozed thread.
+        // Otherwise an in-window snooze would hide the contact's reply
+        // until the timer expires — turning snooze into a way to silently
+        // miss messages instead of just deferring stale ones.
+        ...(thread.snoozedUntil &&
+        resolvedLastInboundAt &&
+        (!thread.lastInboundAt || resolvedLastInboundAt.getTime() > thread.lastInboundAt.getTime())
+          ? { snoozedUntil: null }
+          : {}),
         riskLevel: risk.level,
         slaDueAt: risk.slaDueAt,
         riskReason: hasPersistedMessages

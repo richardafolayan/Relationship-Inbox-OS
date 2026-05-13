@@ -27,6 +27,7 @@ export interface ThreadRowSource {
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason: string | null;
   slaDueAt: Date | null;
+  snoozedUntil: Date | null;
   whatTheyWant: string | null;
   rollingSummary: string | null;
   archivedAt: Date | null;
@@ -76,6 +77,7 @@ export interface ShapedThreadRow {
   messageCount: number;
   category: string | null;
   archivedAt: string | null;
+  snoozedUntil: string | null;
   /**
    * How many surviving inbox rows belong to the same person+platform.
    * 1 for the normal case; >1 when a contact has multiple distinct
@@ -242,6 +244,7 @@ export function toInboxRow(
     messageCount: row.messageCount,
     category: source.category ?? null,
     archivedAt: source.archivedAt?.toISOString() ?? null,
+    snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
     personThreadCount
   };
 }
