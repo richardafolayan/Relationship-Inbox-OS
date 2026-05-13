@@ -187,6 +187,13 @@ export interface IMessageMessageRow {
   attachments: IMessageAttachment[];
   /** Tapbacks the other party (or you) sent on this message, latest-state aggregated. */
   reactions: IMessageReaction[];
+  /**
+   * When this message is an inline reply (a "Reply" in Messages.app, not a
+   * tapback), the guid of the parent message being replied to. Cleaned of
+   * Apple's `p:0/` / `bp:` prefix — just the bare guid that matches another
+   * row's `guid`. Undefined for standalone messages.
+   */
+  replyToGuid?: string;
 }
 
 /**
@@ -570,6 +577,7 @@ export class IMessageDb {
            m.cache_has_attachments       AS hasAttachments,
            m.associated_message_type     AS associatedType,
            m.associated_message_guid     AS associatedGuid,
+           m.thread_originator_guid      AS threadOriginatorGuid,
            h.id                          AS handleId
          FROM message m
          JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
@@ -588,6 +596,7 @@ export class IMessageDb {
         hasAttachments: number;
         associatedType: number | null;
         associatedGuid: string | null;
+        threadOriginatorGuid: string | null;
         handleId: string | null;
       }>;
 
@@ -608,6 +617,12 @@ export class IMessageDb {
       // dashboard renders "[Voice note]" instead of an empty bubble.
       const hasMeaningfulText = decodedText && decodedText.replace(/￼/g, "").trim().length > 0;
       const text = hasMeaningfulText ? decodedText : describeAttachments(attachments);
+      // thread_originator_guid is stored as the bare guid (no p:0/ or bp:
+      // prefix, unlike associated_message_guid). Normalise defensively
+      // anyway so a future macOS version that adds a prefix still parses.
+      const replyToGuid = r.threadOriginatorGuid
+        ? r.threadOriginatorGuid.replace(/^(?:p:\d+\/|bp:)/, "")
+        : undefined;
       return {
         guid: r.guid,
         rowId: r.rowId,
@@ -617,7 +632,8 @@ export class IMessageDb {
         senderHandle: r.handleId ?? undefined,
         hasAttachments: r.hasAttachments === 1,
         attachments,
-        reactions: reactionsByGuid.get(r.guid) ?? []
+        reactions: reactionsByGuid.get(r.guid) ?? [],
+        replyToGuid
       };
     });
   }
