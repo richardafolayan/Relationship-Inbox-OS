@@ -297,6 +297,10 @@ export function createSendService(deps: SendServiceDeps) {
           riskLevel: risk.level,
           riskReason: risk.riskReason,
           slaDueAt: risk.slaDueAt,
+          // Operator replied — the thread no longer needs to be hidden.
+          // Clearing snoozedUntil keeps the active inbox honest about
+          // whether the conversation is still in deferred state.
+          snoozedUntil: null,
           lastOutboundAt: new Date(receipt.sentAt),
           lastMessageAt: new Date(receipt.sentAt),
           unreadCount: 0,

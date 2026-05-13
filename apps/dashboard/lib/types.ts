@@ -34,6 +34,13 @@ export interface InboxRow {
   category?: string | null;
   archivedAt?: string | null;
   /**
+   * ISO timestamp until which the operator has snoozed this thread. Active
+   * inbox views filter rows where snoozedUntil is in the future; when set
+   * the thread page renders an "Asleep until …" badge with an unsnooze
+   * action. Null when the thread is not currently snoozed.
+   */
+  snoozedUntil?: string | null;
+  /**
    * ISO timestamp of the earliest SCHEDULED outbound send for this thread,
    * or null when none. Today uses this to suppress threads the operator
    * has already queued a reply for; Inbox still lists them with the
@@ -225,6 +232,8 @@ export interface ThreadResponse {
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;
+  /** ISO timestamp until which this thread is snoozed; null when active. */
+  snoozedUntil?: string | null;
   unreadCount: number;
   needsReply: boolean;
   summary?: string;
