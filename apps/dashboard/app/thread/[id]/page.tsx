@@ -253,6 +253,15 @@ export default function ThreadPage() {
   // into. Declared up here because the send callback closes over it.
   // Cleared on Esc, the chip ×, or when navigating threads (effect below).
   const [focusedThreadParentId, setFocusedThreadParentId] = useState<string | null>(null);
+  // Bumped on every chip / N-Replies click so the focus useLayoutEffect
+  // re-fires its scroll-into-view even when the operator clicks a chip
+  // whose parent is already the current focus (re-centring after the
+  // user scrolled around).
+  const [focusTrigger, setFocusTrigger] = useState(0);
+  const focusOnParent = useCallback((parentId: string) => {
+    setFocusedThreadParentId(parentId);
+    setFocusTrigger((n) => n + 1);
+  }, []);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
@@ -1128,12 +1137,16 @@ export default function ThreadPage() {
   const focusedParentMessage = focusedThreadParentId
     ? (messageById.get(focusedThreadParentId) ?? null)
     : null;
-  const displayedMessages = useMemo(() => {
-    if (!focusedThreadParentId) return visibleMessages;
+  // The set of message ids that are "in focus" — the parent + every
+  // reply linked to it. Used by the render to bright-light those bubbles
+  // and dim/blur everything else, matching Messages.app's focused-thread
+  // overlay. When no focus, the set is null and every bubble renders at
+  // full opacity.
+  const focusedIdSet = useMemo<Set<string> | null>(() => {
+    if (!focusedThreadParentId) return null;
     const childIds = replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
-    const allowed = new Set<string>([focusedThreadParentId, ...childIds]);
-    return visibleMessages.filter((m) => allowed.has(m.id));
-  }, [visibleMessages, focusedThreadParentId, replyChildIdsByParentId]);
+    return new Set<string>([focusedThreadParentId, ...childIds]);
+  }, [focusedThreadParentId, replyChildIdsByParentId]);
   useEffect(() => {
     // Clear focused thread when navigating to a different thread so the
     // user doesn't carry stale focus across conversations.
@@ -1147,6 +1160,46 @@ export default function ThreadPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedThreadParentId]);
+  // Bring the focused parent into view when the focus changes. Two
+  // pieces of timing care:
+  //   1. Flip `stickToBottomRef` off so the global timeline
+  //      useLayoutEffect doesn't immediately snap scrollTop back to
+  //      scrollHeight after our scroll (it fires on every
+  //      visibleMessages re-creation).
+  //   2. Scroll the timeline container EXPLICITLY rather than relying
+  //      on element.scrollIntoView's "nearest scrollable ancestor"
+  //      heuristic, which picks the wrong context on multi-monitor /
+  //      Retina setups and silently no-ops.
+  // We use a useLayoutEffect so the scroll happens synchronously after
+  // DOM update, before the browser paints — same frame as the dim/blur
+  // class applies, so users see them animate together rather than the
+  // dim happen, pause, then the scroll yank.
+  useLayoutEffect(() => {
+    if (!focusedThreadParentId) {
+      stickToBottomRef.current = true;
+      return;
+    }
+    stickToBottomRef.current = false;
+    const container = timelineRef.current;
+    const target = container?.querySelector(
+      `[data-message-id="${focusedThreadParentId}"]`
+    ) as HTMLElement | null;
+    if (!container || !target) return;
+    const containerRect = container.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    // Centre the focused parent in the visible chat column.
+    const delta = (targetRect.top - containerRect.top)
+      - (containerRect.height / 2)
+      + (targetRect.height / 2);
+    // Direct scrollTop assignment instead of scrollTo({behavior:"smooth"})
+    // because smooth scroll was getting cancelled by React's commit
+    // phase before it could complete on Retina/external-display setups.
+    // The slight jank is worth the reliability — CSS transitions on the
+    // dim/blur classes still provide a smooth visual.
+    container.scrollTop = container.scrollTop + delta;
+    // `focusTrigger` is included so clicking a chip whose parent is
+    // already the current focus re-centres rather than no-opping.
+  }, [focusedThreadParentId, focusTrigger]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
@@ -1600,19 +1653,19 @@ export default function ThreadPage() {
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
             {focusedThreadParentId ? (
-              <div className="flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper-2/60 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} replies</span>
+              <div className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur">
+                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
                 <button
                   type="button"
                   onClick={() => setFocusedThreadParentId(null)}
                   className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
                   title="Esc"
                 >
-                  back to conversation
+                  exit
                 </button>
               </div>
             ) : null}
-            {hasOlder && !focusedThreadParentId ? (
+            {hasOlder ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
@@ -1629,13 +1682,13 @@ export default function ThreadPage() {
                   </button>
                 )}
               </div>
-            ) : focusedThreadParentId ? null : (
-              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
+            ) : (
+              <div className={`self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4 transition-opacity duration-300 ${focusedThreadParentId ? "opacity-30" : ""}`}>
                 start of conversation
               </div>
             )}
-            {displayedMessages.map((message, idx) => {
-              const prev = displayedMessages[idx - 1];
+            {visibleMessages.map((message, idx) => {
+              const prev = visibleMessages[idx - 1];
               const dayLabel = dayDividerLabel(prev?.timestamp, message.timestamp);
               if (message.text.trim() === "[system event]") {
                 return (
@@ -1660,28 +1713,42 @@ export default function ThreadPage() {
               const parentMessageId = parentIdOf.get(message.id);
               const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
               const replyCount = replyCountByParentId.get(message.id) ?? 0;
+              // In focused mode, bubbles outside the parent+replies set
+              // fade + blur so the focused thread "pops out" like
+              // Messages.app's overlay. Pointer events off prevents
+              // accidental clicks on the dimmed background.
+              const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
               return (
                 <div key={message.id} className="contents">
-                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {dayLabel ? (
+                    <div className={`contents ${dimmedByFocus ? "opacity-30" : ""} transition-opacity duration-300`}>
+                      <DayDivider label={dayLabel} />
+                    </div>
+                  ) : null}
                   <div
-                    className={`flex max-w-[72%] flex-col ${
+                    data-message-id={message.id}
+                    className={`flex max-w-[72%] flex-col transition-[opacity,filter] duration-300 ease-out ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
+                    } ${
+                      dimmedByFocus ? "opacity-20 blur-[3px] pointer-events-none" : ""
                     }`}
                   >
                     {parentMessageId ? (
-                      <div
-                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 ${
+                      <button
+                        type="button"
+                        onClick={() => focusOnParent(parentMessageId)}
+                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 ${
                           message.direction === "OUT" ? "self-end" : "self-start"
                         }`}
-                        title={parentMessage?.text ?? "Replying to an earlier message"}
+                        title={`Focus thread: ${parentMessage?.text ?? "earlier message"}`}
                       >
                         <span className="text-ink-4" aria-hidden="true">↳</span>
-                        <span className="line-clamp-2 italic">
+                        <span className="line-clamp-2 italic text-left">
                           {parentMessage
                             ? parentMessage.text.slice(0, 120) || "(media)"
                             : "Replying to an earlier message"}
                         </span>
-                      </div>
+                      </button>
                     ) : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
@@ -1773,7 +1840,7 @@ export default function ThreadPage() {
                       {replyCount > 0 ? (
                         <button
                           type="button"
-                          onClick={() => setFocusedThreadParentId(message.id)}
+                          onClick={() => focusOnParent(message.id)}
                           className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
                           title="Focus this thread"
                         >
