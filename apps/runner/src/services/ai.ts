@@ -537,7 +537,6 @@ function shouldUseJsonResponseFormat(_provider: AiProvider, _model: string): boo
 // with the rule in the system message, GPT-5 sometimes slips in an em-dash
 // or a colon. Apply to every text-producing AI call before persisting /
 // returning to the dashboard.
-const FORBIDDEN_PUNCTUATION_RE = /[—–]|;|:/g;
 export function applyVoiceRules(text: string): string {
   if (!text) return text;
   return text
@@ -565,10 +564,6 @@ export function stripOperatorMetaTalk(text: string): string {
   const cleaned = kept.join(" ").replace(/\s{2,}/g, " ").trim();
   return cleaned.length > 0 ? cleaned : text;
 }
-// Static analysis would flag FORBIDDEN_PUNCTUATION_RE as unused; keep it
-// exported only via the side-effect of being referenced in tests if added.
-void FORBIDDEN_PUNCTUATION_RE;
-
 const startersSchema = z.object({
   starters: z
     .array(
