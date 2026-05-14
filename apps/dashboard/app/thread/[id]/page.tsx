@@ -279,15 +279,12 @@ function formatScheduledFor(iso: string | null | undefined): string {
 }
 
 function DayDivider({ label, className }: { label: string; className?: string }) {
-  // When the divider is being dimmed (focus mode collapsing it),
-  // transition only opacity so the layout snaps in one frame —
-  // matches the bubble behaviour and keeps the focused-thread
-  // re-centre calculation against a stable layout. On exit
-  // (className doesn't carry opacity-0) we go back to transition-all
-  // so the divider expands back smoothly.
+  // Faster collapse on focus enter (150ms) than expand on exit
+  // (300ms) — matches the bubble timing so dividers and bubbles
+  // animate together.
   const dimmed = className?.includes("opacity-0") ?? false;
   return (
-    <div className={`my-3 flex items-center gap-3 self-stretch duration-300 ${dimmed ? "transition-opacity" : "transition-all"} ${className ?? ""}`}>
+    <div className={`my-3 flex items-center gap-3 self-stretch transition-all ${dimmed ? "duration-150" : "duration-300"} ${className ?? ""}`}>
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
@@ -1478,17 +1475,21 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
-    // Non-focused bubbles use transition-opacity (not transition-all)
-    // while focused, so their max-height collapses in this same paint.
-    // That means our recentre calculation runs against the final
-    // layout — one stable scroll position, no drift through
-    // intermediate frames.
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    const delta = (targetRect.top - containerRect.top)
-      - (containerRect.height / 2)
-      + (targetRect.height / 2);
-    container.scrollTop = container.scrollTop + delta;
+    // Bubbles + dividers collapse over 150ms (see bubble/DayDivider
+    // className). Re-centre on every layout change during that
+    // window so the focused parent slides into the centre rather
+    // than the layout shifting underneath a one-shot calculation.
+    const recenter = () => {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const delta = (targetRect.top - containerRect.top)
+        - (containerRect.height / 2)
+        + (targetRect.height / 2);
+      container.scrollTop = container.scrollTop + delta;
+    };
+    recenter();
+    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+    anchorGuardStopRef.current = startScrollSettlingGuard(container, recenter);
     // `focusTrigger` is included so clicking a chip whose parent is
     // already the current focus re-centres rather than no-opping.
   }, [focusedThreadParentId, focusTrigger]);
@@ -2180,18 +2181,16 @@ export default function ThreadPage() {
                   <div
                     data-message-id={message.id}
                     data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
-                    className={`flex max-w-[72%] flex-col duration-300 ease-out ${
-                      // Focus enter: only the opacity fades — the
-                      // max-height collapse happens instantly so the
-                      // layout settles in a single frame and the
-                      // focused-thread re-centre lands at one stable
-                      // position. Without this, the layout shifts
-                      // continuously through the 300ms transition and
-                      // the focused parent visibly moves through
-                      // multiple intermediate positions.
-                      // Focus exit: full transition is restored so
-                      // the dimmed bubbles smoothly expand back.
-                      focusedThreadParentId ? "transition-opacity" : "transition-all"
+                    className={`flex max-w-[72%] flex-col ease-out transition-all ${
+                      // Focus enter is animated too — same easing as
+                      // exit, just faster (150ms vs 300ms) so the
+                      // focused stack snaps into view without
+                      // dragging out the dim. The post-load anchor
+                      // guard re-centres the focused parent on every
+                      // layout change during the collapse, so the
+                      // operator sees the focused stack slide into
+                      // place rather than the parent drifting.
+                      focusedThreadParentId ? "duration-150" : "duration-300"
                     } ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
