@@ -363,12 +363,25 @@ export default function ThreadPage() {
   // mode. Restored on exit so the operator lands back in the same
   // spot they were before they clicked the chip, regardless of how
   // they scrolled inside the focused stack.
-  const preFocusScrollTopRef = useRef<number | null>(null);
+  // The exact message the operator was looking at when they entered
+  // focus mode. Restored on exit so layout shifts during focus
+  // (collapsed bubbles re-expanding, late-loaded attachments) don't
+  // leave them at a numerically-equal-but-visually-different scroll
+  // position.
+  const preFocusAnchorRef = useRef<{ anchorEl: HTMLElement; viewportOffset: number } | null>(null);
   const focusOnParent = useCallback((parentId: string) => {
-    if (timelineRef.current && preFocusScrollTopRef.current === null) {
+    const el = timelineRef.current;
+    if (el && preFocusAnchorRef.current === null) {
       // Only capture once per focus session — repeated chip clicks
       // (focus swaps) keep the same "where we came from" anchor.
-      preFocusScrollTopRef.current = timelineRef.current.scrollTop;
+      const elTop = el.getBoundingClientRect().top;
+      const anchor = pickScrollAnchor(el, elTop);
+      if (anchor) {
+        preFocusAnchorRef.current = {
+          anchorEl: anchor,
+          viewportOffset: anchor.getBoundingClientRect().top - elTop
+        };
+      }
     }
     setFocusedThreadParentId(parentId);
     setFocusTrigger((n) => n + 1);
@@ -1435,14 +1448,21 @@ export default function ThreadPage() {
   useLayoutEffect(() => {
     const container = timelineRef.current;
     if (!focusedThreadParentId) {
-      stickToBottomRef.current = true;
-      // Exit: restore the operator's pre-focus scroll position. The
-      // non-focused bubbles have just expanded back to their natural
-      // heights, so the same scrollTop value puts the timeline exactly
-      // where it was before the chip click.
-      if (container && preFocusScrollTopRef.current !== null) {
-        container.scrollTop = preFocusScrollTopRef.current;
-        preFocusScrollTopRef.current = null;
+      // Exit: restore the operator's pre-focus visual position by
+      // re-pinning the message they were looking at. Numeric scrollTop
+      // restoration drifts when the layout has shifted during focus
+      // (collapsed bubbles re-expanding, late-loaded attachments,
+      // reply-context placeholders filling in), so we anchor on the
+      // specific message instead. The settling guard re-pins through
+      // the 300ms collapse-back transition.
+      if (container && preFocusAnchorRef.current) {
+        const { anchorEl, viewportOffset } = preFocusAnchorRef.current;
+        preFocusAnchorRef.current = null;
+        if (container.contains(anchorEl)) {
+          repinAnchor(container, anchorEl, viewportOffset);
+          if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+          anchorGuardStopRef.current = startPostLoadAnchorGuard(container, anchorEl, viewportOffset);
+        }
       }
       return;
     }
