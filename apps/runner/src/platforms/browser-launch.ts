@@ -174,8 +174,10 @@ export async function launchPersistentContextForPlatform(input: {
 
     if (input.browserProfile.fallbackBehavior === "error") {
       throw new Error(
-        `Unable to prepare personal Chrome profile "${input.browserProfile.personalChromeProfileDirectory}". ` +
-          `${reason}`
+        `Couldn't mirror your "${input.browserProfile.personalChromeProfileName}" Chrome profile (directory ${input.browserProfile.personalChromeProfileDirectory}). ` +
+          `Connect cancelled to avoid switching to a Chrome for Testing fingerprint. ` +
+          `Reason: ${reason}. ` +
+          `Common causes: PERSONAL_CHROME_USER_DATA_DIR points at the wrong path, the profile directory has been renamed in Chrome, or the disk is full.`
       );
     }
 
@@ -291,9 +293,10 @@ export async function launchPersistentContextForPlatform(input: {
 
     if (input.browserProfile.fallbackBehavior === "error") {
       throw new Error(
-        `Unable to use personal Chrome profile "${input.browserProfile.personalChromeProfileDirectory}". ` +
-          `Launch failed with: ${reason}. ` +
-          `Close Chrome fully and retry, or set PERSONAL_PROFILE_FALLBACK=allow_isolated to permit fallback.`
+        `Couldn't launch your "${input.browserProfile.personalChromeProfileName}" Chrome profile (directory ${input.browserProfile.personalChromeProfileDirectory}). ` +
+          `Connect cancelled to avoid switching to a Chrome for Testing fingerprint. ` +
+          `Reason: ${reason}. ` +
+          `Most often this means Chrome is currently open with that profile — quit Chrome (or just that profile's window) and reconnect.`
       );
     }
 
