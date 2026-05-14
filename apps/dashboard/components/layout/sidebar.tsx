@@ -5,11 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   Sun,
   Inbox,
-  AlertTriangle,
   Archive,
-  Users,
-  Cable,
-  ListChecks,
   Search,
   Settings as SettingsIcon,
   PanelLeftClose,
@@ -35,14 +31,12 @@ interface NavItem {
   attention?: boolean;
 }
 
+// v1 nav scope: only the inbox loop. /at-risk, /people, /platforms, /logs
+// still resolve if typed directly; PR2 will decide which routes get deleted.
 const nav: NavItem[] = [
   { href: "/today", label: "Today", icon: Sun, attention: true },
   { href: "/inbox", label: "Inbox", icon: Inbox },
-  { href: "/at-risk", label: "At Risk", icon: AlertTriangle },
   { href: "/archived", label: "Archived", icon: Archive },
-  { href: "/people", label: "People", icon: Users },
-  { href: "/platforms", label: "Platforms", icon: Cable },
-  { href: "/logs", label: "Activity", icon: ListChecks },
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ];
 
