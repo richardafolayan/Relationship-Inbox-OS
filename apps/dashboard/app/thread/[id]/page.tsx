@@ -422,7 +422,7 @@ export default function ThreadPage() {
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const restoreScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  const anchorToTopAfterLoadRef = useRef(false);
   const prevThreadIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -1399,16 +1399,20 @@ export default function ThreadPage() {
   }, [thread]);
 
   // After every layout pass that affects the timeline, do one of:
-  //  (a) restore scroll position (we just prepended older messages)
+  //  (a) jump to the top of the just-loaded older content so the
+  //      operator can read into the new history without fighting the
+  //      page. Earlier behaviour preserved the prior viewport, which on
+  //      long threads pinned the operator above the just-loaded content
+  //      and made reaching the start of the conversation effectively
+  //      impossible (each scroll-up triggered another load that yanked
+  //      them back down).
   //  (b) jump to bottom (fresh thread or stickToBottomRef is true)
   useLayoutEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
-    if (restoreScrollRef.current) {
-      const { prevHeight, prevTop } = restoreScrollRef.current;
-      const delta = el.scrollHeight - prevHeight;
-      el.scrollTop = prevTop + delta;
-      restoreScrollRef.current = null;
+    if (anchorToTopAfterLoadRef.current) {
+      el.scrollTop = 0;
+      anchorToTopAfterLoadRef.current = false;
       return;
     }
     if (stickToBottomRef.current) {
@@ -1427,10 +1431,11 @@ export default function ThreadPage() {
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
     // Scroll near the top + server says more exists → request the next
-    // older page. Capture scroll position so the layout effect above can
-    // restore it once the prepended messages render (no view jump).
+    // older page. Flag the layout effect so it anchors the operator to
+    // the top of the just-loaded content (rather than preserving their
+    // previous viewport, which would leave the new history off-screen).
     if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder && !loadingOlderMessages) {
-      restoreScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+      anchorToTopAfterLoadRef.current = true;
       void loadOlderMessages();
     }
   };
@@ -1875,7 +1880,10 @@ export default function ThreadPage() {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => void loadOlderMessages()}
+                    onClick={() => {
+                      anchorToTopAfterLoadRef.current = true;
+                      void loadOlderMessages();
+                    }}
                     className="hover:text-ink"
                   >
                     load older messages
