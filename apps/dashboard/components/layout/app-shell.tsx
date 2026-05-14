@@ -6,9 +6,8 @@ import type { ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
 import { CommandPalette } from "@/components/layout/command-palette";
-import { SystemStatusBar } from "@/components/layout/system-status-bar";
+import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
-import { RunnerTopStrip } from "@/components/layout/runner-top-strip";
 import { apiGet, apiPost } from "@/lib/api";
 import { initials } from "@/lib/risk";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
@@ -223,8 +222,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
       />
       <div className="flex h-screen min-h-0 flex-col">
-        <RunnerTopStrip />
-        <SystemStatusBar />
+        <TopStatus />
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
