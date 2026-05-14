@@ -68,6 +68,27 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
 
+// Picks a stable element below the sticky header to anchor scroll
+// preservation on. We use the topmost element whose bottom edge is
+// inside the visible portion of the scroller, skipping the sticky
+// header band. The element survives the load-older re-render because
+// every message is rendered with key={message.id}, so React keeps the
+// same DOM node.
+function pickScrollAnchor(scroller: HTMLElement, scrollerTop: number): HTMLElement | null {
+  const stickyBand = 80;
+  const probeTop = scrollerTop + stickyBand;
+  const probeBottom = scrollerTop + scroller.clientHeight;
+  let best: { el: HTMLElement; top: number } | null = null;
+  const candidates = scroller.querySelectorAll<HTMLElement>("div");
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom <= probeTop || rect.top >= probeBottom) continue;
+    if (rect.height < 20 || rect.height > scroller.clientHeight) continue;
+    if (!best || rect.top < best.top) best = { el, top: rect.top };
+  }
+  return best?.el ?? null;
+}
+
 // Returns a friendly day label ("Today", "Yesterday", or "Tue 6 May") if
 // the given message starts a new day relative to the previous, otherwise
 // null. Used to inject day-dividers into the timeline.
@@ -422,7 +443,20 @@ export default function ThreadPage() {
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const restoreScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  // After a load-older fires, the layout effect needs to put the
+  // operator's viewport back where it was. We anchor on a specific
+  // visible message element rather than on `prevTop + (newHeight -
+  // prevHeight)` because the bare height-delta math is wrong whenever
+  // the prepended content isn't the only thing that changes (e.g.,
+  // a day-divider is inserted at the prepend/existing boundary, the
+  // sticky header re-measures, the load button swaps to "loading…").
+  // anchorEl is a React-keyed message DOM node so its identity
+  // survives the re-render; viewportOffset is its top relative to
+  // the scroller's top at the moment of the snapshot.
+  const restoreScrollRef = useRef<{
+    anchorEl: HTMLElement;
+    viewportOffset: number;
+  } | null>(null);
   const prevThreadIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -1399,16 +1433,24 @@ export default function ThreadPage() {
   }, [thread]);
 
   // After every layout pass that affects the timeline, do one of:
-  //  (a) restore scroll position (we just prepended older messages)
+  //  (a) restore scroll position by re-pinning a captured anchor
+  //      element to its previous viewport offset (we just prepended
+  //      older messages and the operator should stay on the same
+  //      message they were looking at)
   //  (b) jump to bottom (fresh thread or stickToBottomRef is true)
   useLayoutEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
     if (restoreScrollRef.current) {
-      const { prevHeight, prevTop } = restoreScrollRef.current;
-      const delta = el.scrollHeight - prevHeight;
-      el.scrollTop = prevTop + delta;
+      const { anchorEl, viewportOffset } = restoreScrollRef.current;
       restoreScrollRef.current = null;
+      if (el.contains(anchorEl)) {
+        const elTop = el.getBoundingClientRect().top;
+        const newAnchorTop = anchorEl.getBoundingClientRect().top;
+        // current viewport offset = newAnchorTop - elTop
+        // we want it to equal viewportOffset, so adjust scrollTop by the diff
+        el.scrollTop += (newAnchorTop - elTop) - viewportOffset;
+      }
       return;
     }
     if (stickToBottomRef.current) {
@@ -1427,10 +1469,21 @@ export default function ThreadPage() {
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
     // Scroll near the top + server says more exists → request the next
-    // older page. Capture scroll position so the layout effect above can
-    // restore it once the prepended messages render (no view jump).
+    // older page. Capture an anchor element (the topmost visible message
+    // bubble below the sticky header) and its viewport offset so the
+    // layout effect above can re-pin it once the prepended messages
+    // render. Element-anchored preservation handles structural shifts
+    // (extra day-dividers at the prepend boundary, etc.) that the
+    // earlier prevHeight/prevTop math couldn't.
     if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder && !loadingOlderMessages) {
-      restoreScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+      const elTop = el.getBoundingClientRect().top;
+      const anchorEl = pickScrollAnchor(el, elTop);
+      if (anchorEl) {
+        restoreScrollRef.current = {
+          anchorEl,
+          viewportOffset: anchorEl.getBoundingClientRect().top - elTop
+        };
+      }
       void loadOlderMessages();
     }
   };
@@ -1875,7 +1928,20 @@ export default function ThreadPage() {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => void loadOlderMessages()}
+                    onClick={() => {
+                      const el = timelineRef.current;
+                      if (el) {
+                        const elTop = el.getBoundingClientRect().top;
+                        const anchorEl = pickScrollAnchor(el, elTop);
+                        if (anchorEl) {
+                          restoreScrollRef.current = {
+                            anchorEl,
+                            viewportOffset: anchorEl.getBoundingClientRect().top - elTop
+                          };
+                        }
+                      }
+                      void loadOlderMessages();
+                    }}
                     className="hover:text-ink"
                   >
                     load older messages
