@@ -279,8 +279,15 @@ function formatScheduledFor(iso: string | null | undefined): string {
 }
 
 function DayDivider({ label, className }: { label: string; className?: string }) {
+  // When the divider is being dimmed (focus mode collapsing it),
+  // transition only opacity so the layout snaps in one frame —
+  // matches the bubble behaviour and keeps the focused-thread
+  // re-centre calculation against a stable layout. On exit
+  // (className doesn't carry opacity-0) we go back to transition-all
+  // so the divider expands back smoothly.
+  const dimmed = className?.includes("opacity-0") ?? false;
   return (
-    <div className={`my-3 flex items-center gap-3 self-stretch transition-all duration-300 ${className ?? ""}`}>
+    <div className={`my-3 flex items-center gap-3 self-stretch duration-300 ${dimmed ? "transition-opacity" : "transition-all"} ${className ?? ""}`}>
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
@@ -1471,14 +1478,13 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
+    // Non-focused bubbles use transition-opacity (not transition-all)
+    // while focused, so their max-height collapses in this same paint.
+    // That means our recentre calculation runs against the final
+    // layout — one stable scroll position, no drift through
+    // intermediate frames.
     const containerRect = container.getBoundingClientRect();
     const targetRect = target.getBoundingClientRect();
-    // With non-focused bubbles collapsed to height 0, the focused
-    // stack is the entire scrollable content. Centring the parent
-    // gives breathing room above when the stack is short, and lets
-    // the operator scroll the stack within the column when the stack
-    // is taller than the viewport. Direct scrollTop assignment (not
-    // smooth scroll) so we don't race React's commit phase.
     const delta = (targetRect.top - containerRect.top)
       - (containerRect.height / 2)
       + (targetRect.height / 2);
@@ -2174,7 +2180,19 @@ export default function ThreadPage() {
                   <div
                     data-message-id={message.id}
                     data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
-                    className={`flex max-w-[72%] flex-col transition-all duration-300 ease-out ${
+                    className={`flex max-w-[72%] flex-col duration-300 ease-out ${
+                      // Focus enter: only the opacity fades — the
+                      // max-height collapse happens instantly so the
+                      // layout settles in a single frame and the
+                      // focused-thread re-centre lands at one stable
+                      // position. Without this, the layout shifts
+                      // continuously through the 300ms transition and
+                      // the focused parent visibly moves through
+                      // multiple intermediate positions.
+                      // Focus exit: full transition is restored so
+                      // the dimmed bubbles smoothly expand back.
+                      focusedThreadParentId ? "transition-opacity" : "transition-all"
+                    } ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
                       dimmedByFocus
