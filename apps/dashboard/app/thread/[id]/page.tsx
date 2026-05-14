@@ -68,25 +68,76 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
 
-// Picks a stable element below the sticky header to anchor scroll
-// preservation on. We use the topmost element whose bottom edge is
-// inside the visible portion of the scroller, skipping the sticky
-// header band. The element survives the load-older re-render because
-// every message is rendered with key={message.id}, so React keeps the
-// same DOM node.
+// Picks the topmost visible message bubble below the sticky header to
+// anchor scroll preservation on. Selecting by data-message-id (set on
+// every bubble in the JSX) avoids accidentally anchoring on a wrapper
+// div whose position doesn't map cleanly to a message — the wrapper's
+// rect can stay constant while the messages inside it shift, leaving
+// scroll preservation off by tens of pixels. Each bubble is rendered
+// with key={message.id}, so React preserves the DOM node across the
+// re-render that prepends older messages.
 function pickScrollAnchor(scroller: HTMLElement, scrollerTop: number): HTMLElement | null {
   const stickyBand = 80;
   const probeTop = scrollerTop + stickyBand;
   const probeBottom = scrollerTop + scroller.clientHeight;
   let best: { el: HTMLElement; top: number } | null = null;
-  const candidates = scroller.querySelectorAll<HTMLElement>("div");
+  const candidates = scroller.querySelectorAll<HTMLElement>("[data-message-id]");
   for (const el of candidates) {
     const rect = el.getBoundingClientRect();
     if (rect.bottom <= probeTop || rect.top >= probeBottom) continue;
-    if (rect.height < 20 || rect.height > scroller.clientHeight) continue;
     if (!best || rect.top < best.top) best = { el, top: rect.top };
   }
   return best?.el ?? null;
+}
+
+// Synchronously adjusts the scroller so the anchor element returns to
+// its captured viewport offset. Returns true if a non-trivial
+// adjustment was applied.
+function repinAnchor(scroller: HTMLElement, anchorEl: HTMLElement, viewportOffset: number): boolean {
+  if (!scroller.contains(anchorEl)) return false;
+  const elTop = scroller.getBoundingClientRect().top;
+  const newAnchorTop = anchorEl.getBoundingClientRect().top;
+  const adjustment = (newAnchorTop - elTop) - viewportOffset;
+  if (Math.abs(adjustment) < 0.5) return false;
+  scroller.scrollTop += adjustment;
+  return true;
+}
+
+// Re-pins the anchor for a short window after a load-older completes,
+// so async content growth above the anchor (image/attachment loads,
+// suggested-replies expanding, etc.) doesn't shift the operator's
+// viewport. Stops as soon as the operator scrolls themselves or the
+// window expires.
+function startPostLoadAnchorGuard(
+  scroller: HTMLElement,
+  anchorEl: HTMLElement,
+  viewportOffset: number
+): () => void {
+  const GUARD_MS = 1500;
+  let active = true;
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    ro.disconnect();
+    scroller.removeEventListener("wheel", stop);
+    scroller.removeEventListener("touchstart", stop);
+    document.removeEventListener("keydown", stop);
+    clearTimeout(timer);
+  };
+  const ro = new ResizeObserver(() => {
+    if (!active) return;
+    repinAnchor(scroller, anchorEl, viewportOffset);
+  });
+  // Observe each non-sticky child of the scroller — that's where the
+  // message-list growth happens. (The sticky header doesn't count.)
+  for (const child of Array.from(scroller.children) as HTMLElement[]) {
+    if (getComputedStyle(child).position !== "sticky") ro.observe(child);
+  }
+  scroller.addEventListener("wheel", stop, { passive: true });
+  scroller.addEventListener("touchstart", stop, { passive: true });
+  document.addEventListener("keydown", stop);
+  const timer = setTimeout(stop, GUARD_MS);
+  return stop;
 }
 
 // Returns a friendly day label ("Today", "Yesterday", or "Tue 6 May") if
@@ -457,6 +508,12 @@ export default function ThreadPage() {
     anchorEl: HTMLElement;
     viewportOffset: number;
   } | null>(null);
+  // The post-load guard's stop fn — held so a new load (or unmount)
+  // can cancel the prior guard before installing a new one.
+  const anchorGuardStopRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => {
+    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+  }, []);
   const prevThreadIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -1445,11 +1502,15 @@ export default function ThreadPage() {
       const { anchorEl, viewportOffset } = restoreScrollRef.current;
       restoreScrollRef.current = null;
       if (el.contains(anchorEl)) {
-        const elTop = el.getBoundingClientRect().top;
-        const newAnchorTop = anchorEl.getBoundingClientRect().top;
-        // current viewport offset = newAnchorTop - elTop
-        // we want it to equal viewportOffset, so adjust scrollTop by the diff
-        el.scrollTop += (newAnchorTop - elTop) - viewportOffset;
+        // Initial re-pin synchronously before paint.
+        repinAnchor(el, anchorEl, viewportOffset);
+        // Then keep re-pinning for a short window so any async content
+        // above the anchor that grows after the first paint (image and
+        // attachment loads, late-rendered reply-context snippets,
+        // suggested-replies expanding) doesn't push the operator's
+        // viewport. Stops on user input or after the window expires.
+        if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+        anchorGuardStopRef.current = startPostLoadAnchorGuard(el, anchorEl, viewportOffset);
       }
       return;
     }
@@ -1727,6 +1788,14 @@ export default function ThreadPage() {
           ref={timelineRef}
           onScroll={onTimelineScroll}
           className="relative min-h-0 flex-1 overflow-y-auto"
+          // Disable the browser's native scroll anchoring so it doesn't
+          // race with the load-older restoration in useLayoutEffect.
+          // When both fire on the same prepend, the browser anchors on
+          // its own heuristic-picked element (often a wrapper) and our
+          // code anchors on a specific message bubble — the difference
+          // shows up as a small visible jolt as the scroll position
+          // settles.
+          style={{ overflowAnchor: "none" }}
         >
           {/* Glassy sticky header. Sits inside the scroll container so the
               timeline scrolls visibly behind it - matches the iOS / Apple
@@ -1979,6 +2048,15 @@ export default function ThreadPage() {
               const parentMessageId = parentIdOf.get(message.id);
               const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
               const replyCount = replyCountByParentId.get(message.id) ?? 0;
+              // A message can carry a reply pointer (replyToMessageId or
+              // raw.replyToGuid) before its parent is in the loaded
+              // window. We render the reply-context stub anyway so the
+              // bubble's height doesn't change when an older-messages
+              // load brings the parent in — the snippet text just fills
+              // in. Same pattern as iMessage / WhatsApp.
+              const hasReplyIntent =
+                !!message.replyToMessageId ||
+                !!(message.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
               // In focused mode, bubbles outside the parent+replies set
               // fade + blur so the focused thread "pops out" like
               // Messages.app's overlay. Pointer events off prevents
@@ -2022,17 +2100,18 @@ export default function ThreadPage() {
                         : ""
                     }`}
                   >
-                    {parentMessageId ? (
+                    {hasReplyIntent ? (
                       <button
                         type="button"
-                        onClick={() => focusOnParent(parentMessageId)}
-                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 ${
+                        onClick={() => parentMessageId && focusOnParent(parentMessageId)}
+                        disabled={!parentMessageId}
+                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 disabled:cursor-default disabled:hover:bg-paper-2/60 disabled:hover:text-ink-3 disabled:hover:border-hairline ${
                           message.direction === "OUT" ? "self-end" : "self-start"
                         }`}
                         title={`Focus thread: ${parentMessage?.text ?? "earlier message"}`}
                       >
                         <span className="text-ink-4" aria-hidden="true">↳</span>
-                        <span className="line-clamp-2 italic text-left">
+                        <span className="line-clamp-2 italic text-left min-h-[30px]">
                           {parentMessage
                             ? parentMessage.text.slice(0, 120) || "(media)"
                             : "Replying to an earlier message"}
