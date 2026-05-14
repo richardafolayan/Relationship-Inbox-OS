@@ -26,6 +26,7 @@ interface RunnerEventDetail {
   threadId?: string;
   reason?: string;
   attempt?: number;
+  platform?: string;
 }
 
 export function ToastHost() {
@@ -82,6 +83,30 @@ export function ToastHost() {
             }
           ]);
           break;
+        case "PERSONAL_PROFILE_FALLBACK": {
+          // The runner tried to launch your real Chrome profile but
+          // fell back to an isolated Chrome for Testing profile.
+          // That keeps the connect from breaking, but it means the
+          // browser is more fingerprintable to the platform until
+          // the underlying issue (usually Chrome being open with
+          // the same profile, or the profile mirror failing) is
+          // sorted.
+          const platformLabel = detail.platform ? ` for ${detail.platform.toLowerCase()}` : "";
+          setToasts((prev) => [
+            ...prev,
+            {
+              id: `sse-${Date.now()}`,
+              kind: "error",
+              title: `Fell back to isolated profile${platformLabel}`,
+              description:
+                (detail.reason ?? "Personal Chrome profile unavailable") +
+                ". Connect succeeded but the runner is using Chrome for Testing instead of your real profile. Close any open Chrome windows on that profile and reconnect to retry.",
+              durationMs: 12000,
+              createdAt: Date.now()
+            }
+          ]);
+          break;
+        }
         default:
           break;
       }
