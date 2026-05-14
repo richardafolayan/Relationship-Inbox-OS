@@ -514,6 +514,13 @@ export default function ThreadPage() {
   useEffect(() => () => {
     if (anchorGuardStopRef.current) anchorGuardStopRef.current();
   }, []);
+  // Tracks the thread.id we last pinned to the bottom for. When this
+  // doesn't match the currently loaded thread, the layout effect
+  // treats it as a fresh landing (page refresh or thread switch) and
+  // unconditionally scrolls to the bottom — bypassing the sticky
+  // verification, which would otherwise reject the bottom-pin
+  // because the operator hasn't had a chance to scroll yet.
+  const lastBottomedThreadIdRef = useRef<string | null>(null);
   const prevThreadIdRef = useRef<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -1527,14 +1534,25 @@ export default function ThreadPage() {
       }
       return;
     }
+    // First layout pass for this thread.id — fresh landing (page
+    // refresh, thread switch). Always pin to the bottom regardless
+    // of the sticky ref's verification, since scrollTop is 0 here
+    // (the page just rendered) and the verification would otherwise
+    // reject the legitimate bottom-pin.
+    if (thread && lastBottomedThreadIdRef.current !== thread.id) {
+      lastBottomedThreadIdRef.current = thread.id;
+      el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
+      return;
+    }
     if (stickToBottomRef.current) {
       // Verify the ref against the operator's actual scroll position
       // before yanking them down. The ref is set to true in places
-      // that pre-state assumptions (initial mount, focus exit, send,
-      // thread switch) and is supposed to be flipped off by the
-      // onScroll handler when the operator scrolls up — but if React
-      // hasn't dispatched the scroll event yet (programmatic scroll
-      // races, fast scroll bursts), the ref can be stale. A refresh
+      // that pre-state assumptions (focus exit, send, scrolled near
+      // bottom) and is supposed to be flipped off by the onScroll
+      // handler when the operator scrolls up — but if React hasn't
+      // dispatched the scroll event yet (programmatic scroll races,
+      // fast scroll bursts), the ref can be stale. A refresh
       // (THREAD_UPDATED, send completion, etc.) firing in that window
       // would otherwise pin the operator to the bottom mid-read.
       const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
@@ -1547,7 +1565,7 @@ export default function ThreadPage() {
         stickToBottomRef.current = false;
       }
     }
-  }, [visibleMessages, pendingSends.length, loading]);
+  }, [visibleMessages, pendingSends.length, loading, thread]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
     // In focused-thread mode, suppress both the bottom-stickiness
