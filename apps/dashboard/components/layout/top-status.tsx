@@ -1,32 +1,21 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MoreHorizontal } from "lucide-react";
-import { apiGet, apiPost } from "@/lib/api";
-import { Menu } from "@/components/ui/menu";
+import { apiGet } from "@/lib/api";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
-import { useRouter } from "next/navigation";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
-// Single 44px status row. Replaces the two competing strips (Connected /
-// Restart runner band + the multi-line scanning/sending bar) with one
-// flat line:
+// Single 44px status row. Read-only in v1:
 //
-//   [● 2/4 connected] · [activity ticker with inline progress + cancel]
-//   ───────────────────────────────── (right) [scan Xm ago] [⋯]
+//   [● 2/4 connected] · [activity ticker with inline progress] (right) [scan Xm ago]
 //
-// The kebab carries Restart runner / Pause all scans / Force re-enrich /
-// View logs / Disconnect platform. Section 04 of the redesign doc.
+// Operator actions (kebab menu with Restart runner / Pause all scans /
+// Force re-enrich / View logs / Manage platforms, the cancel button on
+// in-flight operations, and the iMessage "grant access" affordance) were
+// stripped in PR1; restore from archive/pre-v1-stripback if needed.
 
 const POLL_INTERVAL_MS = 5000;
 const RECENT_FRESHNESS_MS = 8000;
-const RESTART_MAX_WAIT_MS = 90_000;
-const RESTART_POLL_INTERVAL_MS = 500;
-
-const RESTART_CONFIRM_MESSAGE =
-  "Restart the runner? Any in-flight scan or send will be cancelled. " +
-  "Sends queued in the database (PENDING SendRequests) survive and resume after restart. " +
-  "The restart rebuilds @inbox-os/core + @inbox-os/runner before relaunching, so it picks up any new code.";
 
 interface SendQueueItem {
   clientSendId: string;
@@ -212,26 +201,10 @@ function tickerDetail(state: TickerState): string | null {
   return null;
 }
 
-function isPermissionDenied(message: string): boolean {
-  return /-1743|not authorized to send Apple events|grant Automation/i.test(message);
-}
-
-async function runPermissionReset(): Promise<void> {
-  try {
-    await fetch("/runner/control/imessage/permission-reset", { method: "POST" });
-  } catch {
-    // best-effort
-  }
-}
-
 export function TopStatus() {
-  const router = useRouter();
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
-  const [restarting, setRestarting] = useState(false);
-  const [restartError, setRestartError] = useState<string | null>(null);
-  const [cancelling, setCancelling] = useState<"scan" | "enrichment" | null>(null);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -290,63 +263,6 @@ export function TopStatus() {
   const ticker = computeTicker({ health, queue });
   const tickerIsActive =
     ticker.kind === "scanning" || ticker.kind === "sending" || ticker.kind === "enriching";
-  const cancelTarget: "scan" | "enrichment" | null =
-    ticker.kind === "scanning" ? "scan" : ticker.kind === "enriching" ? "enrichment" : null;
-
-  const onCancelTicker = async () => {
-    if (!cancelTarget || cancelling) return;
-    setCancelling(cancelTarget);
-    try {
-      const path =
-        cancelTarget === "scan"
-          ? "/runner/control/scan/abort"
-          : "/runner/control/enrichment/cancel-pending";
-      await apiPost(path, {});
-      await refreshRef.current();
-    } catch (error) {
-      console.warn("[top-status] cancel failed", error);
-    } finally {
-      setCancelling(null);
-    }
-  };
-
-  const onRestartRunner = useCallback(async () => {
-    if (restarting) return;
-    if (!window.confirm(RESTART_CONFIRM_MESSAGE)) return;
-    setRestartError(null);
-    setRestarting(true);
-    try {
-      await apiPost("/runner/control/system/restart", {});
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to ask runner to restart";
-      setRestartError(message);
-      setRestarting(false);
-      return;
-    }
-
-    const startedAt = Date.now();
-    while (Date.now() - startedAt < RESTART_MAX_WAIT_MS) {
-      const ok = await apiGet<HealthResponse>("/runner/health")
-        .then((data) => data?.runnerStatus === "ONLINE")
-        .catch(() => false);
-      if (ok) {
-        window.location.reload();
-        return;
-      }
-      await new Promise((resolve) => setTimeout(resolve, RESTART_POLL_INTERVAL_MS));
-    }
-
-    setRestartError(
-      "Runner did not come back within 90s. Tail /tmp/runner-restart.log to see whether the rebuild errored or the relaunch is still in progress."
-    );
-    setRestarting(false);
-  }, [restarting]);
-
-  const onPauseAllScans = useCallback(() => {
-    void apiPost("/runner/control/scan/abort", {})
-      .catch(() => undefined)
-      .finally(() => void refreshRef.current());
-  }, []);
 
   const tickerHeading = tickerLabel(ticker);
   const tickerSub = tickerDetail(ticker);
@@ -399,61 +315,12 @@ export function TopStatus() {
               </span>
             ) : null}
             {tickerSub ? <span className="text-ink-3">· {tickerSub}</span> : null}
-            {cancelTarget ? (
-              <button
-                type="button"
-                disabled={!!cancelling}
-                onClick={() => void onCancelTicker()}
-                className="ml-1 font-mono text-[10.5px] text-ink-4 hover:text-ink disabled:opacity-50"
-              >
-                {cancelling ? "cancelling…" : "cancel"}
-              </button>
-            ) : null}
-            {ticker.kind === "send_failed" && isPermissionDenied(ticker.message) ? (
-              <button
-                type="button"
-                onClick={() => void runPermissionReset()}
-                className="ml-1 rounded-row border border-hairline bg-paper px-2 py-[1px] font-mono text-[10.5px] text-ink-2 hover:border-hairline-strong hover:text-ink"
-              >
-                grant access
-              </button>
-            ) : null}
           </span>
         </>
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
         <span>{scanLabel}</span>
-        {restarting ? <span className="text-ink-2">restarting…</span> : null}
-        {restartError && !restarting ? (
-          <span className="text-risk-overdue" role="alert" title={restartError}>
-            restart failed
-          </span>
-        ) : null}
-        <Menu
-          align="end"
-          trigger={
-            <button
-              type="button"
-              aria-label="More"
-              title="More"
-              className="grid h-[22px] w-[22px] place-items-center rounded-[6px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
-            >
-              <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={2} />
-            </button>
-          }
-          items={[
-            { label: "Restart runner", onSelect: () => void onRestartRunner() },
-            { label: "Pause all scans", onSelect: onPauseAllScans },
-            {
-              label: "Force re-enrich all",
-              onSelect: () =>
-                void apiPost("/runner/control/people/scan-all", { scope: "all" }).catch(() => undefined)
-            },
-            { label: "View logs", onSelect: () => router.push("/logs") },
-            { label: "Manage platforms…", onSelect: () => router.push("/platforms") }
-          ]}
-        />
       </div>
     </div>
   );
