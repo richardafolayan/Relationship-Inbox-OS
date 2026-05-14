@@ -524,7 +524,26 @@ export default function ThreadPage() {
       apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
     ]);
     if (threadResult.status === "fulfilled") {
-      setThread(threadResult.value);
+      // Merge the fresh recent-messages window with any older messages
+      // the operator has already paginated in. Without this, every poll
+      // (every send, every SSE event, the 3s polling tick) would
+      // overwrite the loaded older history and the operator would get
+      // yanked back to the bottom — exactly the "I scroll up, more
+      // loads, then I get kicked back down" symptom.
+      const fresh = threadResult.value;
+      setThread((current) => {
+        if (!current || current.id !== fresh.id) return fresh;
+        const freshIds = new Set(fresh.messages.map((m) => m.id));
+        const olderKept = current.messages.filter((m) => !freshIds.has(m.id));
+        return {
+          ...fresh,
+          messages: [...olderKept, ...fresh.messages],
+          // Keep the operator's paginated cursor — fresh.messagePage
+          // describes only the recent window and would re-show the
+          // "load older messages" button as if no history were loaded.
+          messagePage: olderKept.length > 0 ? current.messagePage : fresh.messagePage
+        };
+      });
       setComposer((prev) => {
         if (prev) return prev; // operator already typed something
         const explicitDraft = threadResult.value.draft;
@@ -1502,20 +1521,31 @@ export default function ThreadPage() {
       const { anchorEl, viewportOffset } = restoreScrollRef.current;
       restoreScrollRef.current = null;
       if (el.contains(anchorEl)) {
-        // Initial re-pin synchronously before paint.
         repinAnchor(el, anchorEl, viewportOffset);
-        // Then keep re-pinning for a short window so any async content
-        // above the anchor that grows after the first paint (image and
-        // attachment loads, late-rendered reply-context snippets,
-        // suggested-replies expanding) doesn't push the operator's
-        // viewport. Stops on user input or after the window expires.
         if (anchorGuardStopRef.current) anchorGuardStopRef.current();
         anchorGuardStopRef.current = startPostLoadAnchorGuard(el, anchorEl, viewportOffset);
       }
       return;
     }
     if (stickToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
+      // Verify the ref against the operator's actual scroll position
+      // before yanking them down. The ref is set to true in places
+      // that pre-state assumptions (initial mount, focus exit, send,
+      // thread switch) and is supposed to be flipped off by the
+      // onScroll handler when the operator scrolls up — but if React
+      // hasn't dispatched the scroll event yet (programmatic scroll
+      // races, fast scroll bursts), the ref can be stale. A refresh
+      // (THREAD_UPDATED, send completion, etc.) firing in that window
+      // would otherwise pin the operator to the bottom mid-read.
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // 4× the scroll-handler threshold gives the new-message-at-bottom
+      // case (most common reason this branch fires) plenty of headroom
+      // while still rejecting "operator is way up the thread" cases.
+      if (distanceFromBottom < SCROLL_BOTTOM_THRESHOLD * 4) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        stickToBottomRef.current = false;
+      }
     }
   }, [visibleMessages, pendingSends.length, loading]);
 
