@@ -113,6 +113,23 @@ function startPostLoadAnchorGuard(
   anchorEl: HTMLElement,
   viewportOffset: number
 ): () => void {
+  return startScrollSettlingGuard(scroller, () => {
+    repinAnchor(scroller, anchorEl, viewportOffset);
+  });
+}
+
+// Pins the scroller to its bottom for a short window after a fresh
+// thread landing, so async content (images, attachment thumbnails)
+// loading in DOESN'T leave the operator above the most recent
+// message. Same shape as the post-load anchor guard — just a
+// different re-pin target.
+function startInitialBottomGuard(scroller: HTMLElement): () => void {
+  return startScrollSettlingGuard(scroller, () => {
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+}
+
+function startScrollSettlingGuard(scroller: HTMLElement, repin: () => void): () => void {
   const GUARD_MS = 1500;
   let active = true;
   const stop = () => {
@@ -126,7 +143,7 @@ function startPostLoadAnchorGuard(
   };
   const ro = new ResizeObserver(() => {
     if (!active) return;
-    repinAnchor(scroller, anchorEl, viewportOffset);
+    repin();
   });
   // Observe each non-sticky child of the scroller — that's where the
   // message-list growth happens. (The sticky header doesn't count.)
@@ -1538,11 +1555,16 @@ export default function ThreadPage() {
     // refresh, thread switch). Always pin to the bottom regardless
     // of the sticky ref's verification, since scrollTop is 0 here
     // (the page just rendered) and the verification would otherwise
-    // reject the legitimate bottom-pin.
+    // reject the legitimate bottom-pin. Then keep re-pinning for a
+    // short window so attachment images and other async content that
+    // loads after the initial layout pass don't leave the operator
+    // shy of the actual most-recent message.
     if (thread && lastBottomedThreadIdRef.current !== thread.id) {
       lastBottomedThreadIdRef.current = thread.id;
       el.scrollTop = el.scrollHeight;
       stickToBottomRef.current = true;
+      if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+      anchorGuardStopRef.current = startInitialBottomGuard(el);
       return;
     }
     if (stickToBottomRef.current) {
