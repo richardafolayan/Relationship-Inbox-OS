@@ -8,6 +8,7 @@ import type {
   ThreadStub
 } from "@inbox-os/core";
 import { AdapterFailure, cleanText, humanDelay, toStageFailure } from "./utils";
+import { humanClick, humanType, readingPause } from "./humanize";
 import type { SessionManager } from "../services/session-manager";
 
 interface BetaAdapterDependencies {
@@ -131,19 +132,19 @@ export class BetaAdapter implements PlatformAdapter {
       .first();
 
     if ((await byTitle.count()) > 0) {
-      await byTitle.click({ timeout: 10000 });
+      await humanClick(page, byTitle, { timeout: 10000 });
       return;
     }
 
     const byText = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
     if ((await byText.count()) > 0) {
-      await byText.click({ timeout: 10000 });
+      await humanClick(page, byText, { timeout: 10000 });
       return;
     }
 
     const byFallback = page.locator(selectors.thread_item).first();
     if ((await byFallback.count()) > 0) {
-      await byFallback.click({ timeout: 10000 });
+      await humanClick(page, byFallback, { timeout: 10000 });
     }
   }
 
@@ -400,13 +401,16 @@ export class BetaAdapter implements PlatformAdapter {
       await this.waitForConversationReady(page, selectors);
       await this.throwIfAuthRequired(page, "sendMessage");
       const composer = page.locator(selectors.composer_input).first();
-      await composer.click();
-      await composer.fill(text).catch(async () => {
-        await page.keyboard.type(text, { delay: 8 });
+      await humanClick(page, composer);
+      await humanType(page, composer, text, { alreadyFocused: true, reading: null }).catch(async () => {
+        await composer.fill(text).catch(async () => {
+          await page.keyboard.type(text, { delay: 8 });
+        });
       });
 
-      await humanDelay(100, 250);
-      await page.locator(selectors.send_button).first().click({ timeout: 10000 }).catch(async () => {
+      await readingPause(700, 1800);
+      const sendBtn = page.locator(selectors.send_button).first();
+      await humanClick(page, sendBtn, { timeout: 10000, reading: null }).catch(async () => {
         await page.keyboard.press("Enter");
       });
 

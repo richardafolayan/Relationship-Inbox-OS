@@ -20,6 +20,7 @@ import {
   retryWithBackoff,
   isTransientPageError
 } from "./utils.js";
+import { humanClick, humanHover, humanType, humanWait, readingPause } from "./humanize.js";
 import type { AdapterFailureKind, AdapterStage } from "./utils.js";
 import type { SessionManager } from "../services/session-manager";
 import {
@@ -1822,10 +1823,11 @@ async function activateLinkedInUnreadFilterWithHooks(
 
     const clicked = hooks?.clickUnreadPill
       ? await hooks.clickUnreadPill()
-      : await page
-          .locator(linkedInUnreadPillSelector)
-          .first()
-          .click({ timeout: 5000 })
+      : await humanClick(
+          page,
+          page.locator(linkedInUnreadPillSelector).first(),
+          { timeout: 5000 }
+        )
           .then(() => true)
           .catch(() => false);
     if (!clicked) {
@@ -2257,7 +2259,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       note: input?.note,
       attempt: input?.attempt,
       run: async () => {
-        await page.locator(selector).first().click({
+        await humanClick(page, page.locator(selector).first(), {
           timeout: input?.timeoutMs
         });
       }
@@ -2332,7 +2334,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       },
       run: async () => {
         const target = page.locator(containerSelector).first();
-        await target.hover({ force: true }).catch(() => undefined);
+        await humanHover(page, target).catch(() => undefined);
         await page.mouse.wheel(0, delta);
       }
     });
@@ -2671,7 +2673,28 @@ export class LinkedInAdapter implements PlatformAdapter {
     return this.deps.sessionManager.getManagedPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default",
-      args: ["--disable-blink-features=AutomationControlled"],
+      // Chrome flags that reduce the most-checked automation
+      // signals. AutomationControlled hides navigator.webdriver +
+      // the Blink AutomationControlled feature. The rest suppress
+      // first-run UI, default-app prompts, password-saving popups,
+      // and the "you're being controlled by automated test
+      // software" infobar — all of which would otherwise either
+      // cover the page mid-scan or leak through to the DOM.
+      // Note: Playwright's CDP debugger socket is still open on
+      // localhost; that's a structural limit (would need a
+      // CDP-patched browser fork to defeat).
+      args: [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-features=AutomationControlled,IsolateOrigins,site-per-process,Translate,InterestFeedContentSuggestions",
+        "--disable-infobars",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "--disable-popup-blocking",
+        "--password-store=basic",
+        "--use-mock-keychain",
+        "--disable-dev-shm-usage"
+      ],
       runLogger: this.runLogger ?? undefined
     });
   }
@@ -3131,8 +3154,16 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     const targetUrl = page.url();
     try {
-      await usernameField.fill(creds.username, { timeout: 5_000 });
-      await passwordField.fill(creds.password, { timeout: 5_000 });
+      // Type credentials with human cadence rather than instant fill —
+      // password forms are one of the most-fingerprinted entry points
+      // and a 0ms-fill triple-tap is an obvious tell.
+      await humanType(page, usernameField, creds.username, {
+        reading: { min: 400, max: 1100 }
+      });
+      await humanType(page, passwordField, creds.password, {
+        reading: { min: 250, max: 700 },
+        noThink: true
+      });
     } catch (error) {
       return {
         ok: false,
@@ -3160,7 +3191,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     try {
       await Promise.all([
         page.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => undefined),
-        submitButton.click({ timeout: 5_000 })
+        humanClick(page, submitButton, { timeout: 5_000, reading: { min: 250, max: 700 } })
       ]);
     } catch (error) {
       return {
@@ -3401,9 +3432,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       selector: linkedInAllPillSelector,
       note: "activate_all_pill",
       run: async () => {
-        await allPill.click({
-          timeout: 5_000
-        });
+        await humanClick(page, allPill, { timeout: 5_000 });
       }
     });
     await this.runTracedPageAction({
@@ -7739,7 +7768,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           targetDisplayName: thread.displayName
         },
         run: async () => {
-          await clickTarget.click({ timeout: 10_000 });
+          await humanClick(page, clickTarget, { timeout: 10_000 });
         }
       });
     }
@@ -7977,7 +8006,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         },
         run: async () => {
           const container = page.locator(selectors.message_container).first();
-          await container.hover({ force: true }).catch(() => undefined);
+          await humanHover(page, container).catch(() => undefined);
           await page.mouse.wheel(0, -840);
         }
       });
@@ -8309,7 +8338,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         let clicked = false;
         if (!activeBefore) {
           await unreadPill.scrollIntoViewIfNeeded().catch(() => undefined);
-          await unreadPill.click({ timeout: 5_000 }).catch((error: unknown) => {
+          await humanClick(page, unreadPill, { timeout: 5_000 }).catch((error: unknown) => {
             fail("collect_threads", "unread_pill_click_failed", "Failed to click LinkedIn Unread filter.", {
               error: error instanceof Error ? error.message : String(error)
             });
@@ -8472,7 +8501,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         await logStep(5, "open_thread", "opening first detected thread");
         await firstRow.clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-        await firstRow.clickTarget.click({ timeout: 8_000 }).catch((error: unknown) => {
+        await humanClick(page, firstRow.clickTarget, { timeout: 8_000 }).catch((error: unknown) => {
           fail("open_thread", "thread_open_click_failed", "Failed to open first LinkedIn thread row.", {
             error: error instanceof Error ? error.message : String(error)
           });
@@ -9263,20 +9292,22 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         console.warn(`${tag} click composer (selector=${selectors.composer_input})`);
         const composer = page.locator(selectors.composer_input).first();
-        await composer.click({ timeout: 10_000 });
-        console.warn(`${tag} composer clicked, filling text`);
+        await humanClick(page, composer, { timeout: 10_000 });
+        console.warn(`${tag} composer clicked, typing text`);
         try {
-          await composer.fill(text);
+          await humanType(page, composer, text, { alreadyFocused: true, reading: null });
         } catch {
-          console.warn(`${tag} composer.fill failed, falling back to keyboard.type`);
+          console.warn(`${tag} humanType failed, falling back to fill`);
           await page.keyboard.press("Meta+A").catch(() => undefined);
-          await page.keyboard.type(text, { delay: 12 });
+          await composer.fill(text);
         }
-        console.warn(`${tag} text filled`);
+        console.warn(`${tag} text typed`);
 
-        await humanDelay(100, 300);
+        // Operator re-reads their draft before pulling the trigger.
+        await readingPause(700, 1800);
         console.warn(`${tag} click send_button (selector=${selectors.send_button})`);
-        await page.locator(selectors.send_button).first().click({ timeout: 10_000 });
+        const sendBtn = page.locator(selectors.send_button).first();
+        await humanClick(page, sendBtn, { timeout: 10_000, reading: null });
         console.warn(`${tag} send_button clicked, entering verify loop`);
 
         const start = Date.now();

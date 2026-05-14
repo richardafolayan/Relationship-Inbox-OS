@@ -14,7 +14,17 @@ import { isQuietHoursActive } from "@/lib/quiet-hours";
 import type { HealthResponse, InboxResponse } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
-const linkedInAutoScanIntervalMs = 600_000;
+// Auto-scan cadence is randomised between 8 and 13 minutes per
+// firing rather than the old hard 10-min loop. A perfect 10-minute
+// cadence is one of the strongest behavioural fingerprints we
+// produce — anyone watching the LinkedIn account would see a
+// scrape land like clockwork. Jittering still averages a similar
+// rate but kills the periodicity.
+const LINKEDIN_AUTO_SCAN_MIN_MS = 8 * 60 * 1000;
+const LINKEDIN_AUTO_SCAN_MAX_MS = 13 * 60 * 1000;
+function nextAutoScanDelayMs(): number {
+  return Math.floor(Math.random() * (LINKEDIN_AUTO_SCAN_MAX_MS - LINKEDIN_AUTO_SCAN_MIN_MS + 1)) + LINKEDIN_AUTO_SCAN_MIN_MS;
+}
 const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -94,25 +104,36 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     if (autoScanDisabled || !autoScanEnabled) return undefined;
-    const timer = setInterval(() => {
-      if (autoScanInFlightRef.current) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const tick = () => {
+      if (cancelled) return;
       // Quiet hours pause auto-scan during the 22:00-06:00 window. The
       // toggle is otherwise inert; this gives it something tangible to do
       // (#94).
-      if (isQuietHoursActive()) return;
-      autoScanInFlightRef.current = true;
-      // Kick LinkedIn (rate-limited browser session) and iMessage (local
-      // chat.db read, essentially free) on the same cadence. The runner
-      // serializes them per-platform; iMessage will usually finish in
-      // under a second while LinkedIn is still going.
-      Promise.all([
-        apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "update" }).catch(() => undefined),
-        apiPost("/runner/control/scan", { platform: "IMESSAGE", scope: "update" }).catch(() => undefined)
-      ]).finally(() => {
-        autoScanInFlightRef.current = false;
-      });
-    }, linkedInAutoScanIntervalMs);
-    return () => clearInterval(timer);
+      const skip = autoScanInFlightRef.current || isQuietHoursActive();
+      if (!skip) {
+        autoScanInFlightRef.current = true;
+        // Kick LinkedIn (rate-limited browser session) and iMessage (local
+        // chat.db read, essentially free) on the same cadence. The runner
+        // serializes them per-platform; iMessage will usually finish in
+        // under a second while LinkedIn is still going.
+        void Promise.all([
+          apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "update" }).catch(() => undefined),
+          apiPost("/runner/control/scan", { platform: "IMESSAGE", scope: "update" }).catch(() => undefined)
+        ]).finally(() => {
+          autoScanInFlightRef.current = false;
+        });
+      }
+      // Re-schedule with a fresh jitter on every firing so we don't
+      // settle into a predictable cadence even with quiet-hours skips.
+      timer = setTimeout(tick, nextAutoScanDelayMs());
+    };
+    timer = setTimeout(tick, nextAutoScanDelayMs());
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [autoScanDisabled, autoScanEnabled]);
 
   // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
