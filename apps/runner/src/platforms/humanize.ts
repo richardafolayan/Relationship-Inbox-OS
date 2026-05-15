@@ -1,4 +1,4 @@
-import type { ElementHandle, Locator, Page } from "playwright";
+import type { ElementHandle, Locator, Page } from "patchright";
 
 /**
  * Humanization helpers for browser automation.

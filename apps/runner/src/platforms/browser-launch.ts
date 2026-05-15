@@ -1,5 +1,5 @@
 import type { PlatformName } from "@inbox-os/core";
-import type { BrowserContext } from "playwright";
+import type { BrowserContext } from "patchright";
 import type { BrowserProfileConfig } from "../config";
 import {
   preparePersonalProfileMirror as preparePersonalProfileMirrorDefault,

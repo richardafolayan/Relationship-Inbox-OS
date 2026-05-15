@@ -1,4 +1,4 @@
-import type { ElementHandle, Locator, Page } from "playwright";
+import type { ElementHandle, Locator, Page } from "patchright";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
