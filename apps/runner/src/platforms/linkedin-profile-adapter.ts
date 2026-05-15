@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 import { cleanText, humanDelay, safeTruncate } from "./utils";
 
 /**

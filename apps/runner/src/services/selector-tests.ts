@@ -2,7 +2,7 @@ import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { PlatformName, SelectorRegistry, SelectorTestReport, SelectorTestResult } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
-import type { ElementHandle, Page } from "playwright";
+import type { ElementHandle, Page } from "patchright";
 import type { SessionManager } from "./session-manager";
 
 interface SelectorTestServiceDeps {

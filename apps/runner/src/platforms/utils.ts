@@ -1,6 +1,6 @@
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { Page } from "playwright";
+import type { Page } from "patchright";
 import type { PlatformName } from "@inbox-os/core";
 
 export type AdapterFailureKind =

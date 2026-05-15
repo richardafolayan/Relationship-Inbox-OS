@@ -344,7 +344,11 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     selectorDir: resolve(projectRoot, "packages", "core", "selectors"),
     browserProfile: resolveBrowserProfileConfig(env),
     linkedInScan: {
-      maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 200),
+      // Lowered from 200 → 50: a personal account reading 200 unread
+      // threads in one go is a volume signature; 50 covers a normal
+      // catch-up while staying inside the noise floor of a real user
+      // checking their messages.
+      maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 50),
       stableIterations: parseIntOrDefault(env.LINKEDIN_SCAN_STABLE_ITERATIONS, 3),
       scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 1000),
       messageBackfillAttempts: parseIntOrDefault(env.LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS, 8)
@@ -352,7 +356,12 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     enrichPaceMinMs: parseIntOrDefault(env.ENRICH_PACE_MIN_MS, 60_000),
     enrichPaceMaxMs: parseIntOrDefault(env.ENRICH_PACE_MAX_MS, 180_000),
     enrichBatchMax: parseIntOrDefault(env.ENRICH_BATCH_MAX, 6),
-    enrichDailyCap: parseIntOrDefault(env.ENRICH_DAILY_CAP, 40),
+    // Lowered from 40 → 10: profile enrichment is the closest thing
+    // we do to "scraping" — visiting strangers' profiles to lift their
+    // posts/reactions. 40/day is a recruiter-tool footprint and the
+    // most fingerprint-able activity in the app. 10/day is closer to
+    // a real person clicking through to a few profiles a day.
+    enrichDailyCap: parseIntOrDefault(env.ENRICH_DAILY_CAP, 10),
     enrichLongIdleEvery: parseIntOrDefault(env.ENRICH_LONG_IDLE_EVERY, 10),
     enrichLongIdleMinMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MIN_MS, 300_000),
     enrichLongIdleMaxMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MAX_MS, 900_000),

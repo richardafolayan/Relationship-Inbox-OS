@@ -25,6 +25,23 @@ const LINKEDIN_AUTO_SCAN_MAX_MS = 13 * 60 * 1000;
 function nextAutoScanDelayMs(): number {
   return Math.floor(Math.random() * (LINKEDIN_AUTO_SCAN_MAX_MS - LINKEDIN_AUTO_SCAN_MIN_MS + 1)) + LINKEDIN_AUTO_SCAN_MIN_MS;
 }
+
+// Active-hours gate: only auto-scan during plausible working hours
+// for a real person on this account. Skipping nights and weekends
+// matches a personal-account usage profile much more closely than
+// scraping at 3am on a Sunday. Quiet hours (22:00-06:00) are
+// already handled via isQuietHoursActive(); this layer adds the
+// weekday constraint and a daytime window. The user-facing quiet
+// hours toggle still wins — turning quiet hours off doesn't bypass
+// active-hours.
+const AUTO_SCAN_ACTIVE_HOUR_START = 8;  // 08:00
+const AUTO_SCAN_ACTIVE_HOUR_END = 19;   // 19:00 (exclusive)
+function isWithinActiveHours(now: Date = new Date()): boolean {
+  const day = now.getDay(); // 0 = Sunday, 6 = Saturday
+  if (day === 0 || day === 6) return false;
+  const hour = now.getHours();
+  return hour >= AUTO_SCAN_ACTIVE_HOUR_START && hour < AUTO_SCAN_ACTIVE_HOUR_END;
+}
 const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -108,10 +125,13 @@ export function AppShell({ children }: { children: ReactNode }) {
     let timer: ReturnType<typeof setTimeout> | null = null;
     const tick = () => {
       if (cancelled) return;
-      // Quiet hours pause auto-scan during the 22:00-06:00 window. The
-      // toggle is otherwise inert; this gives it something tangible to do
-      // (#94).
-      const skip = autoScanInFlightRef.current || isQuietHoursActive();
+      // Three reasons we skip a tick:
+      //   - already mid-scan (don't pile up requests)
+      //   - quiet hours toggle is on (22:00-06:00 user override)
+      //   - outside plausible active hours (weekend / before 08:00 /
+      //     after 19:00 — keeps the scrape footprint matched to a
+      //     real person's working pattern rather than a 24/7 bot)
+      const skip = autoScanInFlightRef.current || isQuietHoursActive() || !isWithinActiveHours();
       if (!skip) {
         autoScanInFlightRef.current = true;
         // Kick LinkedIn (rate-limited browser session) and iMessage (local

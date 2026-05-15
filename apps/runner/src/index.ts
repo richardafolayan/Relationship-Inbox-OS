@@ -301,10 +301,30 @@ const enrichmentQueue = createEnrichmentQueue({
     await linkedin.ensureConnected();
   }
 });
+// Auto-enrichment is OFF by default. Visiting strangers' profiles
+// to scrape their posts/headline/etc. is the highest-fingerprint
+// activity in this app — it looks like profile enumeration, which
+// is exactly what LinkedIn's anti-scraping models watch for.
+// Reading your own DMs looks like normal inbox usage; bulk-visiting
+// 40 strangers' profiles a day does not. We keep the manual
+// enrichment paths (POST /control/person/:id/enrich, the bulk
+// re-enrich admin endpoint) so the operator can opt into a single
+// "research this person" action. Set ENRICH_AUTO_ENABLED=1 to turn
+// the periodic + on-scan auto-enrichment back on.
+const autoEnrichmentEnabled = (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "1"
+  || (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "true";
 enqueueEnrichmentForScan = (input) => {
+  if (!autoEnrichmentEnabled) return;
   void enrichmentQueue.enqueue(input.personId, input.trigger);
 };
-enrichmentQueue.start();
+if (autoEnrichmentEnabled) {
+  enrichmentQueue.start();
+} else {
+  console.warn(
+    "[enrichment-queue] auto-enrichment disabled (ENRICH_AUTO_ENABLED unset). " +
+      "Manual triggers via /control/person/:id/enrich still work."
+  );
+}
 
 async function withPlatformControlLock<T>(platform: PlatformName, work: () => Promise<T>): Promise<T> {
   return operationMutex.runExclusive(platformLockKey(platform), work);
@@ -1528,6 +1548,15 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   });
 }));
 
+// SEND IS USER-TRIGGERED ONLY — by design, never on a timer, never
+// from a background loop, never as part of a scan. Reading is
+// low-risk (looks like inbox usage); sending is high-risk (creates
+// a side-effect on someone else's account, which is where LinkedIn's
+// abuse models pay closest attention). Every entry to this endpoint
+// must originate from an explicit operator action in the UI.
+// Anything that drifts toward "auto-send" — auto-replies, scheduled
+// outreach loops, batch send-all — should land in a separate gated
+// surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   // For multipart bodies, multer puts file metadata on req.files and
