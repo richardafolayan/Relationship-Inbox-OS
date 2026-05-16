@@ -313,7 +313,7 @@ export default function TodayPage() {
             <article
               ref={heroRef}
               data-testid="today-hero"
-              className={`relative mb-4 flex min-h-[calc(100vh-180px)] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-4 flex min-h-[300px] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               <div
@@ -324,7 +324,7 @@ export default function TodayPage() {
                     "radial-gradient(ellipse at 100% 0%, color-mix(in oklch, var(--accent) 12%, transparent), transparent 55%)"
                 }}
               />
-              <div className="relative flex flex-1 flex-col">
+              <div className="relative flex flex-col">
                 <p className="mb-[20px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
                   <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
                   {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up · 1 of ${rows.length}`}
@@ -353,7 +353,7 @@ export default function TodayPage() {
                   <span className="font-medium text-ink">{hero.personName}</span>
                   <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
                 </div>
-                <p className="m-0 mb-7 max-w-[68ch] flex-1 text-balance border-l-2 border-hairline-strong pl-5 text-[17px] leading-[1.55] text-ink-2">
+                <p className="m-0 mb-7 max-w-[68ch] text-balance border-l-2 border-hairline-strong pl-5 text-[17px] leading-[1.55] text-ink-2">
                   {normalizePreview(hero.preview)}
                 </p>
                 <div
