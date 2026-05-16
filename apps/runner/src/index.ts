@@ -24,6 +24,7 @@ import { createSelectorTestService, isSelectorTestServiceError } from "./service
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
+import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { createIMessageWatcher } from "./services/imessage-watcher";
@@ -1103,6 +1104,20 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
     (r) => r.lastMessageAt !== undefined && Date.parse(r.lastMessageAt) >= cutoffMs
   );
 
+  // Resolve handles to real names via the same vCard the scanner uses.
+  // Without this, `chat.db` only stores the raw phone/email so every
+  // imported person lands as "+447506440284" instead of "Lubosi" and is
+  // unsearchable by name. Mirrors the adapter's resolveDisplayName: an
+  // operator-set chat name wins; 1:1s resolve the chatIdentifier against
+  // the vCard; groups keep chat.db's participant-join name (per-member
+  // vCard resolution happens later in the scanner / backfill).
+  const resolver = loadContactResolver(runnerConfig.imessage.contactsVcfPath);
+  const resolveName = (r: (typeof rows)[number]): string => {
+    if (r.userSetName) return r.userSetName;
+    if (r.isGroup) return r.displayName;
+    return resolver.resolve(r.chatIdentifier) ?? r.displayName;
+  };
+
   if (payload.dryRun) {
     res.json({
       ok: true,
@@ -1110,7 +1125,7 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
       sinceDays,
       totalNonAutomatedChats: rows.length,
       wouldIngest: candidates.length,
-      sample: candidates.slice(0, 8).map((c) => c.displayName)
+      sample: candidates.slice(0, 8).map((c) => resolveName(c))
     });
     return;
   }
@@ -1125,7 +1140,7 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
       index += 1;
       const candidate: ThreadStub = {
         platformThreadId: r.guid,
-        displayName: r.displayName,
+        displayName: resolveName(r),
         lastMessagePreview: r.lastMessagePreview ?? "",
         lastMessageAt: r.lastMessageAt
       };
