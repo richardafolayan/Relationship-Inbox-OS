@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
+import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import type { KeyedMutex } from "./keyed-mutex";
@@ -1350,6 +1351,42 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 existingThreadOpenStateById.set(platformThreadId, lookup);
                 return lookup;
               };
+              // LinkedIn dropped the thread id from conversation-list rows
+              // (no href / data-urn — JS-driven navigation), so the id-keyed
+              // lookup above can't run pre-open. Fall back to matching the
+              // row to a DB thread by the participant display name. Only a
+              // UNIQUE display-name match is usable: if 0 or >1 LinkedIn
+              // threads share the name we can't safely attribute the row, so
+              // we return null and the caller opens the row (safe — at worst
+              // a redundant open). `take: 2` is enough to detect ambiguity.
+              const existingThreadOpenStateByName = new Map<string, Promise<ExistingThreadOpenState>>();
+              const loadExistingThreadByDisplayName = (
+                displayName: string
+              ): Promise<ExistingThreadOpenState> => {
+                const key = displayName.trim();
+                if (!key) {
+                  return Promise.resolve(null);
+                }
+                const cached = existingThreadOpenStateByName.get(key);
+                if (cached) {
+                  return cached;
+                }
+                const lookup = prisma.thread
+                  .findMany({
+                    where: { platform, person: { displayName: key } },
+                    select: {
+                      id: true,
+                      lastMessageAt: true,
+                      unreadCount: true,
+                      firstFullBackfillAt: true
+                    },
+                    take: 2
+                  })
+                  .then((rows) => (rows.length === 1 ? rows[0] ?? null : null))
+                  .catch(() => null);
+                existingThreadOpenStateByName.set(key, lookup);
+                return lookup;
+              };
               // LinkedIn lists threads most-recent-first. Once we've seen
               // N consecutive rows where the DB content is already up-to-
               // date, we've crossed into already-scanned territory and
@@ -1422,120 +1459,146 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   // canonical thread ID. Without one, fall back to "open in
                   // delta mode" — the post-open canonicalisation step will
                   // still dedupe on platformThreadId.
-                  if (!signals.candidatePlatformThreadId) {
+                  // Evaluate a row against the DB thread we matched it to.
+                  // Shared by the id path and the display-name fallback so
+                  // the unchanged check (timestamp <= stored AND unread
+                  // matches) and the streak/stop-scan accounting can never
+                  // diverge between the two. `canonicalIdForBackfill` is the
+                  // URL-derived id when we have one (id path) so the
+                  // first-encounter branch can pre-record the backfill; the
+                  // name path passes null (post-open canonicalisation still
+                  // stamps firstFullBackfillAt).
+                  const evaluateAgainstExisting = (
+                    existing: ExistingThreadOpenState,
+                    canonicalIdForBackfill: string | null,
+                    matchedBy: "id" | "display_name"
+                  ): LinkedInStreamPreOpenDecision => {
+                    // First encounter / pending full backfill — open full so
+                    // we walk the whole history. Breaks any unchanged streak.
+                    if (!existing || !existing.firstFullBackfillAt) {
+                      if (canonicalIdForBackfill) {
+                        fullBackfillThreadIds.add(canonicalIdForBackfill);
+                      }
+                      unchangedStreakCount = 0;
+                      return { open: true, mode: "full", reason: existing ? "first_full_backfill" : "new_thread" };
+                    }
+
+                    // Skip-if-unchanged: open ONLY when the row's list-side
+                    // signals indicate something actually moved. Both clauses
+                    // must hold:
+                    //   • the row's last-message timestamp is no newer than
+                    //     what we already have (so no new message arrived);
+                    //   • the unread count matches DB state (so no
+                    //     read/unread state flip we should record).
+                    //
+                    // Comparison precision depends on the row text. When
+                    // LinkedIn shows a TIME ("8:01 AM" / "19:16"), it's
+                    // today's message — minute precision, exact compare. When
+                    // it shows a date ("May 2"), weekday ("Wed") or
+                    // "Yesterday", we only have day precision; the parser
+                    // fills in noon, which would otherwise be > the precise
+                    // db.lastMessageAt of the same day's message and falsely
+                    // mark the thread "newer". Use a calendar-day compare.
+                    const rowAt = signals.listTimestampIso ? Date.parse(signals.listTimestampIso) : NaN;
+                    const dbAt = existing.lastMessageAt ? existing.lastMessageAt.getTime() : 0;
+                    const rowTextIsTime = /\d{1,2}:\d{2}/.test(signals.listTimestamp ?? "");
+                    let timestampUnchanged = false;
+                    if (!Number.isNaN(rowAt)) {
+                      if (rowTextIsTime) {
+                        timestampUnchanged = rowAt <= dbAt;
+                      } else {
+                        const startOfDay = (ms: number): number => {
+                          const d = new Date(ms);
+                          d.setHours(0, 0, 0, 0);
+                          return d.getTime();
+                        };
+                        timestampUnchanged = startOfDay(rowAt) <= startOfDay(dbAt);
+                      }
+                    }
+                    const unreadUnchanged = existing.unreadCount === signals.unreadCount;
                     runLogger.logDecision({
                       stage: "open_thread",
-                      decision: "shouldOpenCandidate: delta (no candidate id)",
+                      decision: "shouldOpenCandidate evaluated",
                       details: {
                         rowKey: signals.rowKey,
                         displayName: signals.displayName,
                         listTimestamp: signals.listTimestamp,
-                        threadUrl: signals.threadUrl
+                        listTimestampIso: signals.listTimestampIso,
+                        candidatePlatformThreadId: signals.candidatePlatformThreadId ?? null,
+                        matchedBy,
+                        dbLastMessageAt: existing.lastMessageAt?.toISOString() ?? null,
+                        dbUnreadCount: existing.unreadCount,
+                        rowUnreadCount: signals.unreadCount,
+                        rowTextIsTime,
+                        timestampUnchanged,
+                        unreadUnchanged,
+                        decision: timestampUnchanged && unreadUnchanged ? "skip" : "delta"
                       }
                     });
-                    // Reset streak — this row will be opened (we don't know
-                    // if it's unchanged), so it doesn't count toward the
-                    // "everything is up-to-date" signal.
+                    if (timestampUnchanged && unreadUnchanged) {
+                      unchangedStreakCount += 1;
+                      const stopScan = unchangedStreakCount >= unchangedStreakLimit;
+                      if (stopScan) {
+                        runLogger.logDecision({
+                          stage: "open_thread",
+                          decision:
+                            "Pre-open streak hit unchangedStreakLimit - requesting cooperative scan exit",
+                          details: {
+                            unchangedStreakCount,
+                            unchangedStreakLimit,
+                            rowKey: signals.rowKey
+                          }
+                        });
+                      }
+                      return {
+                        open: false,
+                        mode: "delta",
+                        reason: stopScan ? "unchanged_streak" : "unchanged",
+                        stopScan
+                      };
+                    }
+                    // Row had a real change (timestamp / unread count) — reset
+                    // the streak so the next contiguous unchanged-rows window
+                    // counts from this point.
                     unchangedStreakCount = 0;
                     return { open: true, mode: "delta" };
-                  }
-                  const existing = await loadExistingThreadOpenState(signals.candidatePlatformThreadId);
+                  };
 
-                  // First encounter — request a full backfill so we walk the
-                  // message list to the top and persist the entire history.
-                  // Also pre-record the candidate ID so the persistence step
-                  // can stamp firstFullBackfillAt; the post-open canonical ID
-                  // should match this URL-derived one (LinkedIn doesn't
-                  // rewrite thread URLs across click navigation).
-                  if (!existing || !existing.firstFullBackfillAt) {
-                    if (signals.candidatePlatformThreadId) {
-                      fullBackfillThreadIds.add(signals.candidatePlatformThreadId);
-                    }
-                    // First-encounter / pending full backfill — we'll open
-                    // this row, so it breaks any unchanged streak.
-                    unchangedStreakCount = 0;
-                    return { open: true, mode: "full", reason: existing ? "first_full_backfill" : "new_thread" };
-                  }
-
-                  // Skip-if-unchanged: open ONLY when the row's list-side
-                  // signals indicate something actually moved. Both clauses
-                  // must hold:
-                  //   • the row's last-message timestamp is no newer than
-                  //     what we already have (so no new message arrived);
-                  //   • the unread count matches DB state (so no
-                  //     read/unread state flip we should record).
-                  //
-                  // Comparison precision depends on the row text. When
-                  // LinkedIn shows a TIME ("8:01 AM" / "19:16"), it's today's
-                  // message — we have minute precision and can do an exact
-                  // compare. When it shows a date ("May 2"), weekday ("Wed"),
-                  // or "Yesterday", we only have day precision; the parser
-                  // fills in noon, which would otherwise be > the precise
-                  // db.lastMessageAt of the same day's message and falsely
-                  // mark the thread as "newer than db". Use a calendar-day
-                  // comparison in that case.
-                  const rowAt = signals.listTimestampIso ? Date.parse(signals.listTimestampIso) : NaN;
-                  const dbAt = existing.lastMessageAt ? existing.lastMessageAt.getTime() : 0;
-                  const rowTextIsTime = /\d{1,2}:\d{2}/.test(signals.listTimestamp ?? "");
-                  let timestampUnchanged = false;
-                  if (!Number.isNaN(rowAt)) {
-                    if (rowTextIsTime) {
-                      timestampUnchanged = rowAt <= dbAt;
-                    } else {
-                      const startOfDay = (ms: number): number => {
-                        const d = new Date(ms);
-                        d.setHours(0, 0, 0, 0);
-                        return d.getTime();
-                      };
-                      timestampUnchanged = startOfDay(rowAt) <= startOfDay(dbAt);
-                    }
-                  }
-                  const unreadUnchanged = existing.unreadCount === signals.unreadCount;
-                  runLogger.logDecision({
-                    stage: "open_thread",
-                    decision: "shouldOpenCandidate evaluated",
-                    details: {
-                      rowKey: signals.rowKey,
-                      displayName: signals.displayName,
-                      listTimestamp: signals.listTimestamp,
-                      listTimestampIso: signals.listTimestampIso,
-                      candidatePlatformThreadId: signals.candidatePlatformThreadId,
-                      dbLastMessageAt: existing.lastMessageAt?.toISOString() ?? null,
-                      dbUnreadCount: existing.unreadCount,
-                      rowUnreadCount: signals.unreadCount,
-                      rowTextIsTime,
-                      timestampUnchanged,
-                      unreadUnchanged,
-                      decision: timestampUnchanged && unreadUnchanged ? "skip" : "delta"
-                    }
-                  });
-                  if (timestampUnchanged && unreadUnchanged) {
-                    unchangedStreakCount += 1;
-                    const stopScan = unchangedStreakCount >= unchangedStreakLimit;
-                    if (stopScan) {
+                  if (!signals.candidatePlatformThreadId) {
+                    // LinkedIn no longer exposes a thread id on conversation
+                    // list rows, so the id path can't run. Match the row to a
+                    // DB thread by display name instead. Only a UNIQUE
+                    // LinkedIn name match is usable (ambiguous -> open, safe).
+                    // The unchanged check itself is unchanged, so a genuinely
+                    // new message — which always bumps the row's list
+                    // timestamp to the top — is still detected; the only
+                    // relaxation vs the id path is the match key.
+                    const byName = await loadExistingThreadByDisplayName(signals.displayName);
+                    if (!byName) {
                       runLogger.logDecision({
                         stage: "open_thread",
-                        decision:
-                          "Pre-open streak hit unchangedStreakLimit - requesting cooperative scan exit",
+                        decision: "shouldOpenCandidate: delta (no candidate id, name unmatched/ambiguous)",
                         details: {
-                          unchangedStreakCount,
-                          unchangedStreakLimit,
-                          rowKey: signals.rowKey
+                          rowKey: signals.rowKey,
+                          displayName: signals.displayName,
+                          listTimestamp: signals.listTimestamp,
+                          threadUrl: signals.threadUrl
                         }
                       });
+                      // Can't attribute the row — open it. Reset the streak
+                      // (we don't know if it's unchanged).
+                      unchangedStreakCount = 0;
+                      return { open: true, mode: "delta" };
                     }
-                    return {
-                      open: false,
-                      mode: "delta",
-                      reason: stopScan ? "unchanged_streak" : "unchanged",
-                      stopScan
-                    };
+                    return evaluateAgainstExisting(byName, null, "display_name");
                   }
-                  // Row had a real change (timestamp / unread count) — reset
-                  // the streak so the next contiguous unchanged-rows window
-                  // counts from this point.
-                  unchangedStreakCount = 0;
-                  return { open: true, mode: "delta" };
+
+                  const existing = await loadExistingThreadOpenState(signals.candidatePlatformThreadId);
+                  return evaluateAgainstExisting(
+                    existing,
+                    signals.candidatePlatformThreadId,
+                    "id"
+                  );
                 },
                 onThreadCandidate: async (input) => {
                   streamedCandidates.push({
