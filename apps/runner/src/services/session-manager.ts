@@ -29,6 +29,7 @@ interface SessionManagerDependencies {
     args?: string[];
     channel?: string;
     chromiumSandbox?: boolean;
+    ignoreDefaultArgs?: string[];
   }) => Promise<BrowserContext>;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
