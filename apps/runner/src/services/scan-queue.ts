@@ -2424,7 +2424,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
     jobId: string,
     runLogger?: RunLogger,
     preParsedMessages?: NormalizedMessage[],
-    markedFullBackfill = false
+    markedFullBackfill = false,
+    // Bulk historical backfill passes true: persist messages/people/threads
+    // only, skip the per-thread AI summary + category classification.
+    // Enrichment is gated by design and the recurring scanner already does
+    // AI for ACTIVE threads — running it synchronously across hundreds of
+    // dormant backfill threads just rate-limits the AI provider and is not
+    // what the backfill is for.
+    skipAi = false
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
@@ -2896,7 +2903,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         )
       : null;
 
-    const shouldRefreshSummary = !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
+    const shouldRefreshSummary =
+      !skipAi && !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
 
     let summary = thread.rollingSummary;
     let whatTheyWant = thread.whatTheyWant;
@@ -2930,7 +2938,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // can be triggered via /control/classify-uncategorized after a wrong
     // verdict is corrected manually.
     let categoryUpdate: string | null | undefined = undefined;
-    if (!thread.category && hasPersistedMessages) {
+    if (!skipAi && !thread.category && hasPersistedMessages) {
       const classified = await deps.aiService
         .classifyThreadCategory({
           platform: thread.platform as PlatformName,
@@ -3125,6 +3133,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         requestId: string;
         runLogger?: RunLogger;
         messages?: NormalizedMessage[];
+        skipAi?: boolean;
       }
     ) =>
       syncThread(
@@ -3133,7 +3142,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         input.maxMessages,
         input.requestId,
         input.runLogger,
-        input.messages
+        input.messages,
+        false,
+        input.skipAi ?? false
       ),
     clearAbort
   };
