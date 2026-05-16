@@ -4,10 +4,15 @@ export const defaultSettings: AppSettings = {
   scanIntervalSeconds: 60,
   amberHours: 6,
   redHours: 18,
-  // Headless by default: scans run unattended without a Chrome window
-  // stealing focus. The dashboard Settings "Headless browser" toggle
-  // flips this at runtime when you want to watch/debug a live run.
-  headless: true,
+  // Headful by default ON PURPOSE. Headless is one of the strongest bot
+  // signals in browser fingerprinting (GPU/SwiftShader render path, font
+  // metrics, AudioContext, missing window-chrome dimensions) and Patchright
+  // cannot patch those. The "Chrome window pops up every 8-13min" UX
+  // problem is instead solved by launching the real headful Chrome
+  // OFFSCREEN (--window-position far off the desktop) — no visual
+  // disruption, no fingerprint penalty. The Settings toggle can still
+  // force true headless for CI/debug, but it must never be the default.
+  headless: false,
   maxMessagesPerThread: 15,
   enabledPlatforms: ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"],
   demoMode: false,
