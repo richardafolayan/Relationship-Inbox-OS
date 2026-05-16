@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "node scripts/free-runner-port.mjs",
     "dev": "tsx watch src/index.ts",
     "build": "tsc -p tsconfig.json && node scripts/add-js-extensions.mjs",
     "start": "node dist/index.js",
