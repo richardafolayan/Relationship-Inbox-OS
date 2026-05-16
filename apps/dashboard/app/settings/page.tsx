@@ -152,7 +152,7 @@ export default function SettingsPage() {
       <SettingsGroup head="Browser">
         <SettingRow
           name="Headless browser"
-          desc="Run Chrome without a visible window (default). Turn off to watch a live scan/send for debugging — note a visible window is less detection-prone for LinkedIn."
+          desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you AND keep a full human fingerprint. Turn on only for CI/speed — headless is one of the strongest bot signals and is far more detectable for LinkedIn."
           trailing={
             <div className="flex items-center gap-[10px]">
               <span className="font-mono text-[11px] text-ink-3">

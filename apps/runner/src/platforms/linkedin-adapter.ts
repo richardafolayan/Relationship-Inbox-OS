@@ -2739,10 +2739,45 @@ export class LinkedInAdapter implements PlatformAdapter {
       // (ensureSessionCookies, below) decrypts the live LinkedIn
       // cookies out-of-band and injects them into the context. That
       // is the deterministic mechanism that keeps the session alive.
+      //
+      // Headful, not headless. Headless is a top-tier bot signal
+      // (GPU/SwiftShader render path, font metrics, AudioContext,
+      // absent window-chrome dimensions) that Patchright can't patch,
+      // so we run the REAL headful Chrome. --window-size keeps a
+      // realistic viewport (a 0x0 / tiny window is itself a tell).
+      //
+      // Getting the window out of the user's way WITHOUT the headless
+      // fingerprint and WITHOUT the visibilityState=hidden lazy-load
+      // bug:
+      //   - --window-position is useless: macOS clamps off-desktop
+      //     coords back on-screen (verified: -9999,-9999 -> 0,35).
+      //   - minimize sets document.visibilityState='hidden', which
+      //     LinkedIn's virtualised conversation list reads to decide
+      //     whether to render rows -> intermittent short scans.
+      //   - Mission Control / AppleScript Space-moving is brittle
+      //     across macOS versions.
+      //   - --start-fullscreen: macOS gives a native-fullscreen window
+      //     its OWN Space automatically. The user stays on their Space
+      //     (no visual disruption), but the page is genuinely visible
+      //     (visibilityState='visible', compositor + layout running) so
+      //     virtualised lazy-load works normally. Pure Chrome flag, no
+      //     OS scripting -> nothing to break across macOS updates; if a
+      //     future build ignored it you'd just get a normal visible
+      //     window (safe degradation, never a silent scan failure).
+      // --window-size is the fallback size if fullscreen is refused.
+      // The --disable-*-backgrounding flags are kept as cheap insurance
+      // (a faint, below-LinkedIn's-radar signal) in case the fullscreen
+      // Space is ever occluded. settings.headless=true (CI/debug)
+      // bypasses all of this.
       args: [
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-default-apps"
+        "--disable-default-apps",
+        "--start-fullscreen",
+        "--window-size=1280,800",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows"
       ],
       runLogger: this.runLogger ?? undefined
     });
