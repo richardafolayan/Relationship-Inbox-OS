@@ -21,6 +21,7 @@ import {
   isTransientPageError
 } from "./utils.js";
 import { humanClick, humanHover, humanType, humanWait, readingPause } from "./humanize.js";
+import { ChromeCookieBridge } from "./chrome-cookie-bridge.js";
 import type { AdapterFailureKind, AdapterStage } from "./utils.js";
 import type { SessionManager } from "../services/session-manager";
 import {
@@ -58,6 +59,19 @@ interface LinkedInAdapterDependencies {
   linkedInCredentials?: {
     username: string;
     password: string;
+  };
+  /**
+   * When the runner uses the personal Chrome profile, this points at the
+   * real source profile so the cookie bridge can decrypt the live LinkedIn
+   * auth cookies and inject them into the launched (mirrored) context.
+   * A Playwright-launched Chrome with a custom user-data-dir cannot
+   * transparently decrypt the macOS Keychain-encrypted profile cookies, so
+   * without this bridge LinkedIn drops to the login page every launch.
+   * Undefined in isolated mode (nothing to bridge).
+   */
+  personalProfile?: {
+    sourceUserDataDir: string;
+    profileDirectory: string;
   };
 }
 
@@ -2129,6 +2143,13 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private static readonly inboxNavigationTimeoutMs = 10_000;
   private static readonly inboxReadyTimeoutMs = 10_000;
+  /**
+   * Minimum gap between cookie-bridge syncs. The LinkedIn li_at token is
+   * long-lived (≈1y), so re-decrypting on every getPage() call would just
+   * re-hit the Keychain and re-copy the Cookies DB for no benefit. 10min
+   * still picks up a same-run rotation while staying cheap.
+   */
+  private static readonly cookieSyncThrottleMs = 10 * 60 * 1000;
   private runLogger: RunLogger | null = null;
   private activeStage: string | null = null;
   private readonly pageTraceIds = new WeakMap<Page, string>();
@@ -2140,6 +2161,21 @@ export class LinkedInAdapter implements PlatformAdapter {
    * `null` until the first attempt.
    */
   private lastAutoLoginAttemptAt: number | null = null;
+
+  /**
+   * Lazily-built bridge that decrypts the real profile's LinkedIn cookies
+   * and injects them into the launched context. Null until first use, and
+   * stays null entirely in isolated mode (no personalProfile dep).
+   */
+  private cookieBridge: ChromeCookieBridge | null = null;
+
+  /**
+   * Epoch-ms of the last successful cookie-bridge sync. Re-syncing on every
+   * getPage() call would re-hit the Keychain + copy the Cookies DB many
+   * times per scan; the session token is long-lived so a short throttle is
+   * plenty while still picking up rotations within a run.
+   */
+  private lastCookieSyncAt: number | null = null;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
 
@@ -2670,7 +2706,7 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   private async getPage(): Promise<Page> {
-    return this.deps.sessionManager.getManagedPage({
+    const page = await this.deps.sessionManager.getManagedPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default",
       // Minimal arg set on purpose. Patchright patches the
@@ -2687,14 +2723,15 @@ export class LinkedInAdapter implements PlatformAdapter {
       // Deliberately NOT passing --password-store=basic /
       // --use-mock-keychain. On macOS Chrome encrypts cookie values
       // (including LinkedIn's li_at auth cookie) with a key held in
-      // the login Keychain as "Chrome Safe Storage". The mirrored
-      // profile's cookies were encrypted by real Chrome with that
-      // key; forcing a mock/basic keychain makes the launched browser
-      // derive a DIFFERENT key, so it cannot decrypt the inherited
-      // session and LinkedIn drops to the login page on every launch.
-      // We launch the user's real signed Chrome, which already owns
-      // that Keychain item, so there is no recurring prompt (at most
-      // a one-time "Always Allow"). Real keychain == session persists.
+      // the login Keychain as "Chrome Safe Storage"; forcing a
+      // mock/basic keychain guarantees the launched browser cannot
+      // decrypt anything. But even WITHOUT those flags a
+      // Playwright-launched Chrome on a custom user-data-dir often
+      // can't transparently reach that Keychain item, so we don't
+      // rely on profile-cookie decryption at all — the cookie bridge
+      // (ensureSessionCookies, below) decrypts the live LinkedIn
+      // cookies out-of-band and injects them into the context. That
+      // is the deterministic mechanism that keeps the session alive.
       args: [
         "--no-first-run",
         "--no-default-browser-check",
@@ -2702,6 +2739,59 @@ export class LinkedInAdapter implements PlatformAdapter {
       ],
       runLogger: this.runLogger ?? undefined
     });
+    await this.ensureSessionCookies(page);
+    return page;
+  }
+
+  /**
+   * Inject the real Chrome profile's live LinkedIn auth cookies into the
+   * launched context. Best-effort and throttled: never throws (a sync
+   * hiccup must not block a scan/send), and re-syncs at most once per
+   * throttle window since the li_at token is long-lived. No-op in isolated
+   * mode (no personalProfile dependency).
+   */
+  private async ensureSessionCookies(page: Page): Promise<void> {
+    const personal = this.deps.personalProfile;
+    if (!personal) {
+      return;
+    }
+
+    const now = Date.now();
+    if (
+      this.lastCookieSyncAt !== null &&
+      now - this.lastCookieSyncAt < LinkedInAdapter.cookieSyncThrottleMs
+    ) {
+      return;
+    }
+
+    if (!this.cookieBridge) {
+      this.cookieBridge = new ChromeCookieBridge({
+        sourceUserDataDir: personal.sourceUserDataDir,
+        profileDirectory: personal.profileDirectory
+      });
+    }
+
+    try {
+      const context = page.context();
+      const result = await this.cookieBridge.syncIntoContext(context);
+      if (result.reason === "ok") {
+        this.lastCookieSyncAt = now;
+        const hasAuth = result.names?.includes("li_at") ? " (li_at present)" : "";
+        console.log(
+          `[linkedin-cookie-bridge] injected ${result.injected} cookies${hasAuth}`
+        );
+      } else {
+        // Surface a clear, actionable line. The most common failure is the
+        // first-run Keychain prompt not being approved.
+        const detail = result.detail ? ` — ${result.detail}` : "";
+        console.warn(
+          `[linkedin-cookie-bridge] no cookies injected (${result.reason})${detail}`
+        );
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`[linkedin-cookie-bridge] sync threw (non-fatal): ${reason}`);
+    }
   }
 
   private async navigateInbox(selectors: SelectorRegistry): Promise<Page> {
