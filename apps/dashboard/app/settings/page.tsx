@@ -10,16 +10,23 @@ import { cn } from "@/lib/utils";
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
 
-// v1 user surface: auto-scan, quiet hours, and the two operator-profile
-// textareas the AI prompts read. Operator-only knobs (headless, demo
-// data, scan thresholds, AI provider, enabled platforms, danger-zone
-// wipe, runner restart) were stripped in PR1; restore from
+// v1 user surface: auto-scan, quiet hours, headless browser, and the two
+// operator-profile textareas the AI prompts read. Other operator-only
+// knobs (demo data, scan thresholds, AI provider, enabled platforms,
+// danger-zone wipe, runner restart) were stripped in PR1; restore from
 // archive/pre-v1-stripback if they're needed back.
 export default function SettingsPage() {
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+
+  // Headless lives in the runner's persisted settings (the runner reads
+  // settings.headless when launching Chrome), so unlike autoScan/quietHours
+  // it round-trips through the API rather than localStorage.
+  const [headless, setHeadless] = useState(true);
+  const [headlessReady, setHeadlessReady] = useState(false);
+  const [headlessStatus, setHeadlessStatus] = useState<"idle" | "saving" | "error">("idle");
 
   const [operatorProfile, setOperatorProfile] = useState<OperatorProfile>({ about: "", interests: "" });
   const [operatorProfileStatus, setOperatorProfileStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
@@ -59,6 +66,12 @@ export default function SettingsPage() {
     );
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
+    void apiGet<{ headless?: boolean }>("/runner/data/settings")
+      .then((data) => {
+        if (data && typeof data.headless === "boolean") setHeadless(data.headless);
+        setHeadlessReady(true);
+      })
+      .catch(() => setHeadlessReady(true));
   }, []);
 
   const toggleQuietHours = () => {
@@ -74,6 +87,21 @@ export default function SettingsPage() {
     setAutoScan(next);
     window.localStorage.setItem(AUTO_SCAN_KEY, next ? "true" : "false");
     setSavedAt(Date.now());
+  };
+
+  const toggleHeadless = async () => {
+    if (!headlessReady || headlessStatus === "saving") return;
+    const next = !headless;
+    setHeadless(next); // optimistic
+    setHeadlessStatus("saving");
+    try {
+      await apiPost("/runner/control/settings", { headless: next });
+      setHeadlessStatus("idle");
+      setSavedAt(Date.now());
+    } catch {
+      setHeadless(!next); // revert
+      setHeadlessStatus("error");
+    }
   };
 
   return (
@@ -116,6 +144,32 @@ export default function SettingsPage() {
             <div className="flex items-center gap-[10px]">
               <span className="font-mono text-[11px] text-ink-3">22:00–06:00</span>
               <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
+            </div>
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup head="Browser">
+        <SettingRow
+          name="Headless browser"
+          desc="Run Chrome without a visible window (default). Turn off to watch a live scan/send for debugging — note a visible window is less detection-prone for LinkedIn."
+          trailing={
+            <div className="flex items-center gap-[10px]">
+              <span className="font-mono text-[11px] text-ink-3">
+                {headlessStatus === "saving"
+                  ? "saving…"
+                  : headlessStatus === "error"
+                    ? <span className="text-risk-overdue">failed</span>
+                    : headless
+                      ? "headless"
+                      : "visible"}
+              </span>
+              <Toggle
+                on={headless}
+                disabled={!headlessReady || headlessStatus === "saving"}
+                onChange={toggleHeadless}
+                label="Headless browser"
+              />
             </div>
           }
         />
