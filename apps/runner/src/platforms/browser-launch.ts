@@ -18,6 +18,13 @@ interface LaunchPersistentContextOptions {
   // sandboxed; we force it on. (No Docker/CI sandbox constraint here
   // — this runs on the operator's macOS machine.)
   chromiumSandbox?: boolean;
+  // Playwright/Patchright still inject some detectable args by
+  // default even though Patchright strips the big --enable-automation
+  // one. Strip the leftovers explicitly: --disable-blink-features=
+  // AutomationControlled (trips Chrome's bad-flags banner; redundant
+  // since Patchright patches navigator.webdriver natively) and
+  // --disable-infobars (an automation tell real Chrome never sets).
+  ignoreDefaultArgs?: string[];
 }
 
 interface LaunchPersistentContext {
@@ -76,7 +83,11 @@ export async function launchPersistentContextForPlatform(input: {
     // Run the real Chrome sandbox so we don't ship --no-sandbox (and
     // its visible infobar). Applies to both isolated and personal
     // launches via the personalOptions spread below.
-    chromiumSandbox: true
+    chromiumSandbox: true,
+    ignoreDefaultArgs: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-infobars"
+    ]
   };
 
   if (input.browserProfile.mode !== "personal") {
