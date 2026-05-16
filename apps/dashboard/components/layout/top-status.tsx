@@ -432,22 +432,22 @@ export function TopStatus() {
                 return (
                   <div
                     key={p.platform}
-                    className="flex items-center justify-between gap-3 rounded-row border border-hairline bg-paper-2/40 px-3 py-2"
+                    className="flex flex-col gap-2 rounded-row border border-hairline bg-paper-2/40 px-3 py-2"
                   >
-                    <span className="min-w-0 truncate text-[13px] text-ink-2">
-                      {label} ·{" "}
+                    <span className="text-[13px] text-ink-2">
+                      {label}{" "}
                       <span className="font-mono text-[11px] text-risk-overdue">
-                        {p.status.toLowerCase().replace(/_/g, " ")}
+                        · {p.status.toLowerCase().replace(/_/g, " ")}
                       </span>
                     </span>
-                    <span className="flex shrink-0 items-center gap-2">
+                    <span className="flex items-center gap-2">
                       <button
                         type="button"
                         disabled={!!platformActionBusy}
                         onClick={() => void runPlatformAction(p.platform, "connect")}
                         className="rounded-pill bg-ink px-3 py-1 font-mono text-[11px] text-paper transition-opacity duration-calm hover:opacity-90 disabled:opacity-50"
                       >
-                        {connectBusy ? "…" : "Reconnect"}
+                        {connectBusy ? "reconnecting…" : "Reconnect"}
                       </button>
                       <button
                         type="button"
@@ -455,7 +455,7 @@ export function TopStatus() {
                         onClick={() => void runPlatformAction(p.platform, "reset-session")}
                         className="rounded-pill border border-hairline px-3 py-1 font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-50"
                       >
-                        {resetBusy ? "…" : "Reset session"}
+                        {resetBusy ? "resetting…" : "Reset session"}
                       </button>
                     </span>
                   </div>
