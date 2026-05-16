@@ -4820,10 +4820,47 @@ export class LinkedInAdapter implements PlatformAdapter {
         };
       }
       if (hasRows) {
-        return {
-          status: "rows_ready",
-          rowSignalCounts
+        // A bare row signal is NOT enough. On a cold Chrome start LinkedIn
+        // briefly mounts list-item nodes during SPA boot, then tears them
+        // down and re-renders a virtualized list — if we return rows_ready
+        // on that flash, the downstream shell/list-root resolver runs
+        // against a still-booting DOM (document.title === "", every
+        // conversation-list selector count 0) and the whole scan fails
+        // with list_root_not_found. Require the resolver-aligned structure
+        // (a real conversation-list root that actually contains rows) to
+        // be present AND stable across two consecutive polls, with the
+        // messaging app genuinely hydrated (LinkedIn only sets a
+        // "...Messaging | LinkedIn" title post-hydration). This gate is a
+        // strict superset of what a successful run already satisfies, so
+        // it cannot regress the happy path — it only refuses to hand a
+        // half-booted DOM to the resolver.
+        const listRootHasRows = async (): Promise<boolean> => {
+          const roots = page.locator(
+            "ul.msg-conversations-container__conversations-list, [class*='msg-conversations-container__conversations-list']"
+          );
+          if ((await roots.count().catch(() => 0)) === 0) {
+            return false;
+          }
+          return (
+            (await roots.locator("li.msg-conversation-listitem").count().catch(() => 0)) > 0
+          );
         };
+        const titleHydrated = await page
+          .title()
+          .then((title) => /messag/i.test(title ?? ""))
+          .catch(() => false);
+        if (titleHydrated && (await listRootHasRows())) {
+          await page.waitForTimeout(300).catch(() => undefined);
+          if (await listRootHasRows()) {
+            return {
+              status: "rows_ready",
+              rowSignalCounts
+            };
+          }
+        }
+        // Not stably hydrated yet — fall through and keep polling until the
+        // deadline (then list_hydration_timeout, which is a clearer signal
+        // than list_root_not_found and drives the same retry/cooldown).
       }
 
       const emptyStateCount = await page.locator(linkedInStreamingEmptyStateSelector).count().catch(() => 0);
@@ -6780,7 +6817,10 @@ export class LinkedInAdapter implements PlatformAdapter {
           });
         }
 
-        const hydration = await this.waitForThreadListHydratedOrEmptyOrBlocked(page, selectors, 10_000);
+        // 20s (was 10s): a cold Chrome launch + cookie injection + LinkedIn
+        // SPA boot can legitimately take >10s to truly hydrate the list,
+        // and the gate now waits for stable hydration rather than a flash.
+        const hydration = await this.waitForThreadListHydratedOrEmptyOrBlocked(page, selectors, 20_000);
         if (hydration.status === "blocked_by_modal") {
           const artifacts = await this.writeStreamingResolverFailureArtifacts({
             page,
@@ -6919,6 +6959,15 @@ export class LinkedInAdapter implements PlatformAdapter {
             }
           });
         }
+
+        // The messaging document is now hydrated and stable, and the rest
+        // of the scan (shell/list-root resolution, row snapshots, per-thread
+        // reads) happens via SPA route changes on THIS document — no full
+        // reload — so a single __name shim defined here persists for every
+        // downstream evaluate. This is the central fix for the esbuild
+        // `keepNames` -> `ReferenceError: __name is not defined` leak that
+        // otherwise breaks resolver/parser evaluates one callsite at a time.
+        await this.ensurePageRuntimeShims(page);
 
         shellResolution = await this.resolveMessagingShell(page);
         if (shellResolution) {
