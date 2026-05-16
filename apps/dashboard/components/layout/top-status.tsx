@@ -429,6 +429,13 @@ export function TopStatus() {
                   ?? p.platform.charAt(0) + p.platform.slice(1).toLowerCase();
                 const connectBusy = platformActionBusy === `${p.platform}:connect`;
                 const resetBusy = platformActionBusy === `${p.platform}:reset-session`;
+                // iMessage has no browser session — it reads chat.db
+                // locally. "Reconnect" (re-probe the DB) is the only
+                // meaningful action; "Reset session" is a browser
+                // concept that doesn't apply. Its only real failure
+                // mode is a missing macOS Full Disk Access grant, so
+                // say that instead of offering a session reset.
+                const isImessage = p.platform === "IMESSAGE";
                 return (
                   <div
                     key={p.platform}
@@ -440,6 +447,14 @@ export function TopStatus() {
                         · {p.status.toLowerCase().replace(/_/g, " ")}
                       </span>
                     </span>
+                    {isImessage ? (
+                      <span className="font-mono text-[11px] leading-snug text-ink-3">
+                        Reads Messages locally — no login. If it stays
+                        disconnected, grant the runner Full Disk Access
+                        in System Settings → Privacy &amp; Security, then
+                        retry.
+                      </span>
+                    ) : null}
                     <span className="flex items-center gap-2">
                       <button
                         type="button"
@@ -447,16 +462,20 @@ export function TopStatus() {
                         onClick={() => void runPlatformAction(p.platform, "connect")}
                         className="rounded-pill bg-ink px-3 py-1 font-mono text-[11px] text-paper transition-opacity duration-calm hover:opacity-90 disabled:opacity-50"
                       >
-                        {connectBusy ? "reconnecting…" : "Reconnect"}
+                        {connectBusy
+                          ? (isImessage ? "retrying…" : "reconnecting…")
+                          : (isImessage ? "Retry" : "Reconnect")}
                       </button>
-                      <button
-                        type="button"
-                        disabled={!!platformActionBusy}
-                        onClick={() => void runPlatformAction(p.platform, "reset-session")}
-                        className="rounded-pill border border-hairline px-3 py-1 font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-50"
-                      >
-                        {resetBusy ? "resetting…" : "Reset session"}
-                      </button>
+                      {isImessage ? null : (
+                        <button
+                          type="button"
+                          disabled={!!platformActionBusy}
+                          onClick={() => void runPlatformAction(p.platform, "reset-session")}
+                          className="rounded-pill border border-hairline px-3 py-1 font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-50"
+                        >
+                          {resetBusy ? "resetting…" : "Reset session"}
+                        </button>
+                      )}
                     </span>
                   </div>
                 );

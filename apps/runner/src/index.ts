@@ -4193,6 +4193,36 @@ async function start(): Promise<void> {
   await settingsStore.getSettings();
   scanQueue.startScheduler();
 
+  // iMessage connectivity = "can we read chat.db", not "has it
+  // scanned since boot". Without this probe iMessage sits at
+  // NOT_CONNECTED from every restart until its first scan, which
+  // lights it up in the reconnect modal as a false connection
+  // issue (and with browser-session actions that don't even apply
+  // to a local-DB platform). Probe chat.db once at boot and set
+  // the status to match reality. A genuinely missing Full Disk
+  // Access grant still leaves it NOT_CONNECTED — which is correct,
+  // and the modal handles that case with permission guidance.
+  if (runnerConfig.imessage.enabled) {
+    try {
+      const probe = new IMessageDb(runnerConfig.imessage.dbPath);
+      probe.close();
+      await prisma.platform.upsert({
+        where: { name: "IMESSAGE" },
+        update: { status: "CONNECTED", lastError: null },
+        create: { name: "IMESSAGE", status: "CONNECTED" }
+      });
+    } catch (error) {
+      await prisma.platform.upsert({
+        where: { name: "IMESSAGE" },
+        update: {
+          status: "NOT_CONNECTED",
+          lastError: error instanceof Error ? error.message : "chat.db unreadable"
+        },
+        create: { name: "IMESSAGE", status: "NOT_CONNECTED" }
+      });
+    }
+  }
+
   if (runnerConfig.imessage.enabled) {
     const watcher = createIMessageWatcher({
       dbPath: runnerConfig.imessage.dbPath,
