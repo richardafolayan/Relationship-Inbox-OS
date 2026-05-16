@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
@@ -205,6 +205,7 @@ export function TopStatus() {
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const [cancellingScan, setCancellingScan] = useState(false);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -264,6 +265,25 @@ export function TopStatus() {
   const tickerIsActive =
     ticker.kind === "scanning" || ticker.kind === "sending" || ticker.kind === "enriching";
 
+  // Cancelling a running scan is a legitimate user action — a scan
+  // can sit on a single thread for tens of seconds and the operator
+  // shouldn't have to wait it out. This is the one operator-style
+  // control kept in the v1 top bar; the rest of the kebab (restart
+  // runner, pause all, manage platforms) stays stripped.
+  const canCancelScan = ticker.kind === "scanning";
+  const onCancelScan = useCallback(async () => {
+    if (cancellingScan) return;
+    setCancellingScan(true);
+    try {
+      await apiPost("/runner/control/scan/abort", {});
+      await refreshRef.current();
+    } catch (error) {
+      console.warn("[top-status] scan cancel failed", error);
+    } finally {
+      setCancellingScan(false);
+    }
+  }, [cancellingScan]);
+
   const tickerHeading = tickerLabel(ticker);
   const tickerSub = tickerDetail(ticker);
   const tickerTone =
@@ -315,6 +335,16 @@ export function TopStatus() {
               </span>
             ) : null}
             {tickerSub ? <span className="text-ink-3">· {tickerSub}</span> : null}
+            {canCancelScan ? (
+              <button
+                type="button"
+                onClick={() => void onCancelScan()}
+                disabled={cancellingScan}
+                className="ml-1 font-mono text-[10.5px] text-ink-4 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+              >
+                {cancellingScan ? "cancelling…" : "cancel"}
+              </button>
+            ) : null}
           </span>
         </>
       ) : null}
