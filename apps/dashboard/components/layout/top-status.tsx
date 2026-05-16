@@ -17,6 +17,16 @@ import type { HealthResponse, PlatformCard } from "@/lib/types";
 const POLL_INTERVAL_MS = 5000;
 const RECENT_FRESHNESS_MS = 8000;
 
+// Proper-cased platform labels for the reconnect modal. PLATFORM_LABEL
+// in lib/risk is all-lowercase (used elsewhere for compact captions);
+// the modal wants real product casing.
+const PLATFORM_DISPLAY: Record<string, string> = {
+  LINKEDIN: "LinkedIn",
+  IMESSAGE: "iMessage",
+  INSTAGRAM: "Instagram",
+  TIKTOK: "TikTok"
+};
+
 interface SendQueueItem {
   clientSendId: string;
   threadId: string;
@@ -206,6 +216,8 @@ export function TopStatus() {
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
   const [cancellingScan, setCancellingScan] = useState(false);
+  const [reconnectOpen, setReconnectOpen] = useState(false);
+  const [platformActionBusy, setPlatformActionBusy] = useState<string | null>(null);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -258,6 +270,30 @@ export function TopStatus() {
     health?.connectedPlatforms ??
     0;
   const pip = pipToneFor(connected, total);
+  // Platforms that need operator attention. The pip becomes a button
+  // that opens a minimal reconnect modal when any are non-CONNECTED —
+  // the only recovery path a v1 user gets, since the full operator
+  // console at /platforms is intentionally unlinked. (You can still
+  // type /platforms directly for the full diagnostics.)
+  const degradedPlatforms = implemented?.filter((p) => p.status !== "CONNECTED") ?? [];
+  const hasDegraded = degradedPlatforms.length > 0;
+
+  const runPlatformAction = useCallback(
+    async (platform: string, endpoint: "connect" | "reset-session") => {
+      const key = `${platform}:${endpoint}`;
+      if (platformActionBusy) return;
+      setPlatformActionBusy(key);
+      try {
+        await apiPost(`/runner/control/platform/${endpoint}`, { platform });
+        await refreshRef.current();
+      } catch (error) {
+        console.warn(`[top-status] ${endpoint} failed for ${platform}`, error);
+      } finally {
+        setPlatformActionBusy(null);
+      }
+    },
+    [platformActionBusy]
+  );
 
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
 
@@ -299,12 +335,26 @@ export function TopStatus() {
       aria-live="polite"
       className="sticky top-0 z-30 flex h-[44px] items-center gap-3 border-b border-hairline bg-paper/95 px-6 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur"
     >
-      <span className="inline-flex items-center gap-[6px]" title={`${connected}/${total} platforms connected`}>
-        <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
-        <span className="text-ink-2">
-          {connected}/{total} connected
+      {hasDegraded ? (
+        <button
+          type="button"
+          onClick={() => setReconnectOpen(true)}
+          title={`${connected}/${total} platforms connected — click to reconnect`}
+          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2"
+        >
+          <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
+          <span className="text-ink-2 underline-offset-2 hover:underline">
+            {connected}/{total} connected
+          </span>
+        </button>
+      ) : (
+        <span className="inline-flex items-center gap-[6px]" title={`${connected}/${total} platforms connected`}>
+          <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
+          <span className="text-ink-2">
+            {connected}/{total} connected
+          </span>
         </span>
-      </span>
+      )}
 
       {tickerIsActive || ticker.kind === "send_failed" || ticker.kind === "send_succeeded" ? (
         <>
@@ -352,6 +402,78 @@ export function TopStatus() {
       <div className="ml-auto flex items-center gap-3">
         <span>{scanLabel}</span>
       </div>
+
+      {reconnectOpen ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4"
+          role="dialog"
+          aria-modal="true"
+          onClick={() => setReconnectOpen(false)}
+        >
+          <div
+            className="w-full max-w-sm space-y-4 rounded-xl border border-hairline bg-paper p-5 shadow-xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div>
+              <p className="font-display text-[15px] font-medium tracking-[-0.012em] text-ink">
+                Connection issue
+              </p>
+              <p className="mt-1 font-mono text-[11px] text-ink-3">
+                These platforms aren&apos;t connected. Reconnect, or reset the
+                session if reconnect keeps failing.
+              </p>
+            </div>
+            <div className="space-y-2">
+              {degradedPlatforms.map((p) => {
+                const label = PLATFORM_DISPLAY[p.platform]
+                  ?? p.platform.charAt(0) + p.platform.slice(1).toLowerCase();
+                const connectBusy = platformActionBusy === `${p.platform}:connect`;
+                const resetBusy = platformActionBusy === `${p.platform}:reset-session`;
+                return (
+                  <div
+                    key={p.platform}
+                    className="flex items-center justify-between gap-3 rounded-row border border-hairline bg-paper-2/40 px-3 py-2"
+                  >
+                    <span className="min-w-0 truncate text-[13px] text-ink-2">
+                      {label} ·{" "}
+                      <span className="font-mono text-[11px] text-risk-overdue">
+                        {p.status.toLowerCase().replace(/_/g, " ")}
+                      </span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-2">
+                      <button
+                        type="button"
+                        disabled={!!platformActionBusy}
+                        onClick={() => void runPlatformAction(p.platform, "connect")}
+                        className="rounded-pill bg-ink px-3 py-1 font-mono text-[11px] text-paper transition-opacity duration-calm hover:opacity-90 disabled:opacity-50"
+                      >
+                        {connectBusy ? "…" : "Reconnect"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!!platformActionBusy}
+                        onClick={() => void runPlatformAction(p.platform, "reset-session")}
+                        className="rounded-pill border border-hairline px-3 py-1 font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-50"
+                      >
+                        {resetBusy ? "…" : "Reset session"}
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setReconnectOpen(false)}
+                className="font-mono text-[11px] text-ink-3 hover:text-ink"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
