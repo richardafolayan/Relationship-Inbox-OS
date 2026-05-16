@@ -2673,27 +2673,26 @@ export class LinkedInAdapter implements PlatformAdapter {
     return this.deps.sessionManager.getManagedPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default",
-      // Chrome flags that reduce the most-checked automation
-      // signals. AutomationControlled hides navigator.webdriver +
-      // the Blink AutomationControlled feature. The rest suppress
-      // first-run UI, default-app prompts, password-saving popups,
-      // and the "you're being controlled by automated test
-      // software" infobar — all of which would otherwise either
-      // cover the page mid-scan or leak through to the DOM.
-      // Note: Playwright's CDP debugger socket is still open on
-      // localhost; that's a structural limit (would need a
-      // CDP-patched browser fork to defeat).
+      // Minimal arg set on purpose. Patchright patches the
+      // automation signals (navigator.webdriver, the
+      // AutomationControlled blink feature, CDP runtime.enable
+      // leakage) natively — passing --disable-blink-features=
+      // AutomationControlled on top is redundant AND trips Chrome's
+      // "unsupported command-line flag" banner, which is itself a
+      // visible automation tell. Site-isolation disabling
+      // (--disable-features=IsolateOrigins,site-per-process) is also
+      // dropped: real Chrome runs WITH site isolation, so disabling
+      // it is a fingerprint, not a defence. What's left is the
+      // benign launch hygiene that doesn't trip the banner and
+      // matches a normal fresh-profile start: no first-run UI, no
+      // default-browser nag, no keychain prompt (which would
+      // otherwise block the run on macOS).
       args: [
-        "--disable-blink-features=AutomationControlled",
-        "--disable-features=AutomationControlled,IsolateOrigins,site-per-process,Translate,InterestFeedContentSuggestions",
-        "--disable-infobars",
         "--no-first-run",
         "--no-default-browser-check",
         "--disable-default-apps",
-        "--disable-popup-blocking",
         "--password-store=basic",
-        "--use-mock-keychain",
-        "--disable-dev-shm-usage"
+        "--use-mock-keychain"
       ],
       runLogger: this.runLogger ?? undefined
     });
