@@ -1069,6 +1069,107 @@ app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
   res.json({ ok: true, steps: ranSteps, message: "Permissions reset. Toggle your terminal app ON for both Automation > Messages AND Accessibility, then retry the send." });
 }));
 
+// One-shot historical iMessage backfill. The recurring scan is
+// deliberately scoped to unread + the ~30 most-recent threads for
+// efficiency, so dormant conversations (e.g. someone you stopped
+// texting months ago) never enter the DB. This walks chat.db for every
+// NON-automated conversation with activity inside the window and pushes
+// each through the same idempotent syncThreadForIngest path the scanner
+// uses — so it dedupes against already-ingested rows (safe to re-run)
+// and does NOT trigger AI enrichment (that stays gated as today).
+// `dryRun` reports what would be ingested without writing.
+app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      sinceDays: z.number().int().min(1).max(4000).optional(),
+      dryRun: z.boolean().optional()
+    })
+    .parse(req.body ?? {});
+  const sinceDays = payload.sinceDays ?? 365;
+  const cutoffMs = Date.now() - sinceDays * 24 * 60 * 60 * 1000;
+
+  let db: IMessageDb;
+  try {
+    db = new IMessageDb(runnerConfig.imessage.dbPath);
+  } catch {
+    res.status(503).json({ error: "cannot open chat.db (Full Disk Access?)" });
+    return;
+  }
+
+  // listThreads already drops automated/shortcode senders and decodes
+  // lastMessageAt. 5000 comfortably exceeds the total chat count.
+  const rows = db.listThreads(5000, { unreadOnly: false });
+  const candidates = rows.filter(
+    (r) => r.lastMessageAt !== undefined && Date.parse(r.lastMessageAt) >= cutoffMs
+  );
+
+  if (payload.dryRun) {
+    res.json({
+      ok: true,
+      dryRun: true,
+      sinceDays,
+      totalNonAutomatedChats: rows.length,
+      wouldIngest: candidates.length,
+      sample: candidates.slice(0, 8).map((c) => c.displayName)
+    });
+    return;
+  }
+
+  const requestId = uuid();
+  const startedAt = Date.now();
+  const summary = { threadsIngested: 0, messagesParsed: 0, updatedThreads: 0, threadFailures: 0 };
+
+  await withPlatformControlLock("IMESSAGE", async () => {
+    let index = 0;
+    for (const r of candidates) {
+      index += 1;
+      const candidate: ThreadStub = {
+        platformThreadId: r.guid,
+        displayName: r.displayName,
+        lastMessagePreview: r.lastMessagePreview ?? "",
+        lastMessageAt: r.lastMessageAt
+      };
+      try {
+        // High maxMessages so a full year of even chatty threads is
+        // pulled; chat.db reads are cheap and the upsert is idempotent.
+        const partial = await scanQueue.syncThreadForIngest({
+          platform: "IMESSAGE",
+          candidate,
+          maxMessages: 20000,
+          requestId,
+          // Raw historical ingest: no per-thread AI (enrichment is gated;
+          // the recurring scanner does AI for active threads).
+          skipAi: true
+        });
+        summary.threadsIngested += 1;
+        summary.updatedThreads += partial.updatedThreads ?? 0;
+        summary.messagesParsed += partial.parsedMessages ?? 0;
+      } catch (error) {
+        summary.threadFailures += 1;
+        console.warn(
+          `[imessage-import] thread ${index}/${candidates.length} "${r.displayName}" failed (skipped): ${
+            error instanceof Error ? error.message : String(error)
+          }\n${error instanceof Error ? error.stack ?? "(no stack)" : ""}`
+        );
+      }
+      if (index % 25 === 0 || index === candidates.length) {
+        console.log(
+          `[imessage-import] ${index}/${candidates.length} threads · ${summary.messagesParsed} msgs · ${summary.threadFailures} failed`
+        );
+      }
+    }
+  });
+
+  res.json({
+    ok: true,
+    sinceDays,
+    requestId,
+    threadsConsidered: candidates.length,
+    ...summary,
+    durationMs: Date.now() - startedAt
+  });
+}));
+
 // Stream a Messages.app attachment (photo / voice note / video) to the
 // dashboard. Reads chat.db for the file path and serves the bytes from
 // ~/Library/Messages/Attachments. Localhost-only access (the runner
