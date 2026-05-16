@@ -2036,17 +2036,30 @@ async function resummarizeThreadById(threadId: string): Promise<
 > {
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
-    include: {
-      person: true,
-      messages: {
-        orderBy: { timestamp: "asc" },
-        take: 120
-      }
-    }
+    include: { person: true }
   });
   if (!thread) {
     return { ok: false, reason: "not_found" };
   }
+
+  // Mirror the live /data/thread view: for iMessage, merge messages
+  // across sibling threads for the same Person (chat.db splits a single
+  // human's phone vs email handles into separate chats). LinkedIn stays
+  // thread-scoped.
+  const messageThreadFilter =
+    thread.platform === "IMESSAGE"
+      ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
+      : { threadId: thread.id };
+  // Fetch the most RECENT 120 messages (desc + take) then reverse to
+  // chronological order. An `asc + take` returns the OLDEST 120 — on a
+  // long thread that starves the summariser of the live conversation and
+  // it summarises stale opening banter instead.
+  const recentMessagesDesc = await prisma.message.findMany({
+    where: messageThreadFilter,
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: 120
+  });
+  const orderedMessages = [...recentMessagesDesc].reverse();
 
   // Resummarize is driven by the operator clicking "Reassess" or by the
   // stale-summary self-heal path. Recompute needsReply from the thread's
@@ -2060,7 +2073,7 @@ async function resummarizeThreadById(threadId: string): Promise<
     displayName: thread.person.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
     previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    messages: thread.messages.map((message) => ({
+    messages: orderedMessages.map((message) => ({
       direction: message.direction as "IN" | "OUT",
       text: message.text,
       timestamp: message.timestamp.toISOString()
@@ -2117,7 +2130,10 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     include: {
       person: true,
       messages: {
-        orderBy: { timestamp: "asc" },
+        // Most RECENT 80, made chronological by the reverse below. An
+        // asc + take would feed composeInVoice the OLDEST 80 and miss
+        // the live conversation on long threads.
+        orderBy: { timestamp: "desc" },
         take: 80
       }
     }
@@ -2127,7 +2143,8 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     return;
   }
 
-  const voiceSamples = thread.messages
+  const orderedMessages = [...thread.messages].reverse();
+  const voiceSamples = orderedMessages
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
@@ -2162,7 +2179,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
-    threadMessages: thread.messages.map((m) => ({
+    threadMessages: orderedMessages.map((m) => ({
       direction: m.direction as "IN" | "OUT",
       text: m.text,
       timestamp: m.timestamp.toISOString()
@@ -2200,7 +2217,10 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
     include: {
       person: true,
       messages: {
-        orderBy: { timestamp: "asc" },
+        // Most RECENT 80, made chronological by the reverse below. An
+        // asc + take would classify off the OLDEST 80 and ignore where
+        // the thread has actually gone on long conversations.
+        orderBy: { timestamp: "desc" },
         take: 80
       }
     }
@@ -2209,11 +2229,12 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
     res.status(404).json({ error: "Thread not found" });
     return;
   }
+  const orderedMessages = [...thread.messages].reverse();
   const category = await aiService
     .classifyThreadCategory({
       platform: thread.platform as PlatformName,
       displayName: thread.person.displayName,
-      messages: thread.messages.map((m) => ({
+      messages: orderedMessages.map((m) => ({
         direction: m.direction as "IN" | "OUT",
         text: m.text,
         timestamp: m.timestamp.toISOString()
@@ -3788,7 +3809,10 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     where: { id: threadId },
     include: {
       person: true,
-      messages: { orderBy: { timestamp: "asc" }, take: 80 }
+      // Most RECENT 80, made chronological by the reverse below. An asc
+      // + take would calibrate voice off the OLDEST 80 messages and miss
+      // how the operator currently writes to this contact.
+      messages: { orderBy: { timestamp: "desc" }, take: 80 }
     }
   });
   if (!thread) {
@@ -3796,7 +3820,8 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     return;
   }
 
-  const voiceSamples = thread.messages
+  const orderedMessages = [...thread.messages].reverse();
+  const voiceSamples = orderedMessages
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
@@ -3810,7 +3835,7 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
-    threadMessages: thread.messages.map((m) => ({
+    threadMessages: orderedMessages.map((m) => ({
       direction: m.direction as "IN" | "OUT",
       text: m.text,
       timestamp: m.timestamp.toISOString()
