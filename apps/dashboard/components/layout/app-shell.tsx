@@ -34,11 +34,32 @@ function nextAutoScanDelayMs(): number {
 // weekday constraint and a daytime window. The user-facing quiet
 // hours toggle still wins — turning quiet hours off doesn't bypass
 // active-hours.
-const AUTO_SCAN_ACTIVE_HOUR_START = 8;  // 08:00
-const AUTO_SCAN_ACTIVE_HOUR_END = 19;   // 19:00 (exclusive)
+// Configurable so this doesn't become a "why isn't it scanning?"
+// debug session for anyone who works different hours, a different
+// timezone, or actually uses LinkedIn on weekends. These are
+// NEXT_PUBLIC_* because this runs client-side (Next only exposes
+// NEXT_PUBLIC_ vars to the browser bundle). Hours are local-clock
+// 24h ints; end is exclusive. Set NEXT_PUBLIC_AUTO_SCAN_WEEKENDS=1
+// to also scan Sat/Sun. Bad/missing values fall back to the
+// 08:00-19:00 weekday default.
+function parseHour(raw: string | undefined, fallback: number): number {
+  const n = raw === undefined ? NaN : Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 24 ? n : fallback;
+}
+const AUTO_SCAN_ACTIVE_HOUR_START = parseHour(
+  process.env.NEXT_PUBLIC_AUTO_SCAN_HOUR_START,
+  8
+);
+const AUTO_SCAN_ACTIVE_HOUR_END = parseHour(
+  process.env.NEXT_PUBLIC_AUTO_SCAN_HOUR_END,
+  19
+);
+const AUTO_SCAN_INCLUDE_WEEKENDS =
+  process.env.NEXT_PUBLIC_AUTO_SCAN_WEEKENDS === "1" ||
+  process.env.NEXT_PUBLIC_AUTO_SCAN_WEEKENDS === "true";
 function isWithinActiveHours(now: Date = new Date()): boolean {
   const day = now.getDay(); // 0 = Sunday, 6 = Saturday
-  if (day === 0 || day === 6) return false;
+  if (!AUTO_SCAN_INCLUDE_WEEKENDS && (day === 0 || day === 6)) return false;
   const hour = now.getHours();
   return hour >= AUTO_SCAN_ACTIVE_HOUR_START && hour < AUTO_SCAN_ACTIVE_HOUR_END;
 }

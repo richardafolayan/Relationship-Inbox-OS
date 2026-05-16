@@ -188,7 +188,7 @@ Sending is always user-triggered. There's no autonomous send loop. The runner ca
 | `PERSONAL_CHROME_PROFILE_NAME` | `Richard Afolayan` | Display label used in diagnostics. |
 | `CONNECT_OPERATION_TIMEOUT_MS` | `25000` | Connect timeout for isolated mode. |
 | `CONNECT_OPERATION_TIMEOUT_MS_PERSONAL` | `90000` | Connect timeout for personal mode. |
-| `LINKEDIN_SCAN_MAX_THREADS` | `200` | Max threads collected in deep LinkedIn pass. |
+| `LINKEDIN_SCAN_MAX_THREADS` | `50` | Max threads collected in deep LinkedIn pass. Lowered from 200 to stay out of the volume-detection danger zone; tune toward 10-20 if your realistic daily ceiling is lower. |
 | `LINKEDIN_SCAN_STABLE_ITERATIONS` | `3` | Stop after this many no-growth iterations. |
 | `LINKEDIN_SCAN_SCROLL_WAIT_MS` | `700` | Wait between scroll iterations. |
 | `LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS` | `8` | Max message pane backfill attempts per thread. |
@@ -201,6 +201,15 @@ Sending is always user-triggered. There's no autonomous send loop. The runner ca
 | `ADMIN_RESET_ENABLED` | unset | Optional explicit enable in non-dev environments. |
 | `NEXT_PUBLIC_DISABLE_AUTOSCAN` | `1` | Dashboard autoscan gate. |
 | `NEXT_PUBLIC_LINKEDIN_DEV_DISABLE_AUTOSCAN` | `1` | Legacy dashboard autoscan disable flag. |
+| `NEXT_PUBLIC_AUTO_SCAN_HOUR_START` | `8` | Local-clock hour (0-24) auto-scan is allowed to start. |
+| `NEXT_PUBLIC_AUTO_SCAN_HOUR_END` | `19` | Local-clock hour (0-24, exclusive) auto-scan stops. |
+| `NEXT_PUBLIC_AUTO_SCAN_WEEKENDS` | unset | `1`/`true` to allow auto-scan on Sat/Sun (default: weekdays only). |
+| `ENRICH_AUTO_ENABLED` | unset | `1`/`true` to re-enable background profile enrichment (on-scan auto-enqueue + hourly tick). Off by default — manual `/control/person/:id/enrich` still works regardless. |
+| `ENRICH_DAILY_CAP` | `10` | Max profile-enrichment visits per rolling 24h. Lowered from 40 — profile visits are the closest thing to a scraping signature. |
+| `ENRICH_PACE_MIN_MS` | `60000` | Min gap between enrichment profile visits. |
+| `ENRICH_PACE_MAX_MS` | `180000` | Max gap between enrichment profile visits (randomised). |
+| `ENRICH_BATCH_MAX` | `6` | Max profiles enriched per batch before a long idle. |
+| `ENRICH_REFRESH_DAYS` | `30` | Re-enrich a person's profile if older than this. |
 
 ### Runtime settings (`/settings` page)
 

@@ -344,10 +344,11 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     selectorDir: resolve(projectRoot, "packages", "core", "selectors"),
     browserProfile: resolveBrowserProfileConfig(env),
     linkedInScan: {
-      // Lowered from 200 → 50: a personal account reading 200 unread
-      // threads in one go is a volume signature; 50 covers a normal
-      // catch-up while staying inside the noise floor of a real user
-      // checking their messages.
+      // Lowered from 200 → 50: 200 unread threads opened in one go is
+      // a recruiter-tool volume signature. 50 is no longer in the
+      // danger zone, but it's still on the high end of what a person
+      // casually clicks through in one sitting — if your realistic
+      // daily ceiling is 10-20, tune this down further.
       maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 50),
       stableIterations: parseIntOrDefault(env.LINKEDIN_SCAN_STABLE_ITERATIONS, 3),
       scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 1000),
