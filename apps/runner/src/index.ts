@@ -854,15 +854,27 @@ app.get("/health", asyncRoute(async (_req, res) => {
   // "in flight" — counting it sticks the banner on for hours after every
   // failed run and trains the operator to mash the cancel button.
   const now = new Date();
+  // When auto-enrichment is disabled the queue is inert — nothing
+  // drains it. Counting raw PENDING/RUNNING rows would surface stale
+  // leftovers (and zombie RUNNING rows from a killed runner that
+  // never got recovered, because recovery only runs inside start()).
+  // That lit up "Enriching 13 profiles · 1 in flight" in the UI for
+  // work that will never happen. Report the queue as empty when it
+  // isn't running; the DB rows stay harmless and the queue's own
+  // start() recovery picks them up if ENRICH_AUTO_ENABLED is set.
   const [platforms, enrichmentPending, enrichmentRunning] = await Promise.all([
     prisma.platform.findMany(),
-    prisma.enrichmentJob.count({
-      where: {
-        status: "PENDING",
-        OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
-      }
-    }),
-    prisma.enrichmentJob.count({ where: { status: "RUNNING" } })
+    autoEnrichmentEnabled
+      ? prisma.enrichmentJob.count({
+          where: {
+            status: "PENDING",
+            OR: [{ nextAttemptAt: null }, { nextAttemptAt: { lte: now } }]
+          }
+        })
+      : Promise.resolve(0),
+    autoEnrichmentEnabled
+      ? prisma.enrichmentJob.count({ where: { status: "RUNNING" } })
+      : Promise.resolve(0)
   ]);
   const lastScanAt = platforms
     .map((platform) => platform.lastScanAt)
