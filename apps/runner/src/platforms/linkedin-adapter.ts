@@ -1,4 +1,4 @@
-import type { ElementHandle, Locator, Page } from "patchright";
+import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type {
@@ -2170,6 +2170,13 @@ export class LinkedInAdapter implements PlatformAdapter {
   private cookieBridge: ChromeCookieBridge | null = null;
 
   /**
+   * Contexts that already have the __name runtime shim init-script
+   * registered, so we don't stack duplicate init scripts on a reused
+   * persistent context.
+   */
+  private readonly shimmedContexts = new WeakSet<BrowserContext>();
+
+  /**
    * Epoch-ms of the last successful cookie-bridge sync. Re-syncing on every
    * getPage() call would re-hit the Keychain + copy the Cookies DB many
    * times per scan; the session token is long-lived so a short throttle is
@@ -2740,7 +2747,42 @@ export class LinkedInAdapter implements PlatformAdapter {
       runLogger: this.runLogger ?? undefined
     });
     await this.ensureSessionCookies(page);
+    await this.ensurePageRuntimeShims(page);
     return page;
+  }
+
+  /**
+   * tsx/esbuild can inject `__name(...)` helper calls into functions we
+   * hand to page.evaluate (the `keepNames` transform that preserves
+   * Function.name). The browser has no `__name`, so any such evaluate
+   * throws `ReferenceError: __name is not defined` — which silently broke
+   * the streaming-row snapshot once the auth wall was lifted. Define a
+   * harmless identity shim in the page so leaked references resolve.
+   *
+   * The shim is passed as a STRING (not a function) on purpose: a function
+   * literal would itself be run through esbuild and could re-introduce the
+   * very `__name` reference we're trying to define. Registered as an
+   * init-script (covers every future navigation/frame, once per context)
+   * and also evaluated immediately (covers the already-loaded document).
+   * Best-effort: a failure here is no worse than the prior state.
+   */
+  private async ensurePageRuntimeShims(page: Page): Promise<void> {
+    const shimSource =
+      "(()=>{var g=globalThis;" +
+      "if(typeof g.__name==='undefined'){" +
+      "g.__defProp=Object.defineProperty;" +
+      "g.__name=function(t){return t;};}})()";
+    try {
+      const context = page.context();
+      if (!this.shimmedContexts.has(context)) {
+        await context.addInitScript(shimSource);
+        this.shimmedContexts.add(context);
+      }
+      await page.evaluate(shimSource);
+    } catch {
+      // Non-fatal: worst case the original __name error resurfaces, which
+      // is no worse than before this shim existed.
+    }
   }
 
   /**
@@ -5611,6 +5653,21 @@ export class LinkedInAdapter implements PlatformAdapter {
       rowRootSelector: string;
       rowClickSelector: string;
     };
+    // esbuild (tsx `keepNames`) rewrites the named inner arrows below into
+    // `__name(fn, "fn")` and references a module-level `__name` helper that
+    // does NOT travel with the serialized callback — so the evaluate throws
+    // `ReferenceError: __name is not defined` in the page. Define an
+    // identity `globalThis.__name` in the SAME frame world immediately
+    // before the real evaluate. Passed as a STRING so esbuild can't rewrite
+    // the shim itself; the unqualified `__name` refs then resolve to the
+    // global. Same elementHandle == same frame, no navigation between, so
+    // this is deterministic regardless of Patchright's init-script handling.
+    await listRoot
+      .evaluate(
+        "globalThis.__name=globalThis.__name||function(n){return n;};" +
+          "globalThis.__defProp=globalThis.__defProp||Object.defineProperty;"
+      )
+      .catch(() => undefined);
     return listRoot.evaluate((root: Element, input: StreamingSnapshotEvalInput) => {
       const { rowRootSelector, rowClickSelector } = input;
       const clean = (value: string | null | undefined): string =>
