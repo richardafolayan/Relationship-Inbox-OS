@@ -501,27 +501,51 @@ export class IMessageDb {
   private fetchReactionsByMessageGuids(messageGuids: string[]): Map<string, IMessageReaction[]> {
     const map = new Map<string, IMessageReaction[]>();
     if (messageGuids.length === 0) return map;
-    const placeholders = messageGuids.map(() => "?").join(",");
-    const rows = this.db
-      .prepare(
-        `SELECT
-           m.associated_message_guid AS parentGuidRaw,
-           m.associated_message_type AS associatedType,
-           m.is_from_me              AS isFromMe,
-           m.date                    AS date
-         FROM message m
-         WHERE m.associated_message_type BETWEEN 2000 AND 3005
-           AND m.associated_message_guid IN (${messageGuids.map(() => "?").join(",")}
-                                              ${placeholders ? "," : ""}
-                                              ${messageGuids.map(() => "?").join(",")})
-         ORDER BY m.date ASC`
-      )
-      .all(
-        // associated_message_guid is stored prefixed: "p:0/<guid>" or "bp:<guid>"
-        // — bind both forms so we don't miss either.
-        ...messageGuids.map((g) => `p:0/${g}`),
-        ...messageGuids.map((g) => `bp:${g}`)
-      ) as Array<{ parentGuidRaw: string; associatedType: number; isFromMe: number; date: number | bigint | null }>;
+
+    // Each guid is bound TWICE (the "p:0/<guid>" and "bp:<guid>" prefix
+    // forms), so a thread with N messages needs 2N bound parameters. A
+    // multi-year heavy thread blows SQLite's SQLITE_MAX_VARIABLE_NUMBER
+    // ("too many SQL variables") and the whole thread silently dropped on
+    // import. Chunk the guid list (400 -> 800 params/query, safe even on
+    // the oldest 999-limit SQLite) and accumulate raw rows; the
+    // aggregation below is order-independent (it keeps the latest row per
+    // reaction key via lastDate) so running it once over the combined
+    // rows is identical to the un-chunked result.
+    const CHUNK = 400;
+    const rows: Array<{
+      parentGuidRaw: string;
+      associatedType: number;
+      isFromMe: number;
+      date: number | bigint | null;
+    }> = [];
+    for (let i = 0; i < messageGuids.length; i += CHUNK) {
+      const chunk = messageGuids.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      const chunkRows = this.db
+        .prepare(
+          `SELECT
+             m.associated_message_guid AS parentGuidRaw,
+             m.associated_message_type AS associatedType,
+             m.is_from_me              AS isFromMe,
+             m.date                    AS date
+           FROM message m
+           WHERE m.associated_message_type BETWEEN 2000 AND 3005
+             AND m.associated_message_guid IN (${placeholders},${placeholders})
+           ORDER BY m.date ASC`
+        )
+        .all(
+          // associated_message_guid is stored prefixed: "p:0/<guid>" or
+          // "bp:<guid>" — bind both forms so we don't miss either.
+          ...chunk.map((g) => `p:0/${g}`),
+          ...chunk.map((g) => `bp:${g}`)
+        ) as Array<{
+          parentGuidRaw: string;
+          associatedType: number;
+          isFromMe: number;
+          date: number | bigint | null;
+        }>;
+      rows.push(...chunkRows);
+    }
 
     type ReactionKey = string; // `${kind}|${direction}`
     type Aggregator = Map<ReactionKey, { reaction: IMessageReaction; lastDate: number }>;
