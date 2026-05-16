@@ -2682,17 +2682,23 @@ export class LinkedInAdapter implements PlatformAdapter {
       // visible automation tell. Site-isolation disabling
       // (--disable-features=IsolateOrigins,site-per-process) is also
       // dropped: real Chrome runs WITH site isolation, so disabling
-      // it is a fingerprint, not a defence. What's left is the
-      // benign launch hygiene that doesn't trip the banner and
-      // matches a normal fresh-profile start: no first-run UI, no
-      // default-browser nag, no keychain prompt (which would
-      // otherwise block the run on macOS).
+      // it is a fingerprint, not a defence.
+      //
+      // Deliberately NOT passing --password-store=basic /
+      // --use-mock-keychain. On macOS Chrome encrypts cookie values
+      // (including LinkedIn's li_at auth cookie) with a key held in
+      // the login Keychain as "Chrome Safe Storage". The mirrored
+      // profile's cookies were encrypted by real Chrome with that
+      // key; forcing a mock/basic keychain makes the launched browser
+      // derive a DIFFERENT key, so it cannot decrypt the inherited
+      // session and LinkedIn drops to the login page on every launch.
+      // We launch the user's real signed Chrome, which already owns
+      // that Keychain item, so there is no recurring prompt (at most
+      // a one-time "Always Allow"). Real keychain == session persists.
       args: [
         "--no-first-run",
         "--no-default-browser-check",
-        "--disable-default-apps",
-        "--password-store=basic",
-        "--use-mock-keychain"
+        "--disable-default-apps"
       ],
       runLogger: this.runLogger ?? undefined
     });
