@@ -12,6 +12,12 @@ interface LaunchPersistentContextOptions {
   viewport: null;
   args?: string[];
   channel?: string;
+  // Playwright/Patchright default this to false, which injects
+  // --no-sandbox and shows Chrome's "unsupported command-line flag"
+  // infobar — both are loud automation tells. Real Chrome runs
+  // sandboxed; we force it on. (No Docker/CI sandbox constraint here
+  // — this runs on the operator's macOS machine.)
+  chromiumSandbox?: boolean;
 }
 
 interface LaunchPersistentContext {
@@ -66,7 +72,11 @@ export async function launchPersistentContextForPlatform(input: {
   const baseOptions: LaunchPersistentContextOptions = {
     headless: input.headless,
     viewport: null,
-    args: baseArgs
+    args: baseArgs,
+    // Run the real Chrome sandbox so we don't ship --no-sandbox (and
+    // its visible infobar). Applies to both isolated and personal
+    // launches via the personalOptions spread below.
+    chromiumSandbox: true
   };
 
   if (input.browserProfile.mode !== "personal") {
