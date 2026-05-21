@@ -125,7 +125,7 @@ export function PilotFeedbackModal() {
           <p className="m-0 text-[13px] leading-[1.55] text-ink-2">
             {isBug
               ? "Describe what went wrong. The context at the bottom is filled in for you — no message content is included."
-              : "Tell Richard where this helped, felt wrong, or felt too AI. Edit the notes below, then copy them."}
+              : "Note where this helped, felt wrong, or felt too AI. Edit the notes below, then copy them."}
           </p>
 
           <textarea
@@ -171,8 +171,8 @@ export function PilotFeedbackModal() {
 
         <footer className="border-t border-hairline px-5 py-3">
           <p className="m-0 text-[11.5px] leading-[1.5] text-ink-3">
-            Nothing here is sent automatically. Copy the text and share it with Richard yourself —
-            only what you&apos;re comfortable sharing.
+            Nothing here is sent automatically. Copy the text and send it to whoever shared this
+            pilot with you — only what you&apos;re comfortable sharing.
           </p>
         </footer>
       </div>

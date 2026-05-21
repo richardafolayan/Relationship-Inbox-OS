@@ -8,8 +8,8 @@ people — so honest reactions are worth far more than polite ones.
 
 - Use it for **about one week**.
 - **Don't force it.** Use it when you actually need to reply to someone.
-- Tell Richard when it **helps**.
-- Tell Richard when it feels **annoying, wrong, or too AI**.
+- Note when it **helps**.
+- Note when it feels **annoying, wrong, or too AI**.
 - **Don't be polite.** Blunt feedback is the most useful kind.
 
 ## What the app is for
@@ -38,7 +38,7 @@ to send it.
 - Don't worry about scale, teams, or "what if 1000 people used this".
 - Don't stress-test it. Use it like a normal person with real messages.
 
-## What Richard is trying to learn
+## What this pilot is trying to learn
 
 - Does the core loop — open, understand, see what matters, reply — feel calm?
 - Do the action items catch the things you'd actually need to address?
@@ -49,8 +49,8 @@ to send it.
 
 - In the app: the **Feedback** button in the sidebar (on every page), or
   **Settings → Pilot → Share feedback**.
-- It opens a short set of questions you can copy and send to Richard
-  however you like — iMessage, WhatsApp, a DM, whatever's easiest.
+- It opens a short set of questions you can copy and send to whoever
+  shared this pilot with you — iMessage, WhatsApp, a DM, whatever's easiest.
 
 ## How to report a bug
 
@@ -58,7 +58,7 @@ to send it.
   **Settings → Pilot → Report a bug**.
 - It gives you a template asking what you were doing, what went wrong, and
   what you expected. The page name and time are filled in automatically.
-- Copy it and send it to Richard.
+- Copy it and send it to whoever shared this pilot with you.
 
 ## Privacy — please read
 
