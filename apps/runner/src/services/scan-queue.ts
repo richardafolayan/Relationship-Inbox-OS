@@ -2977,7 +2977,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // Phase 2: track who sent the most recent message + its text, so the
         // inbox-row preview reflects the latest of either party. Without
         // these, lastMessagePreview only tracked the latest INBOUND and went
-        // stale the moment Richard replied.
+        // stale the moment the operator replied.
         lastMessageDirection: lastMessage?.direction ?? thread.lastMessageDirection,
         lastMessageText: lastMessage?.text ?? thread.lastMessageText,
         // Phase 3: only write when AI returned a confident classification.
