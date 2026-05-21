@@ -281,6 +281,31 @@ export interface AiService {
     notes?: string | null;
     tags?: string[];
   }): Promise<{ answer: string }>;
+  /**
+   * Optional triage of a pilot bug / feedback report. Turns the tester's
+   * own words plus safe metadata into a short developer summary, a likely
+   * app area, a severity, and repro steps. Operates ONLY on the typed
+   * report and metadata — never on screenshots or message content.
+   * Returns null when the AI service is unavailable; the raw report is
+   * always kept regardless.
+   */
+  summarisePilotReport(input: {
+    type: string;
+    title: string;
+    description: string;
+    expected: string;
+    meta: Record<string, unknown>;
+  }): Promise<PilotReportTriage | null>;
+}
+
+export interface PilotReportTriage {
+  /** 1-2 sentence developer-facing summary. */
+  summary: string;
+  /** Likely area of the app, e.g. "Thread page" or "LinkedIn scan". */
+  area: string;
+  severity: "low" | "medium" | "high";
+  /** Short ordered repro steps. Empty when the report is not a bug. */
+  repro: string[];
 }
 
 export interface FriendshipSummaryOutput {
