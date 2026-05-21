@@ -1,4 +1,4 @@
-# Pilot Feedback — Google Apps Script
+# Pilot Feedback: Google Apps Script
 
 The in-app feedback modal posts a report to the **local runner**, and the
 runner forwards it to a **Google Apps Script web app**. The script writes a
@@ -11,8 +11,8 @@ dashboard modal ──▶ runner /control/pilot-feedback ──▶ Apps Script w
 ```
 
 The shared secret lives only in the runner's `.env` and in the script's
-properties — it is never in browser code. Reports never contain message
-content. This is a deliberately small, pilot-only intake — no database, no
+properties. It is never in browser code. Reports never contain message
+content. This is a deliberately small, pilot-only intake: no database, no
 dashboard, no auto-submit.
 
 ## One-time setup
@@ -29,16 +29,16 @@ dashboard, no auto-submit.
    ```
 
    Note the **first six columns are the only ones the status endpoint
-   reads** — so screenshots and descriptions can never leak into the
+   reads**, so screenshots and descriptions can never leak into the
    "Recent reports" view.
 2. **Create a Drive folder** for screenshots. Keep it private to you.
 3. **New Apps Script project** (script.google.com → New project). Paste the
    [script below](#the-script).
-4. **Project Settings → Script properties** — add three:
-   - `SECRET` — any long random string. It must match
+4. **Project Settings → Script properties**, add three:
+   - `SECRET`: any long random string. It must match
      `PILOT_FEEDBACK_SECRET` in the app's `.env`.
-   - `SHEET_ID` — from the Sheet URL (`/spreadsheets/d/<SHEET_ID>/edit`).
-   - `DRIVE_FOLDER_ID` — from the folder URL (`/folders/<DRIVE_FOLDER_ID>`).
+   - `SHEET_ID`: from the Sheet URL (`/spreadsheets/d/<SHEET_ID>/edit`).
+   - `DRIVE_FOLDER_ID`: from the folder URL (`/folders/<DRIVE_FOLDER_ID>`).
 5. **Deploy → New deployment → Web app.** Execute as **Me**; Who has access
    **Anyone with the link** (the secret is what actually gates it). Copy the
    `/exec` URL.
@@ -50,7 +50,7 @@ dashboard, no auto-submit.
    PILOT_FEEDBACK_STATUS_URL=https://script.google.com/macros/s/AKfy.../exec
    ```
 
-   The webhook and status URL are the same `/exec` URL — `doPost` handles
+   The webhook and status URL are the same `/exec` URL. `doPost` handles
    submissions, `doGet` handles the status read.
 
 Re-deploy the web app after any script change (Deploy → Manage deployments
@@ -60,7 +60,7 @@ Re-deploy the web app after any script change (Deploy → Manage deployments
 
 ```javascript
 /**
- * Relationship Inbox OS — pilot feedback intake.
+ * Relationship Inbox OS: pilot feedback intake.
  * doPost: append a report row (+ optional screenshot to Drive).
  * doGet:  return recent reports (safe columns only) for the in-app view.
  */
@@ -169,7 +169,7 @@ function json_(obj) {
 - **Secret check.** Both handlers reject anything without the matching
   `SECRET`. Apps Script `doPost` cannot read request headers, so the runner
   sends the secret as a body field; `doGet` takes it as a `?secret=` query
-  parameter. The runner adds both — the browser never sees either.
+  parameter. The runner adds both, the browser never sees either.
 - **No message content.** The runner only ever forwards the tester's typed
   fields plus safe metadata. There is no field in the payload through which
   conversation text could arrive.

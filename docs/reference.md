@@ -18,7 +18,7 @@ front page.
 ## Configuration
 
 All configuration is environment variables. **`.env.example` is the source
-of truth** — every variable is listed and commented there. Copy it to `.env`
+of truth**: every variable is listed and commented there. Copy it to `.env`
 and fill in what you need:
 
 ```bash
@@ -33,12 +33,12 @@ a working default. The variables worth understanding are below.
 
 `BROWSER_PROFILE_MODE` decides how the runner gets a browser session.
 
-- **`personal`** — the runner mirrors your real Chrome profile and reuses
+- **`personal`**: the runner mirrors your real Chrome profile and reuses
   the LinkedIn session you are already signed into. This is the recommended
   mode, and the default for the student pilot: a genuine signed-in Chrome
   profile is the gentlest path for LinkedIn's automation detection. It is
   configured by the `PERSONAL_CHROME_*` variables in `.env.example`.
-- **`isolated`** — the runner launches its own clean browser context and you
+- **`isolated`**: the runner launches its own clean browser context and you
   sign in inside it. Simpler to set up, but a fresh automated browser is a
   stronger bot signal. Use it as a fallback.
 
@@ -46,26 +46,26 @@ a working default. The variables worth understanding are below.
 isolated context if the Chrome profile is locked or unavailable.
 
 Keep the headless browser **off** (the Settings toggle, off by default). A
-visible browser — run offscreen — keeps a full human fingerprint; headless
+visible browser (run offscreen) keeps a full human fingerprint; headless
 is one of the strongest bot signals.
 
 ## AI providers
 
 `AI_PROVIDER` selects the LLM provider: `openai` (default), `glm` (Z.AI), or
 `gemini`. Each has its own key and model variable in `.env.example`. The
-provider can also be switched at runtime, and AI can be turned off entirely
-— summaries, action items and drafts simply stop being generated.
+provider can also be switched at runtime, and AI can be turned off entirely.
+Summaries, action items and drafts simply stop being generated.
 
 ## Settings page
 
 The v1 Settings page is deliberately small. It has:
 
-- **Auto-scan** — pull new messages on a cadence.
-- **Quiet hours** — mute the attention dot and pause auto-scan late at night.
-- **Headless browser** — leave off (see [Browser modes](#browser-modes)).
-- **Your reply style** — the voice/identity profile the AI uses, plus the
+- **Auto-scan**: pull new messages on a cadence.
+- **Quiet hours**: mute the attention dot and pause auto-scan late at night.
+- **Headless browser**: leave off (see [Browser modes](#browser-modes)).
+- **Your reply style**: the voice/identity profile the AI uses, plus the
   **AI help level** (memory only / writing support / full drafts).
-- **Pilot** — feedback / bug-report shortcuts and the welcome card.
+- **Pilot**: feedback / bug-report shortcuts and the welcome card.
 
 Operator-console knobs from earlier versions (scan thresholds, model
 pickers, danger-zone resets) were removed from the UI; they live as
@@ -90,7 +90,7 @@ Single app: `npm run dev:dashboard`, `npm run dev:runner`.
 The runner (Express) exposes routes under `/control/*` (actions), `/data/*`
 (reads), and `/admin/*` (token-guarded). The dashboard reaches them through
 proxied `/runner/...` paths. The route definitions live in
-`apps/runner/src/index.ts` — treat that file as the API's source of truth
+`apps/runner/src/index.ts`: treat that file as the API's source of truth
 rather than a hand-maintained list here.
 
 Sending is always user-triggered. The runner can scan, classify, draft,

@@ -45,7 +45,7 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
 const SORT_MODES: { key: SortMode; label: string }[] = [
   { key: "oldest", label: "oldest wait" },
   { key: "recent", label: "most recent" },
-  { key: "name", label: "name A–Z" }
+  { key: "name", label: "name A-Z" }
 ];
 
 const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {

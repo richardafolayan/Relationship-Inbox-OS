@@ -1,9 +1,9 @@
 # Current Product Direction
 
-_Living document — keep this updated as the direction changes. Last updated: 2026-05-21._
+_Living document. Keep this updated as the direction changes. Last updated: 2026-05-21._
 
-Relationship Inbox OS is being prepared for a small 3–5 student pilot. It should
-feel like a calm place to reply properly — not a dashboard, CRM, marketing tool,
+Relationship Inbox OS is being prepared for a small 3-5 student pilot. It should
+feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
 analytics console, or AI ghostwriter.
 
 The current baseline is `v1/strip-back-pr1`.
@@ -35,9 +35,9 @@ Do not build any of these unless explicitly instructed:
 
 ## Build next
 
-Stop adding core product features. Prepare and run the 3–5 student pilot.
+Stop adding core product features. Prepare and run the 3-5 student pilot.
 
-Only build small operational improvements that reduce pilot friction — for
+Only build small operational improvements that reduce pilot friction, for
 example direct feedback submission, install/readme clarity, or setup hardening.
 
 ---

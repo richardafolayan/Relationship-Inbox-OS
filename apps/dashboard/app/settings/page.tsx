@@ -119,7 +119,7 @@ export default function SettingsPage() {
           desc="After 22:00, mute the attention dot and pause auto-scan."
           trailing={
             <div className="flex items-center gap-[10px]">
-              <span className="font-mono text-[11px] text-ink-3">22:00–06:00</span>
+              <span className="font-mono text-[11px] text-ink-3">22:00-06:00</span>
               <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
             </div>
           }
@@ -129,7 +129,7 @@ export default function SettingsPage() {
       <SettingsGroup head="Browser">
         <SettingRow
           name="Headless browser"
-          desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you AND keep a full human fingerprint. Turn on only for CI/speed — headless is one of the strongest bot signals and is far more detectable for LinkedIn."
+          desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you AND keep a full human fingerprint. Turn on only for CI/speed. Headless is one of the strongest bot signals and is far more detectable for LinkedIn."
           trailing={
             <div className="flex items-center gap-[10px]">
               <span className="font-mono text-[11px] text-ink-3">
