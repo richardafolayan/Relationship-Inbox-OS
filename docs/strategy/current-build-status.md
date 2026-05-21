@@ -16,7 +16,7 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 - User voice / identity setup.
 - Student pilot feedback loop.
 - Bug-hunt hardening: live fixes cherry-picked onto v1.
-- Slimmed README, pilot guides, and GitHub feedback flow.
+- Slimmed README, pilot guides, and the in-app feedback intake.
 
 ## Next
 
