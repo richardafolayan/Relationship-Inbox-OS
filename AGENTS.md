@@ -2,6 +2,40 @@
 
 Guidance for AI coding agents (Claude Code, remote agents, etc.) working in this repo.
 
+## Current product direction
+
+Relationship Inbox OS is being prepared for a small 3–5 student pilot. It should
+feel like a calm place to reply properly — not a dashboard, CRM, marketing tool,
+analytics console, or AI ghostwriter.
+
+Product principles:
+
+- Help the user understand what they need to reply to.
+- Show what the other person said and what still needs to be addressed.
+- Keep the user writing in their own words.
+- Full AI drafts stay optional, never the default.
+- Sending is always user-triggered.
+- Never auto-include private message content in feedback or bug reports.
+- Keep the UI calm and low-surface-area.
+
+Live, volatile context lives outside this file — keep it there, not here:
+
+- [`docs/strategy/current-product-direction.md`](docs/strategy/current-product-direction.md) — product direction and the "do not build next" list.
+- [`docs/strategy/current-build-status.md`](docs/strategy/current-build-status.md) — current branch, commit, and build state.
+- [`docs/handoffs/`](docs/handoffs/) — dated point-in-time snapshots; archives, not live strategy.
+
+## Before building
+
+Before implementing anything, state:
+
+1. What is already solved.
+2. Which branch/commit the work is based on.
+3. Whether it can run in parallel or must be sequential.
+4. Which high-conflict files it touches.
+5. Whether the change helps the student pilot directly.
+
+If the task does not help the student pilot directly, pause and say so before building.
+
 ## Git branch naming
 
 - Never create branches named `claude/<random-words>`.
