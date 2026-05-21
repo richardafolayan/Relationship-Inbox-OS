@@ -71,12 +71,13 @@ directly. Otherwise, ignore it.
 
 ## How to tell me something is wrong
 
-Use the **Feedback** button at the bottom of the sidebar (on every page):
+Use the **Feedback** button at the bottom of the sidebar (on every page),
+or the buttons in the **Pilot** section of **Settings**:
 
 - **Report a bug**: for something broken.
 - **Share feedback**: for how it felt to use.
 
-Either one lets you **Open a GitHub issue** (it pre-fills a form you review
-and submit yourself, nothing is sent automatically), or **Copy** the notes
-to send me directly if you would rather not use GitHub. It never includes
-your message content.
+Fill in the short form and press **Submit report**. You will get a
+confirmation with a report number. If submitting fails, your text stays in
+the form, so use the **Copy report** button and send it to me directly.
+Reports never include your message content.

@@ -52,24 +52,27 @@ to send it.
 
 ## How to give feedback
 
-- In the app: the **Feedback** button in the sidebar (on every page), or
-  **Settings → Pilot → Share feedback**.
-- It opens a short set of questions. From there you can either:
-  - **Open a GitHub issue**: it pre-fills a feedback form; you read it and
-    click Create yourself. Nothing is posted automatically. (Easiest if you
-    have a GitHub account, ask me if you'd like to be added to the repo.)
-  - **Copy** the notes and send them to whoever shared this pilot with you:
-    iMessage, WhatsApp, a DM, whatever's easiest.
+- In the app: the **Feedback** button at the bottom of the sidebar (on
+  every page), or **Settings → Pilot → Share feedback**.
+- A short form opens. Pick **Feedback**, give it a title, and tell me what
+  you noticed in plain English. There is a box for what you expected, and
+  you can add a screenshot if it helps.
+- Press **Submit report**. You will see a confirmation with a report
+  number, and that is it. Nothing else is needed from you.
+- If submitting ever fails, your text stays in the form and a **Copy
+  report** button appears. Copy it and send it to whoever shared this pilot
+  with you: iMessage, WhatsApp, a DM, whatever is easiest.
 
 ## How to report a bug
 
-- In the app: **Feedback button → Report a bug**, or
+- In the app: the **Feedback** button, then pick **Something's broken**, or
   **Settings → Pilot → Report a bug**.
-- It gives you a template asking what you were doing, what went wrong, and
-  what you expected. Safe context (the page, app version, time) is filled in
-  for you, no message content.
-- Then **Open a GitHub issue** (a pre-filled form you submit yourself) or
-  **Copy** it and send it over directly.
+- Tell me what you were doing, what went wrong, and what you expected
+  instead. Add a screenshot if you can.
+- Safe context (the page you were on, the app version, the time) is added
+  for you. Your messages are never included.
+- Press **Submit report**. If it fails, use the **Copy report** button and
+  send it to me directly.
 
 ## Privacy: please read
 
@@ -77,6 +80,8 @@ to send it.
 - **AI replies are optional.** You can ignore them entirely.
 - Feedback and bug reports **do not include your message content**, only
   what you choose to type. Share only what you're comfortable sharing.
+- A screenshot you attach may show private messages. Check or blur anything
+  sensitive first. The app asks you to confirm you have.
 - **Don't connect any account you're uncomfortable using** with an early
   build. Use it with conversations that are fine to test against.
 - There is no tracking and no analytics. The app runs on the machine it's
