@@ -1,89 +1,211 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
-import { Bug, Check, Copy, Github, MessageSquareText, X } from "lucide-react";
+import { Check, ChevronLeft, Copy, ExternalLink, ImageUp, Loader2, X } from "lucide-react";
+import { apiGet, apiPost } from "@/lib/api";
 import {
-  buildBugReportTemplate,
-  buildFeedbackTemplate,
-  buildGithubIssueUrl,
-  describeRoute,
-  extractThreadId,
+  ALLOWED_SCREENSHOT_TYPES,
+  PILOT_REPORT_TYPES,
+  PILOT_REPORT_TYPE_LABELS,
+  buildPilotReportPayload,
+  collectPilotMeta,
+  formatReportForCopy,
   onPilotFeedback,
-  type PilotFeedbackMode
+  validateScreenshotFile,
+  type PilotReportPayload,
+  type PilotReportType
 } from "@/lib/pilot";
 import { cn } from "@/lib/utils";
 
-const appVersion = process.env.NEXT_PUBLIC_APP_VERSION?.trim() || "0.1.0";
+// Optional external fallback form, shown only if the failure state is hit
+// and the URL is configured. Never the primary path.
+const fallbackFormUrl = process.env.NEXT_PUBLIC_FEEDBACK_FORM_URL?.trim() || null;
+
+interface StatusReport {
+  reportId: string;
+  title: string;
+  type: string;
+  status: string;
+  createdAt: string;
+  note: string;
+}
+
+interface PickedScreenshot {
+  name: string;
+  dataUrl: string;
+  size: number;
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("read failed"));
+    reader.readAsDataURL(file);
+  });
+}
 
 // Pilot feedback + bug report modal. Mounted once in the app shell; opened
-// from anywhere via openPilotFeedback(). It never reads message content:
-// the tester edits a plain template and either opens a prefilled GitHub
-// issue (which they submit themselves) or copies the text to share. There
-// is no backend, no token, and nothing is ever auto-submitted.
+// from anywhere via openPilotFeedback(). It collects a tester's typed
+// report (and an optional screenshot they attach) and posts it to the
+// local runner, which forwards it to the feedback webhook. It never reads
+// or sends message content.
 export function PilotFeedbackModal() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const [mode, setMode] = useState<PilotFeedbackMode>("feedback");
-  const [draft, setDraft] = useState("");
+  const [view, setView] = useState<"form" | "success" | "reports">("form");
+
+  const [type, setType] = useState<PilotReportType>("feedback");
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [expected, setExpected] = useState("");
+  const [screenshot, setScreenshot] = useState<PickedScreenshot | null>(null);
+  const [screenshotError, setScreenshotError] = useState<string | null>(null);
+  const [privacyAck, setPrivacyAck] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [reportId, setReportId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const templateFor = useCallback(
-    (next: PilotFeedbackMode): string => {
-      if (next === "bug") {
-        return buildBugReportTemplate({
-          route: describeRoute(pathname),
-          threadId: extractThreadId(pathname),
-          appVersion,
-          timestamp: new Date().toISOString()
-        });
-      }
-      return buildFeedbackTemplate();
-    },
-    [pathname]
-  );
+  const [reports, setReports] = useState<StatusReport[] | null>(null);
+  const [reportsError, setReportsError] = useState<string | null>(null);
+
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastPayloadRef = useRef<PilotReportPayload | null>(null);
+
+  const resetForm = useCallback(() => {
+    setTitle("");
+    setDescription("");
+    setExpected("");
+    setScreenshot(null);
+    setScreenshotError(null);
+    setPrivacyAck(false);
+    setSubmitError(null);
+  }, []);
 
   useEffect(
     () =>
-      onPilotFeedback((nextMode) => {
-        setMode(nextMode);
-        setDraft(templateFor(nextMode));
-        setCopied(false);
+      onPilotFeedback((nextType) => {
+        setType(nextType);
+        setView("form");
+        setSubmitError(null);
+        setReportId(null);
         setOpen(true);
       }),
-    [templateFor]
+    []
   );
 
-  const switchMode = useCallback(
-    (next: PilotFeedbackMode) => {
-      setMode(next);
-      setDraft(templateFor(next));
-      setCopied(false);
-    },
-    [templateFor]
-  );
-
-  const onCopy = useCallback(async () => {
+  const acceptFile = useCallback(async (file: File | undefined) => {
+    if (!file) return;
+    setScreenshotError(null);
+    const check = validateScreenshotFile({ type: file.type, size: file.size });
+    if (!check.ok) {
+      setScreenshotError(check.error);
+      return;
+    }
     try {
-      await navigator.clipboard.writeText(draft);
+      const dataUrl = await readFileAsDataUrl(file);
+      setScreenshot({ name: file.name, dataUrl, size: file.size });
+    } catch {
+      setScreenshotError("Could not read that image.");
+    }
+  }, []);
+
+  const removeScreenshot = useCallback(() => {
+    setScreenshot(null);
+    setScreenshotError(null);
+    setPrivacyAck(false);
+  }, []);
+
+  const canSubmit =
+    title.trim().length > 0 &&
+    description.trim().length > 0 &&
+    !submitting &&
+    (screenshot === null || privacyAck);
+
+  const submit = useCallback(async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    setSubmitError(null);
+    const payload = buildPilotReportPayload({
+      type,
+      title,
+      description,
+      expected,
+      privacyAck,
+      meta: collectPilotMeta(pathname),
+      screenshot: screenshot ? { name: screenshot.name, dataUrl: screenshot.dataUrl } : null
+    });
+    lastPayloadRef.current = payload;
+    try {
+      const res = await apiPost<{ ok: boolean; reportId?: string; error?: string }>(
+        "/runner/control/pilot-feedback",
+        payload
+      );
+      if (res.ok && res.reportId) {
+        setReportId(res.reportId);
+        setView("success");
+      } else {
+        setSubmitError(res.error || "Could not send the report.");
+      }
+    } catch (err) {
+      setSubmitError(err instanceof Error ? err.message : "Could not send the report.");
+    } finally {
+      setSubmitting(false);
+    }
+  }, [canSubmit, type, title, description, expected, privacyAck, screenshot, pathname]);
+
+  const copyReport = useCallback(async () => {
+    const payload =
+      lastPayloadRef.current ??
+      buildPilotReportPayload({
+        type,
+        title,
+        description,
+        expected,
+        privacyAck,
+        meta: collectPilotMeta(pathname),
+        screenshot: null
+      });
+    try {
+      await navigator.clipboard.writeText(formatReportForCopy(payload));
       setCopied(true);
       window.setTimeout(() => setCopied(false), 2200);
     } catch {
       setCopied(false);
     }
-  }, [draft]);
+  }, [type, title, description, expected, privacyAck, pathname]);
+
+  const openReports = useCallback(async () => {
+    setView("reports");
+    setReports(null);
+    setReportsError(null);
+    try {
+      const res = await apiGet<{ ok: boolean; reports?: StatusReport[]; configured?: boolean; error?: string }>(
+        "/runner/control/pilot-feedback/status"
+      );
+      if (res.ok && Array.isArray(res.reports)) {
+        setReports(res.reports);
+      } else if (res.configured === false) {
+        setReportsError("Recent reports aren't set up on this install.");
+      } else {
+        setReportsError(res.error ?? "Couldn't load recent reports.");
+      }
+    } catch {
+      setReportsError("Couldn't load recent reports.");
+    }
+  }, []);
 
   if (!open) return null;
 
-  const isBug = mode === "bug";
-
   return (
     <div
-      className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[14vh] backdrop-blur-md"
+      className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[10vh] backdrop-blur-md"
       onClick={() => setOpen(false)}
       onKeyDown={(event) => {
-        // Keep keystrokes inside the modal: Escape closes it, and nothing
-        // leaks to the page-level R/S/E or `[` shortcuts.
         event.stopPropagation();
         if (event.key === "Escape") setOpen(false);
       }}
@@ -91,25 +213,34 @@ export function PilotFeedbackModal() {
       <div
         role="dialog"
         aria-modal="true"
-        aria-label={isBug ? "Report a bug" : "Share feedback"}
-        className="flex w-[min(560px,92vw)] flex-col overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
+        aria-label="Pilot feedback"
+        className="flex max-h-[80vh] w-[min(560px,92vw)] flex-col overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
         <header className="flex items-center gap-3 border-b border-hairline px-5 py-[14px]">
-          <div className="flex gap-[4px]" role="tablist">
-            <ModeTab
-              active={!isBug}
-              onClick={() => switchMode("feedback")}
-              icon={<MessageSquareText className="h-[14px] w-[14px]" strokeWidth={1.7} />}
-              label="Share feedback"
-            />
-            <ModeTab
-              active={isBug}
-              onClick={() => switchMode("bug")}
-              icon={<Bug className="h-[14px] w-[14px]" strokeWidth={1.7} />}
-              label="Report a bug"
-            />
-          </div>
+          {view === "reports" ? (
+            <button
+              type="button"
+              onClick={() => setView("form")}
+              className="inline-flex items-center gap-1.5 text-[12.5px] font-medium text-ink-2 hover:text-ink"
+            >
+              <ChevronLeft className="h-[15px] w-[15px]" strokeWidth={1.7} />
+              Back
+            </button>
+          ) : (
+            <p className="m-0 text-[13px] font-semibold text-ink">
+              {view === "success" ? "Report sent" : "Send pilot feedback"}
+            </p>
+          )}
+          {view === "form" ? (
+            <button
+              type="button"
+              onClick={() => void openReports()}
+              className="text-[12px] font-medium text-ink-3 hover:text-ink"
+            >
+              Recent reports
+            </button>
+          ) : null}
           <button
             type="button"
             onClick={() => setOpen(false)}
@@ -121,89 +252,281 @@ export function PilotFeedbackModal() {
           </button>
         </header>
 
-        <div className="px-5 py-4">
-          <p className="m-0 text-[13px] leading-[1.55] text-ink-2">
-            {isBug
-              ? "Describe what went wrong. The context at the bottom is filled in for you — no message content is included."
-              : "Note where this helped, felt wrong, or felt too AI. Edit the notes below, then copy them."}
-          </p>
-
-          <textarea
-            autoFocus
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            rows={isBug ? 14 : 10}
-            spellCheck={false}
-            className="mt-3 w-full resize-none rounded-row border border-hairline bg-paper-2 px-3 py-[10px] font-mono text-[12.5px] leading-[1.6] text-ink outline-none transition-[border-color] duration-calm focus:border-hairline-strong"
-          />
-
-          <div className="mt-3 flex flex-wrap items-center gap-[10px]">
-            <a
-              href={buildGithubIssueUrl(mode, draft)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-2 rounded-pill bg-ink px-[16px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)]"
-            >
-              <Github className="h-[14px] w-[14px]" strokeWidth={1.7} />
-              Open a GitHub issue
-            </a>
-            <button
-              type="button"
-              onClick={onCopy}
-              className={cn(
-                "inline-flex items-center gap-2 rounded-pill border border-hairline px-[16px] py-[9px] text-[12.5px] font-medium transition-colors duration-calm",
-                copied
-                  ? "border-risk-fresh/40 text-risk-fresh"
-                  : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-              )}
-            >
-              {copied ? (
-                <Check className="h-[14px] w-[14px]" strokeWidth={2} />
-              ) : (
-                <Copy className="h-[14px] w-[14px]" strokeWidth={1.7} />
-              )}
-              {copied ? "Copied" : "Copy instead"}
-            </button>
+        {view === "success" ? (
+          <div className="px-5 py-8 text-center">
+            <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-risk-fresh/15">
+              <Check className="h-6 w-6 text-risk-fresh" strokeWidth={2.2} />
+            </div>
+            <p className="mt-4 font-display text-[18px] font-semibold text-ink">
+              Submitted — report {reportId}
+            </p>
+            <p className="mx-auto mt-1 max-w-[42ch] text-[13px] leading-[1.55] text-ink-3">
+              Thanks — that's genuinely useful. Nothing else needed from you.
+            </p>
+            <div className="mt-5 flex justify-center gap-[10px]">
+              <button
+                type="button"
+                onClick={() => {
+                  resetForm();
+                  setReportId(null);
+                  setView("form");
+                }}
+                className="rounded-pill border border-hairline px-[16px] py-[9px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+              >
+                Send another
+              </button>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className="rounded-pill bg-ink px-[16px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)]"
+              >
+                Done
+              </button>
+            </div>
           </div>
-        </div>
+        ) : view === "reports" ? (
+          <div className="overflow-y-auto px-5 py-4">
+            <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
+              Your recent reports and where they stand. Screenshots and message content are never
+              shown here.
+            </p>
+            {reports === null && !reportsError ? (
+              <p className="font-mono text-[11px] text-ink-3">Loading…</p>
+            ) : reportsError ? (
+              <p className="text-[12.5px] text-ink-3">{reportsError}</p>
+            ) : reports && reports.length === 0 ? (
+              <p className="text-[12.5px] text-ink-3">No reports yet.</p>
+            ) : (
+              <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                {(reports ?? []).map((report) => (
+                  <li
+                    key={report.reportId}
+                    className="rounded-row border border-hairline px-3 py-[10px]"
+                  >
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-[13px] font-medium text-ink">{report.title}</span>
+                      <span className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                        {report.reportId}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
+                      <span>{report.type}</span>
+                      <span className="text-ink-2">{report.status}</span>
+                      <span>{report.createdAt}</span>
+                    </div>
+                    {report.note ? (
+                      <p className="m-0 mt-1.5 text-[12px] leading-[1.5] text-ink-2">{report.note}</p>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        ) : (
+          <div className="overflow-y-auto px-5 py-4">
+            {submitError ? (
+              <div className="mb-4 rounded-row border border-risk-overdue/40 bg-risk-overdue/8 px-3 py-[10px]">
+                <p className="m-0 text-[12.5px] leading-[1.5] text-ink">{submitError}</p>
+                <p className="m-0 mt-1 text-[12px] leading-[1.5] text-ink-3">
+                  Your report is still here — try again, or copy it and send it across.
+                </p>
+                <div className="mt-2 flex flex-wrap items-center gap-[10px]">
+                  <button
+                    type="button"
+                    onClick={() => void copyReport()}
+                    className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-3 py-[6px] text-[11.5px] font-medium text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    {copied ? (
+                      <Check className="h-[13px] w-[13px]" strokeWidth={2} />
+                    ) : (
+                      <Copy className="h-[13px] w-[13px]" strokeWidth={1.7} />
+                    )}
+                    {copied ? "Copied" : "Copy report"}
+                  </button>
+                  {fallbackFormUrl ? (
+                    <a
+                      href={fallbackFormUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-3 py-[6px] text-[11.5px] font-medium text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    >
+                      <ExternalLink className="h-[13px] w-[13px]" strokeWidth={1.7} />
+                      Open the feedback form
+                    </a>
+                  ) : null}
+                </div>
+              </div>
+            ) : null}
 
-        <footer className="border-t border-hairline px-5 py-3">
-          <p className="m-0 text-[11.5px] leading-[1.5] text-ink-3">
-            &ldquo;Open a GitHub issue&rdquo; opens a pre-filled issue you review and submit
-            yourself — nothing is posted automatically. No account? Copy the text and send it to
-            whoever shared this pilot with you. Either way, share only what you&apos;re
-            comfortable sharing — no message content is included.
-          </p>
-        </footer>
+            <Field label="What kind of report is this?">
+              <div className="flex flex-wrap gap-2">
+                {PILOT_REPORT_TYPES.map((option) => (
+                  <button
+                    key={option}
+                    type="button"
+                    onClick={() => setType(option)}
+                    aria-pressed={type === option}
+                    className={cn(
+                      "rounded-pill border px-3 py-[6px] text-[12.5px] transition-colors duration-calm",
+                      type === option
+                        ? "border-ink bg-ink text-paper"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2"
+                    )}
+                  >
+                    {PILOT_REPORT_TYPE_LABELS[option]}
+                  </button>
+                ))}
+              </div>
+            </Field>
+
+            <Field label="Title">
+              <input
+                type="text"
+                value={title}
+                onChange={(event) => setTitle(event.target.value)}
+                placeholder="A short summary"
+                maxLength={200}
+                className="w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+              />
+            </Field>
+
+            <Field
+              label={type === "bug" ? "What happened?" : "Tell us more"}
+              hint="In your own words. Please don't paste private message content."
+            >
+              <textarea
+                value={description}
+                onChange={(event) => setDescription(event.target.value)}
+                rows={4}
+                placeholder={
+                  type === "bug"
+                    ? "What were you doing, and what went wrong?"
+                    : "What did you notice?"
+                }
+                className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+              />
+            </Field>
+
+            <Field label="What did you expect?" hint="Optional.">
+              <textarea
+                value={expected}
+                onChange={(event) => setExpected(event.target.value)}
+                rows={2}
+                placeholder="What you thought would happen instead"
+                className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+              />
+            </Field>
+
+            <Field label="Screenshot" hint="Optional. Drag an image in, or choose a file.">
+              {screenshot ? (
+                <div className="flex items-center gap-3 rounded-row border border-hairline bg-paper-2/50 p-2">
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={screenshot.dataUrl}
+                    alt="Attached screenshot preview"
+                    className="h-[44px] w-[44px] shrink-0 rounded-[6px] object-cover"
+                  />
+                  <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">
+                    {screenshot.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={removeScreenshot}
+                    className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    remove
+                  </button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={(event) => {
+                    event.preventDefault();
+                    setDragOver(true);
+                  }}
+                  onDragLeave={() => setDragOver(false)}
+                  onDrop={(event) => {
+                    event.preventDefault();
+                    setDragOver(false);
+                    void acceptFile(event.dataTransfer.files?.[0]);
+                  }}
+                  className={cn(
+                    "flex w-full items-center justify-center gap-2 rounded-row border border-dashed py-[14px] text-[12.5px] transition-colors duration-calm",
+                    dragOver
+                      ? "border-hairline-strong bg-paper-2 text-ink"
+                      : "border-hairline text-ink-3 hover:border-hairline-strong hover:text-ink-2"
+                  )}
+                >
+                  <ImageUp className="h-[15px] w-[15px]" strokeWidth={1.7} />
+                  Drag a screenshot here, or choose a file
+                </button>
+              )}
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept={ALLOWED_SCREENSHOT_TYPES.join(",")}
+                className="hidden"
+                onChange={(event) => {
+                  void acceptFile(event.target.files?.[0]);
+                  event.target.value = "";
+                }}
+              />
+              {screenshotError ? (
+                <p className="mt-1.5 text-[11.5px] text-risk-overdue">{screenshotError}</p>
+              ) : null}
+            </Field>
+
+            {screenshot ? (
+              <label className="mt-1 flex cursor-pointer items-start gap-2.5">
+                <input
+                  type="checkbox"
+                  checked={privacyAck}
+                  onChange={(event) => setPrivacyAck(event.target.checked)}
+                  className="mt-[2px] h-[14px] w-[14px] cursor-pointer accent-ink"
+                />
+                <span className="text-[12px] leading-[1.5] text-ink-2">
+                  I understand screenshots may include private messages, so I have checked or
+                  blurred anything sensitive.
+                </span>
+              </label>
+            ) : null}
+
+            <div className="mt-4 flex items-center gap-[10px]">
+              <button
+                type="button"
+                onClick={() => void submit()}
+                disabled={!canSubmit}
+                className="inline-flex items-center gap-2 rounded-pill bg-ink px-[18px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {submitting ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : null}
+                {submitting ? "Sending…" : "Submit report"}
+              </button>
+              <span className="text-[11.5px] leading-[1.45] text-ink-3">
+                Goes to the pilot log. No message content is included.
+              </span>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
 }
 
-function ModeTab({
-  active,
-  onClick,
-  icon,
-  label
+function Field({
+  label,
+  hint,
+  children
 }: {
-  active: boolean;
-  onClick: () => void;
-  icon: React.ReactNode;
   label: string;
+  hint?: string;
+  children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      role="tab"
-      aria-selected={active}
-      onClick={onClick}
-      className={cn(
-        "inline-flex items-center gap-[7px] rounded-[9px] px-[11px] py-[7px] text-[12.5px] font-medium transition-colors duration-calm",
-        active ? "bg-ink text-paper" : "text-ink-2 hover:bg-paper-2 hover:text-ink"
-      )}
-    >
-      {icon}
-      {label}
-    </button>
+    <div className="mb-4">
+      <p className="m-0 text-[12.5px] font-medium text-ink">{label}</p>
+      {hint ? <p className="m-0 mt-0.5 text-[11.5px] leading-[1.45] text-ink-3">{hint}</p> : null}
+      <div className="mt-1.5">{children}</div>
+    </div>
   );
 }

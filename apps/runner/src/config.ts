@@ -128,6 +128,17 @@ export interface RunnerConfig {
   enrichLongIdleMaxMs: number;
   /** Days before an enriched profile is considered stale. Default 30. */
   enrichRefreshDays: number;
+  /**
+   * Pilot feedback intake. When `webhookUrl` is unset the
+   * /control/pilot-feedback route reports "not configured" and the
+   * dashboard falls back to copy / the external form. Never exposed to
+   * the browser — the dashboard posts to the runner, the runner forwards.
+   */
+  pilotFeedback: {
+    webhookUrl?: string;
+    secret?: string;
+    statusUrl?: string;
+  };
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -366,7 +377,12 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     enrichLongIdleEvery: parseIntOrDefault(env.ENRICH_LONG_IDLE_EVERY, 10),
     enrichLongIdleMinMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MIN_MS, 300_000),
     enrichLongIdleMaxMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MAX_MS, 900_000),
-    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30)
+    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30),
+    pilotFeedback: {
+      webhookUrl: env.PILOT_FEEDBACK_WEBHOOK_URL?.trim() || undefined,
+      secret: env.PILOT_FEEDBACK_SECRET?.trim() || undefined,
+      statusUrl: env.PILOT_FEEDBACK_STATUS_URL?.trim() || undefined
+    }
   };
 }
 

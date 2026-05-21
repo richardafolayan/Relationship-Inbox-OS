@@ -10,6 +10,7 @@ import type {
   ConversationStarterCitedField,
   FriendshipSummaryOutput,
   OperatorProfile,
+  PilotReportTriage,
   SettingsStore
 } from "../types/runtime";
 import {
@@ -1830,6 +1831,81 @@ ${safeTruncate(trimmed, 1_000)}`;
     return result;
   }
 
+  /**
+   * Optional triage of a pilot bug / feedback report. Operates ONLY on the
+   * tester's typed words and safe metadata — never a screenshot, never
+   * message content. Returns null when the AI service is unavailable or
+   * the call fails; the raw report is forwarded regardless.
+   */
+  async function summarisePilotReport(input: {
+    type: string;
+    title: string;
+    description: string;
+    expected: string;
+    meta: Record<string, unknown>;
+  }): Promise<PilotReportTriage | null> {
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return null;
+    }
+    const prompt = `Triage this report from a small pilot of Relationship Inbox OS, a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
+
+Return strict JSON matching this exact shape:
+{
+  "summary": "string — 1-2 sentence developer-facing summary",
+  "area": "string — likely area of the app (e.g. Today, Inbox, Thread page, LinkedIn scan, Settings, AI drafts)",
+  "severity": "low" | "medium" | "high",
+  "repro": ["string", ...]
+}
+
+Rules:
+- British English, plain and calm. No marketing language.
+- severity: high = blocks core use, medium = wrong or confusing but still usable, low = minor, or any feedback / feature-idea note.
+- repro: short ordered steps, only if the report describes them. Empty array for feedback or feature-idea reports, or when no steps are given.
+
+Report type: ${input.type}
+Title: ${safeTruncate(input.title, 300)}
+What happened: ${safeTruncate(input.description, 4000)}
+Expected: ${safeTruncate(input.expected, 2000)}
+Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = z
+        .object({
+          summary: z.string(),
+          area: z.string(),
+          severity: z.enum(["low", "medium", "high"]),
+          repro: z.array(z.string()).default([])
+        })
+        .parse(parseAiJson(content, model));
+      return {
+        summary: applyVoiceRules(parsed.summary),
+        area: applyVoiceRules(parsed.area),
+        severity: parsed.severity,
+        repro: parsed.repro.map((step) => applyVoiceRules(step)).filter((step) => step.length > 0)
+      };
+    } catch (error) {
+      console.warn(
+        `[ai] summarisePilotReport failed (provider=${provider}, model=${model}); skipping triage. ${classifyLlmError(error, provider)}`
+      );
+      return null;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
@@ -1840,6 +1916,7 @@ ${safeTruncate(trimmed, 1_000)}`;
     composeInVoice,
     suggestSnoozeTimings,
     summarisePersonForFriendship,
-    askAboutPerson
+    askAboutPerson,
+    summarisePilotReport
   };
 }

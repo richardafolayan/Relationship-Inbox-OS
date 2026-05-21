@@ -36,6 +36,13 @@ import { createEnrichmentQueue } from "./services/enrichment-queue";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
 import {
+  PILOT_REPORT_TYPES,
+  parseScreenshotDataUrl,
+  forwardPilotReport,
+  fetchPilotReportStatus,
+  type PilotScreenshot
+} from "./services/pilot-feedback";
+import {
   AdminResetGuardError,
   resetPlatformInboxGraph,
   validateAdminResetGuards
@@ -58,7 +65,14 @@ import {
 } from "./services/thread-row-shaping";
 
 const app = express();
-app.use(express.json({ limit: "1mb" }));
+// Most routes carry tiny JSON. /control/pilot-feedback can carry a base64
+// screenshot, so it gets a larger limit; everything else stays tight.
+const jsonSmall = express.json({ limit: "1mb" });
+const jsonLarge = express.json({ limit: "12mb" });
+app.use((req, res, next) => {
+  if (req.path === "/control/pilot-feedback") return jsonLarge(req, res, next);
+  return jsonSmall(req, res, next);
+});
 
 // Multer is loaded lazily on multipart routes (file uploads for outbound
 // attachments). The default disk-storage strategy puts files under
@@ -3636,6 +3650,130 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);
   res.json(updated);
+}));
+
+// Pilot feedback intake. The dashboard posts a tester's bug / feedback
+// report here; the runner enriches it with server-side metadata, runs an
+// optional AI triage, and forwards it to the configured Apps Script
+// webhook. The shared secret never leaves the runner. Returns 400 only for
+// a malformed request; delivery problems come back as { ok: false } with
+// 200 so the dashboard can show its calm failure state.
+app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      type: z.enum(PILOT_REPORT_TYPES),
+      title: z.string().trim().min(1).max(200),
+      description: z.string().trim().min(1).max(6000),
+      expected: z.string().trim().max(4000).default(""),
+      privacyAck: z.boolean().default(false),
+      meta: z
+        .object({
+          route: z.string().max(80).default(""),
+          pathname: z.string().max(300).default(""),
+          threadId: z.string().max(120).nullable().default(null),
+          appVersion: z.string().max(80).default(""),
+          userAgent: z.string().max(500).default(""),
+          timestamp: z.string().max(40).default("")
+        })
+        .default({}),
+      screenshot: z
+        .object({ name: z.string().max(200), dataUrl: z.string().max(8_000_000) })
+        .nullable()
+        .optional()
+    })
+    .parse(req.body);
+
+  let screenshot: PilotScreenshot | null = null;
+  if (payload.screenshot) {
+    if (!payload.privacyAck) {
+      res.status(400).json({
+        ok: false,
+        error: "Please confirm the screenshot privacy note before submitting."
+      });
+      return;
+    }
+    const parsed = parseScreenshotDataUrl(payload.screenshot.name, payload.screenshot.dataUrl);
+    if (!parsed.ok) {
+      res.status(400).json({ ok: false, error: parsed.error });
+      return;
+    }
+    screenshot = parsed.screenshot;
+  }
+
+  // Server-side metadata enrichment. The dashboard cannot see the browser
+  // mode; the runner adds it here, along with the AI help level and the
+  // thread's platform. None of this is message content.
+  let platform: string | null = null;
+  if (payload.meta.threadId) {
+    const thread = await prisma.thread.findUnique({
+      where: { id: payload.meta.threadId },
+      select: { platform: true }
+    });
+    platform = thread?.platform ?? null;
+  }
+  const operatorProfile = await settingsStore.getOperatorProfile();
+  const enrichedMeta = {
+    ...payload.meta,
+    platform,
+    browserMode: runnerConfig.browserProfile.mode,
+    aiHelpLevel: operatorProfile.aiHelpLevel,
+    commit: process.env.APP_COMMIT?.trim() || "",
+    receivedAt: new Date().toISOString()
+  };
+
+  // Optional AI triage — best effort, typed report + metadata only, never
+  // the screenshot. The raw report is forwarded whether or not this runs.
+  let ai = null;
+  try {
+    ai = await aiService.summarisePilotReport({
+      type: payload.type,
+      title: payload.title,
+      description: payload.description,
+      expected: payload.expected,
+      meta: enrichedMeta
+    });
+  } catch {
+    ai = null;
+  }
+
+  const webhookUrl = runnerConfig.pilotFeedback.webhookUrl;
+  if (!webhookUrl) {
+    res.json({
+      ok: false,
+      configured: false,
+      error: "Feedback delivery is not set up on this install."
+    });
+    return;
+  }
+  const result = await forwardPilotReport({
+    webhookUrl,
+    secret: runnerConfig.pilotFeedback.secret,
+    report: {
+      type: payload.type,
+      title: payload.title,
+      description: payload.description,
+      expected: payload.expected,
+      meta: enrichedMeta,
+      ai: ai as Record<string, unknown> | null,
+      screenshot
+    }
+  });
+  res.json(result);
+}));
+
+// Recent-reports list for the dashboard "My reports" view. Proxies the
+// configured status endpoint, which returns only safe columns.
+app.get("/control/pilot-feedback/status", asyncRoute(async (_req, res) => {
+  const statusUrl = runnerConfig.pilotFeedback.statusUrl;
+  if (!statusUrl) {
+    res.json({ ok: false, configured: false, reports: [] });
+    return;
+  }
+  const result = await fetchPilotReportStatus({
+    statusUrl,
+    secret: runnerConfig.pilotFeedback.secret
+  });
+  res.json(result);
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
