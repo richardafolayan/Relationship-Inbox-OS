@@ -6,6 +6,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import type { OperatorProfile } from "@/lib/types";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { cn } from "@/lib/utils";
+import { readFullAiReplies, writeFullAiReplies } from "@/lib/preferences";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
@@ -18,6 +19,7 @@ const QUIET_HOURS_KEY = "inbox_quiet_hours";
 export default function SettingsPage() {
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
+  const [fullAiReplies, setFullAiReplies] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
@@ -66,6 +68,7 @@ export default function SettingsPage() {
     );
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
+    setFullAiReplies(readFullAiReplies());
     void apiGet<{ headless?: boolean }>("/runner/data/settings")
       .then((data) => {
         if (data && typeof data.headless === "boolean") setHeadless(data.headless);
@@ -78,6 +81,13 @@ export default function SettingsPage() {
     const next = !quietHours;
     setQuietHours(next);
     window.localStorage.setItem(QUIET_HOURS_KEY, next ? "1" : "0");
+    setSavedAt(Date.now());
+  };
+
+  const toggleFullAiReplies = () => {
+    const next = !fullAiReplies;
+    setFullAiReplies(next);
+    writeFullAiReplies(next);
     setSavedAt(Date.now());
   };
 
@@ -170,6 +180,21 @@ export default function SettingsPage() {
                 onChange={toggleHeadless}
                 label="Headless browser"
               />
+            </div>
+          }
+        />
+      </SettingsGroup>
+
+      <SettingsGroup head="AI">
+        <SettingRow
+          name="Full AI replies"
+          desc="Off by default — you reply in your own words, with the summary and things to address always shown. Turn on to also get complete AI draft suggestions. Nothing ever sends automatically."
+          trailing={
+            <div className="flex items-center gap-[10px]">
+              <span className="font-mono text-[11px] text-ink-3">
+                {fullAiReplies ? "drafts on" : "your words"}
+              </span>
+              <Toggle on={fullAiReplies} onChange={toggleFullAiReplies} label="Full AI replies" />
             </div>
           }
         />
