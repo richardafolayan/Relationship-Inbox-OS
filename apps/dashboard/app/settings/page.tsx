@@ -5,6 +5,8 @@ import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
+import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
@@ -27,6 +29,9 @@ export default function SettingsPage() {
   const [headless, setHeadless] = useState(true);
   const [headlessReady, setHeadlessReady] = useState(false);
   const [headlessStatus, setHeadlessStatus] = useState<"idle" | "saving" | "error">("idle");
+
+  // Clearing the dismissed flag brings the welcome card back on Today.
+  const [welcomeReset, setWelcomeReset] = useState(false);
 
   useEffect(() => {
     setAutoScanDisabled(
@@ -148,7 +153,51 @@ export default function SettingsPage() {
       </SettingsGroup>
 
       <UserVoiceProfile variant="settings" />
+
+      <section className="mt-10">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Pilot</p>
+        <PilotWelcomeCard />
+        <div className="flex flex-wrap items-center gap-[10px]">
+          <PilotActionButton onClick={() => openPilotFeedback("feedback")}>
+            Share feedback
+          </PilotActionButton>
+          <PilotActionButton onClick={() => openPilotFeedback("bug")}>
+            Report a bug
+          </PilotActionButton>
+          <PilotActionButton
+            onClick={() => {
+              window.localStorage.removeItem(PILOT_WELCOME_DISMISSED_KEY);
+              setWelcomeReset(true);
+            }}
+          >
+            Show welcome on Today
+          </PilotActionButton>
+          {welcomeReset ? (
+            <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+              it’ll show next time you open Today
+            </span>
+          ) : null}
+        </div>
+      </section>
     </Canvas>
+  );
+}
+
+function PilotActionButton({
+  onClick,
+  children
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+    >
+      {children}
+    </button>
   );
 }
 

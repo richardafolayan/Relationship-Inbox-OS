@@ -19,6 +19,8 @@ import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
+import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
@@ -42,6 +44,9 @@ export default function TodayPage() {
   // Operator voice profile — drives the greeting name, the first-run setup
   // card, and whether full AI drafts are predrafted. null until loaded.
   const [profile, setProfile] = useState<OperatorProfile | null>(null);
+  // First-run pilot welcome card. `undefined` until localStorage is read,
+  // so the card never flashes for testers who already dismissed it.
+  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -88,6 +93,10 @@ export default function TodayPage() {
   useEffect(() => {
     loadProfile();
   }, [loadProfile]);
+
+  useEffect(() => {
+    setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
+  }, []);
 
   useEffect(() => {
     void refresh();
@@ -312,6 +321,15 @@ export default function TodayPage() {
           last scan {health ? formatRelative(health.lastScanAt) : "—"}
         </div>
       </header>
+
+      {welcomeDismissed === false ? (
+        <PilotWelcomeCard
+          onDismiss={() => {
+            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+            setWelcomeDismissed(true);
+          }}
+        />
+      ) : null}
 
       {needsSetup ? (
         <div data-testid="voice-setup-card" className="mb-8">

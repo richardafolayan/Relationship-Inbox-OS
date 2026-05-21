@@ -6,6 +6,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
+import { openPilotFeedback } from "@/lib/pilot";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -58,6 +59,18 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         run: () => {
           void apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" }).catch(() => undefined);
         }
+      },
+      {
+        id: "send-feedback",
+        label: "Send feedback",
+        glyph: "↗",
+        run: () => openPilotFeedback("feedback")
+      },
+      {
+        id: "report-bug",
+        label: "Report a bug",
+        glyph: "↗",
+        run: () => openPilotFeedback("bug")
       }
     ];
     const threadItems: PaletteItem[] = threads.map((thread) => {
