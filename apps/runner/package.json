@@ -22,7 +22,8 @@
     "imessage:reset-permissions": "tsx src/scripts/imessage-permission-reset.ts",
     "imessage:purge-automated": "tsx src/scripts/purge-automated-imessage.ts",
     "imessage:keep-voice-notes": "tsx src/scripts/imessage-keep-voice-notes.ts",
-    "imessage:repair-send-keys": "tsx src/scripts/repair-imessage-send-keys.ts"
+    "imessage:repair-send-keys": "tsx src/scripts/repair-imessage-send-keys.ts",
+    "seed:operator-profile": "tsx src/scripts/seed-operator-profile.ts"
   },
   "dependencies": {
     "@inbox-os/core": "0.1.0",

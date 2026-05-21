@@ -26,7 +26,8 @@
     "linkedin:smoke": "npm run linkedin:smoke --workspace @inbox-os/runner",
     "repair:linkedin-threads": "npm run repair:linkedin-threads --workspace @inbox-os/runner",
     "db:reset:linkedin": "npm run db:reset:linkedin --workspace @inbox-os/runner",
-    "cleanup:artifacts": "npm run cleanup:artifacts --workspace @inbox-os/runner"
+    "cleanup:artifacts": "npm run cleanup:artifacts --workspace @inbox-os/runner",
+    "seed:operator-profile": "npm run seed:operator-profile --workspace @inbox-os/runner"
   },
   "devDependencies": {
     "prisma": "^6.3.1",
