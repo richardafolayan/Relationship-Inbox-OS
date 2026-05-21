@@ -29,6 +29,8 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
+import { ActionItemsChecklist } from "@/components/thread/ActionItemsChecklist";
+import { readFullAiReplies } from "@/lib/preferences";
 
 // Thread workspace - landscape layout.
 //
@@ -447,6 +449,10 @@ export default function ThreadPage() {
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+  // Full AI reply drafting is opt-in (Settings -> AI). Default off so the
+  // workspace leads with replying in your own words; when off, the
+  // suggested-replies, predraft, and compose-in-voice surfaces are hidden.
+  const [fullAiReplies, setFullAiReplies] = useState(false);
 
   // Sibling-threads rail collapse — operator can hide the 240px list to
   // give the chat column more room. State persists in localStorage and
@@ -457,6 +463,30 @@ export default function ThreadPage() {
     const stored = window.localStorage.getItem("dashboard_threads_collapsed");
     if (stored === "true") setThreadsCollapsed(true);
   }, []);
+
+  // Full-AI-replies preference, read on mount from localStorage. Kept out of
+  // the initial state value to avoid an SSR hydration mismatch, mirroring the
+  // threadsCollapsed pattern above.
+  useEffect(() => {
+    setFullAiReplies(readFullAiReplies());
+  }, []);
+
+  // With full AI replies off, the rail compose helper is Ask-only. Ask
+  // answers from context and never drafts a message, so it stays available.
+  useEffect(() => {
+    if (!fullAiReplies) setComposeMode("ask");
+  }, [fullAiReplies]);
+
+  // Open the context rail once per thread when it has things to address, so
+  // the action-items checklist is visible while the operator writes a reply.
+  const railAutoOpenForThreadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!thread || railAutoOpenForThreadRef.current === thread.id) return;
+    railAutoOpenForThreadRef.current = thread.id;
+    if (thread.openLoops.length > 0 || thread.dismissedOpenLoops.length > 0) {
+      setAiOpen(true);
+    }
+  }, [thread]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -594,8 +624,11 @@ export default function ThreadPage() {
         }
         // No explicit draft - fall back to AI predraft (first suggested
         // reply) so the operator opens an already-filled composer when
-        // /today has pre-warmed the cache.
-        const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
+        // /today has pre-warmed the cache. Skipped when full AI replies are
+        // off: that mode leads with the operator writing in their own words.
+        const aiPredraft = readFullAiReplies()
+          ? threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim()
+          : undefined;
         if (aiPredraft) {
           setComposerSource("predraft");
           return aiPredraft;
@@ -1717,7 +1750,6 @@ export default function ThreadPage() {
   const showRelationshipContext = trimmedSummary && !summaryDuplicatesAsk;
   const isReopenMode = thread.needsReply === false;
   const askHeading = isReopenMode ? "Reconnect hook" : "What they want";
-  const loopsHeading = isReopenMode ? "Conversation hooks" : "Open loops";
   const composeHelper = isReopenMode
     ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
     : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
@@ -2626,10 +2658,10 @@ export default function ThreadPage() {
                     ) : null}
                   </div>
                 ) : null}
-                {/* Suggested-replies dropdown. Replaces the row of chips that
-                    used to wrap onto multiple lines on narrower viewports;
-                    keeps the composer compact and previews each suggestion's
-                    text before the operator commits to it. */}
+                {/* Suggested-replies dropdown - full sendable AI drafts.
+                    Hidden when full AI replies are off so the composer leads
+                    with the operator writing in their own words. */}
+                {fullAiReplies ? (
                 <div className="relative" ref={chipsMenuRef}>
                   <button
                     type="button"
@@ -2686,6 +2718,7 @@ export default function ThreadPage() {
                     </div>
                   ) : null}
                 </div>
+                ) : null}
                 <div className="flex flex-1 items-center justify-end gap-2">
                   <button
                     type="button"
@@ -2934,48 +2967,17 @@ export default function ThreadPage() {
             </section>
           ) : null}
 
-          {/* Loops - active rows render with an unchecked box; ticking
-              dismisses the loop (#62). Dismissed loops still render below
-              in a muted, struck-through form so the operator can restore
-              one by un-ticking. Heading flips to "Conversation hooks" in
-              reopen mode where the items are warm callbacks rather than
-              pending asks. */}
-          {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
-            <section>
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                {loopsHeading}
-              </p>
-              <ul className="m-0 list-none space-y-[6px] p-0">
-                {thread.openLoops.map((item) => (
-                  <li key={`open:${item}`} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
-                    <input
-                      type="checkbox"
-                      checked={false}
-                      onChange={() => void toggleOpenLoop(item, true)}
-                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink"
-                      aria-label={`Mark "${item}" as resolved`}
-                    />
-                    {item}
-                  </li>
-                ))}
-                {thread.dismissedOpenLoops.map((item) => (
-                  <li
-                    key={`dismissed:${item}`}
-                    className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-4 line-through"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={true}
-                      onChange={() => void toggleOpenLoop(item, false)}
-                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink-3"
-                      aria-label={`Restore "${item}" as an open loop`}
-                    />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+          {/* Things to address - the reply checklist. Tick / edit / add
+              state is local (a thinking aid that never touches the message);
+              "not relevant" reuses the server-side dismiss via
+              toggleOpenLoop. */}
+          <ActionItemsChecklist
+            threadId={thread.id}
+            openLoops={thread.openLoops}
+            dismissedOpenLoops={thread.dismissedOpenLoops}
+            isReopenMode={isReopenMode}
+            onDismiss={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+          />
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
@@ -2986,6 +2988,15 @@ export default function ThreadPage() {
                 ? composeHelper
                 : "Ask a question about this thread or person. The AI answers from the transcript and what's on record — it won't make anything up."}
             </p>
+            {!fullAiReplies ? (
+              <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
+                Full AI reply drafts are off.{" "}
+                <Link href="/settings" className="text-ink-2 underline-offset-2 hover:underline">
+                  Turn them on in Settings
+                </Link>{" "}
+                to draft complete replies as well.
+              </p>
+            ) : null}
             <textarea
               value={composeIntent}
               onChange={(event) => {
@@ -3028,7 +3039,7 @@ export default function ThreadPage() {
                   </p>
                 );
               }
-              if (composeMode === "ask" && !looksLikeQuestion) {
+              if (composeMode === "ask" && !looksLikeQuestion && fullAiReplies) {
                 return (
                   <p className="mt-1 text-[11px] text-ink-3">
                     Looks like a directive.{" "}
@@ -3055,7 +3066,7 @@ export default function ThreadPage() {
                   onClick={() =>
                     composeMode === "write" ? void composeFromIntent() : void askAi()
                   }
-                  className="inline-flex items-center gap-2 rounded-l-pill bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50"
+                  className={`inline-flex items-center gap-2 ${fullAiReplies ? "rounded-l-pill" : "rounded-pill"} bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50`}
                 >
                   {composing ? (
                     <Loader2 className="h-[14px] w-[14px] animate-spin" />
@@ -3070,6 +3081,8 @@ export default function ThreadPage() {
                       ? "Compose"
                       : "Ask"}
                 </button>
+                {fullAiReplies ? (
+                  <>
                 <span className="my-[6px] w-px bg-paper/20" aria-hidden />
                 <button
                   type="button"
@@ -3114,6 +3127,8 @@ export default function ThreadPage() {
                       </p>
                     </button>
                   </div>
+                ) : null}
+                  </>
                 ) : null}
               </div>
               {composeError ? (
