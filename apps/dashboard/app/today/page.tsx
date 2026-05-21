@@ -11,6 +11,8 @@ import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
@@ -31,6 +33,9 @@ export default function TodayPage() {
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // First-run pilot welcome card. `undefined` until localStorage is read,
+  // so the card never flashes for testers who already dismissed it.
+  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -66,6 +71,10 @@ export default function TodayPage() {
     setPlatforms(platformRows ?? []);
     if (healthData) setHealth(healthData);
     setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
   }, []);
 
   useEffect(() => {
@@ -271,7 +280,7 @@ export default function TodayPage() {
             {dayLabel}
           </p>
           <h1 className="m-0 font-display text-[32px] font-semibold leading-[1.1] tracking-[-0.025em]">
-            {greeting}, Richard.
+            {greeting}.
           </h1>
         </div>
         <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">
@@ -282,6 +291,15 @@ export default function TodayPage() {
           last scan {health ? formatRelative(health.lastScanAt) : "—"}
         </div>
       </header>
+
+      {welcomeDismissed === false ? (
+        <PilotWelcomeCard
+          onDismiss={() => {
+            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+            setWelcomeDismissed(true);
+          }}
+        />
+      ) : null}
 
       {degraded ? (
         <DegradedBanner
