@@ -127,14 +127,30 @@ export interface PersonDetailResponse {
   } | null;
 }
 
+/** Reply tone the user picks during voice setup. "" = not chosen yet. */
+export type ReplyStyle = "warm" | "direct" | "casual" | "thoughtful" | "concise";
+
 /**
- * Operator's free-text self-description used by the AI prompts. Matches
- * runner-side `OperatorProfile`. Both fields are stored as plain strings;
- * empty string means "not set" (no opinion injected into prompts).
+ * How much AI writing help to surface. Mirrors runner-side `AiHelpLevel`.
+ * Lower levels never disable summaries / open loops / things to address —
+ * they only hide complete sendable drafts.
+ */
+export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
+
+/**
+ * The user's voice + identity profile used by the AI prompts and the Today
+ * greeting. Matches runner-side `OperatorProfile`. String fields are stored
+ * as plain strings; "" means "not set" (no opinion injected into prompts).
  */
 export interface OperatorProfile {
+  displayName: string;
   about: string;
   interests: string;
+  commonPhrases: string;
+  avoidedPhrases: string;
+  preferredStyle: ReplyStyle | "";
+  aiHelpLevel: AiHelpLevel;
+  setupCompletedAt: string;
 }
 
 export interface PlatformCard {

@@ -55,16 +55,45 @@ export interface SettingsStore {
   updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
 }
 
+/** Reply tone the operator picks during voice setup. "" = not chosen yet. */
+export type ReplyStyle = "warm" | "direct" | "casual" | "thoughtful" | "concise";
+
 /**
- * Free-text operator self-description that the AI prompts consume so
- * suggested replies and voice rewrites sound like the operator and stay
- * within their domain. Distinct from the LinkedIn-derived self snapshot
- * (which lives behind `SelfProfileService`) — this one is what the
- * operator types into Settings ("how I write", "things I care about").
+ * How much writing help the operator wants. Drives what the dashboard
+ * surfaces — never disables summaries / open loops / action items.
+ *   - memory_only:     context, summaries, things to address only
+ *   - writing_support: + rewrite ("shorten" / "warmer") on the operator's draft
+ *   - full_drafts:     + complete AI-suggested replies and compose-from-intent
+ */
+export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
+
+/**
+ * The operator's voice + identity profile. The AI prompts consume it so
+ * suggested replies and voice rewrites sound like the current user (not a
+ * hardcoded persona) and stay within their domain. Stored as a JSON
+ * `Setting` row, so new fields need no schema migration. Distinct from the
+ * LinkedIn-derived self snapshot (which lives behind `SelfProfileService`).
+ *
+ * All string fields default to "" meaning "not set" — an empty profile
+ * makes the AI fall back to a plain, neutral voice rather than any persona.
  */
 export interface OperatorProfile {
+  /** What the operator is called — used for the Today greeting and AI voice. */
+  displayName: string;
+  /** Free-text description of how the operator usually messages people. */
   about: string;
+  /** Things the operator cares about — keeps replies in-domain. */
   interests: string;
+  /** Words / phrases the operator uses often (free text, newline-separated). */
+  commonPhrases: string;
+  /** Words / phrases the operator never uses (free text, newline-separated). */
+  avoidedPhrases: string;
+  /** Preferred reply tone. "" until the operator picks one. */
+  preferredStyle: ReplyStyle | "";
+  /** How much AI writing help to surface. Defaults conservative. */
+  aiHelpLevel: AiHelpLevel;
+  /** ISO timestamp the operator finished first-run setup. "" = not done. */
+  setupCompletedAt: string;
 }
 
 export interface AiService {
