@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
-import { Bug, Check, Copy, ExternalLink, MessageSquareText, X } from "lucide-react";
+import { Bug, Check, Copy, Github, MessageSquareText, X } from "lucide-react";
 import {
   buildBugReportTemplate,
   buildFeedbackTemplate,
+  buildGithubIssueUrl,
   describeRoute,
   extractThreadId,
   onPilotFeedback,
@@ -13,14 +14,13 @@ import {
 } from "@/lib/pilot";
 import { cn } from "@/lib/utils";
 
-// Optional external form. If unset, the modal is fully self-contained: a
-// copy-to-clipboard template. No backend, no telemetry.
-const feedbackFormUrl = process.env.NEXT_PUBLIC_FEEDBACK_FORM_URL?.trim() || null;
 const appVersion = process.env.NEXT_PUBLIC_APP_VERSION?.trim() || "0.1.0";
 
 // Pilot feedback + bug report modal. Mounted once in the app shell; opened
-// from anywhere via openPilotFeedback(). It never reads or sends message
-// content — a tester copies the template and shares it themselves.
+// from anywhere via openPilotFeedback(). It never reads message content:
+// the tester edits a plain template and either opens a prefilled GitHub
+// issue (which they submit themselves) or copies the text to share. There
+// is no backend, no token, and nothing is ever auto-submitted.
 export function PilotFeedbackModal() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
@@ -138,14 +138,23 @@ export function PilotFeedbackModal() {
           />
 
           <div className="mt-3 flex flex-wrap items-center gap-[10px]">
+            <a
+              href={buildGithubIssueUrl(mode, draft)}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-2 rounded-pill bg-ink px-[16px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)]"
+            >
+              <Github className="h-[14px] w-[14px]" strokeWidth={1.7} />
+              Open a GitHub issue
+            </a>
             <button
               type="button"
               onClick={onCopy}
               className={cn(
-                "inline-flex items-center gap-2 rounded-pill px-[16px] py-[9px] text-[12.5px] font-medium transition-colors duration-calm",
+                "inline-flex items-center gap-2 rounded-pill border border-hairline px-[16px] py-[9px] text-[12.5px] font-medium transition-colors duration-calm",
                 copied
-                  ? "bg-risk-fresh/15 text-risk-fresh"
-                  : "bg-ink text-paper hover:bg-[oklch(28%_0.01_80)]"
+                  ? "border-risk-fresh/40 text-risk-fresh"
+                  : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
               )}
             >
               {copied ? (
@@ -153,26 +162,17 @@ export function PilotFeedbackModal() {
               ) : (
                 <Copy className="h-[14px] w-[14px]" strokeWidth={1.7} />
               )}
-              {copied ? "Copied" : "Copy to clipboard"}
+              {copied ? "Copied" : "Copy instead"}
             </button>
-            {!isBug && feedbackFormUrl ? (
-              <a
-                href={feedbackFormUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-2 rounded-pill border border-hairline px-[16px] py-[9px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-              >
-                <ExternalLink className="h-[14px] w-[14px]" strokeWidth={1.7} />
-                Open feedback form
-              </a>
-            ) : null}
           </div>
         </div>
 
         <footer className="border-t border-hairline px-5 py-3">
           <p className="m-0 text-[11.5px] leading-[1.5] text-ink-3">
-            Nothing here is sent automatically. Copy the text and send it to whoever shared this
-            pilot with you — only what you&apos;re comfortable sharing.
+            &ldquo;Open a GitHub issue&rdquo; opens a pre-filled issue you review and submit
+            yourself — nothing is posted automatically. No account? Copy the text and send it to
+            whoever shared this pilot with you. Either way, share only what you&apos;re
+            comfortable sharing — no message content is included.
           </p>
         </footer>
       </div>

@@ -7,6 +7,7 @@ const {
   FEEDBACK_QUESTIONS,
   buildFeedbackTemplate,
   buildBugReportTemplate,
+  buildGithubIssueUrl,
   describeRoute,
   extractThreadId
 } = await import("../apps/dashboard/lib/pilot.ts");
@@ -63,4 +64,21 @@ test("extractThreadId returns the id only on a thread route", () => {
   assert.equal(extractThreadId("/today"), null);
   assert.equal(extractThreadId("/"), null);
   assert.equal(extractThreadId(""), null);
+});
+
+test("buildGithubIssueUrl targets the right issue form per mode", () => {
+  const bug = buildGithubIssueUrl("bug", "hello");
+  assert.match(bug, /\/issues\/new\?/);
+  assert.match(bug, /template=pilot-bug\.yml/);
+  const feedback = buildGithubIssueUrl("feedback", "hello");
+  assert.match(feedback, /template=pilot-feedback\.yml/);
+});
+
+test("buildGithubIssueUrl url-encodes the details into the details param", () => {
+  const url = buildGithubIssueUrl("bug", "line one\nline two & more");
+  const details = new URL(url).searchParams.get("details");
+  // The body round-trips intact through the query param (no leakage, no
+  // truncation) and special characters are encoded, not raw.
+  assert.equal(details, "line one\nline two & more");
+  assert.doesNotMatch(url, /line one\nline two/);
 });
