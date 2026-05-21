@@ -11,10 +11,12 @@ apps/dashboard/.next
 apps/dashboard/out
 apps/runner/dist
 packages/core/generated
+*.tsbuildinfo
 
 # Data runtime state
 /data/
 /logs/runs/
+/logs/*.log
 /apps/runner/logs/runs
 /apps/runner/LATEST_LINKEDIN_SCAN.txt
 /apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt
