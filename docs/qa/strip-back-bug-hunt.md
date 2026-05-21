@@ -61,14 +61,14 @@ Branch: `fix/strip-back-bug-hunt` (based on `cb8d564`, identical code to
   "INTERESTS debounce check edited second"). PASS.
 - **Remaining risk:** none.
 
-### BUG-D — Hardcoded operator name "Richard"
+### BUG-D — Hardcoded operator name
 - **Source:** code inspection; brief happy-path check #2.
-- **Repro:** Today greeted "Good evening, Richard." and the sidebar operator avatar
-  rendered "R" regardless of who is using the app — wrong for a multi-student pilot.
+- **Repro:** Today greeted a hardcoded operator name and the sidebar operator avatar
+  rendered hardcoded initials regardless of who is using the app — wrong for a multi-student pilot.
 - **Status:** Still relevant. (Full AI-voice de-personalisation in `ai.ts` is separate,
   pending feature work — out of scope here.)
 - **Fix:** the Today greeting drops the name (`{greeting}.`); the sidebar renders a
-  neutral person glyph instead of "Richard" initials (the `userInitials` prop and the
+  neutral person glyph instead of hardcoded initials (the `userInitials` prop and the
   `operatorName` literal in `app-shell.tsx` are removed).
 - **Verification:** Chrome MCP — Today shows "Good afternoon."; the sidebar operator
   avatar shows a person icon. PASS.

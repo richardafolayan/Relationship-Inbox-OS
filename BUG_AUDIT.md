@@ -15,10 +15,10 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 2. Added stage/thread/request details and stack fields in scan audit paths (`SCAN_AUTH_REQUIRED`, `THREAD_SYNC_FAIL`, `SCAN_FAIL`, `SELECTOR_FAIL`).
 3. Added unhandled process rejection/exception audit handlers.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/utils.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
+1. `apps/runner/src/platforms/utils.ts`
+2. `apps/runner/src/platforms/linkedin-adapter.ts`
+3. `apps/runner/src/services/scan-queue.ts`
+4. `apps/runner/src/index.ts`
 
 ### BUG-002: LinkedIn misses threads unless list is deeply scrolled
 - Symptom: Only first viewport threads are collected; unread/recent thread coverage is incomplete.
@@ -33,8 +33,8 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Added stable-key preference chain: URN/href token/safe data-id/fallback composite.
 4. Added regression tests for stop reason behavior and collection stability.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `tests/runner-linkedin-scroll.test.mjs`
 
 ### BUG-003: Inbox previews repeat/cross-contaminate across threads
 - Symptom: Multiple people show the same snippet or stale snippet.
@@ -47,10 +47,10 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 2. Added explicit preview mapping regression test fixture to enforce per-thread isolation.
 3. Improved open-thread activation path usage for `openThread` and message fetch.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/thread-list-snapshots.json`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-preview.test.mjs`
+1. `apps/runner/src/services/scan-queue.ts`
+2. `apps/runner/src/platforms/linkedin-adapter.ts`
+3. `tests/fixtures/linkedin/thread-list-snapshots.json`
+4. `tests/runner-linkedin-preview.test.mjs`
 
 ### BUG-004: `Target page/context/browser closed` across scan/connect/send/open paths
 - Symptom: Intermittent failures across LinkedIn/Instagram/TikTok during active operations.
@@ -64,12 +64,12 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Added page recreation path when platform tab is closed.
 4. Converted reset-session into shared person-context reset.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/platform-factory.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/beta-adapter.ts`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`
+1. `apps/runner/src/services/session-manager.ts`
+2. `apps/runner/src/services/platform-factory.ts`
+3. `apps/runner/src/platforms/linkedin-adapter.ts`
+4. `apps/runner/src/platforms/beta-adapter.ts`
+5. `apps/runner/src/index.ts`
+6. `apps/dashboard/app/platforms/page.tsx`
 
 ### BUG-005: Scan overlap and race between manual/scheduled/control actions
 - Symptom: Lifecycle races and inconsistent operations when scans and control actions happen near-simultaneously.
@@ -82,10 +82,10 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 2. Applied per-platform lock keys (`default:PLATFORM`) across scan and control flows.
 3. Added queue processor/scheduler catch boundaries to avoid unhandled background failures.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/keyed-mutex.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-keyed-mutex.test.mjs`
+1. `apps/runner/src/services/keyed-mutex.ts`
+2. `apps/runner/src/services/scan-queue.ts`
+3. `apps/runner/src/index.ts`
+4. `tests/runner-keyed-mutex.test.mjs`
 
 ### BUG-006: Instagram/TikTok selector/connect flow misclassified auth states
 - Symptom: Login/QR pages surfaced as selector failures instead of actionable auth-required state.
@@ -99,10 +99,10 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 2. Throw `AdapterFailure(kind=AUTH_REQUIRED)` from adapter/selector service when auth is needed.
 3. Mapped selector test response status to 401 for auth-required conditions.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/beta-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/selector-tests.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/utils.ts`
+1. `apps/runner/src/platforms/beta-adapter.ts`
+2. `apps/runner/src/services/selector-tests.ts`
+3. `apps/runner/src/index.ts`
+4. `apps/runner/src/platforms/utils.ts`
 
 ### BUG-007: Async route/loop error paths could become unhandled promise rejections
 - Symptom: Silent or partially logged failures from async GET handlers and background loops.
@@ -116,8 +116,8 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 2. Added explicit catch logging for queue processor and scheduler tick.
 3. Added process-level unhandled rejection/uncaught exception audit logging.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
+1. `apps/runner/src/index.ts`
+2. `apps/runner/src/services/scan-queue.ts`
 
 ### BUG-008: Message model lacked sender/raw fields for full conversation reconstruction
 - Symptom: Conversation view and normalized payload cannot preserve sender identity/raw platform message metadata.
@@ -131,12 +131,12 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Persisted sender/raw in scan pipeline and returned fields via thread API.
 4. Rendered sender labels in conversation UI.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core/prisma/schema.prisma`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core/src/types.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/thread/[id]/page.tsx`
+1. `packages/core/prisma/schema.prisma`
+2. `packages/core/src/types.ts`
+3. `apps/runner/src/services/scan-queue.ts`
+4. `apps/runner/src/index.ts`
+5. `apps/dashboard/lib/types.ts`
+6. `apps/dashboard/app/thread/[id]/page.tsx`
 
 ### BUG-009: Local catch blocks for thread send/open swallowed failure context
 - Symptom: Thread open/send failed responses lacked stage/thread/platform diagnostics and stack context.
@@ -148,7 +148,7 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 1. Reworked send/open control routes to log stage-tagged failures with thread/platform IDs and stack context.
 2. Coordinated these actions through platform mutex to avoid concurrent lifecycle interference.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
+1. `apps/runner/src/index.ts`
 
 ### BUG-010: LinkedIn selector tests failed with `page.evaluate` `__name is not defined`
 - Symptom: Platforms page `Run selector tests` failed with `500` and raw frontend exception text (`ReferenceError: __name is not defined`).
@@ -164,11 +164,11 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 4. Added auth-required `401` handling for LinkedIn/Instagram/TikTok selector runs.
 5. Added regression tests for evaluate safety, contract guarantees, and integration-ish local-page selector execution.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/selector-tests.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-selector-evaluate-safety.test.mjs`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-selector-contract.test.mjs`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-selector-service.test.mjs`
+1. `apps/runner/src/services/selector-tests.ts`
+2. `apps/runner/src/index.ts`
+3. `tests/runner-selector-evaluate-safety.test.mjs`
+4. `tests/runner-selector-contract.test.mjs`
+5. `tests/runner-selector-service.test.mjs`
 
 ### BUG-011: Unread-only LinkedIn scans did not enforce the Unread filter pill
 - Symptom: Unread scans could include stale/non-unread list state depending on LinkedIn UI state and missed intended unread-only context.
@@ -183,9 +183,9 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Added safe fallback when pill is missing or not clickable.
 4. Added unread-pill regression tests and LinkedIn fixture.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-unread-pill.test.mjs`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/unread-pill.html`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `tests/runner-linkedin-unread-pill.test.mjs`
+3. `tests/fixtures/linkedin/unread-pill.html`
 
 ### BUG-012: Extra `about:blank` tab introduced nondeterministic managed-page ownership
 - Symptom: Shared managed session could keep an extra default blank tab before platform pages, making page mapping brittle.
@@ -200,8 +200,8 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Added cleanup of unassigned blank pages while preserving mapped platform pages.
 4. Added session manager tests for reuse and non-reuse when mapped to another platform.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-session-manager.test.mjs`
+1. `apps/runner/src/services/session-manager.ts`
+2. `tests/runner-session-manager.test.mjs`
 
 ### BUG-013: Frontend selector-test failures were not rendered as structured UI errors
 - Symptom: Platforms UI threw raw text errors and did not show stage/reason/requestId/artifact pointers.
@@ -215,9 +215,9 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Added typed selector-test success/failure models.
 4. Added inline selector error panel in Platforms UI with stage/reason/requestId/artifact links.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/api.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`
+1. `apps/dashboard/lib/api.ts`
+2. `apps/dashboard/lib/types.ts`
+3. `apps/dashboard/app/platforms/page.tsx`
 
 ### BUG-014: LinkedIn unread live scan failed at `collect_threads` during unread-filter transition, with root cause hidden by wrapper message
 - Symptom: Dashboard showed `Failed while scanning LinkedIn unread threads` while selector tests passed; real collect-stage runtime cause was not surfaced.
@@ -227,8 +227,8 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 3. Inspect artifacts and receipt data:
    - stage: `collect_threads`
    - action: `SELECTOR_FAIL`
-   - screenshot: `/Users/richard/IdeaProjects/relationship-inbox-os/data/screenshots/linkedin-scan-unread-2026-02-18T15-44-40-904Z.png`
-   - DOM dump: `/Users/richard/IdeaProjects/relationship-inbox-os/data/dom_dumps/linkedin-scan-unread-2026-02-18T15-44-40-904Z.html`
+   - screenshot: `data/screenshots/linkedin-scan-unread-2026-02-18T15-44-40-904Z.png`
+   - DOM dump: `data/dom_dumps/linkedin-scan-unread-2026-02-18T15-44-40-904Z.html`
    - observed state: unread pill active, spinner visible, `thread_item` count `0`.
 - Root cause:
 1. Unread filter can trigger DOM replacement + transient loading windows (spinner + zero rows), causing collect instability unless list/container is reacquired on retry.
@@ -241,14 +241,14 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 5. Extended `/data/platforms` failure summary derivation to read nested `innerError/error` messages.
 6. Added regression fixture/tests for unread rerender, transient execution-context failure retry, and container-only scrolling behavior.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/unread-rerender-scroll.html`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scan-resilience.test.mjs`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`
-7. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/components/common/degraded-banner.tsx`
-8. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/services/scan-queue.ts`
+3. `apps/runner/src/index.ts`
+4. `tests/fixtures/linkedin/unread-rerender-scroll.html`
+5. `tests/runner-linkedin-scan-resilience.test.mjs`
+6. `apps/dashboard/app/platforms/page.tsx`
+7. `apps/dashboard/components/common/degraded-banner.tsx`
+8. `apps/dashboard/lib/types.ts`
 
 ### BUG-015: LinkedIn unread `collect_threads` crashed with `page.evaluate: ReferenceError: __name is not defined`
 - Symptom: Live unread scans failed at stage `collect_threads` and dashboard showed `collect_threads · unknown · request <id>`.
@@ -267,12 +267,12 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 4. Added regression coverage for the real production collect path and a guard test preventing string evaluate usage in unread scan flow.
 5. Added message-iterator sanity test fixture for `div.msg-s-event-listitem[data-event-urn]` parsing and non-text/system fallback handling.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scan-resilience.test.mjs`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/message-events.html`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-message-iterator.test.mjs`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/services/scan-queue.ts`
+3. `tests/runner-linkedin-scan-resilience.test.mjs`
+4. `tests/runner-linkedin-scroll.test.mjs`
+5. `tests/fixtures/linkedin/message-events.html`
+6. `tests/runner-linkedin-message-iterator.test.mjs`
 
 ### BUG-016: LinkedIn unread scans could loop at end-of-list, trigger recovery/reload churn, and surface weak failure reasons
 - Symptom:
@@ -298,19 +298,19 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 6. Added lease-drain timeout failure in session manager close/reset path to avoid forced close during active leased work.
 7. Added regression tests for real collect path/no-string-evaluate guard/deep-scroll termination/circuit-breaker/page-closed reason classification.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-retry-controller.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`
-7. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`
-8. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`
-9. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-collect-threads-no-name-error.test.mjs`
-10. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-deep-scroll-terminates.test.mjs`
-11. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-no-string-evaluate.test.mjs`
-12. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-scan-retry-circuit-breaker.test.mjs`
-13. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-page-closed-mid-stage-reason.test.mjs`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/services/scan-queue.ts`
+3. `apps/runner/src/services/scan-retry-controller.ts`
+4. `apps/runner/src/services/session-manager.ts`
+5. `apps/runner/src/index.ts`
+6. `apps/dashboard/lib/types.ts`
+7. `apps/dashboard/app/platforms/page.tsx`
+8. `tests/runner-linkedin-scroll.test.mjs`
+9. `tests/runner-linkedin-collect-threads-no-name-error.test.mjs`
+10. `tests/runner-linkedin-deep-scroll-terminates.test.mjs`
+11. `tests/runner-linkedin-no-string-evaluate.test.mjs`
+12. `tests/runner-scan-retry-circuit-breaker.test.mjs`
+13. `tests/runner-page-closed-mid-stage-reason.test.mjs`
 
 ### BUG-017: LinkedIn unread smoke ingest debug path + visible logging
 - Symptom:
@@ -330,18 +330,18 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 5. Added prominent `[LI][SMOKE][req=...][step=x/8]` logs, start/end `LOG_DIR` lines, `pretty.log`, and latest pointer file `logs/runs/LATEST_LINKEDIN_SMOKE.txt`.
 6. Added parser fixture test `runner-linkedin-smoke-parsing.test.mjs` using `page.setContent()`.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/run-logger.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-logger.ts`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/cli.ts`
-7. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`
-8. `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`
-9. `/Users/richard/IdeaProjects/relationship-inbox-os/.env.example`
-10. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`
-11. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
-12. `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/services/scan-queue.ts`
+3. `apps/runner/src/services/run-logger.ts`
+4. `apps/runner/src/services/linkedin-smoke-logger.ts`
+5. `apps/runner/src/index.ts`
+6. `apps/runner/src/cli.ts`
+7. `apps/runner/package.json`
+8. `package.json`
+9. `.env.example`
+10. `tests/fixtures/linkedin/smoke-unread.html`
+11. `tests/runner-linkedin-smoke-parsing.test.mjs`
+12. `README.md`
 
 ### BUG-018: LinkedIn unread smoke saw `0` rows while unread view was visibly populated
 - Symptom:
@@ -364,12 +364,12 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 6. Updated endpoint/direct smoke response shape to include `outcome`, `unreadCount`, `messagesParsed`, and `probeArtifacts`; empty unread now returns success (`UNREAD_EMPTY`).
 7. Expanded fixture/tests for spacer rows, convo-item-link click targets, unread counter variants, fallback clickable ancestor discovery, and outcome classification.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/index.ts`
+3. `apps/runner/src/services/linkedin-smoke-direct.ts`
+4. `tests/fixtures/linkedin/smoke-unread.html`
+5. `tests/runner-linkedin-smoke-parsing.test.mjs`
+6. `README.md`
 
 ### BUG-019: LinkedIn smoke navigate failed early with `messaging_shell_not_ready` when LinkedIn landed on thread URL
 - Symptom:
@@ -394,11 +394,11 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
    - `[LI][SMOKE][req=...][navigate] url=... title=... ready=false counts={...} reason=...`
 6. Added fixture/tests for thread-route shell readiness and navigate-state classification paths.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/index.ts`
+3. `apps/runner/src/services/linkedin-smoke-direct.ts`
+4. `tests/fixtures/linkedin/smoke-thread-shell.html`
+5. `tests/runner-linkedin-smoke-parsing.test.mjs`
 
 ### BUG-020: LinkedIn smoke false modal block + spacer-row unread discovery failures
 - Symptom:
@@ -421,9 +421,9 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 6. Added stronger mismatch diagnostics and compact list probe content (direct li counts + first 8 li outerHTML).
 7. Added milestone logs (`navigate`, `unread`, `rows`, `candidates`) to terminal/pretty log.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `tests/fixtures/linkedin/smoke-thread-shell.html`
+3. `tests/runner-linkedin-smoke-parsing.test.mjs`
 
 ### BUG-021: LinkedIn duplicate threads, absurd recency, sponsored pollution, and missed read-but-unreplied items
 - Symptom:
@@ -446,27 +446,27 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 7. Updated dashboard time guards to reject invalid/out-of-range timestamps and show `-`.
 8. Added conservative LinkedIn repair CLI with dry-run default and explicit opt-in destructive cleanup flag.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/linkedin/linkedinIdentity.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/linkedin/linkedinTime.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/linkedin/linkedinRowSignals.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/thread-row-shaping.ts`
-7. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/scripts/repair-linkedin-threads.ts`
-8. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-9. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/time.ts`
-10. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`
-11. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/inbox/page.tsx`
-12. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/people/page.tsx`
-13. `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core/src/types.ts`
-14. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`
-15. `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`
-16. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-time-parser.test.mjs`
-17. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-collect-threads-no-name-error.test.mjs`
-18. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-inbox-row-shaping.test.mjs`
-19. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-repair-linkedin-threads.test.mjs`
-20. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/unread-rerender-scroll.html`
-21. `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
+1. `apps/runner/src/linkedin/linkedinIdentity.ts`
+2. `apps/runner/src/linkedin/linkedinTime.ts`
+3. `apps/runner/src/linkedin/linkedinRowSignals.ts`
+4. `apps/runner/src/platforms/linkedin-adapter.ts`
+5. `apps/runner/src/services/scan-queue.ts`
+6. `apps/runner/src/services/thread-row-shaping.ts`
+7. `apps/runner/src/scripts/repair-linkedin-threads.ts`
+8. `apps/runner/src/index.ts`
+9. `apps/dashboard/lib/time.ts`
+10. `apps/dashboard/lib/types.ts`
+11. `apps/dashboard/app/inbox/page.tsx`
+12. `apps/dashboard/app/people/page.tsx`
+13. `packages/core/src/types.ts`
+14. `apps/runner/package.json`
+15. `package.json`
+16. `tests/runner-linkedin-time-parser.test.mjs`
+17. `tests/runner-linkedin-collect-threads-no-name-error.test.mjs`
+18. `tests/runner-inbox-row-shaping.test.mjs`
+19. `tests/runner-repair-linkedin-threads.test.mjs`
+20. `tests/fixtures/linkedin/unread-rerender-scroll.html`
+21. `README.md`
 - Repair script:
 1. Dry-run (default, non-destructive): `npm run repair:linkedin-threads`
 2. Apply conservative merge/recompute: `npm run repair:linkedin-threads -- --apply`
@@ -491,24 +491,24 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 5. Added reset CLI (`db:reset:linkedin`), `dev:fast`, and artifact cleanup script (`cleanup:artifacts`, dry-run by default, `--apply` opt-in).
 6. Expanded `.gitignore` for runtime artifacts and added streaming scan regression coverage for no reload/goto churn.
 - Files changed:
-1. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`
-2. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-3. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/thread-row-shaping.ts`
-4. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/admin-reset.ts`
-5. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-6. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/scripts/reset-linkedin-inbox.ts`
-7. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/scripts/cleanup-artifacts.ts`
-8. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/settings/page.tsx`
-9. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/api.ts`
-10. `/Users/richard/IdeaProjects/relationship-inbox-os/.gitignore`
-11. `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`
-12. `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`
-13. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/streaming-virtualized.html`
-14. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-streaming-scan.test.mjs`
-15. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-inbox-row-shaping.test.mjs`
-16. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-admin-reset.test.mjs`
-17. `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-cleanup-artifacts.test.mjs`
-18. `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
+1. `apps/runner/src/platforms/linkedin-adapter.ts`
+2. `apps/runner/src/services/scan-queue.ts`
+3. `apps/runner/src/services/thread-row-shaping.ts`
+4. `apps/runner/src/services/admin-reset.ts`
+5. `apps/runner/src/index.ts`
+6. `apps/runner/src/scripts/reset-linkedin-inbox.ts`
+7. `apps/runner/src/scripts/cleanup-artifacts.ts`
+8. `apps/dashboard/app/settings/page.tsx`
+9. `apps/dashboard/lib/api.ts`
+10. `.gitignore`
+11. `apps/runner/package.json`
+12. `package.json`
+13. `tests/fixtures/linkedin/streaming-virtualized.html`
+14. `tests/runner-linkedin-streaming-scan.test.mjs`
+15. `tests/runner-inbox-row-shaping.test.mjs`
+16. `tests/runner-admin-reset.test.mjs`
+17. `tests/runner-cleanup-artifacts.test.mjs`
+18. `README.md`
 - Reset and cleanup commands:
 1. `npm run db:reset:linkedin` (requires `ADMIN_RESET_TOKEN`, confirm enforced by script/service).
 2. `npm run cleanup:artifacts` (dry-run).
@@ -516,25 +516,25 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 
 ## Final Changed Files by Bug ID
 
-- BUG-001: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/utils.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-- BUG-002: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`
-- BUG-003: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/thread-list-snapshots.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-preview.test.mjs`
-- BUG-004: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/platform-factory.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/beta-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`
-- BUG-005: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/keyed-mutex.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-keyed-mutex.test.mjs`
-- BUG-006: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/beta-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/selector-tests.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/utils.ts`
-- BUG-007: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`
-- BUG-008: `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core/prisma/schema.prisma`, `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core/src/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/thread/[id]/page.tsx`
-- BUG-009: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`
-- BUG-010: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/selector-tests.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-selector-evaluate-safety.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-selector-contract.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-selector-service.test.mjs`
-- BUG-011: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-unread-pill.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/unread-pill.html`
-- BUG-012: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-session-manager.test.mjs`
-- BUG-013: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/api.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`
-- BUG-014: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/unread-rerender-scroll.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scan-resilience.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/components/common/degraded-banner.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`
-- BUG-015: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scan-resilience.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/message-events.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-message-iterator.test.mjs`
-- BUG-016: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-retry-controller.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/session-manager.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/platforms/page.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-scroll.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-collect-threads-no-name-error.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-deep-scroll-terminates.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-no-string-evaluate.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-scan-retry-circuit-breaker.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-page-closed-mid-stage-reason.test.mjs`
-- BUG-017: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/run-logger.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-logger.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/cli.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/.env.example`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
-- BUG-018: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-unread.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
-- BUG-019: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/linkedin-smoke-direct.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
-- BUG-020: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/smoke-thread-shell.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-smoke-parsing.test.mjs`
-- BUG-021: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/linkedin/linkedinIdentity.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/linkedin/linkedinTime.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/linkedin/linkedinRowSignals.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/thread-row-shaping.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/scripts/repair-linkedin-threads.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/time.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/inbox/page.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/people/page.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/packages/core/src/types.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/unread-rerender-scroll.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-collect-threads-no-name-error.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-time-parser.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-inbox-row-shaping.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-repair-linkedin-threads.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
-- BUG-022: `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/platforms/linkedin-adapter.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/scan-queue.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/thread-row-shaping.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/services/admin-reset.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/index.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/scripts/reset-linkedin-inbox.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/src/scripts/cleanup-artifacts.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/app/settings/page.tsx`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/dashboard/lib/api.ts`, `/Users/richard/IdeaProjects/relationship-inbox-os/.gitignore`, `/Users/richard/IdeaProjects/relationship-inbox-os/apps/runner/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/package.json`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/fixtures/linkedin/streaming-virtualized.html`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-linkedin-streaming-scan.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-inbox-row-shaping.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-admin-reset.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/tests/runner-cleanup-artifacts.test.mjs`, `/Users/richard/IdeaProjects/relationship-inbox-os/README.md`
+- BUG-001: `apps/runner/src/platforms/utils.ts`, `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/index.ts`
+- BUG-002: `apps/runner/src/platforms/linkedin-adapter.ts`, `tests/runner-linkedin-scroll.test.mjs`
+- BUG-003: `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/platforms/linkedin-adapter.ts`, `tests/fixtures/linkedin/thread-list-snapshots.json`, `tests/runner-linkedin-preview.test.mjs`
+- BUG-004: `apps/runner/src/services/session-manager.ts`, `apps/runner/src/services/platform-factory.ts`, `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/platforms/beta-adapter.ts`, `apps/runner/src/index.ts`, `apps/dashboard/app/platforms/page.tsx`
+- BUG-005: `apps/runner/src/services/keyed-mutex.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/index.ts`, `tests/runner-keyed-mutex.test.mjs`
+- BUG-006: `apps/runner/src/platforms/beta-adapter.ts`, `apps/runner/src/services/selector-tests.ts`, `apps/runner/src/index.ts`, `apps/runner/src/platforms/utils.ts`
+- BUG-007: `apps/runner/src/index.ts`, `apps/runner/src/services/scan-queue.ts`
+- BUG-008: `packages/core/prisma/schema.prisma`, `packages/core/src/types.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/index.ts`, `apps/dashboard/lib/types.ts`, `apps/dashboard/app/thread/[id]/page.tsx`
+- BUG-009: `apps/runner/src/index.ts`
+- BUG-010: `apps/runner/src/services/selector-tests.ts`, `apps/runner/src/index.ts`, `tests/runner-selector-evaluate-safety.test.mjs`, `tests/runner-selector-contract.test.mjs`, `tests/runner-selector-service.test.mjs`
+- BUG-011: `apps/runner/src/platforms/linkedin-adapter.ts`, `tests/runner-linkedin-unread-pill.test.mjs`, `tests/fixtures/linkedin/unread-pill.html`
+- BUG-012: `apps/runner/src/services/session-manager.ts`, `tests/runner-session-manager.test.mjs`
+- BUG-013: `apps/dashboard/lib/api.ts`, `apps/dashboard/lib/types.ts`, `apps/dashboard/app/platforms/page.tsx`
+- BUG-014: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/index.ts`, `tests/fixtures/linkedin/unread-rerender-scroll.html`, `tests/runner-linkedin-scan-resilience.test.mjs`, `apps/dashboard/app/platforms/page.tsx`, `apps/dashboard/components/common/degraded-banner.tsx`, `apps/dashboard/lib/types.ts`
+- BUG-015: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `tests/runner-linkedin-scan-resilience.test.mjs`, `tests/runner-linkedin-scroll.test.mjs`, `tests/fixtures/linkedin/message-events.html`, `tests/runner-linkedin-message-iterator.test.mjs`
+- BUG-016: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/services/scan-retry-controller.ts`, `apps/runner/src/services/session-manager.ts`, `apps/runner/src/index.ts`, `apps/dashboard/lib/types.ts`, `apps/dashboard/app/platforms/page.tsx`, `tests/runner-linkedin-scroll.test.mjs`, `tests/runner-linkedin-collect-threads-no-name-error.test.mjs`, `tests/runner-linkedin-deep-scroll-terminates.test.mjs`, `tests/runner-linkedin-no-string-evaluate.test.mjs`, `tests/runner-scan-retry-circuit-breaker.test.mjs`, `tests/runner-page-closed-mid-stage-reason.test.mjs`
+- BUG-017: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/services/run-logger.ts`, `apps/runner/src/services/linkedin-smoke-logger.ts`, `apps/runner/src/index.ts`, `apps/runner/src/cli.ts`, `apps/runner/package.json`, `package.json`, `.env.example`, `tests/fixtures/linkedin/smoke-unread.html`, `tests/runner-linkedin-smoke-parsing.test.mjs`, `README.md`
+- BUG-018: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/index.ts`, `apps/runner/src/services/linkedin-smoke-direct.ts`, `tests/fixtures/linkedin/smoke-unread.html`, `tests/runner-linkedin-smoke-parsing.test.mjs`, `README.md`
+- BUG-019: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/index.ts`, `apps/runner/src/services/linkedin-smoke-direct.ts`, `tests/fixtures/linkedin/smoke-thread-shell.html`, `tests/runner-linkedin-smoke-parsing.test.mjs`
+- BUG-020: `apps/runner/src/platforms/linkedin-adapter.ts`, `tests/fixtures/linkedin/smoke-thread-shell.html`, `tests/runner-linkedin-smoke-parsing.test.mjs`
+- BUG-021: `apps/runner/src/linkedin/linkedinIdentity.ts`, `apps/runner/src/linkedin/linkedinTime.ts`, `apps/runner/src/linkedin/linkedinRowSignals.ts`, `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/services/thread-row-shaping.ts`, `apps/runner/src/scripts/repair-linkedin-threads.ts`, `apps/runner/src/index.ts`, `apps/dashboard/lib/time.ts`, `apps/dashboard/lib/types.ts`, `apps/dashboard/app/inbox/page.tsx`, `apps/dashboard/app/people/page.tsx`, `packages/core/src/types.ts`, `apps/runner/package.json`, `package.json`, `tests/fixtures/linkedin/unread-rerender-scroll.html`, `tests/runner-linkedin-collect-threads-no-name-error.test.mjs`, `tests/runner-linkedin-time-parser.test.mjs`, `tests/runner-inbox-row-shaping.test.mjs`, `tests/runner-repair-linkedin-threads.test.mjs`, `README.md`
+- BUG-022: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/services/thread-row-shaping.ts`, `apps/runner/src/services/admin-reset.ts`, `apps/runner/src/index.ts`, `apps/runner/src/scripts/reset-linkedin-inbox.ts`, `apps/runner/src/scripts/cleanup-artifacts.ts`, `apps/dashboard/app/settings/page.tsx`, `apps/dashboard/lib/api.ts`, `.gitignore`, `apps/runner/package.json`, `package.json`, `tests/fixtures/linkedin/streaming-virtualized.html`, `tests/runner-linkedin-streaming-scan.test.mjs`, `tests/runner-inbox-row-shaping.test.mjs`, `tests/runner-admin-reset.test.mjs`, `tests/runner-cleanup-artifacts.test.mjs`, `README.md`

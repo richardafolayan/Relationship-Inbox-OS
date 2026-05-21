@@ -11,7 +11,7 @@ const defaultBrowserProfile = {
   personalProfileMirrorRoot: "/tmp/mirror-root",
   personalChromeUserDataDir: "/tmp/chrome-user-data",
   personalChromeProfileDirectory: "Default",
-  personalChromeProfileName: "Richard",
+  personalChromeProfileName: "Test Profile",
   personalChromeProfileResolutionStrategy: "directory_exact"
 };
 

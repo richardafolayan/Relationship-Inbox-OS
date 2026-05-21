@@ -40,8 +40,8 @@ The repository shows a clear three-step journey.
 **Step 1 — The feature-heavy version.** Before the current baseline, the dashboard exposed a full *operator console*: seven nav routes, a settings page full of automation knobs, and operator actions in the top bar. This is **Confirmed** by what the strip-back commits explicitly remove (see table below) and by the fact that those pages still exist in the tree. Automation defaults were also more aggressive — `LINKEDIN_SCAN_MAX_THREADS=200`, background profile-enrichment on by default, enrichment daily cap `40` (Confirmed, `.env.example` diff `pre-v1-stripback..HEAD`).
 
 **Step 2 — The realisation: too much, and too personal.** The product was being built around one specific person.
-- The AI casual-voice prompt hardcodes the author's identity verbatim: *"You write messages on behalf of Richard, a 22-year-old Black British man from Nottingham. Final-year Computer Science student, founder of a business growth agency"* (Confirmed, `apps/runner/src/services/ai.ts:310`).
-- The LinkedIn voice prompt writes *"as Richard, in his voice"* with four verbatim examples of his real messages (Confirmed, `ai.ts:122`).
+- The AI casual-voice prompt hardcoded the operator's identity and demographic detail verbatim. [Removed: historical local operator voice prompt. Richard-specific profile data now lives only in the gitignored local seed file and the local SQLite operator_profile_v1 row.] (Was at `apps/runner/src/services/ai.ts:310`.)
+- The LinkedIn voice prompt hardcoded the operator's voice with verbatim examples of their real messages. [Removed: see the note above.] (Was at `ai.ts:122`.)
 - `README.md` is written in the first person about the author's own habits ("reply to my mum").
 - The Today screen greets `"{greeting}, Richard."` as a hardcoded string (Confirmed, `apps/dashboard/app/today/page.tsx:275`).
 - `.env.example` ships `PERSONAL_CHROME_PROFILE_NAME=Richard Afolayan`.

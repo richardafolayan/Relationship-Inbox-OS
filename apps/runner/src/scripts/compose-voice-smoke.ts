@@ -95,7 +95,7 @@ const scenarios: Scenario[] = [
     ]
   },
   {
-    label: "3. 60+ day gap (late-reply bucket should fire in his voice, not templated)",
+    label: "3. 60+ day gap (late-reply bucket should fire in the operator's voice, not templated)",
     intent: "Apologise for the delay, say things have been good, ask how he's been.",
     displayName: "James",
     voiceSamples: ["Hey man, yhh sounds good, lets do it", "Appreciate you, will catch you soon"],
