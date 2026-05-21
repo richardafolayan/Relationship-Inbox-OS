@@ -19,7 +19,15 @@ import {
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
+import type {
+  AuditLogRow,
+  InboxResponse,
+  InboxRow,
+  OperatorProfile,
+  PlatformCard,
+  ThreadMessage,
+  ThreadResponse
+} from "@/lib/types";
 import { IMessageMedia } from "@/components/thread/imessage-media";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
@@ -30,7 +38,6 @@ import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 import { ActionItemsChecklist } from "@/components/thread/ActionItemsChecklist";
-import { readFullAiReplies } from "@/lib/preferences";
 
 // Thread workspace - landscape layout.
 //
@@ -432,6 +439,12 @@ export default function ThreadPage() {
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
   const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
+  // Operator voice profile — its aiHelpLevel decides which AI affordances
+  // this page surfaces. The ref mirror lets `refresh` (a useCallback that
+  // must not depend on profile) read the latest value when deciding
+  // whether to auto-fill a predraft.
+  const [profile, setProfile] = useState<OperatorProfile | null>(null);
+  const profileRef = useRef<OperatorProfile | null>(null);
   // AI-suggested snooze chips, populated lazily when the operator opens
   // the snooze chip menu. Empty list = AI saw no time hint and refused
   // to fabricate one (correct, expected behaviour for most threads).
@@ -449,10 +462,9 @@ export default function ThreadPage() {
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
-  // Full AI reply drafting is opt-in (Settings -> AI). Default off so the
-  // workspace leads with replying in your own words; when off, the
-  // suggested-replies, predraft, and compose-in-voice surfaces are hidden.
-  const [fullAiReplies, setFullAiReplies] = useState(false);
+  // How much AI writing help to surface is driven by the operator's
+  // configured aiHelpLevel (see the `profile` state below). Full sendable
+  // drafts, predraft, and compose-in-voice only appear at "full_drafts".
 
   // Sibling-threads rail collapse — operator can hide the 240px list to
   // give the chat column more room. State persists in localStorage and
@@ -463,19 +475,6 @@ export default function ThreadPage() {
     const stored = window.localStorage.getItem("dashboard_threads_collapsed");
     if (stored === "true") setThreadsCollapsed(true);
   }, []);
-
-  // Full-AI-replies preference, read on mount from localStorage. Kept out of
-  // the initial state value to avoid an SSR hydration mismatch, mirroring the
-  // threadsCollapsed pattern above.
-  useEffect(() => {
-    setFullAiReplies(readFullAiReplies());
-  }, []);
-
-  // With full AI replies off, the rail compose helper is Ask-only. Ask
-  // answers from context and never drafts a message, so it stays available.
-  useEffect(() => {
-    if (!fullAiReplies) setComposeMode("ask");
-  }, [fullAiReplies]);
 
   // Open the context rail once per thread when it has things to address, so
   // the action-items checklist is visible while the operator writes a reply.
@@ -624,12 +623,11 @@ export default function ThreadPage() {
         }
         // No explicit draft - fall back to AI predraft (first suggested
         // reply) so the operator opens an already-filled composer when
-        // /today has pre-warmed the cache. Skipped when full AI replies are
-        // off: that mode leads with the operator writing in their own words.
-        const aiPredraft = readFullAiReplies()
-          ? threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim()
-          : undefined;
-        if (aiPredraft) {
+        // /today has pre-warmed the cache. Only when the operator has
+        // opted into full AI drafts — at lower help levels the composer
+        // stays empty so they write it themselves.
+        const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
+        if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
           setComposerSource("predraft");
           return aiPredraft;
         }
@@ -656,6 +654,22 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // Load the operator voice profile once. Reloads on a profile-saved
+  // event so an AI-help-level change in Settings lands without a reload.
+  useEffect(() => {
+    const loadProfile = () => {
+      void apiGet<OperatorProfile>("/runner/data/operator-profile")
+        .then((data) => {
+          profileRef.current = data ?? null;
+          setProfile(data ?? null);
+        })
+        .catch(() => undefined);
+    };
+    loadProfile();
+    window.addEventListener("operator-profile-saved", loadProfile);
+    return () => window.removeEventListener("operator-profile-saved", loadProfile);
+  }, []);
 
   // Per-thread rescan progress: shows the active stage inline next to
   // the Rescan button while the runner is opening + parsing the thread.
@@ -1754,6 +1768,20 @@ export default function ThreadPage() {
     ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
     : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
 
+  // AI help level gates which writing affordances this page surfaces.
+  // It NEVER hides the summary, "what they want", open loops, or memory —
+  // those are the core support and stay on at every level.
+  //   - full_drafts:     suggested replies + Compose-a-full-draft + rewrites
+  //   - writing_support: rewrites ("shorten" / "warmer") on the operator's
+  //                      own draft, but no complete AI-written drafts
+  //   - memory_only:     no AI writing help at all (Ask is still allowed —
+  //                      it answers from the thread, it doesn't draft)
+  const aiHelpLevel = profile?.aiHelpLevel ?? "writing_support";
+  const showFullDrafts = aiHelpLevel === "full_drafts";
+  const showWritingSupport = aiHelpLevel !== "memory_only";
+  // When full drafts are off, the compose drawer offers "Ask" only.
+  const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
+
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
   const threadsRailWidth = threadsCollapsed ? "56px" : "240px";
@@ -2658,10 +2686,11 @@ export default function ThreadPage() {
                     ) : null}
                   </div>
                 ) : null}
-                {/* Suggested-replies dropdown - full sendable AI drafts.
-                    Hidden when full AI replies are off so the composer leads
-                    with the operator writing in their own words. */}
-                {fullAiReplies ? (
+                {/* Suggested-replies dropdown. Complete sendable drafts —
+                    shown only when the operator has opted into full AI
+                    drafts via the AI help level. Lower levels keep the
+                    composer centred on the operator's own writing. */}
+                {showFullDrafts ? (
                 <div className="relative" ref={chipsMenuRef}>
                   <button
                     type="button"
@@ -2720,22 +2749,28 @@ export default function ThreadPage() {
                 </div>
                 ) : null}
                 <div className="flex flex-1 items-center justify-end gap-2">
-                  <button
-                    type="button"
-                    disabled={!composer.trim() || transforming !== null}
-                    onClick={() => void transform("SHORTEN")}
-                    className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                  >
-                    {transforming === "SHORTEN" ? "shortening…" : "shorten"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!composer.trim() || transforming !== null}
-                    onClick={() => void transform("MAKE_WARMER")}
-                    className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                  >
-                    {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
-                  </button>
+                  {/* "shorten" / "warmer" rewrite the operator's OWN draft —
+                      writing support, shown unless AI help is memory-only. */}
+                  {showWritingSupport ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("SHORTEN")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("MAKE_WARMER")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
+                      </button>
+                    </>
+                  ) : null}
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
                       type="button"
@@ -2981,18 +3016,18 @@ export default function ThreadPage() {
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-              {composeMode === "write" ? "Compose" : "Ask"}
+              {effectiveComposeMode === "write" ? "Compose" : "Ask"}
             </p>
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              {composeMode === "write"
+              {effectiveComposeMode === "write"
                 ? composeHelper
                 : "Ask a question about this thread or person. The AI answers from the transcript and what's on record — it won't make anything up."}
             </p>
-            {!fullAiReplies ? (
+            {!showFullDrafts ? (
               <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
                 Full AI reply drafts are off.{" "}
                 <Link href="/settings" className="text-ink-2 underline-offset-2 hover:underline">
-                  Turn them on in Settings
+                  Change your AI help level in Settings
                 </Link>{" "}
                 to draft complete replies as well.
               </p>
@@ -3005,7 +3040,7 @@ export default function ThreadPage() {
                 if (composeDraft) setComposeDraft("");
               }}
               placeholder={
-                composeMode === "write"
+                effectiveComposeMode === "write"
                   ? isReopenMode
                     ? "e.g. ask how exams went"
                     : "e.g. ask if free for a quick coffee next week"
@@ -3016,8 +3051,9 @@ export default function ThreadPage() {
             />
             {/* Mismatch hint: if the input shape clashes with the selected
                 mode, surface a one-line nudge below the textarea so the
-                operator can flip modes without burying it in a menu. */}
-            {(() => {
+                operator can flip modes without burying it in a menu. Only
+                relevant when both modes are available (full AI drafts on). */}
+            {showFullDrafts ? (() => {
               const trimmed = composeIntent.trim();
               if (!trimmed) return null;
               const looksLikeQuestion =
@@ -3039,7 +3075,7 @@ export default function ThreadPage() {
                   </p>
                 );
               }
-              if (composeMode === "ask" && !looksLikeQuestion && fullAiReplies) {
+              if (composeMode === "ask" && !looksLikeQuestion) {
                 return (
                   <p className="mt-1 text-[11px] text-ink-3">
                     Looks like a directive.{" "}
@@ -3054,19 +3090,19 @@ export default function ThreadPage() {
                 );
               }
               return null;
-            })()}
+            })() : null}
             <div className="mt-2 flex items-center gap-2">
               {/* Split button: primary action + a chevron to flip the mode.
-                  Keeps the default action one click away while the mode is
-                  always visible on the label. */}
+                  The mode switcher only appears when full AI drafts are on;
+                  otherwise this is an Ask-only button. */}
               <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
                 <button
                   type="button"
                   disabled={composing || !composeIntent.trim()}
                   onClick={() =>
-                    composeMode === "write" ? void composeFromIntent() : void askAi()
+                    effectiveComposeMode === "write" ? void composeFromIntent() : void askAi()
                   }
-                  className={`inline-flex items-center gap-2 ${fullAiReplies ? "rounded-l-pill" : "rounded-pill"} bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50`}
+                  className={`inline-flex items-center gap-2 bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50 ${showFullDrafts ? "rounded-l-pill" : "rounded-pill"}`}
                 >
                   {composing ? (
                     <Loader2 className="h-[14px] w-[14px] animate-spin" />
@@ -3074,14 +3110,14 @@ export default function ThreadPage() {
                     <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.8} />
                   )}
                   {composing
-                    ? composeMode === "write"
+                    ? effectiveComposeMode === "write"
                       ? "Composing…"
                       : "Thinking…"
-                    : composeMode === "write"
+                    : effectiveComposeMode === "write"
                       ? "Compose"
                       : "Ask"}
                 </button>
-                {fullAiReplies ? (
+                {showFullDrafts ? (
                   <>
                 <span className="my-[6px] w-px bg-paper/20" aria-hidden />
                 <button

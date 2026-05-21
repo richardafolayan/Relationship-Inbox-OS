@@ -3622,8 +3622,16 @@ app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
 app.post("/control/operator-profile", asyncRoute(async (req, res) => {
   const payload = z
     .object({
+      displayName: z.string().max(120).optional(),
       about: z.string().max(4000).optional(),
-      interests: z.string().max(4000).optional()
+      interests: z.string().max(4000).optional(),
+      commonPhrases: z.string().max(2000).optional(),
+      avoidedPhrases: z.string().max(2000).optional(),
+      preferredStyle: z
+        .enum(["warm", "direct", "casual", "thoughtful", "concise", ""])
+        .optional(),
+      aiHelpLevel: z.enum(["memory_only", "writing_support", "full_drafts"]).optional(),
+      setupCompletedAt: z.string().max(40).optional()
     })
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);
