@@ -8,8 +8,8 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
+import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { apiGet, apiPost } from "@/lib/api";
-import { initials } from "@/lib/risk";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import type { HealthResponse, InboxResponse } from "@/lib/types";
 
@@ -260,9 +260,6 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("unhandledrejection", onRejection);
   }, []);
 
-  const operatorName = "Richard";
-  const userInitials = initials(operatorName);
-
   // Quiet hours: when the toggle is on AND the local time is between
   // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan
   // (gated above). Keeps the toggle honest with its label (#94).
@@ -278,7 +275,6 @@ export function AppShell({ children }: { children: ReactNode }) {
       <Sidebar
         health={health}
         attentionCount={sidebarAttention}
-        userInitials={userInitials}
         onOpenSearch={() => setPaletteOpen(true)}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
@@ -289,6 +285,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
+      <PilotFeedbackModal />
     </div>
   );
 }
