@@ -31,21 +31,29 @@ export default function SettingsPage() {
   const [operatorProfile, setOperatorProfile] = useState<OperatorProfile>({ about: "", interests: "" });
   const [operatorProfileStatus, setOperatorProfileStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const operatorProfileSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirrors operatorProfile so the debounced save always persists the
+  // current value of BOTH fields. Saving only the just-changed field meant
+  // editing the second textarea within the 600ms window dropped the first
+  // edit (the timer is shared); echoing the server response back into
+  // state also clobbered text typed during the round-trip.
+  const operatorProfileRef = useRef<OperatorProfile>({ about: "", interests: "" });
 
   useEffect(() => () => {
     if (operatorProfileSaveTimer.current) clearTimeout(operatorProfileSaveTimer.current);
   }, []);
 
   const onOperatorProfileChange = useCallback((field: keyof OperatorProfile, value: string) => {
-    setOperatorProfile((prev) => ({ ...prev, [field]: value }));
+    const next: OperatorProfile = { ...operatorProfileRef.current, [field]: value };
+    operatorProfileRef.current = next;
+    setOperatorProfile(next);
     setOperatorProfileStatus("saving");
     if (operatorProfileSaveTimer.current) clearTimeout(operatorProfileSaveTimer.current);
     operatorProfileSaveTimer.current = setTimeout(async () => {
       try {
-        const next = await apiPost<OperatorProfile>("/runner/control/operator-profile", {
-          [field]: value
+        await apiPost<OperatorProfile>("/runner/control/operator-profile", {
+          about: operatorProfileRef.current.about,
+          interests: operatorProfileRef.current.interests
         });
-        setOperatorProfile(next);
         setOperatorProfileStatus("saved");
       } catch {
         setOperatorProfileStatus("error");
@@ -55,7 +63,12 @@ export default function SettingsPage() {
 
   useEffect(() => {
     void apiGet<OperatorProfile>("/runner/data/operator-profile")
-      .then((data) => { if (data) setOperatorProfile(data); })
+      .then((data) => {
+        if (data) {
+          operatorProfileRef.current = data;
+          setOperatorProfile(data);
+        }
+      })
       .catch(() => undefined);
     setAutoScanDisabled(
       resolveAutoScanDisabled({

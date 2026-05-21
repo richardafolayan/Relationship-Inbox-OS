@@ -31,6 +31,11 @@ export default function TodayPage() {
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // True when the /data/inbox fetch failed outright (runner down /
+  // unreachable). Without this the empty "You're caught up" state renders
+  // for an unreachable runner — indistinguishable from a genuinely empty
+  // inbox and quietly misleading.
+  const [inboxUnavailable, setInboxUnavailable] = useState(false);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -50,6 +55,7 @@ export default function TodayPage() {
       apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => [] as PlatformCard[]),
       apiGet<HealthResponse>("/runner/health").catch(() => null)
     ]);
+    setInboxUnavailable(inbox === null);
     if (inbox) {
       setData(inbox);
       const stillPending = new Set(
@@ -271,7 +277,7 @@ export default function TodayPage() {
             {dayLabel}
           </p>
           <h1 className="m-0 font-display text-[32px] font-semibold leading-[1.1] tracking-[-0.025em]">
-            {greeting}, Richard.
+            {greeting}.
           </h1>
         </div>
         <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">
@@ -429,6 +435,11 @@ export default function TodayPage() {
                 ) : null}
               </div>
             </article>
+          ) : loaded && inboxUnavailable && !data ? (
+            <CaughtUp
+              title="Can’t reach the runner."
+              body="The runner isn’t responding. Once it’s back, this page fills in on the next scan."
+            />
           ) : loaded ? (
             <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
           ) : (
