@@ -26,3 +26,7 @@ packages/core/generated
 /.claude/
 /.codex-disabled-*/
 migration-log.md
+
+# Personal operator-profile seed (local voice data; never committed).
+# See apps/runner/operator-profile.seed.example.json for the shape.
+/apps/runner/operator-profile.seed.json
