@@ -69,6 +69,31 @@ export function buildBugReportTemplate(context: BugReportContext): string {
   return lines.join("\n");
 }
 
+// The repo pilot issues land in. Override with NEXT_PUBLIC_GITHUB_REPO
+// ("owner/name") for a fork.
+const GITHUB_REPO =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_GITHUB_REPO?.trim()) ||
+  "richardafolayan/Relationship-Inbox-OS";
+
+// Build a prefilled GitHub "new issue" URL for the pilot bug / feedback
+// issue forms (.github/ISSUE_TEMPLATE/pilot-bug.yml + pilot-feedback.yml).
+// The `details` query param prefills the form's `details` textarea — the
+// `?template=` and field-id query prefill is a built-in GitHub feature.
+//
+// This only ever OPENS a prefilled page. It never submits: the tester
+// reviews the issue and clicks Create themselves. No token, no auto-post.
+// `details` carries only what the modal already showed (the user's own
+// words plus safe metadata — page, version, time, thread id); never
+// message content.
+export function buildGithubIssueUrl(mode: PilotFeedbackMode, details: string): string {
+  const params = new URLSearchParams({
+    template: mode === "bug" ? "pilot-bug.yml" : "pilot-feedback.yml",
+    title: mode === "bug" ? "Pilot bug: " : "Pilot feedback: ",
+    details
+  });
+  return `https://github.com/${GITHUB_REPO}/issues/new?${params.toString()}`;
+}
+
 // Maps a Next.js pathname to the page name a tester would recognise.
 export function describeRoute(pathname: string): string {
   if (!pathname || pathname === "/") return "Today";

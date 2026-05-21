@@ -4,6 +4,11 @@ Thanks for trying this. It's an early build, not a finished product. The
 point of the pilot is to find out whether it actually helps you reply to
 people — so honest reactions are worth far more than polite ones.
 
+**Setting it up** is a separate short call with me — see the
+[install guide](./student-install-guide.md). This page is about what to do
+once it's running. If something looks stuck, see
+[troubleshooting](./troubleshooting.md).
+
 ## The short version
 
 - Use it for **about one week**.
@@ -49,16 +54,22 @@ to send it.
 
 - In the app: the **Feedback** button in the sidebar (on every page), or
   **Settings → Pilot → Share feedback**.
-- It opens a short set of questions you can copy and send to whoever
-  shared this pilot with you — iMessage, WhatsApp, a DM, whatever's easiest.
+- It opens a short set of questions. From there you can either:
+  - **Open a GitHub issue** — it pre-fills a feedback form; you read it and
+    click Create yourself. Nothing is posted automatically. (Easiest if you
+    have a GitHub account — ask me if you'd like to be added to the repo.)
+  - **Copy** the notes and send them to whoever shared this pilot with you —
+    iMessage, WhatsApp, a DM, whatever's easiest.
 
 ## How to report a bug
 
 - In the app: **Feedback button → Report a bug**, or
   **Settings → Pilot → Report a bug**.
 - It gives you a template asking what you were doing, what went wrong, and
-  what you expected. The page name and time are filled in automatically.
-- Copy it and send it to whoever shared this pilot with you.
+  what you expected. Safe context (the page, app version, time) is filled in
+  for you — no message content.
+- Then **Open a GitHub issue** (a pre-filled form you submit yourself) or
+  **Copy** it and send it over directly.
 
 ## Privacy — please read
 
