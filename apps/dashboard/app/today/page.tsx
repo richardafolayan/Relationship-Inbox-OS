@@ -41,6 +41,11 @@ export default function TodayPage() {
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // True when the /data/inbox fetch failed outright (runner down /
+  // unreachable). Without this the empty "You're caught up" state renders
+  // for an unreachable runner — indistinguishable from a genuinely empty
+  // inbox and quietly misleading.
+  const [inboxUnavailable, setInboxUnavailable] = useState(false);
   // Operator voice profile — drives the greeting name, the first-run setup
   // card, and whether full AI drafts are predrafted. null until loaded.
   const [profile, setProfile] = useState<OperatorProfile | null>(null);
@@ -66,6 +71,7 @@ export default function TodayPage() {
       apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => [] as PlatformCard[]),
       apiGet<HealthResponse>("/runner/health").catch(() => null)
     ]);
+    setInboxUnavailable(inbox === null);
     if (inbox) {
       setData(inbox);
       const stillPending = new Set(
@@ -483,6 +489,11 @@ export default function TodayPage() {
                 ) : null}
               </div>
             </article>
+          ) : loaded && inboxUnavailable && !data ? (
+            <CaughtUp
+              title="Can’t reach the runner."
+              body="The runner isn’t responding. Once it’s back, this page fills in on the next scan."
+            />
           ) : loaded ? (
             <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
           ) : (

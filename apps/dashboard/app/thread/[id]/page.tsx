@@ -1693,10 +1693,33 @@ export default function ThreadPage() {
     }
   };
 
-  if (loading || !thread) {
+  if (!thread) {
+    // `loading` flips false the moment the fetch settles. A failed fetch
+    // (stale / removed thread id, runner unreachable) leaves `thread` null
+    // with an `error` set — render that instead of a "Loading…" that would
+    // otherwise hang forever with the error trapped in the unreached main
+    // render below.
     return (
       <div className="px-12 pt-14">
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        {loading ? (
+          <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        ) : (
+          <div className="max-w-[440px]">
+            <p className="m-0 mb-2 font-display text-[18px] font-semibold text-ink">
+              Can’t open this thread.
+            </p>
+            <p className="m-0 mb-4 text-[13px] leading-[1.55] text-ink-3">
+              {error ??
+                "This conversation could not be loaded. It may have been removed, or the runner is unavailable."}
+            </p>
+            <Link
+              href="/today"
+              className="inline-block rounded-[8px] bg-ink px-3 py-[6px] text-[12px] font-medium text-paper hover:opacity-90"
+            >
+              Back to Today
+            </Link>
+          </div>
+        )}
       </div>
     );
   }

@@ -9,6 +9,7 @@ import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { PersonAvatar } from "@/components/common/person-avatar";
+import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
@@ -167,6 +168,14 @@ export default function InboxPage() {
     setPlatforms(platformRows ?? []);
     setLogs(logRows ?? []);
     setLoaded(true);
+  }, []);
+
+  // Seed search from a ?q= deep link (the thread participant popover's
+  // "Find 1:1 thread" → /inbox?q=<handle>). Runs once on mount; the inbox
+  // redesign dropped the original handling — see issue #211.
+  useEffect(() => {
+    const q = readInboxQueryParam(window.location.search);
+    if (q) setQuery(q);
   }, []);
 
   useEffect(() => {
