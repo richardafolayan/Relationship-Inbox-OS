@@ -152,7 +152,7 @@ export default function TodayPage() {
       if (!detail || !detail.threadId) return;
       if (detail.type === "MESSAGE_SENT") {
         const matching = data?.rows.find((row) => row.id === detail.threadId);
-        advanceHero(detail.threadId, "Sent — next up", matching?.riskLevel ?? "GREEN");
+        advanceHero(detail.threadId, "Sent, next up", matching?.riskLevel ?? "GREEN");
       }
     };
     window.addEventListener("runner-event", handler);
@@ -241,13 +241,13 @@ export default function TodayPage() {
         const id = hero.id;
         const level = hero.riskLevel;
         runAction(apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }), setError, refresh);
-        advanceHero(id, "Snoozed — next up", level);
+        advanceHero(id, "Snoozed, next up", level);
       } else if (key === "e") {
         event.preventDefault();
         const id = hero.id;
         const level = hero.riskLevel;
         runAction(apiPost(`/runner/control/thread/${id}/mark-done`, {}), setError, refresh);
-        advanceHero(id, "Handled — next up", level);
+        advanceHero(id, "Handled, next up", level);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -324,7 +324,7 @@ export default function TodayPage() {
             <strong className="font-medium text-ink">{rows.length}</strong> need you tonight
           </span>
           <br />
-          last scan {health ? formatRelative(health.lastScanAt) : "—"}
+          last scan {health ? formatRelative(health.lastScanAt) : "never"}
         </div>
       </header>
 
@@ -439,7 +439,7 @@ export default function TodayPage() {
                         setError,
                         refresh
                       );
-                      advanceHero(id, "Snoozed — next up", level);
+                      advanceHero(id, "Snoozed, next up", level);
                     }}
                   >
                     Snooze ’til tomorrow
@@ -456,7 +456,7 @@ export default function TodayPage() {
                         setError,
                         refresh
                       );
-                      advanceHero(id, "Handled — next up", level);
+                      advanceHero(id, "Handled, next up", level);
                     }}
                   >
                     Mark handled
@@ -555,7 +555,7 @@ export default function TodayPage() {
                   {allDone ? <span className="absolute inset-0 bg-risk-fresh" /> : null}
                 </span>
                 <span>Done · sleep</span>
-                <span className="ml-auto font-mono text-[10px] text-ink-4">{allDone ? "✓" : "—"}</span>
+                <span className="ml-auto font-mono text-[10px] text-ink-4">{allDone ? "✓" : "-"}</span>
               </li>
             </ul>
           </div>

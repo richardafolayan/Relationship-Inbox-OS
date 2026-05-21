@@ -67,7 +67,7 @@ export function ActionItemsChecklist({
   const heading = isReopenMode ? "Conversation hooks" : "Things to address";
   const helper = isReopenMode
     ? "Worth picking up on when you reconnect. Tick each off as you write."
-    : "Tick each off as you write your reply. This is just a checklist — it never changes your message.";
+    : "Tick each off as you write your reply. This is just a checklist. It never changes your message.";
 
   const toggleChecked = (key: string) => {
     setState((prev) => ({ ...prev, checked: { ...prev.checked, [key]: !prev.checked[key] } }));

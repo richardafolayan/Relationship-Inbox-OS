@@ -2,7 +2,7 @@
 
 A lightweight place to record what pilot testers say, so feedback doesn't
 get lost in DMs. Copy the entry block below for each tester. This is not
-an analytics system — just notes.
+an analytics system, just notes.
 
 ---
 
@@ -30,9 +30,9 @@ an analytics system — just notes.
 
 **Bugs found:**
 
-**Would they use it again tomorrow?** (yes / no / maybe — and why)
+**Would they use it again tomorrow?** (yes / no / maybe, and why)
 
-**Direct quotes:** (their words, unedited — the most useful part)
+**Direct quotes:** (their words, unedited, the most useful part)
 
 **Follow-up decisions:** (what to change, keep, or drop because of this)
 

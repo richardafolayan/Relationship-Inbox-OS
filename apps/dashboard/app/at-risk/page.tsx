@@ -49,8 +49,8 @@ const BUCKETS: Bucket[] = [
   },
   {
     key: "atrisk",
-    label: "At risk · 3–7d",
-    sub: "drifting — easy to recover",
+    label: "At risk · 3-7d",
+    sub: "drifting, easy to recover",
     minHours: 24 * 3,
     maxHours: 24 * 7
   },

@@ -258,10 +258,10 @@ export function PilotFeedbackModal() {
               <Check className="h-6 w-6 text-risk-fresh" strokeWidth={2.2} />
             </div>
             <p className="mt-4 font-display text-[18px] font-semibold text-ink">
-              Submitted — report {reportId}
+              Submitted: report {reportId}
             </p>
             <p className="mx-auto mt-1 max-w-[42ch] text-[13px] leading-[1.55] text-ink-3">
-              Thanks — that's genuinely useful. Nothing else needed from you.
+              Thanks, that's genuinely useful. Nothing else needed from you.
             </p>
             <div className="mt-5 flex justify-center gap-[10px]">
               <button
@@ -328,7 +328,7 @@ export function PilotFeedbackModal() {
               <div className="mb-4 rounded-row border border-risk-overdue/40 bg-risk-overdue/8 px-3 py-[10px]">
                 <p className="m-0 text-[12.5px] leading-[1.5] text-ink">{submitError}</p>
                 <p className="m-0 mt-1 text-[12px] leading-[1.5] text-ink-3">
-                  Your report is still here — try again, or copy it and send it across.
+                  Your report is still here. Try again, or copy it and send it across.
                 </p>
                 <div className="mt-2 flex flex-wrap items-center gap-[10px]">
                   <button

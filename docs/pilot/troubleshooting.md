@@ -1,6 +1,6 @@
-# Student Pilot — Troubleshooting
+# Student Pilot: Troubleshooting
 
-Quick fixes for the common snags. None of this is your fault — it is an
+Quick fixes for the common snags. None of this is your fault. It is an
 early build, and a thing not working *is* useful pilot feedback. If a fix
 here does not sort it, open a bug from the **Feedback** button in the
 sidebar (it walks you through it) or message me.
@@ -21,7 +21,7 @@ Terminal running `npm run dev` was closed or crashed.
 
 ## A scan finished but no messages showed up
 
-- Give it a moment — a first LinkedIn scan can take a minute or two.
+- Give it a moment. A first LinkedIn scan can take a minute or two.
 - Make sure you are **signed into LinkedIn in Chrome** (the normal Chrome
   window, not a private one).
 - Press **⌘K**, type `scan`, and run **Full LinkedIn rescan** once.
@@ -33,7 +33,7 @@ Terminal running `npm run dev` was closed or crashed.
 Your LinkedIn session expired. Open Chrome, sign back into LinkedIn as you
 normally would, then run a scan again (**⌘K → Run scan now**).
 
-If it keeps happening, tell me — that is worth knowing.
+If it keeps happening, tell me. That is worth knowing.
 
 ## "Port already in use"
 
@@ -45,7 +45,7 @@ Mac and try again.
 
 The first time the app reads iMessage, macOS may ask to allow access to your
 Messages. Allowing it lets the app show your iMessage threads. If you would
-rather not, decline — LinkedIn still works fine on its own.
+rather not, decline. LinkedIn still works fine on its own.
 
 ## A conversation won't open ("Can't open this thread")
 
@@ -58,14 +58,14 @@ bug worth reporting.
 1. Stop the app (`Ctrl + C` in the Terminal).
 2. Start it again: `npm run dev`.
 
-That is usually enough. A full data reset is a bigger step — ask me first
+That is usually enough. A full data reset is a bigger step, ask me first
 rather than doing it yourself.
 
 ## The "Platforms" page
 
 There is an advanced page at `http://localhost:3100/platforms` for checking
 the LinkedIn / iMessage connection. It is **not** part of the normal flow
-and is deliberately kept out of the sidebar — you should not need it for the
+and is deliberately kept out of the sidebar. You should not need it for the
 pilot. If a scan misbehaves and I ask you to, you can open that address
 directly. Otherwise, ignore it.
 
@@ -73,10 +73,10 @@ directly. Otherwise, ignore it.
 
 Use the **Feedback** button at the bottom of the sidebar (on every page):
 
-- **Report a bug** — for something broken.
-- **Share feedback** — for how it felt to use.
+- **Report a bug**: for something broken.
+- **Share feedback**: for how it felt to use.
 
 Either one lets you **Open a GitHub issue** (it pre-fills a form you review
-and submit yourself — nothing is sent automatically), or **Copy** the notes
+and submit yourself, nothing is sent automatically), or **Copy** the notes
 to send me directly if you would rather not use GitHub. It never includes
 your message content.

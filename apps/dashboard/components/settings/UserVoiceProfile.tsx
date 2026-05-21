@@ -200,7 +200,7 @@ export function UserVoiceProfile({
 
         <Field
           label="How do you usually message people?"
-          hint="A sentence or two in your own words. Plain, warm, short, formal — whatever fits."
+          hint="A sentence or two in your own words. Plain, warm, short, formal, whatever fits."
         >
           <textarea
             rows={3}
@@ -263,7 +263,7 @@ export function UserVoiceProfile({
 
         <Field
           label="Things you care about"
-          hint="Optional. Keeps replies in your world — what you work on, what you're into."
+          hint="Optional. Keeps replies in your world: what you work on, what you're into."
         >
           <textarea
             rows={2}
@@ -280,8 +280,8 @@ export function UserVoiceProfile({
             AI help level
           </p>
           <p className="mt-1 max-w-[60ch] text-[13px] leading-[1.55] text-ink-2">
-            Choose how much writing help you want. Summaries and things to address always show —
-            this only changes whether the app offers complete replies.
+            Choose how much writing help you want. Summaries and things to address always show.
+            This only changes whether the app offers complete replies.
           </p>
           <div className="mt-3 flex flex-col gap-2">
             {AI_HELP_LEVELS.map((level) => {
@@ -329,7 +329,7 @@ export function UserVoiceProfile({
               disabled={finishing || !loaded}
               className="rounded-pill bg-ink px-4 py-[9px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {finishing ? "Saving…" : "Done — take me in"}
+              {finishing ? "Saving…" : "Done, take me in"}
             </button>
             <span className="text-[12px] text-ink-3">You can change any of this later in Settings.</span>
           </div>

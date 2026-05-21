@@ -107,7 +107,7 @@ export function buildPilotReportPayload(input: {
 /** Render a submitted report as plain text — used by the copy fallback. */
 export function formatReportForCopy(payload: PilotReportPayload): string {
   const lines = [
-    `Relationship Inbox OS pilot — ${PILOT_REPORT_TYPE_LABELS[payload.type]}`,
+    `Relationship Inbox OS pilot: ${PILOT_REPORT_TYPE_LABELS[payload.type]}`,
     "",
     `Title: ${payload.title}`,
     "",
@@ -119,7 +119,7 @@ export function formatReportForCopy(payload: PilotReportPayload): string {
   }
   lines.push(
     "",
-    "— Context (no message content) —",
+    "Context (no message content)",
     `Page: ${payload.meta.route}`
   );
   if (payload.meta.threadId) lines.push(`Thread: ${payload.meta.threadId}`);

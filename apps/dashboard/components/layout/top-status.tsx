@@ -339,7 +339,7 @@ export function TopStatus() {
         <button
           type="button"
           onClick={() => setReconnectOpen(true)}
-          title={`${connected}/${total} platforms connected — click to reconnect`}
+          title={`${connected}/${total} platforms connected, click to reconnect`}
           className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2"
         >
           <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
@@ -449,7 +449,7 @@ export function TopStatus() {
                     </span>
                     {isImessage ? (
                       <span className="font-mono text-[11px] leading-snug text-ink-3">
-                        Reads Messages locally — no login. If it stays
+                        Reads Messages locally, no login. If it stays
                         disconnected, grant the runner Full Disk Access
                         in System Settings → Privacy &amp; Security, then
                         retry.
