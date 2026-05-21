@@ -142,7 +142,7 @@ The earlier broader product is reconstructable from (a) the strip-back commit me
 | **WhatsApp / Instagram / TikTok breadth** | More platforms | Each platform is an automation maintenance burden; breadth before the core is validated | **Park** | `platform-factory.ts` (WhatsApp = not-implemented stub); `beta-adapter.ts` |
 
 **Signs it was built around the author's own use (Confirmed).**
-- The AI voice is **the author's voice, hardcoded** — a full personal slang dictionary, emoji palette (🌚 🥀), sentiment modes, and few-shot examples of his real texts (`ai.ts:310`, `ai.ts:122`). The product literally cannot draft authentically for anyone else as shipped.
+- The AI voice is **the author's voice, hardcoded** — a full personal slang dictionary, a fixed emoji palette, sentiment modes, and few-shot examples of the author's real texts (`ai.ts:310`, `ai.ts:122`). The product literally cannot draft authentically for anyone else as shipped.
 - `README.md` is a personal essay ("reply to my mum", "Twenty minutes gone, three reels watched").
 - Hardcoded `"Richard"` in the Today greeting; `PERSONAL_CHROME_PROFILE_NAME=Richard Afolayan` in `.env.example`.
 - The breadth of platforms and the CRM features look like "everything I personally might want", not a scoped MVP.
