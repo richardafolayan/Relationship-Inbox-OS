@@ -9,16 +9,18 @@ import {
   Search,
   Settings as SettingsIcon,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  MessageSquareText,
+  User
 } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { openPilotFeedback } from "@/lib/pilot";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 
 interface SidebarProps {
   health: HealthResponse | null;
   attentionCount: number;
-  userInitials: string;
   onOpenSearch: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
@@ -48,7 +50,6 @@ const nav: NavItem[] = [
 export function Sidebar({
   health,
   attentionCount,
-  userInitials,
   onOpenSearch,
   collapsed,
   onToggleCollapsed
@@ -194,21 +195,42 @@ export function Sidebar({
         })}
       </nav>
 
+      <button
+        type="button"
+        onClick={() => openPilotFeedback("feedback")}
+        aria-label="Send feedback"
+        title={collapsed ? "Send feedback" : undefined}
+        className={cn(
+          "mt-auto flex items-center rounded-[10px] text-[13px] tracking-[-0.005em] text-ink-2",
+          "transition-[color,background-color] duration-calm hover:bg-paper-2 hover:text-ink",
+          collapsed ? "h-9 w-9 justify-center self-center" : "gap-3 px-3 py-2"
+        )}
+      >
+        <MessageSquareText
+          className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-[16px] w-[16px]")}
+          strokeWidth={1.6}
+        />
+        {!collapsed ? <span className="flex-1 text-left">Feedback</span> : null}
+      </button>
+
       <div
         className={cn(
-          "mt-auto flex items-center rounded-[10px] border border-hairline bg-paper-2/40",
+          "mt-[6px] flex items-center rounded-[10px] border border-hairline bg-paper-2/40",
           collapsed ? "h-9 w-9 justify-center self-center" : "gap-3 px-3 py-2"
         )}
         title={collapsed ? `Operator · ${runnerLabel.text}` : undefined}
       >
         <div
           className={cn(
-            "relative grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display font-semibold text-white",
-            collapsed ? "h-7 w-7 text-[10px]" : "h-8 w-8 text-[12px]"
+            "relative grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] text-white",
+            collapsed ? "h-7 w-7" : "h-8 w-8"
           )}
           aria-label="Operator avatar"
         >
-          {userInitials}
+          <User
+            className={collapsed ? "h-[13px] w-[13px]" : "h-[15px] w-[15px]"}
+            strokeWidth={1.8}
+          />
           {collapsed ? (
             <span
               className={cn(
