@@ -3,7 +3,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { HealthResponse, InboxResponse, InboxRow, PlatformCard, ThreadResponse } from "@/lib/types";
+import type {
+  HealthResponse,
+  InboxResponse,
+  InboxRow,
+  OperatorProfile,
+  PlatformCard,
+  ThreadResponse
+} from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
@@ -11,6 +18,7 @@ import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
@@ -31,6 +39,9 @@ export default function TodayPage() {
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
+  // Operator voice profile — drives the greeting name, the first-run setup
+  // card, and whether full AI drafts are predrafted. null until loaded.
+  const [profile, setProfile] = useState<OperatorProfile | null>(null);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -67,6 +78,16 @@ export default function TodayPage() {
     if (healthData) setHealth(healthData);
     setLoaded(true);
   }, []);
+
+  const loadProfile = useCallback(() => {
+    void apiGet<OperatorProfile>("/runner/data/operator-profile")
+      .then((data) => setProfile(data ?? null))
+      .catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
+    loadProfile();
+  }, [loadProfile]);
 
   useEffect(() => {
     void refresh();
@@ -168,14 +189,18 @@ export default function TodayPage() {
       .catch(() => setHeroSummary({ id: hero.id, summary: null }));
   }, [hero, heroSummary?.id]);
 
+  // Background-predraft the top 3 threads — but only when the user has
+  // opted into full AI drafts. At lower help levels the dashboard never
+  // surfaces a complete draft, so generating one would be wasted work.
   const top3Ids = useMemo(() => rows.slice(0, 3).map((row) => row.id).join("|"), [rows]);
+  const fullDrafts = profile?.aiHelpLevel === "full_drafts";
   useEffect(() => {
-    if (!top3Ids) return;
+    if (!top3Ids || !fullDrafts) return;
     const ids = top3Ids.split("|").filter(Boolean);
     for (const id of ids) {
       void apiPost<{ status: string }>(`/runner/control/thread/${id}/predraft`, {}).catch(() => undefined);
     }
-  }, [top3Ids]);
+  }, [top3Ids, fullDrafts]);
 
   // R / S / E keyboard hints on the hero. Active when the hero is
   // visible and no input is focused. Esc behaviour stays owned by
@@ -223,6 +248,11 @@ export default function TodayPage() {
   const hour = today.getHours();
   const greeting =
     hour < 5 ? "Late evening" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  // Greet by the configured name when set; a bare greeting otherwise — the
+  // app no longer assumes who the user is.
+  const operatorName = profile?.displayName?.trim() ?? "";
+  const greetingLine = operatorName ? `${greeting}, ${operatorName}.` : `${greeting}.`;
+  const needsSetup = profile !== null && !profile.setupCompletedAt;
 
   const heroRisk = hero ? toDisplayRisk(hero.riskLevel) : null;
   const heroLabel = !hero
@@ -271,7 +301,7 @@ export default function TodayPage() {
             {dayLabel}
           </p>
           <h1 className="m-0 font-display text-[32px] font-semibold leading-[1.1] tracking-[-0.025em]">
-            {greeting}, Richard.
+            {greetingLine}
           </h1>
         </div>
         <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">
@@ -282,6 +312,12 @@ export default function TodayPage() {
           last scan {health ? formatRelative(health.lastScanAt) : "—"}
         </div>
       </header>
+
+      {needsSetup ? (
+        <div data-testid="voice-setup-card" className="mb-8">
+          <UserVoiceProfile variant="onboarding" onCompleted={loadProfile} />
+        </div>
+      ) : null}
 
       {degraded ? (
         <DegradedBanner

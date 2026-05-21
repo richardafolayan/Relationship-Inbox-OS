@@ -1,14 +1,49 @@
 import type { AppSettings, PlatformName, SelectorOverrideStore, SelectorRegistry } from "@inbox-os/core";
 import { defaultSettings } from "@inbox-os/core";
 import { prisma } from "../db";
-import type { DemoSeedManifest, OperatorProfile, SettingsStore } from "../types/runtime";
+import type { AiHelpLevel, DemoSeedManifest, OperatorProfile, ReplyStyle, SettingsStore } from "../types/runtime";
 
 const APP_SETTINGS_KEY = "app_settings";
 const SELECTOR_OVERRIDES_KEY = "selector_overrides";
 const DEMO_SEED_MANIFEST_KEY = "demo_seed_manifest";
+// Kept at v1 deliberately: the voice/identity fields were added to the JSON
+// shape after about/interests. A pre-existing {about,interests} row parses
+// fine — the new fields just fall through to their defaults below.
 const OPERATOR_PROFILE_KEY = "operator_profile_v1";
 
-const emptyOperatorProfile: OperatorProfile = { about: "", interests: "" };
+const REPLY_STYLES: ReplyStyle[] = ["warm", "direct", "casual", "thoughtful", "concise"];
+const AI_HELP_LEVELS: AiHelpLevel[] = ["memory_only", "writing_support", "full_drafts"];
+
+// Conservative default: full AI reply drafting is OFF until the operator
+// opts in. Summaries / open loops / "shorten" + "warmer" still work.
+const DEFAULT_AI_HELP_LEVEL: AiHelpLevel = "writing_support";
+
+const emptyOperatorProfile: OperatorProfile = {
+  displayName: "",
+  about: "",
+  interests: "",
+  commonPhrases: "",
+  avoidedPhrases: "",
+  preferredStyle: "",
+  aiHelpLevel: DEFAULT_AI_HELP_LEVEL,
+  setupCompletedAt: ""
+};
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function asReplyStyle(value: unknown): ReplyStyle | "" {
+  return typeof value === "string" && (REPLY_STYLES as string[]).includes(value)
+    ? (value as ReplyStyle)
+    : "";
+}
+
+function asAiHelpLevel(value: unknown): AiHelpLevel {
+  return typeof value === "string" && (AI_HELP_LEVELS as string[]).includes(value)
+    ? (value as AiHelpLevel)
+    : DEFAULT_AI_HELP_LEVEL;
+}
 
 function cloneSettings(settings: AppSettings): AppSettings {
   return {
@@ -179,10 +214,16 @@ export function createSettingsStore(): SettingsStore {
     const record = await prisma.setting.findUnique({ where: { key: OPERATOR_PROFILE_KEY } });
     if (!record) return { ...emptyOperatorProfile };
     try {
-      const parsed = JSON.parse(record.valueJson) as Partial<OperatorProfile>;
+      const parsed = JSON.parse(record.valueJson) as Record<string, unknown>;
       return {
-        about: typeof parsed.about === "string" ? parsed.about : "",
-        interests: typeof parsed.interests === "string" ? parsed.interests : ""
+        displayName: asString(parsed.displayName),
+        about: asString(parsed.about),
+        interests: asString(parsed.interests),
+        commonPhrases: asString(parsed.commonPhrases),
+        avoidedPhrases: asString(parsed.avoidedPhrases),
+        preferredStyle: asReplyStyle(parsed.preferredStyle),
+        aiHelpLevel: asAiHelpLevel(parsed.aiHelpLevel),
+        setupCompletedAt: asString(parsed.setupCompletedAt)
       };
     } catch {
       return { ...emptyOperatorProfile };
@@ -192,8 +233,23 @@ export function createSettingsStore(): SettingsStore {
   async function updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile> {
     const current = await getOperatorProfile();
     const next: OperatorProfile = {
+      displayName: typeof partial.displayName === "string" ? partial.displayName : current.displayName,
       about: typeof partial.about === "string" ? partial.about : current.about,
-      interests: typeof partial.interests === "string" ? partial.interests : current.interests
+      interests: typeof partial.interests === "string" ? partial.interests : current.interests,
+      commonPhrases:
+        typeof partial.commonPhrases === "string" ? partial.commonPhrases : current.commonPhrases,
+      avoidedPhrases:
+        typeof partial.avoidedPhrases === "string" ? partial.avoidedPhrases : current.avoidedPhrases,
+      preferredStyle:
+        partial.preferredStyle !== undefined
+          ? asReplyStyle(partial.preferredStyle)
+          : current.preferredStyle,
+      aiHelpLevel:
+        partial.aiHelpLevel !== undefined ? asAiHelpLevel(partial.aiHelpLevel) : current.aiHelpLevel,
+      setupCompletedAt:
+        typeof partial.setupCompletedAt === "string"
+          ? partial.setupCompletedAt
+          : current.setupCompletedAt
     };
     await prisma.setting.upsert({
       where: { key: OPERATOR_PROFILE_KEY },

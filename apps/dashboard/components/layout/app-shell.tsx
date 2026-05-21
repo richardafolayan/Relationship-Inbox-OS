@@ -11,7 +11,7 @@ import { ToastHost } from "@/components/common/toast-host";
 import { apiGet, apiPost } from "@/lib/api";
 import { initials } from "@/lib/risk";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
-import type { HealthResponse, InboxResponse } from "@/lib/types";
+import type { HealthResponse, InboxResponse, OperatorProfile } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised between 8 and 13 minutes per
@@ -73,6 +73,7 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [operatorName, setOperatorName] = useState("");
   const autoScanInFlightRef = useRef(false);
   const autoScanDisabled = useMemo(
     () =>
@@ -129,6 +130,21 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     const stored = window.localStorage.getItem(sidebarCollapsedStorageKey);
     if (stored === "true") setSidebarCollapsed(true);
+  }, []);
+
+  // Operator display name for the sidebar avatar. Comes from the configured
+  // voice profile — empty (and an empty avatar) until the user sets it.
+  // Refreshes on profile-saved events so a Settings change lands without a
+  // page reload.
+  useEffect(() => {
+    const loadName = () => {
+      void apiGet<OperatorProfile>("/runner/data/operator-profile")
+        .then((profile) => setOperatorName(profile?.displayName?.trim() ?? ""))
+        .catch(() => undefined);
+    };
+    loadName();
+    window.addEventListener("operator-profile-saved", loadName);
+    return () => window.removeEventListener("operator-profile-saved", loadName);
   }, []);
 
   useEffect(() => {
@@ -260,8 +276,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("unhandledrejection", onRejection);
   }, []);
 
-  const operatorName = "Richard";
-  const userInitials = initials(operatorName);
+  const userInitials = operatorName ? initials(operatorName) : "";
 
   // Quiet hours: when the toggle is on AND the local time is between
   // 22:00 and 06:00, mute the sidebar attention dot and pause auto-scan

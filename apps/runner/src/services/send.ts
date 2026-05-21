@@ -333,7 +333,7 @@ export function createSendService(deps: SendServiceDeps) {
           unreadCount: 0,
           // Phase 2: keep the inbox-row preview in sync with whoever sent the
           // most recent message. Without these, the row preview stayed pinned
-          // to the last INBOUND even after Richard replied.
+          // to the last INBOUND even after the operator replied.
           lastMessageDirection: "OUT",
           lastMessageText: input.text
         }

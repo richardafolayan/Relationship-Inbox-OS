@@ -272,7 +272,7 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
     personalProfileMirrorRoot,
     personalChromeUserDataDir,
     personalChromeProfileDirectory: profileDirectoryResolution.profileDirectory,
-    personalChromeProfileName: env.PERSONAL_CHROME_PROFILE_NAME ?? "Richard Afolayan",
+    personalChromeProfileName: env.PERSONAL_CHROME_PROFILE_NAME ?? "",
     personalChromeProfileResolutionStrategy: profileDirectoryResolution.resolutionStrategy
   };
 }

@@ -141,7 +141,7 @@ model PersonEnrichment {
   // expose it (Recruiter/limited profiles, or when the badge fails to parse).
   followersCount    Int?
   // Cached AI output, regenerated when the cache key (a hash over the
-  // enrichment payload + Richard's self-profile hash) no longer matches.
+  // enrichment payload + the operator's self-profile hash) no longer matches.
   // Including the self-profile hash means a one-off self-refresh
   // automatically invalidates every dependent summary and starter set.
   summary           String?
@@ -234,7 +234,7 @@ model Thread {
 
   // Direction + text of the most-recent message in the thread, irrespective
   // of who sent it. lastMessagePreview historically only tracked the latest
-  // INBOUND, so once Richard replied the inbox row preview was stale. These
+  // INBOUND, so once the operator replied the inbox row preview was stale. These
   // are written by send.ts (on outbound) and scan-queue.ts (on persist of
   // any new message). The dashboard prefixes outbound previews with "You: "
   // matching LinkedIn's convention.
