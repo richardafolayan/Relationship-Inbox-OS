@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Check, ChevronLeft, Copy, ExternalLink, ImageUp, Loader2, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import { showToast } from "@/lib/feedback";
 import {
   ALLOWED_SCREENSHOT_TYPES,
   PILOT_REPORT_TYPES,
@@ -54,7 +55,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 export function PilotFeedbackModal() {
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<"form" | "success" | "reports">("form");
+  const [view, setView] = useState<"form" | "reports">("form");
 
   const [type, setType] = useState<PilotReportType>("feedback");
   const [title, setTitle] = useState("");
@@ -67,7 +68,6 @@ export function PilotFeedbackModal() {
 
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [reportId, setReportId] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
   const [reports, setReports] = useState<StatusReport[] | null>(null);
@@ -92,7 +92,6 @@ export function PilotFeedbackModal() {
         setType(nextType);
         setView("form");
         setSubmitError(null);
-        setReportId(null);
         setOpen(true);
       }),
     []
@@ -126,7 +125,7 @@ export function PilotFeedbackModal() {
     !submitting &&
     (screenshot === null || privacyAck);
 
-  const submit = useCallback(async () => {
+  const submit = useCallback(() => {
     if (!canSubmit) return;
     setSubmitting(true);
     setSubmitError(null);
@@ -140,23 +139,37 @@ export function PilotFeedbackModal() {
       screenshot: screenshot ? { name: screenshot.name, dataUrl: screenshot.dataUrl } : null
     });
     lastPayloadRef.current = payload;
-    try {
-      const res = await apiPost<{ ok: boolean; reportId?: string; error?: string }>(
-        "/runner/control/pilot-feedback",
-        payload
-      );
-      if (res.ok && res.reportId) {
-        setReportId(res.reportId);
-        setView("success");
-      } else {
-        setSubmitError(res.error || "Could not send the report.");
-      }
-    } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Could not send the report.");
-    } finally {
-      setSubmitting(false);
-    }
-  }, [canSubmit, type, title, description, expected, privacyAck, screenshot, pathname]);
+    // Send without making the tester wait on the modal: close it and let a
+    // toast carry the outcome. On failure the modal reopens with the report
+    // still intact so it can be retried or copied.
+    const toastId = `pilot-feedback-${Date.now()}`;
+    showToast({ id: toastId, kind: "info", title: "Sending your report…", durationMs: 60_000 });
+    setOpen(false);
+    apiPost<{ ok: boolean; reportId?: string; error?: string }>(
+      "/runner/control/pilot-feedback",
+      payload
+    )
+      .then((res) => {
+        if (res.ok && res.reportId) {
+          showToast({ id: toastId, kind: "success", title: `Report sent: ${res.reportId}` });
+          resetForm();
+        } else {
+          throw new Error(res.error || "Could not send the report.");
+        }
+      })
+      .catch((err) => {
+        showToast({
+          id: toastId,
+          kind: "error",
+          title: "Your report didn't send",
+          description: "Reopen feedback to try again or copy it.",
+          durationMs: 9000
+        });
+        setSubmitError(err instanceof Error ? err.message : "Could not send the report.");
+        setOpen(true);
+      })
+      .finally(() => setSubmitting(false));
+  }, [canSubmit, type, title, description, expected, privacyAck, screenshot, pathname, resetForm]);
 
   const copyReport = useCallback(async () => {
     const payload =
@@ -228,9 +241,7 @@ export function PilotFeedbackModal() {
               Back
             </button>
           ) : (
-            <p className="m-0 text-[13px] font-semibold text-ink">
-              {view === "success" ? "Report sent" : "Send pilot feedback"}
-            </p>
+            <p className="m-0 text-[13px] font-semibold text-ink">Send pilot feedback</p>
           )}
           {view === "form" ? (
             <button
@@ -252,39 +263,7 @@ export function PilotFeedbackModal() {
           </button>
         </header>
 
-        {view === "success" ? (
-          <div className="px-5 py-8 text-center">
-            <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-risk-fresh/15">
-              <Check className="h-6 w-6 text-risk-fresh" strokeWidth={2.2} />
-            </div>
-            <p className="mt-4 font-display text-[18px] font-semibold text-ink">
-              Submitted: report {reportId}
-            </p>
-            <p className="mx-auto mt-1 max-w-[42ch] text-[13px] leading-[1.55] text-ink-3">
-              Thanks, that's genuinely useful. Nothing else needed from you.
-            </p>
-            <div className="mt-5 flex justify-center gap-[10px]">
-              <button
-                type="button"
-                onClick={() => {
-                  resetForm();
-                  setReportId(null);
-                  setView("form");
-                }}
-                className="rounded-pill border border-hairline px-[16px] py-[9px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-              >
-                Send another
-              </button>
-              <button
-                type="button"
-                onClick={() => setOpen(false)}
-                className="rounded-pill bg-ink px-[16px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)]"
-              >
-                Done
-              </button>
-            </div>
-          </div>
-        ) : view === "reports" ? (
+        {view === "reports" ? (
           <div className="overflow-y-auto px-5 py-4">
             <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
               Your recent reports and where they stand. Screenshots and message content are never
