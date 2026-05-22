@@ -2,18 +2,30 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import { Button } from "@/components/ui/button";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Sticky top strip that re-surfaces the controls dropped from the original
-// topbar during the redesign: a "Restart runner" button, the connected
-// platform count, and the most recent scan time. Lives on every page so
-// runner health is always one click away. Voice/tokens follow the new
-// design (mono caption, hairline border, no shouty colors).
+// topbar during the redesign: a "Scan now" button, a "Restart runner"
+// button, the connected platform count, and the most recent scan time.
+// Lives on every page so runner health - and a manual scan - is always one
+// click away. Voice/tokens follow the new design (mono caption, hairline
+// border, no shouty colors).
 
 const POLL_INTERVAL_MS = 5000;
 const RESTART_MAX_WAIT_MS = 90_000;
 const RESTART_POLL_INTERVAL_MS = 500;
+
+// Shape of POST /control/scan we care about. A blocked request still comes
+// back HTTP 200 with `ok:false` (a scan already running, or the cooldown is
+// active) - surfaced as an honest toast rather than a fake "scan started".
+interface ScanResult {
+  ok: boolean;
+  status?: "queued" | "running";
+  reason?: string;
+  retryAfterSeconds?: number;
+}
 
 const RESTART_CONFIRM_MESSAGE =
   "Restart the runner? Any in-flight scan or send will be cancelled. " +
@@ -48,6 +60,7 @@ export function RunnerTopStrip() {
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
+  const [scanTriggering, setScanTriggering] = useState(false);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -109,6 +122,40 @@ export function RunnerTopStrip() {
     setRestarting(false);
   }, [restarting]);
 
+  // Manual scan trigger. Posts /control/scan with no platform, so the
+  // runner scans every enabled platform (LinkedIn + iMessage) - the
+  // operator just wants to know "did anyone reply", not pick a platform.
+  // The runner already de-dupes a scan that's mid-flight, so a stray
+  // double-click is harmless; we still disable the button while busy.
+  const onScanNow = useCallback(() => {
+    if (scanTriggering) return;
+    setScanTriggering(true);
+    const request = apiPost<ScanResult>("/runner/control/scan", {});
+    runActionWithFeedback(request, {
+      pending: "Checking for new replies…",
+      success: (result) => {
+        if (result.ok) return "Scan started";
+        if (result.reason === "in_flight") return "A scan is already running";
+        if (result.reason === "cooldown_active") {
+          const secs = result.retryAfterSeconds ?? 0;
+          return secs > 0
+            ? `Just scanned - try again in ${secs}s`
+            : "Just scanned - try again shortly";
+        }
+        return "Scan request received";
+      },
+      failure: "Couldn't start scan"
+    });
+    // Refresh health once the request settles so the strip flips to
+    // "scanning…" without waiting for the next 5s poll. Own .catch so this
+    // chain never leaks a rejection - runActionWithFeedback already toasts
+    // the error.
+    request
+      .then(() => refreshRef.current())
+      .catch(() => undefined)
+      .finally(() => setScanTriggering(false));
+  }, [scanTriggering]);
+
   const total = platforms?.length ?? 0;
   const connected =
     platforms?.filter((p) => p.status === "CONNECTED").length ??
@@ -116,6 +163,9 @@ export function RunnerTopStrip() {
     0;
   const dot = dotClassFor(connected, total || 3);
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
+  // A scan is "busy" while our POST is in flight OR the runner reports it
+  // is mid-scan (covers auto-scan and scans kicked off from other pages).
+  const scanBusy = scanTriggering || health?.runnerStatus === "SCANNING";
 
   return (
     <div className="sticky top-0 z-30 flex items-center justify-end gap-4 border-b border-hairline bg-paper/95 px-6 py-1.5 font-mono text-[11px] text-ink-3 backdrop-blur">
@@ -127,6 +177,20 @@ export function RunnerTopStrip() {
       </span>
       <span aria-hidden className="text-ink-3/60">·</span>
       <span>{scanLabel}</span>
+      <span aria-hidden className="text-ink-3/60">·</span>
+      <Button
+        variant="quiet"
+        onClick={onScanNow}
+        disabled={scanBusy}
+        className="px-3 py-1 text-[11px] font-mono"
+        title={
+          scanBusy
+            ? "A scan is already running."
+            : "Scan every connected platform now to check for new replies."
+        }
+      >
+        {scanBusy ? "scanning…" : "Scan now"}
+      </Button>
       <span aria-hidden className="text-ink-3/60">·</span>
       <Button
         variant="quiet"
