@@ -12,6 +12,14 @@ export interface InboxRow {
    */
   personInferredName?: string | null;
   personAvatarUrl?: string | null;
+  /**
+   * Birthday for this row's contact, synced from the operator's macOS
+   * Contacts. `personBirthday` is "MM-DD"; `personBirthYear` is the
+   * four-digit year when the card carries one. Both null when no contact
+   * matched - the row shows a quiet "birthday soon" marker off these.
+   */
+  personBirthday?: string | null;
+  personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   preview: string;
   /**
@@ -66,6 +74,30 @@ export interface InboxResponse {
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
+}
+
+/**
+ * One upcoming contact birthday, as served by /runner/data/birthdays. The
+ * runner has already computed `daysUntil` and filtered to the horizon, so
+ * the dashboard only formats and renders.
+ */
+export interface UpcomingBirthday {
+  personId: string;
+  personName: string;
+  personAvatarUrl?: string | null;
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /** Most-recent thread for this person, for one-click open. Null when none. */
+  threadId: string | null;
+  /** Birthday month/day as "MM-DD". */
+  monthDay: string;
+  /** Four-digit birth year, or null for a year-less contact card. */
+  birthYear: number | null;
+  /** Whole days until the next occurrence; 0 means today. */
+  daysUntil: number;
+}
+
+export interface BirthdaysResponse {
+  upcoming: UpcomingBirthday[];
 }
 
 export interface PeopleRow {

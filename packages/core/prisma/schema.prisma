@@ -103,6 +103,15 @@ model Person {
   // "not_found", "timeout", "auth_required"). Cleared on the next successful
   // run. Surfaced in the dashboard footer when present.
   enrichmentFailedReason  String?
+  // Birthday sourced from the operator's macOS Contacts (AddressBook), kept
+  // current by the birthday-sync service. Stored as zero-padded "MM-DD" so the
+  // upcoming-birthdays lookup is a pure month/day comparison independent of
+  // year. `birthYear` holds the four-digit year when the contact card carries
+  // one (most do); null for year-less cards. Both stay null until a sync run
+  // matches this Person to a contact by phone or email. The macOS Contacts
+  // card is the source of truth; these are never edited from the dashboard.
+  birthday                String?
+  birthYear               Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
