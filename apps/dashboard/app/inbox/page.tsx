@@ -13,6 +13,7 @@ import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isWithinHorizon } from "@/lib/horizon";
 import { cn } from "@/lib/utils";
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "snoozed";
@@ -138,6 +139,10 @@ export default function InboxPage() {
   const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("oldest");
+  // Issue #287: by default the inbox hides conversations whose last activity
+  // is older than the recency horizon. Searching or flipping "show all"
+  // lifts the horizon so dormant threads stay reachable.
+  const [showAll, setShowAll] = useState(false);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [forceSelectMode, setForceSelectMode] = useState(false);
@@ -206,17 +211,37 @@ export default function InboxPage() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // The recency horizon (issue #287) hides long-dormant threads from the
+    // default view so a year of pilot history does not crowd out the live
+    // inbox. Searching lifts the horizon so older threads are still
+    // reachable; "show all" lifts it explicitly.
+    const applyHorizon = !showAll && !q;
     return allRows.filter((row) => {
       if (!applyTab(row, tab)) return false;
       if (!applyCategory(row, category)) return false;
       if (!applyPlatform(row, platformFilter)) return false;
+      if (applyHorizon && !isWithinHorizon(row.lastMessageAt)) return false;
       if (!q) return true;
       return (
         row.personName.toLowerCase().includes(q) ||
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, tab, category, platformFilter]);
+  }, [allRows, query, tab, category, platformFilter, showAll]);
+
+  // How many threads the horizon is hiding right now, for the "show all"
+  // affordance below the search bar. Only counts threads that would
+  // otherwise be visible under the current tab / category / platform.
+  const hiddenByHorizon = useMemo(() => {
+    if (showAll || query.trim()) return 0;
+    return allRows.filter(
+      (row) =>
+        applyTab(row, tab) &&
+        applyCategory(row, category) &&
+        applyPlatform(row, platformFilter) &&
+        !isWithinHorizon(row.lastMessageAt)
+    ).length;
+  }, [allRows, showAll, query, tab, category, platformFilter]);
 
   const rows = useMemo(
     () => applySort(visible.filter((row) => !removedIds.has(row.id)), sortMode),
@@ -455,6 +480,20 @@ export default function InboxPage() {
 
       {!loaded ? (
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+      ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
+        <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
+          <p className="m-0 text-[16px] font-medium text-ink">You’re caught up.</p>
+          <p className="m-0 text-[14px] text-ink-2">
+            {hiddenByHorizon} older conversation{hiddenByHorizon === 1 ? "" : "s"} set aside.{" "}
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="underline underline-offset-2 hover:text-ink"
+            >
+              Show all
+            </button>
+          </p>
+        </div>
       ) : visible.length === 0 ? (
         <CaughtUp
           title={query || tab !== "all" || category !== "any" ? "Nothing matches that filter." : "You’re caught up."}
@@ -462,6 +501,33 @@ export default function InboxPage() {
         />
       ) : (
         <>
+          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
+            <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+              {showAll ? (
+                <>
+                  Showing all conversations.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(false)}
+                    className="underline underline-offset-2 hover:text-ink"
+                  >
+                    Show recent only
+                  </button>
+                </>
+              ) : (
+                <>
+                  {hiddenByHorizon} older conversation{hiddenByHorizon === 1 ? "" : "s"} set aside.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="underline underline-offset-2 hover:text-ink"
+                  >
+                    Show all
+                  </button>
+                </>
+              )}
+            </p>
+          ) : null}
           {!selectMode ? (
             <div className="mb-3 flex items-center justify-between">
               <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
