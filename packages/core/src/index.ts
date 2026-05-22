@@ -5,3 +5,4 @@ export * from "./hash.js";
 export * from "./selectors.js";
 export * from "./defaults.js";
 export * from "./autoscan.js";
+export * from "./birthday.js";

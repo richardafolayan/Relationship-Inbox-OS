@@ -39,6 +39,10 @@ export interface ThreadRowSource {
     inferredName: string | null;
     platform: PlatformName;
     avatarUrl: string | null;
+    // Birthday synced from the operator's macOS Contacts: "MM-DD" plus an
+    // optional four-digit year. Both null when no contact matched.
+    birthday: string | null;
+    birthYear: number | null;
   };
   _count?: {
     messages: number;
@@ -57,6 +61,13 @@ export interface ShapedThreadRow {
    */
   personInferredName: string | null;
   personAvatarUrl: string | null;
+  /**
+   * Birthday for this row's contact, synced from macOS Contacts: a "MM-DD"
+   * string plus an optional four-digit year. Both null when no contact
+   * matched. The dashboard derives the "birthday soon" badge from these.
+   */
+  personBirthday: string | null;
+  personBirthYear: number | null;
   platform: PlatformName;
   preview: string;
   /**
@@ -224,6 +235,8 @@ export function toInboxRow(
     personName: source.person.displayName,
     personInferredName: source.person.inferredName ?? null,
     personAvatarUrl: source.person.avatarUrl ?? null,
+    personBirthday: source.person.birthday ?? null,
+    personBirthYear: source.person.birthYear ?? null,
     platform: source.platform,
     preview: previewText,
     lastMessageDirection: source.lastMessageDirection ?? null,
