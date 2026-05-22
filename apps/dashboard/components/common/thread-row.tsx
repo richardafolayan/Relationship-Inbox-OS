@@ -25,6 +25,12 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
   const cleanPreview = normalizePreview(row.preview);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
+  // On threads still awaiting a reply, lead with the AI context line - it
+  // says *why* the conversation needs the operator, not just the last
+  // words. Replied/handled threads keep the literal preview so the
+  // "You: …" sent-marker stays visible.
+  const nudge = row.whatTheyWant?.trim();
+  const bodyText = row.needsReply !== false && nudge ? nudge : previewBody;
   const rightLabel =
     risk === "overdue"
       ? "Overdue"
@@ -92,7 +98,7 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
             </span>
           ) : null}
         </span>
-        <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>
+        <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{bodyText}</span>
       </span>
       <span className={`text-[12px] tracking-[-0.005em] ${riskTextClass[risk]}`}>
         {rightLabel}

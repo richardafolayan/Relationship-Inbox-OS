@@ -32,6 +32,13 @@ export interface InboxRow {
   messageCount?: number;
   /** "outreach" | "genuine" | null (Phase 3 categorization). */
   category?: string | null;
+  /**
+   * AI one-line context — what would deepen this conversation / what the
+   * contact is waiting on. Rendered as a proactive nudge on Today + inbox
+   * rows and used as the body of new-message desktop notifications. Null
+   * or absent until the thread has been summarised.
+   */
+  whatTheyWant?: string | null;
   archivedAt?: string | null;
   /**
    * ISO timestamp until which the operator has snoozed this thread. Active
