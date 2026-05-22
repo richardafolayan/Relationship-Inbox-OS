@@ -535,15 +535,42 @@ GitHub and records `skipped` in column Z.
 
 ### Authorize and deploy
 
-The updated script makes an external request (to GitHub), which is a new
-permission, so a plain re-deploy is not enough the first time.
+The script calls the GitHub API with `UrlFetchApp`. Apps Script does **not**
+reliably auto-detect the scope it needs for that (`script.external_request`),
+so it must be declared in the manifest. If it is missing, GitHub calls fail at
+runtime with a `UrlFetchApp` permission error even though the project looks
+authorized.
 
-1. Paste the updated [script](#the-script) over the old one.
-2. In the editor, pick `syncMissingGitHubIssues` in the function dropdown and
-   press **Run** once.
-3. Apps Script asks you to authorize new permissions, including **connecting
-   to an external service** (that is the GitHub call). Review and **Allow**.
-4. Re-deploy the web app (Deploy, Manage deployments, edit, New version).
+1. Paste the updated [script](#the-script) over the old `Code.gs`.
+2. **Declare the OAuth scopes.** In Project Settings, tick **Show
+   'appsscript.json' manifest file in editor**. Open `appsscript.json` and add
+   an `oauthScopes` array. Leave the other fields as they already are:
+
+   ```json
+   {
+     "timeZone": "Europe/London",
+     "dependencies": {},
+     "exceptionLogging": "STACKDRIVER",
+     "runtimeVersion": "V8",
+     "webapp": {
+       "executeAs": "USER_DEPLOYING",
+       "access": "ANYONE_ANONYMOUS"
+     },
+     "oauthScopes": [
+       "https://www.googleapis.com/auth/spreadsheets",
+       "https://www.googleapis.com/auth/drive",
+       "https://www.googleapis.com/auth/script.external_request"
+     ]
+   }
+   ```
+
+3. In the editor, pick any function in the dropdown and press **Run** once.
+   Apps Script asks you to authorize. The permissions screen must list **three**
+   items: Google Sheets, Google Drive, and **Connect to an external service**.
+   If the third one is missing, stop and recheck the manifest. Review and
+   **Allow**.
+4. Re-deploy the web app: Deploy, Manage deployments, edit (the pencil), set
+   Version to **New version**, Deploy. The `/exec` URL stays the same.
 
 ### Test it
 
@@ -566,8 +593,10 @@ has an issue URL is skipped, so it never makes duplicates. Use it to catch up
 reports from before you enabled sync, or to retry rows that show `failed`.
 
 Run it from the Apps Script editor: pick `syncMissingGitHubIssues` in the
-function dropdown, press **Run**, then check **Execution log** for the
-`created / skipped / failed` counts.
+function dropdown, press **Run**, then check **Execution log**. It logs a
+summary line like `GitHub backfill complete. created=6, skipped=0, failed=0.`
+`created` is new issues, `skipped` is rows already synced or with sync off,
+and `failed` is rows the GitHub call did not create (reason in column AA).
 
 ### Duplicate protection and its limit
 
@@ -600,6 +629,17 @@ issues) and you can close one issue by hand.
   status endpoint, so testers never see it. `created` means an issue was
   opened, `skipped` means sync was off, `failed` means it was on but the
   GitHub call did not succeed (the reason is in column AA).
+- **GitHub calls all fail with a `UrlFetchApp` permission error** (column AA
+  shows `You do not have permission to call UrlFetchApp.fetch`), even with the
+  token set: the `script.external_request` scope was never granted, and Apps
+  Script does not always re-prompt for it. Fix it:
+  1. Confirm `appsscript.json` lists `script.external_request` in `oauthScopes`
+     (see [Authorize and deploy](#authorize-and-deploy)).
+  2. Revoke the script's access: open `myaccount.google.com/connections`, find
+     the project by name, open it, and use **Delete all** to remove access.
+  3. Back in the editor, Run any function and complete the consent fully. It
+     now lists **Connect to an external service**. **Allow** it.
+  4. Re-deploy, then re-run `syncMissingGitHubIssues` to retry the failed rows.
 - **GitHub API errors** in column AA:
   - `401`: the token is wrong, expired, or revoked. Make a new fine-grained
     token.
