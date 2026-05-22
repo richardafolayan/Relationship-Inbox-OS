@@ -13,6 +13,8 @@ interface ThreadRowProps {
   row: InboxRow;
   /** Optional - when provided, called after a name suggestion is confirmed/edited/dismissed so the parent can refresh the inbox. */
   onPersonChanged?: () => void;
+  /** Optional DOM id applied to the row, so a parent can scroll it into view. */
+  id?: string;
 }
 
 const riskTextClass: Record<DisplayRisk, string> = {
@@ -21,7 +23,7 @@ const riskTextClass: Record<DisplayRisk, string> = {
   fresh: "text-ink-2"
 };
 
-export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
+export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
   const risk = toDisplayRisk(row.riskLevel);
   const cleanPreview = normalizePreview(row.preview);
   const previewBody =
@@ -56,6 +58,7 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
 
   return (
     <Link
+      id={id}
       href={`/thread/${row.id}`}
       className="group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
     >
