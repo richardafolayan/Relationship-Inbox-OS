@@ -5,8 +5,6 @@ import { Pencil, Plus, RotateCcw, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   type ActionItemChecklistState,
-  CATEGORY_LABEL,
-  categorizeActionItem,
   emptyChecklistState,
   hashActionItem,
   loadChecklistState,
@@ -155,7 +153,6 @@ export function ActionItemsChecklist({
           const key = hashActionItem(loop);
           const display = resolveItemText(state, loop);
           const checked = Boolean(state.checked[key]);
-          const category = categorizeActionItem(display);
           const editing = editingKey === key;
           return (
             <li key={`open:${loop}`} className="group flex items-start gap-2">
@@ -176,24 +173,14 @@ export function ActionItemsChecklist({
                     onCancel={cancelEdit}
                   />
                 ) : (
-                  <div className="flex items-baseline gap-[6px]">
-                    <span
-                      className={cn(
-                        "rounded-[4px] border border-hairline px-[5px] py-[1px] font-mono text-[9.5px] uppercase tracking-[0.04em] text-ink-3",
-                        checked && "opacity-50"
-                      )}
-                    >
-                      {CATEGORY_LABEL[category]}
-                    </span>
-                    <span
-                      className={cn(
-                        "text-[13px] leading-[1.5]",
-                        checked ? "text-ink-4 line-through" : "text-ink-2"
-                      )}
-                    >
-                      {display}
-                    </span>
-                  </div>
+                  <span
+                    className={cn(
+                      "text-[13px] leading-[1.5]",
+                      checked ? "text-ink-4 line-through" : "text-ink-2"
+                    )}
+                  >
+                    {display}
+                  </span>
                 )}
               </div>
               {editing ? null : (
@@ -212,7 +199,6 @@ export function ActionItemsChecklist({
 
         {state.manualItems.map((item) => {
           const editing = editingKey === item.id;
-          const category = categorizeActionItem(item.text);
           return (
             <li key={`manual:${item.id}`} className="group flex items-start gap-2">
               <input
@@ -232,24 +218,14 @@ export function ActionItemsChecklist({
                     onCancel={cancelEdit}
                   />
                 ) : (
-                  <div className="flex items-baseline gap-[6px]">
-                    <span
-                      className={cn(
-                        "rounded-[4px] border border-hairline px-[5px] py-[1px] font-mono text-[9.5px] uppercase tracking-[0.04em] text-ink-3",
-                        item.checked && "opacity-50"
-                      )}
-                    >
-                      {CATEGORY_LABEL[category]}
-                    </span>
-                    <span
-                      className={cn(
-                        "text-[13px] leading-[1.5]",
-                        item.checked ? "text-ink-4 line-through" : "text-ink-2"
-                      )}
-                    >
-                      {item.text}
-                    </span>
-                  </div>
+                  <span
+                    className={cn(
+                      "text-[13px] leading-[1.5]",
+                      item.checked ? "text-ink-4 line-through" : "text-ink-2"
+                    )}
+                  >
+                    {item.text}
+                  </span>
                 )}
               </div>
               {editing ? null : (

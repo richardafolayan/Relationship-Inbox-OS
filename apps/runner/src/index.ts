@@ -7,7 +7,7 @@ import express from "express";
 import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import type { NormalizedMessage, PlatformAdapter, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday } from "@inbox-os/core";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
@@ -2214,6 +2214,9 @@ async function resummarizeThreadById(threadId: string): Promise<
     displayName: thread.person.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
     previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    previousRemember: thread.rememberJson
+      ? (JSON.parse(thread.rememberJson) as RememberItem[])
+      : [],
     messages: orderedMessages.map((message) => ({
       direction: message.direction as "IN" | "OUT",
       text: message.text,
@@ -2228,7 +2231,8 @@ async function resummarizeThreadById(threadId: string): Promise<
       rollingSummary: summary.summary,
       whatTheyWant: summary.what_they_want,
       openLoopsJson: JSON.stringify(summary.open_loops),
-      toneNotesJson: JSON.stringify(summary.tone_notes)
+      toneNotesJson: JSON.stringify(summary.tone_notes),
+      rememberJson: JSON.stringify(summary.remember)
     }
   });
 
@@ -2919,6 +2923,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
       : [],
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
+    remember: thread.rememberJson ? (JSON.parse(thread.rememberJson) as RememberItem[]) : [],
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,

@@ -1,4 +1,5 @@
 import type { AiErrorKind, AiProvider } from "@inbox-os/core";
+import type { RememberItem } from "./thread-remember";
 
 export interface InboxRow {
   id: string;
@@ -312,6 +313,11 @@ export interface ThreadResponse {
   openLoops: string[];
   dismissedOpenLoops: string[];
   toneNotes: string[];
+  /**
+   * AI-extracted durable facts worth remembering — exams, trips, life events.
+   * Optional so older runner builds that predate the field still parse.
+   */
+  remember?: RememberItem[];
   draft: string;
   contextUpdatedAt: string;
   messages: ThreadMessage[];
