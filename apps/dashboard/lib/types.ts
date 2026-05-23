@@ -57,6 +57,16 @@ export interface InboxRow {
    * even when the lightweight heuristic does not flag it.
    */
   closedStatus?: "closed" | "open" | null;
+  /**
+   * AI reconnect-worthiness score (#287 phase 3.5), 0-100. Null until
+   * the runner has scored this dormant LinkedIn thread, or when the AI
+   * provider was unavailable. The Reconnect page falls back to a
+   * deterministic relationship-signal score in that case.
+   */
+  reconnectScore?: number | null;
+  /** Short one-line reason rendered on the Reconnect page alongside
+   *  top-ranked candidates. Null when no AI score is available. */
+  reconnectScoreReason?: string | null;
   archivedAt?: string | null;
   /**
    * ISO timestamp until which the operator has snoozed this thread. Active
