@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { apiGet } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
 import type { InboxResponse, InboxRow } from "@/lib/types";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -22,10 +22,33 @@ import { normalizePreview } from "@/lib/preview";
 // iMessage threads never appear here (see lib/reconnect.ts for the
 // platform-split rationale).
 
+/** Response shape from POST /control/reconnect/refresh-scores. */
+interface RefreshScoresResponse {
+  status: "ok" | "ai_unavailable";
+  scored: number;
+  skipped: number;
+  failed: number;
+  candidates_seen: number;
+  limit: number;
+}
+
+type RefreshState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  // The "done" state holds the last summary so the operator can see what
+  // happened. It clears back to idle after a few seconds via a timer in
+  // the click handler.
+  | { kind: "done"; summary: string; tone: "ok" | "warn" }
+  | { kind: "error"; message: string };
+
 export default function ReconnectPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Inline running/success state for the "Refresh AI scores" button.
+  // Memory note: every action button surfaces inline running / success
+  // status, not just a label flip — that is what this state drives.
+  const [refresh_state, setRefreshState] = useState<RefreshState>({ kind: "idle" });
 
   const refresh = useCallback(async () => {
     try {
@@ -50,6 +73,56 @@ export default function ReconnectPage() {
     return rankReconnectCandidates(data.rows.filter(isReconnectCandidate));
   }, [data]);
 
+  const handleRefreshScores = useCallback(async () => {
+    if (refresh_state.kind === "running") return;
+    setRefreshState({ kind: "running" });
+    try {
+      // Limit 20 matches the runner's default. Higher values are allowed
+      // (up to 100) but 20 is a calm pace: it covers the typical pilot
+      // backlog in two clicks without spiking provider usage.
+      const result = await apiPost<RefreshScoresResponse>(
+        "/runner/control/reconnect/refresh-scores",
+        { limit: 20 }
+      );
+      // Pull the freshly-persisted scores into the page so the order
+      // and captions update without a manual reload.
+      await refresh();
+      const tone: "ok" | "warn" = result.status === "ai_unavailable" ? "warn" : "ok";
+      const summary =
+        result.scored === 0 && result.skipped > 0
+          ? "Already up to date"
+          : result.status === "ai_unavailable"
+            ? `Scored ${result.scored}, then AI went quiet`
+            : `Scored ${result.scored}${result.skipped > 0 ? `, skipped ${result.skipped} already done` : ""}`;
+      setRefreshState({ kind: "done", summary, tone });
+      // Settle back to idle after a few seconds so the button is ready
+      // for another click without the operator having to click away.
+      window.setTimeout(() => {
+        setRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
+      }, 4500);
+    } catch (err) {
+      const message =
+        err instanceof Error && err.message ? err.message : "Could not reach the runner.";
+      setRefreshState({ kind: "error", message });
+      window.setTimeout(() => {
+        setRefreshState((current) => (current.kind === "error" ? { kind: "idle" } : current));
+      }, 5000);
+    }
+  }, [refresh, refresh_state.kind]);
+
+  const refreshButtonLabel = (() => {
+    if (refresh_state.kind === "running") return "Scoring…";
+    if (refresh_state.kind === "done") return refresh_state.summary;
+    if (refresh_state.kind === "error") return refresh_state.message;
+    return "Refresh AI scores";
+  })();
+  const refreshButtonTone =
+    refresh_state.kind === "error"
+      ? "text-risk-overdue"
+      : refresh_state.kind === "done" && refresh_state.tone === "warn"
+        ? "text-risk-waiting"
+        : "text-ink-3";
+
   return (
     <Canvas>
       <PageHead
@@ -58,9 +131,23 @@ export default function ReconnectPage() {
         subtitle="LinkedIn threads that have gone quiet but still might be worth a gentle hello. Open one to write the message yourself - nothing here is auto-sent."
         meta={
           loaded ? (
-            <span>
-              <strong className="font-medium text-ink">{candidates.length}</strong>{" "}
-              {candidates.length === 1 ? "person" : "people"}
+            <span className="flex items-baseline gap-4">
+              <span>
+                <strong className="font-medium text-ink">{candidates.length}</strong>{" "}
+                {candidates.length === 1 ? "person" : "people"}
+              </span>
+              {candidates.length > 0 ? (
+                <button
+                  type="button"
+                  onClick={() => void handleRefreshScores()}
+                  disabled={refresh_state.kind === "running"}
+                  className={`font-mono text-[11px] uppercase tracking-[0.06em] transition-colors duration-calm hover:text-ink disabled:opacity-60 ${refreshButtonTone}`}
+                  data-testid="reconnect-refresh-scores"
+                  aria-live="polite"
+                >
+                  {refreshButtonLabel}
+                </button>
+              ) : null}
             </span>
           ) : null
         }
