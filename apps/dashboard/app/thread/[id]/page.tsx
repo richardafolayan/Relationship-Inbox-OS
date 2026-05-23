@@ -38,6 +38,7 @@ import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 import { ActionItemsChecklist } from "@/components/thread/ActionItemsChecklist";
+import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 
 // Thread workspace - landscape layout.
 //
@@ -3036,6 +3037,11 @@ export default function ThreadPage() {
             isReopenMode={isReopenMode}
             onDismiss={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
           />
+
+          {/* Things to remember - durable facts (exams, trips, life events)
+              the AI re-derives from the transcript each scan. Read-only and
+              self-hiding when empty. */}
+          <ThingsToRemember remember={thread.remember ?? []} />
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">

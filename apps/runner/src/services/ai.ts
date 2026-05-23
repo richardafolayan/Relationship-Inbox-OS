@@ -1,5 +1,11 @@
 import OpenAI from "openai";
-import type { PlatformName, SummaryOutput, SuggestedRepliesOutput, AiSource } from "@inbox-os/core";
+import type {
+  PlatformName,
+  SummaryOutput,
+  SuggestedRepliesOutput,
+  RememberItem,
+  AiSource
+} from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
@@ -27,10 +33,35 @@ const summarySchema = z.object({
   summary: z.string(),
   what_they_want: z.string(),
   open_loops: z.array(z.string()),
+  // Durable facts worth remembering (exams, trips, events). `date` is a
+  // best-effort ISO string the model may also return as null or omit
+  // entirely; normalizeRememberDate sanitises it after parsing.
+  remember: z
+    .array(
+      z.object({
+        note: z.string(),
+        date: z.string().nullable().default(null)
+      })
+    )
+    .default([]),
   tone_notes: z.array(z.string()).default([]),
   needs_reply: z.boolean(),
   urgency_hint: z.string().optional()
 });
+
+// The model is asked for strict ISO YYYY-MM-DD dates but occasionally
+// returns free text ("end of May"), a partial date, or an impossible one
+// (2026-02-30). Anything that isn't a real calendar date in strict ISO
+// form collapses to null so the dashboard's date maths never sees garbage.
+function normalizeRememberDate(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const parsed = new Date(`${trimmed}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  // Reject values that don't round-trip (e.g. 2026-02-30 rolls to Mar 2).
+  return parsed.toISOString().slice(0, 10) === trimmed ? trimmed : null;
+}
 
 // Provider error classification + retry/fallback configuration lives in
 // ./ai-providers. Adding a new AI provider: extend the `AiProvider` union
@@ -909,6 +940,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     displayName: string;
     previousSummary?: string;
     previousOpenLoops: string[];
+    /** Last persisted remember items — kept as the fallback if the AI call fails. */
+    previousRemember: RememberItem[];
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     /**
      * True when the contact's last message is newer than the operator's —
@@ -934,6 +967,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       // ellipsis truncation (issue #193).
       what_they_want: lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
+      remember: input.previousRemember,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",
       urgency_hint: undefined
@@ -981,11 +1015,13 @@ what_they_want guidance (active reply):
 - Examples: "Sultan asked if you've watched the MJ movie — he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch — he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
 
 open_loops guidance (active reply):
-- Focus on items adjacent to the CURRENT active topic. The most recent 2-3 inbound messages define what's live.
+- Work through the recent inbound messages ONE AT A TIME. For each unanswered inbound message, pull out every distinct thing the operator still needs to respond to: a question, a request, a decision they were asked to weigh in on, a piece of news that deserves a reaction. A single message often holds two or three separate loops — surface each one, never collapse a multi-part message into one vague loop.
+- Focus on what is still LIVE. The most recent 2-3 inbound messages define the active topic.
 - DROP any older loops where the conversation has clearly moved on to an unrelated topic. If the recent exchange is about a movie and the old loops are about a months-old logistics request, do not surface those — they're stale.
 - EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript.
 - A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
-- 0-4 loops is fine. Quality over volume. The bar is "would the operator genuinely want to pick this up right now, given what's being discussed".
+- Be specific and grounded in the message. "Tell her which day works for the call" beats "Reply about scheduling" — name the actual thing the contact raised.
+- 0-6 loops. Cover every genuinely open point, but do not pad with things already handled. Quality and completeness over volume.
 - Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".`
       : `MODE: RECONNECT. The operator has the floor — the contact is not currently waiting on anything specific. The summary's job here is to help the operator reopen the conversation warmly, not to surface tasks.
 
@@ -1007,14 +1043,26 @@ open_loops guidance (reconnect):
   "summary": "string — 1-2 sentence rolling summary of the relationship (durable across turns)",
   "what_they_want": "string — see mode-specific guidance below",
   "open_loops": ["string", ...],
+  "remember": [{ "note": "string", "date": "YYYY-MM-DD or null" }, ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
   "urgency_hint": "string or omit if none"
 }
 
+Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve relative dates and to judge whether a remembered event has already passed.
+
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
 
 ${modeBlock}
+
+remember guidance (both modes):
+- Separately from the loops above, extract durable facts worth remembering about the contact's life: exams, trips, interviews, job or house moves, health things, family events, birthdays, milestones, deadlines they mentioned.
+- These are NOT reply tasks and NOT the current conversation topic — they are things the operator would want to keep in mind weeks from now.
+- Each item is { "note": short third-person phrase, "date": "YYYY-MM-DD" or null }.
+- "note" examples: "Final exams", "Trip to Lagos", "Job interview at Spotify", "Starts new role", "Sister's wedding". A few words, no tasks, no questions.
+- Set "date" ONLY when the transcript states or clearly implies a specific calendar date. Resolve relative dates ("next Friday", "the 30th", "in two weeks") against the message timestamp into an absolute YYYY-MM-DD. If no specific date is recoverable (they just said "I have exams soon"), set "date" to null. NEVER guess or invent a date.
+- DROP anything whose date has clearly already passed. DROP one-off small talk.
+- 0-5 items. Only genuinely durable facts.
 
 General rules (both modes):
 - One loop per item. Don't merge ("their work + their move + their dog") into a single string.
@@ -1023,6 +1071,7 @@ General rules (both modes):
 
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
+Previous remember items: ${JSON.stringify(input.previousRemember)}
 Transcript:
 ${transcript}`;
 
@@ -1034,6 +1083,15 @@ ${transcript}`;
     if (result.what_they_want.length > 120) {
       result.what_they_want = safeTruncate(result.what_they_want, 120);
     }
+    // Sanitise remember items: strip unpaired surrogates from notes (the
+    // same SQLite-write hazard the summary fields guard against), coerce
+    // dates to strict ISO-or-null, and drop anything left without a note.
+    result.remember = result.remember
+      .map((item) => ({
+        note: stripUnpairedSurrogates(item.note).trim(),
+        date: normalizeRememberDate(item.date)
+      }))
+      .filter((item) => item.note.length > 0);
     return result;
   }
 
