@@ -307,7 +307,11 @@ test("launchPersistentContextForPlatform throws instead of falling back when str
           durationMs: 1
         })
       }),
-    /Unable to use personal Chrome profile/
+    // The strict-mode error names the profile and explains why the runner
+    // refused to fall back. Match on the leading "Couldn't launch your X
+    // Chrome profile" phrase so this assertion does not break the next
+    // time the trailing reason text is reworded.
+    /Couldn't launch your .* Chrome profile/
   );
 
   assert.equal(calls.length, 1);
