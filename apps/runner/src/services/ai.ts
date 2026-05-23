@@ -52,6 +52,15 @@ const categorySchema = z.object({
   category: z.enum(["outreach", "genuine"])
 });
 
+// #287 phase 2.5. The conversation-end verdict. "closed" means the most
+// recent inbound reads as a natural endpoint and no reply is owed.
+// "open" means the operator still owes a reply. There is no third
+// "ambiguous" tier: ambiguous threads default to "open" so the operator
+// is never quietly nudged out of a conversation that might need them.
+const closedStatusSchema = z.object({
+  status: z.enum(["closed", "open"])
+});
+
 const friendshipSummarySchema = z.object({
   how_you_know_each_other: z.string(),
   recent_topics: z.array(z.string()).default([]),
@@ -258,6 +267,58 @@ Return strict JSON: { "category": "outreach" | "genuine" }`;
 export function selectClassifyPromptPrefix(platform: PlatformName): string {
   return getVoiceTier(platform) === "formal" ? FORMAL_CLASSIFY_PROMPT_PREFIX : CASUAL_CLASSIFY_PROMPT_PREFIX;
 }
+
+// Conversation-end classifier (#287 phase 2.5). The dashboard has a
+// lightweight regex heuristic for obvious closes (bare "thanks", "ok",
+// emoji reactions, farewells with no question). This prompt is the
+// ambiguous-middle pass: the messages that look closing-ish but the
+// regex cannot confidently decide on. The model's job is to mirror how
+// a human reads the last beat of the thread, not to second-guess the
+// operator.
+export const CLOSED_STATUS_PROMPT = `Decide whether this conversation has wrapped up or whether the operator still owes a reply.
+
+Definitions:
+  "closed" — the most recent inbound is a natural endpoint with no
+            implicit ask. Acknowledgements (thanks, got it, perfect,
+            noted), farewells (talk soon, take care, have a good
+            one), wrap statements (cool, sounds good), or short
+            reactions (a heart, a thumbs up, "lol"). The conversation
+            has finished its current arc and no reply is owed.
+
+  "open"   — the most recent inbound expects something from the
+            operator: a question, an explicit ask, a future plan that
+            needs confirming, a statement that obviously invites a
+            response. If the inbound restarts the conversation after
+            a lull ("hey, been a while, how are you?") that is OPEN.
+            If the operator was the last to speak and the conversation
+            is mid-flight, that is OPEN.
+
+Decision rules (apply in order):
+  1. If the latest message includes a question mark or an explicit
+     ask ("can you", "let me know", "thoughts?", "what time", "pls"),
+     → OPEN.
+  2. If the latest inbound is a short acknowledgement / wrap with no
+     follow-up beat → CLOSED.
+  3. If the latest inbound is a farewell ("talk soon", "have a good
+     one", "catch up soon") → CLOSED.
+  4. If the latest inbound mentions future plans needing the operator
+     to confirm or coordinate ("let's grab coffee next week", "I'll
+     send the deck Monday — sound good?") → OPEN.
+  5. If the operator (direction OUT) was last to speak, the thread is
+     waiting on them, → OPEN.
+  6. When in doubt → OPEN. False "closed" hides threads that might
+     need the operator; false "open" just leaves them visible.
+
+Examples:
+  CLOSED — IN: "thanks so much, really appreciate it"
+  CLOSED — IN: "perfect, see you Wednesday"
+  CLOSED — IN: "👍"
+  OPEN   — IN: "thanks - and one more thing, did the invoice clear?"
+  OPEN   — IN: "hey, been ages! how have you been?"
+  OPEN   — IN: "I'll send the doc later today, sound good?"
+  OPEN   — OUT: "let me know what you think"
+
+Return strict JSON: { "status": "closed" | "open" }`;
 
 // Casual-DM voice profile. Applies on WhatsApp / iMessage / Instagram /
 // TikTok DMs. A GENERIC scaffold: it sets the relaxed register without
@@ -1906,11 +1967,96 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
     }
   }
 
+  /**
+   * Conversation-end classifier (#287 phase 2.5). Returns "closed" when
+   * the AI judges the last inbound to be a natural endpoint with no
+   * implicit ask, "open" when the operator still owes a reply, and null
+   * when the provider was unavailable. The caller uses null to mean
+   * "leave the existing verdict and the heuristic in charge" (i.e. fail
+   * open in the dashboard).
+   *
+   * The prompt receives only the last 1-3 messages plus the rolling
+   * summary, so the token cost is low (~150 in, ~10 out). Caching by
+   * last-inbound hash means each thread is classified at most once per
+   * new inbound message.
+   */
+  async function classifyThreadClosed(input: {
+    displayName: string;
+    /** Oldest-first; the prompt examples include direction labels so
+     *  attribution discipline applies. */
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+  }): Promise<"closed" | "open" | null> {
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return null;
+    }
+
+    // Send the last 3 turns oldest-first so the model sees the closing
+    // beat plus the operator's preceding message for context.
+    const recentTurns = input.messages
+      .slice(-3)
+      .map((m) => ({
+        direction: m.direction,
+        text: safeTruncate(m.text, 600)
+      }))
+      .filter((m) => m.text.trim().length > 0);
+
+    if (recentTurns.length === 0) {
+      return null;
+    }
+
+    // No inbound at all means the operator was last to speak; the
+    // thread is by definition waiting on them and the LLM call is
+    // skipped to save tokens. The dashboard already treats OUT-direction
+    // as "not closed" through the heuristic too.
+    const hasInbound = recentTurns.some((t) => t.direction === "IN");
+    if (!hasInbound) {
+      return "open";
+    }
+
+    const summaryLine = input.summary?.trim()
+      ? `Summary so far: ${safeTruncate(input.summary, 600)}`
+      : "Summary so far: (none)";
+
+    const prompt = `${CLOSED_STATUS_PROMPT}
+
+Person name: ${input.displayName}
+${summaryLine}
+Recent messages (oldest first):
+${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = closedStatusSchema.parse(parseAiJson(content, model));
+      return parsed.status;
+    } catch (error) {
+      console.warn(
+        `[ai] classifyThreadClosed failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+      );
+      return null;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
     classifyThreadCategory,
+    classifyThreadClosed,
     generateContactSummary,
     generateConversationStarters,
     composeInVoice,

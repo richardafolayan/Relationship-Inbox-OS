@@ -41,12 +41,21 @@ export interface InboxRow {
   /** "outreach" | "genuine" | null (Phase 3 categorization). */
   category?: string | null;
   /**
-   * AI one-line context — what would deepen this conversation / what the
-   * contact is waiting on. Rendered as a proactive nudge on Today + inbox
-   * rows and used as the body of new-message desktop notifications. Null
-   * or absent until the thread has been summarised.
+   * AI one-line context, what would deepen this conversation or what
+   * the contact is waiting on. Rendered as a proactive nudge on Today +
+   * inbox rows and used as the body of new-message desktop notifications.
+   * Null or absent until the thread has been summarised.
    */
   whatTheyWant?: string | null;
+  /**
+   * AI verdict on whether the conversation has wrapped (issue #287 phase
+   * 2.5). "closed" = last inbound is an acknowledgement / farewell with
+   * no implicit ask, "open" = operator still owes a reply, null = not
+   * yet classified or the AI provider was unavailable on the relevant
+   * scan. The dashboard treats "closed" as a strong "set aside" signal
+   * even when the lightweight heuristic does not flag it.
+   */
+  closedStatus?: "closed" | "open" | null;
   archivedAt?: string | null;
   /**
    * ISO timestamp until which the operator has snoozed this thread. Active

@@ -2957,6 +2957,37 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    // Phase 2.5 (#287): conversation-end classifier. Re-runs whenever the
+    // last inbound text or timestamp changes (a fresh inbound flips the
+    // hash), so a thread that was closed but reopens with a new message
+    // gets re-evaluated automatically. The dedicated cache key is
+    // deliberately narrow (only the inbound itself) so it does not churn
+    // when unrelated fields like needsReply flip.
+    let closedStatusUpdate: string | null | undefined = undefined;
+    let closedStatusCacheKeyUpdate: string | null | undefined = undefined;
+    if (!skipAi && lastInboundMessage) {
+      const closedKey = stableHash(
+        `closed-v1|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+      );
+      if (closedKey !== thread.closedStatusCacheKey) {
+        const verdict = await deps.aiService
+          .classifyThreadClosed({
+            displayName: person.displayName,
+            messages: latestMessages.map((message) => ({
+              direction: message.direction,
+              text: message.text,
+              timestamp: message.timestamp.toISOString()
+            })),
+            summary: summary ?? null
+          })
+          .catch(() => null);
+        if (verdict) {
+          closedStatusUpdate = verdict;
+          closedStatusCacheKeyUpdate = closedKey;
+        }
+      }
+    }
+
     await prisma.thread.update({
       where: { id: thread.id },
       data: {
@@ -2984,6 +3015,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // undefined leaves the existing column value unchanged (Prisma
         // omits the field from the UPDATE statement).
         ...(categoryUpdate ? { category: categoryUpdate } : {}),
+        // Phase 2.5 (#287): same rule — only persist when the AI gave a
+        // verdict for the current inbound hash. A null verdict leaves
+        // the previous decision in place so a transient provider
+        // outage does not silently clear classifications.
+        ...(closedStatusUpdate !== undefined ? { closedStatus: closedStatusUpdate } : {}),
+        ...(closedStatusCacheKeyUpdate !== undefined
+          ? { closedStatusCacheKey: closedStatusCacheKeyUpdate }
+          : {}),
         lastMessageAt: resolvedLastMessageAt,
         lastInboundAt: resolvedLastInboundAt,
         lastOutboundAt: resolvedLastOutboundAt,
