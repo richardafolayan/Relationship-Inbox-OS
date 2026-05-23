@@ -180,7 +180,7 @@ export function PilotFeedbackModal() {
     // toast carry the outcome. On failure the modal reopens with the report
     // restored from the snapshot so it can be retried or copied.
     const toastId = `pilot-feedback-${Date.now()}`;
-    showToast({ id: toastId, kind: "info", title: "Sending your report…", durationMs: 60_000 });
+    showToast({ id: toastId, kind: "pending", title: "Sending your report…" });
     setOpen(false);
     // Clear right away so a reopen during the in-flight call shows a fresh
     // form, not the just-submitted report (#286).
