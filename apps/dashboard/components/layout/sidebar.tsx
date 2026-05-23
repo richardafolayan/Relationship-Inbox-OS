@@ -10,6 +10,7 @@ import {
   Settings as SettingsIcon,
   PanelLeftClose,
   PanelLeftOpen,
+  Sparkles,
   MessageSquareText,
   User
 } from "lucide-react";
@@ -35,9 +36,12 @@ interface NavItem {
 
 // v1 nav scope: only the inbox loop. /at-risk, /people, /platforms, /logs
 // still resolve if typed directly; PR2 will decide which routes get deleted.
+// Reconnect sits between Inbox and Archived: Inbox is the live work, Reconnect
+// is a forward-looking nudge toward dormant ties, Archived is the past.
 const nav: NavItem[] = [
   { href: "/today", label: "Today", icon: Sun, attention: true },
   { href: "/inbox", label: "Inbox", icon: Inbox },
+  { href: "/reconnect", label: "Reconnect", icon: Sparkles },
   { href: "/archived", label: "Archived", icon: Archive },
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ];
