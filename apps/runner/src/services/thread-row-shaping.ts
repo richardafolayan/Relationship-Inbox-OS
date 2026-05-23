@@ -87,6 +87,13 @@ export interface ShapedThreadRow {
   identityWarning?: IdentityWarning | null;
   messageCount: number;
   category: string | null;
+  /**
+   * AI-extracted one-line context — what would make a great reply / what
+   * the contact is waiting on. Surfaced on Today + inbox rows as a
+   * proactive nudge and used as the body of new-message notifications.
+   * Null until the thread has been summarised.
+   */
+  whatTheyWant: string | null;
   archivedAt: string | null;
   snoozedUntil: string | null;
   /**
@@ -256,6 +263,7 @@ export function toInboxRow(
     identityWarning: row.identityWarning,
     messageCount: row.messageCount,
     category: source.category ?? null,
+    whatTheyWant: source.whatTheyWant ?? null,
     archivedAt: source.archivedAt?.toISOString() ?? null,
     snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
     personThreadCount
