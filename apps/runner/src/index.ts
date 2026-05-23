@@ -711,6 +711,7 @@ async function loadVisibleThreadRows(options?: {
       rollingSummary: true,
       archivedAt: true,
       category: true,
+      closedStatus: true,
       updatedAt: true,
       person: {
         select: {
