@@ -32,6 +32,10 @@ export interface ThreadRowSource {
   rollingSummary: string | null;
   archivedAt: Date | null;
   category: string | null;
+  /** "closed" | "open" | null - see Thread.closedStatus. The dashboard
+   *  treats "closed" as a strong "set aside" signal even when the
+   *  lightweight heuristic does not flag it. */
+  closedStatus: string | null;
   updatedAt: Date;
   person: {
     id: string;
@@ -88,12 +92,20 @@ export interface ShapedThreadRow {
   messageCount: number;
   category: string | null;
   /**
-   * AI-extracted one-line context — what would make a great reply / what
-   * the contact is waiting on. Surfaced on Today + inbox rows as a
+   * AI-extracted one-line context, what would make a great reply or
+   * what the contact is waiting on. Surfaced on Today + inbox rows as a
    * proactive nudge and used as the body of new-message notifications.
    * Null until the thread has been summarised.
    */
   whatTheyWant: string | null;
+  /**
+   * AI verdict on whether the conversation has wrapped up (#287 phase
+   * 2.5). "closed" = last inbound is a natural endpoint and no reply
+   * is owed; "open" = operator still owes a reply; null = unclassified
+   * (provider unavailable on the relevant scan, or no inbound yet).
+   * The dashboard treats "closed" as a strong "set aside" signal.
+   */
+  closedStatus: "closed" | "open" | null;
   archivedAt: string | null;
   snoozedUntil: string | null;
   /**
@@ -264,6 +276,7 @@ export function toInboxRow(
     messageCount: row.messageCount,
     category: source.category ?? null,
     whatTheyWant: source.whatTheyWant ?? null,
+    closedStatus: (source.closedStatus as "closed" | "open" | null) ?? null,
     archivedAt: source.archivedAt?.toISOString() ?? null,
     snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
     personThreadCount

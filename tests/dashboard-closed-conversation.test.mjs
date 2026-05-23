@@ -78,3 +78,61 @@ test("placeholder previews never trip the classifier", () => {
   assert.equal(closed("[system event]"), false);
   assert.equal(closed("[non-text message]"), false);
 });
+
+// Phase 2.5: AI verdict (closedStatus) overrides the regex heuristic.
+test("AI verdict 'closed' overrides the heuristic even when preview looks open", () => {
+  assert.equal(
+    isLikelyClosed({
+      preview: "hey, when are you free next week?",
+      lastMessageDirection: IN,
+      closedStatus: "closed"
+    }),
+    true
+  );
+});
+
+test("AI verdict 'open' overrides the heuristic even when preview looks closed", () => {
+  // Heuristic alone would mark this closed; AI saw the next-step plan
+  // the cropped preview missed and decided the operator should reply.
+  assert.equal(
+    isLikelyClosed({
+      preview: "thanks",
+      lastMessageDirection: IN,
+      closedStatus: "open"
+    }),
+    false
+  );
+});
+
+test("missing AI verdict falls back to the heuristic", () => {
+  assert.equal(
+    isLikelyClosed({
+      preview: "thanks",
+      lastMessageDirection: IN,
+      closedStatus: null
+    }),
+    true
+  );
+  assert.equal(
+    isLikelyClosed({
+      preview: "hey, what's up?",
+      lastMessageDirection: IN,
+      closedStatus: null
+    }),
+    false
+  );
+});
+
+test("AI verdict 'open' wins over OUT-direction default", () => {
+  // OUT normally means "waiting on them" -> not closed. The AI verdict
+  // takes precedence either way, so an "open" verdict on an OUT row
+  // still keeps it visible (no surprise).
+  assert.equal(
+    isLikelyClosed({
+      preview: "you: sounds good",
+      lastMessageDirection: OUT,
+      closedStatus: "open"
+    }),
+    false
+  );
+});

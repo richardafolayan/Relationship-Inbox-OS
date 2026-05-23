@@ -50,14 +50,33 @@ export interface ClosedCandidate {
   lastMessageDirection?: "IN" | "OUT" | null;
   /** Raw preview string from the inbox row. */
   preview?: string | null;
+  /**
+   * Runner-side AI verdict (#287 phase 2.5). When present this is the
+   * authoritative signal: "closed" sets the thread aside even if the
+   * heuristic does not flag it; "open" keeps it visible even if the
+   * heuristic would have closed it (the AI saw the full context the
+   * preview crop did not).
+   */
+  closedStatus?: "closed" | "open" | null;
 }
 
 /**
- * Whether the thread reads as a closed conversation under the heuristic
- * above. Returns false (i.e. "leave it visible") whenever direction or
- * preview signals are missing, so we never hide an unclear case.
+ * Whether the thread reads as a closed conversation. The decision is a
+ * layered fail-open check:
+ *   1. If the AI verdict ("closedStatus") says "open", trust it and
+ *      leave the thread visible - the AI saw the full last messages and
+ *      decided the operator still owes a reply.
+ *   2. If the AI verdict says "closed", set the thread aside.
+ *   3. Otherwise (no verdict yet, or AI was unavailable) fall back to
+ *      the lightweight regex heuristic so the dashboard still set the
+ *      obvious cases aside without any AI dependency.
  */
 export function isLikelyClosed(row: ClosedCandidate): boolean {
+  // Trust the AI verdict whenever it is available. "open" wins over
+  // every heuristic; "closed" wins even when the heuristic stays silent.
+  if (row.closedStatus === "open") return false;
+  if (row.closedStatus === "closed") return true;
+
   // Only the inbound side can close a conversation from our perspective.
   // When the operator was last to speak, the thread is "waiting on them"
   // and should stay active.
