@@ -2,20 +2,35 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
+import { runActionWithFeedback } from "@/lib/feedback";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
-// Single 44px status row. Read-only in v1:
+// Single 44px status row. Mostly read-only in v1:
 //
-//   [● 2/4 connected] · [activity ticker with inline progress] (right) [scan Xm ago]
+//   [● 2/4 connected] · [activity ticker with inline progress] (right) [scan Xm ago · Scan now]
 //
-// Operator actions (kebab menu with Restart runner / Pause all scans /
-// Force re-enrich / View logs / Manage platforms, the cancel button on
-// in-flight operations, and the iMessage "grant access" affordance) were
-// stripped in PR1; restore from archive/pre-v1-stripback if needed.
+// Two contextual operator actions are kept: "cancel" during a running
+// scan, and "Scan now" when idle - restored after pilot feedback #293
+// reported there was no discoverable way to check for new replies.
+// The rest of the kebab (Restart runner / Pause all scans / Force
+// re-enrich / View logs / Manage platforms) and the iMessage "grant
+// access" affordance stay stripped; restore from
+// archive/pre-v1-stripback if any of those are also needed.
 
 const POLL_INTERVAL_MS = 5000;
 const RECENT_FRESHNESS_MS = 8000;
+
+// Shape of POST /control/scan we care about. A blocked request still
+// comes back HTTP 200 with `ok:false` (a scan already running, or the
+// cooldown is active) - surface that honestly in the toast rather than
+// claim a fake "scan started".
+interface ScanResult {
+  ok: boolean;
+  status?: "queued" | "running";
+  reason?: string;
+  retryAfterSeconds?: number;
+}
 
 // Proper-cased platform labels for the reconnect modal. PLATFORM_LABEL
 // in lib/risk is all-lowercase (used elsewhere for compact captions);
@@ -223,6 +238,7 @@ export function TopStatus() {
   const [cancellingScan, setCancellingScan] = useState(false);
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [platformActionBusy, setPlatformActionBusy] = useState<string | null>(null);
+  const [scanTriggering, setScanTriggering] = useState(false);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -325,6 +341,42 @@ export function TopStatus() {
     }
   }, [cancellingScan]);
 
+  // Manual scan trigger. Posts /control/scan with no platform, so the
+  // runner scans every enabled platform (LinkedIn + iMessage). The
+  // operator just wants to know "did anyone reply", not pick a
+  // platform. The button is hidden once a scan is actually running
+  // (the ticker takes over with its own cancel control); we only
+  // need to handle the brief window between click and the runner
+  // entering SCANNING via the `scanTriggering` flag.
+  const onScanNow = useCallback(() => {
+    if (scanTriggering) return;
+    setScanTriggering(true);
+    const request = apiPost<ScanResult>("/runner/control/scan", {});
+    runActionWithFeedback(request, {
+      pending: "Checking for new replies…",
+      success: (result) => {
+        if (result.ok) return "Scan started";
+        if (result.reason === "in_flight") return "A scan is already running";
+        if (result.reason === "cooldown_active") {
+          const secs = result.retryAfterSeconds ?? 0;
+          return secs > 0
+            ? `Just scanned - try again in ${secs}s`
+            : "Just scanned - try again shortly";
+        }
+        return "Scan request received";
+      },
+      failure: "Couldn't start scan"
+    });
+    // Refresh once the request settles so the ticker flips to
+    // "Scanning…" without waiting for the next 5s poll. Own .catch so
+    // this chain never leaks a rejection - runActionWithFeedback has
+    // already shown the error toast.
+    request
+      .then(() => refreshRef.current())
+      .catch(() => undefined)
+      .finally(() => setScanTriggering(false));
+  }, [scanTriggering]);
+
   const tickerHeading = tickerLabel(ticker);
   const tickerSub = tickerDetail(ticker);
   const tickerTone =
@@ -406,6 +458,20 @@ export function TopStatus() {
 
       <div className="ml-auto flex items-center gap-3">
         <span>{scanLabel}</span>
+        {ticker.kind !== "scanning" ? (
+          <>
+            <span aria-hidden className="text-ink-3/60">·</span>
+            <button
+              type="button"
+              onClick={onScanNow}
+              disabled={scanTriggering}
+              title="Scan every connected platform now to check for new replies."
+              className="font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+            >
+              {scanTriggering ? "scanning…" : "Scan now"}
+            </button>
+          </>
+        ) : null}
       </div>
 
       {reconnectOpen ? (
