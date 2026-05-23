@@ -58,6 +58,14 @@ export interface InboxRow {
    */
   closedStatus?: "closed" | "open" | null;
   /**
+   * One-line "why" caption explaining the closed / open verdict. Quoted
+   * or paraphrased from the conversation itself. Rendered as a quiet
+   * caption when the operator unhides a set-aside thread via Show all.
+   * Null when the row was classified before reasons were introduced;
+   * a follow-up scan or the Refresh closed verdicts trigger refills it.
+   */
+  closedStatusReason?: string | null;
+  /**
    * AI reconnect-worthiness score (#287 phase 3.5), 0-100. Null until
    * the runner has scored this dormant LinkedIn thread, or when the AI
    * provider was unavailable. The Reconnect page falls back to a

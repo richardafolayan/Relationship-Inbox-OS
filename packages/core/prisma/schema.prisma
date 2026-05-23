@@ -283,6 +283,10 @@ model Thread {
   // The cache key is sha256 of (last-inbound text + last-inbound
   // timestamp); when the inbound changes the verdict is recomputed.
   closedStatus         String?
+  // One-line "why" caption (#287 phase 2.5 follow-up). The dashboard
+  // renders it alongside the row when an operator unhides set-aside
+  // threads via "Show all", so the verdict is not a black box.
+  closedStatusReason   String?
   closedStatusCacheKey String?
 
   // Reconnect ranking (#287 phase 3.5). When a LinkedIn thread ages out

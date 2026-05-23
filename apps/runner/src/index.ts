@@ -715,6 +715,7 @@ async function loadVisibleThreadRows(options?: {
       archivedAt: true,
       category: true,
       closedStatus: true,
+      closedStatusReason: true,
       reconnectScore: true,
       reconnectScoreReason: true,
       updatedAt: true,
@@ -1378,6 +1379,25 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     Math.max(1, Number(req.body?.limit) || 20),
     100
   );
+
+  // Honour the operator's AI tier (#287 F3). "memory_only" turns off
+  // the organisational AI features, so the endpoint short-circuits to
+  // a no-op response instead of calling the model. The dashboard's
+  // refresh button surfaces the "disabled_by_settings" status in its
+  // result message.
+  const operatorProfile = await settingsStore.getOperatorProfile();
+  if (operatorProfile.aiHelpLevel === "memory_only") {
+    res.json({
+      status: "disabled_by_settings",
+      scored: 0,
+      skipped: 0,
+      failed: 0,
+      candidates_seen: 0,
+      limit
+    });
+    return;
+  }
+
   const horizonCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
   const candidates = await prisma.thread.findMany({
@@ -1493,6 +1513,136 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
         reconnectScore: verdict.score,
         reconnectScoreReason: verdict.reason,
         reconnectScoreCacheKey: cacheKey
+      }
+    });
+    scored += 1;
+  }
+
+  res.json({
+    status: unavailable ? "ai_unavailable" : "ok",
+    scored,
+    skipped,
+    failed,
+    candidates_seen: candidates.length,
+    limit
+  });
+}));
+
+// #287 phase 2.5 follow-up. AI-classify the close status of threads
+// that have never had a verdict (or whose cache key has drifted). The
+// scan-queue classifies threads as new inbound messages arrive, so this
+// is for the long tail: dormant threads, threads that pre-date the AI
+// classifier, threads classified before the v2 cache key (which added
+// the reason caption). Same fail-open contract as the reconnect
+// refresher: per-thread failures break the loop cleanly rather than
+// hammering when the provider is unavailable.
+app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => {
+  const limit = Math.min(
+    Math.max(1, Number(req.body?.limit) || 30),
+    150
+  );
+
+  // Honour the operator's chosen AI tier (#287 F3): "memory_only" turns
+  // off organisational AI features, so this trigger should also be a
+  // no-op rather than calling the model behind the operator's back.
+  const operatorProfile = await settingsStore.getOperatorProfile();
+  if (operatorProfile.aiHelpLevel === "memory_only") {
+    res.json({
+      status: "disabled_by_settings",
+      scored: 0,
+      skipped: 0,
+      failed: 0,
+      candidates_seen: 0,
+      limit
+    });
+    return;
+  }
+
+  // The whole point of this endpoint is to refill missing reasons too,
+  // so we target rows where either the verdict OR the reason is null.
+  // Threads with a cache key matching the current v2 hash will skip the
+  // AI call inside the loop via the cache check.
+  const candidates = await prisma.thread.findMany({
+    where: {
+      // Only classify threads with an inbound message at all - the
+      // classifier short-circuits to "open" for OUT-last threads via a
+      // deterministic reason. There is nothing to refill there.
+      lastInboundAt: { not: null },
+      OR: [
+        { closedStatus: null },
+        { closedStatusReason: null }
+      ]
+    },
+    select: {
+      id: true,
+      closedStatusCacheKey: true,
+      lastInboundAt: true,
+      lastInboundHash: true,
+      rollingSummary: true,
+      person: { select: { displayName: true } },
+      messages: {
+        orderBy: { timestamp: "desc" },
+        take: 5,
+        select: { direction: true, text: true, timestamp: true }
+      }
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: limit * 3
+  });
+
+  let scored = 0;
+  let skipped = 0;
+  let failed = 0;
+  let unavailable = false;
+
+  for (const thread of candidates) {
+    if (scored >= limit) break;
+
+    const orderedMessages = [...thread.messages]
+      .reverse()
+      .map((m) => ({
+        direction: m.direction as "IN" | "OUT",
+        text: m.text,
+        timestamp: m.timestamp.toISOString()
+      }));
+    const lastInbound = orderedMessages.filter((m) => m.direction === "IN").pop();
+    if (!lastInbound) {
+      // Defensive: lastInboundAt was non-null but the messages slice
+      // did not contain an IN message (perhaps newer outbound messages
+      // pushed it out of the top 5). Skip rather than guessing.
+      skipped += 1;
+      continue;
+    }
+
+    const cacheKey = stableHash(
+      `closed-v2|${lastInbound.timestamp}|${cleanText(lastInbound.text)}`
+    );
+
+    if (thread.closedStatusCacheKey === cacheKey) {
+      skipped += 1;
+      continue;
+    }
+
+    const verdict = await aiService
+      .classifyThreadClosed({
+        displayName: thread.person.displayName,
+        messages: orderedMessages,
+        summary: thread.rollingSummary
+      })
+      .catch(() => null);
+
+    if (!verdict) {
+      unavailable = true;
+      failed += 1;
+      break;
+    }
+
+    await prisma.thread.update({
+      where: { id: thread.id },
+      data: {
+        closedStatus: verdict.status,
+        closedStatusReason: verdict.reason,
+        closedStatusCacheKey: cacheKey
       }
     });
     scored += 1;
