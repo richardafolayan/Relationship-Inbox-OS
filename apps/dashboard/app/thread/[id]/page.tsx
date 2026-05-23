@@ -2145,7 +2145,16 @@ export default function ThreadPage() {
                       );
                     }
                   },
-                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) }
+                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) },
+                  {
+                    label: "Archive",
+                    onSelect: () =>
+                      runAction(
+                        apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
+                        setError,
+                        () => router.push("/today")
+                      )
+                  }
                 ]}
               />
             </header>
