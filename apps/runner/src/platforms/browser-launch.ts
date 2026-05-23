@@ -317,7 +317,7 @@ export async function launchPersistentContextForPlatform(input: {
         `Couldn't launch your "${input.browserProfile.personalChromeProfileName}" Chrome profile (directory ${input.browserProfile.personalChromeProfileDirectory}). ` +
           `Connect cancelled to avoid switching to a Chrome for Testing fingerprint. ` +
           `Reason: ${reason}. ` +
-          `Most often this means Chrome is currently open with that profile — quit Chrome (or just that profile's window) and reconnect.`
+          `Most often this means Chrome is currently open with that profile. Quit Chrome (or just that profile's window) and reconnect.`
       );
     }
 
