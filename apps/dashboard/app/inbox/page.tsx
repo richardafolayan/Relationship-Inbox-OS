@@ -284,6 +284,63 @@ export default function InboxPage() {
   }, [allRows, showAll, query, tab, category, platformFilter]);
   const hiddenByHorizon = hiddenBreakdown.total;
 
+  // #287 F1: "Refresh closed verdicts" button state. Same idle/running/
+  // done/error transitions as the Reconnect page's refresh button so the
+  // operator's pattern carries across surfaces.
+  type RefreshState =
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "done"; summary: string; tone: "ok" | "warn" }
+    | { kind: "error"; message: string };
+  const [closedRefreshState, setClosedRefreshState] = useState<RefreshState>({ kind: "idle" });
+  const handleRefreshClosedVerdicts = useCallback(async () => {
+    if (closedRefreshState.kind === "running") return;
+    setClosedRefreshState({ kind: "running" });
+    try {
+      const result = await apiPost<{
+        status: "ok" | "ai_unavailable" | "disabled_by_settings";
+        scored: number;
+        skipped: number;
+        failed: number;
+      }>("/runner/control/closed-status/refresh-stale", { limit: 30 });
+      await refresh();
+      const summary =
+        result.status === "disabled_by_settings"
+          ? "AI is off (Settings)"
+          : result.scored === 0 && result.skipped > 0
+            ? "Already up to date"
+            : result.status === "ai_unavailable"
+              ? `Classified ${result.scored}, then AI went quiet`
+              : `Classified ${result.scored}${result.skipped > 0 ? `, skipped ${result.skipped} already done` : ""}`;
+      const tone: "ok" | "warn" =
+        result.status === "ai_unavailable" || result.status === "disabled_by_settings"
+          ? "warn"
+          : "ok";
+      setClosedRefreshState({ kind: "done", summary, tone });
+      window.setTimeout(() => {
+        setClosedRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
+      }, 4500);
+    } catch (err) {
+      const message = err instanceof Error && err.message ? err.message : "Could not reach the runner.";
+      setClosedRefreshState({ kind: "error", message });
+      window.setTimeout(() => {
+        setClosedRefreshState((current) => (current.kind === "error" ? { kind: "idle" } : current));
+      }, 5000);
+    }
+  }, [closedRefreshState.kind, refresh]);
+  const closedRefreshLabel = (() => {
+    if (closedRefreshState.kind === "running") return "Classifying…";
+    if (closedRefreshState.kind === "done") return closedRefreshState.summary;
+    if (closedRefreshState.kind === "error") return closedRefreshState.message;
+    return "Refresh closed verdicts";
+  })();
+  const closedRefreshTone =
+    closedRefreshState.kind === "error"
+      ? "text-risk-overdue"
+      : closedRefreshState.kind === "done" && closedRefreshState.tone === "warn"
+        ? "text-risk-waiting"
+        : "text-ink-3";
+
   // The "All" tab mixes risk levels, so it is bucketed into urgency
   // sections; every other tab is a single bucket and renders flat.
   const grouped = tab === "all";
@@ -543,9 +600,9 @@ export default function InboxPage() {
       ) : (
         <>
           {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
-            <p className="mb-3 mt-3 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+            <p className="mb-3 mt-3 flex flex-wrap items-baseline gap-x-3 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
               {showAll ? (
-                <>
+                <span>
                   Showing all conversations.{" "}
                   <button
                     type="button"
@@ -554,9 +611,9 @@ export default function InboxPage() {
                   >
                     Show recent only
                   </button>
-                </>
+                </span>
               ) : (
-                <>
+                <span>
                   {hiddenLabel(hiddenBreakdown)} set aside.{" "}
                   <button
                     type="button"
@@ -565,8 +622,23 @@ export default function InboxPage() {
                   >
                     Show all
                   </button>
-                </>
+                </span>
               )}
+              {/* #287 F1: trigger AI close-status classification for
+                  threads that have never been classified (or pre-date
+                  the v2 cache with reasons). Sits next to the existing
+                  Show all / Show recent toggle so the affordance is in
+                  the same place the operator already looks. */}
+              <button
+                type="button"
+                onClick={() => void handleRefreshClosedVerdicts()}
+                disabled={closedRefreshState.kind === "running"}
+                className={`underline underline-offset-2 transition-colors duration-calm hover:text-ink disabled:opacity-60 ${closedRefreshTone}`}
+                data-testid="inbox-refresh-closed-verdicts"
+                aria-live="polite"
+              >
+                {closedRefreshLabel}
+              </button>
             </p>
           ) : null}
           {grouped ? (
@@ -765,14 +837,25 @@ function InboxRowItem({ row, selectMode, selected, onToggle }: InboxRowItemProps
           ) : null}
         </button>
       </span>
-      <span className="rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3">
+      <span className="rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3 self-start mt-[2px]">
         {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
       </span>
-      <span className="flex min-w-0 items-baseline gap-[10px]">
-        <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
-          {row.personName}
+      <span className="flex min-w-0 flex-col gap-[2px]">
+        <span className="flex min-w-0 items-baseline gap-[10px]">
+          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+            {row.personName}
+          </span>
+          <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
         </span>
-        <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
+        {/* AI close-status reason caption (#287 F2). Only rendered when
+            the verdict is "closed" - on "open" rows there is nothing
+            useful to caption ("waiting on them" duplicates the right
+            column). The row itself only renders under Show all or a
+            search; the parent's filter decides whether the operator
+            sees it at all. */}
+        {row.closedStatus === "closed" && row.closedStatusReason ? (
+          <span className="block text-[12px] text-ink-3">{row.closedStatusReason}</span>
+        ) : null}
       </span>
       <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
         <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${dot}`} />

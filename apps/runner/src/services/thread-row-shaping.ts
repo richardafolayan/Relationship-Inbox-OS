@@ -36,6 +36,8 @@ export interface ThreadRowSource {
    *  treats "closed" as a strong "set aside" signal even when the
    *  lightweight heuristic does not flag it. */
   closedStatus: string | null;
+  /** One-line caption explaining the closed/open verdict. */
+  closedStatusReason: string | null;
   /** AI reconnect-worthy score, 0-100. See Thread.reconnectScore. */
   reconnectScore: number | null;
   /** Short reason string the dashboard renders as a quiet "why" caption
@@ -111,6 +113,13 @@ export interface ShapedThreadRow {
    * The dashboard treats "closed" as a strong "set aside" signal.
    */
   closedStatus: "closed" | "open" | null;
+  /**
+   * One-line caption explaining the closed / open verdict. Rendered as
+   * a quiet "why" caption on the inbox row when the operator unhides
+   * set-aside threads via Show all. Null when the row was classified
+   * before reasons were introduced (will refill on next scan).
+   */
+  closedStatusReason: string | null;
   /**
    * Reconnect-worthy score (#287 phase 3.5). 0-100 integer indicating
    * how much it makes sense to send a deliberate "hey, been a while"
@@ -292,6 +301,7 @@ export function toInboxRow(
     category: source.category ?? null,
     whatTheyWant: source.whatTheyWant ?? null,
     closedStatus: (source.closedStatus as "closed" | "open" | null) ?? null,
+    closedStatusReason: source.closedStatusReason ?? null,
     reconnectScore: source.reconnectScore ?? null,
     reconnectScoreReason: source.reconnectScoreReason ?? null,
     archivedAt: source.archivedAt?.toISOString() ?? null,

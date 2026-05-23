@@ -2975,11 +2975,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // gets re-evaluated automatically. The dedicated cache key is
     // deliberately narrow (only the inbound itself) so it does not churn
     // when unrelated fields like needsReply flip.
+    //
+    // The version tag is bumped to v2 when the classifier started
+    // returning a reason alongside the verdict — bumping it forces
+    // existing verdicts (which lack a reason) to re-classify on the
+    // next scan that processes their thread, so the dashboard can
+    // surface a "why" caption on rows already in the DB.
     let closedStatusUpdate: string | null | undefined = undefined;
+    let closedStatusReasonUpdate: string | null | undefined = undefined;
     let closedStatusCacheKeyUpdate: string | null | undefined = undefined;
-    if (!skipAi && lastInboundMessage) {
+    // Gate the AI classifier behind the operator's chosen help level
+    // (#287 phase 2.5 follow-up). "memory_only" turns off the
+    // organisational AI features — scoring + close detection — so the
+    // operator can pick a quieter tier without losing summaries.
+    const operatorProfile = await deps.settingsStore.getOperatorProfile();
+    const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
+    if (!skipAi && lastInboundMessage && allowClassification) {
       const closedKey = stableHash(
-        `closed-v1|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+        `closed-v2|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
       );
       if (closedKey !== thread.closedStatusCacheKey) {
         const verdict = await deps.aiService
@@ -2994,7 +3007,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           })
           .catch(() => null);
         if (verdict) {
-          closedStatusUpdate = verdict;
+          closedStatusUpdate = verdict.status;
+          closedStatusReasonUpdate = verdict.reason;
           closedStatusCacheKeyUpdate = closedKey;
         }
       }
@@ -3032,6 +3046,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // the previous decision in place so a transient provider
         // outage does not silently clear classifications.
         ...(closedStatusUpdate !== undefined ? { closedStatus: closedStatusUpdate } : {}),
+        ...(closedStatusReasonUpdate !== undefined
+          ? { closedStatusReason: closedStatusReasonUpdate }
+          : {}),
         ...(closedStatusCacheKeyUpdate !== undefined
           ? { closedStatusCacheKey: closedStatusCacheKeyUpdate }
           : {}),

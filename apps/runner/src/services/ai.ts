@@ -90,8 +90,13 @@ const categorySchema = z.object({
 // "open" means the operator still owes a reply. There is no third
 // "ambiguous" tier: ambiguous threads default to "open" so the operator
 // is never quietly nudged out of a conversation that might need them.
+//
+// `reason` is a one-line caption the dashboard renders alongside set-
+// aside rows so the operator can see WHY a thread was closed without
+// reading it. Without this the verdict feels like a black box.
 const closedStatusSchema = z.object({
-  status: z.enum(["closed", "open"])
+  status: z.enum(["closed", "open"]),
+  reason: z.string().max(160)
 });
 
 // #287 phase 3.5. Reconnect score: a 0-100 integer for "how worth
@@ -363,7 +368,13 @@ Examples:
   OPEN   — IN: "I'll send the doc later today, sound good?"
   OPEN   — OUT: "let me know what you think"
 
-Return strict JSON: { "status": "closed" | "open" }`;
+Return strict JSON: { "status": "closed" | "open", "reason": "<one short sentence, plain English, no more than 18 words>" }
+
+Reason guidance:
+  - Quote or paraphrase the actual closing beat ("she said cool see you Wednesday").
+  - For OPEN, name the question or ask ("he asked when you're back from leave").
+  - No greetings, no recommendations, no second-guessing the operator.
+  - Lowercase fine. No em dashes, en dashes, semicolons, or colons.`;
 
 // #287 phase 3.5. Reconnect-worthy scorer. Asked to rate, on a 0-100
 // scale, how much it makes sense for the operator to send a deliberate
@@ -2132,7 +2143,7 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
      *  attribution discipline applies. */
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     summary?: string | null;
-  }): Promise<"closed" | "open" | null> {
+  }): Promise<{ status: "closed" | "open"; reason: string } | null> {
     const { client, model, provider } = await resolveActive();
     if (!client) {
       return null;
@@ -2155,10 +2166,12 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
     // No inbound at all means the operator was last to speak; the
     // thread is by definition waiting on them and the LLM call is
     // skipped to save tokens. The dashboard already treats OUT-direction
-    // as "not closed" through the heuristic too.
+    // as "not closed" through the heuristic too. Use a deterministic
+    // reason caption so we still get a visible "why" without paying
+    // for a model call.
     const hasInbound = recentTurns.some((t) => t.direction === "IN");
     if (!hasInbound) {
-      return "open";
+      return { status: "open", reason: "you were last to speak; waiting on them" };
     }
 
     const summaryLine = input.summary?.trim()
@@ -2188,7 +2201,13 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
       const content = response.choices[0]?.message?.content;
       if (!content) return null;
       const parsed = closedStatusSchema.parse(parseAiJson(content, model));
-      return parsed.status;
+      return {
+        status: parsed.status,
+        // Apply the same voice rules as other rendered AI strings - the
+        // post-processor scrubs em dashes, semicolons, colons that the
+        // model occasionally slips in.
+        reason: applyVoiceRules(parsed.reason).trim()
+      };
     } catch (error) {
       console.warn(
         `[ai] classifyThreadClosed failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
