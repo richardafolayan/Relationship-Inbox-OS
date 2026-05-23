@@ -4,6 +4,7 @@ const runnerBase = `http://localhost:${runnerPort}`;
 
 const nextConfig = {
   reactStrictMode: true,
+  devIndicators: false,
   // @inbox-os/core ships TypeScript source with NodeNext (".js") import
   // specifiers. The dashboard now imports its birthday/date helpers at
   // runtime (not just as types), so Next must transpile the package to
