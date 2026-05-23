@@ -44,6 +44,40 @@ interface RunnerEventDetail {
   threadId?: string;
 }
 
+// Per-day "tonight's outline" progress, persisted to localStorage so the
+// cleared-thread counts survive a reload instead of dropping back to zero.
+// The date field still forces a fresh start at local midnight.
+const TONIGHT_PROGRESS_KEY = "today_tonight_progress";
+
+type TonightProgress = { date: string; RED: number; AMBER: number; GREEN: number };
+
+function readTonightProgress(): TonightProgress | null {
+  try {
+    const raw = window.localStorage.getItem(TONIGHT_PROGRESS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<TonightProgress>;
+    if (
+      typeof parsed?.date === "string" &&
+      typeof parsed.RED === "number" &&
+      typeof parsed.AMBER === "number" &&
+      typeof parsed.GREEN === "number"
+    ) {
+      return { date: parsed.date, RED: parsed.RED, AMBER: parsed.AMBER, GREEN: parsed.GREEN };
+    }
+  } catch {
+    // Corrupt JSON or storage disabled: fall back to a fresh count.
+  }
+  return null;
+}
+
+function writeTonightProgress(value: TonightProgress): void {
+  try {
+    window.localStorage.setItem(TONIGHT_PROGRESS_KEY, JSON.stringify(value));
+  } catch {
+    // Storage disabled or over quota: progress just won't survive a reload.
+  }
+}
+
 export default function TodayPage() {
   const router = useRouter();
   const [data, setData] = useState<InboxResponse | null>(null);
@@ -69,12 +103,12 @@ export default function TodayPage() {
   // Per-day "done" counter so the right-rail outline ticks up as the
   // operator clears overdue / waiting threads. Keyed by ISO date string
   // so it resets at local midnight.
-  const [doneTodayByLevel, setDoneTodayByLevel] = useState<{
-    date: string;
-    RED: number;
-    AMBER: number;
-    GREEN: number;
-  }>(() => ({ date: new Date().toDateString(), RED: 0, AMBER: 0, GREEN: 0 }));
+  const [doneTodayByLevel, setDoneTodayByLevel] = useState<TonightProgress>(() => ({
+    date: new Date().toDateString(),
+    RED: 0,
+    AMBER: 0,
+    GREEN: 0
+  }));
 
   const refresh = useCallback(async () => {
     const [inbox, platformRows, healthData] = await Promise.all([
@@ -114,6 +148,23 @@ export default function TodayPage() {
   useEffect(() => {
     setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
   }, []);
+
+  // Restore tonight's cleared-thread counts so the right-rail outline keeps
+  // its progress across a reload. A stale (pre-midnight) entry is ignored.
+  useEffect(() => {
+    const stored = readTonightProgress();
+    if (stored && stored.date === new Date().toDateString()) {
+      setDoneTodayByLevel(stored);
+    }
+  }, []);
+
+  // Persist whenever there's progress to save. Skipping the all-zero state
+  // also stops the empty default from clobbering a restored value on mount.
+  useEffect(() => {
+    if (doneTodayByLevel.RED + doneTodayByLevel.AMBER + doneTodayByLevel.GREEN > 0) {
+      writeTonightProgress(doneTodayByLevel);
+    }
+  }, [doneTodayByLevel]);
 
   useEffect(() => {
     void refresh();
@@ -287,6 +338,32 @@ export default function TodayPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [hero, router, advanceHero, refresh]);
+
+  // Right-rail outline rows jump to the first live thread of their risk
+  // level: the hero when it matches, otherwise its row in the queue below.
+  const jumpToLevel = useCallback(
+    (level: "RED" | "AMBER" | "GREEN") => {
+      if (hero?.riskLevel === level) {
+        // The page scrolls inside app-shell's <main>, not the window, so
+        // jump to the hero by returning that container to the top.
+        heroRef.current?.closest("main")?.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      const target = visibleRemaining.find((row) => row.riskLevel === level);
+      if (target) {
+        document
+          .getElementById(`today-row-${target.id}`)
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      // All live threads of this level are beyond the visible cap, so
+      // send the operator to the "see all" link to find them in Inbox.
+      document
+        .querySelector('[data-testid="today-overflow-link"]')
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    [hero, visibleRemaining]
+  );
 
   const today = new Date();
   const dayLabel = today.toLocaleDateString("en-GB", {
@@ -544,7 +621,7 @@ export default function TodayPage() {
               </div>
               <div className="flex flex-col">
                 {visibleRemaining.map((row) => (
-                  <ThreadRow key={row.id} row={row} />
+                  <ThreadRow key={row.id} row={row} id={`today-row-${row.id}`} />
                 ))}
                 {overflowCount > 0 ? (
                   <Link
@@ -580,6 +657,8 @@ export default function TodayPage() {
                 total={totalRed}
                 pct={overduePct}
                 tone="overdue"
+                liveCount={overdueCount}
+                onJump={() => jumpToLevel("RED")}
               />
               <OutlineRow
                 label="Waiting on you"
@@ -587,6 +666,8 @@ export default function TodayPage() {
                 total={totalAmber}
                 pct={waitingPct}
                 tone="waiting"
+                liveCount={waitingCount}
+                onJump={() => jumpToLevel("AMBER")}
               />
               <OutlineRow
                 label="Fresh, no rush"
@@ -594,6 +675,8 @@ export default function TodayPage() {
                 total={totalGreen}
                 pct={freshPct}
                 tone="fresh"
+                liveCount={freshCount}
+                onJump={() => jumpToLevel("GREEN")}
               />
               <li className={`flex items-center gap-[10px] ${allDone ? "" : "opacity-50"}`}>
                 <span
@@ -625,29 +708,46 @@ function OutlineRow({
   done,
   total,
   pct,
-  tone
+  tone,
+  liveCount,
+  onJump
 }: {
   label: string;
   done: number;
   total: number;
   pct: number;
   tone: "overdue" | "waiting" | "fresh";
+  liveCount: number;
+  onJump: () => void;
 }) {
   const fillClass =
     tone === "overdue" ? "bg-risk-overdue" : tone === "waiting" ? "bg-risk-waiting" : "bg-risk-fresh";
-  return (
-    <li className="flex items-center gap-[10px]">
+  const inner = (
+    <>
       <span className={`inline-block h-[8px] w-[8px] rounded-full ${fillClass}`} />
       <span className="relative block h-[3px] w-[28px] overflow-hidden rounded-[2px] bg-hairline">
-        <span
-          className={`absolute inset-y-0 left-0 ${fillClass}`}
-          style={{ width: `${pct}%` }}
-        />
+        <span className={`absolute inset-y-0 left-0 ${fillClass}`} style={{ width: `${pct}%` }} />
       </span>
       <span>{label}</span>
       <span className="ml-auto font-mono text-[10px] text-ink-4">
         {done}/{total}
       </span>
+    </>
+  );
+  // No live threads of this level: nothing to jump to, so render it inert.
+  if (liveCount === 0) {
+    return <li className="flex items-center gap-[10px]">{inner}</li>;
+  }
+  return (
+    <li className="-mx-[8px]">
+      <button
+        type="button"
+        onClick={onJump}
+        title={`Jump to ${label.toLowerCase()}`}
+        className="flex w-full items-center gap-[10px] rounded-[8px] px-[8px] py-[4px] text-left text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        {inner}
+      </button>
     </li>
   );
 }
