@@ -2,13 +2,13 @@
 
 The in-app feedback modal posts a report to the **local runner**, and the
 runner forwards it to a **Google Apps Script web app**. The script writes a
-row to a Google Sheet, saves any screenshot to Google Drive, and (optionally)
+row to a Google Sheet, saves any screenshots to Google Drive, and (optionally)
 opens a GitHub issue for triage.
 
 ```
 dashboard modal ──▶ runner /control/pilot-feedback ──▶ Apps Script web app
                                                          ├─ Google Sheet (one row, the source of truth)
-                                                         ├─ Google Drive (screenshot, if attached)
+                                                         ├─ Google Drive (screenshots, if attached)
                                                          └─ GitHub issue (optional, admin side only)
 ```
 
@@ -75,7 +75,7 @@ edit, New version).
 /**
  * Relationship Inbox OS: pilot feedback intake.
  *
- * doPost: append a report row, save any screenshot to Drive, then (when
+ * doPost: append a report row, save any screenshots to Drive, then (when
  *         GitHub issue sync is configured) open a GitHub issue and record
  *         the result back into the row.
  * doGet:  return recent reports (safe columns only) for the in-app view.
@@ -122,16 +122,25 @@ function doPost(e) {
     var lastRow = sheet.getLastRow();
     var reportId = 'R-' + ('000' + lastRow).slice(-4);
 
+    // A report may carry several screenshots. Save each to Drive; column W
+    // holds every resulting URL, one per line.
     var screenshotUrl = '';
-    if (report.screenshot && report.screenshot.base64) {
-      var bytes = Utilities.base64Decode(report.screenshot.base64);
-      var blob = Utilities.newBlob(
-        bytes,
-        report.screenshot.mimeType || 'image/png',
-        reportId + '-' + (report.screenshot.name || 'screenshot')
-      );
+    var screenshots = report.screenshots || [];
+    if (screenshots.length) {
       var folder = DriveApp.getFolderById(props.getProperty('DRIVE_FOLDER_ID'));
-      screenshotUrl = folder.createFile(blob).getUrl();
+      var urls = [];
+      for (var i = 0; i < screenshots.length; i++) {
+        var shot = screenshots[i];
+        if (!shot || !shot.base64) continue;
+        var bytes = Utilities.base64Decode(shot.base64);
+        var blob = Utilities.newBlob(
+          bytes,
+          shot.mimeType || 'image/png',
+          reportId + '-' + (i + 1) + '-' + (shot.name || 'screenshot')
+        );
+        urls.push(folder.createFile(blob).getUrl());
+      }
+      screenshotUrl = urls.join('\n');
     }
 
     sheet.appendRow([
@@ -157,7 +166,7 @@ function doPost(e) {
       ai.area || '',                  // T aiArea
       ai.severity || '',              // U aiSeverity
       (ai.repro || []).join(' | '),   // V aiRepro
-      screenshotUrl                   // W screenshotUrl
+      screenshotUrl                   // W screenshotUrl (one URL per line)
       // X..AA (GitHub columns) are written by syncGithubForRow_ below.
     ]);
 
@@ -268,8 +277,8 @@ function writeGithubColumns_(sheet, rowNumber, url, number, status, error) {
 
 /**
  * Build the issue title and body from a Sheet row. Privacy-safe by design:
- * no screenshot image, no message thread content, no secrets. The
- * screenshot Drive link is included only when GITHUB_INCLUDE_SCREENSHOT_LINK
+ * no screenshot images, no message thread content, no secrets. The
+ * screenshot Drive links are included only when GITHUB_INCLUDE_SCREENSHOT_LINK
  * is 'true'.
  */
 function buildIssueContent_(props, values) {
@@ -318,13 +327,20 @@ function buildIssueContent_(props, values) {
     if (cell('aiRepro')) lines.push('- Repro: ' + cell('aiRepro'));
   }
 
-  if (cell('screenshotUrl')) {
+  var screenshotUrls = cell('screenshotUrl');
+  if (screenshotUrls) {
     lines.push('');
     var allowLink = String(props.getProperty('GITHUB_INCLUDE_SCREENSHOT_LINK') || '')
       .trim().toLowerCase() === 'true';
+    var shotCount = screenshotUrls.split('\n').filter(function (u) {
+      return u.trim();
+    }).length;
+    var attached = shotCount === 1
+      ? 'A screenshot was attached.'
+      : shotCount + ' screenshots were attached.';
     lines.push(allowLink
-      ? 'Screenshot (Drive, access controlled): ' + cell('screenshotUrl')
-      : 'A screenshot was attached. See column W of the feedback Sheet.');
+      ? attached + ' Drive links (access controlled):\n' + screenshotUrls
+      : attached + ' See column W of the feedback Sheet.');
   }
 
   // Safe metadata only: ids and flags, never message content or secrets.
@@ -466,7 +482,7 @@ number.
 
 Feedback reports contain what the tester typed (a title, a description, an
 optional "expected" note). They never contain message content by design. But
-a tester can still type something they consider private, and **a screenshot
+a tester can still type something they consider private, and **screenshots
 they attach can show real private messages**.
 
 - **Use a private repo.** Put pilot feedback issues in a **private**
@@ -476,9 +492,9 @@ they attach can show real private messages**.
   every issue title and body is world readable, forever, even after deletion
   (search engines and caches).
 - **Screenshots are never uploaded to GitHub.** The script only ever includes
-  a Drive *link*, and only when `GITHUB_INCLUDE_SCREENSHOT_LINK` is `true`. The
-  image itself stays in your private Drive folder. Keep that property off (the
-  default) unless you are sure who can see the repo.
+  Drive *links*, and only when `GITHUB_INCLUDE_SCREENSHOT_LINK` is `true`. The
+  images themselves stay in your private Drive folder. Keep that property off
+  (the default) unless you are sure who can see the repo.
 - The issue body carries metadata, the page, app version, timestamp,
   browser/device, AI triage, and the tester's own words. It never carries
   secrets, auth values, cookies, message thread content, or file paths.
@@ -621,8 +637,8 @@ issues) and you can close one issue by hand.
   fields plus safe metadata. There is no field in the payload through which
   conversation text could arrive.
 - **Screenshots** are user-attached and optional. They are stored in your
-  private Drive folder; the status endpoint never returns the URL, and the
-  GitHub issue body never embeds the image.
+  private Drive folder; the status endpoint never returns those URLs, and the
+  GitHub issue body never embeds the images.
 - **`status` and `note`** (columns C and D) are yours to edit in the Sheet.
   Whatever you type shows up in each tester's "Recent reports" view.
 - **GitHub sync status** lives in columns X to AA and is never returned by the

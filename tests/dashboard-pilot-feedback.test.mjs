@@ -9,7 +9,8 @@ const {
   formatReportForCopy,
   describeRoute,
   extractThreadId,
-  MAX_SCREENSHOT_BYTES
+  MAX_SCREENSHOT_BYTES,
+  MAX_SCREENSHOTS
 } = await import("../apps/dashboard/lib/pilot.ts");
 
 const META = {
@@ -29,7 +30,7 @@ test("buildPilotReportPayload assembles only the safe fields", () => {
     expected: "  A draft should appear  ",
     privacyAck: false,
     meta: META,
-    screenshot: null
+    screenshots: []
   });
   // Top-level keys are a closed, safe set — there is no slot a caller
   // could use to smuggle conversation text into a report.
@@ -38,7 +39,7 @@ test("buildPilotReportPayload assembles only the safe fields", () => {
     "expected",
     "meta",
     "privacyAck",
-    "screenshot",
+    "screenshots",
     "title",
     "type"
   ]);
@@ -55,7 +56,7 @@ test("buildPilotReportPayload assembles only the safe fields", () => {
   assert.equal(payload.description, "I clicked Compose and nothing happened");
   assert.equal(payload.expected, "A draft should appear");
   assert.equal(payload.type, "bug");
-  assert.equal(payload.screenshot, null);
+  assert.deepEqual(payload.screenshots, []);
 });
 
 test("a report carries no message content — only typed fields and metadata", () => {
@@ -68,13 +69,50 @@ test("a report carries no message content — only typed fields and metadata", (
     expected: "",
     privacyAck: false,
     meta: META,
-    screenshot: null
+    screenshots: []
   });
   const json = JSON.stringify(payload);
   for (const leak of ["messages", "rollingSummary", "preview", "lastMessage", "transcript"]) {
     assert.ok(!json.includes(leak), `payload must not carry a "${leak}" field`);
   }
   assert.equal(payload.meta.threadId, "abc-123"); // an id is fine; content is not
+});
+
+test("buildPilotReportPayload carries multiple screenshots through", () => {
+  const payload = buildPilotReportPayload({
+    type: "feedback",
+    title: "Two shots",
+    description: "Here are two images",
+    expected: "",
+    privacyAck: true,
+    meta: META,
+    screenshots: [
+      { name: "one.png", dataUrl: "data:image/png;base64,AAA" },
+      { name: "two.png", dataUrl: "data:image/png;base64,BBB" }
+    ]
+  });
+  assert.equal(payload.screenshots.length, 2);
+  assert.deepEqual(
+    payload.screenshots.map((shot) => shot.name),
+    ["one.png", "two.png"]
+  );
+});
+
+test("buildPilotReportPayload defaults screenshots to an empty array", () => {
+  const payload = buildPilotReportPayload({
+    type: "feedback",
+    title: "No shots",
+    description: "Nothing attached",
+    expected: "",
+    privacyAck: false,
+    meta: META
+  });
+  assert.deepEqual(payload.screenshots, []);
+});
+
+test("MAX_SCREENSHOTS allows more than one image", () => {
+  assert.equal(typeof MAX_SCREENSHOTS, "number");
+  assert.ok(MAX_SCREENSHOTS >= 2, "the feedback form must allow multiple images");
 });
 
 test("formatReportForCopy renders the report without message content", () => {
@@ -85,7 +123,7 @@ test("formatReportForCopy renders the report without message content", () => {
     expected: "It should open",
     privacyAck: false,
     meta: META,
-    screenshot: null
+    screenshots: []
   });
   const text = formatReportForCopy(payload);
   assert.match(text, /Stuck on Loading/);
