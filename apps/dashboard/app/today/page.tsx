@@ -15,6 +15,7 @@ import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { isWithinHorizon } from "@/lib/horizon";
+import { isLikelyClosed } from "@/lib/closed-conversation";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
@@ -166,11 +167,17 @@ export default function TodayPage() {
   }, []);
 
   const allRows = data?.rows ?? [];
-  // Today is the "tonight's work" view. Conversations whose last activity falls
-  // beyond the recency horizon (issue #287) are set aside so a year of message
-  // history does not flood the hero queue. Older threads remain reachable via
-  // the Inbox "show all" control and any new message immediately pulls a
-  // thread back in.
+  // Today is the "tonight's work" view. Two filters narrow the runner's
+  // raw needs-reply set into things that genuinely need the operator
+  // tonight (issue #287):
+  //   - Recency horizon (phase 1): dormant threads drop out so a year of
+  //     history does not flood the hero queue.
+  //   - Closed-conversation heuristic (phase 2): threads that already
+  //     wrapped on a "thanks" / "talk soon" are set aside so the operator
+  //     is not nudged to reply to closing messages.
+  // Both filters are conservative: anything reachable from the Inbox
+  // "show all" toggle still appears there, and a new inbound message
+  // immediately pulls a thread back into Today.
   const rows = useMemo(
     () =>
       allRows.filter(
@@ -178,7 +185,8 @@ export default function TodayPage() {
           row.needsReply !== false &&
           !row.scheduledSendAt &&
           !removedIds.has(row.id) &&
-          isWithinHorizon(row.lastMessageAt)
+          isWithinHorizon(row.lastMessageAt) &&
+          !isLikelyClosed(row)
       ),
     [allRows, removedIds]
   );
