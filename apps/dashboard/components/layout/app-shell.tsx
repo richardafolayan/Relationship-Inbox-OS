@@ -19,7 +19,7 @@ import {
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
-import type { HealthResponse, InboxResponse, InboxRow } from "@/lib/types";
+import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised between 8 and 13 minutes per
@@ -81,6 +81,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  // Operator display name for the sidebar footer (#332). Sourced from
+  // operator_profile_v1 so a fresh install still falls back to "Operator"
+  // rather than baking any persona into the shell.
+  const [operatorDisplayName, setOperatorDisplayName] = useState<string | null>(null);
   const autoScanInFlightRef = useRef(false);
   // New-message desktop notifications: the previous inbox snapshot to diff
   // against, plus a flag so the first poll only establishes a baseline
@@ -172,6 +176,20 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     const stored = window.localStorage.getItem(sidebarCollapsedStorageKey);
     if (stored === "true") setSidebarCollapsed(true);
+  }, []);
+
+  // Keep the sidebar footer label in sync with the operator's displayName.
+  // Fires `operator-profile-saved` whenever Settings writes a new profile —
+  // we re-fetch so the sidebar updates without a full reload.
+  useEffect(() => {
+    const loadProfile = () => {
+      void apiGet<OperatorProfile>("/runner/data/operator-profile")
+        .then((profile) => setOperatorDisplayName(profile?.displayName ?? null))
+        .catch(() => undefined);
+    };
+    loadProfile();
+    window.addEventListener("operator-profile-saved", loadProfile);
+    return () => window.removeEventListener("operator-profile-saved", loadProfile);
   }, []);
 
   useEffect(() => {
@@ -333,6 +351,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         onOpenSearch={() => setPaletteOpen(true)}
         collapsed={sidebarCollapsed}
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
+        operatorDisplayName={operatorDisplayName}
       />
       <div className="flex h-screen min-h-0 flex-col">
         <TopStatus />

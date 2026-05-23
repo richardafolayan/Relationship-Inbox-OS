@@ -24,6 +24,12 @@ interface SidebarProps {
   onOpenSearch: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  /**
+   * Operator's preferred display name, sourced from the operator_profile_v1
+   * setting. Empty / undefined → falls back to the literal "Operator" so the
+   * footer never collapses on a fresh install.
+   */
+  operatorDisplayName?: string | null;
 }
 
 interface NavItem {
@@ -55,8 +61,10 @@ export function Sidebar({
   attentionCount,
   onOpenSearch,
   collapsed,
-  onToggleCollapsed
+  onToggleCollapsed,
+  operatorDisplayName
 }: SidebarProps) {
+  const operatorLabel = operatorDisplayName?.trim() || "Operator";
   const pathname = usePathname();
   // Three runner states the sidebar can surface, in priority order:
   //   - unreachable: dashboard couldn't fetch /runner/health (network or
@@ -219,9 +227,9 @@ export function Sidebar({
       <div
         className={cn(
           "mt-3 flex items-center border-t border-hairline pt-3",
-          collapsed ? "justify-center" : "gap-3 px-3"
+          collapsed ? "justify-center" : "gap-2 px-3"
         )}
-        title={collapsed ? `Operator · ${runnerLabel.text}` : undefined}
+        title={collapsed ? `${operatorLabel} · ${runnerLabel.text}` : undefined}
       >
         <div
           className={cn(
@@ -234,26 +242,20 @@ export function Sidebar({
             className={collapsed ? "h-[13px] w-[13px]" : "h-[15px] w-[15px]"}
             strokeWidth={1.8}
           />
-          {collapsed ? (
-            <span
-              className={cn(
-                "absolute -bottom-[1px] -right-[1px] h-[8px] w-[8px] rounded-full border border-paper",
-                dotColor
-              )}
-              aria-hidden
-            />
-          ) : null}
+          <span
+            className={cn(
+              "absolute -bottom-[1px] -right-[1px] h-[8px] w-[8px] rounded-full border border-paper",
+              dotColor
+            )}
+            aria-hidden
+          />
         </div>
         {!collapsed ? (
           <>
             <div className="min-w-0 flex-1">
-              <p className="m-0 truncate text-[12px] font-medium text-ink">Operator</p>
-              <p className="m-0 flex items-center gap-[6px] text-[11px] text-ink-3">
-                <span
-                  className={cn("h-[6px] w-[6px] rounded-full", dotColor)}
-                  aria-hidden
-                />
-                <span>{runnerLabel.text}</span>
+              <p className="m-0 truncate text-[12px] font-medium text-ink">{operatorLabel}</p>
+              <p className="m-0 truncate whitespace-nowrap text-[11px] text-ink-3">
+                {runnerLabel.text}
               </p>
             </div>
             <ThemeToggle />
