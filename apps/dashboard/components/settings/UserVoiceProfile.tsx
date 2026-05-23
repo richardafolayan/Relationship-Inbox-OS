@@ -36,7 +36,8 @@ const AI_HELP_LEVELS: Array<{ value: AiHelpLevel; label: string; desc: string }>
   {
     value: "memory_only",
     label: "Memory only",
-    desc: "Show summaries, context, and things to address. You write every reply yourself."
+    desc:
+      "Show summaries, context, and things to address. No AI ranking on Reconnect, no AI close detection on the Inbox. You write every reply yourself."
   },
   {
     value: "writing_support",
@@ -280,8 +281,9 @@ export function UserVoiceProfile({
             AI help level
           </p>
           <p className="mt-1 max-w-[60ch] text-[13px] leading-[1.55] text-ink-2">
-            Choose how much writing help you want. Summaries and things to address always show.
-            This only changes whether the app offers complete replies.
+            Choose how much help you want from the app. Summaries and things to address always
+            show. Higher tiers also offer writing help and turn on AI ranking on the Reconnect
+            page and AI close-detection on the Inbox.
           </p>
           <div className="mt-3 flex flex-col gap-2">
             {AI_HELP_LEVELS.map((level) => {
