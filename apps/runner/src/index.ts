@@ -8,7 +8,8 @@ import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, stableHash } from "@inbox-os/core";
+import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -712,6 +713,8 @@ async function loadVisibleThreadRows(options?: {
       archivedAt: true,
       category: true,
       closedStatus: true,
+      reconnectScore: true,
+      reconnectScoreReason: true,
       updatedAt: true,
       person: {
         select: {
@@ -1359,6 +1362,148 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
     data: { status: "FAILED", lastError: "cancelled by operator", nextAttemptAt: null }
   });
   res.json({ status: "ok", cancelled: result.count });
+}));
+
+// #287 phase 3.5. AI-score LinkedIn dormant threads for the Reconnect
+// page. Picks up to `limit` candidates that lack a fresh score, calls
+// the AI scorer for each, and persists score + reason + cache key.
+// Always safe to call: missing AI keys, transient outages, or a
+// per-thread failure simply leave the existing column unchanged. The
+// dashboard's deterministic relationship-signal ranking continues to
+// work in the absence of any AI score.
+app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
+  const limit = Math.min(
+    Math.max(1, Number(req.body?.limit) || 20),
+    100
+  );
+  const horizonCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  const candidates = await prisma.thread.findMany({
+    where: {
+      platform: "LINKEDIN",
+      archivedAt: null,
+      // Dormant = last activity older than the 30-day horizon. Threads
+      // whose lastMessageAt is null are out of scope: the scorer needs
+      // at least one timestamp to anchor "days dormant".
+      lastMessageAt: { lt: horizonCutoff },
+      // Skip outreach threads regardless of category - reconnecting
+      // with a cold pitch contact is the opposite of what this page
+      // exists for. Threads without a category yet are still eligible.
+      NOT: { category: "outreach" }
+    },
+    select: {
+      id: true,
+      platform: true,
+      lastMessageAt: true,
+      lastInboundAt: true,
+      rollingSummary: true,
+      reconnectScore: true,
+      reconnectScoreCacheKey: true,
+      person: {
+        select: {
+          displayName: true,
+          enrichment: { select: { headline: true, currentRole: true, currentCompany: true } }
+        }
+      },
+      _count: { select: { messages: true } },
+      messages: {
+        orderBy: { timestamp: "desc" },
+        take: 6,
+        select: { direction: true, text: true, timestamp: true }
+      }
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: limit * 4 // overfetch so we can skip cache hits without blocking the limit
+  });
+
+  let scored = 0;
+  let skipped = 0;
+  let failed = 0;
+  let unavailable = false;
+
+  for (const thread of candidates) {
+    if (scored >= limit) break;
+
+    const outboundCount = thread.messages.filter((m) => m.direction === "OUT").length;
+    const totalCount = thread._count?.messages ?? thread.messages.length;
+    const lastInbound = thread.messages.find((m) => m.direction === "IN");
+    const daysDormant = thread.lastMessageAt
+      ? Math.max(0, Math.floor((Date.now() - thread.lastMessageAt.getTime()) / (24 * 60 * 60 * 1000)))
+      : 0;
+
+    // Cache key intentionally narrow: only re-score when the signals
+    // the AI was given actually change. A new outbound message would
+    // also un-dormant the thread, so this is mostly defensive.
+    const cacheKey = stableHash(
+      [
+        "reconnect-v1",
+        thread.lastMessageAt?.toISOString() ?? "no-last",
+        String(outboundCount),
+        String(totalCount),
+        cleanText(lastInbound?.text ?? "")
+      ].join("|")
+    );
+
+    if (thread.reconnectScoreCacheKey === cacheKey && thread.reconnectScore !== null) {
+      skipped += 1;
+      continue;
+    }
+
+    const enrichment = thread.person.enrichment;
+    const blurb = enrichment
+      ? [enrichment.currentRole, enrichment.currentCompany, enrichment.headline]
+          .filter((s) => s && s.trim().length > 0)
+          .join(" · ")
+      : null;
+
+    // Oldest-first turns for the prompt examples.
+    const orderedMessages = [...thread.messages]
+      .reverse()
+      .map((m) => ({
+        direction: m.direction as "IN" | "OUT",
+        text: m.text,
+        timestamp: m.timestamp.toISOString()
+      }));
+
+    const verdict = await aiService
+      .scoreReconnectCandidate({
+        displayName: thread.person.displayName,
+        contactBlurb: blurb,
+        daysDormant,
+        operatorOutboundCount: outboundCount,
+        totalMessageCount: totalCount,
+        messages: orderedMessages,
+        summary: thread.rollingSummary
+      })
+      .catch(() => null);
+
+    if (!verdict) {
+      // null can mean "no AI client" or "transient failure"; either way,
+      // there is no point hammering the loop. Mark and exit.
+      unavailable = true;
+      failed += 1;
+      break;
+    }
+
+    await prisma.thread.update({
+      where: { id: thread.id },
+      data: {
+        reconnectScore: verdict.score,
+        reconnectScoreReason: verdict.reason,
+        reconnectScoreCacheKey: cacheKey
+      }
+    });
+    scored += 1;
+  }
+
+  res.json({
+    status: unavailable ? "ai_unavailable" : "ok",
+    scored,
+    skipped,
+    failed,
+    candidates_seen: candidates.length,
+    limit
+  });
 }));
 
 app.post("/control/scan", asyncRoute(async (req, res) => {
