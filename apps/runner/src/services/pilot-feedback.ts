@@ -17,9 +17,13 @@ export const ALLOWED_SCREENSHOT_TYPES = [
   "image/gif"
 ] as const;
 
-// 5 MB decoded. base64 inflates by ~33%, so the JSON body stays well under
-// the /control/pilot-feedback route's 12 MB parser limit.
+// 5 MB decoded per image. base64 inflates by ~33%; the /control/pilot-feedback
+// route's parser limit is sized to fit MAX_SCREENSHOTS images at this cap.
 export const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
+
+// A report may carry a few images. Capped so the combined base64 body stays
+// within the /control/pilot-feedback route's parser limit.
+export const MAX_SCREENSHOTS = 4;
 
 export interface PilotScreenshot {
   name: string;
@@ -81,7 +85,7 @@ export interface ForwardablePilotReport {
   expected: string;
   meta: Record<string, unknown>;
   ai: Record<string, unknown> | null;
-  screenshot: PilotScreenshot | null;
+  screenshots: PilotScreenshot[];
 }
 
 export type ForwardResult =

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseScreenshotDataUrl,
   MAX_SCREENSHOT_BYTES,
+  MAX_SCREENSHOTS,
   PILOT_REPORT_TYPES,
   ALLOWED_SCREENSHOT_TYPES
 } from "../apps/runner/dist/services/pilot-feedback.js";
@@ -53,4 +54,9 @@ test("parseScreenshotDataUrl rejects a screenshot over the size limit", () => {
   const result = parseScreenshotDataUrl("huge.png", huge);
   assert.equal(result.ok, false);
   if (!result.ok) assert.match(result.error, /too large/i);
+});
+
+test("MAX_SCREENSHOTS caps a report at a few images", () => {
+  assert.equal(typeof MAX_SCREENSHOTS, "number");
+  assert.ok(MAX_SCREENSHOTS >= 2, "a report must allow multiple screenshots");
 });

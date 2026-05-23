@@ -41,6 +41,7 @@ import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
 import {
   PILOT_REPORT_TYPES,
+  MAX_SCREENSHOTS,
   parseScreenshotDataUrl,
   forwardPilotReport,
   fetchPilotReportStatus,
@@ -69,10 +70,10 @@ import {
 } from "./services/thread-row-shaping";
 
 const app = express();
-// Most routes carry tiny JSON. /control/pilot-feedback can carry a base64
-// screenshot, so it gets a larger limit; everything else stays tight.
+// Most routes carry tiny JSON. /control/pilot-feedback can carry several
+// base64 screenshots, so it gets a larger limit; everything else stays tight.
 const jsonSmall = express.json({ limit: "1mb" });
-const jsonLarge = express.json({ limit: "12mb" });
+const jsonLarge = express.json({ limit: "32mb" });
 app.use((req, res, next) => {
   if (req.path === "/control/pilot-feedback") return jsonLarge(req, res, next);
   return jsonSmall(req, res, next);
@@ -3918,15 +3919,15 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
           timestamp: z.string().max(40).default("")
         })
         .default({}),
-      screenshot: z
-        .object({ name: z.string().max(200), dataUrl: z.string().max(8_000_000) })
-        .nullable()
-        .optional()
+      screenshots: z
+        .array(z.object({ name: z.string().max(200), dataUrl: z.string().max(8_000_000) }))
+        .max(MAX_SCREENSHOTS)
+        .default([])
     })
     .parse(req.body);
 
-  let screenshot: PilotScreenshot | null = null;
-  if (payload.screenshot) {
+  const screenshots: PilotScreenshot[] = [];
+  if (payload.screenshots.length > 0) {
     if (!payload.privacyAck) {
       res.status(400).json({
         ok: false,
@@ -3934,12 +3935,14 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
       });
       return;
     }
-    const parsed = parseScreenshotDataUrl(payload.screenshot.name, payload.screenshot.dataUrl);
-    if (!parsed.ok) {
-      res.status(400).json({ ok: false, error: parsed.error });
-      return;
+    for (const shot of payload.screenshots) {
+      const parsed = parseScreenshotDataUrl(shot.name, shot.dataUrl);
+      if (!parsed.ok) {
+        res.status(400).json({ ok: false, error: parsed.error });
+        return;
+      }
+      screenshots.push(parsed.screenshot);
     }
-    screenshot = parsed.screenshot;
   }
 
   // Server-side metadata enrichment. The dashboard cannot see the browser
@@ -3997,7 +4000,7 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
       expected: payload.expected,
       meta: enrichedMeta,
       ai: ai as Record<string, unknown> | null,
-      screenshot
+      screenshots
     }
   });
   res.json(result);
