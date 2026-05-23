@@ -215,6 +215,11 @@ model Thread {
   // loops the operator has already handled.
   dismissedOpenLoopsJson String?
   toneNotesJson     String?
+  // AI-extracted durable facts worth remembering about the contact — exams,
+  // trips, interviews, life events. JSON array of { note, date } where date
+  // is an ISO YYYY-MM-DD string or null when no specific date is known.
+  // Re-derived from the transcript on every summary refresh, like openLoops.
+  rememberJson      String?
   // Set the first time we walk the thread's message list to the top and
   // persist every historical message. Subsequent scans only fetch the delta
   // (messages newer than `lastMessageAt`). Null means full-history backfill

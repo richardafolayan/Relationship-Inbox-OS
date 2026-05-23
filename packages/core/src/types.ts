@@ -200,10 +200,25 @@ export type RunnerEvent =
   | (RunnerEventBase & { type: "PERSONAL_PROFILE_FALLBACK"; platform: PlatformName; reason: string })
   | (RunnerEventBase & { type: "RESYNC_REQUIRED"; reason: string });
 
+/**
+ * A durable fact worth remembering about a contact — an exam, a trip, an
+ * interview, a life event. Extracted by the AI summary alongside open loops,
+ * but distinct from them: a loop is something to reply to now, a remember
+ * item is context to carry forward.
+ */
+export interface RememberItem {
+  /** Short third-person phrase, e.g. "Final exams", "Trip to Lagos". */
+  note: string;
+  /** ISO YYYY-MM-DD when a specific date is known, else null. */
+  date: string | null;
+}
+
 export interface SummaryOutput {
   summary: string;
   what_they_want: string;
   open_loops: string[];
+  /** Durable life facts worth remembering — events, milestones, deadlines. */
+  remember: RememberItem[];
   tone_notes: string[];
   needs_reply: boolean;
   urgency_hint?: string;

@@ -8,6 +8,7 @@ import type {
   SelectorTestReport,
   SummaryOutput,
   SuggestedRepliesOutput,
+  RememberItem,
   ThreadStub
 } from "@inbox-os/core";
 
@@ -101,6 +102,8 @@ export interface AiService {
     displayName: string;
     previousSummary?: string;
     previousOpenLoops: string[];
+    /** Last persisted remember items — kept as the fallback if the AI call fails. */
+    previousRemember: RememberItem[];
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     /** Drives mode-aware framing: when false, what_they_want and open_loops are reframed as reconnect hooks. */
     needsReply: boolean;
