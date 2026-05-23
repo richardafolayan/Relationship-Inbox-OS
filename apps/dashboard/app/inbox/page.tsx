@@ -14,6 +14,7 @@ import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
+import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "snoozed";
@@ -123,6 +124,23 @@ function dotFor(row: InboxRow): string {
   return "bg-risk-fresh";
 }
 
+// Human-readable label for the "N older or closed conversations set aside"
+// banner. Picks the right pluralisation and only mentions a bucket when
+// it is non-empty so the copy stays tight ("3 older conversations", "1
+// closed conversation", "5 older, 2 closed").
+function hiddenLabel(breakdown: { older: number; closed: number }): string {
+  const { older, closed } = breakdown;
+  if (older > 0 && closed > 0) {
+    return `${older} older, ${closed} closed conversation${
+      older + closed === 1 ? "" : "s"
+    }`;
+  }
+  if (older > 0) {
+    return `${older} older conversation${older === 1 ? "" : "s"}`;
+  }
+  return `${closed} closed conversation${closed === 1 ? "" : "s"}`;
+}
+
 // All inbox - filter tabs (replacing stacked risk sections), platform
 // glyph column, sort + secondary filters on the right of the tab bar.
 // Search input lives above the tabs. Multi-select + bulk-action bar
@@ -211,16 +229,20 @@ export default function InboxPage() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
-    // The recency horizon (issue #287) hides long-dormant threads from the
-    // default view so a year of pilot history does not crowd out the live
-    // inbox. Searching lifts the horizon so older threads are still
-    // reachable; "show all" lifts it explicitly.
-    const applyHorizon = !showAll && !q;
+    // Two "set aside" filters tighten the default inbox (issue #287):
+    //   - The recency horizon hides dormant threads (phase 1).
+    //   - The closed-conversation heuristic hides threads whose last
+    //     inbound message reads as an acknowledgement / farewell
+    //     (phase 2).
+    // Both are lifted by an explicit "show all" toggle and by any active
+    // search, so older or closed threads are still reachable.
+    const applyActiveOnly = !showAll && !q;
     return allRows.filter((row) => {
       if (!applyTab(row, tab)) return false;
       if (!applyCategory(row, category)) return false;
       if (!applyPlatform(row, platformFilter)) return false;
-      if (applyHorizon && !isWithinHorizon(row.lastMessageAt)) return false;
+      if (applyActiveOnly && !isWithinHorizon(row.lastMessageAt)) return false;
+      if (applyActiveOnly && isLikelyClosed(row)) return false;
       if (!q) return true;
       return (
         row.personName.toLowerCase().includes(q) ||
@@ -229,19 +251,30 @@ export default function InboxPage() {
     });
   }, [allRows, query, tab, category, platformFilter, showAll]);
 
-  // How many threads the horizon is hiding right now, for the "show all"
-  // affordance below the search bar. Only counts threads that would
-  // otherwise be visible under the current tab / category / platform.
-  const hiddenByHorizon = useMemo(() => {
-    if (showAll || query.trim()) return 0;
-    return allRows.filter(
-      (row) =>
-        applyTab(row, tab) &&
-        applyCategory(row, category) &&
-        applyPlatform(row, platformFilter) &&
-        !isWithinHorizon(row.lastMessageAt)
-    ).length;
+  // How many threads the active-only filter is currently hiding, broken
+  // down by reason. Only counts threads that would otherwise be visible
+  // under the current tab / category / platform so the affordance does
+  // not over-promise.
+  const hiddenBreakdown = useMemo(() => {
+    if (showAll || query.trim()) return { total: 0, older: 0, closed: 0 };
+    let older = 0;
+    let closed = 0;
+    for (const row of allRows) {
+      if (!applyTab(row, tab)) continue;
+      if (!applyCategory(row, category)) continue;
+      if (!applyPlatform(row, platformFilter)) continue;
+      const dormant = !isWithinHorizon(row.lastMessageAt);
+      const ended = isLikelyClosed(row);
+      if (!dormant && !ended) continue;
+      // Dormant takes precedence in the count so the two reasons add up
+      // to total without double-counting a thread that is both old and
+      // closed.
+      if (dormant) older += 1;
+      else closed += 1;
+    }
+    return { total: older + closed, older, closed };
   }, [allRows, showAll, query, tab, category, platformFilter]);
+  const hiddenByHorizon = hiddenBreakdown.total;
 
   const rows = useMemo(
     () => applySort(visible.filter((row) => !removedIds.has(row.id)), sortMode),
@@ -484,7 +517,7 @@ export default function InboxPage() {
         <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
           <p className="m-0 text-[16px] font-medium text-ink">You’re caught up.</p>
           <p className="m-0 text-[14px] text-ink-2">
-            {hiddenByHorizon} older conversation{hiddenByHorizon === 1 ? "" : "s"} set aside.{" "}
+            {hiddenLabel(hiddenBreakdown)} set aside.{" "}
             <button
               type="button"
               onClick={() => setShowAll(true)}
@@ -516,7 +549,7 @@ export default function InboxPage() {
                 </>
               ) : (
                 <>
-                  {hiddenByHorizon} older conversation{hiddenByHorizon === 1 ? "" : "s"} set aside.{" "}
+                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
                   <button
                     type="button"
                     onClick={() => setShowAll(true)}
