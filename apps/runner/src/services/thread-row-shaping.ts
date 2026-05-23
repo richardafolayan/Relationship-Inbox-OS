@@ -36,6 +36,11 @@ export interface ThreadRowSource {
    *  treats "closed" as a strong "set aside" signal even when the
    *  lightweight heuristic does not flag it. */
   closedStatus: string | null;
+  /** AI reconnect-worthy score, 0-100. See Thread.reconnectScore. */
+  reconnectScore: number | null;
+  /** Short reason string the dashboard renders as a quiet "why" caption
+   *  alongside top-ranked reconnect candidates. */
+  reconnectScoreReason: string | null;
   updatedAt: Date;
   person: {
     id: string;
@@ -106,6 +111,16 @@ export interface ShapedThreadRow {
    * The dashboard treats "closed" as a strong "set aside" signal.
    */
   closedStatus: "closed" | "open" | null;
+  /**
+   * Reconnect-worthy score (#287 phase 3.5). 0-100 integer indicating
+   * how much it makes sense to send a deliberate "hey, been a while"
+   * message to this LinkedIn dormant. Null when not yet scored or the
+   * AI provider was unavailable; the dashboard falls back to its
+   * deterministic relationship-signal ranking in that case.
+   */
+  reconnectScore: number | null;
+  /** Short reason for the AI score; rendered as a quiet "why" caption. */
+  reconnectScoreReason: string | null;
   archivedAt: string | null;
   snoozedUntil: string | null;
   /**
@@ -277,6 +292,8 @@ export function toInboxRow(
     category: source.category ?? null,
     whatTheyWant: source.whatTheyWant ?? null,
     closedStatus: (source.closedStatus as "closed" | "open" | null) ?? null,
+    reconnectScore: source.reconnectScore ?? null,
+    reconnectScoreReason: source.reconnectScoreReason ?? null,
     archivedAt: source.archivedAt?.toISOString() ?? null,
     snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
     personThreadCount
