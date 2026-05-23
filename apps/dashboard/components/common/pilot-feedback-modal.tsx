@@ -7,6 +7,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import { showToast } from "@/lib/feedback";
 import {
   ALLOWED_SCREENSHOT_TYPES,
+  MAX_SCREENSHOTS,
   PILOT_REPORT_TYPES,
   PILOT_REPORT_TYPE_LABELS,
   buildPilotReportPayload,
@@ -33,6 +34,7 @@ interface StatusReport {
 }
 
 interface PickedScreenshot {
+  id: string;
   name: string;
   dataUrl: string;
   size: number;
@@ -49,7 +51,7 @@ function readFileAsDataUrl(file: File): Promise<string> {
 
 // Pilot feedback + bug report modal. Mounted once in the app shell; opened
 // from anywhere via openPilotFeedback(). It collects a tester's typed
-// report (and an optional screenshot they attach) and posts it to the
+// report (and any screenshots they attach) and posts it to the
 // local runner, which forwards it to the feedback webhook. It never reads
 // or sends message content.
 export function PilotFeedbackModal() {
@@ -61,7 +63,7 @@ export function PilotFeedbackModal() {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [expected, setExpected] = useState("");
-  const [screenshot, setScreenshot] = useState<PickedScreenshot | null>(null);
+  const [screenshots, setScreenshots] = useState<PickedScreenshot[]>([]);
   const [screenshotError, setScreenshotError] = useState<string | null>(null);
   const [privacyAck, setPrivacyAck] = useState(false);
   const [dragOver, setDragOver] = useState(false);
@@ -75,12 +77,13 @@ export function PilotFeedbackModal() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastPayloadRef = useRef<PilotReportPayload | null>(null);
+  const screenshotIdRef = useRef(0);
 
   const resetForm = useCallback(() => {
     setTitle("");
     setDescription("");
     setExpected("");
-    setScreenshot(null);
+    setScreenshots([]);
     setScreenshotError(null);
     setPrivacyAck(false);
     setSubmitError(null);
@@ -97,33 +100,64 @@ export function PilotFeedbackModal() {
     []
   );
 
-  const acceptFile = useCallback(async (file: File | undefined) => {
-    if (!file) return;
-    setScreenshotError(null);
-    const check = validateScreenshotFile({ type: file.type, size: file.size });
-    if (!check.ok) {
-      setScreenshotError(check.error);
-      return;
-    }
-    try {
-      const dataUrl = await readFileAsDataUrl(file);
-      setScreenshot({ name: file.name, dataUrl, size: file.size });
-    } catch {
-      setScreenshotError("Could not read that image.");
-    }
-  }, []);
+  // When the last screenshot is removed, the privacy note unmounts; drop the
+  // acknowledgement so re-attaching an image asks for it again.
+  useEffect(() => {
+    if (screenshots.length === 0) setPrivacyAck(false);
+  }, [screenshots.length]);
 
-  const removeScreenshot = useCallback(() => {
-    setScreenshot(null);
+  const acceptFiles = useCallback(
+    async (fileList: FileList | null | undefined) => {
+      const files = fileList ? Array.from(fileList) : [];
+      if (files.length === 0) return;
+      setScreenshotError(null);
+      const room = MAX_SCREENSHOTS - screenshots.length;
+      if (room <= 0) {
+        setScreenshotError(`You can attach up to ${MAX_SCREENSHOTS} images.`);
+        return;
+      }
+      const picked: PickedScreenshot[] = [];
+      let error: string | null = null;
+      for (const file of files) {
+        const check = validateScreenshotFile({ type: file.type, size: file.size });
+        if (!check.ok) {
+          error = check.error;
+          continue;
+        }
+        try {
+          const dataUrl = await readFileAsDataUrl(file);
+          screenshotIdRef.current += 1;
+          picked.push({
+            id: `s${screenshotIdRef.current}`,
+            name: file.name,
+            dataUrl,
+            size: file.size
+          });
+        } catch {
+          error = "Could not read that image.";
+        }
+      }
+      if (picked.length > room) {
+        error = `You can attach up to ${MAX_SCREENSHOTS} images.`;
+      }
+      if (picked.length > 0) {
+        setScreenshots((prev) => [...prev, ...picked].slice(0, MAX_SCREENSHOTS));
+      }
+      if (error) setScreenshotError(error);
+    },
+    [screenshots.length]
+  );
+
+  const removeScreenshot = useCallback((id: string) => {
+    setScreenshots((prev) => prev.filter((shot) => shot.id !== id));
     setScreenshotError(null);
-    setPrivacyAck(false);
   }, []);
 
   const canSubmit =
     title.trim().length > 0 &&
     description.trim().length > 0 &&
     !submitting &&
-    (screenshot === null || privacyAck);
+    (screenshots.length === 0 || privacyAck);
 
   const submit = useCallback(() => {
     if (!canSubmit) return;
@@ -136,7 +170,7 @@ export function PilotFeedbackModal() {
       expected,
       privacyAck,
       meta: collectPilotMeta(pathname),
-      screenshot: screenshot ? { name: screenshot.name, dataUrl: screenshot.dataUrl } : null
+      screenshots: screenshots.map((shot) => ({ name: shot.name, dataUrl: shot.dataUrl }))
     });
     lastPayloadRef.current = payload;
     // Send without making the tester wait on the modal: close it and let a
@@ -169,7 +203,7 @@ export function PilotFeedbackModal() {
         setOpen(true);
       })
       .finally(() => setSubmitting(false));
-  }, [canSubmit, type, title, description, expected, privacyAck, screenshot, pathname, resetForm]);
+  }, [canSubmit, type, title, description, expected, privacyAck, screenshots, pathname, resetForm]);
 
   const copyReport = useCallback(async () => {
     const payload =
@@ -181,7 +215,7 @@ export function PilotFeedbackModal() {
         expected,
         privacyAck,
         meta: collectPilotMeta(pathname),
-        screenshot: null
+        screenshots: []
       });
     try {
       await navigator.clipboard.writeText(formatReportForCopy(payload));
@@ -396,27 +430,38 @@ export function PilotFeedbackModal() {
               />
             </Field>
 
-            <Field label="Screenshot" hint="Optional. Drag an image in, or choose a file.">
-              {screenshot ? (
-                <div className="flex items-center gap-3 rounded-row border border-hairline bg-paper-2/50 p-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={screenshot.dataUrl}
-                    alt="Attached screenshot preview"
-                    className="h-[44px] w-[44px] shrink-0 rounded-[6px] object-cover"
-                  />
-                  <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">
-                    {screenshot.name}
-                  </span>
-                  <button
-                    type="button"
-                    onClick={removeScreenshot}
-                    className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    remove
-                  </button>
-                </div>
-              ) : (
+            <Field
+              label={screenshots.length > 1 ? "Screenshots" : "Screenshot"}
+              hint={`Optional. Up to ${MAX_SCREENSHOTS}. Drag images in, or choose files.`}
+            >
+              {screenshots.length > 0 ? (
+                <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                  {screenshots.map((shot) => (
+                    <li
+                      key={shot.id}
+                      className="flex items-center gap-3 rounded-row border border-hairline bg-paper-2/50 p-2"
+                    >
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={shot.dataUrl}
+                        alt={`Attached screenshot preview: ${shot.name}`}
+                        className="h-[44px] w-[44px] shrink-0 rounded-[6px] object-cover"
+                      />
+                      <span className="min-w-0 flex-1 truncate text-[12.5px] text-ink-2">
+                        {shot.name}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => removeScreenshot(shot.id)}
+                        className="shrink-0 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                      >
+                        remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {screenshots.length < MAX_SCREENSHOTS ? (
                 <button
                   type="button"
                   onClick={() => fileInputRef.current?.click()}
@@ -428,26 +473,30 @@ export function PilotFeedbackModal() {
                   onDrop={(event) => {
                     event.preventDefault();
                     setDragOver(false);
-                    void acceptFile(event.dataTransfer.files?.[0]);
+                    void acceptFiles(event.dataTransfer.files);
                   }}
                   className={cn(
                     "flex w-full items-center justify-center gap-2 rounded-row border border-dashed py-[14px] text-[12.5px] transition-colors duration-calm",
+                    screenshots.length > 0 && "mt-2",
                     dragOver
                       ? "border-hairline-strong bg-paper-2 text-ink"
                       : "border-hairline text-ink-3 hover:border-hairline-strong hover:text-ink-2"
                   )}
                 >
                   <ImageUp className="h-[15px] w-[15px]" strokeWidth={1.7} />
-                  Drag a screenshot here, or choose a file
+                  {screenshots.length > 0
+                    ? "Add another image"
+                    : "Drag screenshots here, or choose files"}
                 </button>
-              )}
+              ) : null}
               <input
                 ref={fileInputRef}
                 type="file"
+                multiple
                 accept={ALLOWED_SCREENSHOT_TYPES.join(",")}
                 className="hidden"
                 onChange={(event) => {
-                  void acceptFile(event.target.files?.[0]);
+                  void acceptFiles(event.target.files);
                   event.target.value = "";
                 }}
               />
@@ -456,7 +505,7 @@ export function PilotFeedbackModal() {
               ) : null}
             </Field>
 
-            {screenshot ? (
+            {screenshots.length > 0 ? (
               <label className="mt-1 flex cursor-pointer items-start gap-2.5">
                 <input
                   type="checkbox"
