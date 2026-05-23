@@ -371,6 +371,19 @@ export interface AiService {
     expected: string;
     meta: Record<string, unknown>;
   }): Promise<PilotReportTriage | null>;
+  /**
+   * Issue #331. Reads the operator's in-flight draft against the active
+   * open loops and returns the subset the draft already addresses. The
+   * dashboard uses this to auto-tick the reply checklist as the operator
+   * types. Returns an empty `addressed` array when the AI service is
+   * unavailable so the UI never blocks on a failure.
+   */
+  checkDraftCoverage(input: {
+    displayName: string;
+    draft: string;
+    openLoops: string[];
+    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<{ addressed: string[] }>;
 }
 
 export interface PilotReportTriage {

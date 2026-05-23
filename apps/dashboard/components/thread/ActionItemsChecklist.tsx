@@ -23,6 +23,19 @@ interface ActionItemsChecklistProps {
   isReopenMode: boolean;
   /** Dismiss / restore a loop. Wired to the existing /open-loop endpoint. */
   onDismiss: (loop: string, dismissed: boolean) => void;
+  /**
+   * Issue #331. Loops the AI judged the in-flight composer draft addresses.
+   * What this list does to the row depends on `aiCoverageMode`.
+   */
+  aiAddressedLoops?: string[];
+  /**
+   * "auto-tick" (full_drafts tier): the AI pre-checks addressed rows and
+   *   shows a small "AI" tag; the operator can still untick to override.
+   * "highlight" (writing_support tier): the AI nudges the row visually
+   *   (left rule + lighter contrast) but never touches the checkbox.
+   * "off" (memory_only tier or no signal yet): renders exactly as before.
+   */
+  aiCoverageMode?: "auto-tick" | "highlight" | "off";
 }
 
 // A reply checklist — a thinking aid for writing a real reply, not a task
@@ -34,7 +47,9 @@ export function ActionItemsChecklist({
   openLoops,
   dismissedOpenLoops,
   isReopenMode,
-  onDismiss
+  onDismiss,
+  aiAddressedLoops,
+  aiCoverageMode = "off"
 }: ActionItemsChecklistProps) {
   const [state, setState] = useState<ActionItemChecklistState>(emptyChecklistState);
   const [hydrated, setHydrated] = useState(false);
@@ -67,8 +82,16 @@ export function ActionItemsChecklist({
     ? "Worth picking up on when you reconnect. Tick each off as you write."
     : "Tick each off as you write your reply. This is just a checklist. It never changes your message.";
 
-  const toggleChecked = (key: string) => {
-    setState((prev) => ({ ...prev, checked: { ...prev.checked, [key]: !prev.checked[key] } }));
+  // The user's explicit click always wins over the AI suggestion. When
+  // `state.checked[key]` is undefined (operator hasn't touched the box)
+  // and the AI auto-ticked it, toggling needs to go true → false, not
+  // undefined → !undefined === true. So we resolve the visible state
+  // first, then flip THAT.
+  const toggleChecked = (key: string, currentVisibleChecked: boolean) => {
+    setState((prev) => ({
+      ...prev,
+      checked: { ...prev.checked, [key]: !currentVisibleChecked }
+    }));
   };
 
   const startEdit = (key: string, currentText: string) => {
@@ -133,6 +156,12 @@ export function ActionItemsChecklist({
     () => openLoops.filter((loop) => !dismissedSet.has(loop)),
     [openLoops, dismissedSet]
   );
+  // Issue #331. Loops the AI thinks the in-flight draft addresses.
+  // The Set lookup runs once per render rather than per row.
+  const aiAddressedSet = useMemo(
+    () => new Set(aiAddressedLoops ?? []),
+    [aiAddressedLoops]
+  );
 
   const isEmpty =
     activeLoops.length === 0 && state.manualItems.length === 0 && dismissedOpenLoops.length === 0;
@@ -152,14 +181,29 @@ export function ActionItemsChecklist({
         {activeLoops.map((loop) => {
           const key = hashActionItem(loop);
           const display = resolveItemText(state, loop);
-          const checked = Boolean(state.checked[key]);
+          const userChecked = state.checked[key];
+          const aiNoticed = aiAddressedSet.has(loop);
+          // Auto-tick only when the operator hasn't touched the box AND the
+          // tier is "auto-tick" (full_drafts). Once they click, their
+          // choice sticks even if the AI keeps flagging the loop.
+          const aiAutoTicked =
+            aiCoverageMode === "auto-tick" && aiNoticed && userChecked === undefined;
+          const checked = userChecked === undefined ? aiAutoTicked : userChecked;
           const editing = editingKey === key;
+          // Show the small "ai" badge in either AI mode when the loop is
+          // currently flagged. In auto-tick mode it explains the pre-tick;
+          // in highlight mode it explains the visual emphasis.
+          const showAiBadge = aiNoticed && aiCoverageMode !== "off";
+          // Highlight mode never ticks the box, but it leans on the row
+          // visually so the operator can see "the AI thinks you covered
+          // this" without losing manual control of the checkbox.
+          const aiHighlight = aiCoverageMode === "highlight" && aiNoticed && !checked;
           return (
             <li key={`open:${loop}`} className="group flex items-start gap-2">
               <input
                 type="checkbox"
                 checked={checked}
-                onChange={() => toggleChecked(key)}
+                onChange={() => toggleChecked(key, checked)}
                 className="mt-[3px] h-[13px] w-[13px] shrink-0 cursor-pointer accent-ink"
                 aria-label={`Mark "${display}" as addressed`}
               />
@@ -176,10 +220,26 @@ export function ActionItemsChecklist({
                   <span
                     className={cn(
                       "text-[13px] leading-[1.5]",
-                      checked ? "text-ink-4 line-through" : "text-ink-2"
+                      checked
+                        ? "text-ink-4 line-through"
+                        : aiHighlight
+                          ? "text-ink italic"
+                          : "text-ink-2"
                     )}
                   >
                     {display}
+                    {showAiBadge ? (
+                      <span
+                        className="ml-[6px] inline-block translate-y-[-1px] rounded-[3px] border border-hairline px-[4px] py-0 align-middle font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3"
+                        title={
+                          aiCoverageMode === "auto-tick"
+                            ? "AI thinks your draft addresses this. Click to untick if not."
+                            : "AI thinks your draft addresses this. Tick it when you're happy."
+                        }
+                      >
+                        ai
+                      </span>
+                    ) : null}
                   </span>
                 )}
               </div>
