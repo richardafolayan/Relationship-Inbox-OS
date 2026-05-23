@@ -14,6 +14,7 @@ import type {
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
+import { isWithinHorizon } from "@/lib/horizon";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
@@ -164,10 +165,19 @@ export default function TodayPage() {
   }, []);
 
   const allRows = data?.rows ?? [];
+  // Today is the "tonight's work" view. Conversations whose last activity falls
+  // beyond the recency horizon (issue #287) are set aside so a year of message
+  // history does not flood the hero queue. Older threads remain reachable via
+  // the Inbox "show all" control and any new message immediately pulls a
+  // thread back in.
   const rows = useMemo(
     () =>
       allRows.filter(
-        (row) => row.needsReply !== false && !row.scheduledSendAt && !removedIds.has(row.id)
+        (row) =>
+          row.needsReply !== false &&
+          !row.scheduledSendAt &&
+          !removedIds.has(row.id) &&
+          isWithinHorizon(row.lastMessageAt)
       ),
     [allRows, removedIds]
   );
