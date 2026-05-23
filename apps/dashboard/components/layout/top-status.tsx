@@ -127,7 +127,7 @@ function computeTicker(input: {
       queuedBehind: Math.max(0, queueActive.length - 1)
     };
   }
-  const recentest = input.queue?.recent[0];
+  const recentest = input.queue?.recent?.[0];
   if (recentest) {
     const completedAt = Date.parse(recentest.completedAt);
     const age = Date.now() - completedAt;
