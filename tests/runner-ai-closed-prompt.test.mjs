@@ -24,10 +24,30 @@ test("CLOSED_STATUS_PROMPT keeps the conservative default of OPEN when ambiguous
 });
 
 test("CLOSED_STATUS_PROMPT pins the JSON output contract", () => {
+  // F2 (#287): the verdict now includes a one-line "why" caption the
+  // dashboard renders alongside set-aside rows so the call is not a
+  // black box. The contract enforces both status and reason.
   assert.match(
     CLOSED_STATUS_PROMPT,
-    /Return strict JSON: \{ "status": "closed" \| "open" \}/
+    /Return strict JSON: \{ "status": "closed" \| "open", "reason": "[^"]+" \}/
   );
+});
+
+test("CLOSED_STATUS_PROMPT instructs the reason to be evidence-grounded", () => {
+  // No invented details, no recommendations, no second-guessing - the
+  // reason is for the operator to read at a glance, not a coaching note.
+  assert.match(CLOSED_STATUS_PROMPT, /Quote or paraphrase the actual closing beat/i);
+  assert.match(CLOSED_STATUS_PROMPT, /no recommendations/i);
+});
+
+test("CLOSED_STATUS_PROMPT caps the reason length", () => {
+  assert.match(CLOSED_STATUS_PROMPT, /no more than 18 words/i);
+});
+
+test("CLOSED_STATUS_PROMPT forbids em dashes in the reason", () => {
+  // The dash guard scans rendered UI copy; this reason caption surfaces
+  // on the inbox so it must obey the same rule.
+  assert.match(CLOSED_STATUS_PROMPT, /No em dashes/);
 });
 
 test("CLOSED_STATUS_PROMPT includes worked examples for each bucket", () => {

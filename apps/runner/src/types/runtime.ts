@@ -220,7 +220,7 @@ export interface AiService {
     displayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     summary?: string | null;
-  }): Promise<"closed" | "open" | null>;
+  }): Promise<{ status: "closed" | "open"; reason: string } | null>;
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
    * plus a one-sentence reason for how worth it would feel to send the
