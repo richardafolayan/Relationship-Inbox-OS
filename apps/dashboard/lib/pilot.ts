@@ -32,9 +32,13 @@ export const ALLOWED_SCREENSHOT_TYPES = [
   "image/gif"
 ] as const;
 
-// 5 MB. base64 inflates by ~33%, leaving the JSON body well under the
-// runner's 12 MB limit on /control/pilot-feedback.
+// 5 MB per image. base64 inflates by ~33%; the runner's /control/pilot-feedback
+// body limit is sized to fit MAX_SCREENSHOTS images at this cap.
 export const MAX_SCREENSHOT_BYTES = 5 * 1024 * 1024;
+
+// A report may carry a few images. Capped so the combined base64 body stays
+// within the runner's /control/pilot-feedback parser limit.
+export const MAX_SCREENSHOTS = 4;
 
 export type ScreenshotValidation = { ok: true } | { ok: false; error: string };
 
@@ -74,7 +78,7 @@ export interface PilotReportPayload {
   expected: string;
   privacyAck: boolean;
   meta: PilotReportMeta;
-  screenshot: { name: string; dataUrl: string } | null;
+  screenshots: Array<{ name: string; dataUrl: string }>;
 }
 
 /**
@@ -91,7 +95,7 @@ export function buildPilotReportPayload(input: {
   expected: string;
   privacyAck: boolean;
   meta: PilotReportMeta;
-  screenshot?: { name: string; dataUrl: string } | null;
+  screenshots?: Array<{ name: string; dataUrl: string }>;
 }): PilotReportPayload {
   return {
     type: input.type,
@@ -100,7 +104,7 @@ export function buildPilotReportPayload(input: {
     expected: input.expected.trim(),
     privacyAck: input.privacyAck,
     meta: input.meta,
-    screenshot: input.screenshot ?? null
+    screenshots: input.screenshots ?? []
   };
 }
 
