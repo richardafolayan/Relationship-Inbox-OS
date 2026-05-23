@@ -170,6 +170,18 @@ export interface AiService {
     whatTheyWant?: string | null;
   }): Promise<"outreach" | "genuine" | null>;
   /**
+   * Conversation-end verdict (#287 phase 2.5). "closed" = last inbound
+   * reads as a natural endpoint with no implicit ask, "open" = operator
+   * still owes a reply. Null when the AI service is unavailable so the
+   * dashboard heuristic stays in charge. Cheap to call (last 3 turns +
+   * summary, ~150 tokens in); cache the verdict by last-inbound hash.
+   */
+  classifyThreadClosed(input: {
+    displayName: string;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+  }): Promise<"closed" | "open" | null>;
+  /**
    * Short paragraph (2-3 sentences) that introduces a contact based on
    * their LinkedIn profile data and any obvious commonality with the
    * operator's own profile. Returns null when the AI service is

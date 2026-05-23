@@ -265,6 +265,21 @@ model Thread {
   // Set by the AI service on first scan-time persist of a thread; null until
   // classified. Used by the Inbox filter dropdown to hide outreach noise.
   category String?
+
+  // Conversation-ending verdict (#287 phase 2.5). "closed" means the AI
+  // judges the last inbound to be a natural endpoint (thanks / ok / talk
+  // soon / acknowledgement) with no implicit ask. "open" means the AI
+  // expects the operator to reply. Null while unclassified or when the
+  // AI provider was unavailable. The dashboard's lightweight heuristic
+  // still runs alongside this field as a fast first pass; the AI verdict
+  // is only consulted for the ambiguous middle the heuristic does not
+  // catch.
+  //
+  // The cache key is sha256 of (last-inbound text + last-inbound
+  // timestamp); when the inbound changes the verdict is recomputed.
+  closedStatus         String?
+  closedStatusCacheKey String?
+
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
