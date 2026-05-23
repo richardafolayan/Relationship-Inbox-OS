@@ -21,6 +21,7 @@ import {
   contactSnapshotFingerprint,
   operatorProfileFingerprint
 } from "./services/ai";
+import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
@@ -2439,6 +2440,14 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
+  // Writing-style profiles (issue #299) — so the rewrite matches how the
+  // operator and contact actually write to each other, not only the
+  // generic voice tier.
+  const operatorStyle = analyzeStyle(voiceSamples);
+  const contactStyle = analyzeStyle(
+    orderedMessages.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
+
   // Pull other-thread context for the same Person so the AI doesn't
   // repeat questions already answered elsewhere or contradict prior
   // tone. Bounded to 5 threads + person notes/tags.
@@ -2477,7 +2486,9 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     })),
     relationshipContext,
     operatorProfile: composeOperatorProfile,
-    contact: composeContactSnapshot
+    contact: composeContactSnapshot,
+    operatorStyle,
+    contactStyle
   });
 
   res.json({ text });
@@ -2804,7 +2815,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     thread.platform === "IMESSAGE"
       ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
       : { threadId: thread.id };
-  const [messagesDescWithExtra, lastInbound, lastOutbound] = await Promise.all([
+  // Style sample (issue #299) — newest messages on the thread for the
+  // writing-style analysis. A dedicated fixed-size window so it stays
+  // stable regardless of the messagesLimit / beforeMessageId pagination
+  // params, which keeps the suggested-replies cache key consistent with
+  // the /predraft pre-warm.
+  const STYLE_SAMPLE_LIMIT = 40;
+  const [messagesDescWithExtra, lastInbound, lastOutbound, styleSampleDesc] = await Promise.all([
     prisma.message.findMany({
       where: messageThreadFilter,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -2818,6 +2835,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     prisma.message.findFirst({
       where: { ...messageThreadFilter, direction: "OUT" },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }]
+    }),
+    prisma.message.findMany({
+      where: messageThreadFilter,
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: STYLE_SAMPLE_LIMIT,
+      select: { direction: true, text: true }
     })
   ]);
   const hasOlderMessages = messagesDescWithExtra.length > messageLimit;
@@ -2861,6 +2884,16 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
   );
 
+  // Writing-style profiles (issue #299) measured from the stable style
+  // sample — one per speaker direction. Fed into generateSuggestedReplies
+  // so suggestions match how the operator and contact actually write.
+  const operatorStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "OUT").map((m) => m.text)
+  );
+  const contactStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
+
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
@@ -2881,7 +2914,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
     lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null,
     operatorProfile,
-    contact: contactSnapshot
+    contact: contactSnapshot,
+    operatorStyle,
+    contactStyle
   };
   // Cache key over the AI inputs. Hashing keeps the column short and
   // doesn't leak content into the audit log if anyone ever inspects it. As
@@ -2915,7 +2950,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
     .join("|");
   const cacheKey = createHash("sha256")
-    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
+    .update(`v4|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}|${styleFingerprint(operatorStyle, contactStyle)}`)
     .digest("hex");
 
   let suggested: SuggestedRepliesOutput | undefined;
@@ -4148,9 +4183,12 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   // Fetch the last ~6 turns to mirror the /data/thread call site. Pulling
   // the full recent window means a predraft pre-warm builds the same
   // recentSignature, so the cacheKey matches and the operator's next
-  // /data/thread fetch reuses the warmed cache row.
+  // /data/thread fetch reuses the warmed cache row. The style sample is
+  // fetched on the same fixed window as /data/thread so the style part
+  // of the cacheKey matches too (issue #299).
   const RECENT_TURN_WINDOW = 6;
-  const [recentTurnsDesc, operatorProfile, contactSnapshot] = await Promise.all([
+  const STYLE_SAMPLE_LIMIT = 40;
+  const [recentTurnsDesc, operatorProfile, contactSnapshot, styleSampleDesc] = await Promise.all([
     prisma.message.findMany({
       where: { threadId },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -4158,8 +4196,20 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       select: { direction: true, text: true, timestamp: true }
     }),
     settingsStore.getOperatorProfile(),
-    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
+    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName),
+    prisma.message.findMany({
+      where: { threadId },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: STYLE_SAMPLE_LIMIT,
+      select: { direction: true, text: true }
+    })
   ]);
+  const operatorStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "OUT").map((m) => m.text)
+  );
+  const contactStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
   const recentMessages = [...recentTurnsDesc].reverse().map((m) => ({
     direction: m.direction as "IN" | "OUT",
     text: m.text,
@@ -4181,7 +4231,9 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
     operatorProfile,
-    contact: contactSnapshot
+    contact: contactSnapshot,
+    operatorStyle,
+    contactStyle
   };
   const lateBucket = (() => {
     if (!aiInputs.lastInboundAt) return "n";
@@ -4202,7 +4254,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
     .join("|");
   const cacheKey = createHash("sha256")
-    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
+    .update(`v4|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}|${styleFingerprint(operatorStyle, contactStyle)}`)
     .digest("hex");
 
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
@@ -4294,6 +4346,13 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
+  // Writing-style profiles (issue #299) — keep the in-place rewrite true
+  // to how the operator and contact actually write to each other.
+  const operatorStyle = analyzeStyle(voiceSamples);
+  const contactStyle = analyzeStyle(
+    orderedMessages.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
+
   const [rewriteOperatorProfile, rewriteContactSnapshot] = await Promise.all([
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
@@ -4310,7 +4369,9 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
       timestamp: m.timestamp.toISOString()
     })),
     operatorProfile: rewriteOperatorProfile,
-    contact: rewriteContactSnapshot
+    contact: rewriteContactSnapshot,
+    operatorStyle,
+    contactStyle
   });
 
   res.json({ text });

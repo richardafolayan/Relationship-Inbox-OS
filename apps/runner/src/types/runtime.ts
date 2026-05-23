@@ -97,6 +97,30 @@ export interface OperatorProfile {
   setupCompletedAt: string;
 }
 
+/**
+ * Observed writing style measured from a set of real messages (one
+ * speaker's). Computed at runtime by `analyzeStyle` in services/style —
+ * never hardcoded — and rendered into the draft prompts so suggestions
+ * adapt to how the operator and each contact actually write (issue
+ * #299). Distinct from `OperatorProfile`, which is operator-typed text.
+ */
+export interface StyleProfile {
+  /** Non-empty messages the profile was measured from. */
+  sampleCount: number;
+  /** Mean words per message. */
+  avgWords: number;
+  /** Bucketed `avgWords` for prompt phrasing. */
+  lengthLabel: "very short" | "short" | "medium" | "longer";
+  /** Mean whole-emoji count per message. */
+  emojiPerMessage: number;
+  /** Most-used emoji, most frequent first, capped at 5. */
+  topEmojis: string[];
+  /** 0..1 share of messages that close a sentence with a full stop. */
+  fullStopRate: number;
+  /** 0..1 share of letter-leading messages whose first letter is lowercase. */
+  lowercaseRate: number;
+}
+
 export interface AiService {
   updateThreadSummary(input: {
     displayName: string;
@@ -148,6 +172,19 @@ export interface AiService {
      * something specific the contact has shared.
      */
     contact?: ContactProfileSnapshot | null;
+    /**
+     * Writing style measured from the operator's own recent messages on
+     * THIS thread. Calibrates length, punctuation, capitalisation, and
+     * emoji to how the operator actually writes to this contact. Null
+     * when there isn't enough history (issue #299).
+     */
+    operatorStyle?: StyleProfile | null;
+    /**
+     * Writing style measured from the contact's own recent messages on
+     * THIS thread. Reinforces the reciprocity rule with concrete numbers
+     * to mirror. Null when there isn't enough history.
+     */
+    contactStyle?: StyleProfile | null;
   }): Promise<SuggestedRepliesOutput>;
   transformReply(input: {
     mode: "SHORTEN" | "MAKE_WARMER";
@@ -272,6 +309,13 @@ export interface AiService {
      *  recipient's headline, recent posts, etc. when the operator's intent
      *  is light on detail. */
     contact?: ContactProfileSnapshot | null;
+    /** Writing style measured from the operator's own recent messages on
+     *  this thread — calibrates length, punctuation, capitalisation, and
+     *  emoji to how the operator writes to this contact (issue #299). */
+    operatorStyle?: StyleProfile | null;
+    /** Writing style measured from the contact's own recent messages —
+     *  concrete numbers for the reciprocity match. */
+    contactStyle?: StyleProfile | null;
   }): Promise<string>;
   /**
    * Suggest up to 3 snooze targets grounded in the conversation. Picks
