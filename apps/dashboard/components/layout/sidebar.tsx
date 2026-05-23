@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import {
   Sun,
   Inbox,
-  Archive,
   Search,
   Settings as SettingsIcon,
   PanelLeftClose,
@@ -36,13 +35,13 @@ interface NavItem {
 
 // v1 nav scope: only the inbox loop. /at-risk, /people, /platforms, /logs
 // still resolve if typed directly; PR2 will decide which routes get deleted.
-// Reconnect sits between Inbox and Archived: Inbox is the live work, Reconnect
-// is a forward-looking nudge toward dormant ties, Archived is the past.
+// Reconnect is the live nudge toward dormant ties. Archived is off the rail
+// (pilot feedback #303) — reachable from a quiet link at the foot of the
+// Inbox and via the ⌘K palette.
 const nav: NavItem[] = [
   { href: "/today", label: "Today", icon: Sun, attention: true },
   { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/reconnect", label: "Reconnect", icon: Sparkles },
-  { href: "/archived", label: "Archived", icon: Archive },
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ];
 
