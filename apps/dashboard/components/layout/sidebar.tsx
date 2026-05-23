@@ -219,8 +219,8 @@ export function Sidebar({
 
       <div
         className={cn(
-          "mt-[6px] flex items-center rounded-[10px] border border-hairline bg-paper-2/40",
-          collapsed ? "h-9 w-9 justify-center self-center" : "gap-3 px-3 py-2"
+          "mt-3 flex items-center border-t border-hairline pt-3",
+          collapsed ? "justify-center" : "gap-3 px-3"
         )}
         title={collapsed ? `Operator · ${runnerLabel.text}` : undefined}
       >
