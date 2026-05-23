@@ -173,12 +173,18 @@ export function PilotFeedbackModal() {
       screenshots: screenshots.map((shot) => ({ name: shot.name, dataUrl: shot.dataUrl }))
     });
     lastPayloadRef.current = payload;
+    // Keep the screenshots with their picked ids so the failure handler
+    // below can restore them as-is; the payload has the rest of the form.
+    const screenshotsSnapshot = screenshots;
     // Send without making the tester wait on the modal: close it and let a
     // toast carry the outcome. On failure the modal reopens with the report
-    // still intact so it can be retried or copied.
+    // restored from the snapshot so it can be retried or copied.
     const toastId = `pilot-feedback-${Date.now()}`;
     showToast({ id: toastId, kind: "info", title: "Sending your report…", durationMs: 60_000 });
     setOpen(false);
+    // Clear right away so a reopen during the in-flight call shows a fresh
+    // form, not the just-submitted report (#286).
+    resetForm();
     apiPost<{ ok: boolean; reportId?: string; error?: string }>(
       "/runner/control/pilot-feedback",
       payload
@@ -186,7 +192,6 @@ export function PilotFeedbackModal() {
       .then((res) => {
         if (res.ok && res.reportId) {
           showToast({ id: toastId, kind: "success", title: `Report sent: ${res.reportId}` });
-          resetForm();
         } else {
           throw new Error(res.error || "Could not send the report.");
         }
@@ -199,6 +204,12 @@ export function PilotFeedbackModal() {
           description: "Reopen feedback to try again or copy it.",
           durationMs: 9000
         });
+        setType(payload.type);
+        setTitle(payload.title);
+        setDescription(payload.description);
+        setExpected(payload.expected);
+        setPrivacyAck(payload.privacyAck);
+        setScreenshots(screenshotsSnapshot);
         setSubmitError(err instanceof Error ? err.message : "Could not send the report.");
         setOpen(true);
       })
