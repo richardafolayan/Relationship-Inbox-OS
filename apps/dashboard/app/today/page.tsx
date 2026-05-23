@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type {
   HealthResponse,
@@ -30,6 +31,13 @@ import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 // right-rail day outline tracking overdue → waiting → fresh → done.
 // Greeting drops from 56px to ~32px so the screen leads with the hero,
 // not the salutation. Section 05 of the redesign doc.
+
+// Today is a focused triage queue, not the whole backlog. The "Then
+// these, in order" stack renders at most this many rows; the rest stay a
+// click away on /inbox (built for "every active thread"). Before the
+// cap, the stack listed every reply-needed thread - dozens of rows that
+// made Today feel like the entire inbox (issue #291).
+const TODAY_STACK_LIMIT = 7;
 
 interface RunnerEventDetail {
   type?: string;
@@ -207,6 +215,13 @@ export default function TodayPage() {
   }, [rows]);
   const hero = sortedRows[0];
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
+  // Cap the "Then these, in order" stack; the long tail routes to Inbox.
+  // overflowCount drives the "see all" link's label. (issue #291)
+  const visibleRemaining = useMemo(
+    () => remaining.slice(0, TODAY_STACK_LIMIT),
+    [remaining]
+  );
+  const overflowCount = remaining.length - visibleRemaining.length;
   const queuePeek = useMemo(() => remaining.slice(0, 3), [remaining]);
   const queueRemaining = Math.max(0, remaining.length - queuePeek.length);
   const queueEtaMinutes = remaining.length > 0 ? Math.max(1, remaining.length * 2) : 0;
@@ -525,12 +540,26 @@ export default function TodayPage() {
                 <h3 className="m-0 font-display text-[19px] font-semibold tracking-[-0.018em]">
                   Then these, in order
                 </h3>
-                <span className="font-mono text-[12px] text-ink-3">{remaining.length} left</span>
+                <span className="font-mono text-[12px] text-ink-3">{remaining.length} waiting</span>
               </div>
               <div className="flex flex-col">
-                {remaining.map((row) => (
+                {visibleRemaining.map((row) => (
                   <ThreadRow key={row.id} row={row} />
                 ))}
+                {overflowCount > 0 ? (
+                  <Link
+                    href="/inbox"
+                    data-testid="today-overflow-link"
+                    className="group flex items-center justify-between border-b border-t border-hairline px-1 py-[18px] transition-colors duration-calm hover:bg-paper-2"
+                  >
+                    <span className="text-[14px] text-ink-2 transition-colors duration-calm group-hover:text-ink">
+                      + {overflowCount} more waiting
+                    </span>
+                    <span className="font-mono text-[12px] tracking-[-0.005em] text-ink-3 transition-colors duration-calm group-hover:text-ink">
+                      See all in Inbox →
+                    </span>
+                  </Link>
+                ) : null}
               </div>
             </>
           ) : hero && loaded ? (
