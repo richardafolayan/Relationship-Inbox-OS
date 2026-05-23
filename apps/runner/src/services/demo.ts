@@ -59,7 +59,14 @@ export async function seedDemoData(input: { screenshotDir: string; domDumpDir: s
         rollingSummary: `Ongoing conversation with ${name} about partnership timings and next steps.`,
         whatTheyWant: "They want a confirmed timeline this week.",
         openLoopsJson: JSON.stringify(["Confirm timeline", "Share next milestone"]),
-        toneNotesJson: JSON.stringify(["Friendly", "Direct"])
+        toneNotesJson: JSON.stringify(["Friendly", "Direct"]),
+        rememberJson: JSON.stringify([
+          {
+            note: i % 2 === 0 ? "Final exams" : "Trip to Lisbon",
+            date: new Date(now + (i + 4) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+          },
+          { note: "Just started a new role", date: null }
+        ])
       }
     });
     manifest.threadIds.push(thread.id);

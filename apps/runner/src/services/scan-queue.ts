@@ -1,4 +1,10 @@
-import type { NormalizedMessage, PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
+import type {
+  NormalizedMessage,
+  PlatformAdapter,
+  PlatformName,
+  RememberItem,
+  ThreadStub
+} from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -2910,12 +2916,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
     let whatTheyWant = thread.whatTheyWant;
     let openLoopsJson = thread.openLoopsJson;
     let toneNotesJson = thread.toneNotesJson;
+    let rememberJson = thread.rememberJson;
 
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
         displayName: person.displayName,
         previousSummary: thread.rollingSummary ?? undefined,
         previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+        previousRemember: thread.rememberJson
+          ? (JSON.parse(thread.rememberJson) as RememberItem[])
+          : [],
         messages: latestMessages.map((message) => ({
           direction: message.direction,
           text: message.text,
@@ -2931,6 +2941,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
       whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
       openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
       toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
+      // remember notes are already surrogate-stripped inside updateThreadSummary.
+      rememberJson = JSON.stringify(aiSummary.remember);
     }
 
     // Phase 3: classify on first encounter only. Once a thread has a
@@ -2954,6 +2966,37 @@ export function createScanQueue(deps: ScanQueueDeps) {
         .catch(() => null);
       if (classified) {
         categoryUpdate = classified;
+      }
+    }
+
+    // Phase 2.5 (#287): conversation-end classifier. Re-runs whenever the
+    // last inbound text or timestamp changes (a fresh inbound flips the
+    // hash), so a thread that was closed but reopens with a new message
+    // gets re-evaluated automatically. The dedicated cache key is
+    // deliberately narrow (only the inbound itself) so it does not churn
+    // when unrelated fields like needsReply flip.
+    let closedStatusUpdate: string | null | undefined = undefined;
+    let closedStatusCacheKeyUpdate: string | null | undefined = undefined;
+    if (!skipAi && lastInboundMessage) {
+      const closedKey = stableHash(
+        `closed-v1|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+      );
+      if (closedKey !== thread.closedStatusCacheKey) {
+        const verdict = await deps.aiService
+          .classifyThreadClosed({
+            displayName: person.displayName,
+            messages: latestMessages.map((message) => ({
+              direction: message.direction,
+              text: message.text,
+              timestamp: message.timestamp.toISOString()
+            })),
+            summary: summary ?? null
+          })
+          .catch(() => null);
+        if (verdict) {
+          closedStatusUpdate = verdict;
+          closedStatusCacheKeyUpdate = closedKey;
+        }
       }
     }
 
@@ -2984,6 +3027,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // undefined leaves the existing column value unchanged (Prisma
         // omits the field from the UPDATE statement).
         ...(categoryUpdate ? { category: categoryUpdate } : {}),
+        // Phase 2.5 (#287): same rule — only persist when the AI gave a
+        // verdict for the current inbound hash. A null verdict leaves
+        // the previous decision in place so a transient provider
+        // outage does not silently clear classifications.
+        ...(closedStatusUpdate !== undefined ? { closedStatus: closedStatusUpdate } : {}),
+        ...(closedStatusCacheKeyUpdate !== undefined
+          ? { closedStatusCacheKey: closedStatusCacheKeyUpdate }
+          : {}),
         lastMessageAt: resolvedLastMessageAt,
         lastInboundAt: resolvedLastInboundAt,
         lastOutboundAt: resolvedLastOutboundAt,
@@ -3009,6 +3060,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         whatTheyWant,
         openLoopsJson,
         toneNotesJson,
+        rememberJson,
         // Stamp the first-full-backfill marker on the FIRST successful
         // persistence of any thread that has at least one message. We don't
         // gate on the pre-click `markedFullBackfill` flag because the URL

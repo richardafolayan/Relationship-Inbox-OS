@@ -1,5 +1,11 @@
 import OpenAI from "openai";
-import type { PlatformName, SummaryOutput, SuggestedRepliesOutput, AiSource } from "@inbox-os/core";
+import type {
+  PlatformName,
+  SummaryOutput,
+  SuggestedRepliesOutput,
+  RememberItem,
+  AiSource
+} from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
@@ -11,8 +17,10 @@ import type {
   FriendshipSummaryOutput,
   OperatorProfile,
   PilotReportTriage,
-  SettingsStore
+  SettingsStore,
+  StyleProfile
 } from "../types/runtime";
+import { describeContactStyle, describeOperatorStyle } from "./style";
 import {
   providerRegistry,
   fallbackChain,
@@ -27,10 +35,35 @@ const summarySchema = z.object({
   summary: z.string(),
   what_they_want: z.string(),
   open_loops: z.array(z.string()),
+  // Durable facts worth remembering (exams, trips, events). `date` is a
+  // best-effort ISO string the model may also return as null or omit
+  // entirely; normalizeRememberDate sanitises it after parsing.
+  remember: z
+    .array(
+      z.object({
+        note: z.string(),
+        date: z.string().nullable().default(null)
+      })
+    )
+    .default([]),
   tone_notes: z.array(z.string()).default([]),
   needs_reply: z.boolean(),
   urgency_hint: z.string().optional()
 });
+
+// The model is asked for strict ISO YYYY-MM-DD dates but occasionally
+// returns free text ("end of May"), a partial date, or an impossible one
+// (2026-02-30). Anything that isn't a real calendar date in strict ISO
+// form collapses to null so the dashboard's date maths never sees garbage.
+function normalizeRememberDate(raw: string | null | undefined): string | null {
+  if (typeof raw !== "string") return null;
+  const trimmed = raw.trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) return null;
+  const parsed = new Date(`${trimmed}T00:00:00Z`);
+  if (Number.isNaN(parsed.getTime())) return null;
+  // Reject values that don't round-trip (e.g. 2026-02-30 rolls to Mar 2).
+  return parsed.toISOString().slice(0, 10) === trimmed ? trimmed : null;
+}
 
 // Provider error classification + retry/fallback configuration lives in
 // ./ai-providers. Adding a new AI provider: extend the `AiProvider` union
@@ -50,6 +83,27 @@ const repliesSchema = z.object({
 
 const categorySchema = z.object({
   category: z.enum(["outreach", "genuine"])
+});
+
+// #287 phase 2.5. The conversation-end verdict. "closed" means the most
+// recent inbound reads as a natural endpoint and no reply is owed.
+// "open" means the operator still owes a reply. There is no third
+// "ambiguous" tier: ambiguous threads default to "open" so the operator
+// is never quietly nudged out of a conversation that might need them.
+const closedStatusSchema = z.object({
+  status: z.enum(["closed", "open"])
+});
+
+// #287 phase 3.5. Reconnect score: a 0-100 integer for "how worth
+// reaching out is this dormant relationship?" plus a single short reason
+// the dashboard can surface as a quiet "why" caption. The model is asked
+// to be conservative; the dashboard already orders dormants by simple
+// relationship signals (outbound count, depth, recency) so a near-zero
+// score just means "AI does not see a reason to nudge this one
+// specifically", not that the relationship is worthless.
+const reconnectScoreSchema = z.object({
+  score: z.number().int().min(0).max(100),
+  reason: z.string().max(160)
 });
 
 const friendshipSummarySchema = z.object({
@@ -258,6 +312,94 @@ Return strict JSON: { "category": "outreach" | "genuine" }`;
 export function selectClassifyPromptPrefix(platform: PlatformName): string {
   return getVoiceTier(platform) === "formal" ? FORMAL_CLASSIFY_PROMPT_PREFIX : CASUAL_CLASSIFY_PROMPT_PREFIX;
 }
+
+// Conversation-end classifier (#287 phase 2.5). The dashboard has a
+// lightweight regex heuristic for obvious closes (bare "thanks", "ok",
+// emoji reactions, farewells with no question). This prompt is the
+// ambiguous-middle pass: the messages that look closing-ish but the
+// regex cannot confidently decide on. The model's job is to mirror how
+// a human reads the last beat of the thread, not to second-guess the
+// operator.
+export const CLOSED_STATUS_PROMPT = `Decide whether this conversation has wrapped up or whether the operator still owes a reply.
+
+Definitions:
+  "closed" — the most recent inbound is a natural endpoint with no
+            implicit ask. Acknowledgements (thanks, got it, perfect,
+            noted), farewells (talk soon, take care, have a good
+            one), wrap statements (cool, sounds good), or short
+            reactions (a heart, a thumbs up, "lol"). The conversation
+            has finished its current arc and no reply is owed.
+
+  "open"   — the most recent inbound expects something from the
+            operator: a question, an explicit ask, a future plan that
+            needs confirming, a statement that obviously invites a
+            response. If the inbound restarts the conversation after
+            a lull ("hey, been a while, how are you?") that is OPEN.
+            If the operator was the last to speak and the conversation
+            is mid-flight, that is OPEN.
+
+Decision rules (apply in order):
+  1. If the latest message includes a question mark or an explicit
+     ask ("can you", "let me know", "thoughts?", "what time", "pls"),
+     → OPEN.
+  2. If the latest inbound is a short acknowledgement / wrap with no
+     follow-up beat → CLOSED.
+  3. If the latest inbound is a farewell ("talk soon", "have a good
+     one", "catch up soon") → CLOSED.
+  4. If the latest inbound mentions future plans needing the operator
+     to confirm or coordinate ("let's grab coffee next week", "I'll
+     send the deck Monday — sound good?") → OPEN.
+  5. If the operator (direction OUT) was last to speak, the thread is
+     waiting on them, → OPEN.
+  6. When in doubt → OPEN. False "closed" hides threads that might
+     need the operator; false "open" just leaves them visible.
+
+Examples:
+  CLOSED — IN: "thanks so much, really appreciate it"
+  CLOSED — IN: "perfect, see you Wednesday"
+  CLOSED — IN: "👍"
+  OPEN   — IN: "thanks - and one more thing, did the invoice clear?"
+  OPEN   — IN: "hey, been ages! how have you been?"
+  OPEN   — IN: "I'll send the doc later today, sound good?"
+  OPEN   — OUT: "let me know what you think"
+
+Return strict JSON: { "status": "closed" | "open" }`;
+
+// #287 phase 3.5. Reconnect-worthy scorer. Asked to rate, on a 0-100
+// scale, how much it makes sense for the operator to send a deliberate
+// "hey, been a while" message to this LinkedIn contact right now. The
+// dashboard already ranks dormants by deterministic signals (outbound
+// count, depth, recency); this prompt adds the qualitative read of the
+// arc: did the relationship feel mutual? did the last exchange leave
+// something open? does the contact's profile / role suggest a natural
+// hook?
+//
+// The prompt is deliberately conservative: a score of 50 is "neutral,
+// could go either way" and the model is reminded that "low" is fine —
+// it does not have to manufacture reasons to message someone.
+export const RECONNECT_SCORE_PROMPT = `Rate, from 0 to 100, how worth it would feel for the operator to send a deliberate "hey, been a while" message to this LinkedIn contact today.
+
+A higher score means the relationship looks like one where a gentle reconnect is welcome AND there is a natural beat to hang it on (a topic from the prior arc, a role change, an unanswered thread of conversation, an obvious common ground). A lower score means the relationship feels transactional, the contact's last message clearly closed the conversation, or there is no specific reason to surface this one ahead of the rest.
+
+Scoring guide:
+  90-100 — Strong: real mutual relationship, the last exchange left a natural reopen point, or the contact's profile / topic gives an obvious hook.
+  70-89  — Good: warm tie, the operator probably wants to keep this person in their orbit; reasonable to nudge.
+  50-69  — Neutral: ordinary professional acquaintance; reconnecting is fine but no particular reason today.
+  20-49  — Weak: thin relationship, transactional history, or the conversation already wrapped fully.
+  0-19   — Discourage: cold pitch in disguise, fully one-sided, or the last exchange explicitly ended the relationship.
+
+Decision rules:
+  - Be conservative. When uncertain, lean toward the middle (40-60). False high scores nudge the operator into awkward outreach; that is worse than missing one.
+  - Mutual back-and-forth depth is the single best signal. Long one-sided threads from a recruiter or pitch contact should score low.
+  - The freshness of the dormancy matters: very long lulls (years) reduce the score unless there is a strong hook.
+  - Do not invent details. If the inputs give you nothing specific to point to, the score belongs in the 40-60 band.
+
+Return strict JSON: { "score": 0-100 integer, "reason": "<one short sentence, plain English, no more than 25 words>" }
+
+Examples of good reasons (style only, not actual outputs):
+  "you swapped notes on hiring last year and they just took a new role"
+  "deep back-and-forth on the product side, last lull was after they moved jobs"
+  "one-sided pitch thread, nothing to hang a hello on"`;
 
 // Casual-DM voice profile. Applies on WhatsApp / iMessage / Instagram /
 // TikTok DMs. A GENERIC scaffold: it sets the relaxed register without
@@ -848,6 +990,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     displayName: string;
     previousSummary?: string;
     previousOpenLoops: string[];
+    /** Last persisted remember items — kept as the fallback if the AI call fails. */
+    previousRemember: RememberItem[];
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     /**
      * True when the contact's last message is newer than the operator's —
@@ -873,6 +1017,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       // ellipsis truncation (issue #193).
       what_they_want: lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.",
       open_loops: input.previousOpenLoops,
+      remember: input.previousRemember,
       tone_notes: [],
       needs_reply: lastMessage?.direction === "IN",
       urgency_hint: undefined
@@ -920,11 +1065,13 @@ what_they_want guidance (active reply):
 - Examples: "Sultan asked if you've watched the MJ movie — he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch — he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
 
 open_loops guidance (active reply):
-- Focus on items adjacent to the CURRENT active topic. The most recent 2-3 inbound messages define what's live.
+- Work through the recent inbound messages ONE AT A TIME. For each unanswered inbound message, pull out every distinct thing the operator still needs to respond to: a question, a request, a decision they were asked to weigh in on, a piece of news that deserves a reaction. A single message often holds two or three separate loops — surface each one, never collapse a multi-part message into one vague loop.
+- Focus on what is still LIVE. The most recent 2-3 inbound messages define the active topic.
 - DROP any older loops where the conversation has clearly moved on to an unrelated topic. If the recent exchange is about a movie and the old loops are about a months-old logistics request, do not surface those — they're stale.
 - EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript.
 - A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
-- 0-4 loops is fine. Quality over volume. The bar is "would the operator genuinely want to pick this up right now, given what's being discussed".
+- Be specific and grounded in the message. "Tell her which day works for the call" beats "Reply about scheduling" — name the actual thing the contact raised.
+- 0-6 loops. Cover every genuinely open point, but do not pad with things already handled. Quality and completeness over volume.
 - Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".`
       : `MODE: RECONNECT. The operator has the floor — the contact is not currently waiting on anything specific. The summary's job here is to help the operator reopen the conversation warmly, not to surface tasks.
 
@@ -946,14 +1093,26 @@ open_loops guidance (reconnect):
   "summary": "string — 1-2 sentence rolling summary of the relationship (durable across turns)",
   "what_they_want": "string — see mode-specific guidance below",
   "open_loops": ["string", ...],
+  "remember": [{ "note": "string", "date": "YYYY-MM-DD or null" }, ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
   "urgency_hint": "string or omit if none"
 }
 
+Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve relative dates and to judge whether a remembered event has already passed.
+
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
 
 ${modeBlock}
+
+remember guidance (both modes):
+- Separately from the loops above, extract durable facts worth remembering about the contact's life: exams, trips, interviews, job or house moves, health things, family events, birthdays, milestones, deadlines they mentioned.
+- These are NOT reply tasks and NOT the current conversation topic — they are things the operator would want to keep in mind weeks from now.
+- Each item is { "note": short third-person phrase, "date": "YYYY-MM-DD" or null }.
+- "note" examples: "Final exams", "Trip to Lagos", "Job interview at Spotify", "Starts new role", "Sister's wedding". A few words, no tasks, no questions.
+- Set "date" ONLY when the transcript states or clearly implies a specific calendar date. Resolve relative dates ("next Friday", "the 30th", "in two weeks") against the message timestamp into an absolute YYYY-MM-DD. If no specific date is recoverable (they just said "I have exams soon"), set "date" to null. NEVER guess or invent a date.
+- DROP anything whose date has clearly already passed. DROP one-off small talk.
+- 0-5 items. Only genuinely durable facts.
 
 General rules (both modes):
 - One loop per item. Don't merge ("their work + their move + their dog") into a single string.
@@ -962,6 +1121,7 @@ General rules (both modes):
 
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
+Previous remember items: ${JSON.stringify(input.previousRemember)}
 Transcript:
 ${transcript}`;
 
@@ -973,6 +1133,15 @@ ${transcript}`;
     if (result.what_they_want.length > 120) {
       result.what_they_want = safeTruncate(result.what_they_want, 120);
     }
+    // Sanitise remember items: strip unpaired surrogates from notes (the
+    // same SQLite-write hazard the summary fields guard against), coerce
+    // dates to strict ISO-or-null, and drop anything left without a note.
+    result.remember = result.remember
+      .map((item) => ({
+        note: stripUnpairedSurrogates(item.note).trim(),
+        date: normalizeRememberDate(item.date)
+      }))
+      .filter((item) => item.note.length > 0);
     return result;
   }
 
@@ -1040,6 +1209,14 @@ ${transcript}`;
     lastOutboundAt?: string | null;
     operatorProfile?: OperatorProfile | null;
     contact?: ContactProfileSnapshot | null;
+    /**
+     * Writing style measured from the operator's / contact's own recent
+     * messages on this thread. Rendered into the prompt so suggestions
+     * adapt to how each side actually writes — length, punctuation,
+     * capitalisation, emoji (issue #299). Null when history is too thin.
+     */
+    operatorStyle?: StyleProfile | null;
+    contactStyle?: StyleProfile | null;
   }): Promise<SuggestedRepliesOutput> {
     const isOutreach = input.category === "outreach";
 
@@ -1146,6 +1323,19 @@ Hard rules:
 - No generic "hey how have you been" filler unless there's literally nothing else in the transcript. In that case one slot can be a warm "hey how are things" but the other two must still ground in something real.
 - Each intent describes the callback: "Ask about the Lagos move", "Follow up on exam stress", "Mention you watched the doc". Avoid "Clarifying question" — there's nothing to clarify in reopen mode.`;
 
+    // Observed-style fragments (issue #299) — concrete length / emoji /
+    // full-stop / capitalisation signals measured from real messages so
+    // suggestions match how the operator and contact actually write,
+    // not only the generic voice tier. Each renders to "" when there
+    // isn't enough history, so the join collapses cleanly.
+    const styleGuidance = [
+      describeOperatorStyle(input.operatorStyle),
+      describeContactStyle(input.contactStyle)
+    ]
+      .filter((fragment) => fragment.length > 0)
+      .map((fragment) => `\n\n${fragment}`)
+      .join("");
+
     const prompt = `Return strict JSON matching this exact shape:
 {
   "replies": [
@@ -1161,7 +1351,7 @@ Each reply text must be a complete, sendable message under 280 characters,
 colons. Match the conversation's register: warm if it's warm, formal if
 it's formal.
 
-${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
+${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -1495,6 +1685,11 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     };
     operatorProfile?: OperatorProfile | null;
     contact?: ContactProfileSnapshot | null;
+    /** Observed writing style of the operator / contact on this thread,
+     *  rendered into the prompt so the rewrite matches how each side
+     *  actually writes (issue #299). Null when history is too thin. */
+    operatorStyle?: StyleProfile | null;
+    contactStyle?: StyleProfile | null;
   }): Promise<string> {
     const trimmed = input.intent.trim();
     if (!trimmed) return "";
@@ -1571,6 +1766,18 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       return `\n\nRelationship context (other threads with this person, do NOT repeat questions already answered elsewhere):${tagsLine}${notesLine}\n${exchanges.join("\n")}`;
     })();
 
+    // Observed-style fragments (issue #299): concrete length / emoji /
+    // full-stop / capitalisation signals measured from real messages, so
+    // the rewrite matches how each side actually writes. Each renders to
+    // "" when history is too thin, so the join collapses cleanly.
+    const styleGuidance = [
+      describeOperatorStyle(input.operatorStyle),
+      describeContactStyle(input.contactStyle)
+    ]
+      .filter((fragment) => fragment.length > 0)
+      .map((fragment) => `\n\n${fragment}`)
+      .join("");
+
     const prompt = `Rewrite the operator's intent below as a complete, sendable ${platformMessageNoun(input.platform)} in the operator's voice. Match the length and energy of the recipient's last message (reciprocity rule from system prompt). When in doubt, err shorter. The voice samples below are additional calibration for this thread, the few-shot examples in the system prompt are the primary reference.
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
@@ -1580,7 +1787,7 @@ Recipient: ${input.displayName}
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
 ${recipientSamples.length > 0 ? `\nRecipient's recent messages on this thread (oldest first — match their tempo, length, and warmth, not just the last line):\n${recipientSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n")}` : ""}
-${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -1906,11 +2113,178 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
     }
   }
 
+  /**
+   * Conversation-end classifier (#287 phase 2.5). Returns "closed" when
+   * the AI judges the last inbound to be a natural endpoint with no
+   * implicit ask, "open" when the operator still owes a reply, and null
+   * when the provider was unavailable. The caller uses null to mean
+   * "leave the existing verdict and the heuristic in charge" (i.e. fail
+   * open in the dashboard).
+   *
+   * The prompt receives only the last 1-3 messages plus the rolling
+   * summary, so the token cost is low (~150 in, ~10 out). Caching by
+   * last-inbound hash means each thread is classified at most once per
+   * new inbound message.
+   */
+  async function classifyThreadClosed(input: {
+    displayName: string;
+    /** Oldest-first; the prompt examples include direction labels so
+     *  attribution discipline applies. */
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+  }): Promise<"closed" | "open" | null> {
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return null;
+    }
+
+    // Send the last 3 turns oldest-first so the model sees the closing
+    // beat plus the operator's preceding message for context.
+    const recentTurns = input.messages
+      .slice(-3)
+      .map((m) => ({
+        direction: m.direction,
+        text: safeTruncate(m.text, 600)
+      }))
+      .filter((m) => m.text.trim().length > 0);
+
+    if (recentTurns.length === 0) {
+      return null;
+    }
+
+    // No inbound at all means the operator was last to speak; the
+    // thread is by definition waiting on them and the LLM call is
+    // skipped to save tokens. The dashboard already treats OUT-direction
+    // as "not closed" through the heuristic too.
+    const hasInbound = recentTurns.some((t) => t.direction === "IN");
+    if (!hasInbound) {
+      return "open";
+    }
+
+    const summaryLine = input.summary?.trim()
+      ? `Summary so far: ${safeTruncate(input.summary, 600)}`
+      : "Summary so far: (none)";
+
+    const prompt = `${CLOSED_STATUS_PROMPT}
+
+Person name: ${input.displayName}
+${summaryLine}
+Recent messages (oldest first):
+${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = closedStatusSchema.parse(parseAiJson(content, model));
+      return parsed.status;
+    } catch (error) {
+      console.warn(
+        `[ai] classifyThreadClosed failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
+   * plus a one-sentence reason for how worth it would feel for the
+   * operator to send a deliberate reconnect message to this LinkedIn
+   * dormant contact today. Returns null when the AI provider was
+   * unavailable; the dashboard then ranks dormants by deterministic
+   * relationship signals alone (outbound count, depth, recency).
+   */
+  async function scoreReconnectCandidate(input: {
+    displayName: string;
+    /** Headline / current role line, or null when no enrichment exists. */
+    contactBlurb?: string | null;
+    daysDormant: number;
+    operatorOutboundCount: number;
+    totalMessageCount: number;
+    /** Oldest-first; up to 4 most recent turns is plenty for the model. */
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+  }): Promise<{ score: number; reason: string } | null> {
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return null;
+    }
+
+    const recentTurns = input.messages
+      .slice(-4)
+      .map((m) => ({ direction: m.direction, text: safeTruncate(m.text, 500) }))
+      .filter((m) => m.text.trim().length > 0);
+
+    if (recentTurns.length === 0) {
+      return null;
+    }
+
+    const blurbLine = input.contactBlurb?.trim()
+      ? `Contact blurb: ${safeTruncate(input.contactBlurb, 400)}`
+      : "Contact blurb: (none)";
+    const summaryLine = input.summary?.trim()
+      ? `Summary so far: ${safeTruncate(input.summary, 600)}`
+      : "Summary so far: (none)";
+
+    const prompt = `${RECONNECT_SCORE_PROMPT}
+
+Person name: ${input.displayName}
+${blurbLine}
+${summaryLine}
+Days dormant: ${input.daysDormant}
+Operator outbound count: ${input.operatorOutboundCount}
+Total message count: ${input.totalMessageCount}
+Recent messages (oldest first):
+${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = reconnectScoreSchema.parse(parseAiJson(content, model));
+      return {
+        score: parsed.score,
+        // Apply voice rules so the reason caption respects the same
+        // punctuation rules as the rest of the dashboard's AI strings.
+        reason: applyVoiceRules(parsed.reason).trim()
+      };
+    } catch (error) {
+      console.warn(
+        `[ai] scoreReconnectCandidate failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+      );
+      return null;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
     classifyThreadCategory,
+    classifyThreadClosed,
+    scoreReconnectCandidate,
     generateContactSummary,
     generateConversationStarters,
     composeInVoice,

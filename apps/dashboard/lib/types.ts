@@ -1,4 +1,5 @@
 import type { AiErrorKind, AiProvider } from "@inbox-os/core";
+import type { RememberItem } from "./thread-remember";
 
 export interface InboxRow {
   id: string;
@@ -12,6 +13,14 @@ export interface InboxRow {
    */
   personInferredName?: string | null;
   personAvatarUrl?: string | null;
+  /**
+   * Birthday for this row's contact, synced from the operator's macOS
+   * Contacts. `personBirthday` is "MM-DD"; `personBirthYear` is the
+   * four-digit year when the card carries one. Both null when no contact
+   * matched - the row shows a quiet "birthday soon" marker off these.
+   */
+  personBirthday?: string | null;
+  personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   preview: string;
   /**
@@ -32,6 +41,32 @@ export interface InboxRow {
   messageCount?: number;
   /** "outreach" | "genuine" | null (Phase 3 categorization). */
   category?: string | null;
+  /**
+   * AI one-line context, what would deepen this conversation or what
+   * the contact is waiting on. Rendered as a proactive nudge on Today +
+   * inbox rows and used as the body of new-message desktop notifications.
+   * Null or absent until the thread has been summarised.
+   */
+  whatTheyWant?: string | null;
+  /**
+   * AI verdict on whether the conversation has wrapped (issue #287 phase
+   * 2.5). "closed" = last inbound is an acknowledgement / farewell with
+   * no implicit ask, "open" = operator still owes a reply, null = not
+   * yet classified or the AI provider was unavailable on the relevant
+   * scan. The dashboard treats "closed" as a strong "set aside" signal
+   * even when the lightweight heuristic does not flag it.
+   */
+  closedStatus?: "closed" | "open" | null;
+  /**
+   * AI reconnect-worthiness score (#287 phase 3.5), 0-100. Null until
+   * the runner has scored this dormant LinkedIn thread, or when the AI
+   * provider was unavailable. The Reconnect page falls back to a
+   * deterministic relationship-signal score in that case.
+   */
+  reconnectScore?: number | null;
+  /** Short one-line reason rendered on the Reconnect page alongside
+   *  top-ranked candidates. Null when no AI score is available. */
+  reconnectScoreReason?: string | null;
   archivedAt?: string | null;
   /**
    * ISO timestamp until which the operator has snoozed this thread. Active
@@ -66,6 +101,30 @@ export interface InboxResponse {
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
+}
+
+/**
+ * One upcoming contact birthday, as served by /runner/data/birthdays. The
+ * runner has already computed `daysUntil` and filtered to the horizon, so
+ * the dashboard only formats and renders.
+ */
+export interface UpcomingBirthday {
+  personId: string;
+  personName: string;
+  personAvatarUrl?: string | null;
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /** Most-recent thread for this person, for one-click open. Null when none. */
+  threadId: string | null;
+  /** Birthday month/day as "MM-DD". */
+  monthDay: string;
+  /** Four-digit birth year, or null for a year-less contact card. */
+  birthYear: number | null;
+  /** Whole days until the next occurrence; 0 means today. */
+  daysUntil: number;
+}
+
+export interface BirthdaysResponse {
+  upcoming: UpcomingBirthday[];
 }
 
 export interface PeopleRow {
@@ -273,6 +332,11 @@ export interface ThreadResponse {
   openLoops: string[];
   dismissedOpenLoops: string[];
   toneNotes: string[];
+  /**
+   * AI-extracted durable facts worth remembering — exams, trips, life events.
+   * Optional so older runner builds that predate the field still parse.
+   */
+  remember?: RememberItem[];
   draft: string;
   contextUpdatedAt: string;
   messages: ThreadMessage[];

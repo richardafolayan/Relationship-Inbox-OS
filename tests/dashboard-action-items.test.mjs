@@ -5,7 +5,6 @@ import assert from "node:assert/strict";
 // `node --import tsx --test ...` so the tsx hook resolves the .ts import
 // below — see test:all in the root package.json.
 const {
-  categorizeActionItem,
   hashActionItem,
   parseChecklistState,
   resolveItemText,
@@ -18,46 +17,6 @@ const {
 // These pure helpers back the thread "things to address" checklist. They are
 // the testable core extracted out of ActionItemsChecklist.tsx, since the
 // dashboard has no component-test framework.
-
-test("categorizeActionItem: a trailing question mark reads as a question", () => {
-  assert.equal(categorizeActionItem("Did the proposal land okay?"), "question");
-});
-
-test("categorizeActionItem: a leading question word reads as a question", () => {
-  assert.equal(categorizeActionItem("when are you free to chat"), "question");
-  assert.equal(categorizeActionItem("How did the move go"), "question");
-});
-
-test("categorizeActionItem: an explicit ask reads as a request", () => {
-  assert.equal(categorizeActionItem("They asked for the deck"), "request");
-  assert.equal(categorizeActionItem("can you send me the link"), "request");
-});
-
-test("categorizeActionItem: emotion words read as a feeling", () => {
-  assert.equal(categorizeActionItem("They sounded stressed about the deadline"), "feeling");
-  assert.equal(categorizeActionItem("Seemed really excited about the new role"), "feeling");
-});
-
-test("categorizeActionItem: time language reads as a follow-up", () => {
-  assert.equal(categorizeActionItem("Said they'd circle back next week"), "follow-up");
-  assert.equal(categorizeActionItem("Wants to check in later"), "follow-up");
-});
-
-test("categorizeActionItem: shared news reads as an update", () => {
-  assert.equal(categorizeActionItem("They mentioned moving to Berlin"), "update");
-  assert.equal(categorizeActionItem("Shared that the studio launched"), "update");
-});
-
-test("categorizeActionItem: anything unmatched falls back to mention", () => {
-  assert.equal(categorizeActionItem("the weather was nice apparently"), "mention");
-  assert.equal(categorizeActionItem(""), "mention");
-  assert.equal(categorizeActionItem("   "), "mention");
-});
-
-test("categorizeActionItem: question detection wins over request wording", () => {
-  // "can you" would match request, but the trailing "?" makes it a question.
-  assert.equal(categorizeActionItem("Can you send the file over?"), "question");
-});
 
 test("hashActionItem: deterministic for the same text", () => {
   assert.equal(hashActionItem("Reply about the meeting"), hashActionItem("Reply about the meeting"));

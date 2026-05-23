@@ -5,7 +5,7 @@ import Link from "next/link";
 import { Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
-import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
+import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -13,6 +13,8 @@ import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isWithinHorizon } from "@/lib/horizon";
+import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "snoozed";
@@ -29,7 +31,7 @@ const TABS: { key: RiskTab; label: string }[] = [
 ];
 
 const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
-  { key: "any", label: "Any kind" },
+  { key: "any", label: "Any" },
   { key: "needs_reply", label: "Needs reply" },
   { key: "waiting_on_them", label: "Waiting on them" },
   { key: "genuine", label: "Genuine" },
@@ -37,7 +39,7 @@ const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
 ];
 
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
-  { key: "all", label: "Any platform" },
+  { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
   { key: "IMESSAGE", label: "iMessage" }
 ];
@@ -122,10 +124,35 @@ function dotFor(row: InboxRow): string {
   return "bg-risk-fresh";
 }
 
-// All inbox - filter tabs (replacing stacked risk sections), platform
-// glyph column, sort + secondary filters on the right of the tab bar.
-// Search input lives above the tabs. Multi-select + bulk-action bar
-// unchanged.
+// Human-readable label for the "N older or closed conversations set aside"
+// banner. Picks the right pluralisation and only mentions a bucket when
+// it is non-empty so the copy stays tight ("3 older conversations", "1
+// closed conversation", "5 older, 2 closed").
+function hiddenLabel(breakdown: { older: number; closed: number }): string {
+  const { older, closed } = breakdown;
+  if (older > 0 && closed > 0) {
+    return `${older} older, ${closed} closed conversation${
+      older + closed === 1 ? "" : "s"
+    }`;
+  }
+  if (older > 0) {
+    return `${older} older conversation${older === 1 ? "" : "s"}`;
+  }
+  return `${closed} closed conversation${closed === 1 ? "" : "s"}`;
+}
+
+interface SectionGroup {
+  key: string;
+  label: string | null;
+  items: InboxRow[];
+}
+
+// Inbox - search box, a risk tab bar, then a thin secondary filter row
+// (platform / kind / sort). The "All" tab buckets the feed into Overdue /
+// Waiting / Fresh sections so a long list scans top-down by urgency; a
+// single-risk or Snoozed tab is already homogeneous and renders as one
+// flat list. Older / likely-closed threads are hidden by default
+// (issue #287) and surfaced via the Show all affordance.
 export default function InboxPage() {
   const [data, setData] = useState<InboxResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
@@ -138,6 +165,10 @@ export default function InboxPage() {
   const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("oldest");
+  // Issue #287: by default the inbox hides conversations whose last activity
+  // is older than the recency horizon. Searching or flipping "show all"
+  // lifts the horizon so dormant threads stay reachable.
+  const [showAll, setShowAll] = useState(false);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [forceSelectMode, setForceSelectMode] = useState(false);
@@ -206,26 +237,81 @@ export default function InboxPage() {
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Two "set aside" filters tighten the default inbox (issue #287):
+    //   - The recency horizon hides dormant threads (phase 1).
+    //   - The closed-conversation heuristic hides threads whose last
+    //     inbound message reads as an acknowledgement / farewell
+    //     (phase 2).
+    // Both are lifted by an explicit "show all" toggle and by any active
+    // search, so older or closed threads are still reachable.
+    const applyActiveOnly = !showAll && !q;
     return allRows.filter((row) => {
       if (!applyTab(row, tab)) return false;
       if (!applyCategory(row, category)) return false;
       if (!applyPlatform(row, platformFilter)) return false;
+      if (applyActiveOnly && !isWithinHorizon(row.lastMessageAt)) return false;
+      if (applyActiveOnly && isLikelyClosed(row)) return false;
       if (!q) return true;
       return (
         row.personName.toLowerCase().includes(q) ||
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, tab, category, platformFilter]);
+  }, [allRows, query, tab, category, platformFilter, showAll]);
 
-  const rows = useMemo(
-    () => applySort(visible.filter((row) => !removedIds.has(row.id)), sortMode),
-    [visible, removedIds, sortMode]
+  // How many threads the active-only filter is currently hiding, broken
+  // down by reason. Only counts threads that would otherwise be visible
+  // under the current tab / category / platform so the affordance does
+  // not over-promise.
+  const hiddenBreakdown = useMemo(() => {
+    if (showAll || query.trim()) return { total: 0, older: 0, closed: 0 };
+    let older = 0;
+    let closed = 0;
+    for (const row of allRows) {
+      if (!applyTab(row, tab)) continue;
+      if (!applyCategory(row, category)) continue;
+      if (!applyPlatform(row, platformFilter)) continue;
+      const dormant = !isWithinHorizon(row.lastMessageAt);
+      const ended = isLikelyClosed(row);
+      if (!dormant && !ended) continue;
+      // Dormant takes precedence in the count so the two reasons add up
+      // to total without double-counting a thread that is both old and
+      // closed.
+      if (dormant) older += 1;
+      else closed += 1;
+    }
+    return { total: older + closed, older, closed };
+  }, [allRows, showAll, query, tab, category, platformFilter]);
+  const hiddenByHorizon = hiddenBreakdown.total;
+
+  // The "All" tab mixes risk levels, so it is bucketed into urgency
+  // sections; every other tab is a single bucket and renders flat.
+  const grouped = tab === "all";
+
+  const sections = useMemo<SectionGroup[]>(() => {
+    const live = visible.filter((row) => !removedIds.has(row.id));
+    if (!grouped) {
+      return [{ key: tab, label: null, items: applySort(live, sortMode) }];
+    }
+    const byLevel = (level: InboxRow["riskLevel"]) =>
+      applySort(live.filter((row) => row.riskLevel === level), sortMode);
+    return [
+      { key: "overdue", label: "Overdue", items: byLevel("RED") },
+      { key: "waiting", label: "Waiting", items: byLevel("AMBER") },
+      { key: "fresh", label: "Fresh", items: byLevel("GREEN") }
+    ].filter((section) => section.items.length > 0);
+  }, [visible, removedIds, grouped, tab, sortMode]);
+
+  // Flat, in-visual-order id list so shift-click range select spans across
+  // section boundaries.
+  const orderedRows = useMemo(
+    () => sections.flatMap((section) => section.items),
+    [sections]
   );
 
   const degraded = platforms.find((p) => p.status === "DEGRADED");
 
-  const flatVisibleIds = useMemo(() => rows.map((r) => r.id), [rows]);
+  const flatVisibleIds = useMemo(() => orderedRows.map((r) => r.id), [orderedRows]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectMode = forceSelectMode || selectedIds.length > 0;
 
@@ -320,8 +406,6 @@ export default function InboxPage() {
     [selectedIds, clearSelection, refresh]
   );
 
-  const sortLabel = SORT_MODES.find((s) => s.key === sortMode)?.label ?? "oldest wait";
-
   return (
     <Canvas>
       <PageHead
@@ -349,7 +433,7 @@ export default function InboxPage() {
         />
       </div>
 
-      <div className="mb-[18px] flex flex-wrap items-center gap-[2px] border-b border-hairline">
+      <div className="flex flex-wrap items-center gap-[2px] border-b border-hairline">
         {TABS.map((entry) => {
           const active = tab === entry.key;
           const count = counts[entry.key];
@@ -382,44 +466,26 @@ export default function InboxPage() {
             </button>
           );
         })}
-        <div className="ml-auto flex items-center gap-3 pr-1 font-mono text-[11px] text-ink-3">
-          <select
-            value={platformFilter}
-            onChange={(e) => setPlatformFilter(e.target.value as PlatformFilter)}
-            aria-label="Platform"
-            className="bg-transparent text-ink-2 outline-none hover:text-ink"
+      </div>
+
+      <div className="mb-1 mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[11px]">
+        <FilterSelect
+          label="platform"
+          value={platformFilter}
+          onChange={setPlatformFilter}
+          options={PLATFORM_FILTERS}
+        />
+        <FilterSelect label="kind" value={category} onChange={setCategory} options={CATEGORY_FILTERS} />
+        <FilterSelect label="sort" value={sortMode} onChange={setSortMode} options={SORT_MODES} />
+        {!selectMode && orderedRows.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => setForceSelectMode(true)}
+            className="ml-auto uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
           >
-            {PLATFORM_FILTERS.map((p) => (
-              <option key={p.key} value={p.key}>{p.label}</option>
-            ))}
-          </select>
-          <span aria-hidden className="text-ink-3/60">·</span>
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value as CategoryFilter)}
-            aria-label="Kind"
-            className="bg-transparent text-ink-2 outline-none hover:text-ink"
-          >
-            {CATEGORY_FILTERS.map((c) => (
-              <option key={c.key} value={c.key}>{c.label}</option>
-            ))}
-          </select>
-          <span aria-hidden className="text-ink-3/60">·</span>
-          <span>
-            sort:{" "}
-            <select
-              value={sortMode}
-              onChange={(e) => setSortMode(e.target.value as SortMode)}
-              aria-label="Sort"
-              className="bg-transparent text-ink-2 outline-none hover:text-ink"
-            >
-              {SORT_MODES.map((s) => (
-                <option key={s.key} value={s.key}>{s.label} ↓</option>
-              ))}
-            </select>
-            <span className="sr-only">{sortLabel}</span>
-          </span>
-        </div>
+            Select
+          </button>
+        ) : null}
       </div>
 
       {degraded ? (
@@ -455,6 +521,20 @@ export default function InboxPage() {
 
       {!loaded ? (
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+      ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
+        <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
+          <p className="m-0 text-[16px] font-medium text-ink">You’re caught up.</p>
+          <p className="m-0 text-[14px] text-ink-2">
+            {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+            <button
+              type="button"
+              onClick={() => setShowAll(true)}
+              className="underline underline-offset-2 hover:text-ink"
+            >
+              Show all
+            </button>
+          </p>
+        </div>
       ) : visible.length === 0 ? (
         <CaughtUp
           title={query || tab !== "all" || category !== "any" ? "Nothing matches that filter." : "You’re caught up."}
@@ -462,31 +542,63 @@ export default function InboxPage() {
         />
       ) : (
         <>
-          {!selectMode ? (
-            <div className="mb-3 flex items-center justify-between">
-              <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                Tip: hover a row and click the circle to select multiple at once.
-              </p>
-              <button
-                type="button"
-                onClick={() => setForceSelectMode(true)}
-                className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-              >
-                Select
-              </button>
-            </div>
+          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
+            <p className="mb-3 mt-3 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+              {showAll ? (
+                <>
+                  Showing all conversations.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(false)}
+                    className="underline underline-offset-2 hover:text-ink"
+                  >
+                    Show recent only
+                  </button>
+                </>
+              ) : (
+                <>
+                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="underline underline-offset-2 hover:text-ink"
+                  >
+                    Show all
+                  </button>
+                </>
+              )}
+            </p>
           ) : null}
-          <div className="flex flex-col">
-            {rows.map((row) => (
-              <InboxRowItem
-                key={row.id}
-                row={row}
-                selectMode={selectMode}
-                selected={selectedSet.has(row.id)}
-                onToggle={toggleId}
-              />
-            ))}
-          </div>
+          {grouped ? (
+            sections.map((section, index) => (
+              <section key={section.key}>
+                <SectionDivider label={section.label ?? ""} tight={index === 0} />
+                <div className="flex flex-col">
+                  {section.items.map((row) => (
+                    <InboxRowItem
+                      key={row.id}
+                      row={row}
+                      selectMode={selectMode}
+                      selected={selectedSet.has(row.id)}
+                      onToggle={toggleId}
+                    />
+                  ))}
+                </div>
+              </section>
+            ))
+          ) : (
+            <div className="mt-4 flex flex-col">
+              {orderedRows.map((row) => (
+                <InboxRowItem
+                  key={row.id}
+                  row={row}
+                  selectMode={selectMode}
+                  selected={selectedSet.has(row.id)}
+                  onToggle={toggleId}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
 
@@ -545,6 +657,32 @@ export default function InboxPage() {
         title="Inbox receipts"
       />
     </Canvas>
+  );
+}
+
+interface FilterSelectProps<K extends string> {
+  label: string;
+  value: K;
+  onChange: (value: K) => void;
+  options: readonly { key: K; label: string }[];
+}
+
+function FilterSelect<K extends string>({ label, value, onChange, options }: FilterSelectProps<K>) {
+  return (
+    <label className="flex items-center gap-[6px] text-ink-3">
+      <span>{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value as K)}
+        className="cursor-pointer bg-transparent text-ink-2 outline-none transition-colors duration-calm hover:text-ink"
+      >
+        {options.map((option) => (
+          <option key={option.key} value={option.key}>
+            {option.label}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
 

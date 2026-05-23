@@ -127,7 +127,7 @@ function computeTicker(input: {
       queuedBehind: Math.max(0, queueActive.length - 1)
     };
   }
-  const recentest = input.queue?.recent[0];
+  const recentest = input.queue?.recent?.[0];
   if (recentest) {
     const completedAt = Date.parse(recentest.completedAt);
     const age = Date.now() - completedAt;
@@ -207,6 +207,11 @@ function tickerDetail(state: TickerState): string | null {
     if (state.etaSeconds <= 0) return "wrapping up…";
     if (state.etaSeconds < 60) return `~${state.etaSeconds}s left`;
     return `~${Math.round(state.etaSeconds / 60)}m left`;
+  }
+  // Carry the failure reason the (now removed) send-failed toast used to show,
+  // skipping the generic fallback that would just echo the heading.
+  if (state.kind === "send_failed" && state.message && state.message !== "Send failed") {
+    return state.message;
   }
   return null;
 }

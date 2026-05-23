@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import Link from "next/link";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type {
   HealthResponse,
@@ -14,10 +15,13 @@ import type {
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
+import { isWithinHorizon } from "@/lib/horizon";
+import { isLikelyClosed } from "@/lib/closed-conversation";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -28,9 +32,50 @@ import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 // Greeting drops from 56px to ~32px so the screen leads with the hero,
 // not the salutation. Section 05 of the redesign doc.
 
+// Today is a focused triage queue, not the whole backlog. The "Then
+// these, in order" stack renders at most this many rows; the rest stay a
+// click away on /inbox (built for "every active thread"). Before the
+// cap, the stack listed every reply-needed thread - dozens of rows that
+// made Today feel like the entire inbox (issue #291).
+const TODAY_STACK_LIMIT = 7;
+
 interface RunnerEventDetail {
   type?: string;
   threadId?: string;
+}
+
+// Per-day "tonight's outline" progress, persisted to localStorage so the
+// cleared-thread counts survive a reload instead of dropping back to zero.
+// The date field still forces a fresh start at local midnight.
+const TONIGHT_PROGRESS_KEY = "today_tonight_progress";
+
+type TonightProgress = { date: string; RED: number; AMBER: number; GREEN: number };
+
+function readTonightProgress(): TonightProgress | null {
+  try {
+    const raw = window.localStorage.getItem(TONIGHT_PROGRESS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<TonightProgress>;
+    if (
+      typeof parsed?.date === "string" &&
+      typeof parsed.RED === "number" &&
+      typeof parsed.AMBER === "number" &&
+      typeof parsed.GREEN === "number"
+    ) {
+      return { date: parsed.date, RED: parsed.RED, AMBER: parsed.AMBER, GREEN: parsed.GREEN };
+    }
+  } catch {
+    // Corrupt JSON or storage disabled: fall back to a fresh count.
+  }
+  return null;
+}
+
+function writeTonightProgress(value: TonightProgress): void {
+  try {
+    window.localStorage.setItem(TONIGHT_PROGRESS_KEY, JSON.stringify(value));
+  } catch {
+    // Storage disabled or over quota: progress just won't survive a reload.
+  }
 }
 
 export default function TodayPage() {
@@ -58,12 +103,12 @@ export default function TodayPage() {
   // Per-day "done" counter so the right-rail outline ticks up as the
   // operator clears overdue / waiting threads. Keyed by ISO date string
   // so it resets at local midnight.
-  const [doneTodayByLevel, setDoneTodayByLevel] = useState<{
-    date: string;
-    RED: number;
-    AMBER: number;
-    GREEN: number;
-  }>(() => ({ date: new Date().toDateString(), RED: 0, AMBER: 0, GREEN: 0 }));
+  const [doneTodayByLevel, setDoneTodayByLevel] = useState<TonightProgress>(() => ({
+    date: new Date().toDateString(),
+    RED: 0,
+    AMBER: 0,
+    GREEN: 0
+  }));
 
   const refresh = useCallback(async () => {
     const [inbox, platformRows, healthData] = await Promise.all([
@@ -103,6 +148,23 @@ export default function TodayPage() {
   useEffect(() => {
     setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
   }, []);
+
+  // Restore tonight's cleared-thread counts so the right-rail outline keeps
+  // its progress across a reload. A stale (pre-midnight) entry is ignored.
+  useEffect(() => {
+    const stored = readTonightProgress();
+    if (stored && stored.date === new Date().toDateString()) {
+      setDoneTodayByLevel(stored);
+    }
+  }, []);
+
+  // Persist whenever there's progress to save. Skipping the all-zero state
+  // also stops the empty default from clobbering a restored value on mount.
+  useEffect(() => {
+    if (doneTodayByLevel.RED + doneTodayByLevel.AMBER + doneTodayByLevel.GREEN > 0) {
+      writeTonightProgress(doneTodayByLevel);
+    }
+  }, [doneTodayByLevel]);
 
   useEffect(() => {
     void refresh();
@@ -164,10 +226,26 @@ export default function TodayPage() {
   }, []);
 
   const allRows = data?.rows ?? [];
+  // Today is the "tonight's work" view. Two filters narrow the runner's
+  // raw needs-reply set into things that genuinely need the operator
+  // tonight (issue #287):
+  //   - Recency horizon (phase 1): dormant threads drop out so a year of
+  //     history does not flood the hero queue.
+  //   - Closed-conversation heuristic (phase 2): threads that already
+  //     wrapped on a "thanks" / "talk soon" are set aside so the operator
+  //     is not nudged to reply to closing messages.
+  // Both filters are conservative: anything reachable from the Inbox
+  // "show all" toggle still appears there, and a new inbound message
+  // immediately pulls a thread back into Today.
   const rows = useMemo(
     () =>
       allRows.filter(
-        (row) => row.needsReply !== false && !row.scheduledSendAt && !removedIds.has(row.id)
+        (row) =>
+          row.needsReply !== false &&
+          !row.scheduledSendAt &&
+          !removedIds.has(row.id) &&
+          isWithinHorizon(row.lastMessageAt) &&
+          !isLikelyClosed(row)
       ),
     [allRows, removedIds]
   );
@@ -188,6 +266,13 @@ export default function TodayPage() {
   }, [rows]);
   const hero = sortedRows[0];
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
+  // Cap the "Then these, in order" stack; the long tail routes to Inbox.
+  // overflowCount drives the "see all" link's label. (issue #291)
+  const visibleRemaining = useMemo(
+    () => remaining.slice(0, TODAY_STACK_LIMIT),
+    [remaining]
+  );
+  const overflowCount = remaining.length - visibleRemaining.length;
   const queuePeek = useMemo(() => remaining.slice(0, 3), [remaining]);
   const queueRemaining = Math.max(0, remaining.length - queuePeek.length);
   const queueEtaMinutes = remaining.length > 0 ? Math.max(1, remaining.length * 2) : 0;
@@ -253,6 +338,32 @@ export default function TodayPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [hero, router, advanceHero, refresh]);
+
+  // Right-rail outline rows jump to the first live thread of their risk
+  // level: the hero when it matches, otherwise its row in the queue below.
+  const jumpToLevel = useCallback(
+    (level: "RED" | "AMBER" | "GREEN") => {
+      if (hero?.riskLevel === level) {
+        // The page scrolls inside app-shell's <main>, not the window, so
+        // jump to the hero by returning that container to the top.
+        heroRef.current?.closest("main")?.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      const target = visibleRemaining.find((row) => row.riskLevel === level);
+      if (target) {
+        document
+          .getElementById(`today-row-${target.id}`)
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      // All live threads of this level are beyond the visible cap, so
+      // send the operator to the "see all" link to find them in Inbox.
+      document
+        .querySelector('[data-testid="today-overflow-link"]')
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    [hero, visibleRemaining]
+  );
 
   const today = new Date();
   const dayLabel = today.toLocaleDateString("en-GB", {
@@ -506,12 +617,26 @@ export default function TodayPage() {
                 <h3 className="m-0 font-display text-[19px] font-semibold tracking-[-0.018em]">
                   Then these, in order
                 </h3>
-                <span className="font-mono text-[12px] text-ink-3">{remaining.length} left</span>
+                <span className="font-mono text-[12px] text-ink-3">{remaining.length} waiting</span>
               </div>
               <div className="flex flex-col">
-                {remaining.map((row) => (
-                  <ThreadRow key={row.id} row={row} />
+                {visibleRemaining.map((row) => (
+                  <ThreadRow key={row.id} row={row} id={`today-row-${row.id}`} />
                 ))}
+                {overflowCount > 0 ? (
+                  <Link
+                    href="/inbox"
+                    data-testid="today-overflow-link"
+                    className="group flex items-center justify-between border-b border-t border-hairline px-1 py-[18px] transition-colors duration-calm hover:bg-paper-2"
+                  >
+                    <span className="text-[14px] text-ink-2 transition-colors duration-calm group-hover:text-ink">
+                      + {overflowCount} more waiting
+                    </span>
+                    <span className="font-mono text-[12px] tracking-[-0.005em] text-ink-3 transition-colors duration-calm group-hover:text-ink">
+                      See all in Inbox →
+                    </span>
+                  </Link>
+                ) : null}
               </div>
             </>
           ) : hero && loaded ? (
@@ -532,6 +657,8 @@ export default function TodayPage() {
                 total={totalRed}
                 pct={overduePct}
                 tone="overdue"
+                liveCount={overdueCount}
+                onJump={() => jumpToLevel("RED")}
               />
               <OutlineRow
                 label="Waiting on you"
@@ -539,6 +666,8 @@ export default function TodayPage() {
                 total={totalAmber}
                 pct={waitingPct}
                 tone="waiting"
+                liveCount={waitingCount}
+                onJump={() => jumpToLevel("AMBER")}
               />
               <OutlineRow
                 label="Fresh, no rush"
@@ -546,6 +675,8 @@ export default function TodayPage() {
                 total={totalGreen}
                 pct={freshPct}
                 tone="fresh"
+                liveCount={freshCount}
+                onJump={() => jumpToLevel("GREEN")}
               />
               <li className={`flex items-center gap-[10px] ${allDone ? "" : "opacity-50"}`}>
                 <span
@@ -559,6 +690,13 @@ export default function TodayPage() {
               </li>
             </ul>
           </div>
+          {/* Upcoming birthdays sits below the day outline so the right
+              rail keeps its rhythm: today's work, then a soft reminder of
+              who has a birthday coming up. The component renders nothing
+              when the runner has no upcoming birthdays. */}
+          <div className="mt-[14px]">
+            <UpcomingBirthdays />
+          </div>
         </aside>
       </div>
     </Canvas>
@@ -570,29 +708,46 @@ function OutlineRow({
   done,
   total,
   pct,
-  tone
+  tone,
+  liveCount,
+  onJump
 }: {
   label: string;
   done: number;
   total: number;
   pct: number;
   tone: "overdue" | "waiting" | "fresh";
+  liveCount: number;
+  onJump: () => void;
 }) {
   const fillClass =
     tone === "overdue" ? "bg-risk-overdue" : tone === "waiting" ? "bg-risk-waiting" : "bg-risk-fresh";
-  return (
-    <li className="flex items-center gap-[10px]">
+  const inner = (
+    <>
       <span className={`inline-block h-[8px] w-[8px] rounded-full ${fillClass}`} />
       <span className="relative block h-[3px] w-[28px] overflow-hidden rounded-[2px] bg-hairline">
-        <span
-          className={`absolute inset-y-0 left-0 ${fillClass}`}
-          style={{ width: `${pct}%` }}
-        />
+        <span className={`absolute inset-y-0 left-0 ${fillClass}`} style={{ width: `${pct}%` }} />
       </span>
       <span>{label}</span>
       <span className="ml-auto font-mono text-[10px] text-ink-4">
         {done}/{total}
       </span>
+    </>
+  );
+  // No live threads of this level: nothing to jump to, so render it inert.
+  if (liveCount === 0) {
+    return <li className="flex items-center gap-[10px]">{inner}</li>;
+  }
+  return (
+    <li className="-mx-[8px]">
+      <button
+        type="button"
+        onClick={onJump}
+        title={`Jump to ${label.toLowerCase()}`}
+        className="flex w-full items-center gap-[10px] rounded-[8px] px-[8px] py-[4px] text-left text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+      >
+        {inner}
+      </button>
     </li>
   );
 }

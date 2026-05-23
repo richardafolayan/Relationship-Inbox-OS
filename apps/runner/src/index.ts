@@ -7,7 +7,9 @@ import express from "express";
 import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
-import type { NormalizedMessage, PlatformAdapter, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, stableHash } from "@inbox-os/core";
+import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -19,6 +21,7 @@ import {
   contactSnapshotFingerprint,
   operatorProfileFingerprint
 } from "./services/ai";
+import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
@@ -31,6 +34,7 @@ import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
+import { createBirthdaySync } from "./services/birthday-sync";
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import { createSelfProfileService } from "./services/self-profile";
@@ -254,6 +258,13 @@ const scheduledSendPromoter = createScheduledSendPromoter({
   eventBus
 });
 scheduledSendPromoter.start();
+
+// Syncs contact birthdays from the macOS AddressBook into Person rows once
+// at boot and then daily. Mac-only and read-only against Contacts; a no-op
+// when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
+if (runnerConfig.contacts.birthdaySyncEnabled) {
+  createBirthdaySync().start();
+}
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
@@ -702,6 +713,9 @@ async function loadVisibleThreadRows(options?: {
       rollingSummary: true,
       archivedAt: true,
       category: true,
+      closedStatus: true,
+      reconnectScore: true,
+      reconnectScoreReason: true,
       updatedAt: true,
       person: {
         select: {
@@ -709,7 +723,9 @@ async function loadVisibleThreadRows(options?: {
           displayName: true,
           inferredName: true,
           platform: true,
-          avatarUrl: true
+          avatarUrl: true,
+          birthday: true,
+          birthYear: true
         }
       },
       _count: {
@@ -1347,6 +1363,148 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
     data: { status: "FAILED", lastError: "cancelled by operator", nextAttemptAt: null }
   });
   res.json({ status: "ok", cancelled: result.count });
+}));
+
+// #287 phase 3.5. AI-score LinkedIn dormant threads for the Reconnect
+// page. Picks up to `limit` candidates that lack a fresh score, calls
+// the AI scorer for each, and persists score + reason + cache key.
+// Always safe to call: missing AI keys, transient outages, or a
+// per-thread failure simply leave the existing column unchanged. The
+// dashboard's deterministic relationship-signal ranking continues to
+// work in the absence of any AI score.
+app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
+  const limit = Math.min(
+    Math.max(1, Number(req.body?.limit) || 20),
+    100
+  );
+  const horizonCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+  const candidates = await prisma.thread.findMany({
+    where: {
+      platform: "LINKEDIN",
+      archivedAt: null,
+      // Dormant = last activity older than the 30-day horizon. Threads
+      // whose lastMessageAt is null are out of scope: the scorer needs
+      // at least one timestamp to anchor "days dormant".
+      lastMessageAt: { lt: horizonCutoff },
+      // Skip outreach threads regardless of category - reconnecting
+      // with a cold pitch contact is the opposite of what this page
+      // exists for. Threads without a category yet are still eligible.
+      NOT: { category: "outreach" }
+    },
+    select: {
+      id: true,
+      platform: true,
+      lastMessageAt: true,
+      lastInboundAt: true,
+      rollingSummary: true,
+      reconnectScore: true,
+      reconnectScoreCacheKey: true,
+      person: {
+        select: {
+          displayName: true,
+          enrichment: { select: { headline: true, currentRole: true, currentCompany: true } }
+        }
+      },
+      _count: { select: { messages: true } },
+      messages: {
+        orderBy: { timestamp: "desc" },
+        take: 6,
+        select: { direction: true, text: true, timestamp: true }
+      }
+    },
+    orderBy: { lastMessageAt: "desc" },
+    take: limit * 4 // overfetch so we can skip cache hits without blocking the limit
+  });
+
+  let scored = 0;
+  let skipped = 0;
+  let failed = 0;
+  let unavailable = false;
+
+  for (const thread of candidates) {
+    if (scored >= limit) break;
+
+    const outboundCount = thread.messages.filter((m) => m.direction === "OUT").length;
+    const totalCount = thread._count?.messages ?? thread.messages.length;
+    const lastInbound = thread.messages.find((m) => m.direction === "IN");
+    const daysDormant = thread.lastMessageAt
+      ? Math.max(0, Math.floor((Date.now() - thread.lastMessageAt.getTime()) / (24 * 60 * 60 * 1000)))
+      : 0;
+
+    // Cache key intentionally narrow: only re-score when the signals
+    // the AI was given actually change. A new outbound message would
+    // also un-dormant the thread, so this is mostly defensive.
+    const cacheKey = stableHash(
+      [
+        "reconnect-v1",
+        thread.lastMessageAt?.toISOString() ?? "no-last",
+        String(outboundCount),
+        String(totalCount),
+        cleanText(lastInbound?.text ?? "")
+      ].join("|")
+    );
+
+    if (thread.reconnectScoreCacheKey === cacheKey && thread.reconnectScore !== null) {
+      skipped += 1;
+      continue;
+    }
+
+    const enrichment = thread.person.enrichment;
+    const blurb = enrichment
+      ? [enrichment.currentRole, enrichment.currentCompany, enrichment.headline]
+          .filter((s) => s && s.trim().length > 0)
+          .join(" · ")
+      : null;
+
+    // Oldest-first turns for the prompt examples.
+    const orderedMessages = [...thread.messages]
+      .reverse()
+      .map((m) => ({
+        direction: m.direction as "IN" | "OUT",
+        text: m.text,
+        timestamp: m.timestamp.toISOString()
+      }));
+
+    const verdict = await aiService
+      .scoreReconnectCandidate({
+        displayName: thread.person.displayName,
+        contactBlurb: blurb,
+        daysDormant,
+        operatorOutboundCount: outboundCount,
+        totalMessageCount: totalCount,
+        messages: orderedMessages,
+        summary: thread.rollingSummary
+      })
+      .catch(() => null);
+
+    if (!verdict) {
+      // null can mean "no AI client" or "transient failure"; either way,
+      // there is no point hammering the loop. Mark and exit.
+      unavailable = true;
+      failed += 1;
+      break;
+    }
+
+    await prisma.thread.update({
+      where: { id: thread.id },
+      data: {
+        reconnectScore: verdict.score,
+        reconnectScoreReason: verdict.reason,
+        reconnectScoreCacheKey: cacheKey
+      }
+    });
+    scored += 1;
+  }
+
+  res.json({
+    status: unavailable ? "ai_unavailable" : "ok",
+    scored,
+    skipped,
+    failed,
+    candidates_seen: candidates.length,
+    limit
+  });
 }));
 
 app.post("/control/scan", asyncRoute(async (req, res) => {
@@ -2203,6 +2361,9 @@ async function resummarizeThreadById(threadId: string): Promise<
     displayName: thread.person.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
     previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    previousRemember: thread.rememberJson
+      ? (JSON.parse(thread.rememberJson) as RememberItem[])
+      : [],
     messages: orderedMessages.map((message) => ({
       direction: message.direction as "IN" | "OUT",
       text: message.text,
@@ -2217,7 +2378,8 @@ async function resummarizeThreadById(threadId: string): Promise<
       rollingSummary: summary.summary,
       whatTheyWant: summary.what_they_want,
       openLoopsJson: JSON.stringify(summary.open_loops),
-      toneNotesJson: JSON.stringify(summary.tone_notes)
+      toneNotesJson: JSON.stringify(summary.tone_notes),
+      rememberJson: JSON.stringify(summary.remember)
     }
   });
 
@@ -2278,6 +2440,14 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
+  // Writing-style profiles (issue #299) — so the rewrite matches how the
+  // operator and contact actually write to each other, not only the
+  // generic voice tier.
+  const operatorStyle = analyzeStyle(voiceSamples);
+  const contactStyle = analyzeStyle(
+    orderedMessages.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
+
   // Pull other-thread context for the same Person so the AI doesn't
   // repeat questions already answered elsewhere or contradict prior
   // tone. Bounded to 5 threads + person notes/tags.
@@ -2316,7 +2486,9 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     })),
     relationshipContext,
     operatorProfile: composeOperatorProfile,
-    contact: composeContactSnapshot
+    contact: composeContactSnapshot,
+    operatorStyle,
+    contactStyle
   });
 
   res.json({ text });
@@ -2643,7 +2815,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     thread.platform === "IMESSAGE"
       ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
       : { threadId: thread.id };
-  const [messagesDescWithExtra, lastInbound, lastOutbound] = await Promise.all([
+  // Style sample (issue #299) — newest messages on the thread for the
+  // writing-style analysis. A dedicated fixed-size window so it stays
+  // stable regardless of the messagesLimit / beforeMessageId pagination
+  // params, which keeps the suggested-replies cache key consistent with
+  // the /predraft pre-warm.
+  const STYLE_SAMPLE_LIMIT = 40;
+  const [messagesDescWithExtra, lastInbound, lastOutbound, styleSampleDesc] = await Promise.all([
     prisma.message.findMany({
       where: messageThreadFilter,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -2657,6 +2835,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     prisma.message.findFirst({
       where: { ...messageThreadFilter, direction: "OUT" },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }]
+    }),
+    prisma.message.findMany({
+      where: messageThreadFilter,
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: STYLE_SAMPLE_LIMIT,
+      select: { direction: true, text: true }
     })
   ]);
   const hasOlderMessages = messagesDescWithExtra.length > messageLimit;
@@ -2700,6 +2884,16 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
   );
 
+  // Writing-style profiles (issue #299) measured from the stable style
+  // sample — one per speaker direction. Fed into generateSuggestedReplies
+  // so suggestions match how the operator and contact actually write.
+  const operatorStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "OUT").map((m) => m.text)
+  );
+  const contactStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
+
   const aiInputs = {
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
@@ -2720,7 +2914,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
     lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null,
     operatorProfile,
-    contact: contactSnapshot
+    contact: contactSnapshot,
+    operatorStyle,
+    contactStyle
   };
   // Cache key over the AI inputs. Hashing keeps the column short and
   // doesn't leak content into the audit log if anyone ever inspects it. As
@@ -2754,7 +2950,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
     .join("|");
   const cacheKey = createHash("sha256")
-    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
+    .update(`v4|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}|${styleFingerprint(operatorStyle, contactStyle)}`)
     .digest("hex");
 
   let suggested: SuggestedRepliesOutput | undefined;
@@ -2908,6 +3104,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
       : [],
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
+    remember: thread.rememberJson ? (JSON.parse(thread.rememberJson) as RememberItem[]) : [],
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
@@ -3294,6 +3491,51 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
       };
     })
   );
+}));
+
+app.get("/data/birthdays", asyncRoute(async (_req, res) => {
+  // Contacts whose macOS Contacts card carries a birthday, surfaced as a
+  // gentle "reach out" reminder. Each links to the person's most-recent
+  // thread so the dashboard can open the conversation in one click.
+  const people = await prisma.person.findMany({
+    where: { birthday: { not: null } },
+    select: {
+      id: true,
+      displayName: true,
+      avatarUrl: true,
+      platform: true,
+      birthday: true,
+      birthYear: true,
+      threads: {
+        orderBy: { lastMessageAt: "desc" },
+        take: 1,
+        select: { id: true }
+      }
+    }
+  });
+
+  const upcoming = people
+    .map((person) => {
+      const daysUntil = daysUntilBirthday(person.birthday);
+      if (daysUntil === null) return null;
+      return {
+        personId: person.id,
+        personName: person.displayName,
+        personAvatarUrl: person.avatarUrl ?? null,
+        platform: person.platform,
+        threadId: person.threads[0]?.id ?? null,
+        monthDay: person.birthday,
+        birthYear: person.birthYear,
+        daysUntil
+      };
+    })
+    .filter(
+      (entry): entry is NonNullable<typeof entry> =>
+        entry !== null && entry.daysUntil <= BIRTHDAY_HORIZON_DAYS
+    )
+    .sort((a, b) => a.daysUntil - b.daysUntil || a.personName.localeCompare(b.personName));
+
+  res.json({ upcoming });
 }));
 
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {
@@ -3941,9 +4183,12 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   // Fetch the last ~6 turns to mirror the /data/thread call site. Pulling
   // the full recent window means a predraft pre-warm builds the same
   // recentSignature, so the cacheKey matches and the operator's next
-  // /data/thread fetch reuses the warmed cache row.
+  // /data/thread fetch reuses the warmed cache row. The style sample is
+  // fetched on the same fixed window as /data/thread so the style part
+  // of the cacheKey matches too (issue #299).
   const RECENT_TURN_WINDOW = 6;
-  const [recentTurnsDesc, operatorProfile, contactSnapshot] = await Promise.all([
+  const STYLE_SAMPLE_LIMIT = 40;
+  const [recentTurnsDesc, operatorProfile, contactSnapshot, styleSampleDesc] = await Promise.all([
     prisma.message.findMany({
       where: { threadId },
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -3951,8 +4196,20 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       select: { direction: true, text: true, timestamp: true }
     }),
     settingsStore.getOperatorProfile(),
-    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
+    conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName),
+    prisma.message.findMany({
+      where: { threadId },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: STYLE_SAMPLE_LIMIT,
+      select: { direction: true, text: true }
+    })
   ]);
+  const operatorStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "OUT").map((m) => m.text)
+  );
+  const contactStyle = analyzeStyle(
+    styleSampleDesc.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
   const recentMessages = [...recentTurnsDesc].reverse().map((m) => ({
     direction: m.direction as "IN" | "OUT",
     text: m.text,
@@ -3974,7 +4231,9 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
     operatorProfile,
-    contact: contactSnapshot
+    contact: contactSnapshot,
+    operatorStyle,
+    contactStyle
   };
   const lateBucket = (() => {
     if (!aiInputs.lastInboundAt) return "n";
@@ -3995,7 +4254,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     .map((m) => `${m.direction}:${m.timestamp}:${m.text}`)
     .join("|");
   const cacheKey = createHash("sha256")
-    .update(`v3|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}`)
+    .update(`v4|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}|${styleFingerprint(operatorStyle, contactStyle)}`)
     .digest("hex");
 
   if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
@@ -4087,6 +4346,13 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     .filter((m) => m.direction === "OUT")
     .map((m) => m.text);
 
+  // Writing-style profiles (issue #299) — keep the in-place rewrite true
+  // to how the operator and contact actually write to each other.
+  const operatorStyle = analyzeStyle(voiceSamples);
+  const contactStyle = analyzeStyle(
+    orderedMessages.filter((m) => m.direction === "IN").map((m) => m.text)
+  );
+
   const [rewriteOperatorProfile, rewriteContactSnapshot] = await Promise.all([
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName)
@@ -4103,7 +4369,9 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
       timestamp: m.timestamp.toISOString()
     })),
     operatorProfile: rewriteOperatorProfile,
-    contact: rewriteContactSnapshot
+    contact: rewriteContactSnapshot,
+    operatorStyle,
+    contactStyle
   });
 
   res.json({ text });

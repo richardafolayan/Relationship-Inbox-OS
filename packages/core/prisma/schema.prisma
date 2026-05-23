@@ -103,6 +103,15 @@ model Person {
   // "not_found", "timeout", "auth_required"). Cleared on the next successful
   // run. Surfaced in the dashboard footer when present.
   enrichmentFailedReason  String?
+  // Birthday sourced from the operator's macOS Contacts (AddressBook), kept
+  // current by the birthday-sync service. Stored as zero-padded "MM-DD" so the
+  // upcoming-birthdays lookup is a pure month/day comparison independent of
+  // year. `birthYear` holds the four-digit year when the contact card carries
+  // one (most do); null for year-less cards. Both stay null until a sync run
+  // matches this Person to a contact by phone or email. The macOS Contacts
+  // card is the source of truth; these are never edited from the dashboard.
+  birthday                String?
+  birthYear               Int?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -206,6 +215,11 @@ model Thread {
   // loops the operator has already handled.
   dismissedOpenLoopsJson String?
   toneNotesJson     String?
+  // AI-extracted durable facts worth remembering about the contact — exams,
+  // trips, interviews, life events. JSON array of { note, date } where date
+  // is an ISO YYYY-MM-DD string or null when no specific date is known.
+  // Re-derived from the transcript on every summary refresh, like openLoops.
+  rememberJson      String?
   // Set the first time we walk the thread's message list to the top and
   // persist every historical message. Subsequent scans only fetch the delta
   // (messages newer than `lastMessageAt`). Null means full-history backfill
@@ -256,6 +270,36 @@ model Thread {
   // Set by the AI service on first scan-time persist of a thread; null until
   // classified. Used by the Inbox filter dropdown to hide outreach noise.
   category String?
+
+  // Conversation-ending verdict (#287 phase 2.5). "closed" means the AI
+  // judges the last inbound to be a natural endpoint (thanks / ok / talk
+  // soon / acknowledgement) with no implicit ask. "open" means the AI
+  // expects the operator to reply. Null while unclassified or when the
+  // AI provider was unavailable. The dashboard's lightweight heuristic
+  // still runs alongside this field as a fast first pass; the AI verdict
+  // is only consulted for the ambiguous middle the heuristic does not
+  // catch.
+  //
+  // The cache key is sha256 of (last-inbound text + last-inbound
+  // timestamp); when the inbound changes the verdict is recomputed.
+  closedStatus         String?
+  closedStatusCacheKey String?
+
+  // Reconnect ranking (#287 phase 3.5). When a LinkedIn thread ages out
+  // of the active inbox it surfaces on /reconnect. The dashboard ranks
+  // candidates using deterministic relationship signals (outbound count,
+  // total turns, days dormant) for free, then layers this optional AI
+  // score on top: a 0-100 integer for how worth-reaching-out the
+  // particular relationship feels given the conversation arc, plus a
+  // short reason rendered as a quiet "why" alongside the row. Null
+  // until classified or when the AI provider was unavailable.
+  //
+  // Cache key is sha256 of (lastMessageAt + outboundCount + lastInboundText)
+  // so the score re-evaluates only when the relationship state shifts.
+  reconnectScore          Int?
+  reconnectScoreReason    String?
+  reconnectScoreCacheKey  String?
+
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 

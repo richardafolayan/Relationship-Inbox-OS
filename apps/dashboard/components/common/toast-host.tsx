@@ -21,23 +21,6 @@ const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: stri
   }
 };
 
-interface RunnerEventDetail {
-  type?: string;
-  threadId?: string;
-  reason?: string;
-  attempt?: number;
-}
-
-// Monotonic suffix so SSE toasts created within the same millisecond can't
-// collide. `sse-${Date.now()}` alone produced React's "two children with the
-// same key" warning (and duplicated/dropped toasts) when the runner emitted
-// MESSAGE_SENT events in a tight burst.
-let toastSeq = 0;
-function nextSseId(): string {
-  toastSeq += 1;
-  return `sse-${Date.now()}-${toastSeq}`;
-}
-
 // How far (px) a pointer-drag must travel before the toast is dismissed on
 // release. Below the threshold it springs back.
 const SWIPE_DISMISS_PX = 80;
@@ -58,8 +41,8 @@ export function ToastHost() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  // Single funnel for every toast source (in-app + SSE) so they all get the
-  // same cap and the same auto-dismiss behaviour.
+  // Single funnel for every toast source so they all get the same cap and
+  // the same auto-dismiss behaviour.
   const pushToast = useCallback(
     (toast: Toast) => {
       setToasts((prev) => {
@@ -84,43 +67,6 @@ export function ToastHost() {
   useEffect(() => {
     const off = onToast((toast) => pushToast(toast));
     return off;
-  }, [pushToast]);
-
-  // Mirror selected runner SSE events as toasts so background work surfaces
-  // even when no UI action triggered it. Kept narrow on purpose - the SSE
-  // stream is noisy and we don't want every receipt becoming a toast.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<RunnerEventDetail>).detail;
-      if (!detail || typeof detail.type !== "string") return;
-      // Event-type names must match what the runner emits in
-      // packages/core/src/types.ts and apps/runner/src/services/send.ts.
-      switch (detail.type) {
-        case "MESSAGE_SEND_FAILED":
-          pushToast({
-            id: nextSseId(),
-            kind: "error",
-            title: "Send failed",
-            description: detail.reason ?? "Runner reported a failed send",
-            durationMs: 9000,
-            createdAt: Date.now()
-          });
-          break;
-        case "MESSAGE_SENT":
-          pushToast({
-            id: nextSseId(),
-            kind: "success",
-            title: "Reply confirmed by platform",
-            durationMs: 5000,
-            createdAt: Date.now()
-          });
-          break;
-        default:
-          break;
-      }
-    };
-    window.addEventListener("runner-event", handler);
-    return () => window.removeEventListener("runner-event", handler);
   }, [pushToast]);
 
   // Clear every pending timer on unmount.

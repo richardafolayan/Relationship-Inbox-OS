@@ -32,6 +32,15 @@ export interface ThreadRowSource {
   rollingSummary: string | null;
   archivedAt: Date | null;
   category: string | null;
+  /** "closed" | "open" | null - see Thread.closedStatus. The dashboard
+   *  treats "closed" as a strong "set aside" signal even when the
+   *  lightweight heuristic does not flag it. */
+  closedStatus: string | null;
+  /** AI reconnect-worthy score, 0-100. See Thread.reconnectScore. */
+  reconnectScore: number | null;
+  /** Short reason string the dashboard renders as a quiet "why" caption
+   *  alongside top-ranked reconnect candidates. */
+  reconnectScoreReason: string | null;
   updatedAt: Date;
   person: {
     id: string;
@@ -39,6 +48,10 @@ export interface ThreadRowSource {
     inferredName: string | null;
     platform: PlatformName;
     avatarUrl: string | null;
+    // Birthday synced from the operator's macOS Contacts: "MM-DD" plus an
+    // optional four-digit year. Both null when no contact matched.
+    birthday: string | null;
+    birthYear: number | null;
   };
   _count?: {
     messages: number;
@@ -57,6 +70,13 @@ export interface ShapedThreadRow {
    */
   personInferredName: string | null;
   personAvatarUrl: string | null;
+  /**
+   * Birthday for this row's contact, synced from macOS Contacts: a "MM-DD"
+   * string plus an optional four-digit year. Both null when no contact
+   * matched. The dashboard derives the "birthday soon" badge from these.
+   */
+  personBirthday: string | null;
+  personBirthYear: number | null;
   platform: PlatformName;
   preview: string;
   /**
@@ -76,6 +96,31 @@ export interface ShapedThreadRow {
   identityWarning?: IdentityWarning | null;
   messageCount: number;
   category: string | null;
+  /**
+   * AI-extracted one-line context, what would make a great reply or
+   * what the contact is waiting on. Surfaced on Today + inbox rows as a
+   * proactive nudge and used as the body of new-message notifications.
+   * Null until the thread has been summarised.
+   */
+  whatTheyWant: string | null;
+  /**
+   * AI verdict on whether the conversation has wrapped up (#287 phase
+   * 2.5). "closed" = last inbound is a natural endpoint and no reply
+   * is owed; "open" = operator still owes a reply; null = unclassified
+   * (provider unavailable on the relevant scan, or no inbound yet).
+   * The dashboard treats "closed" as a strong "set aside" signal.
+   */
+  closedStatus: "closed" | "open" | null;
+  /**
+   * Reconnect-worthy score (#287 phase 3.5). 0-100 integer indicating
+   * how much it makes sense to send a deliberate "hey, been a while"
+   * message to this LinkedIn dormant. Null when not yet scored or the
+   * AI provider was unavailable; the dashboard falls back to its
+   * deterministic relationship-signal ranking in that case.
+   */
+  reconnectScore: number | null;
+  /** Short reason for the AI score; rendered as a quiet "why" caption. */
+  reconnectScoreReason: string | null;
   archivedAt: string | null;
   snoozedUntil: string | null;
   /**
@@ -224,6 +269,8 @@ export function toInboxRow(
     personName: source.person.displayName,
     personInferredName: source.person.inferredName ?? null,
     personAvatarUrl: source.person.avatarUrl ?? null,
+    personBirthday: source.person.birthday ?? null,
+    personBirthYear: source.person.birthYear ?? null,
     platform: source.platform,
     preview: previewText,
     lastMessageDirection: source.lastMessageDirection ?? null,
@@ -243,6 +290,10 @@ export function toInboxRow(
     identityWarning: row.identityWarning,
     messageCount: row.messageCount,
     category: source.category ?? null,
+    whatTheyWant: source.whatTheyWant ?? null,
+    closedStatus: (source.closedStatus as "closed" | "open" | null) ?? null,
+    reconnectScore: source.reconnectScore ?? null,
+    reconnectScoreReason: source.reconnectScoreReason ?? null,
     archivedAt: source.archivedAt?.toISOString() ?? null,
     snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
     personThreadCount

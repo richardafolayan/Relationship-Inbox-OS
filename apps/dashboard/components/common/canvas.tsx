@@ -47,12 +47,20 @@ export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
 
 interface SectionDividerProps {
   label: string;
+  // `tight` trims the leading gap for the first divider in a list, where
+  // the full `mt-14` would leave a dead band under the page controls.
+  tight?: boolean;
 }
 
 // `[label] ─────` divider used to bucket lists.
-export function SectionDivider({ label }: SectionDividerProps) {
+export function SectionDivider({ label, tight }: SectionDividerProps) {
   return (
-    <div className="mb-[18px] mt-14 flex items-center gap-[14px] px-1">
+    <div
+      className={cn(
+        "mb-[18px] flex items-center gap-[14px] px-1",
+        tight ? "mt-7" : "mt-14"
+      )}
+    >
       <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
     </div>

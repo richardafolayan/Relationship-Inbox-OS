@@ -11,7 +11,15 @@ import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { apiGet, apiPost } from "@/lib/api";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
-import type { HealthResponse, InboxResponse } from "@/lib/types";
+import {
+  detectNewInbound,
+  notifyNewMessage,
+  notifyNewMessageDigest,
+  requestNotificationPermission,
+  snapshotInbox,
+  type InboxSnapshot
+} from "@/lib/notifications";
+import type { HealthResponse, InboxResponse, InboxRow } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised between 8 and 13 minutes per
@@ -74,6 +82,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   const [attentionCount, setAttentionCount] = useState(0);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const autoScanInFlightRef = useRef(false);
+  // New-message desktop notifications: the previous inbox snapshot to diff
+  // against, plus a flag so the first poll only establishes a baseline
+  // rather than alerting for the whole existing inbox.
+  const inboxSnapshotRef = useRef<InboxSnapshot | null>(null);
+  const notificationsPrimedRef = useRef(false);
   const autoScanDisabled = useMemo(
     () =>
       resolveAutoScanDisabled({
@@ -83,6 +96,35 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
+  // Diff the latest inbox poll against the previous one and raise a
+  // desktop notification for any thread that gained a new inbound
+  // message. Gated so it stays a signal, not noise: silent on the first
+  // poll (baseline only), silent while the tab is focused (the Today feed
+  // already shows it), silent during quiet hours, and rolled up into one
+  // digest when a batch lands at once.
+  const maybeNotify = useCallback(
+    (rows: InboxRow[]) => {
+      const previous = inboxSnapshotRef.current;
+      inboxSnapshotRef.current = snapshotInbox(rows);
+      if (!notificationsPrimedRef.current || !previous) {
+        notificationsPrimedRef.current = true;
+        return;
+      }
+      if (typeof document !== "undefined" && document.visibilityState !== "hidden") return;
+      if (isQuietHoursActive()) return;
+      const fresh = detectNewInbound(previous, rows);
+      if (fresh.length === 0) return;
+      if (fresh.length <= 3) {
+        for (const row of fresh) {
+          notifyNewMessage(row, (threadId) => router.push(`/thread/${threadId}`));
+        }
+      } else {
+        notifyNewMessageDigest(fresh, () => router.push("/today"));
+      }
+    },
+    [router]
+  );
+
   // refreshMeta drops the /runner/data/settings poll the shell used to
   // perform every 8s. The setSettings result was only `void`-discarded —
   // pages that genuinely need settings (/settings, /platforms) fetch
@@ -101,8 +143,9 @@ export function AppShell({ children }: { children: ReactNode }) {
         (row) => row.riskLevel === "RED" || row.riskLevel === "AMBER"
       ).length;
       setAttentionCount(count);
+      maybeNotify(inboxData.rows);
     }
-  }, []);
+  }, [maybeNotify]);
 
   useEffect(() => {
     void refreshMeta();
@@ -177,6 +220,12 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [autoScanDisabled, autoScanEnabled]);
 
+  // Ask for desktop-notification permission once on mount so new-message
+  // alerts can fire when the operator is away from the tab.
+  useEffect(() => {
+    void requestNotificationPermission();
+  }, []);
+
   // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
   // `runner-resync` window events.
   useEffect(() => {
@@ -192,6 +241,12 @@ export function AppShell({ children }: { children: ReactNode }) {
         window.dispatchEvent(new CustomEvent("runner-event", { detail: payload }));
         if (payload.type === "RESYNC_REQUIRED") {
           window.dispatchEvent(new CustomEvent("runner-resync"));
+        }
+        // Refresh the app-wide inbox snapshot the moment a scan finishes
+        // (or a resync is demanded) so new-message notifications fire
+        // promptly - background tabs throttle the 8s poll hard, which is
+        // exactly when the notification matters most.
+        if (payload.type === "RESYNC_REQUIRED" || payload.type === "SCAN_FINISHED") {
           void refreshMeta();
         }
       } catch {
