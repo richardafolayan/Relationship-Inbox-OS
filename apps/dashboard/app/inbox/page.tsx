@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { Search } from "lucide-react";
+import { Archive, Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
@@ -601,6 +601,18 @@ export default function InboxPage() {
           )}
         </>
       )}
+
+      {loaded ? (
+        <div className="mt-14 flex justify-center border-t border-hairline pt-6">
+          <Link
+            href="/archived"
+            className="inline-flex items-center gap-[7px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
+          >
+            <Archive className="h-[13px] w-[13px]" strokeWidth={1.6} />
+            View archived threads
+          </Link>
+        </div>
+      ) : null}
 
       {selectMode ? (
         <div
