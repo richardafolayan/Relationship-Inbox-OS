@@ -724,16 +724,47 @@ function InboxRowItem({ row, selectMode, selected, onToggle }: InboxRowItemProps
       href={`/thread/${row.id}`}
       onClick={onClick}
       className={cn(
-        "grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
         selected ? "bg-paper-2" : ""
       )}
     >
-      <PersonAvatar
-        name={row.personName}
-        avatarUrl={row.personAvatarUrl}
-        size={28}
-        className="text-[11px]"
-      />
+      {/* Avatar doubles as the select target: a circle fades in over it on
+          row hover (and stays put in select mode) so multi-select is
+          discoverable without a ⌘-click. The button stops propagation so a
+          click selects rather than opening the thread. */}
+      <span className="relative h-7 w-7">
+        <PersonAvatar
+          name={row.personName}
+          avatarUrl={row.personAvatarUrl}
+          size={28}
+          className="text-[11px]"
+        />
+        <button
+          type="button"
+          aria-label={selected ? `Deselect ${row.personName}` : `Select ${row.personName}`}
+          aria-pressed={selected}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggle(row.id, { shiftKey: event.shiftKey });
+          }}
+          className={cn(
+            "absolute inset-0 grid place-items-center rounded-full border transition-opacity duration-calm",
+            selected
+              ? "border-accent bg-accent text-white"
+              : "border-hairline-strong bg-paper text-ink-3 hover:border-ink-3 hover:text-ink-2",
+            selectMode
+              ? "opacity-100"
+              : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          )}
+        >
+          {selected ? (
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.25">
+              <path d="M3 8.5l3 3 7-7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : null}
+        </button>
+      </span>
       <span className="rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3">
         {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
       </span>
