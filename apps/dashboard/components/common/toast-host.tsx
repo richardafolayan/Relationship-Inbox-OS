@@ -1,9 +1,15 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
 import { onToast, type Toast } from "@/lib/feedback";
 
 const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: string }> = {
+  pending: {
+    ring: "ring-1 ring-hairline",
+    dot: "text-ink-2",
+    label: "text-ink-1"
+  },
   info: {
     ring: "ring-1 ring-hairline",
     dot: "bg-ink-3",
@@ -155,7 +161,17 @@ function ToastCard({
       onPointerCancel={endDrag}
     >
       <div className="flex items-start gap-2">
-        <span className={`mt-[6px] inline-block h-[6px] w-[6px] flex-none rounded-full ${style.dot}`} />
+        {toast.kind === "pending" ? (
+          <Loader2
+            aria-hidden
+            className={`mt-[2px] h-[12px] w-[12px] flex-none animate-spin ${style.dot}`}
+          />
+        ) : (
+          <span
+            aria-hidden
+            className={`mt-[6px] inline-block h-[6px] w-[6px] flex-none rounded-full ${style.dot}`}
+          />
+        )}
         <div className="min-w-0 flex-1">
           <div className={`text-[13px] font-medium leading-tight ${style.label}`}>
             {toast.title}

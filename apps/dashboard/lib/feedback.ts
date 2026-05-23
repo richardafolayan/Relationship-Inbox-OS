@@ -2,7 +2,9 @@
 
 import { ApiRequestError } from "./api";
 
-export type ToastKind = "info" | "success" | "error";
+// `pending` is the in-flight kind: shows a spinner instead of a static dot,
+// stays put until the same id is replaced by a success/error toast.
+export type ToastKind = "pending" | "info" | "success" | "error";
 
 export interface ToastInput {
   id?: string;
@@ -35,7 +37,9 @@ export function showToast(input: ToastInput): void {
     title: input.title,
     description: input.description,
     receiptId: input.receiptId,
-    durationMs: input.durationMs ?? (input.kind === "error" ? 8000 : 3500),
+    durationMs:
+      input.durationMs ??
+      (input.kind === "pending" ? 60_000 : input.kind === "error" ? 8000 : 3500),
     createdAt: Date.now()
   };
   window.dispatchEvent(new CustomEvent<Toast>(TOAST_EVENT, { detail: toast }));
@@ -64,7 +68,7 @@ export function runActionWithFeedback<T>(
   }
 ): void {
   const pendingId = nextId();
-  showToast({ id: pendingId, kind: "info", title: opts.pending, durationMs: 60_000 });
+  showToast({ id: pendingId, kind: "pending", title: opts.pending });
 
   promise
     .then(async (value) => {
