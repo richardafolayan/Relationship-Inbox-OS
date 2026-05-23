@@ -6,7 +6,11 @@ import { apiGet } from "@/lib/api";
 import type { InboxResponse, InboxRow } from "@/lib/types";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { PersonAvatar } from "@/components/common/person-avatar";
-import { isReconnectCandidate, rankReconnectCandidates } from "@/lib/reconnect";
+import {
+  combinedReconnectScore,
+  isReconnectCandidate,
+  rankReconnectCandidates
+} from "@/lib/reconnect";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 
@@ -75,8 +79,16 @@ export default function ReconnectPage() {
         />
       ) : (
         <div className="flex flex-col">
-          {candidates.map((row) => (
-            <ReconnectRow key={row.id} row={row} />
+          {candidates.map((row, index) => (
+            <ReconnectRow
+              key={row.id}
+              row={row}
+              // The first few rows scoring above the "worth a hello"
+              // threshold get a quiet accent. The threshold is gentle so
+              // that even a deterministic-only ranking surfaces the
+              // best handful at the top with a subtle "Suggested" mark.
+              suggested={index < 3 && combinedReconnectScore(row) >= 55}
+            />
           ))}
         </div>
       )}
@@ -86,21 +98,25 @@ export default function ReconnectPage() {
 
 interface ReconnectRowProps {
   row: InboxRow;
+  suggested: boolean;
 }
 
 // Reconnect row layout deliberately differs from Inbox: there is no risk
 // dot or unread badge to defuse - everything here is, by definition,
 // quiet. The right column shows "quiet for Nm" so the operator can pick
-// the freshest-still-rememberable threads first.
-function ReconnectRow({ row }: ReconnectRowProps) {
+// the freshest-still-rememberable threads first. When the AI reconnect
+// scorer (phase 3.5) ran for this thread the reason caption sits under
+// the preview as a quiet "why".
+function ReconnectRow({ row, suggested }: ReconnectRowProps) {
   const preview = normalizePreview(row.preview);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${preview}` : preview;
   const quietFor = formatRelative(row.lastMessageAt);
+  const reason = row.reconnectScoreReason?.trim() || null;
   return (
     <Link
       href={`/thread/${row.id}`}
-      className="grid grid-cols-[28px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2"
+      className="grid grid-cols-[28px_1fr_auto] items-start gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2"
     >
       <PersonAvatar
         name={row.personName}
@@ -108,11 +124,21 @@ function ReconnectRow({ row }: ReconnectRowProps) {
         size={28}
         className="text-[11px]"
       />
-      <span className="flex min-w-0 items-baseline gap-[10px]">
-        <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
-          {row.personName}
+      <span className="flex min-w-0 flex-col gap-[3px]">
+        <span className="flex min-w-0 items-baseline gap-[10px]">
+          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+            {row.personName}
+          </span>
+          {suggested ? (
+            <span className="shrink-0 rounded-full bg-accent/15 px-[7px] py-[2px] font-mono text-[10px] uppercase tracking-[0.08em] text-accent-ink">
+              Suggested
+            </span>
+          ) : null}
+          <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
         </span>
-        <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
+        {reason ? (
+          <span className="block text-[12px] text-ink-3">{reason}</span>
+        ) : null}
       </span>
       <span className="font-mono text-[11px] text-ink-3">quiet for {quietFor}</span>
     </Link>

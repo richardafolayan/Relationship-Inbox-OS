@@ -285,6 +285,21 @@ model Thread {
   closedStatus         String?
   closedStatusCacheKey String?
 
+  // Reconnect ranking (#287 phase 3.5). When a LinkedIn thread ages out
+  // of the active inbox it surfaces on /reconnect. The dashboard ranks
+  // candidates using deterministic relationship signals (outbound count,
+  // total turns, days dormant) for free, then layers this optional AI
+  // score on top: a 0-100 integer for how worth-reaching-out the
+  // particular relationship feels given the conversation arc, plus a
+  // short reason rendered as a quiet "why" alongside the row. Null
+  // until classified or when the AI provider was unavailable.
+  //
+  // Cache key is sha256 of (lastMessageAt + outboundCount + lastInboundText)
+  // so the score re-evaluates only when the relationship state shifts.
+  reconnectScore          Int?
+  reconnectScoreReason    String?
+  reconnectScoreCacheKey  String?
+
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 

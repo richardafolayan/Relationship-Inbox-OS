@@ -92,6 +92,18 @@ const closedStatusSchema = z.object({
   status: z.enum(["closed", "open"])
 });
 
+// #287 phase 3.5. Reconnect score: a 0-100 integer for "how worth
+// reaching out is this dormant relationship?" plus a single short reason
+// the dashboard can surface as a quiet "why" caption. The model is asked
+// to be conservative; the dashboard already orders dormants by simple
+// relationship signals (outbound count, depth, recency) so a near-zero
+// score just means "AI does not see a reason to nudge this one
+// specifically", not that the relationship is worthless.
+const reconnectScoreSchema = z.object({
+  score: z.number().int().min(0).max(100),
+  reason: z.string().max(160)
+});
+
 const friendshipSummarySchema = z.object({
   how_you_know_each_other: z.string(),
   recent_topics: z.array(z.string()).default([]),
@@ -350,6 +362,42 @@ Examples:
   OPEN   — OUT: "let me know what you think"
 
 Return strict JSON: { "status": "closed" | "open" }`;
+
+// #287 phase 3.5. Reconnect-worthy scorer. Asked to rate, on a 0-100
+// scale, how much it makes sense for the operator to send a deliberate
+// "hey, been a while" message to this LinkedIn contact right now. The
+// dashboard already ranks dormants by deterministic signals (outbound
+// count, depth, recency); this prompt adds the qualitative read of the
+// arc: did the relationship feel mutual? did the last exchange leave
+// something open? does the contact's profile / role suggest a natural
+// hook?
+//
+// The prompt is deliberately conservative: a score of 50 is "neutral,
+// could go either way" and the model is reminded that "low" is fine —
+// it does not have to manufacture reasons to message someone.
+export const RECONNECT_SCORE_PROMPT = `Rate, from 0 to 100, how worth it would feel for the operator to send a deliberate "hey, been a while" message to this LinkedIn contact today.
+
+A higher score means the relationship looks like one where a gentle reconnect is welcome AND there is a natural beat to hang it on (a topic from the prior arc, a role change, an unanswered thread of conversation, an obvious common ground). A lower score means the relationship feels transactional, the contact's last message clearly closed the conversation, or there is no specific reason to surface this one ahead of the rest.
+
+Scoring guide:
+  90-100 — Strong: real mutual relationship, the last exchange left a natural reopen point, or the contact's profile / topic gives an obvious hook.
+  70-89  — Good: warm tie, the operator probably wants to keep this person in their orbit; reasonable to nudge.
+  50-69  — Neutral: ordinary professional acquaintance; reconnecting is fine but no particular reason today.
+  20-49  — Weak: thin relationship, transactional history, or the conversation already wrapped fully.
+  0-19   — Discourage: cold pitch in disguise, fully one-sided, or the last exchange explicitly ended the relationship.
+
+Decision rules:
+  - Be conservative. When uncertain, lean toward the middle (40-60). False high scores nudge the operator into awkward outreach; that is worse than missing one.
+  - Mutual back-and-forth depth is the single best signal. Long one-sided threads from a recruiter or pitch contact should score low.
+  - The freshness of the dormancy matters: very long lulls (years) reduce the score unless there is a strong hook.
+  - Do not invent details. If the inputs give you nothing specific to point to, the score belongs in the 40-60 band.
+
+Return strict JSON: { "score": 0-100 integer, "reason": "<one short sentence, plain English, no more than 25 words>" }
+
+Examples of good reasons (style only, not actual outputs):
+  "you swapped notes on hiring last year and they just took a new role"
+  "deep back-and-forth on the product side, last lull was after they moved jobs"
+  "one-sided pitch thread, nothing to hang a hello on"`;
 
 // Casual-DM voice profile. Applies on WhatsApp / iMessage / Instagram /
 // TikTok DMs. A GENERIC scaffold: it sets the relaxed register without
@@ -2109,12 +2157,94 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
     }
   }
 
+  /**
+   * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
+   * plus a one-sentence reason for how worth it would feel for the
+   * operator to send a deliberate reconnect message to this LinkedIn
+   * dormant contact today. Returns null when the AI provider was
+   * unavailable; the dashboard then ranks dormants by deterministic
+   * relationship signals alone (outbound count, depth, recency).
+   */
+  async function scoreReconnectCandidate(input: {
+    displayName: string;
+    /** Headline / current role line, or null when no enrichment exists. */
+    contactBlurb?: string | null;
+    daysDormant: number;
+    operatorOutboundCount: number;
+    totalMessageCount: number;
+    /** Oldest-first; up to 4 most recent turns is plenty for the model. */
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+  }): Promise<{ score: number; reason: string } | null> {
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return null;
+    }
+
+    const recentTurns = input.messages
+      .slice(-4)
+      .map((m) => ({ direction: m.direction, text: safeTruncate(m.text, 500) }))
+      .filter((m) => m.text.trim().length > 0);
+
+    if (recentTurns.length === 0) {
+      return null;
+    }
+
+    const blurbLine = input.contactBlurb?.trim()
+      ? `Contact blurb: ${safeTruncate(input.contactBlurb, 400)}`
+      : "Contact blurb: (none)";
+    const summaryLine = input.summary?.trim()
+      ? `Summary so far: ${safeTruncate(input.summary, 600)}`
+      : "Summary so far: (none)";
+
+    const prompt = `${RECONNECT_SCORE_PROMPT}
+
+Person name: ${input.displayName}
+${blurbLine}
+${summaryLine}
+Days dormant: ${input.daysDormant}
+Operator outbound count: ${input.operatorOutboundCount}
+Total message count: ${input.totalMessageCount}
+Recent messages (oldest first):
+${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return null;
+      const parsed = reconnectScoreSchema.parse(parseAiJson(content, model));
+      return {
+        score: parsed.score,
+        // Apply voice rules so the reason caption respects the same
+        // punctuation rules as the rest of the dashboard's AI strings.
+        reason: applyVoiceRules(parsed.reason).trim()
+      };
+    } catch (error) {
+      console.warn(
+        `[ai] scoreReconnectCandidate failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
+      );
+      return null;
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
     transformReply,
     classifyThreadCategory,
     classifyThreadClosed,
+    scoreReconnectCandidate,
     generateContactSummary,
     generateConversationStarters,
     composeInVoice,

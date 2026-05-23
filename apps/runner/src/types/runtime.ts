@@ -185,6 +185,22 @@ export interface AiService {
     summary?: string | null;
   }): Promise<"closed" | "open" | null>;
   /**
+   * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
+   * plus a one-sentence reason for how worth it would feel to send the
+   * LinkedIn dormant a deliberate "hey, been a while" message today.
+   * Null when the AI provider was unavailable; the dashboard ranks
+   * dormants by deterministic signals alone in that case.
+   */
+  scoreReconnectCandidate(input: {
+    displayName: string;
+    contactBlurb?: string | null;
+    daysDormant: number;
+    operatorOutboundCount: number;
+    totalMessageCount: number;
+    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    summary?: string | null;
+  }): Promise<{ score: number; reason: string } | null>;
+  /**
    * Short paragraph (2-3 sentences) that introduces a contact based on
    * their LinkedIn profile data and any obvious commonality with the
    * operator's own profile. Returns null when the AI service is
