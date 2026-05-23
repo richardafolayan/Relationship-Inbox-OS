@@ -460,6 +460,12 @@ export default function ThreadPage() {
   // Voice-match: rebuilt only when the thread's outbound history
   // changes. Score is debounced against the composer text below.
   const [voiceRewritePending, setVoiceRewritePending] = useState(false);
+  // Issue #331. Loops the AI thinks the current draft addresses. The
+  // ActionItemsChecklist uses these to auto-tick (full_drafts) or
+  // highlight (writing_support) covered rows. Cleared when the thread
+  // changes or the composer empties; refreshed by a debounced effect
+  // that hits /control/thread/:id/check-draft.
+  const [aiAddressedLoops, setAiAddressedLoops] = useState<string[]>([]);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
@@ -1365,6 +1371,72 @@ export default function ThreadPage() {
     () => scoreDraftAgainstCorpus(composer, voiceCorpus),
     [composer, voiceCorpus]
   );
+
+  // Issue #331. Debounced draft-coverage check: ~1.4s after the operator
+  // stops typing, ask the runner which open loops the in-flight draft
+  // addresses. Skipped at memory_only (the privacy-tightest tier opts
+  // out of all AI writing aids), when there are no open loops to score
+  // against, and for drafts under 20 chars (saves tokens on stubs like
+  // "ok" or "yeah"). The ref guard discards stale responses if the
+  // operator keeps typing or switches threads mid-flight.
+  const draftCoverageThreadIdRef = useRef<string | null>(null);
+  const draftCoverageDraftRef = useRef<string>("");
+  useEffect(() => {
+    if (!thread) return;
+    const aiLevel = profile?.aiHelpLevel ?? "writing_support";
+    // Functional updater + ref-equal short-circuit so clearing on every
+    // re-render doesn't itself become a dependency that re-fires the
+    // effect.
+    const clearIfNotEmpty = () =>
+      setAiAddressedLoops((prev) => (prev.length === 0 ? prev : []));
+    if (aiLevel === "memory_only") {
+      clearIfNotEmpty();
+      return;
+    }
+    const trimmed = composer.trim();
+    if (trimmed.length < 20 || thread.openLoops.length === 0) {
+      clearIfNotEmpty();
+      return;
+    }
+    const threadId = thread.id;
+    draftCoverageThreadIdRef.current = threadId;
+    draftCoverageDraftRef.current = trimmed;
+    const handle = window.setTimeout(() => {
+      void apiPost<{ addressed: string[] }>(`/runner/control/thread/${threadId}/check-draft`, {
+        draft: trimmed
+      })
+        .then((output) => {
+          // Latest-write-wins: ignore responses from a stale debounce
+          // (operator either kept typing past this fire or moved on
+          // to a different thread).
+          if (
+            draftCoverageThreadIdRef.current !== threadId ||
+            draftCoverageDraftRef.current !== trimmed
+          ) {
+            return;
+          }
+          setAiAddressedLoops(output.addressed);
+        })
+        .catch((coverageError: unknown) => {
+          // Coverage is a polish — never escalate to the visible error
+          // badge. A console line is enough for debugging without
+          // distracting the operator mid-draft.
+          console.warn(
+            "[draft-coverage]",
+            coverageError instanceof Error ? coverageError.message : String(coverageError)
+          );
+        });
+    }, 1400);
+    return () => window.clearTimeout(handle);
+  }, [composer, thread, profile?.aiHelpLevel]);
+
+  // Reset AI coverage when the thread changes — local state from the
+  // previous thread shouldn't bleed into a new one.
+  useEffect(() => {
+    setAiAddressedLoops([]);
+    draftCoverageThreadIdRef.current = null;
+    draftCoverageDraftRef.current = "";
+  }, [thread?.id]);
 
   // Pagination is now driven by the runner: `thread.messages` is whatever
   // the latest fetch returned (initial slice or initial + lazily-pulled
@@ -3057,6 +3129,14 @@ export default function ThreadPage() {
             dismissedOpenLoops={thread.dismissedOpenLoops}
             isReopenMode={isReopenMode}
             onDismiss={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+            aiAddressedLoops={aiAddressedLoops}
+            aiCoverageMode={
+              aiHelpLevel === "memory_only"
+                ? "off"
+                : aiHelpLevel === "full_drafts"
+                  ? "auto-tick"
+                  : "highlight"
+            }
           />
 
           {/* Things to remember - durable facts (exams, trips, life events)

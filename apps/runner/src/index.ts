@@ -2559,6 +2559,66 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
   res.json({ text });
 }));
 
+// Issue #331. Reads the operator's in-flight draft against the thread's
+// active open loops and returns the subset the draft already addresses.
+// The dashboard debounces calls here while the operator types so the
+// reply checklist can auto-tick covered items. Caps the draft at 5k chars
+// before validation so a runaway paste never burns model tokens.
+app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({
+      draft: z.string().min(1).max(5000)
+    })
+    .parse(req.body);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: {
+      person: true,
+      messages: {
+        // Tail of the conversation gives the model just enough context
+        // to judge whether a short ack actually answers a specific loop.
+        orderBy: { timestamp: "desc" },
+        take: 8
+      }
+    }
+  });
+  if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+
+  const rawOpenLoops = thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [];
+  const dismissed = new Set(
+    thread.dismissedOpenLoopsJson ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[]) : []
+  );
+  // Only check against loops the operator hasn't set aside. Sending
+  // dismissed loops to the model would burn tokens on items the user
+  // has explicitly opted out of and produces phantom auto-ticks for rows
+  // the dashboard no longer renders.
+  const openLoops = rawOpenLoops.filter((loop) => !dismissed.has(loop));
+  if (openLoops.length === 0) {
+    res.json({ addressed: [] });
+    return;
+  }
+
+  const recentMessages = [...thread.messages].reverse().map((m) => ({
+    direction: m.direction as "IN" | "OUT",
+    text: m.text,
+    timestamp: m.timestamp.toISOString()
+  }));
+
+  const { addressed } = await aiService.checkDraftCoverage({
+    displayName: thread.person.displayName,
+    draft: payload.draft,
+    openLoops,
+    recentMessages
+  });
+
+  res.json({ addressed });
+}));
+
 // "Tell the AI what you want to say, get it back in your voice."
 // The operator types a brief intent (a sentence or two) and gets back
 // a sendable draft calibrated to how they've previously written on

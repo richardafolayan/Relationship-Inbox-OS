@@ -122,6 +122,15 @@ const askAboutPersonSchema = z.object({
   answer: z.string()
 });
 
+// Issue #331. Per-loop verdict the model returns when it reads the
+// operator's in-flight draft against the thread's open loops. "addressed"
+// = the draft substantively responds to this loop; "not_addressed" = the
+// draft says nothing on this point. There's no "partial" tier: anything
+// short of a real answer is left unticked so the operator decides.
+const draftCoverageSchema = z.object({
+  addressed: z.array(z.string()).default([])
+});
+
 // Voice + style rules applied to every AI generation (summary, suggested
 // replies, transformReply, classifier). Centralised so a tweak is one edit.
 // Three constraints in particular drive the rest of the prompts in this file:
@@ -2297,6 +2306,95 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
     }
   }
 
+  // Issue #331. Reads the operator's in-flight draft against the active
+  // open loops and returns the subset the draft addresses. The dashboard
+  // uses this to auto-tick the reply checklist while the operator types.
+  // Conservative by design: anything short of a substantive answer is
+  // left off the addressed list. Returns an empty array (not null) on
+  // failure so the UI gracefully renders "nothing inferred yet" rather
+  // than wedging on an error path.
+  async function checkDraftCoverage(input: {
+    displayName: string;
+    draft: string;
+    openLoops: string[];
+    /** Last few turns oldest-first for context (lets the model judge whether
+     *  a short ack like "yes" actually addresses the specific loop). */
+    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+  }): Promise<{ addressed: string[] }> {
+    if (input.openLoops.length === 0 || !input.draft.trim()) {
+      return { addressed: [] };
+    }
+
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return { addressed: [] };
+    }
+
+    const recentTurns = input.recentMessages
+      .slice(-4)
+      .map((m) => {
+        const speaker = m.direction === "OUT" ? "operator" : "contact";
+        return `${speaker}: ${safeTruncate(m.text, 400)}`;
+      })
+      .join("\n");
+
+    const loopsBlock = input.openLoops
+      .map((loop, i) => `${i + 1}. ${loop}`)
+      .join("\n");
+
+    const prompt = `The operator is writing a reply to ${input.displayName}. Decide which of the LOOPS below the draft substantively addresses.
+
+A loop counts as ADDRESSED only if the draft genuinely responds to it: answers the question, makes the decision, acknowledges the news, or confirms the action. A passing mention, a vague hedge, or a related topic is NOT enough. When in doubt, leave it off.
+
+Return strict JSON matching this exact shape:
+{
+  "addressed": ["exact loop string", ...]
+}
+
+Rules:
+- Each entry in "addressed" MUST be the loop string COPIED VERBATIM from the list below. Do not paraphrase, shorten, or invent new strings. Anything that doesn't match a loop verbatim is ignored.
+- Empty array is fine. Most drafts only cover one or two loops at a time.
+
+Recent conversation (oldest first):
+${recentTurns || "(no prior messages)"}
+
+LOOPS:
+${loopsBlock}
+
+DRAFT:
+${safeTruncate(input.draft, 2000)}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) return { addressed: [] };
+      const parsed = draftCoverageSchema.parse(parseAiJson(content, model));
+      // Keep only loops that match the input verbatim. The prompt asks
+      // for copies, but models occasionally paraphrase; dropping the
+      // mismatches stops the dashboard from trying to tick a row that
+      // doesn't exist in its local state.
+      const loopSet = new Set(input.openLoops);
+      const addressed = parsed.addressed.filter((loop) => loopSet.has(loop));
+      return { addressed };
+    } catch (error) {
+      console.warn(
+        `[ai] checkDraftCoverage failed (provider=${provider}, model=${model}); returning empty. ${classifyLlmError(error, provider)}`
+      );
+      return { addressed: [] };
+    }
+  }
+
   return {
     updateThreadSummary,
     generateSuggestedReplies,
@@ -2310,6 +2408,7 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
     suggestSnoozeTimings,
     summarisePersonForFriendship,
     askAboutPerson,
-    summarisePilotReport
+    summarisePilotReport,
+    checkDraftCoverage
   };
 }
