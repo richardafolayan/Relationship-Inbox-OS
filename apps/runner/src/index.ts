@@ -8,6 +8,7 @@ import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday } from "@inbox-os/core";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
@@ -31,6 +32,7 @@ import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
+import { createBirthdaySync } from "./services/birthday-sync";
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import { createSelfProfileService } from "./services/self-profile";
@@ -254,6 +256,13 @@ const scheduledSendPromoter = createScheduledSendPromoter({
   eventBus
 });
 scheduledSendPromoter.start();
+
+// Syncs contact birthdays from the macOS AddressBook into Person rows once
+// at boot and then daily. Mac-only and read-only against Contacts; a no-op
+// when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
+if (runnerConfig.contacts.birthdaySyncEnabled) {
+  createBirthdaySync().start();
+}
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
 const suggestedRepliesInFlight = new Map<string, Promise<SuggestedRepliesOutput>>();
@@ -709,7 +718,9 @@ async function loadVisibleThreadRows(options?: {
           displayName: true,
           inferredName: true,
           platform: true,
-          avatarUrl: true
+          avatarUrl: true,
+          birthday: true,
+          birthYear: true
         }
       },
       _count: {
@@ -3294,6 +3305,51 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
       };
     })
   );
+}));
+
+app.get("/data/birthdays", asyncRoute(async (_req, res) => {
+  // Contacts whose macOS Contacts card carries a birthday, surfaced as a
+  // gentle "reach out" reminder. Each links to the person's most-recent
+  // thread so the dashboard can open the conversation in one click.
+  const people = await prisma.person.findMany({
+    where: { birthday: { not: null } },
+    select: {
+      id: true,
+      displayName: true,
+      avatarUrl: true,
+      platform: true,
+      birthday: true,
+      birthYear: true,
+      threads: {
+        orderBy: { lastMessageAt: "desc" },
+        take: 1,
+        select: { id: true }
+      }
+    }
+  });
+
+  const upcoming = people
+    .map((person) => {
+      const daysUntil = daysUntilBirthday(person.birthday);
+      if (daysUntil === null) return null;
+      return {
+        personId: person.id,
+        personName: person.displayName,
+        personAvatarUrl: person.avatarUrl ?? null,
+        platform: person.platform,
+        threadId: person.threads[0]?.id ?? null,
+        monthDay: person.birthday,
+        birthYear: person.birthYear,
+        daysUntil
+      };
+    })
+    .filter(
+      (entry): entry is NonNullable<typeof entry> =>
+        entry !== null && entry.daysUntil <= BIRTHDAY_HORIZON_DAYS
+    )
+    .sort((a, b) => a.daysUntil - b.daysUntil || a.personName.localeCompare(b.personName));
+
+  res.json({ upcoming });
 }));
 
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {

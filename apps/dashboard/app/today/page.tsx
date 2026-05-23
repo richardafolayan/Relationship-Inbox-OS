@@ -19,6 +19,7 @@ import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -568,6 +569,13 @@ export default function TodayPage() {
                 <span className="ml-auto font-mono text-[10px] text-ink-4">{allDone ? "✓" : "-"}</span>
               </li>
             </ul>
+          </div>
+          {/* Upcoming birthdays sits below the day outline so the right
+              rail keeps its rhythm: today's work, then a soft reminder of
+              who has a birthday coming up. The component renders nothing
+              when the runner has no upcoming birthdays. */}
+          <div className="mt-[14px]">
+            <UpcomingBirthdays />
           </div>
         </aside>
       </div>

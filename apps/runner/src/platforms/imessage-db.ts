@@ -451,6 +451,30 @@ export class IMessageDb {
     return rows.map((r) => r.handleId);
   }
 
+  /**
+   * Map every chat's guid to its participant handle ids (phone numbers /
+   * emails). A 1:1 conversation has exactly one handle; group chats have
+   * several. Used by the birthday sync to bridge a Thread (keyed by chat
+   * guid) back to a contact handle for matching against macOS Contacts.
+   */
+  listChatHandleMap(): Map<string, string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT c.guid AS guid, h.id AS handleId
+           FROM chat c
+           JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+           JOIN handle h ON h.ROWID = chj.handle_id`
+      )
+      .all() as Array<{ guid: string; handleId: string }>;
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      const list = map.get(row.guid) ?? [];
+      list.push(row.handleId);
+      map.set(row.guid, list);
+    }
+    return map;
+  }
+
   private fetchAttachmentsByMessageRowIds(rowIds: number[]): Map<number, IMessageAttachment[]> {
     const map = new Map<number, IMessageAttachment[]>();
     if (rowIds.length === 0) return map;

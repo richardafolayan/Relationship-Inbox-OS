@@ -28,12 +28,6 @@
     "paths": {
       "@/*": [
         "./*"
-      ],
-      "@inbox-os/core": [
-        "../../packages/core/src/index.ts"
-      ],
-      "@inbox-os/core/*": [
-        "../../packages/core/src/*"
       ]
     }
   },
