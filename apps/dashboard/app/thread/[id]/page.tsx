@@ -405,6 +405,7 @@ export default function ThreadPage() {
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
   const [reassessing, setReassessing] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
   const [composeIntent, setComposeIntent] = useState("");
   const [composing, setComposing] = useState(false);
@@ -2100,6 +2101,26 @@ export default function ThreadPage() {
                 Mark as handled
               </Button>
               <Button
+                variant="ghost"
+                disabled={archiving}
+                onClick={() => {
+                  if (archiving) return;
+                  setArchiving(true);
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
+                    (message) => {
+                      setError(message);
+                      if (message) setArchiving(false);
+                    },
+                    () => router.push("/today")
+                  );
+                }}
+                title="Move this thread out of the active inbox (you can find it in Archived)"
+                className="px-3 py-1.5 text-[12px]"
+              >
+                {archiving ? "Archiving…" : "Archive"}
+              </Button>
+              <Button
                 variant={aiOpen ? "primary" : "quiet"}
                 onClick={() => setAiOpen((v) => !v)}
                 title="Toggle the AI assist sidebar"
@@ -2145,16 +2166,7 @@ export default function ThreadPage() {
                       );
                     }
                   },
-                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) },
-                  {
-                    label: "Archive",
-                    onSelect: () =>
-                      runAction(
-                        apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
-                        setError,
-                        () => router.push("/today")
-                      )
-                  }
+                  { label: "Receipts", onSelect: () => setReceiptsOpen(true) }
                 ]}
               />
             </header>
