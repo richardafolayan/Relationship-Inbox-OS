@@ -17,8 +17,10 @@ import type {
   FriendshipSummaryOutput,
   OperatorProfile,
   PilotReportTriage,
-  SettingsStore
+  SettingsStore,
+  StyleProfile
 } from "../types/runtime";
+import { describeContactStyle, describeOperatorStyle } from "./style";
 import {
   providerRegistry,
   fallbackChain,
@@ -1207,6 +1209,14 @@ ${transcript}`;
     lastOutboundAt?: string | null;
     operatorProfile?: OperatorProfile | null;
     contact?: ContactProfileSnapshot | null;
+    /**
+     * Writing style measured from the operator's / contact's own recent
+     * messages on this thread. Rendered into the prompt so suggestions
+     * adapt to how each side actually writes — length, punctuation,
+     * capitalisation, emoji (issue #299). Null when history is too thin.
+     */
+    operatorStyle?: StyleProfile | null;
+    contactStyle?: StyleProfile | null;
   }): Promise<SuggestedRepliesOutput> {
     const isOutreach = input.category === "outreach";
 
@@ -1313,6 +1323,19 @@ Hard rules:
 - No generic "hey how have you been" filler unless there's literally nothing else in the transcript. In that case one slot can be a warm "hey how are things" but the other two must still ground in something real.
 - Each intent describes the callback: "Ask about the Lagos move", "Follow up on exam stress", "Mention you watched the doc". Avoid "Clarifying question" — there's nothing to clarify in reopen mode.`;
 
+    // Observed-style fragments (issue #299) — concrete length / emoji /
+    // full-stop / capitalisation signals measured from real messages so
+    // suggestions match how the operator and contact actually write,
+    // not only the generic voice tier. Each renders to "" when there
+    // isn't enough history, so the join collapses cleanly.
+    const styleGuidance = [
+      describeOperatorStyle(input.operatorStyle),
+      describeContactStyle(input.contactStyle)
+    ]
+      .filter((fragment) => fragment.length > 0)
+      .map((fragment) => `\n\n${fragment}`)
+      .join("");
+
     const prompt = `Return strict JSON matching this exact shape:
 {
   "replies": [
@@ -1328,7 +1351,7 @@ Each reply text must be a complete, sendable message under 280 characters,
 colons. Match the conversation's register: warm if it's warm, formal if
 it's formal.
 
-${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${
+${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -1662,6 +1685,11 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     };
     operatorProfile?: OperatorProfile | null;
     contact?: ContactProfileSnapshot | null;
+    /** Observed writing style of the operator / contact on this thread,
+     *  rendered into the prompt so the rewrite matches how each side
+     *  actually writes (issue #299). Null when history is too thin. */
+    operatorStyle?: StyleProfile | null;
+    contactStyle?: StyleProfile | null;
   }): Promise<string> {
     const trimmed = input.intent.trim();
     if (!trimmed) return "";
@@ -1738,6 +1766,18 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       return `\n\nRelationship context (other threads with this person, do NOT repeat questions already answered elsewhere):${tagsLine}${notesLine}\n${exchanges.join("\n")}`;
     })();
 
+    // Observed-style fragments (issue #299): concrete length / emoji /
+    // full-stop / capitalisation signals measured from real messages, so
+    // the rewrite matches how each side actually writes. Each renders to
+    // "" when history is too thin, so the join collapses cleanly.
+    const styleGuidance = [
+      describeOperatorStyle(input.operatorStyle),
+      describeContactStyle(input.contactStyle)
+    ]
+      .filter((fragment) => fragment.length > 0)
+      .map((fragment) => `\n\n${fragment}`)
+      .join("");
+
     const prompt = `Rewrite the operator's intent below as a complete, sendable ${platformMessageNoun(input.platform)} in the operator's voice. Match the length and energy of the recipient's last message (reciprocity rule from system prompt). When in doubt, err shorter. The voice samples below are additional calibration for this thread, the few-shot examples in the system prompt are the primary reference.
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
@@ -1747,7 +1787,7 @@ Recipient: ${input.displayName}
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
 ${recipientSamples.length > 0 ? `\nRecipient's recent messages on this thread (oldest first — match their tempo, length, and warmth, not just the last line):\n${recipientSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n")}` : ""}
-${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
