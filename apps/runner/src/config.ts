@@ -73,6 +73,15 @@ export interface RunnerConfig {
      */
     contactsVcfPath: string | undefined;
   };
+  contacts: {
+    /**
+     * Sync contact birthdays from the macOS AddressBook into Person rows.
+     * Mac-only (the AddressBook databases exist only on macOS); the reader
+     * degrades to a no-op when Contacts data is absent or unreadable. On by
+     * default on macOS; set CONTACTS_BIRTHDAY_SYNC=false to disable.
+     */
+    birthdaySyncEnabled: boolean;
+  };
   screenshotDir: string;
   domDumpDir: string;
   selectorDir: string;
@@ -349,6 +358,16 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
       watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
+    },
+    contacts: {
+      // Mac-only. Enabled by default on macOS; the AddressBook reader is a
+      // no-op when Contacts data is missing or unreadable, so leaving it on
+      // is safe. Disable explicitly with CONTACTS_BIRTHDAY_SYNC=false.
+      birthdaySyncEnabled:
+        process.platform === "darwin" &&
+        !["false", "0", "no", "off"].includes(
+          (env.CONTACTS_BIRTHDAY_SYNC ?? "").trim().toLowerCase()
+        )
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),

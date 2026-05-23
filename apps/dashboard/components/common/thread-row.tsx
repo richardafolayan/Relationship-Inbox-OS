@@ -7,6 +7,7 @@ import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
+import { birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 
 interface ThreadRowProps {
   row: InboxRow;
@@ -40,6 +41,12 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
   // marker so the operator can spot it while scanning the list.
   const needsReplyMarker =
     row.lastMessageDirection === "IN" && row.unreadCount > 0 && !row.archivedAt;
+  // Quiet "birthday soon" marker, from the contact's macOS Contacts card.
+  // Capped at a week so the row stays a reply-triage surface, not a
+  // calendar; the Today page carries the fuller upcoming-birthdays list.
+  const birthdayDays = daysUntilBirthday(row.personBirthday);
+  const birthdayMarker =
+    birthdayDays !== null && birthdayDays <= 7 ? birthdayCountdownLabel(birthdayDays) : null;
 
   return (
     <Link
@@ -81,6 +88,15 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
           {needsReplyMarker ? (
             <span className="font-mono text-[11px] tracking-[0.02em] text-risk-overdue">
               · needs reply
+            </span>
+          ) : null}
+          {birthdayMarker ? (
+            <span
+              className={`font-mono text-[11px] tracking-[0.02em] ${
+                birthdayDays === 0 ? "text-accent-ink" : "text-ink-3"
+              }`}
+            >
+              · birthday {birthdayMarker}
             </span>
           ) : null}
           {row.personThreadCount && row.personThreadCount > 1 ? (
