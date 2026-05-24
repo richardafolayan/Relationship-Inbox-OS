@@ -2901,10 +2901,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // transcript produces different summaries in active-reply vs reopen
     // mode — the cache has to invalidate when the operator's reply flips
     // a thread from active to dormant (or vice versa).
-    // v4 substitutes the operator's displayName for "the operator" in
-    // output text (issue #340); existing summaries say "the operator"
-    // and must regenerate on next scan to pick up the new wording.
-    const SUMMARY_VERSION = "v4-named-operator";
+    // v5 switches to second-person ("you") in all output text. Earlier
+    // v4 substituted the configured displayName, but the name + greeting
+    // already personalise the shell — summaries read more naturally in
+    // second person ("Ashley let you know") than third ("Ashley let
+    // Richard know"). Existing v4 summaries regenerate on next scan.
+    const SUMMARY_VERSION = "v5-second-person";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
@@ -2921,16 +2923,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     let toneNotesJson = thread.toneNotesJson;
     let rememberJson = thread.rememberJson;
 
-    // Operator profile is loaded once and reused below for both the
-    // summary call (needs the displayName per #340) and the classifier
-    // gate (needs aiHelpLevel). Hoisted from the later classifier block
-    // so updateThreadSummary can see the name without a second DB read.
-    const operatorProfile = await deps.settingsStore.getOperatorProfile();
-
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
         displayName: person.displayName,
-        operatorDisplayName: operatorProfile.displayName,
         previousSummary: thread.rollingSummary ?? undefined,
         previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
         previousRemember: thread.rememberJson
@@ -2998,7 +2993,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // (#287 phase 2.5 follow-up). "memory_only" turns off the
     // organisational AI features — scoring + close detection — so the
     // operator can pick a quieter tier without losing summaries.
-    // operatorProfile was loaded above (hoisted for #340 displayName use).
+    const operatorProfile = await deps.settingsStore.getOperatorProfile();
     const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
     if (!skipAi && lastInboundMessage && allowClassification) {
       const closedKey = stableHash(
