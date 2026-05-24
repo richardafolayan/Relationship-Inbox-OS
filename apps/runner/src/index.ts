@@ -2508,8 +2508,10 @@ async function resummarizeThreadById(threadId: string): Promise<
     thread.lastInboundAt &&
       (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
   );
+  const resummarizeOperatorProfile = await settingsStore.getOperatorProfile();
   const summary = await aiService.updateThreadSummary({
     displayName: thread.person.displayName,
+    operatorDisplayName: resummarizeOperatorProfile.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
     previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
     previousRemember: thread.rememberJson
@@ -4003,8 +4005,10 @@ app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, 
     take: 600,
     select: { direction: true, text: true, timestamp: true }
   });
+  const operatorProfileForFriendship = await settingsStore.getOperatorProfile();
   const result = await aiService.summarisePersonForFriendship({
     displayName: person.displayName,
+    operatorDisplayName: operatorProfileForFriendship.displayName,
     messages: messages.map((m) => ({
       direction: m.direction as "IN" | "OUT",
       text: m.text,
@@ -4062,8 +4066,10 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
           : undefined
       }
     : null;
+  const operatorProfileForAsk = await settingsStore.getOperatorProfile();
   const result = await aiService.askAboutPerson({
     displayName: person.displayName,
+    operatorDisplayName: operatorProfileForAsk.displayName,
     question,
     messages: messages.map((m) => ({
       direction: m.direction as "IN" | "OUT",
