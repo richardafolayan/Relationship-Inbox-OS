@@ -123,7 +123,10 @@ export interface StyleProfile {
 
 export interface AiService {
   updateThreadSummary(input: {
+    /** Contact's name (used in fallback summary text). */
     displayName: string;
+    /** Operator's own name from operator_profile_v1; used as the third-person reference in output text (#340). */
+    operatorDisplayName: string;
     previousSummary?: string;
     previousOpenLoops: string[];
     /** Last persisted remember items — kept as the fallback if the AI call fails. */
@@ -339,7 +342,10 @@ export interface AiService {
    * Used by the iMessage profile drawer.
    */
   summarisePersonForFriendship(input: {
+    /** Contact's name (the person being characterised). */
     displayName: string;
+    /** Operator's own name from operator_profile_v1; used as the third-person reference in output text (#340). */
+    operatorDisplayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
   }): Promise<FriendshipSummaryOutput>;
   /**
@@ -349,7 +355,10 @@ export interface AiService {
    * question returns empty answer.
    */
   askAboutPerson(input: {
+    /** Contact's name (the person being asked about). */
     displayName: string;
+    /** Operator's own name from operator_profile_v1; used as the third-person reference in output text (#340). */
+    operatorDisplayName: string;
     question: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     contact?: ContactProfileSnapshot | null;
