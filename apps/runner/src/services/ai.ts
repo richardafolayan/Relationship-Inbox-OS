@@ -1007,7 +1007,14 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   }
 
   async function updateThreadSummary(input: {
+    /** Contact's name — used as fallback summary text "Conversation with {name}." */
     displayName: string;
+    /**
+     * Operator's own name from operator_profile_v1; used as the
+     * third-person reference in output text per issue #340. Falls back
+     * to "you" when empty so fresh installs read naturally.
+     */
+    operatorDisplayName: string;
     previousSummary?: string;
     previousOpenLoops: string[];
     /** Last persisted remember items — kept as the fallback if the AI call fails. */
@@ -1067,6 +1074,15 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       })
       .join("\n");
 
+    // Name to use when referring to the operator in user-facing output
+    // strings (issue #340). The transcript label stays `operator:` for
+    // attribution discipline, but summaries previously echoed that label
+    // back as "the operator" ("Ashley informed the operator that…"). Use
+    // the operator's configured displayName when set; fall back to
+    // second-person "you" so fresh installs still read naturally.
+    // input.displayName here is the CONTACT's name — do not confuse.
+    const operatorRef = input.operatorDisplayName.trim() || "you";
+
     // The summary now operates in one of two modes, switched on
     // `needsReply`. Active-reply mode (contact's message is newest) asks
     // for a recap of the current exchange + loops adjacent to the active
@@ -1122,6 +1138,8 @@ open_loops guidance (reconnect):
 Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve relative dates and to judge whether a remembered event has already passed.
 
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
+
+OPERATOR NAME (output rule): When you write any user-facing output string (summary, what_they_want, open_loops, remember notes, tone_notes, urgency_hint), refer to the operator as "${operatorRef}". NEVER write the literal phrases "the operator" or "operator" in output text — those words exist only as the transcript attribution label. ${operatorRef === "you" ? "Second-person phrasing reads naturally (\"Ashley is waiting on you to reply\")." : `Use the name in third-person sentences ("Ashley is waiting on ${operatorRef} to reply"). Second-person "you" is also fine where it reads more naturally.`}
 
 ${modeBlock}
 
@@ -1932,7 +1950,14 @@ If the message has no time hint, return { "suggestions": [] }.`;
    * the rendered transcript.
    */
   async function summarisePersonForFriendship(input: {
+    /** Contact's name (the person we're characterising). */
     displayName: string;
+    /**
+     * Operator's own displayName from operator_profile_v1 — used as the
+     * third-person reference in output text per issue #340. Falls back
+     * to "you" when empty.
+     */
+    operatorDisplayName: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
   }): Promise<FriendshipSummaryOutput> {
     const fallback: FriendshipSummaryOutput = {
@@ -1953,6 +1978,13 @@ If the message has no time hint, return { "suggestions": [] }.`;
       })
       .join("\n");
 
+    // Output-name rule per issue #340 — transcript label stays `operator:`
+    // for attribution but third-person output strings ("how_you_know_each_other",
+    // "vibe") must use the operator's configured displayName or fall back
+    // to "you". Don't confuse this with input.displayName, which is the
+    // CONTACT's name.
+    const operatorRef = input.operatorDisplayName.trim() || "you";
+
     const prompt = `Return strict JSON matching this exact shape:
 {
   "how_you_know_each_other": "string — 1-2 sentences about how the operator knows this contact, inferred from the earliest messages in the transcript",
@@ -1962,6 +1994,8 @@ If the message has no time hint, return { "suggestions": [] }.`;
 }
 
 Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
+
+OPERATOR NAME (output rule): When writing user-facing strings (how_you_know_each_other, recent_topics, inside_jokes, vibe), refer to the operator as "${operatorRef}". NEVER write "the operator" or "operator" in output text — that label only exists for transcript attribution.
 
 Hard rules:
 - Stick to what is literally in the transcript. Do not invent context.
@@ -1994,7 +2028,14 @@ ${transcript}`;
    *     reinforced in SYSTEM_PROMPT).
    */
   async function askAboutPerson(input: {
+    /** Contact's name (the person being asked about). */
     displayName: string;
+    /**
+     * Operator's own name from operator_profile_v1; used as the
+     * third-person reference in output text per issue #340. Falls back
+     * to "you" when empty.
+     */
+    operatorDisplayName: string;
     question: string;
     messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
     contact?: ContactProfileSnapshot | null;
@@ -2017,6 +2058,12 @@ ${transcript}`;
             .join("\n")
         : "(no messages on record)";
 
+    // Output-name rule per issue #340 — keep transcript label as
+    // `operator:` for attribution, but force user-facing answers to use
+    // the operator's configured name (or "you") rather than the word
+    // "operator". input.displayName here is the CONTACT's name.
+    const operatorRef = input.operatorDisplayName.trim() || "you";
+
     const contactBlock = input.contact
       ? `Contact enrichment (do NOT invent fields not present here):\n${JSON.stringify(
           snapshotForPrompt(input.contact)
@@ -2038,6 +2085,7 @@ HARD RULES (strict):
 - Only answer using the provided context (transcript + enrichment + notes). If the context doesn't contain the answer, say so plainly: "We haven't discussed this" or "Not on record" - do not guess or extrapolate.
 - When relevant, cite specific dates from the message timestamps in your answer, e.g. "On 4 March 2025 they said they were moving to Lagos." Pull dates from the timestamp prefix on each transcript line. Verbatim short quotes are fine.
 - Lines prefixed \`operator:\` are the operator's own words; \`contact:\` are the other person. Never paraphrase one as if it were the other.
+- When you refer to the operator in your answer, write "${operatorRef}". NEVER write "the operator" or "operator" in the answer text — that label only exists for transcript attribution.
 - Do not fabricate names, dates, jobs, locations, or any facts not in the context.
 
 Contact: ${input.displayName}
