@@ -37,8 +37,9 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
-import { ActionItemsChecklist } from "@/components/thread/ActionItemsChecklist";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
+import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
+import { chooseDisplayBrief } from "@/lib/reply-brief";
 
 // Thread workspace - landscape layout.
 //
@@ -1848,19 +1849,9 @@ export default function ThreadPage() {
   // - reopen (operator already replied or thread dormant): rail surfaces a
   //   warm reconnect hook + transcript-grounded callbacks + conversation
   //   starters in the chips
-  // The fields themselves (whatTheyWant, openLoops, suggestedReplies) are
-  // generated mode-aware on the server. The dashboard only adjusts headers
-  // and helper copy. `trimmedSummary` (the durable rolling relationship
-  // summary) shows as a muted subline so the operator gets the relationship
-  // shorthand without it crowding the per-turn ask.
-  const trimmedSummary = thread.summary?.trim() ?? "";
-  const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
-  const summaryDuplicatesAsk =
-    trimmedAsk && trimmedSummary &&
-    (trimmedSummary.includes(trimmedAsk) || trimmedAsk.includes(trimmedSummary));
-  const showRelationshipContext = trimmedSummary && !summaryDuplicatesAsk;
+  // The Reply Brief itself is generated mode-aware on the server. This page
+  // only flips the compose helper + the AI predraft heading on reopen.
   const isReopenMode = thread.needsReply === false;
-  const askHeading = isReopenMode ? "Reconnect hook" : "What they want";
   const composeHelper = isReopenMode
     ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
     : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
@@ -3100,35 +3091,20 @@ export default function ThreadPage() {
       {/* ───── Context rail ───── */}
       <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
         <div className="flex flex-col gap-7 px-7 py-10">
-          {trimmedAsk || trimmedSummary ? (
-            <section>
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                {askHeading}
-              </p>
-              <p className="m-0 text-balance text-[14px] leading-[1.55] text-ink">
-                {trimmedAsk || trimmedSummary}
-              </p>
-              {showRelationshipContext && trimmedAsk ? (
-                <p className="mt-3 border-t border-hairline pt-3 text-[13px] leading-[1.55] text-ink-3">
-                  <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                    context ·{" "}
-                  </span>
-                  {trimmedSummary}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
-
-          {/* Things to address - the reply checklist. Tick / edit / add
-              state is local (a thinking aid that never touches the message);
-              "not relevant" reuses the server-side dismiss via
-              toggleOpenLoop. */}
-          <ActionItemsChecklist
+          {/* Reply Brief - the single adaptive panel that drives the rail.
+              Default visible card carries only Where it stands + On you so
+              the operator can read the thread in under 10 seconds; everything
+              else (optional follow-ups, fuller context, tone steer, the
+              gated reply checklist with its existing auto-tick / dismiss
+              behaviour) sits behind one collapsed disclosure. Falls back to
+              a safe brief derived from the legacy fields when the runner
+              hasn't yet generated one for this row. */}
+          <ReplyBriefPanel
             threadId={thread.id}
+            brief={chooseDisplayBrief(thread)}
             openLoops={thread.openLoops}
             dismissedOpenLoops={thread.dismissedOpenLoops}
-            isReopenMode={isReopenMode}
-            onDismiss={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+            onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
             aiAddressedLoops={aiAddressedLoops}
             aiCoverageMode={
               aiHelpLevel === "memory_only"
@@ -3140,7 +3116,9 @@ export default function ThreadPage() {
           />
 
           {/* Things to remember - durable facts (exams, trips, life events)
-              the AI re-derives from the transcript each scan. Read-only and
+              the AI re-derives from the transcript each scan. Stays separate
+              from the Reply Brief on purpose: this is life context the
+              operator wants to carry forward, not reply-state. Read-only and
               self-hiding when empty. */}
           <ThingsToRemember remember={thread.remember ?? []} />
 
