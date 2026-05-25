@@ -24,7 +24,7 @@ export function FullDemoSettingsCard() {
       <header className="space-y-1">
         <h2 className="text-base font-medium text-ink">Run full demo</h2>
         <p className="text-sm text-ink-2">
-          Walk through the whole app without touching real conversations. Use sandbox for a safe seeded inbox, or read-only live mode to demo against real threads you choose.
+          Walk through the whole app. Sandbox uses a seeded showcase inbox. Live mode is read-only against real threads you choose.
         </p>
       </header>
 

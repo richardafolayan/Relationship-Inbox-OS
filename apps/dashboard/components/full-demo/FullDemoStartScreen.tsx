@@ -31,7 +31,7 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
         <header className="space-y-2">
           <h1 className="text-2xl font-medium tracking-tight">Live demo: choose threads</h1>
           <p className="text-sm text-ink-2">
-            Pick the real threads you want on screen during the demo. The app stays read-only, so sending, archiving, snoozing and marking handled are all intercepted with a clear notice. Nothing real is changed.
+            Pick the real threads you want on screen during the demo. The app stays read-only. Sending, archiving, snoozing and marking handled are intercepted with a clear notice.
           </p>
         </header>
         <LiveThreadPicker
@@ -60,7 +60,7 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
       <header className="space-y-2">
         <h1 className="text-2xl font-medium tracking-tight">Run full demo</h1>
         <p className="text-sm text-ink-2">
-          Use a safe demo inbox to walk through the whole app without touching real conversations.
+          Walk through the whole app against safe demo data, or run a read-only tour over your own threads.
         </p>
       </header>
 
@@ -85,10 +85,7 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
         >
           <div className="text-sm font-medium text-ink">Use selected live threads</div>
           <div className="mt-1 text-sm text-ink-2">
-            Walk through with real threads you choose. The app is read-only, so sending, archiving and snoozing are intercepted.
-          </div>
-          <div className="mt-2 text-xs text-ink-3">
-            Live mode is read-only by default. It will not send messages or change real threads.
+            Walk through with real threads you choose. The app stays read-only: sending, archiving and snoozing are intercepted.
           </div>
         </button>
       </div>
