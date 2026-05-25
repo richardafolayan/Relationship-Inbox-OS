@@ -6,6 +6,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 import { cn } from "@/lib/utils";
 
@@ -152,7 +153,14 @@ export default function SettingsPage() {
         />
       </SettingsGroup>
 
-      <UserVoiceProfile variant="settings" />
+      <div data-demo-target="settings-user-voice">
+        <UserVoiceProfile variant="settings" />
+      </div>
+
+      <section className="mt-10">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Demo</p>
+        <FullDemoSettingsCard />
+      </section>
 
       <section className="mt-10">
         <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Pilot</p>

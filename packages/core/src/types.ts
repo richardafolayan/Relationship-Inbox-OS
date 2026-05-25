@@ -275,6 +275,20 @@ export type AiErrorKind =
   | "empty_content"
   | "unknown";
 
+/**
+ * Presenter / demo mode for the full-presenter-demo flow.
+ *  - "off":     normal app, no demo seeding or guards.
+ *  - "sandbox": seeded showcase threads, mutations scoped to manifest,
+ *               all real platform adapters bypassed (sends route through
+ *               demoSendAdapter).
+ *  - "live":    real threads visible, every mutation intercepted + 403'd
+ *               server-side. Used together with presenterReadOnly=true.
+ *
+ * Optional so settings rows persisted before this field was added still
+ * parse — undefined is treated as "off".
+ */
+export type PresenterDemoMode = "off" | "sandbox" | "live";
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -283,6 +297,19 @@ export interface AppSettings {
   maxMessagesPerThread: number;
   enabledPlatforms: PlatformName[];
   demoMode: boolean;
+  /**
+   * Full-presenter-demo mode. See PresenterDemoMode. Optional so old rows
+   * still parse; undefined == "off".
+   */
+  presenterDemoMode?: PresenterDemoMode;
+  /**
+   * Live-demo read-only flag. When true, the runner rejects every
+   * mutation listed in the presenter-guard table with a 403 so a stray
+   * client request cannot accidentally archive / send / snooze a real
+   * thread during a presentation. Always cleared via
+   * POST /control/presenter-demo/reset.
+   */
+  presenterReadOnly?: boolean;
   recentThreadSweepCount: number;
   // Optional so existing rows persisted before this field was added still
   // parse. When undefined, runner falls back to runnerConfig.aiProvider

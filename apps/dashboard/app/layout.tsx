@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/layout/app-shell";
+import { FullDemoProvider } from "@/components/full-demo/FullDemoProvider";
+import { FullDemoOverlay } from "@/components/full-demo/FullDemoOverlay";
 
 export const metadata: Metadata = {
   title: "Relationship Inbox OS",
@@ -18,7 +20,10 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
         <script dangerouslySetInnerHTML={{ __html: themeBootstrap }} />
       </head>
       <body>
-        <AppShell>{children}</AppShell>
+        <FullDemoProvider>
+          <AppShell>{children}</AppShell>
+          <FullDemoOverlay />
+        </FullDemoProvider>
       </body>
     </html>
   );

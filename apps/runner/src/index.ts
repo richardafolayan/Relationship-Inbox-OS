@@ -53,6 +53,7 @@ import {
   validateAdminResetGuards
 } from "./services/admin-reset";
 import { cleanupDemoData, seedDemoData } from "./services/demo";
+import { checkPresenterGuard } from "./middleware/presenter-guard";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
 import {
@@ -1300,6 +1301,8 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
       enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"])).optional(),
       demoMode: z.boolean().optional(),
+      presenterDemoMode: z.enum(["off", "sandbox", "live"]).optional(),
+      presenterReadOnly: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
       aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
       // Empty string from the dashboard is normalised to undefined client-side,
@@ -1311,9 +1314,24 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     .parse(req.body);
 
   const previous = await settingsStore.getSettings();
-  const next = await settingsStore.updateSettings(payload);
 
-  if (!previous.demoMode && next.demoMode) {
+  // Presenter sandbox piggybacks on the existing demoMode plumbing so the
+  // scan-queue guard at scan-queue.ts:841 still fires. Live read-only does
+  // NOT touch demoMode — real threads remain visible, just read-only.
+  const derivedDemoMode = payload.presenterDemoMode === "sandbox"
+    ? true
+    : payload.presenterDemoMode === "live" || payload.presenterDemoMode === "off"
+      ? false
+      : payload.demoMode;
+
+  const updatePayload = { ...payload, demoMode: derivedDemoMode };
+  const next = await settingsStore.updateSettings(updatePayload);
+
+  const isEnteringDemo = !previous.demoMode && next.demoMode;
+  const isLeavingDemo = previous.demoMode && !next.demoMode;
+  const seedMode = next.presenterDemoMode === "sandbox" ? "full-presenter-demo" : "generic";
+
+  if (isEnteringDemo) {
     const previousManifest = await settingsStore.getDemoSeedManifest();
     if (previousManifest) {
       await cleanupDemoData(previousManifest, {
@@ -1325,12 +1343,13 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
 
     const manifest = await seedDemoData({
       screenshotDir: runnerConfig.screenshotDir,
-      domDumpDir: runnerConfig.domDumpDir
+      domDumpDir: runnerConfig.domDumpDir,
+      mode: seedMode
     });
     await settingsStore.setDemoSeedManifest(manifest);
   }
 
-  if (previous.demoMode && !next.demoMode) {
+  if (isLeavingDemo) {
     const manifest = await settingsStore.getDemoSeedManifest();
     if (manifest) {
       await cleanupDemoData(manifest, {
@@ -1342,6 +1361,27 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
   }
 
   res.json(next);
+}));
+
+// Single source of truth for "get out of presenter demo cleanly". Reached
+// from the always-visible exit banner, the Settings recovery card, and as
+// a CLI fallback. Never wrapped by the presenter guard — must always
+// succeed even when the runner is in read-only mode.
+app.post("/control/presenter-demo/reset", asyncRoute(async (_req, res) => {
+  const manifest = await settingsStore.getDemoSeedManifest();
+  if (manifest) {
+    await cleanupDemoData(manifest, {
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir
+    });
+    await settingsStore.setDemoSeedManifest(null);
+  }
+  await settingsStore.updateSettings({
+    demoMode: false,
+    presenterDemoMode: "off",
+    presenterReadOnly: false
+  });
+  res.json({ ok: true });
 }));
 
 // Cooperative scan abort. Drives the cancel button in the dashboard's
@@ -1375,6 +1415,7 @@ app.post("/control/enrichment/cancel-pending", asyncRoute(async (_req, res) => {
 // dashboard's deterministic relationship-signal ranking continues to
 // work in the absence of any AI score.
 app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "refresh reconnect scores", kind: "external-action" })) return;
   const limit = Math.min(
     Math.max(1, Number(req.body?.limit) || 20),
     100
@@ -1537,6 +1578,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
 // refresher: per-thread failures break the loop cleanly rather than
 // hammering when the provider is unavailable.
 app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "refresh closed verdicts", kind: "external-action" })) return;
   const limit = Math.min(
     Math.max(1, Number(req.body?.limit) || 30),
     150
@@ -1659,6 +1701,7 @@ app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => 
 }));
 
 app.post("/control/scan", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "run a scan", kind: "external-action" })) return;
   const payload = z
     .object({
       platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
@@ -1731,6 +1774,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "connect a platform", kind: "external-action" })) return;
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
@@ -1895,6 +1939,7 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "run selector tests", kind: "external-action" })) return;
   const payload = z
     .object({
       platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
@@ -2010,6 +2055,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
 // surface, never inline here.
 app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send", kind: "thread-mutation" })) return;
   // For multipart bodies, multer puts file metadata on req.files and
   // string fields on req.body. Reuse the same JSON schema for the field
   // values so the validation flow is identical between JSON and multipart.
@@ -2122,6 +2168,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
 
 app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "update a scheduled send", kind: "thread-mutation" })) return;
   // Either text, scheduledFor, or both. Empty body 400s — there's
   // nothing to do if the operator didn't send a change.
   const payload = z
@@ -2166,6 +2213,7 @@ app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) =>
 
 app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "cancel a send", kind: "thread-mutation" })) return;
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
 
   const result = await sendService.cancelScheduledSend({
@@ -2190,6 +2238,7 @@ app.post("/control/thread/:threadId/cancel-send", asyncRoute(async (req, res) =>
 
 app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "retry a send", kind: "thread-mutation" })) return;
   const payload = z.object({ clientSendId: z.string().uuid() }).parse(req.body);
 
   // Same unsupported-platform guard as /send. Without this, retrying a
@@ -2285,6 +2334,7 @@ app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
 // — those persons surface a clean 400 instead of dispatching nowhere.
 app.post("/control/person/:personId/open-profile", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "open the contact profile", kind: "external-action" })) return;
   const person = await prisma.person.findUnique({ where: { id: personId } });
   if (!person) {
     res.status(404).json({ error: "person not found" });
@@ -2327,6 +2377,7 @@ app.post("/control/person/:personId/open-profile", asyncRoute(async (req, res) =
 
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "rescan the thread", kind: "external-action" })) return;
   const target = await getThreadStub(threadId);
   // Reject early for unsupported platforms — see requireAdapter. Without
   // this, scanQueue.syncThread → adapter.fetchThreadMessages crashes with
@@ -2547,7 +2598,8 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
   // Validate the path param even though the handler doesn't currently
   // need the thread row. Without this, any string in the path was
   // accepted, which silently let bad URLs reach the AI service.
-  z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "transform draft", kind: "thread-mutation" })) return;
   const payload = z
     .object({
       mode: z.enum(["SHORTEN", "MAKE_WARMER"]),
@@ -2566,6 +2618,7 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
 // before validation so a runaway paste never burns model tokens.
 app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "check draft coverage", kind: "thread-mutation" })) return;
   const payload = z
     .object({
       draft: z.string().min(1).max(5000)
@@ -2626,6 +2679,7 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
 // page when the suggested replies don't fit.
 app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "compose a reply", kind: "thread-mutation" })) return;
   const payload = z.object({ intent: z.string().min(1).max(2000) }).parse(req.body);
 
   const thread = await prisma.thread.findUnique({
@@ -2714,6 +2768,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
 // state rather than blanking the fields.
 app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "reassess the thread", kind: "thread-mutation" })) return;
 
   // 1. Resummarise (this also refreshes whatTheyWant + openLoops via the
   // existing helper, which already persists the result).
@@ -3472,6 +3527,7 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
 // default Inbox/At Risk/People views and only shows in the Archived view.
 app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "archive", kind: "thread-mutation" })) return;
   const archivedAt = new Date();
   const targetIds = await actionTargetThreadIds(threadId);
   await prisma.thread.updateMany({
@@ -3488,6 +3544,7 @@ app.post("/control/thread/:threadId/archive", asyncRoute(async (req, res) => {
 // in the conversation).
 app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "edit the reply checklist", kind: "thread-mutation" })) return;
   const { loop, dismissed } = z
     .object({ loop: z.string().min(1).max(2_000), dismissed: z.boolean() })
     .parse(req.body ?? {});
@@ -3515,6 +3572,7 @@ app.post("/control/thread/:threadId/open-loop", asyncRoute(async (req, res) => {
 // Unarchive — clears archivedAt so the thread returns to the active Inbox.
 app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "unarchive", kind: "thread-mutation" })) return;
   const targetIds = await actionTargetThreadIds(threadId);
   await prisma.thread.updateMany({
     where: { id: { in: targetIds } },
@@ -3818,6 +3876,7 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
 //   action: "dismiss"  → clear inferredName (keep displayName as-is)
 app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "rename the contact", kind: "thread-mutation" })) return;
   const payload = z
     .object({
       action: z.enum(["confirm", "rename", "dismiss"]),
@@ -3863,6 +3922,7 @@ app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
 
 app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "save contact notes", kind: "thread-mutation" })) return;
   const { notes } = z
     .object({ notes: z.string().max(10_000).nullable().optional() })
     .parse(req.body ?? {});
@@ -3881,6 +3941,7 @@ app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {
 
 app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "enrich the contact", kind: "external-action" })) return;
   const wait = req.query.wait === "1" || req.query.wait === "true";
   const person = await prisma.person.findUnique({ where: { id: personId } });
   if (!person) {
@@ -3924,6 +3985,7 @@ app.post("/control/person/:personId/enrich", asyncRoute(async (req, res) => {
 // next enrichment run has a target.
 app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "set the contact profile URL", kind: "thread-mutation" })) return;
   const payload = z
     .object({ profileUrl: z.string().url() })
     .parse(req.body);
@@ -3950,6 +4012,7 @@ app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) =>
 // a fresh row so a Scan-all click while another is in-flight will still
 // produce visible progress).
 app.post("/control/people/scan-all", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "scan all people", kind: "external-action" })) return;
   const payload = z
     .object({ scope: z.enum(["all", "new"]).optional() })
     .parse(req.body ?? {});
@@ -3989,6 +4052,7 @@ app.post("/control/people/scan-all", asyncRoute(async (req, res) => {
 // each time the operator hits "Generate" in the profile drawer.
 app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "summarise the friendship", kind: "thread-mutation" })) return;
   const person = await prisma.person.findUnique({ where: { id: personId } });
   if (!person) {
     res.status(404).json({ error: "person not found" });
@@ -4020,6 +4084,7 @@ app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, 
 // enforces "only answer from provided context, cite dates when relevant".
 app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "ask about the contact", kind: "thread-mutation" })) return;
   const { question } = z
     .object({ question: z.string().min(1).max(2_000) })
     .parse(req.body ?? {});
@@ -4087,6 +4152,7 @@ app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/operator-profile", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "save your profile", kind: "operator-write" })) return;
   const payload = z
     .object({
       displayName: z.string().max(120).optional(),
@@ -4232,6 +4298,7 @@ app.get("/control/pilot-feedback/status", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "open the platform browser", kind: "external-action" })) return;
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     // The zod payload restricts platform to the three with adapters today,
@@ -4245,6 +4312,7 @@ app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "run a LinkedIn smoke test", kind: "external-action" })) return;
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const runTraceBaseDir = scanQueue.getRunTraceBaseDir();
   const runLogger = createRunLogger({
@@ -4383,6 +4451,7 @@ app.post("/control/platform/linkedin/smoke-unread", asyncRoute(async (_req, res)
  */
 app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "request an AI predraft", kind: "thread-mutation" })) return;
 
   const thread = await prisma.thread.findUnique({
     where: { id: threadId },
@@ -4537,6 +4606,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
  */
 app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "voice-rewrite a draft", kind: "thread-mutation" })) return;
   const payload = z.object({ draft: z.string().min(1).max(5000) }).parse(req.body);
 
   const thread = await prisma.thread.findUnique({
@@ -4592,6 +4662,7 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
 
 app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "save a draft", kind: "thread-mutation" })) return;
   const payload = z.object({ text: z.string().max(5000) }).parse(req.body);
 
   const existingDraft = await prisma.draft.findFirst({ where: { threadId } });
@@ -4615,6 +4686,7 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
 
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "mark the thread handled", kind: "thread-mutation" })) return;
   // If the operator hasn't replied to the latest inbound, "Mark as
   // handled" really means "I'm done with this conversation, take it
   // out of my view" — so we archive the thread alongside clearing the
@@ -4692,6 +4764,7 @@ app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) 
 
 app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "snooze", kind: "thread-mutation" })) return;
   const payload = z.object({ hours: z.number().int().min(1).max(72) }).parse(req.body);
   const due = new Date(Date.now() + payload.hours * 60 * 60 * 1000);
 
@@ -4717,6 +4790,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 
 app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "unsnooze", kind: "thread-mutation" })) return;
 
   const targetIds = await actionTargetThreadIds(threadId);
   await prisma.thread.updateMany({
@@ -4738,6 +4812,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "reset the platform session", kind: "external-action" })) return;
   const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
