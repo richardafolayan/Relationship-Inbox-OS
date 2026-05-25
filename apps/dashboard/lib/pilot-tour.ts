@@ -81,7 +81,7 @@ export function getPilotTourSteps(): GuidedTourStep[] {
       key: "clear-thread",
       title: "Clear the thread",
       body: "Mark as handled, snooze, or archive when you are finished.",
-      targets: ["mark-handled", "snooze", "archive"],
+      targets: ["thread-actions"],
       placement: "bottom"
     },
     {

@@ -2126,80 +2126,90 @@ export default function ThreadPage() {
               >
                 Save draft
               </Button>
-              {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+              {/* Clear-thread action cluster: wrapped so the guided tour
+                  can highlight all three buttons at once. Matches the
+                  parent header's flex layout so the visual spacing is
+                  unchanged. The individual `data-demo-target` attrs are
+                  kept so steps targeting a single action still resolve. */}
+              <div
+                data-demo-target="thread-actions"
+                className="flex items-center gap-2"
+              >
+                {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                  <Button
+                    variant="ghost"
+                    onClick={() =>
+                      runAction(
+                        apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+                        setError,
+                        refresh
+                      )
+                    }
+                    title="Bring this thread back into the active inbox now"
+                    className="px-3 py-1.5 text-[12px]"
+                  >
+                    Wake up
+                  </Button>
+                ) : (
+                  <Button
+                    variant="ghost"
+                    data-demo-target="snooze"
+                    onClick={() => {
+                      // Toggle the AI snooze menu, lazily fetching once. The
+                      // popover renders above this row when `snoozeMenuOpen`.
+                      if (!snoozeMenuOpen && !snoozeSuggestions) {
+                        setSnoozeSuggestions({ loading: true, items: [] });
+                        void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
+                          `/runner/control/thread/${thread.id}/suggest-snooze`
+                        )
+                          .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
+                          .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                      }
+                      setSnoozeMenuOpen((prev) => !prev);
+                    }}
+                    aria-expanded={snoozeMenuOpen}
+                    title="Hide from active inbox until later"
+                    className="px-3 py-1.5 text-[12px]"
+                  >
+                    Snooze
+                  </Button>
+                )}
                 <Button
                   variant="ghost"
+                  data-demo-target="mark-handled"
                   onClick={() =>
                     runAction(
-                      apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+                      apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
                       setError,
                       refresh
                     )
                   }
-                  title="Bring this thread back into the active inbox now"
                   className="px-3 py-1.5 text-[12px]"
                 >
-                  Wake up
+                  Mark as handled
                 </Button>
-              ) : (
                 <Button
                   variant="ghost"
-                  data-demo-target="snooze"
+                  disabled={archiving}
+                  data-demo-target="archive"
                   onClick={() => {
-                    // Toggle the AI snooze menu, lazily fetching once. The
-                    // popover renders above this row when `snoozeMenuOpen`.
-                    if (!snoozeMenuOpen && !snoozeSuggestions) {
-                      setSnoozeSuggestions({ loading: true, items: [] });
-                      void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
-                        `/runner/control/thread/${thread.id}/suggest-snooze`
-                      )
-                        .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
-                        .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
-                    }
-                    setSnoozeMenuOpen((prev) => !prev);
+                    if (archiving) return;
+                    setArchiving(true);
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
+                      (message) => {
+                        setError(message);
+                        if (message) setArchiving(false);
+                      },
+                      () => router.push("/today")
+                    );
                   }}
-                  aria-expanded={snoozeMenuOpen}
-                  title="Hide from active inbox until later"
+                  title="Move this thread out of the active inbox (you can find it in Archived)"
                   className="px-3 py-1.5 text-[12px]"
                 >
-                  Snooze
+                  {archiving ? "Archiving…" : "Archive"}
                 </Button>
-              )}
-              <Button
-                variant="ghost"
-                data-demo-target="mark-handled"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                    setError,
-                    refresh
-                  )
-                }
-                className="px-3 py-1.5 text-[12px]"
-              >
-                Mark as handled
-              </Button>
-              <Button
-                variant="ghost"
-                disabled={archiving}
-                data-demo-target="archive"
-                onClick={() => {
-                  if (archiving) return;
-                  setArchiving(true);
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
-                    (message) => {
-                      setError(message);
-                      if (message) setArchiving(false);
-                    },
-                    () => router.push("/today")
-                  );
-                }}
-                title="Move this thread out of the active inbox (you can find it in Archived)"
-                className="px-3 py-1.5 text-[12px]"
-              >
-                {archiving ? "Archiving…" : "Archive"}
-              </Button>
+              </div>
               <Button
                 variant={aiOpen ? "primary" : "quiet"}
                 onClick={() => setAiOpen((v) => !v)}

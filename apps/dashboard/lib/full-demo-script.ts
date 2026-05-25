@@ -114,7 +114,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
     id: "serena-clear",
     mode: "sandbox",
     threadPlatformId: SHOWCASE_THREAD_IDS.serena,
-    target: "mark-handled",
+    target: "thread-actions",
     placement: "bottom",
     title: "Clear the thread",
     body: "Mark as handled, snooze, or archive when you are finished."

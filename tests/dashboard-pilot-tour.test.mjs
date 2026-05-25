@@ -134,9 +134,7 @@ test("pilot tour anchors on existing data-demo-target attributes shared with ful
     "reply-brief-where-it-stands",
     "reply-brief-on-you",
     "composer-input",
-    "mark-handled",
-    "snooze",
-    "archive",
+    "thread-actions",
     "feedback"
   ]);
   const used = new Set();
