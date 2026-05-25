@@ -18,6 +18,13 @@ export interface DemoStep {
   mode?: FullDemoMode | "both";
   /** Optional route to navigate to before the step body shows. */
   route?: string;
+  /**
+   * When set, the provider looks up the showcase thread by its stable
+   * platformThreadId via /data/inbox and navigates to /thread/{internalId}.
+   * Takes precedence over `route` so the script doesn't need to know the
+   * runner's cuid for each thread up-front.
+   */
+  threadPlatformId?: string;
   /** `data-demo-target` value of the element to highlight. Omit for centred. */
   target?: string;
   title: string;
@@ -92,7 +99,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "serena-reply-brief",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.serena}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
     target: "reply-brief",
     title: "Reply brief",
     body:
@@ -102,7 +109,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "serena-action-items",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.serena}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
     target: "action-items",
     title: "Things to address",
     body:
@@ -111,7 +118,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "serena-composer",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.serena}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
     target: "composer",
     title: "Reply in your own words",
     body:
@@ -129,7 +136,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "timi-respond-lightly",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.timi}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.timi,
     target: "reply-brief",
     title: "Respond lightly",
     body:
@@ -139,7 +146,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "multi-loop",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.multiLoop}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.multiLoop,
     target: "action-items",
     title: "Several open items",
     body:
@@ -148,7 +155,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "suggested-replies",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.serena}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
     target: "suggested-replies",
     title: "Suggested replies",
     body:
@@ -157,7 +164,7 @@ export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "snooze-archive",
     mode: "sandbox",
-    route: `/thread/${SHOWCASE_THREAD_IDS.serena}`,
+    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
     target: "thread-actions",
     title: "Snooze, archive, mark handled",
     body:

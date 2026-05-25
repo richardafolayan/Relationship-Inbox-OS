@@ -90,3 +90,32 @@ test("getStepIndex returns the correct index for a known id", () => {
 test("script ends on the closing step", () => {
   assert.equal(FULL_DEMO_SCRIPT[FULL_DEMO_SCRIPT.length - 1].id, "closing");
 });
+
+test("threadPlatformId references known showcase ids only", () => {
+  const known = new Set(Object.values(SHOWCASE_THREAD_IDS));
+  for (const step of FULL_DEMO_SCRIPT) {
+    if (step.threadPlatformId) {
+      assert.ok(
+        known.has(step.threadPlatformId),
+        `step "${step.id}" references unknown threadPlatformId "${step.threadPlatformId}"`
+      );
+    }
+  }
+});
+
+test("steps never use /thread/{platformThreadId} in `route` (resolve via threadPlatformId instead)", () => {
+  // Catch the regression that caused /thread/demo-full-serena-imessage to 404:
+  // /thread/[id] takes the runner's internal cuid, not the platformThreadId,
+  // so the script must use `threadPlatformId` and let the provider resolve.
+  const platformIds = new Set(Object.values(SHOWCASE_THREAD_IDS));
+  for (const step of FULL_DEMO_SCRIPT) {
+    if (step.route?.startsWith("/thread/")) {
+      const last = step.route.slice("/thread/".length);
+      assert.equal(
+        platformIds.has(last),
+        false,
+        `step "${step.id}" hardcodes a platformThreadId in route — use threadPlatformId instead`
+      );
+    }
+  }
+});

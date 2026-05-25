@@ -4,7 +4,7 @@ import { useRouter } from "next/navigation";
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 
 import { apiGet, apiPost } from "@/lib/api";
-import type { AppSettings } from "@/lib/types";
+import type { AppSettings, InboxResponse } from "@/lib/types";
 import { showToast } from "@/lib/feedback";
 import {
   FULL_DEMO_SCRIPT,
@@ -85,6 +85,11 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   const [serverSettings, setServerSettings] = useState<AppSettings | null>(null);
   const [liveThreadIds, setLiveThreadIds] = useState<string[]>([]);
   const fetchInterceptorTeardownRef = useRef<(() => void) | null>(null);
+  // platformThreadId → internal thread id, populated from /data/inbox
+  // when sandbox is active. The script references threads by their stable
+  // platformThreadId; the dashboard /thread/[id] route wants the runner's
+  // cuid. This map bridges the two without baking cuids into the script.
+  const [threadIdMap, setThreadIdMap] = useState<Map<string, string>>(new Map());
 
   // --- localStorage hydration on mount -------------------------------------
   useEffect(() => {
@@ -147,12 +152,46 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
 
   const currentStep: DemoStep | null = active ? visibleSteps[stepIndex] ?? null : null;
 
+  // --- inbox → threadIdMap lookup (sandbox only) ---------------------------
+  // Refreshes whenever the walkthrough becomes active, the mode changes, or
+  // the operator advances to a step that needs an unresolved platformThreadId.
+  // GET only, ignored on failure so a transient runner blip doesn't stall the
+  // walkthrough.
+  const refreshThreadIdMap = useCallback(async () => {
+    try {
+      const inbox = await apiGet<InboxResponse>("/runner/data/inbox");
+      const next = new Map<string, string>();
+      for (const row of inbox.rows ?? []) {
+        if (row.platformThreadId) next.set(row.platformThreadId, row.id);
+      }
+      setThreadIdMap(next);
+    } catch {
+      /* leave previous map */
+    }
+  }, []);
+  useEffect(() => {
+    if (active && mode === "sandbox") void refreshThreadIdMap();
+  }, [active, mode, refreshThreadIdMap]);
+
   // --- route-changing on step entry ----------------------------------------
   useEffect(() => {
-    if (!active || !currentStep?.route) return;
-    if (typeof window !== "undefined" && window.location.pathname === currentStep.route) return;
-    router.push(currentStep.route);
-  }, [active, currentStep, router]);
+    if (!active || !currentStep) return;
+    let target = currentStep.route;
+    if (currentStep.threadPlatformId) {
+      const resolved = threadIdMap.get(currentStep.threadPlatformId);
+      if (!resolved) {
+        // Map not populated yet (race on first sandbox start) or the
+        // showcase row has not seeded. Refetch and bail this tick; the
+        // next render with the updated map will retry.
+        void refreshThreadIdMap();
+        return;
+      }
+      target = `/thread/${resolved}`;
+    }
+    if (!target) return;
+    if (typeof window !== "undefined" && window.location.pathname === target) return;
+    router.push(target);
+  }, [active, currentStep, router, threadIdMap, refreshThreadIdMap]);
 
   // --- autoplay timer ------------------------------------------------------
   useEffect(() => {
