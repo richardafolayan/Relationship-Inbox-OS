@@ -186,11 +186,12 @@ export function GuidedTour(props: GuidedTourProps) {
   }, [active]);
 
   // ── Safe-area top ─────────────────────────────────────────────────
-  // The AppShell renders a sticky banner + status row above <main>. The
-  // overlay otherwise paints across the whole viewport, so the spotlight
-  // ring (and its dim spread) bleed up into that fixed-header area. We
-  // find <main>'s viewport-top and clip the overlay container below it
-  // so the banner stays visually intact.
+  // The AppShell renders a sticky banner + status row above <main>, and
+  // each page renders a sticky PageHead inside <main>. The overlay
+  // otherwise paints across the whole viewport, so the spotlight ring
+  // (and its dim spread) bleeds up into that fixed-header area. We
+  // compute the bottom edge of all sticky chrome currently pinned to
+  // the top of the viewport and clip the overlay below it.
   const [safeTop, setSafeTop] = useState(0);
   useEffect(() => {
     if (typeof window === "undefined" || !active) return undefined;
@@ -200,10 +201,24 @@ export function GuidedTour(props: GuidedTourProps) {
         setSafeTop(0);
         return;
       }
-      const top = main.getBoundingClientRect().top;
-      // Negative values can happen briefly during route transitions;
-      // clamp at 0 so the overlay never sits below the viewport top.
-      setSafeTop(Math.max(0, Math.round(top)));
+      // Start with <main>'s top (covers the AppShell's banner + status row).
+      let bottom = main.getBoundingClientRect().top;
+      // Then walk every sticky element inside <main> that is currently
+      // pinned to the top of the viewport and take its bottom. The
+      // PageHead component uses `position: sticky; top: 0` and lives
+      // inside <main>.
+      const stickies = main.querySelectorAll<HTMLElement>("header, [data-sticky-top]");
+      for (const el of stickies) {
+        const style = window.getComputedStyle(el);
+        if (style.position !== "sticky") continue;
+        const rect = el.getBoundingClientRect();
+        // Only count elements that are currently "stuck" at the top —
+        // their top is at (or very near) the viewport top.
+        if (rect.top <= bottom + 1 && rect.bottom > bottom) {
+          bottom = rect.bottom;
+        }
+      }
+      setSafeTop(Math.max(0, Math.round(bottom)));
     };
     update();
     const interval = window.setInterval(update, 250);
