@@ -209,6 +209,16 @@ model Thread {
   rollingSummary    String?
   whatTheyWant      String?
   openLoopsJson     String?
+  // Compressed Reply Brief that drives the thread right rail. JSON blob
+  // shaped like `ReplyBrief` (packages/core/src/types.ts): a where-it-stands
+  // trace, an on-you obligation read, required / optional / handled point
+  // classifications, and optional fuller-context / tone-steer fields.
+  // Generated in the same AI call as the rolling summary so it stays
+  // internally consistent. Nullable for older rows that pre-date the field
+  // — the dashboard self-heals by deriving a safe fallback brief from
+  // `rollingSummary` / `whatTheyWant` / `openLoopsJson` until the next
+  // scan or Reassess regenerates the real brief.
+  replyBriefJson    String?
   // List of open-loop strings the operator has dismissed via the thread-pane
   // checkbox. Filtered out of the visible openLoops surface in the dashboard
   // so re-summarisation can still recompute openLoopsJson without re-showing

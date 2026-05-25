@@ -222,6 +222,80 @@ export interface SummaryOutput {
   tone_notes: string[];
   needs_reply: boolean;
   urgency_hint?: string;
+  /**
+   * Compressed Reply Brief that drives the thread right rail. Generated in
+   * the same AI call as `summary`/`what_they_want`/`open_loops` so the
+   * catch-up, the obligation read, and the classification stay internally
+   * consistent. Optional so older AI runs / fallbacks still parse — when
+   * absent, the dashboard derives a safe brief from the legacy fields.
+   */
+  reply_brief?: ReplyBrief | null;
+}
+
+/**
+ * Classification of a point the AI extracted from the recent transcript.
+ *
+ * - required: the reply would feel incomplete if this point were ignored
+ *   (direct question, request, decision the contact asked the operator
+ *   to make, important news that deserves acknowledgement, multi-part
+ *   inbound where parts still need a response). Mirrored into the legacy
+ *   `open_loops` array so the existing checklist + draft-coverage flow
+ *   keeps working.
+ * - optional: a relationship-deepening or conversational move the AI
+ *   suggests but the contact did not actually ask for. Never gates
+ *   sending, never appears in the required list.
+ * - handled: a point that no longer needs action (the contact answered
+ *   themselves later, the operator already answered, the conversation
+ *   moved on, rhetorical, or covered by the operator's current draft).
+ */
+export type ReplyBriefPointStatus = "required" | "optional" | "handled";
+
+export interface ReplyBriefPoint {
+  /** Stable id within this brief — short slug, used as a UI key. */
+  id: string;
+  /** Plain-English phrasing the operator can read in under a beat. */
+  text: string;
+  status: ReplyBriefPointStatus;
+  /**
+   * For `handled` points only: a short reason it's been dropped from the
+   * required list (e.g. "you already answered this on Tuesday"). Optional;
+   * surfaced only in the expanded "More" disclosure.
+   */
+  reason?: string;
+}
+
+export interface ReplyBrief {
+  /**
+   * The compressed trace. Explains what the operator previously said
+   * (only when it explains why the contact replied the way they did),
+   * what the contact said back, and where the conversation has landed.
+   * NOT a generic relationship summary — that lives in `summary` /
+   * `fuller_context`. Plain British English, no abstract coaching.
+   */
+  where_it_stands: string;
+  /**
+   * The obligation read. States plainly whether the contact has asked
+   * the operator for anything and what would close the loop. If nothing
+   * is genuinely on the operator, says so directly (e.g. "He hasn't
+   * asked you anything. Acknowledge the offer, ask what he's looking at
+   * now, and you're done.").
+   */
+  on_you: string;
+  required_points: ReplyBriefPoint[];
+  optional_followups: ReplyBriefPoint[];
+  handled_points?: ReplyBriefPoint[];
+  /** Longer context for the expanded "More" section, when useful. */
+  fuller_context?: string | null;
+  /** Durable relationship context (who they are, how the operator knows them). */
+  durable_context?: string | null;
+  /** One short line on how to approach the reply (tone, register). */
+  tone_steer?: string | null;
+  /**
+   * AI self-report: does the brief carry enough for the operator to write
+   * a reply without scrolling up into the message history? Surface signal
+   * only — the dashboard renders regardless.
+   */
+  enough_to_reply_without_scrolling: boolean;
 }
 
 export interface SuggestedReply {

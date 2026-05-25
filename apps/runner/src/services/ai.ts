@@ -4,11 +4,17 @@ import type {
   SummaryOutput,
   SuggestedRepliesOutput,
   RememberItem,
-  AiSource
+  AiSource,
+  ReplyBrief
 } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
+import {
+  mirrorRequiredToOpenLoops,
+  sanitizeReplyBrief,
+  synthesiseFallbackBrief
+} from "./reply-brief";
 import type {
   AiService,
   ContactProfileSnapshot,
@@ -48,7 +54,13 @@ const summarySchema = z.object({
     .default([]),
   tone_notes: z.array(z.string()).default([]),
   needs_reply: z.boolean(),
-  urgency_hint: z.string().optional()
+  urgency_hint: z.string().optional(),
+  // The compressed Reply Brief that drives the thread right rail. Validated
+  // loosely here (the model occasionally returns malformed point objects)
+  // and re-sanitised by `sanitizeReplyBrief` post-parse, which enforces the
+  // classification invariants (required/optional/handled mutually exclusive,
+  // banned coaching phrases stripped, caps applied).
+  reply_brief: z.unknown().optional()
 });
 
 // The model is asked for strict ISO YYYY-MM-DD dates but occasionally
@@ -1026,6 +1038,8 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
 
+    const fallbackWhatTheyWant = lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.";
+    const fallbackNeedsReply = lastMessage?.direction === "IN";
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
       // safeTruncate splits on Unicode code points so the cut won't bisect
@@ -1036,12 +1050,22 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       // (max-w-22ch, 36px display, ~31 chars/line). Staying within budget
       // means the operator reads the full fallback rather than an
       // ellipsis truncation (issue #193).
-      what_they_want: lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.",
+      what_they_want: fallbackWhatTheyWant,
       open_loops: input.previousOpenLoops,
       remember: input.previousRemember,
       tone_notes: [],
-      needs_reply: lastMessage?.direction === "IN",
-      urgency_hint: undefined
+      needs_reply: fallbackNeedsReply,
+      urgency_hint: undefined,
+      // When the AI call fails entirely we still need a brief so the right
+      // rail can render. Synthesise it from the legacy fallback fields —
+      // conservative by design (no invented obligations).
+      reply_brief: synthesiseFallbackBrief({
+        rollingSummary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
+        whatTheyWant: fallbackWhatTheyWant,
+        openLoops: input.previousOpenLoops,
+        needsReply: fallbackNeedsReply,
+        latestInboundText: lastInbound?.text ?? null
+      })
     };
 
     // Explicit schema in the prompt: gpt-5.4 honours response_format json_object
@@ -1125,7 +1149,18 @@ open_loops guidance (reconnect):
   "remember": [{ "note": "string", "date": "YYYY-MM-DD or null" }, ...],
   "tone_notes": ["string", ...],
   "needs_reply": true | false,
-  "urgency_hint": "string or omit if none"
+  "urgency_hint": "string or omit if none",
+  "reply_brief": {
+    "where_it_stands": "string — see Reply Brief guidance below",
+    "on_you": "string — the obligation read",
+    "required_points": [{ "id": "short-slug", "text": "specific thing on the operator", "status": "required" }, ...],
+    "optional_followups": [{ "id": "short-slug", "text": "nice-to-have move you suggest", "status": "optional" }, ...],
+    "handled_points": [{ "id": "short-slug", "text": "thing that no longer needs action", "status": "handled", "reason": "short why" }, ...],
+    "fuller_context": "string or null — longer chain context for the More disclosure",
+    "durable_context": "string or null — who they are / how the operator knows them",
+    "tone_steer": "string or null — one short line on how to approach the reply",
+    "enough_to_reply_without_scrolling": true | false
+  }
 }
 
 Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve relative dates and to judge whether a remembered event has already passed.
@@ -1135,6 +1170,68 @@ Reminder: lines starting with \`operator:\` are the operator's own words; lines 
 OPERATOR OUTPUT VOICE: Write user-facing strings (summary, what_they_want, open_loops, remember notes, tone_notes, urgency_hint) in SECOND PERSON. Refer to the operator as "you" (e.g. "Ashley is waiting on you to reply"). NEVER write the literal phrases "the operator" or "operator" in output text — those words exist only as the transcript attribution label.
 
 ${modeBlock}
+
+REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail. It must let the operator write a reply WITHOUT scrolling up into the message history. Default visible card = where_it_stands + on_you only.
+
+where_it_stands:
+- A CHAIN / TRACE of the conversation, not a generic relationship summary.
+- Include the operator's prior message ONLY when it explains why the contact replied the way they did (e.g. "You asked if he'd started looking at exec roles. He explained...").
+- End on the contact's most recent update or the latest relevant point.
+- Concrete and specific. Quote real details ("paused the offer because the clients are in the Middle East"), never abstractions.
+- 1-4 sentences, plain British English. No abstract coaching ("deepen the connection", "grounded question", "helpful nudge"). No marketing register.
+- DO NOT attribute operator words to the contact, or vice versa. The transcript labels (operator: / contact:) are authoritative.
+
+on_you:
+- Plainly state whether the contact has actually asked the operator for anything.
+- If the contact has NOT asked anything explicit, say so directly. Example wording: "He hasn't asked you anything. Acknowledge the offer, ask what he's looking at now, and you're done."
+- If the contact has asked ONE thing, name it. Example: "She asked whether Friday works. Confirm yes, or suggest another time."
+- If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
+- Never invent obligations. If the contact is simply updating the operator, say a light social reply is enough.
+- 1-3 sentences. No tasking the operator on things the contact didn't raise.
+
+required_points (status = "required"):
+- Things that would make the reply feel incomplete if ignored.
+- Direct questions to the operator, requests, decisions the contact asked the operator to make, things asked to send / confirm / check / arrange, important news that clearly deserves acknowledgement.
+- A question the operator acknowledged but never actually answered counts as required.
+- A multi-part inbound where several parts still need a response: surface each separate part as its own required point.
+- Each text is a short follow-up prompt the operator can act on ("Confirm Friday at 11 works", "Send the deck Marianne asked about", "Decide whether to invite Tolu").
+- 0-6 points. Quality and completeness over volume.
+- NEVER include relationship-deepening moves or curiosity prompts here. Those go in optional_followups.
+
+optional_followups (status = "optional"):
+- Nice-to-have conversational moves the AI suggests, that the contact did NOT actually ask for.
+- Warm callbacks, curiosity prompts, relationship-deepening follow-ups, "ask what they're working on now".
+- 0-4 points. Skip entirely when there's nothing genuinely interesting to add.
+- These NEVER appear in required_points. They never gate sending.
+
+handled_points (status = "handled"):
+- Things that no longer need action. Drop from required_points but record here so the operator can see why something is no longer flagged.
+- Questions the contact answered themselves later in the transcript.
+- Questions the operator already answered later in the transcript.
+- Older topics where the conversation clearly moved on to something else.
+- Rhetorical questions.
+- Stale requests that would feel awkward to resurrect unless the operator explicitly chooses to.
+- Include a short "reason" string explaining why it's handled (e.g. "you answered this on Tuesday", "she answered her own question two messages later", "the topic moved on to the trip planning").
+- 0-6 points. Omit the field entirely if nothing was dropped.
+
+fuller_context:
+- Optional longer trace for the expanded "More" disclosure. Used when the conversation has texture worth unpacking (a longer arc, a shift in topic, a relevant earlier exchange).
+- Plain prose, 1-3 sentences. Null when where_it_stands already covers everything.
+
+durable_context:
+- Optional one-line "who they are / how the operator knows them" — what would help if the operator hadn't spoken to this person in months. Null when unknown.
+
+tone_steer:
+- Optional one short line on how to approach the reply ("warm and brief, matches her tone", "stay direct — he's busy"). Null when nothing specific is worth saying.
+
+enough_to_reply_without_scrolling:
+- Boolean self-check: would the where_it_stands + on_you blocks let the operator write a reply WITHOUT having to scroll back into the message history? Be honest; this is a signal, not a gate.
+
+GLOBAL Reply Brief rules:
+- Use plain, direct British English in every brief field.
+- Do NOT use the phrases "deepen the connection", "grounded question", "helpful nudge", "agile career planning", "build rapport", "deepen rapport" anywhere in default-visible sections.
+- Keep total brief length tight enough to scan in under 10 seconds.
+- Required and optional and handled are MUTUALLY EXCLUSIVE buckets. A single point cannot appear in more than one.
 
 remember guidance (both modes):
 - Separately from the loops above, extract durable facts worth remembering about the contact's life: exams, trips, interviews, job or house moves, health things, family events, birthdays, milestones, deadlines they mentioned.
@@ -1173,7 +1270,47 @@ ${transcript}`;
         date: normalizeRememberDate(item.date)
       }))
       .filter((item) => item.note.length > 0);
-    return result;
+
+    // Reply Brief post-processing. The zod schema accepts the brief as
+    // `unknown` so a malformed shape doesn't reject the entire summary.
+    // sanitizeReplyBrief enforces the classification invariants (required
+    // / optional / handled mutually exclusive, banned coaching phrases
+    // stripped, caps applied). When the model omits the brief entirely,
+    // synthesise one from the legacy fields so the rail still renders.
+    const sanitisedBrief = sanitizeReplyBrief(result.reply_brief);
+    const finalBrief: ReplyBrief =
+      sanitisedBrief ??
+      synthesiseFallbackBrief({
+        rollingSummary: result.summary,
+        whatTheyWant: result.what_they_want,
+        openLoops: result.open_loops,
+        needsReply: result.needs_reply,
+        latestInboundText: lastInbound?.text ?? null
+      });
+
+    // Mirror required_points.text into open_loops so the legacy checklist,
+    // the /check-draft loop matcher, and the inbox preview stay in lockstep
+    // with the brief. The brief is authoritative; we never want open_loops
+    // to surface a loop the brief doesn't classify as required.
+    const mirroredLoops = mirrorRequiredToOpenLoops(finalBrief);
+    const finalOpenLoops = mirroredLoops
+      ? mirroredLoops.map((loop) => stripUnpairedSurrogates(loop))
+      : result.open_loops;
+
+    // Build the typed SummaryOutput explicitly — `result.reply_brief` is
+    // `unknown` per the permissive zod schema, so we cannot just return
+    // `result` directly without a type clash against SummaryOutput.
+    const output: SummaryOutput = {
+      summary: result.summary,
+      what_they_want: result.what_they_want,
+      open_loops: finalOpenLoops,
+      remember: result.remember,
+      tone_notes: result.tone_notes,
+      needs_reply: result.needs_reply,
+      urgency_hint: result.urgency_hint,
+      reply_brief: finalBrief
+    };
+    return output;
   }
 
   async function generateSuggestedReplies(input: {

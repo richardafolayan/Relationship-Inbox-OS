@@ -1,5 +1,7 @@
-import type { AiErrorKind, AiProvider } from "@inbox-os/core";
+import type { AiErrorKind, AiProvider, ReplyBrief } from "@inbox-os/core";
 import type { RememberItem } from "./thread-remember";
+
+export type { ReplyBrief, ReplyBriefPoint, ReplyBriefPointStatus } from "@inbox-os/core";
 
 export interface InboxRow {
   id: string;
@@ -345,6 +347,15 @@ export interface ThreadResponse {
    * Optional so older runner builds that predate the field still parse.
    */
   remember?: RememberItem[];
+  /**
+   * Compressed Reply Brief that drives the thread right rail (Where it
+   * stands + On you + collapsed More disclosure). The runner persists a
+   * brief alongside the rolling summary; older threads / fallback paths
+   * surface a synthesised brief derived from the legacy fields. Optional
+   * so dashboards talking to a runner build that predates this field
+   * still parse cleanly.
+   */
+  replyBrief?: ReplyBrief | null;
   draft: string;
   contextUpdatedAt: string;
   messages: ThreadMessage[];
