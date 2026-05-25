@@ -185,6 +185,37 @@ export function GuidedTour(props: GuidedTourProps) {
     if (!active) setDragOffset({ x: 0, y: 0 });
   }, [active]);
 
+  // ── Safe-area top ─────────────────────────────────────────────────
+  // The AppShell renders a sticky banner + status row above <main>. The
+  // overlay otherwise paints across the whole viewport, so the spotlight
+  // ring (and its dim spread) bleed up into that fixed-header area. We
+  // find <main>'s viewport-top and clip the overlay container below it
+  // so the banner stays visually intact.
+  const [safeTop, setSafeTop] = useState(0);
+  useEffect(() => {
+    if (typeof window === "undefined" || !active) return undefined;
+    const update = () => {
+      const main = document.querySelector("main");
+      if (!main) {
+        setSafeTop(0);
+        return;
+      }
+      const top = main.getBoundingClientRect().top;
+      // Negative values can happen briefly during route transitions;
+      // clamp at 0 so the overlay never sits below the viewport top.
+      setSafeTop(Math.max(0, Math.round(top)));
+    };
+    update();
+    const interval = window.setInterval(update, 250);
+    window.addEventListener("scroll", update, true);
+    window.addEventListener("resize", update);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener("scroll", update, true);
+      window.removeEventListener("resize", update);
+    };
+  }, [active]);
+
   // ── Card position ──────────────────────────────────────────────────
   const [viewport, setViewport] = useState(() =>
     typeof window === "undefined"
@@ -213,9 +244,10 @@ export function GuidedTour(props: GuidedTourProps) {
         placement,
         dragOffset,
         viewport,
+        safeTop,
         cardSize: { width: CARD_WIDTH, height: cardHeight }
       }),
-    [anchor.rect, placement, dragOffset, viewport, cardHeight]
+    [anchor.rect, placement, dragOffset, viewport, safeTop, cardHeight]
   );
 
   const dragged = dragOffset.x !== 0 || dragOffset.y !== 0;
@@ -419,6 +451,10 @@ export function GuidedTour(props: GuidedTourProps) {
       data-testid={`${variant}-tour-overlay`}
       className="pointer-events-none fixed inset-0 z-[80]"
       aria-live="polite"
+      // Clip the entire overlay (dim, ring, card) below the AppShell's
+      // sticky banner + status row so neither the spotlight edges nor
+      // the dim spread bleed into that fixed-header area.
+      style={safeTop > 0 ? { clipPath: `inset(${safeTop}px 0 0 0)` } : undefined}
     >
       {ringStyle ? (
         <div aria-hidden className="pointer-events-none absolute" style={ringStyle} />
