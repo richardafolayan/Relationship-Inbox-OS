@@ -3,6 +3,13 @@ import type { RememberItem } from "./thread-remember";
 
 export interface InboxRow {
   id: string;
+  /**
+   * Platform-side stable id (e.g. iMessage chat guid, LinkedIn thread
+   * URN). Optional because legacy rows persisted before this field was
+   * surfaced still parse. Surfaced so the presenter demo can target
+   * specific showcase rows by their stable demo platformThreadId.
+   */
+  platformThreadId?: string | null;
   personId?: string;
   personName: string;
   /**
@@ -453,6 +460,8 @@ export interface HealthResponse {
 // file. Adding a new provider in core's union (openai/glm/<future>) flows
 // straight through to AppSettings + AiSource without further edits here.
 
+export type PresenterDemoMode = "off" | "sandbox" | "live";
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -461,6 +470,8 @@ export interface AppSettings {
   maxMessagesPerThread: number;
   enabledPlatforms: Array<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE">;
   demoMode: boolean;
+  presenterDemoMode?: PresenterDemoMode;
+  presenterReadOnly?: boolean;
   recentThreadSweepCount: number;
   aiProvider?: AiProvider;
   glmModel?: string;
