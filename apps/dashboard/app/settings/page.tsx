@@ -8,6 +8,7 @@ import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
+import { clearTourSeen, startPilotTour } from "@/lib/pilot-tour";
 import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
@@ -179,6 +180,14 @@ export default function SettingsPage() {
             }}
           >
             Show welcome on Today
+          </PilotActionButton>
+          <PilotActionButton
+            onClick={() => {
+              clearTourSeen(window.localStorage);
+              startPilotTour({ replay: true });
+            }}
+          >
+            Replay walkthrough
           </PilotActionButton>
           {welcomeReset ? (
             <span className="font-mono text-[11px] text-ink-3" aria-live="polite">

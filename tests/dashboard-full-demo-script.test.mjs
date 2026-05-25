@@ -9,7 +9,8 @@ const { FULL_DEMO_SCRIPT, SHOWCASE_THREAD_IDS, isStepInMode, getStepIndex } = aw
 );
 
 const VALID_MODES = new Set(["sandbox", "live", "both"]);
-const VALID_FALLBACKS = new Set(["skip", "show-centred", "stop", undefined]);
+const VALID_PLACEMENTS = new Set(["top", "bottom", "left", "right", "center", undefined]);
+const VALID_CONTINUE_MODES = new Set(["next", "click-target", undefined]);
 
 test("every step has a unique id", () => {
   const ids = FULL_DEMO_SCRIPT.map((s) => s.id);
@@ -29,9 +30,21 @@ test("every step's mode is valid", () => {
   }
 });
 
-test("every step's fallback (when set) is valid", () => {
+test("every step's placement (when set) is valid", () => {
   for (const step of FULL_DEMO_SCRIPT) {
-    assert.ok(VALID_FALLBACKS.has(step.fallback), `${step.id} has invalid fallback: ${step.fallback}`);
+    assert.ok(
+      VALID_PLACEMENTS.has(step.placement),
+      `${step.id} has invalid placement: ${step.placement}`
+    );
+  }
+});
+
+test("every step's continueMode (when set) is valid", () => {
+  for (const step of FULL_DEMO_SCRIPT) {
+    assert.ok(
+      VALID_CONTINUE_MODES.has(step.continueMode),
+      `${step.id} has invalid continueMode: ${step.continueMode}`
+    );
   }
 });
 
@@ -43,15 +56,61 @@ test("script covers the documented surfaces", () => {
     "inbox",
     "open-serena",
     "serena-reply-brief",
-    "serena-action-items",
+    "serena-composer",
     "open-timi",
-    "multi-loop",
     "user-voice",
     "feedback",
     "settings",
     "closing"
   ]) {
     assert.ok(ids.has(required), `script is missing step "${required}"`);
+  }
+});
+
+test("script copy drops the banned 'not X, not Y' framings the brief flagged", () => {
+  // Keep this list tight — only phrases the brief specifically flagged.
+  // Other negative phrasings ('blocked', 'no longer') are valid because
+  // they state a guarantee, not a meaningless comparison.
+  const banned = [
+    /\bnot a dashboard\b/i,
+    /\bnot a crm\b/i,
+    /\bnot a relationship score\b/i,
+    /\bAI handles\b/i,
+    /\blet AI reply\b/i
+  ];
+  for (const step of FULL_DEMO_SCRIPT) {
+    const copy = `${step.title} ${step.body}`;
+    for (const re of banned) {
+      assert.ok(!re.test(copy), `step "${step.id}" copy contains banned phrase ${re}`);
+    }
+  }
+});
+
+test("script body length stays calm (≤ 220 chars per step)", () => {
+  for (const step of FULL_DEMO_SCRIPT) {
+    assert.ok(
+      step.body.length <= 220,
+      `step "${step.id}" body too long (${step.body.length} chars)`
+    );
+  }
+});
+
+test("click-target steps land the operator on an inbox-style page so the click can happen", () => {
+  // Click-target steps drive navigation through the operator clicking
+  // the anchor (e.g. a thread row). The step's own `route` should be
+  // an inbox-style listing — never a deep thread URL — so the row Link
+  // is visible to be clicked.
+  for (const step of FULL_DEMO_SCRIPT) {
+    if (step.continueMode !== "click-target") continue;
+    assert.ok(
+      step.route && !step.route.startsWith("/thread/"),
+      `click-target step "${step.id}" should have a non-thread route`
+    );
+    assert.equal(
+      step.threadPlatformId,
+      undefined,
+      `click-target step "${step.id}" should not set threadPlatformId — the click drives that nav`
+    );
   }
 });
 

@@ -3,12 +3,13 @@
  *
  * Steps are declarative records consumed by FullDemoProvider — they
  * carry no functions so the array can be inspected by tests and serialised
- * across reloads if needed. `beforeStep` / `simulatedAction` reference
- * keys in `demoActionRegistry` (also exported here) which is where any
- * actual side-effects live.
+ * across reloads if needed.
  *
- * Tone: calm, practical, British English. No hype.
+ * Tone: calm, practical, British English. State what each thing is and
+ * what the operator does with it. No "not X, not Y" framing. No em dashes.
  */
+
+import type { GuidedTourPlacement } from "./guided-tour";
 
 export type FullDemoMode = "sandbox" | "live";
 
@@ -27,18 +28,20 @@ export interface DemoStep {
   threadPlatformId?: string;
   /** `data-demo-target` value of the element to highlight. Omit for centred. */
   target?: string;
+  /** Where the card sits relative to the anchor. Defaults to "bottom". */
+  placement?: GuidedTourPlacement;
   title: string;
   body: string;
-  /** Registry key called once before the step renders. */
-  beforeStep?: string;
-  /** Registry key called when the user presses "Try it" on the step. */
-  simulatedAction?: string;
+  /** Soft pre-body caption for loading / scanning beats. */
+  beat?: string;
+  /**
+   * "next" (default) or "click-target". Click-target steps wait for the
+   * operator to click inside the anchored element, so the tour mirrors
+   * the real interaction.
+   */
+  continueMode?: "next" | "click-target";
   /** When provided, autoplay advances after this many ms. */
   waitMs?: number;
-  /** Default true. */
-  skippable?: boolean;
-  /** What to do if `target` cannot be resolved. Default "show-centred". */
-  fallback?: "skip" | "show-centred" | "stop";
 }
 
 /**
@@ -58,164 +61,124 @@ export const SHOWCASE_THREAD_IDS = {
 export const FULL_DEMO_SCRIPT: DemoStep[] = [
   {
     id: "opening",
-    title: "Relationship Inbox OS",
+    title: "A guided tour",
     body:
-      "A calm place to reply properly. It helps you understand what needs a reply, catch up quickly, and respond in your own words. Use Next to step through; you can pause or exit at any time."
+      "This is the full walkthrough. Demo conversations have been loaded. All actions stay inside sandbox data."
   },
   {
     id: "today",
     route: "/today",
     target: "today-hero",
+    placement: "left",
     title: "Today",
-    body:
-      "The daily reply queue. The hero card is the most overdue thread; everything else sits underneath. Nothing scrolls past you: you handle one thing, the next comes forward.",
-    waitMs: 6000
-  },
-  {
-    id: "today-queue",
-    route: "/today",
-    target: "today-queue",
-    title: "What is waiting",
-    body:
-      "A short peek at the next few, never the full firehose. The goal is to finish, not to scroll."
+    body: "Today shows who is waiting. Start with the top thread, then move down the queue."
   },
   {
     id: "inbox",
     route: "/inbox",
     target: "nav-inbox",
-    title: "Full inbox",
-    body:
-      "When you do want to scan everything, the inbox shows conversations across every connected platform (LinkedIn, iMessage, and the rest) in one list, with light filtering on the side."
+    placement: "right",
+    title: "Inbox",
+    body: "The inbox lists every conversation across connected platforms in one place."
   },
   {
     id: "open-serena",
     mode: "sandbox",
     route: "/inbox",
     target: `thread-row-${SHOWCASE_THREAD_IDS.serena}`,
-    title: "An iMessage thread",
-    body:
-      "Serena. She's confirmed she's free Saturday and is asking where to meet. Open it to see what catching up looks like."
+    placement: "left",
+    title: "Open Serena",
+    body: "She is asking where to meet on Saturday. Click her row to open the thread.",
+    continueMode: "click-target"
   },
   {
     id: "serena-reply-brief",
     mode: "sandbox",
     threadPlatformId: SHOWCASE_THREAD_IDS.serena,
     target: "reply-brief",
+    placement: "left",
     title: "Reply brief",
     body:
-      "Before you write anything, the app summarises where the conversation stands and what is on you. No need to scroll back through five days of messages.",
-    waitMs: 7000
-  },
-  {
-    id: "serena-action-items",
-    mode: "sandbox",
-    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
-    target: "action-items",
-    title: "Things to address",
-    body:
-      "Two open items: pick a spot, lock a time. As you type a reply, the AI ticks the ones your draft already covers, quietly, not in your face."
+      "The brief sums up where the conversation stands and what is on you. Read this before writing the reply."
   },
   {
     id: "serena-composer",
     mode: "sandbox",
     threadPlatformId: SHOWCASE_THREAD_IDS.serena,
-    target: "composer",
-    title: "Reply in your own words",
-    body:
-      "The composer stays the focus. AI help is optional: you can ask for a draft if you want one, but most of the time you'll just write."
+    target: "composer-input",
+    placement: "top",
+    title: "Write the reply",
+    body: "Compose in your own words. AI can help shape the reply. You stay in control of what gets sent."
+  },
+  {
+    id: "serena-clear",
+    mode: "sandbox",
+    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
+    target: "mark-handled",
+    placement: "bottom",
+    title: "Clear the thread",
+    body: "Mark as handled, snooze, or archive when you are finished."
   },
   {
     id: "open-timi",
     mode: "sandbox",
     route: "/inbox",
     target: `thread-row-${SHOWCASE_THREAD_IDS.timi}`,
-    title: "A LinkedIn thread",
-    body:
-      "Timi is sharing a quick career update. There is no direct question, no real ask, and the app reads that and tells you so."
+    placement: "left",
+    title: "Open Timi",
+    body: "Timi shared a quick career update on LinkedIn. Click the row to open it.",
+    continueMode: "click-target"
   },
   {
-    id: "timi-respond-lightly",
+    id: "timi-light-reply",
     mode: "sandbox",
     threadPlatformId: SHOWCASE_THREAD_IDS.timi,
     target: "reply-brief",
-    title: "Respond lightly",
-    body:
-      "When nothing is really on you, the brief says so. Reply briefly and move on; no need to manufacture an essay.",
-    waitMs: 7000
-  },
-  {
-    id: "multi-loop",
-    mode: "sandbox",
-    threadPlatformId: SHOWCASE_THREAD_IDS.multiLoop,
-    target: "action-items",
-    title: "Several open items",
-    body:
-      "Sometimes a thread has more in it. Four open points here, the checklist shows them all so nothing slips through, and the AI ticks them off as you address them in the draft."
-  },
-  {
-    id: "suggested-replies",
-    mode: "sandbox",
-    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
-    target: "suggested-replies",
-    title: "Suggested replies",
-    body:
-      "If you'd rather start from something, three short options are there. Always a draft, never an auto-send; you stay in control of every message."
-  },
-  {
-    id: "snooze-archive",
-    mode: "sandbox",
-    threadPlatformId: SHOWCASE_THREAD_IDS.serena,
-    target: "thread-actions",
-    title: "Snooze, archive, mark handled",
-    body:
-      "Three quick actions for when you don't need to reply right now. In this sandbox demo they only affect demo data, so your real inbox is not touched."
+    placement: "left",
+    title: "When nothing is on you",
+    body: "The brief calls out when nothing in particular is on you. Reply briefly and move on."
   },
   {
     id: "reconnect",
     mode: "sandbox",
     route: "/reconnect",
-    target: `thread-row-${SHOWCASE_THREAD_IDS.reconnect}`,
+    target: "nav-reconnect",
+    placement: "right",
     title: "Reconnect",
-    body:
-      "Old threads worth returning to surface here. Not a relationship score, not a dashboard, just a quiet prompt that you haven't heard from someone in a while and the conversation was a good one."
+    body: "Reconnect brings back older conversations worth revisiting."
   },
   {
     id: "user-voice",
     route: "/settings",
     target: "settings-user-voice",
+    placement: "right",
     title: "Writing in your voice",
-    body:
-      "Settings holds your voice profile: how you usually write, words you favour, words you avoid. The AI uses it to support your wording rather than replace it."
+    body: "Settings holds your voice profile. The AI uses it to match how you usually write."
   },
   {
     id: "feedback",
     target: "feedback",
-    title: "Tell me what's wrong",
+    placement: "right",
+    title: "Send feedback",
     body:
-      "Anything confusing or broken: the feedback button captures what you saw without including private message content. Quick to send, no friction."
+      "Anything confusing or broken. The feedback button captures what you saw without including private message content."
   },
   {
     id: "settings",
     route: "/settings",
     target: "settings-full-demo",
-    title: "Run the demo again",
-    body:
-      "Settings is also where you start this demo. Sandbox is safe; the live read-only mode lets you walk someone through your own real threads without any risk of sending or archiving anything."
+    placement: "right",
+    title: "Run it again",
+    body: "Settings starts this demo. Sandbox uses seeded data. Live mode is read-only against your real threads."
   },
   {
     id: "closing",
     title: "That is the loop",
     body:
-      "Find what needs a reply, catch up quickly, write in your own words, and clear it. Press End demo when you are ready to leave."
+      "Find what needs a reply. Catch up quickly. Write in your own words. Clear the thread. Press Done when you are ready."
   }
 ];
 
-/**
- * Registry of side-effect functions referenced by step ids
- * (`beforeStep` / `simulatedAction`). Pure functions, never serialised.
- * Empty for now — the v1 demo controller relies on route navigation +
- * DOM-bounds highlight only.
- */
 export interface DemoActionContext {
   navigate: (route: string) => void;
 }

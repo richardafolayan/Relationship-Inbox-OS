@@ -34,30 +34,53 @@ import { installLiveDemoFetchInterceptor } from "@/lib/full-demo-fetch";
  * the dashboard sees ordinary client-side transitions.
  */
 
+/**
+ * Which guided experience is currently driving the sandbox.
+ *
+ *  - "presenter": the full walkthrough (FullDemoOverlay renders).
+ *  - "pilot": the first-run onboarding tour (PilotTour renders).
+ *  - null: no walkthrough is running. If `serverSettings` still reports
+ *    presenter flags on at this point, recovery is needed.
+ *
+ * Sandbox seeding/teardown is owned by the provider and shared by both
+ * flows — only one flow can be active at a time.
+ */
+export type FullDemoFlow = "presenter" | "pilot" | null;
+
 interface FullDemoContextValue {
-  /** Local "the walkthrough is currently active" — set while the controller is running. */
+  /** True only when the presenter walkthrough is running. */
   active: boolean;
-  /** Walkthrough mode if active, otherwise null. */
+  /** The currently driving flow, or null if nothing is running. */
+  flow: FullDemoFlow;
+  /** Walkthrough mode if presenter is active, otherwise null. */
   mode: FullDemoMode | null;
   /** Index into FULL_DEMO_SCRIPT, filtered to steps in the current mode. */
   stepIndex: number;
   /** Total visible steps in the current mode. */
   visibleStepCount: number;
-  /** Current DemoStep if active, otherwise null. */
+  /** Current DemoStep if presenter is active, otherwise null. */
   currentStep: DemoStep | null;
   autoplay: boolean;
   /** Server settings as last fetched — used by banner + recovery surfaces. */
   serverSettings: AppSettings | null;
   /**
    * True when the server reports presenter on (presenterDemoMode !== "off"
-   * OR presenterReadOnly === true) but local state has no active flag.
+   * OR presenterReadOnly === true) but no flow is locally active.
    * Banner / Settings shell uses this to offer a "Recover demo state"
    * one-click exit.
    */
   recoveryNeeded: boolean;
   liveThreadIds: string[];
+  /** platformThreadId → internal cuid. Populated from /data/inbox while sandbox is active. */
+  threadIdMap: Map<string, string>;
 
   start: (mode: FullDemoMode, liveThreadIds?: string[]) => Promise<void>;
+  /**
+   * Seed the sandbox without engaging the presenter walkthrough. Used by
+   * the pilot tour, which drives its own GuidedTour overlay against the
+   * same showcase data.
+   */
+  startPilotSandbox: () => Promise<void>;
   next: () => void;
   back: () => void;
   goToStepId: (stepId: string) => void;
@@ -78,7 +101,8 @@ function presenterFlagsOn(settings: AppSettings | null): boolean {
 
 export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   const router = useRouter();
-  const [active, setActive] = useState(false);
+  const [flow, setFlow] = useState<FullDemoFlow>(null);
+  const active = flow === "presenter";
   const [mode, setMode] = useState<FullDemoMode | null>(null);
   const [stepId, setStepId] = useState<string | null>(null);
   const [autoplay, setAutoplayState] = useState(false);
@@ -95,7 +119,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const initial = readFullDemoState();
     if (initial.active) {
-      setActive(true);
+      setFlow("presenter");
       setMode(initial.mode);
       setStepId(initial.stepId);
       setAutoplayState(initial.autoplay);
@@ -170,8 +194,14 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
   useEffect(() => {
-    if (active && mode === "sandbox") void refreshThreadIdMap();
-  }, [active, mode, refreshThreadIdMap]);
+    // Refresh the map whenever a flow is running against the sandbox.
+    // The presenter live flow doesn't need it (real threads), but it's
+    // cheap and the sandbox cases are: presenter + sandbox mode, and
+    // pilot (which always runs against sandbox).
+    if (flow === "pilot" || (flow === "presenter" && mode === "sandbox")) {
+      void refreshThreadIdMap();
+    }
+  }, [flow, mode, refreshThreadIdMap]);
 
   // --- route-changing on step entry ----------------------------------------
   useEffect(() => {
@@ -232,7 +262,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
         return;
       }
       const initialStepId = FULL_DEMO_SCRIPT.find((s) => isStepInMode(s, newMode))?.id ?? "opening";
-      setActive(true);
+      setFlow("presenter");
       setMode(newMode);
       setStepId(initialStepId);
       setAutoplayState(false);
@@ -248,6 +278,35 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     },
     [refreshSettings]
   );
+
+  const startPilotSandbox = useCallback(async () => {
+    // Seed the sandbox without engaging the presenter walkthrough.
+    // Pilot tour owns its own GuidedTour overlay against the same
+    // showcase data.
+    if (flow === "presenter") {
+      // The presenter walkthrough is already running. Pilot tour should
+      // bow out rather than fight for the overlay.
+      return;
+    }
+    const payload: Partial<AppSettings> = {
+      presenterDemoMode: "sandbox",
+      presenterReadOnly: false
+    };
+    try {
+      await apiPost<AppSettings>("/runner/control/settings", payload);
+    } catch (err) {
+      showToast({
+        kind: "error",
+        title: "Couldn't start demo",
+        description: err instanceof Error ? err.message : "Unknown error"
+      });
+      throw err;
+    }
+    setFlow("pilot");
+    setMode("sandbox");
+    setLiveThreadIds([]);
+    await refreshSettings();
+  }, [flow, refreshSettings]);
 
   const goToStepId = useCallback((id: string) => {
     setStepId(id);
@@ -285,7 +344,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
         description: err instanceof Error ? err.message : "Try again in Settings."
       });
     }
-    setActive(false);
+    setFlow(null);
     setMode(null);
     setStepId(null);
     setAutoplayState(false);
@@ -295,11 +354,15 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   }, [refreshSettings]);
 
   // --- recovery state computation ------------------------------------------
-  const recoveryNeeded = !active && presenterFlagsOn(serverSettings);
+  // Recovery means: server says presenter flags are still on, but no local
+  // flow is driving the sandbox. Pilot counts as "driving" — its overlay
+  // mounts the same teardown path on exit.
+  const recoveryNeeded = flow === null && presenterFlagsOn(serverSettings);
 
   const value = useMemo<FullDemoContextValue>(
     () => ({
       active,
+      flow,
       mode,
       stepIndex,
       visibleStepCount: visibleSteps.length,
@@ -308,7 +371,9 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
       serverSettings,
       recoveryNeeded,
       liveThreadIds,
+      threadIdMap,
       start,
+      startPilotSandbox,
       next,
       back,
       goToStepId,
@@ -318,6 +383,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     }),
     [
       active,
+      flow,
       mode,
       stepIndex,
       visibleSteps.length,
@@ -326,7 +392,9 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
       serverSettings,
       recoveryNeeded,
       liveThreadIds,
+      threadIdMap,
       start,
+      startPilotSandbox,
       next,
       back,
       goToStepId,
