@@ -485,13 +485,26 @@ export default function ThreadPage() {
     if (stored === "true") setThreadsCollapsed(true);
   }, []);
 
-  // Open the context rail once per thread when it has things to address, so
-  // the action-items checklist is visible while the operator writes a reply.
+  // Open the context rail once per thread when there's a brief to show — i.e.
+  // a Where it stands or On you string the operator can use to write the
+  // reply without scrolling. Previously the rail only auto-opened when the
+  // thread had open loops, which left the panel hidden on dormant or
+  // social-update threads where the brief is still useful (Brandon-style:
+  // "He hasn't asked you anything. Acknowledge the offer, ask what he's
+  // looking at now, and you're done.").
   const railAutoOpenForThreadRef = useRef<string | null>(null);
   useEffect(() => {
     if (!thread || railAutoOpenForThreadRef.current === thread.id) return;
     railAutoOpenForThreadRef.current = thread.id;
-    if (thread.openLoops.length > 0 || thread.dismissedOpenLoops.length > 0) {
+    const brief = thread.replyBrief;
+    const hasBriefContent = Boolean(
+      brief && (brief.where_it_stands?.trim() || brief.on_you?.trim())
+    );
+    if (
+      hasBriefContent ||
+      thread.openLoops.length > 0 ||
+      thread.dismissedOpenLoops.length > 0
+    ) {
       setAiOpen(true);
     }
   }, [thread]);
