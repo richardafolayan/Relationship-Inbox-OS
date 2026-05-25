@@ -93,21 +93,6 @@ test("computeCardPosition pins the card to a corner when the anchor scrolls full
   assert.ok(pos.top + cardSize.height <= viewport.height - VIEWPORT_MARGIN + 1);
 });
 
-test("computeCardPosition respects safeTop so the card never sits behind a sticky header", () => {
-  // Anchor near the top of the page; without safeTop the card placed
-  // above the anchor would end up clamped to 24 (sticky header would
-  // cover it). With safeTop=100 the card top must be at least 124.
-  const pos = computeCardPosition({
-    rect: rect({ top: 200, left: 400, width: 200, height: 50 }),
-    placement: "top",
-    dragOffset: { x: 0, y: 0 },
-    viewport,
-    safeTop: 100,
-    cardSize
-  });
-  assert.ok(pos.top >= 100 + VIEWPORT_MARGIN, `card top ${pos.top} should sit below the safe area`);
-});
-
 test("computeCardPosition is not pinned when the anchor is partially visible", () => {
   // Anchor straddles the top edge: top is above the viewport but bottom is visible.
   const pos = computeCardPosition({

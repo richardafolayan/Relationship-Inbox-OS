@@ -185,52 +185,6 @@ export function GuidedTour(props: GuidedTourProps) {
     if (!active) setDragOffset({ x: 0, y: 0 });
   }, [active]);
 
-  // ── Safe-area top ─────────────────────────────────────────────────
-  // The AppShell renders a sticky banner + status row above <main>, and
-  // each page renders a sticky PageHead inside <main>. The overlay
-  // otherwise paints across the whole viewport, so the spotlight ring
-  // (and its dim spread) bleeds up into that fixed-header area. We
-  // compute the bottom edge of all sticky chrome currently pinned to
-  // the top of the viewport and clip the overlay below it.
-  const [safeTop, setSafeTop] = useState(0);
-  useEffect(() => {
-    if (typeof window === "undefined" || !active) return undefined;
-    const update = () => {
-      const main = document.querySelector("main");
-      if (!main) {
-        setSafeTop(0);
-        return;
-      }
-      // Start with <main>'s top (covers the AppShell's banner + status row).
-      let bottom = main.getBoundingClientRect().top;
-      // Then walk every sticky element inside <main> that is currently
-      // pinned to the top of the viewport and take its bottom. The
-      // PageHead component uses `position: sticky; top: 0` and lives
-      // inside <main>.
-      const stickies = main.querySelectorAll<HTMLElement>("header, [data-sticky-top]");
-      for (const el of stickies) {
-        const style = window.getComputedStyle(el);
-        if (style.position !== "sticky") continue;
-        const rect = el.getBoundingClientRect();
-        // Only count elements that are currently "stuck" at the top —
-        // their top is at (or very near) the viewport top.
-        if (rect.top <= bottom + 1 && rect.bottom > bottom) {
-          bottom = rect.bottom;
-        }
-      }
-      setSafeTop(Math.max(0, Math.round(bottom)));
-    };
-    update();
-    const interval = window.setInterval(update, 250);
-    window.addEventListener("scroll", update, true);
-    window.addEventListener("resize", update);
-    return () => {
-      window.clearInterval(interval);
-      window.removeEventListener("scroll", update, true);
-      window.removeEventListener("resize", update);
-    };
-  }, [active]);
-
   // ── Card position ──────────────────────────────────────────────────
   const [viewport, setViewport] = useState(() =>
     typeof window === "undefined"
@@ -259,10 +213,9 @@ export function GuidedTour(props: GuidedTourProps) {
         placement,
         dragOffset,
         viewport,
-        safeTop,
         cardSize: { width: CARD_WIDTH, height: cardHeight }
       }),
-    [anchor.rect, placement, dragOffset, viewport, safeTop, cardHeight]
+    [anchor.rect, placement, dragOffset, viewport, cardHeight]
   );
 
   const dragged = dragOffset.x !== 0 || dragOffset.y !== 0;
@@ -466,10 +419,6 @@ export function GuidedTour(props: GuidedTourProps) {
       data-testid={`${variant}-tour-overlay`}
       className="pointer-events-none fixed inset-0 z-[80]"
       aria-live="polite"
-      // Clip the entire overlay (dim, ring, card) below the AppShell's
-      // sticky banner + status row so neither the spotlight edges nor
-      // the dim spread bleed into that fixed-header area.
-      style={safeTop > 0 ? { clipPath: `inset(${safeTop}px 0 0 0)` } : undefined}
     >
       {ringStyle ? (
         <div aria-hidden className="pointer-events-none absolute" style={ringStyle} />

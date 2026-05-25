@@ -95,12 +95,6 @@ export interface ComputeCardPositionInput {
   dragOffset: GuidedTourCardOffset;
   viewport: { width: number; height: number };
   cardSize?: { width: number; height: number };
-  /**
-   * Pixels of fixed UI at the top of the viewport (e.g. an AppShell
-   * banner + sticky page-head). The card and pin position are clamped
-   * below this offset so they never sit behind that chrome.
-   */
-  safeTop?: number;
 }
 
 export interface ComputedCardPosition {
@@ -125,11 +119,10 @@ export function computeCardPosition(input: ComputeCardPositionInput): ComputedCa
   const height = input.cardSize?.height ?? CARD_HEIGHT_CEILING;
   const vw = input.viewport.width;
   const vh = input.viewport.height;
-  const safeTop = input.safeTop ?? 0;
   const minLeft = VIEWPORT_MARGIN;
   const maxLeft = Math.max(VIEWPORT_MARGIN, vw - width - VIEWPORT_MARGIN);
-  const minTop = Math.max(VIEWPORT_MARGIN, safeTop + VIEWPORT_MARGIN);
-  const maxTop = Math.max(minTop, vh - height - VIEWPORT_MARGIN);
+  const minTop = VIEWPORT_MARGIN;
+  const maxTop = Math.max(VIEWPORT_MARGIN, vh - height - VIEWPORT_MARGIN);
 
   if (!input.rect) {
     const top = clamp(Math.round(vh / 2 - height / 2) + input.dragOffset.y, minTop, maxTop);
