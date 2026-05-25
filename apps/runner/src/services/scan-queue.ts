@@ -2922,6 +2922,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     let openLoopsJson = thread.openLoopsJson;
     let toneNotesJson = thread.toneNotesJson;
     let rememberJson = thread.rememberJson;
+    let replyBriefJson = thread.replyBriefJson;
 
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
@@ -2948,6 +2949,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
       toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
       // remember notes are already surrogate-stripped inside updateThreadSummary.
       rememberJson = JSON.stringify(aiSummary.remember);
+      // Reply Brief is already sanitised + sub-fields surrogate-stripped
+      // inside updateThreadSummary. Persisted as a single JSON blob; the
+      // dashboard parses on read.
+      replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
     }
 
     // Phase 3: classify on first encounter only. Once a thread has a
@@ -3083,6 +3088,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         openLoopsJson,
         toneNotesJson,
         rememberJson,
+        replyBriefJson,
         // Stamp the first-full-backfill marker on the FIRST successful
         // persistence of any thread that has at least one message. We don't
         // gate on the pre-click `markedFullBackfill` flag because the URL

@@ -21,6 +21,7 @@ import {
   contactSnapshotFingerprint,
   operatorProfileFingerprint
 } from "./services/ai";
+import { sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
 import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
@@ -2530,7 +2531,8 @@ async function resummarizeThreadById(threadId: string): Promise<
       whatTheyWant: summary.what_they_want,
       openLoopsJson: JSON.stringify(summary.open_loops),
       toneNotesJson: JSON.stringify(summary.tone_notes),
-      rememberJson: JSON.stringify(summary.remember)
+      rememberJson: JSON.stringify(summary.remember),
+      replyBriefJson: summary.reply_brief ? JSON.stringify(summary.reply_brief) : null
     }
   });
 
@@ -3294,6 +3296,32 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
   };
 
+  // Reply Brief surface. Persisted as JSON on the Thread row; older rows
+  // (pre-feature) carry null. In that case, synthesise a safe fallback
+  // from the legacy fields so the dashboard rail always has something
+  // grounded to render. The real brief regenerates on next scan /
+  // Reassess / stale-summary self-heal.
+  const persistedOpenLoops: string[] = thread.openLoopsJson
+    ? (JSON.parse(thread.openLoopsJson) as string[])
+    : [];
+  let parsedReplyBrief: ReturnType<typeof sanitizeReplyBrief> = null;
+  if (thread.replyBriefJson) {
+    try {
+      parsedReplyBrief = sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+    } catch {
+      parsedReplyBrief = null;
+    }
+  }
+  const replyBriefResponse =
+    parsedReplyBrief ??
+    synthesiseFallbackBrief({
+      rollingSummary: thread.rollingSummary ?? "",
+      whatTheyWant: thread.whatTheyWant ?? "",
+      openLoops: persistedOpenLoops,
+      needsReply: thread.needsReply,
+      latestInboundText: lastInbound?.text ?? null
+    });
+
   res.json({
     id: thread.id,
     personId: thread.person.id,
@@ -3308,7 +3336,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     summary: thread.rollingSummary,
     whatTheyWant: thread.whatTheyWant,
     openLoops: filterDismissedOpenLoops(
-      thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+      persistedOpenLoops,
       thread.dismissedOpenLoopsJson
     ),
     dismissedOpenLoops: thread.dismissedOpenLoopsJson
@@ -3316,6 +3344,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       : [],
     toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
     remember: thread.rememberJson ? (JSON.parse(thread.rememberJson) as RememberItem[]) : [],
+    replyBrief: replyBriefResponse,
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
