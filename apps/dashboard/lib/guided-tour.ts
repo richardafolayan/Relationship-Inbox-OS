@@ -105,6 +105,13 @@ export interface ComputedCardPosition {
   resolvedPlacement: GuidedTourPlacement;
   /** True when the card is anchored to a real target. */
   anchored: boolean;
+  /**
+   * True when the anchor exists but is fully outside the viewport. The
+   * component should hide the spotlight ring + arrow in this case and
+   * pin the card to a stable corner so it doesn't drift over scrolled
+   * content.
+   */
+  pinned: boolean;
 }
 
 export function computeCardPosition(input: ComputeCardPositionInput): ComputedCardPosition {
@@ -120,10 +127,20 @@ export function computeCardPosition(input: ComputeCardPositionInput): ComputedCa
   if (!input.rect) {
     const top = clamp(Math.round(vh / 2 - height / 2) + input.dragOffset.y, minTop, maxTop);
     const left = clamp(Math.round(vw / 2 - width / 2) + input.dragOffset.x, minLeft, maxLeft);
-    return { top, left, width, resolvedPlacement: "center", anchored: false };
+    return { top, left, width, resolvedPlacement: "center", anchored: false, pinned: false };
   }
 
   const rect = input.rect;
+
+  // Anchor fully outside the viewport — pin the card to the bottom-right
+  // corner so it stays visible without drifting over arbitrary scrolled
+  // content. The component then hides the spotlight ring + arrow.
+  const offscreen = rect.bottom <= 0 || rect.top >= vh || rect.right <= 0 || rect.left >= vw;
+  if (offscreen) {
+    const top = clamp(maxTop + input.dragOffset.y, minTop, maxTop);
+    const left = clamp(maxLeft + input.dragOffset.x, minLeft, maxLeft);
+    return { top, left, width, resolvedPlacement: "center", anchored: true, pinned: true };
+  }
   let placement = input.placement;
   let top: number;
   let left: number;
@@ -172,7 +189,7 @@ export function computeCardPosition(input: ComputeCardPositionInput): ComputedCa
   top = clamp(Math.round(top + input.dragOffset.y), minTop, maxTop);
   left = clamp(Math.round(left + input.dragOffset.x), minLeft, maxLeft);
 
-  return { top, left, width, resolvedPlacement: placement, anchored: true };
+  return { top, left, width, resolvedPlacement: placement, anchored: true, pinned: false };
 }
 
 // ── Arrow geometry ─────────────────────────────────────────────────────

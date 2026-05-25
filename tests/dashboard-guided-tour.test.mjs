@@ -77,6 +77,35 @@ test("computeCardPosition clamps the card to the viewport margins", () => {
   assert.ok(pos.left >= VIEWPORT_MARGIN);
 });
 
+test("computeCardPosition pins the card to a corner when the anchor scrolls fully off-screen", () => {
+  // Anchor above the viewport (operator scrolled down past it).
+  const pos = computeCardPosition({
+    rect: rect({ top: -400, left: 400, width: 200, height: 50 }),
+    placement: "bottom",
+    dragOffset: { x: 0, y: 0 },
+    viewport,
+    cardSize
+  });
+  assert.equal(pos.pinned, true);
+  assert.equal(pos.anchored, true);
+  // Card sits near the bottom-right corner.
+  assert.ok(pos.left + cardSize.width <= viewport.width - VIEWPORT_MARGIN + 1);
+  assert.ok(pos.top + cardSize.height <= viewport.height - VIEWPORT_MARGIN + 1);
+});
+
+test("computeCardPosition is not pinned when the anchor is partially visible", () => {
+  // Anchor straddles the top edge: top is above the viewport but bottom is visible.
+  const pos = computeCardPosition({
+    rect: rect({ top: -20, left: 400, width: 200, height: 200 }),
+    placement: "bottom",
+    dragOffset: { x: 0, y: 0 },
+    viewport,
+    cardSize
+  });
+  assert.equal(pos.pinned, false);
+  assert.equal(pos.anchored, true);
+});
+
 test("computeCardPosition applies dragOffset on top of the computed anchor", () => {
   const base = computeCardPosition({
     rect: rect({ top: 200, left: 400 }),

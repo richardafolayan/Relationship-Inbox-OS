@@ -109,6 +109,9 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   const [serverSettings, setServerSettings] = useState<AppSettings | null>(null);
   const [liveThreadIds, setLiveThreadIds] = useState<string[]>([]);
   const fetchInterceptorTeardownRef = useRef<(() => void) | null>(null);
+  // Forward ref to `exit` so `next` (declared earlier) can trigger
+  // teardown on the final step without a circular useCallback dep.
+  const exitRef = useRef<(() => Promise<void>) | null>(null);
   // platformThreadId → internal thread id, populated from /data/inbox
   // when sandbox is active. The script references threads by their stable
   // platformThreadId; the dashboard /thread/[id] route wants the runner's
@@ -316,7 +319,12 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   const next = useCallback(() => {
     const idx = visibleSteps.findIndex((s) => s.id === stepId);
     const target = visibleSteps[idx + 1];
-    if (!target) return;
+    if (!target) {
+      // Last step: Done should tear the walkthrough down rather than
+      // silently no-op. Mirrors the pilot tour's Done behaviour.
+      void exitRef.current?.();
+      return;
+    }
     setStepId(target.id);
     writeFullDemoState({ stepId: target.id });
   }, [stepId, visibleSteps]);
@@ -352,6 +360,10 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     clearFullDemoState();
     await refreshSettings();
   }, [refreshSettings]);
+  // `next` is declared above `exit` and needs to trigger teardown when
+  // pressed on the final step. Keep a ref so that callback can reach the
+  // current `exit` without re-creating itself on every render.
+  exitRef.current = exit;
 
   // --- recovery state computation ------------------------------------------
   // Recovery means: server says presenter flags are still on, but no local

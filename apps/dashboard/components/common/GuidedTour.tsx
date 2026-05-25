@@ -106,6 +106,10 @@ export function GuidedTour(props: GuidedTourProps) {
   // ── Anchor measurement ─────────────────────────────────────────────
   const elementRef = useRef<HTMLElement | null>(null);
   const [anchor, setAnchor] = useState<ResolvedAnchor>({ rect: null, element: null });
+  // Track which (step + element) pair we have already scrolled into view
+  // so the polling re-measure does not keep yanking the page back. Reset
+  // on step change so the next step gets one fresh scroll.
+  const scrolledForRef = useRef<{ stepIndex: number; element: HTMLElement } | null>(null);
   useLayoutEffect(() => {
     if (!active || targets.length === 0) {
       elementRef.current = null;
@@ -120,6 +124,24 @@ export function GuidedTour(props: GuidedTourProps) {
       if (!el) {
         setAnchor((prev) => (prev.element === null && prev.rect === null ? prev : { rect: null, element: null }));
         return;
+      }
+      // If the anchor is off-screen (or only partially visible), scroll
+      // it into view once so the operator can actually see what the step
+      // is pointing at. Once per (step, element) pair — subsequent
+      // measure ticks must not re-trigger the scroll, otherwise the
+      // page would yank back whenever the operator scrolls away.
+      const already =
+        scrolledForRef.current &&
+        scrolledForRef.current.stepIndex === stepIndex &&
+        scrolledForRef.current.element === el;
+      if (!already) {
+        const r = el.getBoundingClientRect();
+        const vh = window.innerHeight;
+        const offscreen = r.bottom <= 0 || r.top >= vh || r.top < 0 || r.bottom > vh;
+        if (offscreen) {
+          el.scrollIntoView({ block: "center", behavior: "smooth" });
+        }
+        scrolledForRef.current = { stepIndex, element: el };
       }
       const next = el.getBoundingClientRect();
       setAnchor((prev) => {
@@ -197,8 +219,10 @@ export function GuidedTour(props: GuidedTourProps) {
   );
 
   const dragged = dragOffset.x !== 0 || dragOffset.y !== 0;
+  // Hide the arrow whenever the anchor is off-screen — the card is now
+  // pinned to a corner and any arrow would point at empty space.
   const arrow =
-    position.anchored && anchor.rect
+    position.anchored && !position.pinned && anchor.rect
       ? computeArrowGeometry({
           card: { top: position.top, left: position.left, width: position.width },
           rect: anchor.rect,
@@ -374,7 +398,7 @@ export function GuidedTour(props: GuidedTourProps) {
   // sits *outside* the anchor rect. The anchor itself stays crisp and
   // readable. Anchorless / centred steps get a flat dim instead.
   const ringStyle: React.CSSProperties | null =
-    position.anchored && anchor.rect
+    position.anchored && !position.pinned && anchor.rect
       ? {
           top: anchor.rect.top - 6,
           left: anchor.rect.left - 6,
