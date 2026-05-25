@@ -9,6 +9,7 @@ import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
+import { PilotTour, recoverAbandonedTourIfAny } from "@/components/common/pilot-tour";
 import { apiGet, apiPost } from "@/lib/api";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
@@ -244,6 +245,16 @@ export function AppShell({ children }: { children: ReactNode }) {
     void requestNotificationPermission();
   }, []);
 
+  // One-shot recovery for an abandoned pilot guided tour. If the previous
+  // session ended without a clean /control/pilot-tour/end (tab closed mid-
+  // tour, hard refresh, etc.), this re-runs cleanup so the seeded demo
+  // threads never linger. Guarded inside recoverAbandonedTourIfAny so it
+  // can only ever fire once per JS session — route navigation inside the
+  // running app cannot trigger it.
+  useEffect(() => {
+    void recoverAbandonedTourIfAny();
+  }, []);
+
   // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
   // `runner-resync` window events.
   useEffect(() => {
@@ -360,6 +371,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />
+      <PilotTour />
     </div>
   );
 }

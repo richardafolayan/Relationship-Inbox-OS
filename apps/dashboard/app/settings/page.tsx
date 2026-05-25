@@ -1,12 +1,14 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
+import { markTourSeen, startPilotTour } from "@/lib/pilot-tour";
 import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
@@ -18,10 +20,14 @@ const QUIET_HOURS_KEY = "inbox_quiet_hours";
 // platforms, danger-zone wipe, runner restart) were stripped in PR1;
 // restore from archive/pre-v1-stripback if they're needed back.
 export default function SettingsPage() {
+  const router = useRouter();
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
   const [savedAt, setSavedAt] = useState<number | null>(null);
+  // "Replay guided demo" — flips on briefly so the button surfaces an
+  // inline "starting…" caption while the runner seeds the sandbox.
+  const [replayStarting, setReplayStarting] = useState(false);
 
   // Headless lives in the runner's persisted settings (the runner reads
   // settings.headless when launching Chrome), so unlike autoScan/quietHours
@@ -172,12 +178,39 @@ export default function SettingsPage() {
           >
             Show welcome on Today
           </PilotActionButton>
+          <PilotActionButton
+            onClick={() => {
+              if (replayStarting) return;
+              setReplayStarting(true);
+              // Keep `seen` set — the first-run welcome card has already
+              // been shown for this user, and re-showing it alongside the
+              // tour overlay would stack two cards on the same screen.
+              // Replay just drives to Today and starts the walkthrough
+              // against the demo sandbox.
+              markTourSeen(window.localStorage);
+              router.push("/today");
+              // Give Next a tick to mount the Today route before the
+              // tour starts looking for its `data-tour="today-nav"`
+              // anchor. Without the gap the tour starts on whatever
+              // page Settings was rendered onto.
+              setTimeout(() => {
+                startPilotTour({ replay: true });
+                setReplayStarting(false);
+              }, 60);
+            }}
+          >
+            {replayStarting ? "Starting demo…" : "Replay guided demo"}
+          </PilotActionButton>
           {welcomeReset ? (
             <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
               it’ll show next time you open Today
             </span>
           ) : null}
         </div>
+        <p className="mt-3 font-mono text-[11px] text-ink-3">
+          The walkthrough runs against demo conversations only. Your real
+          threads are never touched.
+        </p>
       </section>
     </Canvas>
   );

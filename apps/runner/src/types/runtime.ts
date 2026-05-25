@@ -26,8 +26,18 @@ export type RunnerEventInput = {
     Partial<Pick<Extract<RunnerEvent, { type: Type }>, "at">>;
 }[RunnerEvent["type"]];
 
+/**
+ * Tags which seed variant produced a manifest. Cleanup matches against the
+ * manifest's id lists either way, so the marker is mainly so the runner can
+ * report what kind of demo state is currently sitting on disk (a generic
+ * demoMode seed vs. a pilot-tour seed) and so a future variant can branch
+ * cleanup behaviour without changing the wire format.
+ */
+export type DemoSeedMode = "generic" | "pilot-guided-tour";
+
 export interface DemoSeedManifest {
   seededAt: string;
+  mode: DemoSeedMode;
   personIds: string[];
   threadIds: string[];
   logIds: string[];

@@ -165,6 +165,7 @@ export function Sidebar({
             <Link
               key={item.href}
               href={item.href}
+              data-tour={item.href === "/today" ? "today-nav" : undefined}
               title={collapsed ? item.label : undefined}
               className={cn(
                 "relative flex items-center rounded-[10px] text-[13px] tracking-[-0.005em]",
@@ -208,6 +209,7 @@ export function Sidebar({
 
       <button
         type="button"
+        data-tour="feedback"
         onClick={() => openPilotFeedback("feedback")}
         aria-label="Send feedback"
         title={collapsed ? "Send feedback" : undefined}

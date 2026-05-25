@@ -24,7 +24,14 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { PilotTourInviteCard } from "@/components/common/pilot-tour-invite";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
+import {
+  isTourSeen,
+  markTourSeen,
+  PILOT_TOUR_SEEN_KEY,
+  startPilotTour
+} from "@/lib/pilot-tour";
 
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
@@ -97,6 +104,9 @@ export default function TodayPage() {
   // First-run pilot welcome card. `undefined` until localStorage is read,
   // so the card never flashes for testers who already dismissed it.
   const [welcomeDismissed, setWelcomeDismissed] = useState<boolean | undefined>(undefined);
+  // First-run guided tour invite. Same `undefined` discipline so the
+  // bigger Start/Skip card doesn't flash on a returning operator's load.
+  const [tourSeen, setTourSeen] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -147,6 +157,15 @@ export default function TodayPage() {
 
   useEffect(() => {
     setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
+    setTourSeen(isTourSeen(window.localStorage));
+    // Stay in sync if Settings clears the seen flag from another tab.
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === PILOT_TOUR_SEEN_KEY) {
+        setTourSeen(event.newValue === "1");
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
   }, []);
 
   // Restore tonight's cleared-thread counts so the right-rail outline keeps
@@ -439,7 +458,26 @@ export default function TodayPage() {
         </div>
       </header>
 
-      {welcomeDismissed === false ? (
+      {tourSeen === false ? (
+        <PilotTourInviteCard
+          onStart={() => {
+            // Welcome counts as dismissed too — skipping a started tour
+            // would otherwise show the older welcome card on the next
+            // reload, which feels like getting pestered twice.
+            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+            markTourSeen(window.localStorage);
+            setWelcomeDismissed(true);
+            setTourSeen(true);
+            startPilotTour();
+          }}
+          onSkip={() => {
+            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+            markTourSeen(window.localStorage);
+            setWelcomeDismissed(true);
+            setTourSeen(true);
+          }}
+        />
+      ) : welcomeDismissed === false ? (
         <PilotWelcomeCard
           onDismiss={() => {
             window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
@@ -484,6 +522,7 @@ export default function TodayPage() {
             <article
               ref={heroRef}
               data-testid="today-hero"
+              data-tour="today-hero"
               className={`relative mb-4 flex min-h-[300px] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
@@ -619,7 +658,7 @@ export default function TodayPage() {
                 </h3>
                 <span className="font-mono text-[12px] text-ink-3">{remaining.length} waiting</span>
               </div>
-              <div className="flex flex-col">
+              <div className="flex flex-col" data-tour="today-list">
                 {visibleRemaining.map((row) => (
                   <ThreadRow key={row.id} row={row} id={`today-row-${row.id}`} />
                 ))}

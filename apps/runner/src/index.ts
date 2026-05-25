@@ -52,7 +52,12 @@ import {
   resetPlatformInboxGraph,
   validateAdminResetGuards
 } from "./services/admin-reset";
-import { cleanupDemoData, seedDemoData } from "./services/demo";
+import {
+  cleanupDemoData,
+  PILOT_TOUR_SERENA_THREAD_ID,
+  PILOT_TOUR_TIMI_THREAD_ID,
+  seedDemoData
+} from "./services/demo";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
 import {
@@ -1342,6 +1347,63 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
   }
 
   res.json(next);
+}));
+
+// ── Pilot guided tour ───────────────────────────────────────────────────
+// The dashboard runs a small first-run walkthrough for pilot testers. It
+// must never touch real threads. Start seeds a deterministic two-thread
+// demo set (Serena / Timi) and flips demoMode true — which also pauses
+// the auto-scan scheduler (scan-queue.ts) so no real platform is scraped
+// during the tour. End cleans up via the manifest (id-list only, never a
+// broad delete) and flips demoMode back off.
+//
+// Both endpoints are idempotent: calling /start when a tour is already
+// active cleans up the previous manifest before reseeding; calling /end
+// when nothing is active returns ok.
+app.post("/control/pilot-tour/start", asyncRoute(async (_req, res) => {
+  const existing = await settingsStore.getDemoSeedManifest();
+  if (existing) {
+    await cleanupDemoData(existing, {
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir
+    });
+    await settingsStore.setDemoSeedManifest(null);
+  }
+
+  // Pause real scans for the duration of the tour. demoMode === true
+  // makes the auto-scan scheduler short-circuit (scan-queue.ts).
+  await settingsStore.updateSettings({ demoMode: true });
+
+  const manifest = await seedDemoData({
+    mode: "pilot-guided-tour",
+    screenshotDir: runnerConfig.screenshotDir,
+    domDumpDir: runnerConfig.domDumpDir
+  });
+  await settingsStore.setDemoSeedManifest(manifest);
+
+  res.json({
+    ok: true,
+    mode: manifest.mode,
+    demoThreadIds: {
+      serena: PILOT_TOUR_SERENA_THREAD_ID,
+      timi: PILOT_TOUR_TIMI_THREAD_ID
+    }
+  });
+}));
+
+app.post("/control/pilot-tour/end", asyncRoute(async (_req, res) => {
+  const manifest = await settingsStore.getDemoSeedManifest();
+  if (manifest) {
+    await cleanupDemoData(manifest, {
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir
+    });
+    await settingsStore.setDemoSeedManifest(null);
+  }
+  // Flip demoMode back off so real scans resume. Idempotent — settingsStore
+  // will simply rewrite the same value if it was already false.
+  await settingsStore.updateSettings({ demoMode: false });
+  res.json({ ok: true });
 }));
 
 // Cooperative scan abort. Drives the cancel button in the dashboard's

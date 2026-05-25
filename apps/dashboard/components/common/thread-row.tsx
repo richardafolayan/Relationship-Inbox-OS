@@ -8,6 +8,10 @@ import { normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
 import { birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
+import {
+  PILOT_TOUR_SERENA_THREAD_KEY,
+  PILOT_TOUR_TIMI_THREAD_KEY
+} from "@/lib/pilot-tour";
 
 interface ThreadRowProps {
   row: InboxRow;
@@ -56,10 +60,21 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
   const birthdayMarker =
     birthdayDays !== null && birthdayDays <= 7 ? birthdayCountdownLabel(birthdayDays) : null;
 
+  // Tag the deterministic pilot-tour demo rows so the guided walkthrough
+  // can anchor a "Open Serena's thread" step on them. Plain rows get no
+  // `data-tour` attribute and behave as before.
+  const tourTarget =
+    row.platformThreadId === PILOT_TOUR_SERENA_THREAD_KEY
+      ? "demo-serena-thread"
+      : row.platformThreadId === PILOT_TOUR_TIMI_THREAD_KEY
+        ? "demo-timi-thread"
+        : undefined;
+
   return (
     <Link
       id={id}
       href={`/thread/${row.id}`}
+      data-tour={tourTarget}
       className="group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
     >
       <PersonAvatar

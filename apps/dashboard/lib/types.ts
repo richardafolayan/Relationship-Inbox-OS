@@ -3,6 +3,13 @@ import type { RememberItem } from "./thread-remember";
 
 export interface InboxRow {
   id: string;
+  /**
+   * Platform-side thread identifier (LinkedIn convo id, iMessage chat
+   * guid). Stable across re-scans. The pilot guided tour uses this to
+   * recognise the deterministic Serena / Timi demo rows independent of
+   * the runtime-generated cuid in `id`.
+   */
+  platformThreadId?: string;
   personId?: string;
   personName: string;
   /**

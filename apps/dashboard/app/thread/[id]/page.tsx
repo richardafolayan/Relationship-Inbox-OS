@@ -2139,6 +2139,7 @@ export default function ThreadPage() {
               ) : (
                 <Button
                   variant="ghost"
+                  data-tour="snooze"
                   onClick={() => {
                     // Toggle the AI snooze menu, lazily fetching once. The
                     // popover renders above this row when `snoozeMenuOpen`.
@@ -2161,6 +2162,7 @@ export default function ThreadPage() {
               )}
               <Button
                 variant="ghost"
+                data-tour="mark-handled"
                 onClick={() =>
                   runAction(
                     apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
@@ -2174,6 +2176,7 @@ export default function ThreadPage() {
               </Button>
               <Button
                 variant="ghost"
+                data-tour="archive"
                 disabled={archiving}
                 onClick={() => {
                   if (archiving) return;
@@ -2676,6 +2679,7 @@ export default function ThreadPage() {
             ) : null}
             <div
               data-thread-composer="true"
+              data-tour="composer"
               className="rounded-card border border-hairline bg-paper px-3 pb-1.5 pt-1.5"
             >
               {focusedParentMessage ? (
@@ -2811,6 +2815,7 @@ export default function ThreadPage() {
                 <div className="relative" ref={chipsMenuRef}>
                   <button
                     type="button"
+                    data-tour="suggested-replies"
                     onClick={() => setChipsMenuOpen((v) => !v)}
                     disabled={repliesGenerating}
                     className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
@@ -3098,7 +3103,10 @@ export default function ThreadPage() {
       </div>
 
       {/* ───── Context rail ───── */}
-      <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
+      <aside
+        data-tour="reply-brief"
+        className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}
+      >
         <div className="flex flex-col gap-7 px-7 py-10">
           {trimmedAsk || trimmedSummary ? (
             <section>

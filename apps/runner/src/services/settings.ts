@@ -194,7 +194,18 @@ export function createSettingsStore(): SettingsStore {
     if (!record) {
       return null;
     }
-    return JSON.parse(record.valueJson) as DemoSeedManifest;
+    const parsed = JSON.parse(record.valueJson) as Partial<DemoSeedManifest>;
+    // Backfill `mode` for manifests persisted before the field existed.
+    // Anything without an explicit mode was the 15-row generic seed.
+    return {
+      seededAt: typeof parsed.seededAt === "string" ? parsed.seededAt : new Date().toISOString(),
+      mode: parsed.mode === "pilot-guided-tour" ? "pilot-guided-tour" : "generic",
+      personIds: Array.isArray(parsed.personIds) ? parsed.personIds : [],
+      threadIds: Array.isArray(parsed.threadIds) ? parsed.threadIds : [],
+      logIds: Array.isArray(parsed.logIds) ? parsed.logIds : [],
+      screenshotFiles: Array.isArray(parsed.screenshotFiles) ? parsed.screenshotFiles : [],
+      domDumpFiles: Array.isArray(parsed.domDumpFiles) ? parsed.domDumpFiles : []
+    };
   }
 
   async function setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void> {
