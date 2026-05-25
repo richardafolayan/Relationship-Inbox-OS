@@ -202,6 +202,31 @@ test("synthesiseFallbackBrief: static fallback whatTheyWant gives a generic wait
   assert.match(brief.on_you, /waiting on a reply|short acknowledgement/i);
 });
 
+test("synthesiseFallbackBrief: a whatTheyWant poisoned by banned coaching phrases is rejected wholesale", () => {
+  // Real failure case observed on a v5 thread: the legacy whatTheyWant
+  // ("What would deepen the connection is...") was built around the
+  // banned coaching idea. Partial stripping would leave "What would." —
+  // a grammatical fragment worse than a clean generic. Whole-phrase
+  // rejection should kick in and route on_you through the neutral
+  // "they're waiting on a reply, but nothing specific has been asked"
+  // branch instead.
+  const brief = synthesiseFallbackBrief({
+    rollingSummary: "Brandon is sharing a thoughtful shift from law to recruitment.",
+    whatTheyWant:
+      "What would deepen the connection is acknowledging his move and asking a light, grounded question about his next steps, or offering a helpful nudge.",
+    openLoops: [],
+    needsReply: true,
+    latestInboundText: null
+  });
+  assert.equal(/deepen the connection/i.test(brief.on_you), false);
+  assert.equal(/grounded question/i.test(brief.on_you), false);
+  assert.equal(/helpful nudge/i.test(brief.on_you), false);
+  // The fragment "What would" must NOT survive — that's the live-verification bug.
+  assert.equal(/^What would\.?\s*$/i.test(brief.on_you.trim()), false);
+  // Falls through to the generic waiting-on-reply wording.
+  assert.match(brief.on_you, /waiting on a reply|short acknowledgement|nothing specific/i);
+});
+
 test("synthesiseFallbackBrief: derives where_it_stands from latest inbound when summary is empty", () => {
   const brief = synthesiseFallbackBrief({
     rollingSummary: "",

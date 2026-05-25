@@ -30,6 +30,22 @@ export function stripBannedPhrases(text: string | null | undefined): string {
   return out.replace(/\s{2,}/g, " ").replace(/\s+([.,!?])/g, "$1").trim();
 }
 
+// True when the input was built around an abstract coaching phrase the new
+// prompt bans. Used by the fallback synthesiser to decide whether to
+// salvage the existing whatTheyWant / summary text (`false` ⇒ keep it,
+// just trim) or to ditch it and use a neutral grounded message instead
+// (`true` ⇒ legacy field was poisoned end-to-end, nothing to salvage).
+// Stripping in place tends to leave grammatical fragments like "What
+// would." that read worse than a plain "they're not waiting on
+// anything specific".
+export function isPoisonedByBannedPhrases(text: string | null | undefined): boolean {
+  if (!text) return false;
+  return BANNED_PHRASES.some((re) => {
+    re.lastIndex = 0;
+    return re.test(text);
+  });
+}
+
 function shortSlug(text: string, index: number): string {
   const slug = text
     .toLowerCase()
@@ -179,6 +195,14 @@ export function sanitizeReplyBrief(raw: unknown): ReplyBrief | null {
 // never invent obligations from thin air — required_points only carry the
 // existing open_loops, and on_you stays generic when whatTheyWant is the
 // static fallback string ("No clear ask yet.").
+//
+// IMPORTANT — runs banned-phrase stripping on the legacy fields before
+// returning. Existing threads in the wild were summarised under the OLD
+// "What they want" prompt which freely used "deepen the connection",
+// "grounded question", and "helpful nudge". The fallback brief is the
+// only thing the rail can show until those threads are re-summarised
+// under the new prompt, so the strip happens here too — not only inside
+// sanitizeReplyBrief.
 export function synthesiseFallbackBrief(args: {
   rollingSummary: string;
   whatTheyWant: string;
@@ -186,16 +210,28 @@ export function synthesiseFallbackBrief(args: {
   needsReply: boolean;
   latestInboundText: string | null;
 }): ReplyBrief {
-  const trimmedSummary = args.rollingSummary?.trim() ?? "";
-  const trimmedAsk = args.whatTheyWant?.trim() ?? "";
+  const rawSummary = args.rollingSummary?.trim() ?? "";
+  const rawAsk = args.whatTheyWant?.trim() ?? "";
   const trimmedInbound = args.latestInboundText?.trim() ?? "";
 
-  const whereItStands = trimmedSummary || (trimmedInbound ? safeTruncate(trimmedInbound, 360) : "");
+  // Whole-phrase rejection. If the legacy field was generated under the
+  // old prompt and built around a banned coaching idea, partial stripping
+  // leaves a grammatical fragment that reads worse than a clean
+  // "nothing-specific" message. Drop the field entirely and fall through
+  // to the neutral generic.
+  const summaryClean = isPoisonedByBannedPhrases(rawSummary)
+    ? ""
+    : stripBannedPhrases(rawSummary);
+  const askClean = isPoisonedByBannedPhrases(rawAsk)
+    ? ""
+    : stripBannedPhrases(rawAsk);
+
+  const whereItStands = summaryClean || (trimmedInbound ? safeTruncate(trimmedInbound, 360) : "");
 
   const hasRealAsk =
-    trimmedAsk.length > 0 && trimmedAsk.toLowerCase() !== "no clear ask yet." && args.needsReply;
+    askClean.length > 0 && askClean.toLowerCase() !== "no clear ask yet." && args.needsReply;
   const onYou = hasRealAsk
-    ? safeTruncate(trimmedAsk, 320)
+    ? safeTruncate(askClean, 320)
     : args.needsReply
       ? "They're waiting on a reply, but nothing specific has been asked. A short acknowledgement is enough."
       : "Nothing pending from them right now.";
@@ -211,7 +247,7 @@ export function synthesiseFallbackBrief(args: {
     required_points: required,
     optional_followups: [],
     handled_points: [],
-    fuller_context: trimmedSummary && trimmedSummary !== whereItStands ? trimmedSummary : null,
+    fuller_context: summaryClean && summaryClean !== whereItStands ? summaryClean : null,
     durable_context: null,
     tone_steer: null,
     enough_to_reply_without_scrolling: Boolean(whereItStands) && Boolean(onYou)

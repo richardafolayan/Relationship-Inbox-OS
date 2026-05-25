@@ -2906,7 +2906,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // already personalise the shell — summaries read more naturally in
     // second person ("Ashley let you know") than third ("Ashley let
     // Richard know"). Existing v4 summaries regenerate on next scan.
-    const SUMMARY_VERSION = "v5-second-person";
+    // v6 adds the Reply Brief sub-object alongside the legacy fields and
+    // bans abstract coaching phrases ("deepen the connection", "grounded
+    // question", "helpful nudge") from the default-visible strings.
+    // Existing v5 summaries regenerate on next scan so the rail surfaces
+    // the new brief shape and clean prose rather than the stripped
+    // fallback derived from the older summary.
+    const SUMMARY_VERSION = "v6-reply-brief";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
