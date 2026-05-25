@@ -2906,7 +2906,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // already personalise the shell — summaries read more naturally in
     // second person ("Ashley let you know") than third ("Ashley let
     // Richard know"). Existing v4 summaries regenerate on next scan.
-    const SUMMARY_VERSION = "v5-second-person";
+    // v6 adds the Reply Brief sub-object alongside the legacy fields and
+    // bans abstract coaching phrases ("deepen the connection", "grounded
+    // question", "helpful nudge") from the default-visible strings.
+    // Existing v5 summaries regenerate on next scan so the rail surfaces
+    // the new brief shape and clean prose rather than the stripped
+    // fallback derived from the older summary.
+    const SUMMARY_VERSION = "v6-reply-brief";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
@@ -2922,6 +2928,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     let openLoopsJson = thread.openLoopsJson;
     let toneNotesJson = thread.toneNotesJson;
     let rememberJson = thread.rememberJson;
+    let replyBriefJson = thread.replyBriefJson;
 
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
@@ -2948,6 +2955,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
       toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
       // remember notes are already surrogate-stripped inside updateThreadSummary.
       rememberJson = JSON.stringify(aiSummary.remember);
+      // Reply Brief is already sanitised + sub-fields surrogate-stripped
+      // inside updateThreadSummary. Persisted as a single JSON blob; the
+      // dashboard parses on read.
+      replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
     }
 
     // Phase 3: classify on first encounter only. Once a thread has a
@@ -3083,6 +3094,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         openLoopsJson,
         toneNotesJson,
         rememberJson,
+        replyBriefJson,
         // Stamp the first-full-backfill marker on the FIRST successful
         // persistence of any thread that has at least one message. We don't
         // gate on the pre-click `markedFullBackfill` flag because the URL
