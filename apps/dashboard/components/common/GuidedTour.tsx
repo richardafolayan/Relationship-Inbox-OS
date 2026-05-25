@@ -317,6 +317,11 @@ export function GuidedTour(props: GuidedTourProps) {
         const paperBg = "var(--paper)";
         const base: React.CSSProperties = {
           position: "absolute",
+          // Decorative only — never absorb clicks. Without this, the
+          // arrow inherits pointer-events:auto from the card and could
+          // block a click on the highlighted target if the gap between
+          // card and anchor ever shrinks below the 8px arrow extent.
+          pointerEvents: "none",
           width: 0,
           height: 0
         };
