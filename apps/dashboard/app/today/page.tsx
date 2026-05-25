@@ -484,6 +484,7 @@ export default function TodayPage() {
             <article
               ref={heroRef}
               data-testid="today-hero"
+              data-demo-target="today-hero"
               className={`relative mb-4 flex min-h-[300px] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >

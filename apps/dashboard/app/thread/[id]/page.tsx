@@ -2115,6 +2115,7 @@ export default function ThreadPage() {
               </button>
               <Button
                 variant="ghost"
+                data-demo-target="save-draft"
                 onClick={() =>
                   runAction(
                     apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
@@ -2143,6 +2144,7 @@ export default function ThreadPage() {
               ) : (
                 <Button
                   variant="ghost"
+                  data-demo-target="snooze"
                   onClick={() => {
                     // Toggle the AI snooze menu, lazily fetching once. The
                     // popover renders above this row when `snoozeMenuOpen`.
@@ -2165,6 +2167,7 @@ export default function ThreadPage() {
               )}
               <Button
                 variant="ghost"
+                data-demo-target="mark-handled"
                 onClick={() =>
                   runAction(
                     apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
@@ -2179,6 +2182,7 @@ export default function ThreadPage() {
               <Button
                 variant="ghost"
                 disabled={archiving}
+                data-demo-target="archive"
                 onClick={() => {
                   if (archiving) return;
                   setArchiving(true);
@@ -2723,6 +2727,7 @@ export default function ThreadPage() {
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
+                data-demo-target="composer-input"
                 onChange={(event) => {
                   setComposer(event.target.value);
                   if (composerSource === "predraft" || composerSource === "empty") {
@@ -2993,6 +2998,7 @@ export default function ThreadPage() {
                   ) : null}
                   <Button
                     variant="primary"
+                    data-demo-target="send-button"
                     onClick={() => void onSend()}
                     disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
                     className="px-3.5 py-1.5 text-[12px]"
@@ -3133,7 +3139,9 @@ export default function ThreadPage() {
               from the Reply Brief on purpose: this is life context the
               operator wants to carry forward, not reply-state. Read-only and
               self-hiding when empty. */}
-          <ThingsToRemember remember={thread.remember ?? []} />
+          <div data-demo-target="things-to-remember">
+            <ThingsToRemember remember={thread.remember ?? []} />
+          </div>
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">

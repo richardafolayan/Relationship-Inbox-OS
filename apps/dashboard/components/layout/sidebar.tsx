@@ -165,6 +165,7 @@ export function Sidebar({
             <Link
               key={item.href}
               href={item.href}
+              data-demo-target={`nav-${item.href.replace(/^\//, "")}`}
               title={collapsed ? item.label : undefined}
               className={cn(
                 "relative flex items-center rounded-[10px] text-[13px] tracking-[-0.005em]",

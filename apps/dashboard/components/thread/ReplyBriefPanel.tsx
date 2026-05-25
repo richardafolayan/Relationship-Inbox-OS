@@ -69,9 +69,14 @@ export function ReplyBriefPanel({
   const onYou = useMemo(() => brief.on_you?.trim() ?? "", [brief.on_you]);
 
   return (
-    <section data-testid="reply-brief" className="flex flex-col gap-7">
+    <section
+      data-testid="reply-brief"
+      data-demo-target="reply-brief"
+      data-tour="reply-brief"
+      className="flex flex-col gap-7"
+    >
       {where ? (
-        <div>
+        <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
             Where it stands
           </p>
@@ -80,7 +85,7 @@ export function ReplyBriefPanel({
       ) : null}
 
       {onYou ? (
-        <div>
+        <div data-demo-target="reply-brief-on-you" data-tour="reply-brief-on-you">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
             On you
           </p>
