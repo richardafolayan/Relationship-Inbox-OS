@@ -70,23 +70,71 @@ test("pilot tour step list is calm, ordered, and covers the brief", () => {
   ]);
 
   // Every step body is a couple of sentences max — the brief asked for
-  // a calm tour, not paragraphs. 280 chars is roughly two sentences.
+  // a calm tour, not paragraphs. 200 chars is roughly two short sentences.
   for (const step of steps) {
     assert.ok(step.body.length > 0, `step "${step.key}" has empty body`);
-    assert.ok(step.body.length <= 280, `step "${step.key}" body too long`);
+    assert.ok(step.body.length <= 200, `step "${step.key}" body too long (${step.body.length})`);
+  }
+
+  // No negative framing ("not a dashboard", "not a CRM", "AI handles…").
+  // The brief specifically asked us to drop "not this, not that" copy.
+  const negativeMarkers = [
+    /\bnot a dashboard\b/i,
+    /\bnot a crm\b/i,
+    /\bnot just\b/i,
+    /\bAI will handle\b/i,
+    /\blet AI reply\b/i
+  ];
+  for (const step of steps) {
+    const copy = `${step.title} ${step.body}`;
+    for (const re of negativeMarkers) {
+      assert.ok(!re.test(copy), `step "${step.key}" copy contains banned phrase ${re}`);
+    }
   }
 });
 
-test("open-serena step navigates to the demo Serena thread when an id is known", () => {
+test("open-serena step is click-target so the operator drives navigation", () => {
+  const steps = getPilotTourSteps();
+  const openSerena = steps.find((s) => s.key === "open-serena");
+  assert.ok(openSerena, "open-serena step missing");
+  assert.equal(openSerena.continueMode, "click-target");
+  // It should still declare a route in case the operator presses Back
+  // from a later step — Back must land them back on /today.
+  assert.ok(typeof openSerena.navigateTo === "function");
+  assert.equal(openSerena.navigateTo({ serena: "tid", timi: null }), "/today");
+});
+
+test("destructive-action steps are still narrated (continueMode default = next)", () => {
+  // clear-thread highlights Mark handled / Snooze / Archive. The brief
+  // says: never require the user to click destructive actions. So this
+  // step must NOT be click-target.
+  const steps = getPilotTourSteps();
+  const clearThread = steps.find((s) => s.key === "clear-thread");
+  assert.notEqual(clearThread.continueMode, "click-target");
+});
+
+test("open-serena step lands the operator on /today so they can click Serena's row", () => {
+  // open-serena is click-target — the row's Link drives the actual
+  // navigation to /thread/<id>. The step's own navigateTo is "/today"
+  // so that pressing Back from a later step (e.g. Reply Brief) brings
+  // the operator back to the inbox rather than stranding them mid-thread.
   const steps = getPilotTourSteps();
   const serenaStep = steps.find((s) => s.key === "open-serena");
   assert.ok(serenaStep.navigateTo, "open-serena should declare a navigation target");
-  // Without seeded ids, it stays put (returns null) rather than driving
-  // the user to a broken /thread/null route.
-  assert.equal(serenaStep.navigateTo(emptyDemoIds()), null);
-  // With a seeded id, navigation lands on /thread/<cuid>.
-  const target = serenaStep.navigateTo({ serena: "tid-serena", timi: "tid-timi" });
-  assert.equal(target, "/thread/tid-serena");
+  assert.equal(serenaStep.navigateTo(emptyDemoIds()), "/today");
+  assert.equal(serenaStep.navigateTo({ serena: "tid-serena", timi: "tid-timi" }), "/today");
+
+  // The Reply Brief step is the one that actually carries the operator
+  // onto the thread page (used both for forward fallback and for Back
+  // navigation from later thread-page steps).
+  const replyBrief = steps.find((s) => s.key === "reply-brief");
+  assert.equal(
+    replyBrief.navigateTo({ serena: "tid-serena", timi: "tid-timi" }),
+    "/thread/tid-serena"
+  );
+  // Without seeded ids the Reply Brief step stays put rather than
+  // pushing /thread/null.
+  assert.equal(replyBrief.navigateTo(emptyDemoIds()), null);
 });
 
 test("seen-flag helpers read and write the documented localStorage key", () => {

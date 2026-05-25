@@ -71,6 +71,19 @@ export interface PilotTourStep {
    * without ever triggering a real scan.
    */
   beat?: string;
+  /**
+   * How the tour advances from this step.
+   *   "next"         — operator clicks "Next" in the popover (default).
+   *   "click-target" — operator clicks the highlighted UI; the tour
+   *                    listens for a click that lands inside the
+   *                    resolved target and advances. Use this for
+   *                    safe navigation steps (opening a demo thread)
+   *                    so the tour mirrors the real interaction.
+   *                    Never used for destructive actions (Send /
+   *                    Archive / Mark handled / Snooze) — those
+   *                    stay narrated with a Next button.
+   */
+  continueMode?: "next" | "click-target";
 }
 
 export interface PilotTourDemoIds {
@@ -93,8 +106,7 @@ export function getPilotTourSteps(): PilotTourStep[] {
     {
       key: "today-nav",
       title: "This is Today",
-      body:
-        "Today shows the people who are waiting on a reply. One place to start the evening, not a dashboard.",
+      body: "Today shows who needs a reply first.",
       targets: ["today-nav"],
       placement: "right",
       navigateTo: () => "/today"
@@ -103,61 +115,67 @@ export function getPilotTourSteps(): PilotTourStep[] {
       key: "scanning-beat",
       title: "Loading a few demo conversations",
       body:
-        "Two demo threads have been added: Serena on iMessage and Timi on LinkedIn. No real inbox is being scanned during this walkthrough.",
+        "Two demo threads have been added: Serena on iMessage and Timi on LinkedIn.",
       targets: [],
       placement: "center",
-      beat: "Scanning demo inbox…"
+      beat: "Scanning demo inbox…",
+      navigateTo: () => "/today"
     },
     {
       key: "today-list",
       title: "Each row is a conversation",
-      body:
-        "Threads sorted by how long someone has been waiting. The top one is what you'd open first tonight.",
+      body: "The top one is the oldest waiting.",
       targets: ["today-hero", "today-list"],
-      placement: "left"
+      placement: "left",
+      navigateTo: () => "/today"
     },
     {
       key: "open-serena",
-      title: "Open Serena's thread",
+      title: "Open Serena",
       body:
-        "iMessage from a friend who's been waiting since yesterday. Let's see what's actually on you here.",
+        "She has been waiting since yesterday. Click her row to open the thread.",
       targets: ["demo-serena-thread", "today-hero"],
       placement: "left",
-      navigateTo: (ids) => (ids.serena ? `/thread/${ids.serena}` : null)
+      // Keep navigateTo so the Back button from the Reply Brief step
+      // routes the operator back to /today before re-anchoring.
+      navigateTo: () => "/today",
+      continueMode: "click-target"
     },
     {
       key: "reply-brief",
       title: "Where it stands · On you",
-      body:
-        "The right rail summarises what they said and what still needs addressing. It's the part that saves you from rereading the whole thread.",
+      body: "This catches you up before you reply.",
       targets: [
         "reply-brief-where-it-stands",
         "reply-brief-on-you",
         "reply-brief"
       ],
-      placement: "left"
+      placement: "left",
+      // No navigateTo on forward — clicking Serena's row drives the
+      // route change. On Back from later steps we are already on the
+      // thread page, so no navigation needed either.
+      navigateTo: (ids) => (ids.serena ? `/thread/${ids.serena}` : null)
     },
     {
       key: "composer",
-      title: "Write the reply in your own words",
-      body:
-        "Type your reply here. AI help is optional (shorten, make warmer, suggest a draft), but nothing sends until you choose to send it.",
+      title: "Write in your own words",
+      body: "Write your reply here. Nothing sends until you press Send.",
       targets: ["composer"],
-      placement: "top"
+      placement: "top",
+      navigateTo: (ids) => (ids.serena ? `/thread/${ids.serena}` : null)
     },
     {
       key: "clear-thread",
-      title: "Clear the thread when you're done",
-      body:
-        "Mark as handled when you've replied. Snooze if you'd rather come back to it later. Archive moves it out of the active inbox.",
+      title: "Clear the thread when you are done",
+      body: "Mark as handled, snooze, or archive when you are finished.",
       targets: ["mark-handled", "snooze", "archive"],
-      placement: "bottom"
+      placement: "bottom",
+      navigateTo: (ids) => (ids.serena ? `/thread/${ids.serena}` : null)
     },
     {
       key: "feedback",
-      title: "Tell us what's confusing",
-      body:
-        "This is a pilot. If anything feels wrong, awkward, or unclear, send feedback from the sidebar. We read every one.",
+      title: "Send feedback any time",
+      body: "Tell us what is confusing or wrong. Every report helps.",
       targets: ["feedback"],
       placement: "right"
     }

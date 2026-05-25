@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { apiPost } from "@/lib/api";
 import {
@@ -13,6 +13,7 @@ import {
   markTourSeen,
   nextStepIndex,
   onPilotTourStart,
+  prevStepIndex,
   PILOT_TOUR_ACTIVE_KEY,
   PILOT_TOUR_SERENA_THREAD_KEY,
   PILOT_TOUR_TIMI_THREAD_KEY,
@@ -41,18 +42,27 @@ interface PilotTourState {
   bootstrapping: boolean;
 }
 
-// Re-resolve the popover rect on each animation frame for the duration
-// of a step. Lets the popover follow scroll, sticky-header jumps, and
-// component remounts caused by route navigation between steps.
-function useResolvedRect(targets: string[], step: number): DOMRect | null {
+// Resolve the popover rect for a step. Measures synchronously on mount
+// (useLayoutEffect runs after DOM commit but before paint, so we get
+// the freshly-laid-out element), then re-measures on scroll, resize,
+// and any DOM mutation that touches the anchor. Returns both the rect
+// (for positioning) and a ref to the resolved element (for the
+// click-target listener to compare event.target against).
+interface ResolvedTarget {
+  rect: DOMRect | null;
+  elementRef: React.MutableRefObject<HTMLElement | null>;
+}
+
+function useResolvedRect(targets: string[], step: number): ResolvedTarget {
   const [rect, setRect] = useState<DOMRect | null>(null);
-  useEffect(() => {
+  const elementRef = useRef<HTMLElement | null>(null);
+
+  useLayoutEffect(() => {
     if (targets.length === 0) {
-      setRect(null);
+      elementRef.current = null;
+      setRect((prev) => (prev === null ? prev : null));
       return;
     }
-    let cancelled = false;
-    let rafId = 0;
 
     const resolve = (): HTMLElement | null => {
       for (const name of targets) {
@@ -62,9 +72,9 @@ function useResolvedRect(targets: string[], step: number): DOMRect | null {
       return null;
     };
 
-    const tick = () => {
-      if (cancelled) return;
+    const measure = () => {
       const el = resolve();
+      elementRef.current = el;
       setRect((prev) => {
         if (!el) return prev === null ? prev : null;
         const next = el.getBoundingClientRect();
@@ -79,16 +89,30 @@ function useResolvedRect(targets: string[], step: number): DOMRect | null {
         }
         return next;
       });
-      rafId = window.requestAnimationFrame(tick);
     };
 
-    rafId = window.requestAnimationFrame(tick);
+    // Measure immediately so the popover anchors on first paint.
+    measure();
+
+    // Re-measure on scroll / resize so the popover follows the target
+    // when the operator scrolls inside the Today list or the thread
+    // page. A polling interval (every 250ms while the step is active)
+    // catches anchors that arrive after route navigation or content
+    // re-renders without depending on rAF, which Strict-Mode dev
+    // builds can drop on the first scheduled callback.
+    const interval = window.setInterval(measure, 250);
+    const onScroll = () => measure();
+    window.addEventListener("scroll", onScroll, true);
+    window.addEventListener("resize", onScroll);
+
     return () => {
-      cancelled = true;
-      window.cancelAnimationFrame(rafId);
+      window.clearInterval(interval);
+      window.removeEventListener("scroll", onScroll, true);
+      window.removeEventListener("resize", onScroll);
     };
   }, [targets, step]);
-  return rect;
+
+  return { rect, elementRef };
 }
 
 // Find the cuid for one of the pilot demo threads in the inbox. The
@@ -120,7 +144,13 @@ async function resolveDemoIds(): Promise<PilotTourDemoIds> {
 export function PilotTour() {
   const router = useRouter();
   const pathname = usePathname();
-  const steps = getPilotTourSteps();
+  // Memoised once per mount. `getPilotTourSteps` returns fresh arrays /
+  // objects each call; without this the `targets` array reference would
+  // change on every render and re-trigger `useResolvedRect`'s rAF loop,
+  // which interacts badly with the auto-skip timer (the rect can race
+  // long enough for the 1.5s safety net to fire on a perfectly valid
+  // anchor).
+  const steps = useMemo(() => getPilotTourSteps(), []);
   const [state, setState] = useState<PilotTourState>(() => ({
     active: false,
     stepIndex: 0,
@@ -249,7 +279,48 @@ export function PilotTour() {
     ? steps[state.stepIndex] ?? null
     : null;
   const targetNames = currentStep?.targets ?? [];
-  const rect = useResolvedRect(targetNames, state.stepIndex);
+  const { rect, elementRef } = useResolvedRect(targetNames, state.stepIndex);
+
+  // Forward / back step controls. Both go through the setState updater
+  // so they can race a Skip without stomping it. `goNext` ends the tour
+  // when called on the final step.
+  const goNext = useCallback(() => {
+    setState((prev) => {
+      const next = nextStepIndex(steps, prev.stepIndex);
+      if (next === null) {
+        void endTour(true);
+        return prev;
+      }
+      return { ...prev, stepIndex: next };
+    });
+  }, [endTour, steps]);
+
+  const goBack = useCallback(() => {
+    setState((prev) => ({ ...prev, stepIndex: prevStepIndex(steps, prev.stepIndex) }));
+  }, [steps]);
+
+  // Click-target steps: listen for a click that lands inside the
+  // resolved target element and advance. We do NOT preventDefault — the
+  // page's own handler (e.g. the Link that opens the demo thread) still
+  // fires, which is exactly what makes the step feel like the real
+  // interaction rather than a tour-driven jump. Capture phase so we see
+  // the click before React's synthetic event system tears it apart on
+  // unmount during route navigation.
+  useEffect(() => {
+    if (!currentStep || currentStep.continueMode !== "click-target") return undefined;
+    const onCapture = (event: MouseEvent) => {
+      const el = elementRef.current;
+      if (!el) return;
+      const node = event.target instanceof Node ? event.target : null;
+      if (!node || !el.contains(node)) return;
+      // Use the bare setState updater so a Skip / Esc that fired in the
+      // same frame still wins. We don't preventDefault — the real click
+      // continues to the Link / button on the page.
+      goNext();
+    };
+    document.addEventListener("click", onCapture, true);
+    return () => document.removeEventListener("click", onCapture, true);
+  }, [currentStep, elementRef, goNext]);
 
   // Run the step's optional navigation when the step changes. Wait one
   // tick before the next render so the next step's selectors can resolve
@@ -270,16 +341,24 @@ export function PilotTour() {
     router.push(target);
   }, [currentStep, pathname, router, state.demoIds]);
 
-  // Auto-advance if a step's targets never resolve. Without this the user
-  // would be stuck staring at an unanchored popover on a step whose
-  // anchor disappeared between renders (e.g. Today re-fetched and the
-  // hero row hasn't repainted yet, or the Reply Brief branch isn't
-  // merged so the right rail anchor is missing). 1.5s feels long enough
-  // for normal render races without making the tour feel laggy.
+  // Auto-advance if a step's targets never resolve — purely a safety net
+  // for steps where the anchor genuinely isn't in the DOM (e.g. the Reply
+  // Brief branch isn't merged so its specific anchors are missing). The
+  // safety net is intentionally narrow:
+  //   - It only fires while the rect is still null.
+  //   - It does NOT fire during bootstrap (Today is re-rendering and
+  //     anchors can briefly read as missing).
+  //   - It does NOT fire on click-target steps. Those are explicitly
+  //     waiting on operator action; the operator should decide when to
+  //     move on, not a timer.
+  //   - 5s buffer accommodates slow renders without making the tour feel
+  //     stuck on a real missing anchor.
   const skipTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     if (!currentStep) return undefined;
     if (currentStep.targets.length === 0) return undefined; // anchor-less step
+    if (currentStep.continueMode === "click-target") return undefined;
+    if (state.bootstrapping) return undefined;
     if (rect) {
       if (skipTimerRef.current) {
         clearTimeout(skipTimerRef.current);
@@ -288,22 +367,15 @@ export function PilotTour() {
       return undefined;
     }
     skipTimerRef.current = setTimeout(() => {
-      setState((prev) => {
-        const next = nextStepIndex(steps, prev.stepIndex);
-        if (next === null) {
-          void endTour(true);
-          return prev;
-        }
-        return { ...prev, stepIndex: next };
-      });
-    }, 1500);
+      goNext();
+    }, 5000);
     return () => {
       if (skipTimerRef.current) {
         clearTimeout(skipTimerRef.current);
         skipTimerRef.current = null;
       }
     };
-  }, [currentStep, endTour, rect, steps]);
+  }, [currentStep, goNext, rect, state.bootstrapping]);
 
   // Render nothing when the tour isn't running.
   if (!state.active || !currentStep) return null;
@@ -350,19 +422,75 @@ export function PilotTour() {
     };
   })();
 
+  const isFirst = state.stepIndex === 0;
+  const isClickTarget = currentStep.continueMode === "click-target";
+  // The popover arrow sits on whichever edge of the popover faces the
+  // target. Anchorless / centered steps get no arrow.
+  const arrowStyle: React.CSSProperties | null = (() => {
+    if (!isAnchored) return null;
+    if (placement === "center") return null;
+    const size = 8;
+    const base: React.CSSProperties = { position: "absolute", width: 0, height: 0 };
+    // The triangle is drawn with CSS borders; the side facing the
+    // popover bg is opaque, the others transparent. `--paper` matches
+    // the popover background so the arrow visually continues the card.
+    const paperBg = "var(--paper)";
+    if (placement === "top") {
+      return {
+        ...base,
+        bottom: -size,
+        left: "50%",
+        transform: "translateX(-50%)",
+        borderStyle: "solid",
+        borderColor: `${paperBg} transparent transparent transparent`,
+        borderWidth: `${size}px ${size}px 0 ${size}px`
+      };
+    }
+    if (placement === "bottom") {
+      return {
+        ...base,
+        top: -size,
+        left: "50%",
+        transform: "translateX(-50%)",
+        borderStyle: "solid",
+        borderColor: `transparent transparent ${paperBg} transparent`,
+        borderWidth: `0 ${size}px ${size}px ${size}px`
+      };
+    }
+    if (placement === "left") {
+      return {
+        ...base,
+        right: -size,
+        top: 32,
+        borderStyle: "solid",
+        borderColor: `transparent transparent transparent ${paperBg}`,
+        borderWidth: `${size}px 0 ${size}px ${size}px`
+      };
+    }
+    // right
+    return {
+      ...base,
+      left: -size,
+      top: 32,
+      borderStyle: "solid",
+      borderColor: `transparent ${paperBg} transparent transparent`,
+      borderWidth: `${size}px ${size}px ${size}px 0`
+    };
+  })();
+
   return (
     <div
       data-testid="pilot-tour-overlay"
       className="pointer-events-none fixed inset-0 z-[80]"
       aria-live="polite"
     >
-      {/* Soft dim layer that lets the page show through. Pointer events
-          stay disabled so the operator can still scroll/inspect the
-          highlighted area while the tour is open. */}
-      <div className="pointer-events-none absolute inset-0 bg-ink/15 backdrop-blur-[1px]" />
-
-      {/* Highlight ring drawn around the anchor rect. Pure CSS — no
-          mutation of the target element so the page DOM stays untouched. */}
+      {/* Dim the page WITHOUT blurring. Two render modes:
+           - Anchored steps: the highlight ring's box-shadow paints
+             everything outside the target rect — the target itself
+             stays crisp and readable. No separate full-page dim layer
+             is rendered, so nothing covers the highlighted UI.
+           - Anchorless / centered steps: a flat dim covers the whole
+             viewport so the popover stands out. */}
       {isAnchored && rect ? (
         <div
           aria-hidden
@@ -372,11 +500,10 @@ export function PilotTour() {
             left: rect.left - 6,
             width: rect.width + 12,
             height: rect.height + 12,
-            boxShadow: "0 0 0 9999px rgba(0,0,0,0.25)"
+            boxShadow: "0 0 0 9999px rgba(0,0,0,0.35)"
           }}
         />
       ) : (
-        // Anchorless step: dim the whole screen evenly behind the popover.
         <div aria-hidden className="absolute inset-0 bg-ink/25" />
       )}
 
@@ -384,9 +511,11 @@ export function PilotTour() {
         role="dialog"
         aria-modal="false"
         aria-labelledby="pilot-tour-title"
+        data-tour-popover="true"
         className="pointer-events-auto absolute rounded-card border border-hairline bg-paper p-5 shadow-pop"
         style={popover}
       >
+        {arrowStyle ? <span aria-hidden style={arrowStyle} /> : null}
         <div className="flex items-start justify-between gap-3">
           <p className="m-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
             {state.bootstrapping
@@ -420,6 +549,18 @@ export function PilotTour() {
           {currentStep.body}
         </p>
 
+        {/* Click-target hint: a tiny "click the highlighted area"
+            caption replaces the Next button on click-target steps so
+            the operator knows the demo wants a real click. */}
+        {isClickTarget && !state.bootstrapping ? (
+          <p
+            data-testid="pilot-tour-click-hint"
+            className="mt-3 font-mono text-[10.5px] uppercase tracking-[0.07em] text-accent-ink"
+          >
+            · Click the highlighted area ·
+          </p>
+        ) : null}
+
         <div className="mt-4 flex items-center justify-between gap-3">
           <button
             type="button"
@@ -428,23 +569,28 @@ export function PilotTour() {
           >
             Skip tour
           </button>
-          <button
-            type="button"
-            onClick={() => {
-              setState((prev) => {
-                const next = nextStepIndex(steps, prev.stepIndex);
-                if (next === null) {
-                  void endTour(true);
-                  return prev;
-                }
-                return { ...prev, stepIndex: next };
-              });
-            }}
-            disabled={state.bootstrapping}
-            className="inline-flex items-center rounded-pill bg-ink px-[14px] py-[7px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-wait disabled:opacity-60"
-          >
-            {state.bootstrapping ? "Just a moment…" : isLast ? "Done" : "Next"}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              data-testid="pilot-tour-back"
+              onClick={goBack}
+              disabled={isFirst || state.bootstrapping}
+              className="inline-flex items-center rounded-pill border border-hairline px-[12px] py-[6px] text-[12px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Back
+            </button>
+            {isClickTarget ? null : (
+              <button
+                type="button"
+                data-testid="pilot-tour-next"
+                onClick={goNext}
+                disabled={state.bootstrapping}
+                className="inline-flex items-center rounded-pill bg-ink px-[14px] py-[7px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-wait disabled:opacity-60"
+              >
+                {state.bootstrapping ? "Just a moment…" : isLast ? "Done" : "Next"}
+              </button>
+            )}
+          </div>
         </div>
       </div>
     </div>
