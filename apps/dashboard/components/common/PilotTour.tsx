@@ -110,15 +110,17 @@ export function PilotTour() {
   useEffect(() => onPilotTourStart((replay) => void startTour(replay)), [startTour]);
 
   const goNext = useCallback(() => {
-    setState((prev) => {
-      const next = prev.stepIndex + 1;
-      if (next >= steps.length) {
-        void endTour(true);
-        return prev;
-      }
-      return { ...prev, stepIndex: next };
-    });
-  }, [endTour, steps.length]);
+    // End-of-tour side effect lives outside the setState updater. React
+    // Strict Mode invokes the updater twice in dev to test purity, and
+    // a `void endTour(...)` call there can race with React's batching
+    // and be silently dropped — leaving the operator stuck on the last
+    // step with a Done button that visually does nothing.
+    if (state.stepIndex + 1 >= steps.length) {
+      void endTour(true);
+      return;
+    }
+    setState((prev) => ({ ...prev, stepIndex: prev.stepIndex + 1 }));
+  }, [endTour, state.stepIndex, steps.length]);
 
   const goBack = useCallback(() => {
     setState((prev) => ({
