@@ -38,10 +38,12 @@ export default function FullDemoPage() {
 
   return (
     <Canvas>
-      <PageHead eyebrow="Demo" title="Run full demo" />
-      <div className="mx-auto max-w-2xl px-6 py-6">
-        <FullDemoStartScreen inboxRows={rows} />
-      </div>
+      <PageHead
+        eyebrow="Demo"
+        title="Run full demo"
+        subtitle="Walk through the whole app against safe demo data, or run a read-only tour over your own threads."
+      />
+      <FullDemoStartScreen inboxRows={rows} />
     </Canvas>
   );
 }

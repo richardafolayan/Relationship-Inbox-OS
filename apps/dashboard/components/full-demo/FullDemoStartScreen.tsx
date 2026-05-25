@@ -27,11 +27,16 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
 
   if (pickingLive) {
     return (
-      <div className="space-y-6">
-        <header className="space-y-2">
-          <h1 className="text-2xl font-medium tracking-tight">Live demo: choose threads</h1>
-          <p className="text-sm text-ink-2">
-            Pick the real threads you want on screen during the demo. The app stays read-only. Sending, archiving, snoozing and marking handled are intercepted with a clear notice.
+      <section className="space-y-6">
+        <header className="space-y-1">
+          <p className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+            Live demo · pick threads
+          </p>
+          <h2 className="m-0 font-display text-[20px] font-medium tracking-[-0.01em]">
+            Choose the threads to walk through
+          </h2>
+          <p className="m-0 max-w-[60ch] text-[13px] text-ink-2">
+            The app stays read-only. Sending, archiving, snoozing and marking handled are intercepted with a clear notice.
           </p>
         </header>
         <LiveThreadPicker
@@ -51,44 +56,48 @@ export function FullDemoStartScreen({ inboxRows }: { inboxRows: InboxRow[] }) {
             Back
           </Button>
         </div>
-      </div>
+      </section>
     );
   }
 
+  // Two side-by-side option cards. At narrow widths the grid collapses
+  // to a single column; at the Canvas's full 920px the cards sit side
+  // by side so the page does not feel empty.
   return (
-    <div className="space-y-6">
-      <header className="space-y-2">
-        <h1 className="text-2xl font-medium tracking-tight">Run full demo</h1>
-        <p className="text-sm text-ink-2">
-          Walk through the whole app against safe demo data, or run a read-only tour over your own threads.
-        </p>
-      </header>
+    <section className="grid gap-4 md:grid-cols-2">
+      <button
+        type="button"
+        className="flex h-full flex-col rounded-card border border-hairline bg-paper-2 p-6 text-left transition-colors duration-calm hover:border-hairline-strong"
+        onClick={() => void start("sandbox")}
+        data-demo-target="full-demo-start-sandbox"
+      >
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          Sandbox
+        </span>
+        <span className="mt-2 font-display text-[18px] font-medium tracking-[-0.01em] text-ink">
+          Start sandbox demo
+        </span>
+        <span className="mt-2 text-[13.5px] leading-[1.55] text-ink-2">
+          Seeds a showcase inbox: Serena on iMessage, Timi on LinkedIn, and a handful of demo threads. Every action stays inside the demo data.
+        </span>
+      </button>
 
-      <div className="space-y-4">
-        <button
-          type="button"
-          className="block w-full rounded-3xl border border-hairline bg-paper-2 p-5 text-left transition-colors hover:border-hairline-strong"
-          onClick={() => void start("sandbox")}
-          data-demo-target="full-demo-start-sandbox"
-        >
-          <div className="text-sm font-medium text-ink">Start sandbox demo</div>
-          <div className="mt-1 text-sm text-ink-2">
-            Seeds a showcase inbox: Serena on iMessage, Timi on LinkedIn, and a handful of demo threads. Every action stays inside the demo data.
-          </div>
-        </button>
-
-        <button
-          type="button"
-          className="block w-full rounded-3xl border border-hairline bg-paper p-5 text-left transition-colors hover:border-hairline-strong"
-          onClick={() => setPickingLive(true)}
-          data-demo-target="full-demo-start-live"
-        >
-          <div className="text-sm font-medium text-ink">Use selected live threads</div>
-          <div className="mt-1 text-sm text-ink-2">
-            Walk through with real threads you choose. The app stays read-only: sending, archiving and snoozing are intercepted.
-          </div>
-        </button>
-      </div>
-    </div>
+      <button
+        type="button"
+        className="flex h-full flex-col rounded-card border border-hairline bg-paper p-6 text-left transition-colors duration-calm hover:border-hairline-strong"
+        onClick={() => setPickingLive(true)}
+        data-demo-target="full-demo-start-live"
+      >
+        <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          Live, read-only
+        </span>
+        <span className="mt-2 font-display text-[18px] font-medium tracking-[-0.01em] text-ink">
+          Use selected live threads
+        </span>
+        <span className="mt-2 text-[13.5px] leading-[1.55] text-ink-2">
+          Walk through with real threads you choose. Sending, archiving and snoozing are intercepted.
+        </span>
+      </button>
+    </section>
   );
 }
