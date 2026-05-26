@@ -30,7 +30,7 @@ import type {
   ThreadMessage,
   ThreadResponse
 } from "@/lib/types";
-import { IMessageMedia } from "@/components/thread/imessage-media";
+import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -2484,6 +2484,14 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                 ))}
+                                {message.audioTranscription &&
+                                playableAttachments.some(
+                                  (a) => a.kind === "voice_note" || a.kind === "audio"
+                                ) ? (
+                                  <VoiceMessageTranscript
+                                    transcription={message.audioTranscription}
+                                  />
+                                ) : null}
                               </div>
                             ) : null}
                             {showText ? (
