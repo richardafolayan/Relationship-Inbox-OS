@@ -2484,12 +2484,12 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                 ))}
-                                {message.audioTranscription &&
-                                playableAttachments.some(
+                                {playableAttachments.some(
                                   (a) => a.kind === "voice_note" || a.kind === "audio"
                                 ) ? (
                                   <VoiceMessageTranscript
-                                    transcription={message.audioTranscription}
+                                    messageId={message.id}
+                                    transcription={message.audioTranscription ?? null}
                                   />
                                 ) : null}
                               </div>
