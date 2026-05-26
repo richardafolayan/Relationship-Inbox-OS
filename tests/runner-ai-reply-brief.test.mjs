@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+  briefSignatureForCache,
   mirrorRequiredToOpenLoops,
   sanitizeReplyBrief,
   stripBannedPhrases,
@@ -252,4 +253,206 @@ test("mirrorRequiredToOpenLoops: returns the required text array verbatim", () =
 
 test("mirrorRequiredToOpenLoops: returns null when the brief itself is null", () => {
   assert.equal(mirrorRequiredToOpenLoops(null), null);
+});
+
+// Substance ("they said") field — the core regression this expansion is
+// fixing. Multi-part inbound where the contact answered the operator's
+// question across several distinct beats (recruiters, interview status,
+// an offer, a Middle East constraint) must keep each beat as its own
+// bullet — not collapse into one vague summary. See Brandon-shaped
+// fixture below. Required_points stays conservative: Brandon didn't
+// explicitly ask anything, so under the tightened prompt only the
+// single weightiest acknowledgement is required; further acks and any
+// "ask back" moves live in optional_followups so the rail doesn't
+// invent homework on a no-ask thread.
+test("sanitizeReplyBrief: they_said substance bullets pass through with stable ids", () => {
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "You asked Brandon if he'd started exploring executive search.",
+    on_you:
+      "He's slightly paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging.",
+    they_said: [
+      {
+        id: "recruiter",
+        text:
+          "He explained that executive search normally involves partnering with a recruiter or team who pitch your CV to companies."
+      },
+      { id: "interviews", text: "He has a couple of interviews still active." },
+      { id: "offer", text: "He has secured one offer." },
+      { id: "pause", text: "He paused that offer because the clients are based in the Middle East." }
+    ],
+    required_points: [
+      {
+        id: "ack-pause",
+        text: "Acknowledge the paused offer in the Middle East",
+        status: "required"
+      }
+    ],
+    optional_followups: [
+      {
+        id: "ack-explain",
+        text: "Acknowledge his explanation of how exec search works",
+        status: "optional"
+      },
+      {
+        id: "ask-rest",
+        text: "Ask how the remaining interviews are going",
+        status: "optional"
+      }
+    ]
+  });
+  assert.ok(brief);
+  assert.equal(brief.they_said?.length, 4);
+  // Each Brandon-substance beat survives — the prompt's job is to extract
+  // them and the sanitiser's job is to pass them through verbatim.
+  assert.match(brief.they_said?.[0].text ?? "", /recruiter|team|CV/);
+  assert.match(brief.they_said?.[1].text ?? "", /interviews/);
+  assert.match(brief.they_said?.[2].text ?? "", /offer/);
+  assert.match(brief.they_said?.[3].text ?? "", /Middle East/);
+  // Conservative required-points discipline on a no-ask thread:
+  // exactly one acknowledgement; further moves are optional.
+  assert.equal(brief.required_points.length, 1);
+  assert.match(brief.required_points[0].text, /paused offer|Middle East/i);
+  assert.equal(brief.optional_followups.length, 2);
+});
+
+test("sanitizeReplyBrief: they_said accepts plain strings and assigns stable ids", () => {
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "You asked about her week.",
+    on_you: "Light acknowledgement is enough.",
+    they_said: [
+      "Her week was hectic with the new product launch.",
+      "She's heading to Lagos on Friday for a friend's wedding."
+    ]
+  });
+  assert.ok(brief);
+  assert.equal(brief.they_said?.length, 2);
+  assert.equal(brief.they_said?.[0].text, "Her week was hectic with the new product launch.");
+  assert.ok((brief.they_said?.[0].id ?? "").length > 0);
+  // Each item gets a unique id so React keys don't collide.
+  assert.notEqual(brief.they_said?.[0].id, brief.they_said?.[1].id);
+});
+
+test("sanitizeReplyBrief: they_said deduplicates case-insensitively and caps at 6", () => {
+  const tenStrings = Array.from({ length: 10 }, (_, i) => `Substance bullet ${i}`);
+  // Include a duplicate of an existing bullet but in upper case to verify
+  // the dedupe rule. The dupe stays out, the cap holds at 6.
+  tenStrings.push("SUBSTANCE BULLET 0");
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "Lots of substance.",
+    on_you: "Acknowledge each.",
+    they_said: tenStrings
+  });
+  assert.ok(brief);
+  // Cap (MAX_THEY_SAID_POINTS = 6) holds, dedupe runs before the cap.
+  assert.equal(brief.they_said?.length, 6);
+});
+
+test("sanitizeReplyBrief: they_said malformed entries are dropped, not trusted", () => {
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "Mixed inbound.",
+    on_you: "On you.",
+    they_said: [
+      { id: "ok", text: "Real substance bullet" },
+      { id: "missing-text" },
+      { id: "empty", text: "   " },
+      42,
+      null
+    ]
+  });
+  assert.ok(brief);
+  assert.equal(brief.they_said?.length, 1);
+  assert.equal(brief.they_said?.[0].text, "Real substance bullet");
+});
+
+test("sanitizeReplyBrief: they_said omitted by the model parses as an empty array", () => {
+  // Older AI runs (pre-they_said) and reconnect-mode responses leave the
+  // field out entirely. The sanitiser must still produce a brief — the
+  // panel just hides the section when the list is empty.
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "Quiet, mature thread.",
+    on_you: "Nothing pending.",
+    required_points: [],
+    optional_followups: []
+  });
+  assert.ok(brief);
+  assert.deepEqual(brief.they_said, []);
+});
+
+test("sanitizeReplyBrief: they_said strips banned coaching phrases the same way other fields do", () => {
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "Where things stand.",
+    on_you: "Light acknowledgement.",
+    they_said: [
+      "He shared a thoughtful update — would deepen the connection to follow up."
+    ]
+  });
+  assert.ok(brief);
+  // Banned phrase stripped; clean fragment survives.
+  assert.equal(/deepen the connection/i.test(brief.they_said?.[0].text ?? ""), false);
+});
+
+test("sanitizeReplyBrief: handled_points reason carries the actual substance, not a generic", () => {
+  // The prompt now requires reason to include the actual answer/substance
+  // in compact form. The sanitiser passes it through up to 160 chars so
+  // the operator can read "what was settled" without scrolling back.
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "Trace.",
+    on_you: "Nothing pending.",
+    required_points: [],
+    handled_points: [
+      {
+        id: "friday-h",
+        text: "Confirm Friday at 11",
+        status: "handled",
+        reason: "she answered Friday at 11 works herself two messages later when you didn't reply right away"
+      }
+    ]
+  });
+  assert.ok(brief);
+  assert.equal(brief.handled_points?.length, 1);
+  assert.match(brief.handled_points?.[0].reason ?? "", /Friday at 11|herself/);
+});
+
+test("synthesiseFallbackBrief: falls back to an empty they_said list", () => {
+  // The synthesiser is conservative — it never invents substance, so
+  // older threads (pre-brief) get an empty array. The UI hides the
+  // section when empty.
+  const brief = synthesiseFallbackBrief({
+    rollingSummary: "Brandon — old peer, last spoke about hiring.",
+    whatTheyWant: "He hasn't asked anything specific.",
+    openLoops: [],
+    needsReply: false,
+    latestInboundText: "all good, talk soon"
+  });
+  assert.deepEqual(brief.they_said, []);
+});
+
+test("briefSignatureForCache: empty string when brief is null", () => {
+  // Predraft pre-warm + /data/thread both run this helper. Null brief
+  // (older row, no JSON persisted yet) must produce the same key on both
+  // sides so the cache hits.
+  assert.equal(briefSignatureForCache(null), "");
+});
+
+test("briefSignatureForCache: a change to they_said flips the signature", () => {
+  // Confirms the brief substance actually contributes to the cache key —
+  // otherwise a new inbound that refreshed the brief wouldn't invalidate
+  // the cached replies, and the operator would keep seeing replies
+  // generated for the previous turn.
+  const baseBrief = sanitizeReplyBrief({
+    where_it_stands: "You asked about her week.",
+    on_you: "Light acknowledgement is enough.",
+    they_said: ["Her week was hectic with the new product launch."],
+    required_points: []
+  });
+  const updatedBrief = sanitizeReplyBrief({
+    where_it_stands: "You asked about her week.",
+    on_you: "Light acknowledgement is enough.",
+    they_said: [
+      "Her week was hectic with the new product launch.",
+      "She's heading to Lagos on Friday for a friend's wedding."
+    ],
+    required_points: []
+  });
+  assert.notEqual(briefSignatureForCache(baseBrief), briefSignatureForCache(updatedBrief));
 });
