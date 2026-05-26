@@ -463,12 +463,16 @@ export default function ThreadPage() {
   // Voice-match: rebuilt only when the thread's outbound history
   // changes. Score is debounced against the composer text below.
   const [voiceRewritePending, setVoiceRewritePending] = useState(false);
-  // Issue #331. Loops the AI thinks the current draft addresses. The
-  // ActionItemsChecklist uses these to auto-tick (full_drafts) or
-  // highlight (writing_support) covered rows. Cleared when the thread
-  // changes or the composer empties; refreshed by a debounced effect
-  // that hits /control/thread/:id/check-draft.
-  const [aiAddressedLoops, setAiAddressedLoops] = useState<string[]>([]);
+  // Issue #331. Per-loop coverage verdicts the AI returns for the
+  // current draft. "addressed" rows auto-tick at full_drafts (or
+  // highlight at writing_support); "partial" rows stay unticked but
+  // render a soft "partly covered" hint with a short reason, so the
+  // operator can see why the row didn't tick and what's still missing.
+  // Cleared when the thread changes or the composer empties; refreshed
+  // by a debounced effect that hits /control/thread/:id/check-draft.
+  const [aiCoverageItems, setAiCoverageItems] = useState<
+    Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>
+  >([]);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
@@ -1412,7 +1416,7 @@ export default function ThreadPage() {
     // re-render doesn't itself become a dependency that re-fires the
     // effect.
     const clearIfNotEmpty = () =>
-      setAiAddressedLoops((prev) => (prev.length === 0 ? prev : []));
+      setAiCoverageItems((prev) => (prev.length === 0 ? prev : []));
     if (aiLevel === "memory_only") {
       clearIfNotEmpty();
       return;
@@ -1426,9 +1430,10 @@ export default function ThreadPage() {
     draftCoverageThreadIdRef.current = threadId;
     draftCoverageDraftRef.current = trimmed;
     const handle = window.setTimeout(() => {
-      void apiPost<{ addressed: string[] }>(`/runner/control/thread/${threadId}/check-draft`, {
-        draft: trimmed
-      })
+      void apiPost<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>(
+        `/runner/control/thread/${threadId}/check-draft`,
+        { draft: trimmed }
+      )
         .then((output) => {
           // Latest-write-wins: ignore responses from a stale debounce
           // (operator either kept typing past this fire or moved on
@@ -1439,7 +1444,7 @@ export default function ThreadPage() {
           ) {
             return;
           }
-          setAiAddressedLoops(output.addressed);
+          setAiCoverageItems(output.items ?? []);
         })
         .catch((coverageError: unknown) => {
           // Coverage is a polish — never escalate to the visible error
@@ -1457,7 +1462,7 @@ export default function ThreadPage() {
   // Reset AI coverage when the thread changes — local state from the
   // previous thread shouldn't bleed into a new one.
   useEffect(() => {
-    setAiAddressedLoops([]);
+    setAiCoverageItems([]);
     draftCoverageThreadIdRef.current = null;
     draftCoverageDraftRef.current = "";
   }, [thread?.id]);
@@ -3163,7 +3168,7 @@ export default function ThreadPage() {
             openLoops={thread.openLoops}
             dismissedOpenLoops={thread.dismissedOpenLoops}
             onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
-            aiAddressedLoops={aiAddressedLoops}
+            aiCoverageItems={aiCoverageItems}
             aiCoverageMode={
               aiHelpLevel === "memory_only"
                 ? "off"

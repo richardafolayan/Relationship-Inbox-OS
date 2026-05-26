@@ -19,7 +19,12 @@ interface ReplyBriefPanelProps {
   openLoops: string[];
   dismissedOpenLoops: string[];
   onDismissLoop: (loop: string, dismissed: boolean) => void;
-  aiAddressedLoops?: string[];
+  /**
+   * Issue #331. Per-loop AI coverage verdicts for the in-flight draft.
+   * Forwarded to ActionItemsChecklist where "addressed" rows auto-tick
+   * and "partial" rows render a soft "partly covered" hint with reason.
+   */
+  aiCoverageItems?: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>;
   /**
    * "auto-tick" / "highlight" / "off" mirror the existing checklist
    * behaviour driven by the operator's aiHelpLevel. Forwarded straight
@@ -45,7 +50,7 @@ export function ReplyBriefPanel({
   openLoops,
   dismissedOpenLoops,
   onDismissLoop,
-  aiAddressedLoops,
+  aiCoverageItems,
   aiCoverageMode = "off"
 }: ReplyBriefPanelProps) {
   const [moreOpen, setMoreOpen] = useState(false);
@@ -206,7 +211,7 @@ export function ReplyBriefPanel({
                   dismissedOpenLoops={dismissedOpenLoops}
                   isReopenMode={false}
                   onDismiss={onDismissLoop}
-                  aiAddressedLoops={aiAddressedLoops}
+                  aiCoverageItems={aiCoverageItems}
                   aiCoverageMode={aiCoverageMode}
                 />
               ) : null}

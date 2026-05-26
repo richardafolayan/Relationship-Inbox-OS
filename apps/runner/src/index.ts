@@ -2601,7 +2601,7 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
   // the dashboard no longer renders.
   const openLoops = rawOpenLoops.filter((loop) => !dismissed.has(loop));
   if (openLoops.length === 0) {
-    res.json({ addressed: [] });
+    res.json({ items: [] });
     return;
   }
 
@@ -2611,14 +2611,14 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
     timestamp: m.timestamp.toISOString()
   }));
 
-  const { addressed } = await aiService.checkDraftCoverage({
+  const { items } = await aiService.checkDraftCoverage({
     displayName: thread.person.displayName,
     draft: payload.draft,
     openLoops,
     recentMessages
   });
 
-  res.json({ addressed });
+  res.json({ items });
 }));
 
 // "Tell the AI what you want to say, get it back in your voice."
