@@ -19,13 +19,22 @@ test("audio attachments are detected by kind", () => {
   assert.equal(audio[1].index, 2);
 });
 
-test("non-audio attachments are skipped", () => {
+test("non-transcribable attachments are skipped (photos, pdfs, stickers)", () => {
   const json = JSON.stringify([
     { type: "image", manualReview: false, kind: "photo" },
-    { type: "video", manualReview: false, kind: "video" },
-    { type: "pdf", manualReview: false, kind: "pdf" }
+    { type: "pdf", manualReview: false, kind: "pdf" },
+    { type: "sticker", manualReview: false, kind: "sticker" }
   ]);
   assert.equal(collectAudioAttachments(json).length, 0);
+});
+
+test("video attachments are picked up alongside audio (collectAudioAttachments)", () => {
+  const json = JSON.stringify([
+    { type: "video", manualReview: false, kind: "video", guid: "v1" }
+  ]);
+  const out = collectAudioAttachments(json);
+  assert.equal(out.length, 1);
+  assert.equal(out[0].attachment.kind, "video");
 });
 
 test("null or malformed attachmentsJson returns empty", () => {
