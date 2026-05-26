@@ -1,0 +1,63 @@
+<!--
+  Real-world DOM shape for a LinkedIn voice message in the "Lite"/
+  Tailwind messaging UI. Captured live on 2026-05-26 (DevTools open ->
+  LinkedIn flipped from Ember to this Lite render) with the URN +
+  signed token slots REDACTED so the fixture is safe to commit.
+
+  The download URL is exposed directly on the `<a class="download-
+  attachment">`, so the adapter can fetch it with the session cookies
+  via `page.context().request.get(url)` and skip the click-trigger
+  dance entirely. URN match uses the inner id (`2-REDACTED`), which
+  also appears in the Ember UI's `data-event-urn`, so the disk-store
+  key stays consistent across renderings.
+
+  Note: this fixture INTENTIONALLY puts the voice message LI inside a
+  thread that also contains the Ember-UI selectors the adapter
+  normally targets, simulating a hybrid render where both could be
+  visible. In production the two are mutually exclusive but the test
+  asserts the adapter prefers the direct-URL path.
+-->
+<div id="messaging-thread-container">
+  <ol class="list-none" id="message-thread-list">
+    <li
+      class="medium mr-3 ml-2 mb-0.5 member-message lite-mt msg-s-message-list__event"
+      data-message-urn="urn:li:messagingMessage:2-REDACTED"
+    >
+      <!-- The Ember-UI scaffold the adapter normally matches.
+           kept here so the message_item selector still finds the LI;
+           the adapter's per-LI extraction then hits the Lite UI's
+           download-attachment link nested below. -->
+      <div
+        class="msg-s-event-listitem msg-s-event-listitem--other"
+        data-event-urn="urn:li:msg_message:(urn:li:fsd_profile:REDACTED,2-REDACTED)"
+        data-view-name="message-list-item"
+      >
+        <div class="msg-s-event-listitem__message-bubble" tabindex="0">
+          <div class="msg-s-event-listitem__audio-container">
+            <button class="msg-s-event-listitem__audio" type="button">
+              <progress class="msg-s-event-listitem__audio-progress-bar" value="0" max="30.72"></progress>
+              <span class="msg-s-event-listitem__audio-time">0:31</span>
+            </button>
+          </div>
+          <div class="medium message inline-block">
+            <a
+              class="small w-full download-attachment"
+              href="https://www.linkedin.com/dms/prv/vid/v2/D4E20AQG-o1LuopXz7A/messaging-audio-analyzed/B4EZzowVlgHAAU-/0/1773431512255?m=AQK_REDACTED_TOKEN"
+              download
+              aria-label="Download"
+              title="Download"
+            >
+              <div class="attachment-container flex">
+                <div class="file-meta">FILE</div>
+                <div class="file-info">
+                  <div class="name">Voice message</div>
+                  <div class="file-size">147 KB</div>
+                </div>
+              </div>
+            </a>
+          </div>
+        </div>
+      </div>
+    </li>
+  </ol>
+</div>

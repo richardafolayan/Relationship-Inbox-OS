@@ -8094,21 +8094,29 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   /**
-   * Trigger a voice-message audio fetch and persist the bytes to disk so
-   * the transcription service's `AttachmentResolver` can read them back.
+   * Capture a voice-message audio file to disk so the transcription
+   * service's `AttachmentResolver` can read it back. Two strategies in
+   * order of preference:
    *
-   * LinkedIn's inline player ( `.msg-s-event-listitem__audio` ) doesn't
-   * expose the audio URL in the DOM — it lazy-loads on play. We arm a
-   * `page.waitForResponse` against the `messaging-audio-analyzed` URL
-   * pattern, then click the play button via Playwright (a real user
-   * gesture, unlike a synthetic `dispatchEvent('click')` which the
-   * browser ignores for media playback). The page is muted before the
-   * click so a headed-mode debug run doesn't blast audio at the operator.
+   *   1. **Direct URL.** LinkedIn's "Lite"/Tailwind messaging UI renders
+   *      voice notes as a file widget with an `<a class="download-
+   *      attachment" href="...messaging-audio-analyzed...">` exposing
+   *      the signed CDN URL inline. When that link is present anywhere
+   *      on the page and matches this message's URN, we fetch it
+   *      directly via `page.context().request` (re-uses the session's
+   *      auth cookies). No click, no timeout, no playback.
+   *   2. **Click-trigger fallback.** The Ember messaging UI keeps the
+   *      audio URL out of the DOM — it lazy-loads on play. We arm a
+   *      `page.waitForResponse` against the `messaging-audio-analyzed`
+   *      pattern, then click the play button via Playwright (a real
+   *      user gesture; synthetic `dispatchEvent('click')` is rejected
+   *      by browsers for media playback). The page is muted first so a
+   *      headed-mode debug run stays quiet.
    *
-   * Returns the on-disk path + byte count on success, or null if the
-   * fetch never lands within the timeout (LinkedIn's CDN occasionally
-   * stalls). Idempotent: if a voice for this URN is already on disk, we
-   * skip the click and return the cached path.
+   * Returns the on-disk path + byte count on success, or null when
+   * neither strategy works. Idempotent: if a voice for this URN is
+   * already on disk, both branches short-circuit and return the cached
+   * path.
    */
   private async captureLinkedInVoiceMessage(
     page: Page,
@@ -8125,6 +8133,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
     }
 
+    // Strategy 1: Lite UI direct fetch.
+    const direct = await this.tryDirectLinkedInVoiceFetch(page, urn).catch(() => null);
+    if (direct) {
+      return direct;
+    }
+
+    // Strategy 2: click-trigger + network intercept on the Ember UI.
     await page
       .evaluate(() => {
         for (const el of Array.from(document.querySelectorAll("audio,video"))) {
@@ -8155,6 +8170,55 @@ export class LinkedInAdapter implements PlatformAdapter {
     }
 
     const path = writeLinkedInVoice(urn, bytes);
+    return { path, byteSize: bytes.length };
+  }
+
+  /**
+   * Look for an `<a class="download-attachment">` whose href points at
+   * the `messaging-audio-analyzed` CDN AND belongs to this URN's LI,
+   * then fetch it through the page's auth context. Returns null if no
+   * matching link exists (the Ember messaging UI never renders one) or
+   * if the fetch fails — caller falls back to the click strategy.
+   *
+   * URN matching: the Lite UI uses `data-message-urn=
+   * "urn:li:messagingMessage:2-<innerId>"`, while the Ember UI's
+   * `data-event-urn` is `"urn:li:msg_message:(...,2-<innerId>)"`. We
+   * match on the canonical inner id (`2-<innerId>`), which appears in
+   * both URN forms, so a hybrid render or future variant rename
+   * doesn't break the lookup.
+   */
+  private async tryDirectLinkedInVoiceFetch(
+    page: Page,
+    urn: string
+  ): Promise<{ path: string; byteSize: number } | null> {
+    const innerIdMatch = urn.match(/2-[A-Za-z0-9_=-]+/);
+    if (!innerIdMatch) return null;
+    const innerId = innerIdMatch[0];
+
+    const url = await page
+      .evaluate(
+        ({ innerId: needle }) => {
+          const liSelector = `li[data-message-urn*="${needle}"]`;
+          const li = document.querySelector(liSelector);
+          if (!li) return null;
+          const anchor = li.querySelector<HTMLAnchorElement>(
+            'a.download-attachment[href*="messaging-audio"]'
+          );
+          return anchor?.href ?? null;
+        },
+        { innerId }
+      )
+      .catch(() => null);
+
+    if (!url) return null;
+
+    const response = await page.context().request.get(url).catch(() => null);
+    if (!response || !response.ok()) return null;
+
+    const bytes = await response.body().catch(() => null);
+    if (!bytes || bytes.length === 0) return null;
+
+    const path = writeLinkedInVoice(urn, Buffer.from(bytes));
     return { path, byteSize: bytes.length };
   }
 
