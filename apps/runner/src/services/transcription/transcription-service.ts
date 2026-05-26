@@ -2,7 +2,7 @@ import { existsSync, statSync } from "node:fs";
 import { extname } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import type { AttachmentPlaceholder } from "@inbox-os/core";
-import { convertCafToM4a } from "../imessage-attachment-server";
+import { convertCafToM4a, convertVideoToAudioM4a } from "../imessage-attachment-server";
 import { buildAudioFingerprint } from "./fingerprint";
 import type {
   TranscriptionOutcome,
@@ -41,6 +41,25 @@ function isCafSource(input: { mimeType: string | null; filename: string | null; 
   if (mime.includes("caf") || mime.includes("coreaudio")) return true;
   if (/\.caf($|\?)/.test(name)) return true;
   if (name.includes("audio message")) return true;
+  return false;
+}
+
+/**
+ * Whether the attachment is a video the audio-extractor should run on.
+ * iMessage videos arrive as `.mov` (QuickTime) most of the time but
+ * occasionally `.mp4`; both are accepted by macOS `afconvert`.
+ */
+function isVideoSource(input: {
+  kind: string | undefined;
+  mimeType: string | null;
+  filename: string | null;
+  transferName: string | null;
+}): boolean {
+  if (input.kind === "video") return true;
+  const mime = (input.mimeType ?? "").toLowerCase();
+  if (mime.startsWith("video/")) return true;
+  const name = (input.transferName ?? input.filename ?? "").toLowerCase();
+  if (/\.(mov|mp4|m4v)($|\?)/.test(name)) return true;
   return false;
 }
 
@@ -94,6 +113,12 @@ interface TranscriptionServiceDeps {
    * macOS-only afconvert dependency.
    */
   convertCafToM4a?: (absolutePath: string) => Promise<string | null>;
+  /**
+   * Optional override for the video-to-audio extractor. Defaults to the
+   * shared `convertVideoToAudioM4a` helper. Tests stub this to skip
+   * macOS-only afconvert when running on CI / Linux.
+   */
+  convertVideoToAudioM4a?: (absolutePath: string) => Promise<string | null>;
   /** Log channel; defaults to console.warn. Tests stub to silence noise. */
   warn?: (message: string) => void;
 }
@@ -134,6 +159,7 @@ export type TranscribeMessageOutcome =
 export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
   const warn = deps.warn ?? ((message) => console.warn(message));
   const cafConverter = deps.convertCafToM4a ?? convertCafToM4a;
+  const videoAudioExtractor = deps.convertVideoToAudioM4a ?? convertVideoToAudioM4a;
   const inflight = new Set<string>();
   // Retention-warning state. Emit a single calm warning per process the
   // first time we see a missing-file skip while transcription is on, so
@@ -303,16 +329,19 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     if (!existsSync(resolved.absolutePath)) {
       return { kind: "skipped", reason: "missing_file" };
     }
-    const stat = statSync(resolved.absolutePath);
-    if (stat.size > deps.config.maxBytes) {
-      return { kind: "skipped", reason: `attachment exceeds size cap (${stat.size} bytes)` };
-    }
 
-    // CAF voice notes need converting to m4a before OpenAI will accept
-    // them. Conversion is cached on disk by source path + mtime so a
-    // re-run never repeats the afconvert call. Failed conversions are
-    // treated as "skipped" with a clear reason; the runner does not crash.
+    // CAF voice notes and videos both need converting to m4a before
+    // OpenAI will accept the upload. Conversion is cached on disk by
+    // source path + mtime so a re-run never repeats the afconvert call.
+    // Failed conversions are treated as "skipped" with a clear reason;
+    // the runner does not crash.
     const sourceIsCaf = isCafSource({
+      mimeType: resolved.mimeType,
+      filename: resolved.filename,
+      transferName: resolved.transferName
+    });
+    const sourceIsVideo = !sourceIsCaf && isVideoSource({
+      kind: attachment.kind,
       mimeType: resolved.mimeType,
       filename: resolved.filename,
       transferName: resolved.transferName
@@ -323,6 +352,12 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       const converted = await cafConverter(resolved.absolutePath);
       if (!converted) {
         return { kind: "skipped", reason: "caf to m4a conversion failed" };
+      }
+      // Size cap is enforced on the extracted m4a — for both CAF and
+      // video, the upload bytes are the converted m4a, not the original.
+      const m4aSize = safeFileSize(converted);
+      if (m4aSize > deps.config.maxBytes) {
+        return { kind: "skipped", reason: `attachment exceeds size cap (${m4aSize} bytes)` };
       }
       // The original transferName is "Audio Message.caf". OpenAI's
       // /v1/audio/transcriptions endpoint sniffs the filename extension
@@ -336,7 +371,32 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         language: deps.config.language,
         model: deps.config.model
       };
+    } else if (sourceIsVideo) {
+      const converted = await videoAudioExtractor(resolved.absolutePath);
+      if (!converted) {
+        // afconvert refused the container (no audio track, or a codec
+        // macOS can't decode). Skipped, not failed — there's nothing
+        // for OpenAI to work with even if we did upload.
+        return { kind: "skipped", reason: "video to m4a conversion failed" };
+      }
+      const m4aSize = safeFileSize(converted);
+      if (m4aSize > deps.config.maxBytes) {
+        return { kind: "skipped", reason: `attachment exceeds size cap (${m4aSize} bytes)` };
+      }
+      request = {
+        filePath: converted,
+        mimeType: "audio/mp4",
+        // Generic name so OpenAI's filename-extension sniffer sees an
+        // audio/mp4 upload (not a `.mov` it would reject).
+        filename: "video-audio.m4a",
+        language: deps.config.language,
+        model: deps.config.model
+      };
     } else {
+      const stat = statSync(resolved.absolutePath);
+      if (stat.size > deps.config.maxBytes) {
+        return { kind: "skipped", reason: `attachment exceeds size cap (${stat.size} bytes)` };
+      }
       const mimeType = (resolved.mimeType ?? "").toLowerCase();
       if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
         return { kind: "skipped", reason: `unsupported mime type ${mimeType || "<unknown>"}` };
@@ -353,13 +413,23 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     return deps.provider!.transcribe(request);
   }
 
+  function safeFileSize(path: string): number {
+    try {
+      return statSync(path).size;
+    } catch {
+      return 0;
+    }
+  }
+
   return { enqueueMessage, transcribeMessage };
 }
 
 /**
- * Parse the attachmentsJson column into the list of likely audio
- * attachments (with their original positional index, used as a fallback
- * id when an attachment has no guid).
+ * Parse the attachmentsJson column into the list of attachments the
+ * transcription pipeline can usefully run on (voice notes, generic
+ * audio attachments, and videos whose audio track is extractable via
+ * `convertVideoToAudioM4a`). Each entry carries its original positional
+ * index, used as a fallback id when an attachment has no guid.
  */
 export function collectAudioAttachments(
   attachmentsJson: string | null
@@ -376,7 +446,11 @@ export function collectAudioAttachments(
   parsed.forEach((entry, index) => {
     if (!entry || typeof entry !== "object") return;
     const candidate = entry as AttachmentPlaceholder;
-    if (candidate.kind === "voice_note" || candidate.kind === "audio") {
+    if (
+      candidate.kind === "voice_note" ||
+      candidate.kind === "audio" ||
+      candidate.kind === "video"
+    ) {
       out.push({ attachment: candidate, index });
     }
   });

@@ -2541,14 +2541,29 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                 ))}
-                                {playableAttachments.some(
-                                  (a) => a.kind === "voice_note" || a.kind === "audio"
-                                ) ? (
-                                  <VoiceMessageTranscript
-                                    messageId={message.id}
-                                    transcription={message.audioTranscription ?? null}
-                                  />
-                                ) : null}
+                                {(() => {
+                                  // Pick the first transcribable attachment to
+                                  // drive the per-message transcript surface.
+                                  // Voice notes win over plain audio, which
+                                  // win over video, so a multi-attachment
+                                  // bubble (rare) labels itself sensibly.
+                                  const transcribableKind = playableAttachments
+                                    .map((a) => a.kind)
+                                    .find(
+                                      (k) =>
+                                        k === "voice_note" ||
+                                        k === "audio" ||
+                                        k === "video"
+                                    );
+                                  if (!transcribableKind) return null;
+                                  return (
+                                    <VoiceMessageTranscript
+                                      messageId={message.id}
+                                      transcription={message.audioTranscription ?? null}
+                                      attachmentKind={transcribableKind}
+                                    />
+                                  );
+                                })()}
                               </div>
                             ) : null}
                             {showText ? (

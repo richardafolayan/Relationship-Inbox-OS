@@ -11,6 +11,13 @@ interface IMessageMediaProps {
 interface VoiceMessageTranscriptProps {
   messageId: string;
   transcription: ThreadMessage["audioTranscription"];
+  /**
+   * Source attachment kind. Drives copy: "voice message" for audio
+   * sources, "video" for a video whose audio track was extracted and
+   * sent to OpenAI's `/v1/audio/transcriptions`. Defaults to voice
+   * copy so the existing call-sites need no change.
+   */
+  attachmentKind?: "voice_note" | "audio" | "video";
 }
 
 interface TranscribeResponse {
@@ -26,10 +33,23 @@ interface TranscribeResponse {
  * otherwise. Stays visually secondary (12px, ink-3, no badge) so it
  * never competes with the audio control.
  */
-export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessageTranscriptProps) {
+export function VoiceMessageTranscript({
+  messageId,
+  transcription,
+  attachmentKind
+}: VoiceMessageTranscriptProps) {
   const [local, setLocal] = useState<ThreadMessage["audioTranscription"]>(transcription ?? null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const isVideo = attachmentKind === "video";
+  const transcriptLabel = isVideo ? "video transcript" : "voice message transcript";
+  const pendingCopy = isVideo ? "Transcribing video..." : "Transcribing voice message...";
+  const unavailableCopy = isVideo ? "Video unavailable" : "Voice message unavailable";
+  const failedHintCopy = isVideo
+    ? "Video could not be transcribed."
+    : "Voice message could not be transcribed.";
+  const transcribeButtonLabel = isVideo ? "Transcribe video" : "Transcribe voice message";
 
   async function trigger() {
     if (running) return;
@@ -63,7 +83,7 @@ export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessag
     return (
       <span className="block whitespace-pre-wrap text-[12px] leading-[1.45] text-ink-3">
         <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3">
-          voice message transcript
+          {transcriptLabel}
         </span>
         <span className="ml-[6px]">{local.transcript}</span>
       </span>
@@ -73,7 +93,7 @@ export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessag
   if (local?.status === "pending" || running) {
     return (
       <span className="block text-[12px] italic leading-[1.45] text-ink-3">
-        Transcribing voice message...
+        {pendingCopy}
       </span>
     );
   }
@@ -97,7 +117,7 @@ export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessag
     // doesn't block the second look.
     return (
       <span className="block text-[12px] leading-[1.45] text-ink-3">
-        <span className="mr-[6px]">Voice message unavailable</span>
+        <span className="mr-[6px]">{unavailableCopy}</span>
         <button
           type="button"
           onClick={trigger}
@@ -113,12 +133,8 @@ export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessag
   // Offer the on-demand action; failed / errored states render a small
   // "Try again" affordance instead of a fresh "Transcribe" link.
   const offerRetry = local?.status === "failed" || error !== null;
-  const buttonLabel = offerRetry ? "Try again" : "Transcribe voice message";
-  const hint = error
-    ? error
-    : local?.status === "failed"
-      ? "Voice message could not be transcribed."
-      : null;
+  const buttonLabel = offerRetry ? "Try again" : transcribeButtonLabel;
+  const hint = error ? error : local?.status === "failed" ? failedHintCopy : null;
 
   return (
     <span className="block text-[12px] leading-[1.45] text-ink-3">
