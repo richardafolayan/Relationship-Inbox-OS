@@ -69,6 +69,18 @@ import {
   toInboxRow,
   type ThreadRowSource
 } from "./services/thread-row-shaping";
+import {
+  applyAck,
+  applyDismissToday,
+  applySnoozePerson,
+  applyUnsnoozePerson,
+  computeTick,
+  createOverdueDigestStore,
+  isValidCadence,
+  listSnoozedPeople,
+  selectCandidates
+} from "./services/overdue-digest";
+import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
 // Most routes carry tiny JSON. /control/pilot-feedback can carry several
@@ -121,6 +133,7 @@ function kindFromMime(mime: string | undefined, filename: string | undefined): "
 }
 
 const settingsStore = createSettingsStore();
+const overdueDigestStore = createOverdueDigestStore(prisma);
 const auditService = createAuditService();
 const eventBus = createEventBus();
 const aiService = createAiService(settingsStore);
@@ -676,6 +689,50 @@ function requireAdapter(platform: string): PlatformAdapter {
     );
   }
   return adapter;
+}
+
+async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
+  // Mirrors the projection used by /data/inbox so the digest's idea of
+  // "overdue" stays in lockstep with what Today calls overdue (#360
+  // amendment 2). loadVisibleThreadRows already hides archived rows and
+  // thread-level snoozes; the digest service does the rest of the filtering.
+  const [visibleRows, scheduledSends] = await Promise.all([
+    loadVisibleThreadRows(),
+    prisma.sendRequest.findMany({
+      where: { status: "SCHEDULED" },
+      select: { threadId: true, scheduledFor: true }
+    })
+  ]);
+  const counts = personThreadCounts(visibleRows);
+  const scheduledByThread = new Map<string, Date>();
+  for (const row of scheduledSends) {
+    if (!row.scheduledFor) continue;
+    const existing = scheduledByThread.get(row.threadId);
+    if (!existing || row.scheduledFor.getTime() < existing.getTime()) {
+      scheduledByThread.set(row.threadId, row.scheduledFor);
+    }
+  }
+  return visibleRows.map((row) => {
+    const count = counts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
+    const shaped = toInboxRow(row, count);
+    const scheduledFor = scheduledByThread.get(shaped.id);
+    return {
+      threadId: shaped.id,
+      personId: row.source.personId,
+      personName: shaped.personName,
+      riskLevel: shaped.riskLevel,
+      needsReply: shaped.needsReply,
+      lastInboundAt: shaped.lastInboundAt,
+      lastMessageAt: shaped.lastMessageAt,
+      lastMessageDirection: shaped.lastMessageDirection,
+      preview: shaped.preview,
+      whatTheyWant: shaped.whatTheyWant,
+      archivedAt: shaped.archivedAt,
+      snoozedUntil: shaped.snoozedUntil,
+      scheduledSendAt: scheduledFor ? scheduledFor.toISOString() : null,
+      closedStatus: shaped.closedStatus
+    } satisfies OverdueDigestRowInput;
+  });
 }
 
 async function loadVisibleThreadRows(options?: {
@@ -1342,6 +1399,115 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
     }
   }
 
+  res.json(next);
+}));
+
+// Overdue-reply digest (#360). One calm digest; off by default; cadence is
+// daily / weekly / off; click → /today, never per-thread. These endpoints
+// are read-only by default — only /ack mutates `lastDigestAt` and per-person
+// memory, and only after the dashboard has actually fired a notification.
+const LOCAL_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const localDateSchema = z.string().regex(LOCAL_DATE_RE, "expected YYYY-MM-DD");
+
+app.get("/data/overdue-digest/settings", asyncRoute(async (_req, res) => {
+  res.json(await overdueDigestStore.get());
+}));
+
+app.post("/control/overdue-digest/settings", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({ cadence: z.enum(["off", "daily", "weekly"]) })
+    .parse(req.body ?? {});
+  const current = await overdueDigestStore.get();
+  if (!isValidCadence(payload.cadence)) {
+    res.status(400).json({ error: "invalid_cadence" });
+    return;
+  }
+  const next = await overdueDigestStore.put({ ...current, cadence: payload.cadence });
+  res.json(next);
+}));
+
+app.get("/data/overdue-digest/preview", asyncRoute(async (_req, res) => {
+  const [settings, rows] = await Promise.all([overdueDigestStore.get(), loadOverdueDigestRows()]);
+  const nowIso = new Date().toISOString();
+  const candidates = selectCandidates({ rows, settings, nowIso });
+  res.json({
+    settings,
+    candidates,
+    snoozed: listSnoozedPeople(settings, nowIso)
+  });
+}));
+
+app.post("/control/overdue-digest/tick", asyncRoute(async (req, res) => {
+  const payload = z.object({ localDate: localDateSchema }).parse(req.body ?? {});
+  const [settings, rows] = await Promise.all([overdueDigestStore.get(), loadOverdueDigestRows()]);
+  const result = computeTick({
+    settings,
+    rows,
+    nowIso: new Date().toISOString(),
+    localDate: payload.localDate
+  });
+  res.json(result);
+}));
+
+app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      included: z
+        .array(
+          z.object({
+            personId: z.string().min(1),
+            displayName: z.string(),
+            stateKey: z.string().min(1)
+          })
+        )
+        .min(1)
+    })
+    .parse(req.body ?? {});
+  const current = await overdueDigestStore.get();
+  // Refuse to ack when cadence is off — the dashboard should never reach
+  // this state but the guard keeps memory honest if it somehow does.
+  if (current.cadence === "off") {
+    res.status(409).json({ error: "cadence_off" });
+    return;
+  }
+  const nowIso = new Date().toISOString();
+  const next = await overdueDigestStore.put(applyAck(current, payload.included, nowIso));
+  await auditService.log({
+    action: "OVERDUE_DIGEST_FIRED",
+    stage: "Notify",
+    status: "OK",
+    details: { count: payload.included.length, cadence: current.cadence }
+  });
+  res.json(next);
+}));
+
+app.post("/control/overdue-digest/dismiss-today", asyncRoute(async (req, res) => {
+  const payload = z.object({ localDate: localDateSchema }).parse(req.body ?? {});
+  const current = await overdueDigestStore.get();
+  const next = await overdueDigestStore.put(applyDismissToday(current, payload.localDate));
+  res.json(next);
+}));
+
+app.post("/control/overdue-digest/snooze-person", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      personId: z.string().min(1),
+      displayName: z.string().default(""),
+      days: z.number().int().min(1).max(60).default(7)
+    })
+    .parse(req.body ?? {});
+  const current = await overdueDigestStore.get();
+  const until = new Date(Date.now() + payload.days * 24 * 60 * 60 * 1000).toISOString();
+  const next = await overdueDigestStore.put(
+    applySnoozePerson(current, payload.personId, payload.displayName, until)
+  );
+  res.json(next);
+}));
+
+app.post("/control/overdue-digest/unsnooze-person", asyncRoute(async (req, res) => {
+  const payload = z.object({ personId: z.string().min(1) }).parse(req.body ?? {});
+  const current = await overdueDigestStore.get();
+  const next = await overdueDigestStore.put(applyUnsnoozePerson(current, payload.personId));
   res.json(next);
 }));
 

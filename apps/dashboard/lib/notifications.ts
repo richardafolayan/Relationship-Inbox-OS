@@ -101,3 +101,53 @@ export function notifyNewMessageDigest(rows: InboxRow[], onOpen: () => void): vo
     : "Several conversations are waiting on a reply.";
   show(`${rows.length} new messages`, body, "inbox-os:digest", onOpen);
 }
+
+// The calm overdue-reply digest (#360). One notification per cadence tick,
+// never one per thread. Stable tag prevents duplicates if the scheduler
+// fires twice before the browser dismisses the first. British English,
+// no guilt phrasing, no em dashes.
+export interface OverdueDigestNotificationPerson {
+  personId: string;
+  personName: string;
+}
+
+export function buildOverdueDigestTitle(count: number): string {
+  if (count <= 1) return "1 person still needs a reply";
+  return `${count} people still need replies`;
+}
+
+export function buildOverdueDigestBody(people: OverdueDigestNotificationPerson[]): string {
+  const names = people.map((p) => p.personName.trim()).filter(Boolean);
+  if (names.length === 0) return "A few conversations are still open.";
+  if (names.length === 1) return `${names[0]} is still open.`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} are still open.`;
+  if (names.length === 3) return `${names[0]}, ${names[1]} and ${names[2]} are still open.`;
+  const [a, b, ...rest] = names;
+  const remaining = rest.length;
+  return `${a}, ${b} and ${remaining} ${remaining === 1 ? "other" : "others"} are still open.`;
+}
+
+// Returns true only when the Notification constructor actually succeeded.
+// The AppShell scheduler uses this signal to decide whether to call /ack
+// on the runner — we never ack unless a notification was really created.
+export function notifyOverdueReplyDigest(
+  people: OverdueDigestNotificationPerson[],
+  onOpenToday: () => void
+): boolean {
+  if (!notificationsSupported() || Notification.permission !== "granted") return false;
+  if (people.length === 0) return false;
+  try {
+    const notification = new Notification(buildOverdueDigestTitle(people.length), {
+      body: buildOverdueDigestBody(people),
+      tag: "inbox-os:overdue-digest"
+    });
+    notification.onclick = () => {
+      window.focus();
+      onOpenToday();
+      notification.close();
+    };
+    return true;
+  } catch {
+    return false;
+  }
+}
