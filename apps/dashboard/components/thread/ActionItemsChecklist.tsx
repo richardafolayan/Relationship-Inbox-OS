@@ -24,16 +24,22 @@ interface ActionItemsChecklistProps {
   /** Dismiss / restore a loop. Wired to the existing /open-loop endpoint. */
   onDismiss: (loop: string, dismissed: boolean) => void;
   /**
-   * Issue #331. Loops the AI judged the in-flight composer draft addresses.
-   * What this list does to the row depends on `aiCoverageMode`.
+   * Issue #331. Per-loop AI coverage verdicts for the in-flight composer
+   * draft. "addressed" rows render under the existing auto-tick /
+   * highlight rule; "partial" rows stay unticked but show a soft hint
+   * line under the row naming what's still missing, so the operator can
+   * see why the row didn't tick (R-0023 pilot feedback).
    */
-  aiAddressedLoops?: string[];
+  aiCoverageItems?: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>;
   /**
    * "auto-tick" (full_drafts tier): the AI pre-checks addressed rows and
    *   shows a small "AI" tag; the operator can still untick to override.
+   *   Partial rows still render their hint line.
    * "highlight" (writing_support tier): the AI nudges the row visually
    *   (left rule + lighter contrast) but never touches the checkbox.
-   * "off" (memory_only tier or no signal yet): renders exactly as before.
+   *   Partial rows still render their hint line.
+   * "off" (memory_only tier or no signal yet): renders exactly as before,
+   *   no AI signals at all.
    */
   aiCoverageMode?: "auto-tick" | "highlight" | "off";
 }
@@ -48,7 +54,7 @@ export function ActionItemsChecklist({
   dismissedOpenLoops,
   isReopenMode,
   onDismiss,
-  aiAddressedLoops,
+  aiCoverageItems,
   aiCoverageMode = "off"
 }: ActionItemsChecklistProps) {
   const [state, setState] = useState<ActionItemChecklistState>(emptyChecklistState);
@@ -156,12 +162,22 @@ export function ActionItemsChecklist({
     () => openLoops.filter((loop) => !dismissedSet.has(loop)),
     [openLoops, dismissedSet]
   );
-  // Issue #331. Loops the AI thinks the in-flight draft addresses.
-  // The Set lookup runs once per render rather than per row.
+  // Issue #331. Two indexed views over the AI coverage verdicts so each
+  // row can answer "did the AI tick this?" and "does it have a partly-
+  // covered hint?" in one lookup. Loops not in either map are silent.
   const aiAddressedSet = useMemo(
-    () => new Set(aiAddressedLoops ?? []),
-    [aiAddressedLoops]
+    () => new Set((aiCoverageItems ?? []).filter((i) => i.status === "addressed").map((i) => i.loop)),
+    [aiCoverageItems]
   );
+  const aiPartialMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const item of aiCoverageItems ?? []) {
+      if (item.status === "partial" && item.reason) {
+        map.set(item.loop, item.reason);
+      }
+    }
+    return map;
+  }, [aiCoverageItems]);
 
   const isEmpty =
     activeLoops.length === 0 && state.manualItems.length === 0 && dismissedOpenLoops.length === 0;
@@ -198,6 +214,15 @@ export function ActionItemsChecklist({
           // visually so the operator can see "the AI thinks you covered
           // this" without losing manual control of the checkbox.
           const aiHighlight = aiCoverageMode === "highlight" && aiNoticed && !checked;
+          // Issue #331 / R-0023. "Partly covered" hint when the AI thinks
+          // the draft touched this loop but didn't actually answer it.
+          // Suppressed once the operator has explicitly ticked the row
+          // (their judgement wins) and when the AI already calls it
+          // addressed (don't pile signals on the same row).
+          const partialReason =
+            aiCoverageMode !== "off" && !checked && !aiNoticed
+              ? aiPartialMap.get(loop)
+              : undefined;
           return (
             <li key={`open:${loop}`} className="group flex items-start gap-2">
               <input
@@ -217,30 +242,43 @@ export function ActionItemsChecklist({
                     onCancel={cancelEdit}
                   />
                 ) : (
-                  <span
-                    className={cn(
-                      "text-[13px] leading-[1.5]",
-                      checked
-                        ? "text-ink-4 line-through"
-                        : aiHighlight
-                          ? "text-ink italic"
-                          : "text-ink-2"
-                    )}
-                  >
-                    {display}
-                    {showAiBadge ? (
+                  <>
+                    <span
+                      className={cn(
+                        "text-[13px] leading-[1.5]",
+                        checked
+                          ? "text-ink-4 line-through"
+                          : aiHighlight
+                            ? "text-ink italic"
+                            : "text-ink-2"
+                      )}
+                    >
+                      {display}
+                      {showAiBadge ? (
+                        <span
+                          className="ml-[6px] inline-block translate-y-[-1px] rounded-[3px] border border-hairline px-[4px] py-0 align-middle font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3"
+                          title={
+                            aiCoverageMode === "auto-tick"
+                              ? "AI thinks your draft addresses this. Click to untick if not."
+                              : "AI thinks your draft addresses this. Tick it when you're happy."
+                          }
+                        >
+                          ai
+                        </span>
+                      ) : null}
+                    </span>
+                    {partialReason ? (
                       <span
-                        className="ml-[6px] inline-block translate-y-[-1px] rounded-[3px] border border-hairline px-[4px] py-0 align-middle font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3"
-                        title={
-                          aiCoverageMode === "auto-tick"
-                            ? "AI thinks your draft addresses this. Click to untick if not."
-                            : "AI thinks your draft addresses this. Tick it when you're happy."
-                        }
+                        className="mt-[2px] block text-[11.5px] leading-[1.45] text-ink-4"
+                        title="The AI thinks your draft mentions this but doesn't actually answer it yet."
                       >
-                        ai
+                        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3">
+                          partly covered
+                        </span>
+                        <span className="ml-[6px]">{partialReason}</span>
                       </span>
                     ) : null}
-                  </span>
+                  </>
                 )}
               </div>
               {editing ? null : (
