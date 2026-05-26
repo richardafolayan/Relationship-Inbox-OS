@@ -939,7 +939,14 @@ app.get("/health", asyncRoute(async (_req, res) => {
     }
     return {
       platform: snap.platform,
+      // #338/#362: scope + openedRows so the dashboard TopStatus can
+      // tell an "update" (incremental) scan apart from a "full" sweep.
+      // Update-mode copy uses "checked" + "updated" (openedRows is the
+      // count of threads we actually opened — i.e. rows that had new
+      // content worth a look). Full-mode keeps the X/total denominator.
+      scope: snap.scope,
       processedRows: snap.processedRows,
+      openedRows: snap.openedRows,
       total,
       percent,
       etaSeconds
