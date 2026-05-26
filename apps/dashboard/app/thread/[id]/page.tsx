@@ -21,6 +21,7 @@ import {
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import { runActionWithFeedback } from "@/lib/feedback";
+import { readThreadSource } from "@/lib/thread-source";
 import type {
   AuditLogRow,
   InboxResponse,
@@ -2212,13 +2213,18 @@ export default function ThreadPage() {
                 onClick={() => {
                   if (archiving) return;
                   setArchiving(true);
+                  // Issue #336. Return to whichever list the operator
+                  // came from (Inbox, Reconnect, Archived, At risk…)
+                  // rather than always /today; falls back to /today
+                  // when no source was recorded (deep link, fresh tab).
+                  const returnTo = readThreadSource();
                   runAction(
                     apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
                     (message) => {
                       setError(message);
                       if (message) setArchiving(false);
                     },
-                    () => router.push("/today")
+                    () => router.push(returnTo)
                   );
                 }}
                 title="Move this thread out of the active inbox (you can find it in Archived)"
