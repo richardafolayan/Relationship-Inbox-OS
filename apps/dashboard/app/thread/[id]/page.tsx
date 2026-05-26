@@ -15,7 +15,8 @@ import {
   PanelLeftOpen,
   Paperclip,
   Send,
-  Sparkles
+  Sparkles,
+  X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
@@ -2680,7 +2681,19 @@ export default function ThreadPage() {
             ) : null}
             <div
               data-thread-composer="true"
-              className="rounded-card border border-hairline bg-paper px-3 pb-1.5 pt-1.5"
+              // Predraft state earns a tinted accent border + soft ring
+              // (#350): the textarea on its own looks like a passive
+              // surface, so operators read the AI predraft as static
+              // text rather than something they're meant to edit. The
+              // accent frame signals "this is suggested content, click
+              // anywhere to refine, or discard and start fresh". As soon
+              // as composerSource flips to "user" (typing starts) the
+              // frame reverts to the neutral hairline.
+              className={`rounded-card border bg-paper px-3 pb-1.5 pt-1.5 transition-colors duration-calm ${
+                composerSource === "predraft"
+                  ? "border-accent-ink/40 ring-1 ring-accent-ink/10"
+                  : "border-hairline"
+              }`}
             >
               {focusedParentMessage ? (
                 <div className="mb-2 flex items-start gap-2 rounded-[10px] border border-hairline bg-paper-2/60 px-2 py-1.5 text-[12px] leading-snug text-ink-2">
@@ -2704,19 +2717,27 @@ export default function ThreadPage() {
               {composerSource === "predraft" ? (
                 <div
                   data-testid="ai-predraft-badge"
-                  className="mb-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
+                  className="mb-1.5 flex items-center justify-between gap-2"
                 >
-                  <Sparkles className="h-[11px] w-[11px]" />
-                  {isReopenMode ? "AI opener - review before sending" : "AI predraft - review before sending"}
+                  <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
+                    <Sparkles className="h-[12px] w-[12px]" />
+                    {isReopenMode ? "AI opener · review before sending" : "AI predraft · review before sending"}
+                  </span>
+                  {/* Bumped from a tiny "clear" link to a proper Discard
+                      button at body-text size with an icon (#350). Old
+                      treatment was easy to miss when the operator wanted
+                      to throw away the AI draft and write their own. */}
                   <button
                     type="button"
                     onClick={() => {
                       setComposer("");
                       setComposerSource("empty");
                     }}
-                    className="ml-1 text-ink-3 hover:text-ink"
+                    title="Discard the AI draft and start fresh"
+                    className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
                   >
-                    clear
+                    <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                    Discard
                   </button>
                 </div>
               ) : null}
