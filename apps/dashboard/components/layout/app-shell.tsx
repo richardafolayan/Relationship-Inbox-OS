@@ -28,6 +28,7 @@ import {
   type OverdueDigestTickResult
 } from "@/lib/overdue-digest";
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
+import { recordThreadSource } from "@/lib/thread-source";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised between 8 and 13 minutes per
@@ -84,6 +85,13 @@ const sidebarCollapsedStorageKey = "dashboard_sidebar_collapsed";
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
   const router = useRouter();
+  // Issue #336. Remember the most recent non-thread route so that
+  // archiving a thread can return the operator to wherever they came
+  // from rather than always bouncing to /today. Lives in the shell so
+  // every list page contributes without needing per-page wiring.
+  useEffect(() => {
+    recordThreadSource(pathname);
+  }, [pathname]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
