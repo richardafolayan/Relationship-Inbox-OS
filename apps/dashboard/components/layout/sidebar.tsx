@@ -187,11 +187,21 @@ export function Sidebar({
                     <span
                       className={cn(
                         "ml-auto inline-flex min-w-[18px] justify-center rounded-full px-[6px] py-[1px] font-mono text-[10px] font-medium",
-                        active ? "bg-paper text-ink" : "bg-accent/15 text-accent"
+                        // Muted styling on purpose (#352). The bright
+                        // accent on a 3-digit count read as "your life
+                        // is on fire" rather than "today's queue".
+                        // Today is the calm-pile, not an alert. Active
+                        // state still inverts so the count remains
+                        // visible against the dark Today background.
+                        active ? "bg-paper text-ink" : "bg-paper-2 text-ink-3"
                       )}
                       aria-label={`${attentionCount} need attention`}
                     >
-                      {attentionCount}
+                      {/* Cap the displayed number — the operator isn't
+                          actioning 220 items in a day, so past ~99 the
+                          exact figure stops being useful and starts
+                          being noise. */}
+                      {attentionCount > 99 ? "99+" : attentionCount}
                     </span>
                   ) : null}
                 </>
