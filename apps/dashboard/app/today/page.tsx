@@ -500,7 +500,15 @@ export default function TodayPage() {
                   <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
                   {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up · 1 of ${rows.length}`}
                 </p>
-                <h2 className="m-0 mb-[14px] max-w-[22ch] text-balance font-display text-[36px] font-semibold leading-[1.15] tracking-[-0.025em]">
+                {/* #348: line-clamp-3 caps the hero at 3 lines. The
+                    36px display type inside a 22ch container can grow
+                    to 5+ tall lines when the bound source (whatTheyWant
+                    / preview) runs long, which dominates the card and
+                    pushes the message preview, action row and queue
+                    counter below the fold. The prompt cap (runner side)
+                    is the primary fix; this is the visual safety net so
+                    legacy long content stays readable. */}
+                <h2 className="m-0 mb-[14px] line-clamp-3 max-w-[22ch] text-balance font-display text-[36px] font-semibold leading-[1.15] tracking-[-0.025em]">
                   {heroHeadline || "Catching up with someone"}
                 </h2>
                 <div className="mb-[18px] flex items-center gap-3">
