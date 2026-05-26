@@ -119,6 +119,14 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
   const warn = deps.warn ?? ((message) => console.warn(message));
   const cafConverter = deps.convertCafToM4a ?? convertCafToM4a;
   const inflight = new Set<string>();
+  // Retention-warning state. Emit a single calm warning per process the
+  // first time we see a missing-file skip while transcription is on, so
+  // the operator notices their Messages audio retention window is
+  // expiring files before the runner can transcribe them. Re-armed
+  // after RETENTION_WARNING_COOLDOWN_MS so a long-running process
+  // surfaces the warning again if the situation repeats hours later.
+  const RETENTION_WARNING_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+  let retentionWarningAt = 0;
 
   function enqueueMessage(messageId: string): void {
     if (!deps.config.enabled) return;
@@ -216,6 +224,18 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           }
         });
         skipped += 1;
+        if (outcome.reason === "missing_file") {
+          const now = Date.now();
+          if (now - retentionWarningAt >= RETENTION_WARNING_COOLDOWN_MS) {
+            retentionWarningAt = now;
+            warn(
+              "[transcription] iMessage voice note missing from disk before transcription could run. " +
+                "Apple Messages may be expiring audio files before Inbox OS reads them. " +
+                "Open Messages, Settings > Messages, and set Audio Messages > Expire to Never (or Keep) " +
+                "to stop future voice notes being lost."
+            );
+          }
+        }
       } else {
         await deps.prisma.messageAudioTranscription.create({
           data: {
@@ -245,11 +265,17 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     }
     const resolved = await deps.attachmentResolver!.resolve(attachment.guid);
     if (!resolved) {
-      return { kind: "skipped", reason: "attachment not found on disk" };
+      // Stable code (rather than free-text "attachment not found...")
+      // so the dashboard and the retention-warning counter can both
+      // match a single string. Apple expires audio messages after the
+      // user-configurable retention window — if transcription was
+      // turned on after a thread had been running for a while, many
+      // historical rows resolve to this state.
+      return { kind: "skipped", reason: "missing_file" };
     }
 
     if (!existsSync(resolved.absolutePath)) {
-      return { kind: "skipped", reason: "attachment file missing on disk" };
+      return { kind: "skipped", reason: "missing_file" };
     }
     const stat = statSync(resolved.absolutePath);
     if (stat.size > deps.config.maxBytes) {

@@ -8,7 +8,7 @@ import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, stableHash } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
@@ -20,6 +20,7 @@ import {
   createAiService,
   contactSnapshotFingerprint,
   operatorProfileFingerprint,
+  isAiVisibleMessage,
   prismaMessageToPrompt
 } from "./services/ai";
 import { sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
@@ -1723,7 +1724,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     // Oldest-first turns for the prompt examples.
     const orderedMessages = [...thread.messages]
       .reverse()
-      .map(prismaMessageToPrompt);
+      .map(prismaMessageToPrompt).filter(isAiVisibleMessage);
 
     const verdict = await aiService
       .scoreReconnectCandidate({
@@ -1841,7 +1842,7 @@ app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => 
   for (const thread of candidates) {
     if (scored >= limit) break;
 
-    const orderedMessages = [...thread.messages].reverse().map(prismaMessageToPrompt);
+    const orderedMessages = [...thread.messages].reverse().map(prismaMessageToPrompt).filter(isAiVisibleMessage);
     const lastInbound = orderedMessages.filter((m) => m.direction === "IN").pop();
     if (!lastInbound) {
       // Defensive: lastInboundAt was non-null but the messages slice
@@ -2753,7 +2754,7 @@ async function resummarizeThreadById(threadId: string): Promise<
     previousRemember: thread.rememberJson
       ? (JSON.parse(thread.rememberJson) as RememberItem[])
       : [],
-    messages: orderedMessages.map(prismaMessageToPrompt),
+    messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
     needsReply: computedNeedsReply
   });
 
@@ -2903,7 +2904,7 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
     return;
   }
 
-  const recentMessages = [...thread.messages].reverse().map(prismaMessageToPrompt);
+  const recentMessages = [...thread.messages].reverse().map(prismaMessageToPrompt).filter(isAiVisibleMessage);
 
   const { items } = await aiService.checkDraftCoverage({
     displayName: thread.person.displayName,
@@ -3044,7 +3045,7 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
     .classifyThreadCategory({
       platform: thread.platform as PlatformName,
       displayName: thread.person.displayName,
-      messages: orderedMessages.map(prismaMessageToPrompt),
+      messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
       summary: thread.rollingSummary,
       whatTheyWant: thread.whatTheyWant
     })
@@ -3647,7 +3648,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
-    messages: pageMessages.map((message) => ({
+    messages: pageMessages
+      // Hide iMessage "kept an audio message" system events from the
+      // thread view entirely. The iMessage adapter drops these at
+      // ingestion going forward; this filter takes care of any
+      // historical rows already persisted.
+      .filter((message) => !isNonContentIMessageSystemEvent(message.text))
+      .map((message) => ({
       id: message.id,
       platformMessageKey: message.platformMessageKey,
       direction: message.direction,
@@ -3668,7 +3675,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       audioTranscription: message.audioTranscription
         ? {
             status: message.audioTranscription.status,
-            transcript: message.audioTranscription.transcript
+            transcript: message.audioTranscription.transcript,
+            errorMessage: message.audioTranscription.errorMessage
           }
         : null
     })),
@@ -4348,7 +4356,7 @@ app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, 
   });
   const result = await aiService.summarisePersonForFriendship({
     displayName: person.displayName,
-    messages: messages.map(prismaMessageToPrompt)
+    messages: messages.map(prismaMessageToPrompt).filter(isAiVisibleMessage)
   });
   res.json(result);
 }));
@@ -4409,7 +4417,7 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
   const result = await aiService.askAboutPerson({
     displayName: person.displayName,
     question,
-    messages: messages.map(prismaMessageToPrompt),
+    messages: messages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
     contact: contactSnapshot,
     notes: person.notes,
     tags
