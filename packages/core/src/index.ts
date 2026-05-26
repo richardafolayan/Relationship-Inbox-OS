@@ -7,3 +7,4 @@ export * from "./defaults.js";
 export * from "./autoscan.js";
 export * from "./birthday.js";
 export * from "./deleted-placeholder.js";
+export * from "./imessage-system-events.js";
