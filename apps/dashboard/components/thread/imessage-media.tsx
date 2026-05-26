@@ -90,9 +90,21 @@ export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessag
     typeof local.errorMessage === "string" &&
     /^missing_file$|missing on disk|not found on disk/i.test(local.errorMessage)
   ) {
+    // Quiet "unavailable" line with a small "Try again" affordance.
+    // iCloud sometimes hasn't finished downloading the audio at the
+    // moment the runner first looked; a manual retry asks the runner
+    // to check again now. The endpoint passes `force: true` so dedup
+    // doesn't block the second look.
     return (
       <span className="block text-[12px] leading-[1.45] text-ink-3">
-        Voice message unavailable
+        <span className="mr-[6px]">Voice message unavailable</span>
+        <button
+          type="button"
+          onClick={trigger}
+          className="inline-flex items-center rounded-[3px] border border-hairline px-[6px] py-[1px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3 hover:bg-paper-2"
+        >
+          Try again
+        </button>
       </span>
     );
   }

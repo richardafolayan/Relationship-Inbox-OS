@@ -2804,7 +2804,11 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
 app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) => {
   const { messageId } = z.object({ messageId: z.string().min(1) }).parse(req.params);
 
-  const outcome = await transcriptionService.transcribeMessage(messageId);
+  // Manual clicks always force a fresh attempt. Auto-scan keeps
+  // fingerprint dedup; the operator's deliberate "Try again" should
+  // re-check the disk state (e.g. when a missing_file row was written
+  // before iCloud finished downloading the audio).
+  const outcome = await transcriptionService.transcribeMessage(messageId, { force: true });
 
   if (outcome.kind === "disabled") {
     res.status(409).json({
