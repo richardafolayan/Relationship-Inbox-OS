@@ -996,7 +996,14 @@ app.get("/health", asyncRoute(async (_req, res) => {
     }
     return {
       platform: snap.platform,
+      // #338/#362: scope + openedRows so the dashboard TopStatus can
+      // tell an "update" (incremental) scan apart from a "full" sweep.
+      // Update-mode copy uses "checked" + "updated" (openedRows is the
+      // count of threads we actually opened — i.e. rows that had new
+      // content worth a look). Full-mode keeps the X/total denominator.
+      scope: snap.scope,
       processedRows: snap.processedRows,
+      openedRows: snap.openedRows,
       total,
       percent,
       etaSeconds
@@ -2767,7 +2774,7 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
   // the dashboard no longer renders.
   const openLoops = rawOpenLoops.filter((loop) => !dismissed.has(loop));
   if (openLoops.length === 0) {
-    res.json({ addressed: [] });
+    res.json({ items: [] });
     return;
   }
 
@@ -2777,14 +2784,14 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
     timestamp: m.timestamp.toISOString()
   }));
 
-  const { addressed } = await aiService.checkDraftCoverage({
+  const { items } = await aiService.checkDraftCoverage({
     displayName: thread.person.displayName,
     draft: payload.draft,
     openLoops,
     recentMessages
   });
 
-  res.json({ addressed });
+  res.json({ items });
 }));
 
 // "Tell the AI what you want to say, get it back in your voice."

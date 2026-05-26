@@ -74,7 +74,14 @@ type TickerState =
   | {
       kind: "scanning";
       platform?: string | null;
+      // #338/#362: scope + openedRows feed the copy that distinguishes
+      // an incremental "checking" pass from a true full-inbox sweep.
+      // Both are optional so an older runner build (without the fields)
+      // falls through to the legacy "Scanning <platform>" / "X/total"
+      // copy rather than rendering blanks.
+      scope?: "update" | "full";
       processedRows?: number;
+      openedRows?: number;
       total?: number;
       percent?: number;
       etaSeconds?: number | null;
@@ -164,7 +171,9 @@ function computeTicker(input: {
       return {
         kind: "scanning",
         platform,
+        scope: progress.scope,
         processedRows: progress.processedRows,
+        openedRows: progress.openedRows,
         total: progress.total,
         percent: progress.percent,
         etaSeconds: progress.etaSeconds
@@ -187,14 +196,30 @@ function tickerLabel(state: TickerState): string {
   switch (state.kind) {
     case "scanning": {
       const platformLabel = state.platform ? platformDisplay(state.platform) : "linkedin";
+      // #338/#362: branch on scope so an incremental walk doesn't read as
+      // a full inbox sweep. Reporter R-0027 saw "Scanning linkedin · 5/167"
+      // during an update-mode pass and interpreted the 167 (the persisted
+      // inbox row count) as "the runner is about to re-scan 167 threads".
+      // - "update": "Checking <plat> · N checked · M updated" — no
+      //   denominator, because we don't visit the whole inbox. M is the
+      //   count of rows actually opened (rows with new content).
+      // - "full": keep the X/total denominator — for a true sweep it's
+      //   the right shape, and the operator opted into it.
+      // Falls through to the legacy copy if either scope or the counts
+      // are missing (older runner build).
+      if (state.scope === "update" && typeof state.processedRows === "number") {
+        const updated = typeof state.openedRows === "number" ? state.openedRows : 0;
+        return `Checking ${platformLabel} · ${state.processedRows} checked · ${updated} updated`;
+      }
       if (
         typeof state.processedRows === "number" &&
         typeof state.total === "number" &&
         state.total > 0
       ) {
-        return `Scanning ${platformLabel} · ${state.processedRows}/${state.total}`;
+        const prefix = state.scope === "full" ? `Full ${platformLabel} scan` : `Scanning ${platformLabel}`;
+        return `${prefix} · ${state.processedRows}/${state.total}`;
       }
-      return `Scanning ${platformLabel}`;
+      return state.scope === "full" ? `Full ${platformLabel} scan` : `Scanning ${platformLabel}`;
     }
     case "enriching":
       return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;

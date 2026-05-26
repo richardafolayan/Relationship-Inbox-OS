@@ -376,17 +376,19 @@ export interface AiService {
   }): Promise<PilotReportTriage | null>;
   /**
    * Issue #331. Reads the operator's in-flight draft against the active
-   * open loops and returns the subset the draft already addresses. The
-   * dashboard uses this to auto-tick the reply checklist as the operator
-   * types. Returns an empty `addressed` array when the AI service is
-   * unavailable so the UI never blocks on a failure.
+   * open loops and returns per-loop verdicts. "addressed" loops are the
+   * ones the draft genuinely answers; "partial" loops are mentioned but
+   * not actually answered, and carry a short `reason` naming what's
+   * still missing. Loops the draft doesn't touch at all are omitted.
+   * Returns an empty items array when the AI service is unavailable so
+   * the UI never blocks on a failure.
    */
   checkDraftCoverage(input: {
     displayName: string;
     draft: string;
     openLoops: string[];
     recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
-  }): Promise<{ addressed: string[] }>;
+  }): Promise<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>;
 }
 
 export interface PilotReportTriage {

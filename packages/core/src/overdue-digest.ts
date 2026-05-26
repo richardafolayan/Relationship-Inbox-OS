@@ -145,26 +145,6 @@ function roundToMinute(iso: string): string {
   return new Date(rounded).toISOString();
 }
 
-/**
- * Patterns that signal the latest inbound is a deleted / retracted
- * placeholder rather than a real waiting message (#360 amendment 3). When
- * the preview / whatTheyWant text only carries one of these, the thread
- * looks "fresh" to the risk calculator but is not actionable, so the
- * digest must skip it. Kept conservative — anything ambiguous stays in.
- */
-const DELETED_PLACEHOLDER_PATTERNS: RegExp[] = [
-  /this message has been deleted/i,
-  /this message was deleted/i,
-  /message (has been )?unsent/i,
-  /message (has been )?removed/i,
-  /\[deleted( message)?\]/i,
-  /\[message deleted\]/i,
-  /unsent a message/i
-];
-
-export function isDeletedPlaceholder(text: string | null | undefined): boolean {
-  if (!text) return false;
-  const trimmed = text.trim();
-  if (!trimmed) return false;
-  return DELETED_PLACEHOLDER_PATTERNS.some((re) => re.test(trimmed));
-}
+// Deleted-placeholder handling lives in `./deleted-placeholder.ts` (added
+// in #364). The scan-queue already excludes those placeholders from the
+// inbound aggregate, so the digest service no longer needs its own filter.

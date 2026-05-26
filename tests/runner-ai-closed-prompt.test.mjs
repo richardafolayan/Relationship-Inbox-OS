@@ -65,3 +65,29 @@ test("CLOSED_STATUS_PROMPT explicitly handles a question mark as OPEN", () => {
   // still owed a reply.
   assert.match(CLOSED_STATUS_PROMPT, /question mark/i);
 });
+
+test("CLOSED_STATUS_PROMPT teaches the model that deleted-message placeholders are non-actionable", () => {
+  // The scan-queue layer already strips deletion placeholders from the
+  // inbound aggregates, but the classifier prompt also needs guidance
+  // for any case where the filter is bypassed (a new placeholder
+  // variant the helper has not yet learned). The rule must look at the
+  // prior real turn rather than treat the placeholder itself as a
+  // fresh ask or as a closing beat.
+  assert.match(CLOSED_STATUS_PROMPT, /deleted/i);
+  assert.match(CLOSED_STATUS_PROMPT, /unsent|retract/i);
+  assert.match(CLOSED_STATUS_PROMPT, /prior real (turn|inbound)/i);
+});
+
+test("CLOSED_STATUS_PROMPT shows worked examples for the deleted-placeholder case", () => {
+  // Both buckets must illustrate the rule: a deletion placeholder by
+  // itself is CLOSED only when the prior real inbound was already
+  // settled, and OPEN when the prior real inbound was a live ask.
+  assert.match(
+    CLOSED_STATUS_PROMPT,
+    /CLOSED\s+— IN: "This message has been deleted\."/
+  );
+  assert.match(
+    CLOSED_STATUS_PROMPT,
+    /OPEN\s+— IN: "This message has been deleted\."/
+  );
+});

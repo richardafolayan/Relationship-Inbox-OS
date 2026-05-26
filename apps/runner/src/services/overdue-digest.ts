@@ -19,8 +19,8 @@ import { PrismaClient } from "@prisma/client";
 import {
   DEFAULT_OVERDUE_DIGEST_SETTINGS,
   buildStateKey,
-  isDeletedPlaceholder,
   isDigestDue,
+  isNonActionableInboundPlaceholder,
   type OverdueDigestCadence,
   type OverdueDigestCandidate,
   type OverdueDigestRowInput,
@@ -193,18 +193,19 @@ export function selectCandidates(input: {
       if (!Number.isNaN(lastMs) && now - lastMs > DIGEST_HORIZON_MS) continue;
     }
 
-    // Deleted-placeholder guard. Both the row's `preview` (last visible
-    // text) and `whatTheyWant` (AI one-liner) can carry a "this message
-    // was deleted" string. If both look like a placeholder, treat the
-    // inbound as not actionable and skip it (#360 amendment 3).
-    if (isDeletedPlaceholder(row.preview) && isDeletedPlaceholder(row.whatTheyWant)) {
-      continue;
-    }
-    // If only the visible preview is a placeholder and the AI never got a
-    // chance to summarise yet (`whatTheyWant` null), be conservative and
-    // skip. The thread will surface again as soon as a real next message
-    // lands or the AI gives the row a real `whatTheyWant`.
-    if (isDeletedPlaceholder(row.preview) && !row.whatTheyWant) {
+    // Deleted-placeholder rows: skip ONLY when the whole inbound side is
+    // a placeholder and the AI has no real `whatTheyWant` either. Upstream
+    // (#364) already keeps the placeholder out of `lastInboundAt` and the
+    // needs-reply heuristic, so a thread reaching this point with a
+    // placeholder preview still has a *real* prior inbound the operator
+    // owes a reply to — we should NOT exclude it from the digest just
+    // because the latest visible bubble was retracted. The combined check
+    // here is a last-resort guard against rows where both signals are
+    // empty/placeholder; expected to be rare post-#364.
+    if (
+      isNonActionableInboundPlaceholder(row.preview) &&
+      isNonActionableInboundPlaceholder(row.whatTheyWant ?? "")
+    ) {
       continue;
     }
 
