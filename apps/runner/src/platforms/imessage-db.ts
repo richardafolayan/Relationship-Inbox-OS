@@ -783,6 +783,37 @@ export class IMessageDb {
   }
 
   /**
+   * Return guids of every outbound message in `chatGuid` whose chat.db
+   * `error` column is non-zero — i.e. Messages.app accepted the send,
+   * then later flipped it to "Not Delivered" (most common with
+   * SMS-fallback on a recipient whose iMessage activation lags). The
+   * scan loop uses this to hard-delete the matching Message rows from
+   * our DB so the thread reflects what the recipient actually saw.
+   * Unbounded by time on purpose: failures don't self-heal, and the
+   * delete-by-guid filter on the Prisma side is a no-op if we never
+   * persisted the row.
+   */
+  findFailedOutboundGuids(chatGuid: string): string[] {
+    const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
+      | { chatId: number }
+      | undefined;
+    if (!chat) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT m.guid AS guid
+           FROM message m
+           JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+          WHERE cmj.chat_id = ?
+            AND m.is_from_me = 1
+            AND m.error IS NOT NULL
+            AND m.error != 0
+            AND m.guid IS NOT NULL`
+      )
+      .all(chat.chatId) as Array<{ guid: string | null }>;
+    return rows.map((r) => r.guid).filter((g): g is string => typeof g === "string" && g.length > 0);
+  }
+
+  /**
    * Look up the chat.db attachments for the most-recent outbound message
    * in `chatGuid` newer than `afterUnixMs`. Used by send.ts to capture
    * voice-note / photo / video attachments the operator just sent so the
