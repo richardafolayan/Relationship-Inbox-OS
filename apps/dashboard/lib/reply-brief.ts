@@ -109,4 +109,4 @@ export function durableContextLabel(): string {
 
 // Single source of truth for the disclosure label so the test can pin
 // the exact wording from the spec.
-export const MORE_DISCLOSURE_LABEL = "More full context · nudge · checklist";
+export const MORE_DISCLOSURE_LABEL = "More context · nudge · checklist";
