@@ -1174,10 +1174,11 @@ open_loops guidance (reconnect):
   "urgency_hint": "string or omit if none",
   "reply_brief": {
     "where_it_stands": "string — see Reply Brief guidance below",
+    "they_said": [{ "id": "short-slug", "text": "one substance bullet from the latest unanswered inbound" }, ...],
     "on_you": "string — the obligation read",
     "required_points": [{ "id": "short-slug", "text": "specific thing on the operator", "status": "required" }, ...],
     "optional_followups": [{ "id": "short-slug", "text": "nice-to-have move you suggest", "status": "optional" }, ...],
-    "handled_points": [{ "id": "short-slug", "text": "thing that no longer needs action", "status": "handled", "reason": "short why" }, ...],
+    "handled_points": [{ "id": "short-slug", "text": "thing that no longer needs action", "status": "handled", "reason": "the actual answer/substance, not just 'topic moved on'" }, ...],
     "fuller_context": "string or null — longer chain context for the More disclosure",
     "durable_context": "string or null — who they are / how the operator knows them",
     "tone_steer": "string or null — one short line on how to approach the reply",
@@ -1193,32 +1194,48 @@ OPERATOR OUTPUT VOICE: Write user-facing strings (summary, what_they_want, open_
 
 ${modeBlock}
 
-REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail. It must let the operator write a reply WITHOUT scrolling up into the message history. Default visible card = where_it_stands + on_you only.
+REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail. It must let the operator write a thoughtful reply WITHOUT scrolling up into the message history. The default visible card surfaces where_it_stands → they_said → on_you in that order, so structure the brief as: context (what was asked / what's the topic), substance (what the contact actually said), obligation (what's on the operator). The substance is the part operators consistently say is too compressed — do not over-summarise it.
 
-where_it_stands:
-- A CHAIN / TRACE of the conversation, not a generic relationship summary.
-- Include the operator's prior message ONLY when it explains why the contact replied the way they did (e.g. "You asked if he'd started looking at exec roles. He explained...").
-- End on the contact's most recent update or the latest relevant point.
-- Concrete and specific. Quote real details ("paused the offer because the clients are in the Middle East"), never abstractions.
-- 1-4 sentences, plain British English. No abstract coaching ("deepen the connection", "grounded question", "helpful nudge"). No marketing register.
+where_it_stands (CONTEXT ONLY — KEEP TIGHT):
+- 1-2 short sentences. Plain British English. ≤ 280 chars total.
+- Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether he'd started exploring executive search opportunities, or was still figuring out his next steps.", "You sent the slides and asked what she thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
+- If the operator has not asked anything specific in the recent exchange, describe what the contact has now opened with — one sentence, neutral. Example: "Brandon has sent through a long update on where he's landed since you last spoke."
+- DO NOT cram the contact's reply substance into where_it_stands. The substance goes in they_said. This field is just the setup.
+- No abstract coaching ("deepen the connection", "grounded question", "helpful nudge"). No marketing register.
 - DO NOT attribute operator words to the contact, or vice versa. The transcript labels (operator: / contact:) are authoritative.
 
-on_you:
+they_said (SUBSTANCE — the most important field):
+- A bulleted list of every reply-relevant detail from the LATEST UNANSWERED INBOUND from the contact.
+- The test for each bullet: "would the operator need this detail to write a thoughtful reply?" If yes, include it.
+- Capture each of these when present in the inbound: direct answers to the operator's question(s), decisions, constraints, reasons / explanations, news, updates, plans, anything implying emotional weight or significance, and follow-up opportunities the contact opened.
+- One detail per bullet — do NOT merge ("recruiters pitch your CV and he has interviews and one offer" must split into three bullets). The whole point is to lay the substance out so the operator can scan it.
+- Each bullet is plain prose, one short sentence (≤ 200 chars), grounded in real words from the inbound. Use third person ("He explained that...", "She mentioned...", "They said..."). Quote concrete details ("paused the offer because the clients are based in the Middle East"), never abstractions.
+- 0-6 bullets. Match the texture of the inbound: a multi-part answer needs 3-5 bullets, a short message needs 1-2 or even none. Do NOT pad with invented detail to hit a number.
+- Empty array [] when there is no recent unanswered inbound (reconnect mode), when the latest inbound is a bare acknowledgement ("thanks", "👍"), or when the inbound is genuinely thin.
+- NEVER include the operator's words here. NEVER include reply tasks here — those belong in required_points.
+
+on_you (THE OBLIGATION READ):
 - Plainly state whether the contact has actually asked the operator for anything.
 - If the contact has NOT asked anything explicit, say so directly. Example wording: "Nothing asked — a light acknowledgement is enough."
 - If the contact has asked ONE thing, name it. Example: "She asked whether Friday works."
 - If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
+- For a message that's a multi-part personal update (decisions, constraints, news) without explicit asks, point at the single biggest acknowledgement-worthy beat. Example: "He's slightly paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging."
 - Never invent obligations. If the contact is simply updating the operator, say a light social reply is enough.
 - ONE sentence, ~140 characters max. The on_you block is the obligation read, not a paragraph. Resist stacking guidance ("acknowledge X; follow up on Y; keep the door open") — that pattern reliably blows past the budget and the dashboard truncates it mid-word. Pick the single most important obligation. Anything else goes in required_points or optional_followups.
 
-required_points (status = "required"):
-- Things that would make the reply feel incomplete if ignored.
-- Direct questions to the operator, requests, decisions the contact asked the operator to make, things asked to send / confirm / check / arrange, important news that clearly deserves acknowledgement.
-- A question the operator acknowledged but never actually answered counts as required.
-- A multi-part inbound where several parts still need a response: surface each separate part as its own required point.
-- Each text is a short follow-up prompt the operator can act on ("Confirm Friday at 11 works", "Send the deck Marianne asked about", "Decide whether to invite Tolu").
-- 0-6 points. Quality and completeness over volume.
-- NEVER include relationship-deepening moves or curiosity prompts here. Those go in optional_followups.
+required_points (status = "required") — the reply checklist:
+- BE CONSERVATIVE. Required points are the small set of things the operator MUST address. If a point is borderline, send it to optional_followups instead — the rail's job is to prevent invented homework, not to manufacture it. The substance the operator should read is already in they_said; required is only for "you owe a response on this".
+- Always belongs in required: direct questions to the operator, requests, decisions the contact asked the operator to make, things asked to send / confirm / check / arrange. A question the operator acknowledged but never actually answered counts as required.
+- Acknowledgement-worthy news: when the contact has NOT asked anything explicit but has shared a single weighty beat the operator should acknowledge (a paused job offer, a hard decision, a major life event), surface AT MOST ONE required point — "Acknowledge the [most significant beat]". Any further acknowledgements go in optional_followups. The high bar is: "would the contact feel actively unheard, not just under-engaged, if the reply ignored this?" A piece of explanation or background context they shared does NOT meet that bar — that's substance for they_said to surface, not a task.
+- For a multi-part inbound where the contact DID ask several distinct things, surface each ask as its own required point. Asks > acknowledgements.
+- "Ask how X is going" / "ask about Y" prompts are NEVER required — the contact did not ask the operator to ask back. They go in optional_followups.
+- Each text is a short follow-up prompt the operator can act on. Start with a verb. Examples: "Acknowledge the paused offer", "Send the deck Marianne asked about", "Confirm Friday at 11 works".
+- Volume guide:
+    - Thread with no explicit ask: 0-1 required points. Default to 0 when in doubt.
+    - Thread with one ask: 1-2.
+    - Thread with multiple asks: up to 4.
+    - Above 4 only when the contact is genuinely waiting on several distinct deliverables. Never pad to hit a number.
+- NEVER include relationship-deepening moves, curiosity prompts, or "ask back" follow-ups here.
 
 optional_followups (status = "optional"):
 - Nice-to-have conversational moves the AI suggests, that the contact did NOT actually ask for.
@@ -1233,7 +1250,7 @@ handled_points (status = "handled"):
 - Older topics where the conversation clearly moved on to something else.
 - Rhetorical questions.
 - Stale requests that would feel awkward to resurrect unless the operator explicitly chooses to.
-- Include a short "reason" string explaining why it's handled (e.g. "you answered this on Tuesday", "she answered her own question two messages later", "the topic moved on to the trip planning").
+- The "reason" field MUST carry the actual answer / substance in compact form, not just "topic moved on" or "you covered this". The operator should be able to read the reason and know what was settled without scrolling back. Examples: "she answered Friday at 11 works herself two messages later", "you replied that Tuesday won't work because of the school run", "he said the deck looked great and moved on to ask about the trip dates". Lowercase fine, ≤ 160 chars.
 - 0-6 points. Omit the field entirely if nothing was dropped.
 
 fuller_context:
@@ -1254,6 +1271,8 @@ GLOBAL Reply Brief rules:
 - Do NOT use the phrases "deepen the connection", "grounded question", "helpful nudge", "agile career planning", "build rapport", "deepen rapport" anywhere in default-visible sections.
 - Keep total brief length tight enough to scan in under 10 seconds.
 - Required and optional and handled are MUTUALLY EXCLUSIVE buckets. A single point cannot appear in more than one.
+- they_said is the substance the contact shared; required_points is the action verbs the operator should take in response. The same beat can appear once in each (e.g. they_said: "He said he paused the offer because the clients are based in the Middle East." paired with required_points: "Acknowledge the paused offer"). That pairing is correct — they_said carries the substance, required_points carries the action.
+- In RECONNECT mode the contact is not waiting on the operator and there is no fresh inbound to unpack — set they_said to an empty array [] in that case. Do NOT mine old messages for substance bullets when the operator already replied.
 
 remember guidance (both modes):
 - Separately from the loops above, extract durable facts worth remembering about the contact's life: exams, trips, interviews, job or house moves, health things, family events, birthdays, milestones, deadlines they mentioned.
@@ -1407,6 +1426,14 @@ ${transcript}`;
      */
     operatorStyle?: StyleProfile | null;
     contactStyle?: StyleProfile | null;
+    /**
+     * The compressed reply brief from the most recent thread analysis.
+     * Carries the substance bullets (they_said) and the obligation read
+     * (on_you) so the suggested replies engage with each reply-relevant
+     * beat from the latest inbound, not just the first surface point.
+     * Null on cold paths.
+     */
+    replyBrief?: ReplyBrief | null;
   }): Promise<SuggestedRepliesOutput> {
     const isOutreach = input.category === "outreach";
 
@@ -1526,6 +1553,42 @@ Hard rules:
       .map((fragment) => `\n\n${fragment}`)
       .join("");
 
+    // Reply-brief fragment. When the upstream summary run produced a brief,
+    // we hand the model the substance bullets the operator will see in the
+    // rail and the obligation read so the generated replies engage with
+    // EVERY reply-relevant beat from the latest inbound, not just the
+    // first surface point. Without this, multi-part inbound (e.g. Brandon
+    // explaining recruiters AND naming interview status AND naming a
+    // paused offer with a constraint) reliably produced replies that
+    // acknowledged one beat and ignored the rest.
+    const replyBriefFragment = (() => {
+      const brief = input.replyBrief;
+      if (!brief) return "";
+      const substance = (brief.they_said ?? [])
+        .map((p) => p.text.trim())
+        .filter((t) => t.length > 0);
+      if (substance.length === 0 && !brief.on_you?.trim()) return "";
+      const lines: string[] = ["", "Reply brief from the latest analysis — engage with EVERY beat in 'They said' across the three replies, not just the first one. A reply that ignores a substantive beat the contact took the time to share will feel like the operator skim-read the message."];
+      if (brief.where_it_stands?.trim()) {
+        lines.push(`Where it stands: ${brief.where_it_stands.trim()}`);
+      }
+      if (substance.length > 0) {
+        lines.push("They said:");
+        for (const bullet of substance) lines.push(`- ${bullet}`);
+      }
+      if (brief.on_you?.trim()) {
+        lines.push(`On you: ${brief.on_you.trim()}`);
+      }
+      const required = (brief.required_points ?? [])
+        .map((p) => p.text.trim())
+        .filter((t) => t.length > 0);
+      if (required.length > 0) {
+        lines.push("Worth addressing in the reply:");
+        for (const bullet of required) lines.push(`- ${bullet}`);
+      }
+      return `\n${lines.join("\n")}\n`;
+    })();
+
     const prompt = `Return strict JSON matching this exact shape:
 {
   "replies": [
@@ -1541,7 +1604,7 @@ Each reply text must be a complete, sendable message under 280 characters,
 colons. Match the conversation's register: warm if it's warm, formal if
 it's formal.
 
-${modeBlock}${lateReplyHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
+${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""

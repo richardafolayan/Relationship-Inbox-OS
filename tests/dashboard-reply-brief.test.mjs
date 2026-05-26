@@ -218,6 +218,42 @@ test("moreSectionHasContent: durable_context, tone_steer, fuller_context each su
   }
 });
 
+test("chooseDisplayBrief: synthesised fallback carries an empty they_said list", () => {
+  // The dashboard panel renders the substance section only when
+  // they_said has content. The fallback path (older rows without
+  // replyBriefJson) must produce an empty array so the panel hides
+  // the section calmly instead of throwing on .map() against undefined.
+  const result = chooseDisplayBrief(
+    thread({
+      summary: "Old peer, last spoke six weeks ago.",
+      needsReply: false,
+      messages: [{ direction: "IN", text: "All good, talk soon." }]
+    })
+  );
+  assert.deepEqual(result.they_said, []);
+});
+
+test("chooseDisplayBrief: server-provided brief's they_said passes through untouched", () => {
+  const serverBrief = {
+    where_it_stands: "You asked about exec search.",
+    on_you: "Acknowledge the paused offer.",
+    required_points: [],
+    optional_followups: [],
+    handled_points: [],
+    they_said: [
+      { id: "recruiter", text: "He explained recruiter / team CV pitching." },
+      { id: "pause", text: "Paused the Middle East offer." }
+    ],
+    fuller_context: null,
+    durable_context: null,
+    tone_steer: null,
+    enough_to_reply_without_scrolling: true
+  };
+  const result = chooseDisplayBrief(thread({ replyBrief: serverBrief }));
+  assert.equal(result, serverBrief);
+  assert.equal(result.they_said?.length, 2);
+});
+
 test("moreSectionHasContent: handled_points alone surface More so the operator can see what was dropped", () => {
   const brief = {
     where_it_stands: "Trace.",

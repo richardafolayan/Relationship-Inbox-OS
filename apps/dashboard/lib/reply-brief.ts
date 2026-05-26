@@ -55,6 +55,7 @@ export function chooseDisplayBrief(thread: Pick<
     required_points: required,
     optional_followups: [],
     handled_points: [],
+    they_said: [],
     fuller_context: null,
     durable_context: null,
     tone_steer: null,
