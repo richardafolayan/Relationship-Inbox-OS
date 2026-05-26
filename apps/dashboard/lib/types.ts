@@ -453,7 +453,21 @@ export interface HealthResponse {
    */
   scanProgress?: {
     platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+    /**
+     * #338/#362: scan scope drives the progress copy. "update" mode reads
+     * "Checking <platform> · N checked · M updated" (no denominator —
+     * incremental walks don't visit the whole inbox). "full" mode keeps
+     * the "Full <platform> scan · N/total" denominator that's meaningful
+     * for a true sweep. Optional so older runner builds parse cleanly.
+     */
+    scope?: "update" | "full";
     processedRows: number;
+    /**
+     * Threads the scan actually opened (i.e. rows that had new content
+     * worth a closer look). Drives the "updated" count in update-mode
+     * progress copy. Optional so older runner builds parse cleanly.
+     */
+    openedRows?: number;
     total: number;
     percent: number;
     etaSeconds: number | null;
