@@ -126,3 +126,30 @@ export async function convertCafToM4a(absolutePath: string): Promise<string | nu
     });
   });
 }
+
+/**
+ * Extract the audio track from an iMessage video (`.mov` / `.mp4`) into
+ * AAC-in-MPEG4 (`.m4a`) using macOS `afconvert`. `afconvert` accepts
+ * QuickTime / MP4 containers and pulls the audio stream out at the
+ * Core Audio layer — no extra dependency (ffmpeg etc.) required.
+ *
+ * Used by the transcription service to feed video bubbles into the
+ * same OpenAI audio endpoint as voice notes. A 8 MiB iMessage video
+ * typically lands as ~500 KiB of audio, comfortably under the
+ * `/v1/audio/transcriptions` 25 MiB request cap even on long clips.
+ *
+ * Returns the converted file path or `null` when the source is missing
+ * or `afconvert` cannot read the container (e.g. a video with no audio
+ * track, or a codec macOS can't decode).
+ */
+export async function convertVideoToAudioM4a(absolutePath: string): Promise<string | null> {
+  // Different cache extension (`mov.m4a`) so video extractions never
+  // collide with CAF extractions in the shared cache directory even
+  // if their input paths happened to hash to the same key under a
+  // future rename. Belt-and-braces given both writers append .m4a.
+  return convertOnce(absolutePath, "mov.m4a", async (src, dst) => {
+    await execFileAsync("afconvert", [src, dst, "-d", "aac", "-f", "m4af"], {
+      timeout: 60_000
+    });
+  });
+}
