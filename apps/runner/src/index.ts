@@ -2794,6 +2794,67 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
   res.json({ text });
 }));
 
+// On-demand transcription for a single message. Used by the thread UI's
+// "Transcribe voice message" affordance under untranscribed voice notes:
+// the operator can spend a single OpenAI call without waiting for the
+// next scan to re-persist the row. Fingerprint dedup still applies (a
+// repeat click returns the existing row's status rather than billing
+// twice).
+app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) => {
+  const { messageId } = z.object({ messageId: z.string().min(1) }).parse(req.params);
+
+  const outcome = await transcriptionService.transcribeMessage(messageId);
+
+  if (outcome.kind === "disabled") {
+    res.status(409).json({
+      ok: false,
+      reason: "disabled",
+      message:
+        "Audio transcription is off. Set AUDIO_TRANSCRIPTION_ENABLED=true with a valid OPENAI_API_KEY in the runner config."
+    });
+    return;
+  }
+  if (outcome.kind === "missing_message") {
+    res.status(404).json({ ok: false, reason: "missing_message", message: "Message not found." });
+    return;
+  }
+  if (outcome.kind === "no_audio") {
+    res.status(422).json({
+      ok: false,
+      reason: "no_audio",
+      message: "This message has no voice or audio attachment."
+    });
+    return;
+  }
+
+  // outcome.kind === "processed": fingerprint dedup may have skipped the
+  // call even on a fresh request (existing row). Read the row back so the
+  // response always reflects what's currently persisted.
+  const row = await prisma.messageAudioTranscription.findUnique({
+    where: { messageId },
+    select: {
+      status: true,
+      transcript: true,
+      provider: true,
+      model: true,
+      language: true,
+      durationSeconds: true,
+      errorMessage: true
+    }
+  });
+
+  res.json({
+    ok: true,
+    counts: {
+      attachments: outcome.attachments,
+      transcribed: outcome.ok,
+      failed: outcome.failed,
+      skipped: outcome.skipped
+    },
+    transcription: row ?? null
+  });
+}));
+
 // Issue #331. Reads the operator's in-flight draft against the thread's
 // active open loops and returns the subset the draft already addresses.
 // The dashboard debounces calls here while the operator types so the
