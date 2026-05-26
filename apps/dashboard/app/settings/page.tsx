@@ -7,6 +7,7 @@ import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
+import { notificationsSupported, requestNotificationPermission } from "@/lib/notifications";
 import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
@@ -126,6 +127,14 @@ export default function SettingsPage() {
         />
       </SettingsGroup>
 
+      <SettingsGroup head="Notifications">
+        <SettingRow
+          name="Desktop notifications"
+          desc="Show a system notification when a new message arrives. Clicking it jumps you to the thread. Quiet hours still apply, and nothing fires while this tab is in focus."
+          trailing={<NotificationsPermissionControl />}
+        />
+      </SettingsGroup>
+
       <SettingsGroup head="Browser">
         <SettingRow
           name="Headless browser"
@@ -231,6 +240,80 @@ function SettingRow({
       </div>
       <div>{trailing}</div>
     </div>
+  );
+}
+
+// #359: desktop notification permission control.
+//
+// The previous version asked for permission on every AppShell mount,
+// before the operator had expressed any intent. Browsers (Chrome
+// especially) treat these "cold" requests as low-quality signals and
+// deny them more readily; after enough denies the origin can be
+// permanently blocked from ever asking again. This control moves the
+// ask behind an explicit operator gesture and reflects the live
+// permission state so it never re-prompts a granted/denied browser.
+function NotificationsPermissionControl() {
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
+    "unsupported"
+  );
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!notificationsSupported()) {
+      setPermission("unsupported");
+      return;
+    }
+    setPermission(Notification.permission);
+  }, []);
+
+  const enable = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await requestNotificationPermission();
+      setPermission(result);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  if (permission === "unsupported") {
+    return (
+      <span className="font-mono text-[11px] text-ink-3">Not supported in this browser</span>
+    );
+  }
+
+  if (permission === "granted") {
+    return (
+      <span className="inline-flex items-center gap-[6px] font-mono text-[11px] text-ink-3">
+        <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" />
+        Enabled
+      </span>
+    );
+  }
+
+  if (permission === "denied") {
+    return (
+      <span className="font-mono text-[11px] text-ink-3">
+        Blocked - re-enable in your browser settings
+      </span>
+    );
+  }
+
+  // permission === "default" — actionable enable button
+  return (
+    <button
+      type="button"
+      onClick={() => void enable()}
+      disabled={busy}
+      className={cn(
+        "inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm",
+        "hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
+        busy && "cursor-not-allowed opacity-60"
+      )}
+    >
+      {busy ? "Asking…" : "Enable desktop notifications"}
+    </button>
   );
 }
 

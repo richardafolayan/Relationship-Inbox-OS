@@ -15,7 +15,6 @@ import {
   detectNewInbound,
   notifyNewMessage,
   notifyNewMessageDigest,
-  requestNotificationPermission,
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
@@ -238,11 +237,15 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [autoScanDisabled, autoScanEnabled]);
 
-  // Ask for desktop-notification permission once on mount so new-message
-  // alerts can fire when the operator is away from the tab.
-  useEffect(() => {
-    void requestNotificationPermission();
-  }, []);
+  // #359: notification permission is no longer requested on mount.
+  // Asking pre-intent (i.e. on every page load before the operator has
+  // signalled they want desktop alerts) is a low-quality permission
+  // request — modern browsers deny these more often, and after enough
+  // denies the origin can be permanently blocked from ever asking
+  // again. The ask now lives behind an explicit "Enable desktop
+  // notifications" button in Settings (see Notifications group there).
+  // The firing logic below is unchanged — if permission is granted
+  // however the operator got there, new-message alerts still work.
 
   // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
   // `runner-resync` window events.
