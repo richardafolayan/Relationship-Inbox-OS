@@ -2853,12 +2853,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
           await flushBatchedMessageWrites();
         }
       }
-      if (message.attachments.some((a) => a.kind === "voice_note" || a.kind === "audio")) {
-        // Both directions. The operator's own voice notes carry context
-        // the AI otherwise can't see (intent, tone, what they actually
-        // said), so transcribing them too means a future "what did I tell
-        // them about X" question can reach into the operator's outbound
-        // audio the same way it reaches into inbound text.
+      if (
+        message.attachments.some(
+          (a) => a.kind === "voice_note" || a.kind === "audio" || a.kind === "video"
+        )
+      ) {
+        // Both directions, audio + video. The operator's own voice notes
+        // and screen / phone-camera videos carry context the AI otherwise
+        // can't see (intent, tone, what they actually said), so
+        // transcribing them too means a future "what did I tell them
+        // about X" question can reach into the audio track of either.
         audioBearingMessageKeys.push(key);
       }
     }
