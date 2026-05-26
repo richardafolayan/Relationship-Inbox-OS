@@ -27,7 +27,7 @@ function thread(partial = {}) {
 }
 
 test("MORE_DISCLOSURE_LABEL exact wording from the spec", () => {
-  assert.equal(MORE_DISCLOSURE_LABEL, "More full context · nudge · checklist");
+  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge · checklist");
 });
 
 test("durableContextLabel returns the neutral 'Who they are' phrasing", () => {
