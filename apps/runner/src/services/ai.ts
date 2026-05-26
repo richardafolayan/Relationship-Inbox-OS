@@ -387,16 +387,28 @@ Decision rules (apply in order):
      send the deck Monday — sound good?") → OPEN.
   5. If the operator (direction OUT) was last to speak, the thread is
      waiting on them, → OPEN.
-  6. When in doubt → OPEN. False "closed" hides threads that might
+  6. If the latest inbound is a deleted / retracted message placeholder
+     ("This message has been deleted.", "This message was deleted",
+     "Message unsent") it is not a real turn — the other party unsent
+     what they wrote. Skip it and decide based on the prior real turn:
+     if the prior real inbound is still after the last outbound and
+     genuinely asks for something → OPEN; otherwise → CLOSED. Do not
+     treat the placeholder itself as either a fresh ask or a closing
+     beat.
+  7. When in doubt → OPEN. False "closed" hides threads that might
      need the operator; false "open" just leaves them visible.
 
 Examples:
   CLOSED — IN: "thanks so much, really appreciate it"
   CLOSED — IN: "perfect, see you Wednesday"
   CLOSED — IN: "👍"
+  CLOSED — IN: "This message has been deleted." (and the prior real
+            inbound did not leave a live question on the table)
   OPEN   — IN: "thanks - and one more thing, did the invoice clear?"
   OPEN   — IN: "hey, been ages! how have you been?"
   OPEN   — IN: "I'll send the doc later today, sound good?"
+  OPEN   — IN: "This message has been deleted." (the prior real
+            inbound was an unanswered direct question)
   OPEN   — OUT: "let me know what you think"
 
 Return strict JSON: { "status": "closed" | "open", "reason": "<one short sentence, plain English, no more than 18 words>" }
