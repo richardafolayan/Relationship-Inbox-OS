@@ -1,7 +1,9 @@
 import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
 import { writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  AttachmentPlaceholder,
   NormalizedMessage,
   PlatformAdapter,
   SelectorRegistry,
@@ -9,6 +11,12 @@ import type {
   ThreadStub,
   VerificationMethod
 } from "@inbox-os/core";
+import {
+  LINKEDIN_VOICE_MIME,
+  hasLinkedInVoice,
+  linkedInVoicePath,
+  writeLinkedInVoice
+} from "../services/linkedin-voice-store.js";
 import { stableHash } from "@inbox-os/core";
 import {
   cleanMessageText,
@@ -6443,12 +6451,14 @@ export class LinkedInAdapter implements PlatformAdapter {
             // braces filter out anything nested inside a profile picture.
             const attachmentScope =
               bubbleEl.querySelector(".msg-s-event-listitem__message-bubble") ?? bubbleEl;
-            // TODO(audio-transcription): LinkedIn voice messages render as
-            // an interactive widget rather than a downloadable media node,
-            // so they are not captured here today. Adding them would need
-            // a dedicated DOM probe + a stable URL or blob path the runner
-            // can fetch. Out of scope for the v1 transcription PR; the
-            // iMessage adapter is the only audio source for now.
+            // LinkedIn voice messages (`.msg-s-event-listitem__audio-
+            // container`) are handled in `collectThreadMessagesWithBackfill`,
+            // not here: capturing them requires clicking the play button
+            // to trigger the audio fetch, which only works from the
+            // Locator-based path with `waitForResponse`. The streaming
+            // scan stays read-only and leaves the voice message off the
+            // attachment count — the deep fetch fills it in when the
+            // operator opens the thread.
             const attachmentMatches = attachmentScope.querySelectorAll(
               ".msg-s-event-listitem__attachment, .msg-s-event-listitem__inline-image, video, a[download], a[href*='attachment']"
             );
@@ -8083,6 +8093,135 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
+  /**
+   * Capture a voice-message audio file to disk so the transcription
+   * service's `AttachmentResolver` can read it back. Two strategies in
+   * order of preference:
+   *
+   *   1. **Direct URL.** LinkedIn's "Lite"/Tailwind messaging UI renders
+   *      voice notes as a file widget with an `<a class="download-
+   *      attachment" href="...messaging-audio-analyzed...">` exposing
+   *      the signed CDN URL inline. When that link is present anywhere
+   *      on the page and matches this message's URN, we fetch it
+   *      directly via `page.context().request` (re-uses the session's
+   *      auth cookies). No click, no timeout, no playback.
+   *   2. **Click-trigger fallback.** The Ember messaging UI keeps the
+   *      audio URL out of the DOM — it lazy-loads on play. We arm a
+   *      `page.waitForResponse` against the `messaging-audio-analyzed`
+   *      pattern, then click the play button via Playwright (a real
+   *      user gesture; synthetic `dispatchEvent('click')` is rejected
+   *      by browsers for media playback). The page is muted first so a
+   *      headed-mode debug run stays quiet.
+   *
+   * Returns the on-disk path + byte count on success, or null when
+   * neither strategy works. Idempotent: if a voice for this URN is
+   * already on disk, both branches short-circuit and return the cached
+   * path.
+   */
+  private async captureLinkedInVoiceMessage(
+    page: Page,
+    audioButton: Locator,
+    urn: string
+  ): Promise<{ path: string; byteSize: number } | null> {
+    if (hasLinkedInVoice(urn)) {
+      const cached = linkedInVoicePath(urn);
+      try {
+        return { path: cached, byteSize: statSync(cached).size };
+      } catch {
+        // Cached file vanished between hasLinkedInVoice and statSync;
+        // fall through and re-capture.
+      }
+    }
+
+    // Strategy 1: Lite UI direct fetch.
+    const direct = await this.tryDirectLinkedInVoiceFetch(page, urn).catch(() => null);
+    if (direct) {
+      return direct;
+    }
+
+    // Strategy 2: click-trigger + network intercept on the Ember UI.
+    await page
+      .evaluate(() => {
+        for (const el of Array.from(document.querySelectorAll("audio,video"))) {
+          const media = el as HTMLMediaElement;
+          media.muted = true;
+          media.volume = 0;
+        }
+      })
+      .catch(() => undefined);
+
+    const responsePromise = page
+      .waitForResponse(
+        (response) => /messaging-audio-analyzed/.test(response.url()),
+        { timeout: 8000 }
+      )
+      .catch(() => null);
+
+    await audioButton.click({ timeout: 4000 }).catch(() => undefined);
+
+    const response = await responsePromise;
+    if (!response || !response.ok()) {
+      return null;
+    }
+
+    const bytes = await response.body().catch(() => null);
+    if (!bytes || bytes.length === 0) {
+      return null;
+    }
+
+    const path = writeLinkedInVoice(urn, bytes);
+    return { path, byteSize: bytes.length };
+  }
+
+  /**
+   * Look for an `<a class="download-attachment">` whose href points at
+   * the `messaging-audio-analyzed` CDN AND belongs to this URN's LI,
+   * then fetch it through the page's auth context. Returns null if no
+   * matching link exists (the Ember messaging UI never renders one) or
+   * if the fetch fails — caller falls back to the click strategy.
+   *
+   * URN matching: the Lite UI uses `data-message-urn=
+   * "urn:li:messagingMessage:2-<innerId>"`, while the Ember UI's
+   * `data-event-urn` is `"urn:li:msg_message:(...,2-<innerId>)"`. We
+   * match on the canonical inner id (`2-<innerId>`), which appears in
+   * both URN forms, so a hybrid render or future variant rename
+   * doesn't break the lookup.
+   */
+  private async tryDirectLinkedInVoiceFetch(
+    page: Page,
+    urn: string
+  ): Promise<{ path: string; byteSize: number } | null> {
+    const innerIdMatch = urn.match(/2-[A-Za-z0-9_=-]+/);
+    if (!innerIdMatch) return null;
+    const innerId = innerIdMatch[0];
+
+    const url = await page
+      .evaluate(
+        ({ innerId: needle }) => {
+          const liSelector = `li[data-message-urn*="${needle}"]`;
+          const li = document.querySelector(liSelector);
+          if (!li) return null;
+          const anchor = li.querySelector<HTMLAnchorElement>(
+            'a.download-attachment[href*="messaging-audio"]'
+          );
+          return anchor?.href ?? null;
+        },
+        { innerId }
+      )
+      .catch(() => null);
+
+    if (!url) return null;
+
+    const response = await page.context().request.get(url).catch(() => null);
+    if (!response || !response.ok()) return null;
+
+    const bytes = await response.body().catch(() => null);
+    if (!bytes || bytes.length === 0) return null;
+
+    const path = writeLinkedInVoice(urn, Buffer.from(bytes));
+    return { path, byteSize: bytes.length };
+  }
+
   private async collectThreadMessagesWithBackfill(
     page: Page,
     selectors: SelectorRegistry,
@@ -8147,12 +8286,69 @@ export class LinkedInAdapter implements PlatformAdapter {
         const root = messageNodes.nth(index);
         const className = (await readAttr(root, "class")) ?? "";
         const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
-        const attachmentCount = await root
-          .locator("img, video, svg, a[download], a[href*='attachment']")
+        const basePlatformMessageKey = await readMessageKey(root, index);
+        // Voice-message detection. LinkedIn renders voice notes as an
+        // inline player widget keyed off `.msg-s-event-listitem__audio-
+        // container`; the audio URL itself only loads on play, so we
+        // trigger a real click via Playwright and intercept the
+        // resulting `messaging-audio-analyzed` response. Bytes land on
+        // disk under a URN-hashed filename that LinkedInAttachmentResolver
+        // looks back up by the same URN we set as `guid` below. Each
+        // capture is gated on `hasLinkedInVoice(urn)` so repeated
+        // backfill passes don't re-click messages we've already grabbed.
+        const voiceContainerCount = await root
+          .locator(".msg-s-event-listitem__audio-container")
           .count()
           .catch(() => 0);
+        let voiceAttachment: AttachmentPlaceholder | null = null;
+        if (voiceContainerCount > 0) {
+          const audioButton = root.locator(".msg-s-event-listitem__audio").first();
+          const captured = await this.captureLinkedInVoiceMessage(
+            page,
+            audioButton,
+            basePlatformMessageKey
+          ).catch(() => null);
+          voiceAttachment = {
+            type: LINKEDIN_VOICE_MIME,
+            manualReview: false,
+            rawLabel: "Voice message",
+            kind: "voice_note",
+            guid: basePlatformMessageKey,
+            ...(captured ? { byteSize: captured.byteSize } : {})
+          };
+        }
+        // Match path 1's (`collectVisibleThreadMessages`) filtering: the
+        // raw img/video/svg sweep otherwise picks up profile-pictures,
+        // the play-button SVG inside the voice container, and UI icons,
+        // tagging every voice-only or text-only message with a spurious
+        // "Attachment" placeholder alongside the real voice_note one.
+        const nonVoiceAttachmentCount = await root
+          .evaluate((el) => {
+            const matches = (el as Element).querySelectorAll(
+              "img, video, svg, a[download], a[href*='attachment']"
+            );
+            let count = 0;
+            matches.forEach((m) => {
+              if (
+                m.closest(
+                  ".msg-s-event-listitem__audio-container, .msg-s-event-listitem__profile-picture, .presence-entity__image, .msg-s-message-group__profile-link"
+                )
+              ) {
+                return;
+              }
+              count += 1;
+            });
+            return count;
+          })
+          .catch(() => 0);
+        const attachmentCount = nonVoiceAttachmentCount + voiceContainerCount;
+        const fallbackBodyText = voiceAttachment
+          ? "[voice message]"
+          : attachmentCount > 0
+            ? "[non-text message]"
+            : "[system event]";
         const rawBodyParts = await readAllTextParts(root.locator(selectors.message_text));
-        const textParts = rawBodyParts.length > 0 ? rawBodyParts : [attachmentCount > 0 ? "[non-text message]" : "[system event]"];
+        const textParts = rawBodyParts.length > 0 ? rawBodyParts : [fallbackBodyText];
         const senderName = clean(
           (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??
             (await readText(root.locator(".msg-s-message-group__name").first())) ??
@@ -8208,12 +8404,28 @@ export class LinkedInAdapter implements PlatformAdapter {
             timestamp = bubbleTimeData.timeText;
           }
         }
-        const basePlatformMessageKey = await readMessageKey(root, index);
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
           const partTimestamp = Number.isNaN(parsedTimestampMs)
             ? timestamp
             : new Date(parsedTimestampMs + partIndex).toISOString();
+          // Only the first text part of a multi-paragraph bubble carries
+          // attachments; the voice-note placeholder replaces the generic
+          // "N attachment(s)" stub when present so the transcription
+          // pipeline (which keys off `kind === "voice_note"`) sees it.
+          const partAttachments: AttachmentPlaceholder[] = [];
+          if (partIndex === 0) {
+            if (voiceAttachment) {
+              partAttachments.push(voiceAttachment);
+            }
+            if (nonVoiceAttachmentCount > 0) {
+              partAttachments.push({
+                type: "attachment",
+                manualReview: true,
+                rawLabel: `${nonVoiceAttachmentCount} attachment(s)`
+              });
+            }
+          }
           messages.push({
             platformMessageKey:
               partIndex === 0 ? basePlatformMessageKey : `${basePlatformMessageKey}:body:${partIndex}`,
@@ -8228,10 +8440,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               bodyPartIndex: partIndex,
               bodyPartCount: textParts.length
             },
-            attachments:
-              partIndex === 0 && attachmentCount
-                ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
-                : []
+            attachments: partAttachments
           });
         });
       }
