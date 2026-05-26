@@ -2046,20 +2046,35 @@ export default function ThreadPage() {
           ref={timelineRef}
           onScroll={onTimelineScroll}
           className="relative min-h-0 flex-1 overflow-y-auto"
-          // Disable the browser's native scroll anchoring so it doesn't
-          // race with the load-older restoration in useLayoutEffect.
-          // When both fire on the same prepend, the browser anchors on
-          // its own heuristic-picked element (often a wrapper) and our
-          // code anchors on a specific message bubble — the difference
-          // shows up as a small visible jolt as the scroll position
-          // settles.
-          style={{ overflowAnchor: "none" }}
+          // overflowAnchor: disable the browser's native scroll anchoring
+          // so it doesn't race with the load-older restoration in
+          // useLayoutEffect. When both fire on the same prepend, the
+          // browser anchors on its own heuristic-picked element (often a
+          // wrapper) and our code anchors on a specific message bubble —
+          // the difference shows up as a small visible jolt as the scroll
+          // position settles.
+          //
+          // scrollPaddingTop: the glassy sticky header below sits INSIDE
+          // this scroller, so any programmatic scroll (scrollIntoView,
+          // future snap-to-message features) would otherwise land target
+          // elements at scroll-container-top — i.e. behind the header.
+          // Reserving a top scroll-padding zone the size of the header
+          // makes those alignments respect the header. Value tuned to the
+          // header's resting height (single row, h-9 avatar + py-2.5 ≈
+          // 60-64px); if the header grows another row of chips this may
+          // need a ref-based measurement.
+          style={{ overflowAnchor: "none", scrollPaddingTop: "64px" }}
         >
           {/* Glassy sticky header. Sits inside the scroll container so the
               timeline scrolls visibly behind it - matches the iOS / Apple
               translucent-bar aesthetic the rest of the redesign nods at.
-              Single-row layout keeps vertical real estate for the chat. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
+              Single-row layout keeps vertical real estate for the chat.
+              Opacity is high (92%) on purpose: at lower values (~70%)
+              message bubbles passing behind the bar stayed legible enough
+              to read as a layout bug — the operator saw a clipped bubble
+              rather than a tinted bar. 92% + backdrop-blur reads as
+              frosted glass while making clipped content visually fade. */}
+          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
             <header className="flex items-center gap-2">
               <button
                 type="button"
