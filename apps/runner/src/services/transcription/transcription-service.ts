@@ -98,15 +98,31 @@ interface TranscriptionServiceDeps {
   warn?: (message: string) => void;
 }
 
+export interface TranscribeMessageOptions {
+  /**
+   * When true, an existing transcription row for the same fingerprint
+   * is deleted before the attempt. Used by the manual "Try again"
+   * affordance in the dashboard: if a previous run wrote a
+   * `missing_file` skip because the audio hadn't downloaded yet from
+   * iCloud, the operator can ask the runner to re-check. Auto-scan
+   * never sets this — fingerprint dedup keeps scans cheap.
+   */
+  force?: boolean;
+}
+
 export interface TranscriptionService {
   /** Fire-and-forget; never throws. Scans must not block on this. */
   enqueueMessage(messageId: string): void;
   /**
-   * Synchronous entrypoint for tests and the future manual "retry
-   * transcription" admin action. Resolves to a brief outcome summary so
-   * callers can log without re-querying the DB.
+   * Synchronous entrypoint for tests and the manual "Transcribe / Try
+   * again" affordance. Resolves to a brief outcome summary so callers
+   * can log without re-querying the DB. Set `force: true` to bypass
+   * fingerprint dedup and re-attempt against the current disk state.
    */
-  transcribeMessage(messageId: string): Promise<TranscribeMessageOutcome>;
+  transcribeMessage(
+    messageId: string,
+    options?: TranscribeMessageOptions
+  ): Promise<TranscribeMessageOutcome>;
 }
 
 export type TranscribeMessageOutcome =
@@ -145,7 +161,10 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     });
   }
 
-  async function transcribeMessage(messageId: string): Promise<TranscribeMessageOutcome> {
+  async function transcribeMessage(
+    messageId: string,
+    options: TranscribeMessageOptions = {}
+  ): Promise<TranscribeMessageOutcome> {
     if (!deps.config.enabled) return { kind: "disabled" };
     if (!deps.provider || !deps.attachmentResolver || !deps.config.apiKey) {
       // Defensive: a misconfigured runner (enabled but missing key /
@@ -178,18 +197,25 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         attachmentIndex: index
       });
 
-      // Idempotency: any prior row for this fingerprint wins. We don't
-      // auto-retry failed transcriptions because most failures are
-      // structural (file unsupported, OpenAI quota exhausted) and a
-      // tight retry loop just burns money. A future admin reset endpoint
-      // can delete the row to force a retry.
+      // Idempotency: any prior row for this fingerprint wins by default.
+      // We don't auto-retry failed transcriptions because most failures
+      // are structural (file unsupported, OpenAI quota exhausted) and a
+      // tight retry loop just burns money. The manual "Try again"
+      // affordance passes `options.force` to bypass dedup — the most
+      // common case there is `missing_file` skips where the audio was
+      // pending iCloud download at first run and is on disk now.
       const existing = await deps.prisma.messageAudioTranscription.findUnique({
         where: { audioFingerprint: fingerprint },
         select: { id: true, status: true }
       });
-      if (existing) {
+      if (existing && !options.force) {
         skipped += 1;
         continue;
+      }
+      if (existing && options.force) {
+        await deps.prisma.messageAudioTranscription.delete({
+          where: { audioFingerprint: fingerprint }
+        });
       }
 
       const attachmentId = attachment.guid ?? `idx-${index}`;
