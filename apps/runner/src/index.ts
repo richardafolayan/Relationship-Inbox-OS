@@ -3428,6 +3428,161 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     ? pageMessages[0]?.id ?? null
     : null;
 
+  // Reply-parent snippet enrichment. The dashboard's per-message
+  // reply-context line previously walked only the loaded window — so a
+  // reply to a message from yesterday (or to a parent that lives in a
+  // sibling iMessage thread) rendered as the literal "Replying to an
+  // earlier message" stub. Resolve the parent server-side instead so
+  // each row carries a usable snippet regardless of how far back the
+  // parent sits or whether it's in the same Prisma thread.
+  //
+  // Batched on the in-flight pageMessages so this is one Prisma round
+  // trip per /data/thread/:id, not one per bubble.
+  const parentGuidsNeeded = new Set<string>();
+  const parentIdsNeeded = new Set<string>();
+  for (const m of pageMessages) {
+    if (m.replyToMessageId) parentIdsNeeded.add(m.replyToMessageId);
+    if (m.rawJson) {
+      try {
+        const raw = JSON.parse(m.rawJson) as { replyToGuid?: string };
+        if (typeof raw?.replyToGuid === "string" && raw.replyToGuid.length > 0) {
+          parentGuidsNeeded.add(raw.replyToGuid);
+        }
+      } catch {
+        // ignore malformed rawJson
+      }
+    }
+  }
+  const siblingScope = messageThreadFilter;
+  const [parentsById, parentsByKey] = await Promise.all([
+    parentIdsNeeded.size > 0
+      ? prisma.message.findMany({
+          where: { id: { in: [...parentIdsNeeded] } },
+          select: {
+            id: true,
+            direction: true,
+            text: true,
+            platformMessageKey: true,
+            attachmentsJson: true,
+            audioTranscription: { select: { transcript: true, status: true } }
+          }
+        })
+      : Promise.resolve([] as const),
+    parentGuidsNeeded.size > 0
+      ? prisma.message.findMany({
+          where: {
+            ...siblingScope,
+            platformMessageKey: { in: [...parentGuidsNeeded] }
+          },
+          select: {
+            id: true,
+            direction: true,
+            text: true,
+            platformMessageKey: true,
+            attachmentsJson: true,
+            audioTranscription: { select: { transcript: true, status: true } }
+          }
+        })
+      : Promise.resolve([] as const)
+  ]);
+  const parentByMessageId = new Map<string, typeof parentsById[number]>();
+  for (const p of parentsById) parentByMessageId.set(p.id, p);
+  const parentByPlatformKey = new Map<string, typeof parentsByKey[number]>();
+  for (const p of parentsByKey) {
+    if (p.platformMessageKey) parentByPlatformKey.set(p.platformMessageKey, p);
+  }
+
+  function buildReplyToSnippet(
+    parent:
+      | (typeof parentsById)[number]
+      | (typeof parentsByKey)[number]
+      | undefined
+  ): { messageId?: string; snippet: string; direction?: "IN" | "OUT" } | null {
+    if (!parent) return null;
+    const text = (parent.text ?? "").trim();
+    const transcript =
+      parent.audioTranscription?.status === "transcribed" &&
+      parent.audioTranscription.transcript
+        ? parent.audioTranscription.transcript.trim()
+        : "";
+    const SNIPPET_CAP = 120;
+    let snippet = "";
+    if (transcript) {
+      // Prefer the transcript over a "[Voice note]" placeholder so the
+      // dashboard sees the actual content the parent carried.
+      snippet = transcript.length > SNIPPET_CAP ? `${transcript.slice(0, SNIPPET_CAP)}...` : transcript;
+    } else if (text && text !== "[Voice note]" && text !== "[Video]") {
+      snippet = text.length > SNIPPET_CAP ? `${text.slice(0, SNIPPET_CAP)}...` : text;
+    } else if (parent.attachmentsJson) {
+      try {
+        const attachments = JSON.parse(parent.attachmentsJson) as Array<{ kind?: string }>;
+        const kind = attachments[0]?.kind;
+        snippet =
+          kind === "voice_note" || kind === "audio"
+            ? "Voice message"
+            : kind === "video"
+              ? "Video"
+              : kind === "photo" || kind === "sticker"
+                ? "Photo"
+                : kind === "pdf"
+                  ? "PDF"
+                  : "Attachment";
+      } catch {
+        snippet = "Attachment";
+      }
+    }
+    if (!snippet) snippet = "Earlier message";
+    return {
+      messageId: parent.id,
+      snippet,
+      direction: parent.direction as "IN" | "OUT"
+    };
+  }
+
+  const replyToByChildId = new Map<
+    string,
+    { messageId?: string; snippet: string; direction?: "IN" | "OUT" } | null
+  >();
+  for (const m of pageMessages) {
+    let parent:
+      | (typeof parentsById)[number]
+      | (typeof parentsByKey)[number]
+      | undefined;
+    if (m.replyToMessageId) parent = parentByMessageId.get(m.replyToMessageId);
+    if (!parent && m.rawJson) {
+      try {
+        const raw = JSON.parse(m.rawJson) as { replyToGuid?: string };
+        if (raw?.replyToGuid) parent = parentByPlatformKey.get(raw.replyToGuid);
+      } catch {
+        // ignore
+      }
+    }
+    if (parent) {
+      replyToByChildId.set(m.id, buildReplyToSnippet(parent));
+      continue;
+    }
+    // The child cited a parent we couldn't find anywhere in the DB.
+    // chat.db sometimes references guids that never landed (the
+    // original was unsent, or stored on a device that hasn't synced).
+    // Surface a "(deleted or unavailable)" stub so the UI still has
+    // something better than the literal "Replying to an earlier
+    // message" string.
+    const hasReplyPointer =
+      Boolean(m.replyToMessageId) ||
+      (() => {
+        if (!m.rawJson) return false;
+        try {
+          const raw = JSON.parse(m.rawJson) as { replyToGuid?: string };
+          return typeof raw?.replyToGuid === "string" && raw.replyToGuid.length > 0;
+        } catch {
+          return false;
+        }
+      })();
+    if (hasReplyPointer) {
+      replyToByChildId.set(m.id, { snippet: "Earlier message no longer available" });
+    }
+  }
+
   // Operator self-description from Settings + the contact's own enrichment
   // snapshot. Both feed `generateSuggestedReplies` so replies stay in the
   // operator's domain ("how I write", "things I care about") and ground
@@ -3771,7 +3926,14 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
             transcript: message.audioTranscription.transcript,
             errorMessage: message.audioTranscription.errorMessage
           }
-        : null
+        : null,
+      // Server-resolved snippet of the parent this message replies to.
+      // Resolves across sibling iMessage threads and outside the loaded
+      // window, so the dashboard never falls back to the literal
+      // "Replying to an earlier message" string for a parent that
+      // actually exists in the DB. `null` when this message has no
+      // reply pointer at all. See enrichment block above.
+      replyTo: replyToByChildId.get(message.id) ?? null
     })),
     messagePage: {
       hasOlder: hasOlderMessages,
