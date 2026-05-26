@@ -13,11 +13,20 @@ import { apiGet, apiPost } from "@/lib/api";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
   detectNewInbound,
+  notificationsSupported,
   notifyNewMessage,
   notifyNewMessageDigest,
+  notifyOverdueReplyDigest,
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
+import {
+  localDateString,
+  shouldQueryDigestTick,
+  summariseCandidatesForAck,
+  type OverdueDigestSettings,
+  type OverdueDigestTickResult
+} from "@/lib/overdue-digest";
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
@@ -246,6 +255,62 @@ export function AppShell({ children }: { children: ReactNode }) {
   // notifications" button in Settings (see Notifications group there).
   // The firing logic below is unchanged — if permission is granted
   // however the operator got there, new-message alerts still work.
+
+  // #360: calm overdue-reply digest scheduler. Quiet, opt-in, low-frequency.
+  // Self-gated: never asks for permission, never fires while the tab is
+  // visible, never fires during quiet hours, never fires when cadence is
+  // off or when permission is not granted. /ack is only called when the
+  // notification actually fires.
+  const overdueDigestInFlightRef = useRef(false);
+  useEffect(() => {
+    const check = async () => {
+      if (overdueDigestInFlightRef.current) return;
+      overdueDigestInFlightRef.current = true;
+      try {
+        const settings = await apiGet<OverdueDigestSettings>(
+          "/runner/data/overdue-digest/settings"
+        ).catch(() => null);
+        if (!settings) return;
+        const permission: NotificationPermission | "unsupported" = notificationsSupported()
+          ? Notification.permission
+          : "unsupported";
+        const gate = shouldQueryDigestTick({
+          cadence: settings.cadence,
+          notificationsSupported: notificationsSupported(),
+          notificationPermission: permission,
+          documentVisibility:
+            typeof document === "undefined" ? "unknown" : document.visibilityState,
+          quietHoursActive: isQuietHoursActive()
+        });
+        if (!gate) return;
+        const tick = await apiPost<OverdueDigestTickResult>(
+          "/runner/control/overdue-digest/tick",
+          { localDate: localDateString() }
+        ).catch(() => null);
+        if (!tick || !tick.due || tick.candidates.length === 0) return;
+        const fired = notifyOverdueReplyDigest(
+          tick.candidates.map((c) => ({ personId: c.personId, personName: c.personName })),
+          () => router.push("/today")
+        );
+        if (!fired) return;
+        await apiPost("/runner/control/overdue-digest/ack", {
+          included: summariseCandidatesForAck(tick.candidates)
+        }).catch(() => undefined);
+      } finally {
+        overdueDigestInFlightRef.current = false;
+      }
+    };
+    // First check after a short delay so we don't pile onto the AppShell
+    // mount. After that, every 5 minutes. The cadence calendar gate
+    // (daily / weekly) lives on the runner; this interval is only a poll
+    // rate, not a "fire every 5 min" cadence.
+    const initial = setTimeout(() => void check(), 30_000);
+    const timer = setInterval(() => void check(), 5 * 60 * 1000);
+    return () => {
+      clearTimeout(initial);
+      clearInterval(timer);
+    };
+  }, [router]);
 
   // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
   // `runner-resync` window events.
