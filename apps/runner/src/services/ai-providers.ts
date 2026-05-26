@@ -196,10 +196,18 @@ function classifyGeminiError(error: unknown): AiErrorClassification {
     };
   }
   if (status === 429 || googleStatus === "RESOURCE_EXHAUSTED") {
+    // Rate-limit windows clear in tens of seconds or longer; the AI
+    // wrapper's 3-attempt backoff (baseBackoffMs * attempt + jitter)
+    // routinely takes the whole 30s client timeout, leaving the
+    // dashboard with a "socket hang up" instead of a usable reply.
+    // Mark non-retriable so `tryProvider` bails after the first 429
+    // and `modelJson` walks the fallback chain straight to OpenAI
+    // (gpt-5-nano by default) — the operator gets a result in a few
+    // seconds rather than a timeout error.
     return {
       kind: "rate_limit",
-      message: "Gemini API rate limit reached. Retrying with backoff.",
-      retriable: true
+      message: "Gemini API rate limit reached. Failing over to OpenAI fallback.",
+      retriable: false
     };
   }
   if (typeof status === "number" && status >= 500 && status <= 504) {

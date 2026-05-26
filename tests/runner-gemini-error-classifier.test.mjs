@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { classifyLlmError } from "../apps/runner/dist/services/ai.js";
+import { providerRegistry } from "../apps/runner/dist/services/ai-providers.js";
 
 // Gemini API errors arrive in three shapes through the OpenAI-compat endpoint:
 //   1. OpenAI SDK shape:     { status, code, message }
@@ -55,6 +56,28 @@ test("gemini: HTTP 429 is rate limit, not balance", () => {
   const result = classifyLlmError({ status: 429, message: "Too many requests" }, "gemini");
   assert.match(result, /rate limit/i);
   assert.doesNotMatch(result, /quota exhausted/i);
+});
+
+test("gemini: rate-limit classification is non-retriable so the wrapper falls over to OpenAI", () => {
+  // Rate-limit windows can take tens of seconds to clear. Retrying
+  // Gemini three times with backoff routinely blew past the dashboard's
+  // 30s request timeout, leaving the operator with a "socket hang up"
+  // instead of a reply. Mark non-retriable so modelJson walks the
+  // fallback chain (OpenAI / gpt-5-nano) immediately. This is the
+  // behavioural contract for the reassess + suggested-replies paths.
+  const cls = providerRegistry.gemini.classifyError({ status: 429, message: "Too many requests" });
+  assert.equal(cls.kind, "rate_limit");
+  assert.equal(cls.retriable, false);
+  assert.match(cls.message, /OpenAI fallback/i);
+});
+
+test("gemini: 5xx classification stays retriable (transient hiccup, not a sustained limit)", () => {
+  // A flaky 500 from Gemini is worth one or two retries with backoff —
+  // the bucket-style 429 rationale doesn't apply. Guards against an
+  // over-broad "all gemini errors skip retries" change.
+  const cls = providerRegistry.gemini.classifyError({ status: 503, message: "Service unavailable" });
+  assert.equal(cls.kind, "service_overloaded");
+  assert.equal(cls.retriable, true);
 });
 
 test("gemini: nested googleStatus RESOURCE_EXHAUSTED maps to rate_limit", () => {
