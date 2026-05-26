@@ -135,12 +135,22 @@ const askAboutPersonSchema = z.object({
 });
 
 // Issue #331. Per-loop verdict the model returns when it reads the
-// operator's in-flight draft against the thread's open loops. "addressed"
-// = the draft substantively responds to this loop; "not_addressed" = the
-// draft says nothing on this point. There's no "partial" tier: anything
-// short of a real answer is left unticked so the operator decides.
+// operator's in-flight draft against the thread's open loops.
+//   - "addressed": the draft genuinely answers / decides / confirms this
+//     loop. The dashboard auto-ticks it at full_drafts.
+//   - "partial": the draft mentions or touches the loop but doesn't
+//     actually answer it. The dashboard leaves the row unticked and shows
+//     a soft "partly covered" hint with the reason underneath, so the
+//     operator knows why it didn't tick. (Issue #331 / R-0023.)
+// Loops the model judges as fully unaddressed are omitted — the absence
+// of a row is the signal, which keeps the wire small.
+const draftCoverageItemSchema = z.object({
+  loop: z.string(),
+  status: z.enum(["addressed", "partial"]),
+  reason: z.string().max(160).optional()
+});
 const draftCoverageSchema = z.object({
-  addressed: z.array(z.string()).default([])
+  items: z.array(draftCoverageItemSchema).default([])
 });
 
 // Voice + style rules applied to every AI generation (summary, suggested
@@ -2461,12 +2471,13 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
   }
 
   // Issue #331. Reads the operator's in-flight draft against the active
-  // open loops and returns the subset the draft addresses. The dashboard
-  // uses this to auto-tick the reply checklist while the operator types.
-  // Conservative by design: anything short of a substantive answer is
-  // left off the addressed list. Returns an empty array (not null) on
-  // failure so the UI gracefully renders "nothing inferred yet" rather
-  // than wedging on an error path.
+  // open loops and returns per-loop verdicts ("addressed" or "partial").
+  // The dashboard auto-ticks "addressed" rows and renders a soft "partly
+  // covered" hint under "partial" rows so the operator can see why a row
+  // didn't tick. Conservative by design: anything short of a substantive
+  // answer is either marked "partial" (mentioned but not answered) or
+  // omitted entirely (the row stays silent). Returns an empty items
+  // array on failure so the UI never wedges on an error path.
   async function checkDraftCoverage(input: {
     displayName: string;
     draft: string;
@@ -2474,14 +2485,14 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
     /** Last few turns oldest-first for context (lets the model judge whether
      *  a short ack like "yes" actually addresses the specific loop). */
     recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
-  }): Promise<{ addressed: string[] }> {
+  }): Promise<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }> {
     if (input.openLoops.length === 0 || !input.draft.trim()) {
-      return { addressed: [] };
+      return { items: [] };
     }
 
     const { client, model, provider } = await resolveActive();
     if (!client) {
-      return { addressed: [] };
+      return { items: [] };
     }
 
     const recentTurns = input.recentMessages
@@ -2496,18 +2507,26 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
       .map((loop, i) => `${i + 1}. ${loop}`)
       .join("\n");
 
-    const prompt = `The operator is writing a reply to ${input.displayName}. Decide which of the LOOPS below the draft substantively addresses.
+    const prompt = `The operator is writing a reply to ${input.displayName}. Judge how well the DRAFT covers each LOOP below.
 
-A loop counts as ADDRESSED only if the draft genuinely responds to it: answers the question, makes the decision, acknowledges the news, or confirms the action. A passing mention, a vague hedge, or a related topic is NOT enough. When in doubt, leave it off.
+Each loop falls into one of three buckets:
+- ADDRESSED: the draft genuinely responds to it — answers the question, makes the decision, acknowledges the news, or confirms the action.
+- PARTIAL: the draft mentions or touches the loop but does NOT actually answer it. e.g. acknowledges the trip without naming dates, names the date without saying yes/no, mentions the question without resolving it.
+- (omitted): the draft says nothing on this loop. Do not include these in the output.
 
 Return strict JSON matching this exact shape:
 {
-  "addressed": ["exact loop string", ...]
+  "items": [
+    { "loop": "exact loop string", "status": "addressed" }
+    , { "loop": "exact loop string", "status": "partial", "reason": "one short clause naming what's still missing" }
+  ]
 }
 
 Rules:
-- Each entry in "addressed" MUST be the loop string COPIED VERBATIM from the list below. Do not paraphrase, shorten, or invent new strings. Anything that doesn't match a loop verbatim is ignored.
-- Empty array is fine. Most drafts only cover one or two loops at a time.
+- "loop" MUST be the loop string COPIED VERBATIM from the list below. Do not paraphrase, shorten, or invent new strings. Anything that doesn't match a loop verbatim is ignored.
+- "reason" is required for "partial" and must be a single short clause (under 120 chars) naming what's still missing. e.g. "doesn't name a date", "mentions the offer but doesn't say yes or no". No greetings, no preamble, no second sentence.
+- Omit loops the draft doesn't touch at all. Empty items array is fine.
+- When in doubt between addressed and partial, pick partial.
 
 Recent conversation (oldest first):
 ${recentTurns || "(no prior messages)"}
@@ -2532,20 +2551,34 @@ ${safeTruncate(input.draft, 2000)}`;
         ...geminiExtraBody(provider, model)
       });
       const content = response.choices[0]?.message?.content;
-      if (!content) return { addressed: [] };
+      if (!content) return { items: [] };
       const parsed = draftCoverageSchema.parse(parseAiJson(content, model));
-      // Keep only loops that match the input verbatim. The prompt asks
-      // for copies, but models occasionally paraphrase; dropping the
-      // mismatches stops the dashboard from trying to tick a row that
-      // doesn't exist in its local state.
+      // Keep only items whose loop matches the input verbatim. The prompt
+      // asks for copies, but models occasionally paraphrase; dropping
+      // mismatches stops the dashboard from trying to render a row that
+      // doesn't exist in its local state. Also drop "partial" without a
+      // reason — the whole point of the partial signal is the why.
       const loopSet = new Set(input.openLoops);
-      const addressed = parsed.addressed.filter((loop) => loopSet.has(loop));
-      return { addressed };
+      const seen = new Set<string>();
+      const items = parsed.items
+        .filter((item) => loopSet.has(item.loop))
+        .filter((item) => item.status !== "partial" || (item.reason && item.reason.trim().length > 0))
+        .filter((item) => {
+          if (seen.has(item.loop)) return false;
+          seen.add(item.loop);
+          return true;
+        })
+        .map((item) => ({
+          loop: item.loop,
+          status: item.status,
+          reason: item.reason?.trim() || undefined
+        }));
+      return { items };
     } catch (error) {
       console.warn(
         `[ai] checkDraftCoverage failed (provider=${provider}, model=${model}); returning empty. ${classifyLlmError(error, provider)}`
       );
-      return { addressed: [] };
+      return { items: [] };
     }
   }
 
