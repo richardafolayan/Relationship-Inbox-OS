@@ -272,10 +272,15 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       if (!converted) {
         return { kind: "skipped", reason: "caf to m4a conversion failed" };
       }
+      // The original transferName is "Audio Message.caf". OpenAI's
+      // /v1/audio/transcriptions endpoint sniffs the filename extension
+      // to decide whether the file format is supported, so the upload
+      // must advertise the converted `.m4a` shape rather than the
+      // original `.caf` name.
       request = {
         filePath: converted,
         mimeType: "audio/mp4",
-        filename: resolved.transferName ?? "voice-note.m4a",
+        filename: "voice-note.m4a",
         language: deps.config.language,
         model: deps.config.model
       };
