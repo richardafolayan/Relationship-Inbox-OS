@@ -7,6 +7,7 @@ import type {
   AiSource,
   ReplyBrief
 } from "@inbox-os/core";
+import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
@@ -238,6 +239,44 @@ export function renderMessageBody(
 export function formatMessageForPrompt(message: MessageForPrompt): string {
   const speaker = message.direction === "OUT" ? "operator" : "contact";
   return `${speaker} (${message.timestamp}): ${renderMessageBody(message)}`;
+}
+
+/**
+ * Whether a message should enter the AI prompt body at all.
+ *
+ * The two rules:
+ *   - iMessage "kept an audio message" system events never enter the
+ *     prompt. They're platform retention notices, not speech, and
+ *     letting the model see them wastes tokens + risks misattribution.
+ *   - Voice-only bubbles whose transcription failed / was skipped /
+ *     is still pending don't enter as "[Voice note]" placeholders.
+ *     With no transcript content there's nothing real for the model
+ *     to ground on; the existing thread UI still shows the audio chip
+ *     so the operator can see audio existed.
+ *
+ * Returns true for ordinary text turns and for voice-only messages
+ * with a successful transcript. Used as the filter at every site that
+ * hands a message log to a prompt builder.
+ */
+export function isAiVisibleMessage(
+  message: Pick<MessageForPrompt, "text" | "audioTranscription">
+): boolean {
+  const text = (message.text ?? "").trim();
+  if (isNonContentIMessageSystemEvent(text)) return false;
+  const transcription = message.audioTranscription;
+  const hasTranscript =
+    !!transcription &&
+    transcription.status === "transcribed" &&
+    !!transcription.transcript &&
+    transcription.transcript.trim().length > 0;
+  if (text.length === 0 && !hasTranscript) return false;
+  // Pure "[Voice note]" placeholder text (no transcript) should not
+  // enter prompts as fake content. Other attachment placeholders are
+  // left in place — the AI still benefits from knowing "[Photo]" was
+  // sent even though it can't see images here.
+  if (/^\[\s*voice notes?\s*\]$/i.test(text) && !hasTranscript) return false;
+  if (/^\[\s*audios?\s*\]$/i.test(text) && !hasTranscript) return false;
+  return true;
 }
 
 /**

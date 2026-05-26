@@ -78,8 +78,27 @@ export function VoiceMessageTranscript({ messageId, transcription }: VoiceMessag
     );
   }
 
-  // No usable transcript yet (null, failed, skipped, or empty). Offer
-  // the on-demand action; failed / errored states render a small
+  // Apple expires audio messages after the user-configurable retention
+  // window. If the file was already gone by the time the runner reached
+  // it, there's no audio left to transcribe and the transcribe button
+  // would just produce the same skip on every click. Show a calm one-
+  // liner instead and stay out of the operator's way. Match the stable
+  // "missing_file" code plus the older free-text reasons used by
+  // backfill rows written before this code existed.
+  if (
+    local?.status === "skipped" &&
+    typeof local.errorMessage === "string" &&
+    /^missing_file$|missing on disk|not found on disk/i.test(local.errorMessage)
+  ) {
+    return (
+      <span className="block text-[12px] leading-[1.45] text-ink-3">
+        Voice message unavailable
+      </span>
+    );
+  }
+
+  // No usable transcript yet (null, failed, other skips, or empty).
+  // Offer the on-demand action; failed / errored states render a small
   // "Try again" affordance instead of a fresh "Transcribe" link.
   const offerRetry = local?.status === "failed" || error !== null;
   const buttonLabel = offerRetry ? "Try again" : "Transcribe voice message";

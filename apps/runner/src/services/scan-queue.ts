@@ -20,7 +20,7 @@ import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../type
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
-import { prismaMessageToPrompt } from "./ai";
+import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
@@ -2913,14 +2913,28 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // the inbox row still surfaces "this message has been deleted" so
     // the operator can see what happened.
     const SYSTEM_EVENT_PLACEHOLDER = "[system event]";
-    const notSystemEvent = { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } } as const;
+    // iMessage "kept an audio message" system events. Substring filter
+    // is narrow enough — the exact phrase rarely appears in normal
+    // user text. Read-side defence in depth: the iMessage adapter
+    // drops these at ingestion going forward; this filter catches
+    // historical rows already in the DB.
+    const KEPT_AUDIO_CONTAINS = "kept an audio message";
+    const notSystemEvent = {
+      AND: [
+        { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } },
+        { NOT: { text: { contains: KEPT_AUDIO_CONTAINS } } }
+      ]
+    };
     const NON_REAL_INBOUND_TEXTS = [
       SYSTEM_EVENT_PLACEHOLDER,
       ...DELETED_INBOUND_PLACEHOLDER_STRINGS
     ];
     const notNonRealInbound = {
-      text: { notIn: NON_REAL_INBOUND_TEXTS }
-    } as const;
+      AND: [
+        { text: { notIn: NON_REAL_INBOUND_TEXTS } },
+        { NOT: { text: { contains: KEPT_AUDIO_CONTAINS } } }
+      ]
+    };
 
     const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage, latestRealMessage] = await Promise.all([
       prisma.message.findMany({
@@ -3031,7 +3045,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         previousRemember: thread.rememberJson
           ? (JSON.parse(thread.rememberJson) as RememberItem[])
           : [],
-        messages: latestMessages.map(prismaMessageToPrompt),
+        messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
         needsReply: resolvedNeedsReply
       });
 
@@ -3060,7 +3074,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         .classifyThreadCategory({
           platform: thread.platform as PlatformName,
           displayName: person.displayName,
-          messages: latestMessages.map(prismaMessageToPrompt),
+          messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
           summary: summary ?? null,
           whatTheyWant: whatTheyWant ?? null
         })
@@ -3106,7 +3120,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
             (m) =>
               m.direction !== "IN" || !isNonActionableInboundPlaceholder(m.text)
           )
-          .map(prismaMessageToPrompt);
+          .map(prismaMessageToPrompt)
+          .filter(isAiVisibleMessage);
         const verdict = await deps.aiService
           .classifyThreadClosed({
             displayName: person.displayName,

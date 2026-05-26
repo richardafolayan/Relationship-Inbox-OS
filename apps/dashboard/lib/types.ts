@@ -334,6 +334,13 @@ export interface ThreadMessage {
   audioTranscription?: {
     status: "pending" | "transcribed" | "failed" | "skipped" | string;
     transcript: string | null;
+    /**
+     * Stable error / skip reason. The dashboard checks for `missing_file`
+     * to render a calm "Voice message unavailable" line instead of the
+     * transcribe button, since retrying audio that's gone from disk is
+     * pointless.
+     */
+    errorMessage?: string | null;
   } | null;
 }
 
