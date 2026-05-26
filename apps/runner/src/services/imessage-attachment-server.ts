@@ -65,9 +65,7 @@ export async function streamIMessageAttachment(input: {
     // sips failed — fall through and send raw heic.
   }
   if (isCaf) {
-    const converted = await convertOnce(absolutePath, "m4a", async (src, dst) => {
-      await execFileAsync("afconvert", [src, dst, "-d", "aac", "-f", "m4af"], { timeout: 30_000 });
-    });
+    const converted = await convertCafToM4a(absolutePath);
     if (converted) {
       pipeFile(converted, "audio/mp4", res, transferName ?? "voice-note.m4a");
       return;
@@ -95,6 +93,7 @@ async function convertOnce(
   outExt: string,
   run: (src: string, dst: string) => Promise<void>
 ): Promise<string | null> {
+  if (!existsSync(src)) return null;
   const stat = statSync(src);
   const key = createHash("sha1").update(`${src}|${stat.mtimeMs}|${outExt}`).digest("hex");
   const dst = join(CACHE_DIR, `${key}.${outExt}`);
@@ -106,4 +105,24 @@ async function convertOnce(
   } catch {
     return null;
   }
+}
+
+/**
+ * Convert an Apple CAF voice note to AAC-in-MPEG4 (`.m4a`) using macOS
+ * `afconvert`. Cached on disk by source path + mtime, so repeat calls
+ * are free. Returns the converted file path or `null` when the source
+ * is missing or `afconvert` fails.
+ *
+ * Single source of truth for the conversion: the dashboard's inline
+ * audio playback path streams the same `.m4a`, and the transcription
+ * service uploads the same file to OpenAI. Keeping the helper exported
+ * here (rather than duplicated) means the cache is shared and the
+ * conversion command stays in lockstep.
+ */
+export async function convertCafToM4a(absolutePath: string): Promise<string | null> {
+  return convertOnce(absolutePath, "m4a", async (src, dst) => {
+    await execFileAsync("afconvert", [src, dst, "-d", "aac", "-f", "m4af"], {
+      timeout: 30_000
+    });
+  });
 }

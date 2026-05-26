@@ -1,11 +1,8 @@
-import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, statSync } from "node:fs";
-import { extname, join } from "node:path";
-import { tmpdir } from "node:os";
-import { promisify } from "node:util";
+import { existsSync, statSync } from "node:fs";
+import { extname } from "node:path";
 import type { PrismaClient } from "@prisma/client";
 import type { AttachmentPlaceholder } from "@inbox-os/core";
+import { convertCafToM4a } from "../imessage-attachment-server";
 import { buildAudioFingerprint } from "./fingerprint";
 import type {
   TranscriptionOutcome,
@@ -13,13 +10,11 @@ import type {
   TranscriptionRequest
 } from "./provider";
 
-const execFileAsync = promisify(execFile);
-
 /**
  * MIME types OpenAI's audio.transcriptions endpoint accepts directly.
  * Apple's .caf voice notes are NOT in this list and must be converted
- * to m4a (audio/mp4) first; conversion is handled inline before the
- * provider call.
+ * to m4a (audio/mp4) first via the shared `convertCafToM4a` helper
+ * (also used by the dashboard's audio playback path).
  */
 const SUPPORTED_MIME_TYPES = new Set<string>([
   "audio/mpeg",
@@ -93,8 +88,10 @@ interface TranscriptionServiceDeps {
   attachmentResolver: AttachmentResolver | null;
   config: TranscriptionServiceConfig;
   /**
-   * Optional override for the per-attachment conversion step. Tests can
-   * stub this to skip the macOS-only afconvert dependency.
+   * Optional override for the per-attachment conversion step. Defaults
+   * to the shared `convertCafToM4a` helper exported by
+   * `services/imessage-attachment-server`. Tests stub this to skip the
+   * macOS-only afconvert dependency.
    */
   convertCafToM4a?: (absolutePath: string) => Promise<string | null>;
   /** Log channel; defaults to console.warn. Tests stub to silence noise. */
@@ -120,7 +117,7 @@ export type TranscribeMessageOutcome =
 
 export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
   const warn = deps.warn ?? ((message) => console.warn(message));
-  const cafConverter = deps.convertCafToM4a ?? defaultCafConverter;
+  const cafConverter = deps.convertCafToM4a ?? convertCafToM4a;
   const inflight = new Set<string>();
 
   function enqueueMessage(messageId: string): void {
@@ -329,31 +326,3 @@ export function collectAudioAttachments(
   return out;
 }
 
-/**
- * Convert a CAF voice note to m4a via macOS afconvert. Results are
- * cached in the OS tmp dir, keyed by source path + mtime, so repeat
- * calls are free. Returns the converted path or null on failure.
- *
- * Lifted from the same pattern in imessage-attachment-server.ts (which
- * uses it to serve audio to the dashboard). Keeping it inline here
- * means the transcription service doesn't reach into the dashboard's
- * attachment HTTP layer, and tests can substitute a no-op converter
- * via deps.convertCafToM4a.
- */
-const CAF_CACHE_DIR = join(tmpdir(), "inbox-os-transcription-converted");
-async function defaultCafConverter(absolutePath: string): Promise<string | null> {
-  if (!existsSync(absolutePath)) return null;
-  mkdirSync(CAF_CACHE_DIR, { recursive: true });
-  const stat = statSync(absolutePath);
-  const key = createHash("sha1").update(`${absolutePath}|${stat.mtimeMs}|m4a`).digest("hex");
-  const dst = join(CAF_CACHE_DIR, `${key}.m4a`);
-  if (existsSync(dst)) return dst;
-  try {
-    await execFileAsync("afconvert", [absolutePath, dst, "-d", "aac", "-f", "m4af"], {
-      timeout: 30_000
-    });
-    return existsSync(dst) ? dst : null;
-  } catch {
-    return null;
-  }
-}
