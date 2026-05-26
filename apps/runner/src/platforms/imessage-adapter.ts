@@ -213,10 +213,20 @@ export class IMessageAdapter implements PlatformAdapter {
     const initialHandle = chat.participants[0] ?? chat.chatIdentifier;
     const handle = this.pickBestSendHandle(initialHandle);
     const sendStartedAt = Date.now();
+    // Service must follow the *handle* we picked, not chat.service_name.
+    // The chat row records whatever service Messages.app last touched it
+    // with - so a thread whose previous reply happened to land on SMS will
+    // keep chat.service = "SMS" forever, and passing that to AppleScript
+    // forces every subsequent send (including ones routed to an
+    // iMessage-capable handle by pickBestSendHandle) down the SMS path.
+    // Reading the service off the handle itself lets a contact toggle
+    // back to blue bubbles as soon as we send to an iMessage-registered
+    // address.
+    const handleService = db.findHandleService(handle) ?? undefined;
     try {
       await sendIMessage({
         handle,
-        service: chat.service ?? undefined,
+        service: handleService,
         text,
         attachmentPaths: (attachments ?? []).map((a) => a.absolutePath)
       });
