@@ -8,7 +8,7 @@ import multer from "multer";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, stableHash } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
@@ -19,7 +19,9 @@ import { createEventBus } from "./services/event-bus";
 import {
   createAiService,
   contactSnapshotFingerprint,
-  operatorProfileFingerprint
+  operatorProfileFingerprint,
+  isAiVisibleMessage,
+  prismaMessageToPrompt
 } from "./services/ai";
 import { sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
 import { analyzeStyle, styleFingerprint } from "./services/style";
@@ -38,6 +40,11 @@ import { createScheduledSendPromoter } from "./services/scheduled-send-promoter"
 import { createBirthdaySync } from "./services/birthday-sync";
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
+import {
+  createOpenAITranscriptionProvider,
+  createTranscriptionService,
+  type AttachmentResolver
+} from "./services/transcription";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
 import {
@@ -230,6 +237,62 @@ let enqueueEnrichmentForScan:
   | ((input: { personId: string; trigger: "first_seen" }) => void)
   | null = null;
 
+// Audio transcription wiring. The provider exists only when an OpenAI
+// key is configured and the feature is enabled; the service falls back
+// to no-ops otherwise (returning "disabled" without touching the DB).
+// The iMessage attachment resolver opens a short-lived read-only handle
+// against chat.db per call, matching the existing /data/imessage-
+// attachment route's pattern.
+const imessageAttachmentResolver: AttachmentResolver | null = runnerConfig.imessage.enabled
+  ? {
+      async resolve(guid: string) {
+        let db: IMessageDb;
+        try {
+          db = new IMessageDb(runnerConfig.imessage.dbPath);
+        } catch {
+          return null;
+        }
+        try {
+          const meta = db.findAttachmentByGuid(guid);
+          if (!meta || !meta.absolutePath) return null;
+          return {
+            absolutePath: meta.absolutePath,
+            mimeType: meta.mimeType,
+            filename: meta.filename,
+            transferName: meta.transferName
+          };
+        } finally {
+          db.close();
+        }
+      }
+    }
+  : null;
+
+const transcriptionProvider =
+  runnerConfig.audioTranscription.enabled && runnerConfig.openAiApiKey
+    ? createOpenAITranscriptionProvider({ apiKey: runnerConfig.openAiApiKey })
+    : null;
+
+const transcriptionService = createTranscriptionService({
+  prisma,
+  provider: transcriptionProvider,
+  attachmentResolver: imessageAttachmentResolver,
+  config: {
+    enabled: runnerConfig.audioTranscription.enabled,
+    apiKey: runnerConfig.openAiApiKey ?? null,
+    model: runnerConfig.audioTranscription.model,
+    language: runnerConfig.audioTranscription.language,
+    maxBytes: runnerConfig.audioTranscription.maxBytes,
+    maxSeconds: runnerConfig.audioTranscription.maxSeconds
+  }
+});
+
+if (runnerConfig.audioTranscription.enabled && !runnerConfig.openAiApiKey) {
+  console.warn(
+    "[transcription] AUDIO_TRANSCRIPTION_ENABLED=true but OPENAI_API_KEY is unset; voice notes will be skipped"
+  );
+}
+
 const scanQueue = createScanQueue({
   adapters,
   eventBus,
@@ -240,7 +303,8 @@ const scanQueue = createScanQueue({
   screenshotDir: runnerConfig.screenshotDir,
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
-  onNewPerson: (input) => enqueueEnrichmentForScan?.(input)
+  onNewPerson: (input) => enqueueEnrichmentForScan?.(input),
+  onAudioMessage: (input) => transcriptionService.enqueueMessage(input.messageId)
 }) as ScanQueueWithSmokeIngest;
 
 const sendService = createSendService({
@@ -1605,7 +1669,12 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
       messages: {
         orderBy: { timestamp: "desc" },
         take: 6,
-        select: { direction: true, text: true, timestamp: true }
+        select: {
+          direction: true,
+          text: true,
+          timestamp: true,
+          audioTranscription: { select: { status: true, transcript: true } }
+        }
       }
     },
     orderBy: { lastMessageAt: "desc" },
@@ -1655,11 +1724,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     // Oldest-first turns for the prompt examples.
     const orderedMessages = [...thread.messages]
       .reverse()
-      .map((m) => ({
-        direction: m.direction as "IN" | "OUT",
-        text: m.text,
-        timestamp: m.timestamp.toISOString()
-      }));
+      .map(prismaMessageToPrompt).filter(isAiVisibleMessage);
 
     const verdict = await aiService
       .scoreReconnectCandidate({
@@ -1757,7 +1822,12 @@ app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => 
       messages: {
         orderBy: { timestamp: "desc" },
         take: 5,
-        select: { direction: true, text: true, timestamp: true }
+        select: {
+          direction: true,
+          text: true,
+          timestamp: true,
+          audioTranscription: { select: { status: true, transcript: true } }
+        }
       }
     },
     orderBy: { lastMessageAt: "desc" },
@@ -1772,13 +1842,7 @@ app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => 
   for (const thread of candidates) {
     if (scored >= limit) break;
 
-    const orderedMessages = [...thread.messages]
-      .reverse()
-      .map((m) => ({
-        direction: m.direction as "IN" | "OUT",
-        text: m.text,
-        timestamp: m.timestamp.toISOString()
-      }));
+    const orderedMessages = [...thread.messages].reverse().map(prismaMessageToPrompt).filter(isAiVisibleMessage);
     const lastInbound = orderedMessages.filter((m) => m.direction === "IN").pop();
     if (!lastInbound) {
       // Defensive: lastInboundAt was non-null but the messages slice
@@ -2670,7 +2734,8 @@ async function resummarizeThreadById(threadId: string): Promise<
   const recentMessagesDesc = await prisma.message.findMany({
     where: messageThreadFilter,
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-    take: 120
+    take: 120,
+    include: { audioTranscription: true }
   });
   const orderedMessages = [...recentMessagesDesc].reverse();
 
@@ -2689,11 +2754,7 @@ async function resummarizeThreadById(threadId: string): Promise<
     previousRemember: thread.rememberJson
       ? (JSON.parse(thread.rememberJson) as RememberItem[])
       : [],
-    messages: orderedMessages.map((message) => ({
-      direction: message.direction as "IN" | "OUT",
-      text: message.text,
-      timestamp: message.timestamp.toISOString()
-    })),
+    messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
     needsReply: computedNeedsReply
   });
 
@@ -2734,6 +2795,71 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
   res.json({ text });
 }));
 
+// On-demand transcription for a single message. Used by the thread UI's
+// "Transcribe voice message" affordance under untranscribed voice notes:
+// the operator can spend a single OpenAI call without waiting for the
+// next scan to re-persist the row. Fingerprint dedup still applies (a
+// repeat click returns the existing row's status rather than billing
+// twice).
+app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) => {
+  const { messageId } = z.object({ messageId: z.string().min(1) }).parse(req.params);
+
+  // Manual clicks always force a fresh attempt. Auto-scan keeps
+  // fingerprint dedup; the operator's deliberate "Try again" should
+  // re-check the disk state (e.g. when a missing_file row was written
+  // before iCloud finished downloading the audio).
+  const outcome = await transcriptionService.transcribeMessage(messageId, { force: true });
+
+  if (outcome.kind === "disabled") {
+    res.status(409).json({
+      ok: false,
+      reason: "disabled",
+      message:
+        "Audio transcription is off. Set AUDIO_TRANSCRIPTION_ENABLED=true with a valid OPENAI_API_KEY in the runner config."
+    });
+    return;
+  }
+  if (outcome.kind === "missing_message") {
+    res.status(404).json({ ok: false, reason: "missing_message", message: "Message not found." });
+    return;
+  }
+  if (outcome.kind === "no_audio") {
+    res.status(422).json({
+      ok: false,
+      reason: "no_audio",
+      message: "This message has no voice or audio attachment."
+    });
+    return;
+  }
+
+  // outcome.kind === "processed": fingerprint dedup may have skipped the
+  // call even on a fresh request (existing row). Read the row back so the
+  // response always reflects what's currently persisted.
+  const row = await prisma.messageAudioTranscription.findUnique({
+    where: { messageId },
+    select: {
+      status: true,
+      transcript: true,
+      provider: true,
+      model: true,
+      language: true,
+      durationSeconds: true,
+      errorMessage: true
+    }
+  });
+
+  res.json({
+    ok: true,
+    counts: {
+      attachments: outcome.attachments,
+      transcribed: outcome.ok,
+      failed: outcome.failed,
+      skipped: outcome.skipped
+    },
+    transcription: row ?? null
+  });
+}));
+
 // Issue #331. Reads the operator's in-flight draft against the thread's
 // active open loops and returns the subset the draft already addresses.
 // The dashboard debounces calls here while the operator types so the
@@ -2755,7 +2881,11 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
         // Tail of the conversation gives the model just enough context
         // to judge whether a short ack actually answers a specific loop.
         orderBy: { timestamp: "desc" },
-        take: 8
+        take: 8,
+        // Audio transcripts flow into the recentMessages context the
+        // same way they flow into the summary path, so a draft that
+        // answers a voice-only inbound question can auto-tick.
+        include: { audioTranscription: true }
       }
     }
   });
@@ -2778,11 +2908,7 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
     return;
   }
 
-  const recentMessages = [...thread.messages].reverse().map((m) => ({
-    direction: m.direction as "IN" | "OUT",
-    text: m.text,
-    timestamp: m.timestamp.toISOString()
-  }));
+  const recentMessages = [...thread.messages].reverse().map(prismaMessageToPrompt).filter(isAiVisibleMessage);
 
   const { items } = await aiService.checkDraftCoverage({
     displayName: thread.person.displayName,
@@ -2909,7 +3035,8 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
         // asc + take would classify off the OLDEST 80 and ignore where
         // the thread has actually gone on long conversations.
         orderBy: { timestamp: "desc" },
-        take: 80
+        take: 80,
+        include: { audioTranscription: true }
       }
     }
   });
@@ -2922,11 +3049,7 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
     .classifyThreadCategory({
       platform: thread.platform as PlatformName,
       displayName: thread.person.displayName,
-      messages: orderedMessages.map((m) => ({
-        direction: m.direction as "IN" | "OUT",
-        text: m.text,
-        timestamp: m.timestamp.toISOString()
-      })),
+      messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
       summary: thread.rollingSummary,
       whatTheyWant: thread.whatTheyWant
     })
@@ -3212,7 +3335,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       where: messageThreadFilter,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: messageLimit + 1,
-      ...(beforeMessageId ? { cursor: { id: beforeMessageId }, skip: 1 } : {})
+      ...(beforeMessageId ? { cursor: { id: beforeMessageId }, skip: 1 } : {}),
+      // Voice / audio attachments carry an optional transcript row. The
+      // dashboard's IMessageMedia renders a quiet line under the audio
+      // control when one exists; the AI context builders inject the
+      // transcript into prompts via renderMessageBody.
+      include: { audioTranscription: true }
     }),
     prisma.message.findFirst({
       where: { ...messageThreadFilter, direction: "IN" },
@@ -3260,7 +3388,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     .map((m) => ({
       direction: m.direction as "IN" | "OUT",
       text: m.text,
-      timestamp: m.timestamp.toISOString()
+      timestamp: m.timestamp.toISOString(),
+      audioTranscription: m.audioTranscription
+        ? { status: m.audioTranscription.status, transcript: m.audioTranscription.transcript }
+        : null
     }));
   // needsReply mirrors scan-queue's derivation: the contact's last message
   // is newer than the operator's. When false, generateSuggestedReplies
@@ -3521,7 +3652,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
-    messages: pageMessages.map((message) => ({
+    messages: pageMessages
+      // Hide iMessage "kept an audio message" system events from the
+      // thread view entirely. The iMessage adapter drops these at
+      // ingestion going forward; this filter takes care of any
+      // historical rows already persisted.
+      .filter((message) => !isNonContentIMessageSystemEvent(message.text))
+      .map((message) => ({
       id: message.id,
       platformMessageKey: message.platformMessageKey,
       direction: message.direction,
@@ -3534,7 +3671,18 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       // started from the dashboard's focused composer reconcile correctly.
       replyToMessageId: message.replyToMessageId ?? null,
       raw: message.rawJson ? JSON.parse(message.rawJson) : null,
-      attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : []
+      attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : [],
+      // Audio transcription status + text, when the runner ran one for
+      // this message. Null when the message has no audio attachment or
+      // transcription is disabled. The dashboard's IMessageMedia uses
+      // this to render a quiet transcript line under the audio control.
+      audioTranscription: message.audioTranscription
+        ? {
+            status: message.audioTranscription.status,
+            transcript: message.audioTranscription.transcript,
+            errorMessage: message.audioTranscription.errorMessage
+          }
+        : null
     })),
     messagePage: {
       hasOlder: hasOlderMessages,
@@ -4203,15 +4351,16 @@ app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, 
     where: { thread: { personId } },
     orderBy: { timestamp: "asc" },
     take: 600,
-    select: { direction: true, text: true, timestamp: true }
+    select: {
+      direction: true,
+      text: true,
+      timestamp: true,
+      audioTranscription: { select: { status: true, transcript: true } }
+    }
   });
   const result = await aiService.summarisePersonForFriendship({
     displayName: person.displayName,
-    messages: messages.map((m) => ({
-      direction: m.direction as "IN" | "OUT",
-      text: m.text,
-      timestamp: m.timestamp.toISOString()
-    }))
+    messages: messages.map(prismaMessageToPrompt).filter(isAiVisibleMessage)
   });
   res.json(result);
 }));
@@ -4237,7 +4386,12 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
     where: { thread: { personId } },
     orderBy: { timestamp: "asc" },
     take: 600,
-    select: { direction: true, text: true, timestamp: true }
+    select: {
+      direction: true,
+      text: true,
+      timestamp: true,
+      audioTranscription: { select: { status: true, transcript: true } }
+    }
   });
   const tags = person.tagsJson ? (JSON.parse(person.tagsJson) as string[]) : [];
   const contactSnapshot = person.enrichment
@@ -4267,11 +4421,7 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
   const result = await aiService.askAboutPerson({
     displayName: person.displayName,
     question,
-    messages: messages.map((m) => ({
-      direction: m.direction as "IN" | "OUT",
-      text: m.text,
-      timestamp: m.timestamp.toISOString()
-    })),
+    messages: messages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
     contact: contactSnapshot,
     notes: person.notes,
     tags

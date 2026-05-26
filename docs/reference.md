@@ -10,6 +10,7 @@ front page.
 - [Configuration](#configuration)
 - [Browser modes](#browser-modes)
 - [AI providers](#ai-providers)
+- [Audio transcription](#audio-transcription)
 - [Settings page](#settings-page)
 - [Command-line helpers](#command-line-helpers)
 - [Runner API](#runner-api)
@@ -55,6 +56,63 @@ is one of the strongest bot signals.
 `gemini`. Each has its own key and model variable in `.env.example`. The
 provider can also be switched at runtime, and AI can be turned off entirely.
 Summaries, action items and drafts simply stop being generated.
+
+## Audio transcription
+
+Voice and audio attachments captured during scans can be transcribed via
+OpenAI's `/v1/audio/transcriptions` endpoint, so summaries, the reply
+brief, the checklist, and predraft suggestions all read voice content as
+ordinary text. Off by default. iMessage is the only supported source in
+v1 (chat.db exposes the stored `.caf` voice notes); LinkedIn voice
+messages are not captured today.
+
+Enable with these `.env` variables (defaults shown):
+
+```
+AUDIO_TRANSCRIPTION_ENABLED=false
+AUDIO_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
+AUDIO_TRANSCRIPTION_MAX_BYTES=26214400
+AUDIO_TRANSCRIPTION_MAX_SECONDS=600
+AUDIO_TRANSCRIPTION_LANGUAGE=en
+```
+
+`OPENAI_API_KEY` is reused; with the key blank the service marks every
+attachment `skipped` and warns once at startup. `gpt-4o-mini-transcribe`
+is the cheaper default; set `AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe`
+for higher quality at higher cost. Other model ids accepted by the
+endpoint are also passed through unchanged but are not supported.
+
+Supported MIME types: `audio/mpeg`, `audio/mp4`, `audio/m4a`,
+`audio/webm`, `audio/ogg`, `audio/wav`, `audio/aac`, `audio/flac`.
+iMessage `.caf` voice notes are converted to `.m4a` via macOS
+`afconvert` before upload, using the same converter that the dashboard
+uses to play them inline.
+
+How it runs:
+
+- The scan-queue persists messages first, then enqueues a fire-and-forget
+  transcription pass for any inbound message carrying a `voice_note` or
+  `audio` attachment. Scans never block on transcription.
+- A stable `audioFingerprint` (the platform message key plus the
+  attachment guid) is the dedup key. Re-scans never spend a second
+  OpenAI call on audio that has already been transcribed, failed, or
+  skipped. A future admin reset endpoint can delete the row to retry.
+- Each row records status (`pending`, `transcribed`, `failed`,
+  `skipped`), the provider, the model, language, duration, and a short
+  safe error message. Raw API bodies are never stored.
+- The thread page renders a quiet `voice message transcript` line under
+  the audio control when a transcription succeeded. Pending and failed
+  states show a calm one-line hint. Skipped states stay silent.
+
+Realtime transcription (`gpt-realtime-whisper` and similar) is
+intentionally out of scope. Stored voice notes are files; the file
+endpoint is the simplest and cheapest fit. If the app ever streams live
+audio, a streaming provider can be added as a sibling without touching
+the file path used here.
+
+Privacy note: transcripts become part of the AI context for that thread
+and are stored alongside the message rows in the local SQLite database.
+Treat them like message content.
 
 ## Settings page
 

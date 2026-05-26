@@ -31,7 +31,8 @@ import type {
   ThreadMessage,
   ThreadResponse
 } from "@/lib/types";
-import { IMessageMedia } from "@/components/thread/imessage-media";
+import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
+import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -1472,7 +1473,26 @@ export default function ThreadPage() {
   // the latest fetch returned (initial slice or initial + lazily-pulled
   // older pages). `messagePage.hasOlder` tells us whether more history
   // exists on the server.
-  const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
+  // Render-time filter on top of the runner's API filter. Drops:
+  //   - iMessage "kept an audio message" system events (the runner
+  //     hides these too; this is belt-and-braces);
+  //   - bubbles with no displayable content at all (empty text + no
+  //     playable attachments + no transcript) so the thread never
+  //     paints a literally-blank bubble.
+  const visibleMessages: ThreadMessage[] = (thread?.messages ?? []).filter((m) => {
+    if (isNonContentIMessageSystemEvent(m.text)) return false;
+    const text = (m.text ?? "").trim();
+    const hasText = text.length > 0;
+    const hasPlayable = (m.attachments ?? []).some(
+      (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
+    );
+    const hasTranscript =
+      !!m.audioTranscription &&
+      m.audioTranscription.status === "transcribed" &&
+      !!m.audioTranscription.transcript &&
+      m.audioTranscription.transcript.trim().length > 0;
+    return hasText || hasPlayable || hasTranscript;
+  });
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
   // Threaded-reply lookups — unifies two sources:
@@ -2490,6 +2510,14 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                 ))}
+                                {playableAttachments.some(
+                                  (a) => a.kind === "voice_note" || a.kind === "audio"
+                                ) ? (
+                                  <VoiceMessageTranscript
+                                    messageId={message.id}
+                                    transcription={message.audioTranscription ?? null}
+                                  />
+                                ) : null}
                               </div>
                             ) : null}
                             {showText ? (

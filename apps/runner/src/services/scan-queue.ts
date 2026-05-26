@@ -20,6 +20,7 @@ import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../type
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
+import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
@@ -73,6 +74,15 @@ interface ScanQueueDeps {
    * scan even if it throws.
    */
   onNewPerson?: (input: { personId: string; trigger: "first_seen" }) => void;
+  /**
+   * Optional hook fired after a message with a voice / audio attachment
+   * is persisted during a scan. Used by the transcription service to
+   * spend an OpenAI call on the audio so summaries, reply briefs,
+   * predrafts, etc. can read voice content as ordinary text. Fire-and-
+   * forget; the service dedupes against any prior transcription row.
+   * Scans must not block on transcription.
+   */
+  onAudioMessage?: (input: { messageId: string }) => void;
 }
 
 /**
@@ -2680,6 +2690,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
       const batch = batchedMessageWrites.splice(0, batchedMessageWrites.length);
       await prisma.$transaction(batch);
     };
+    // Platform message keys for inbound messages carrying voice / audio
+    // attachments. After persistence we resolve these to Message ids and
+    // hand them to the transcription service (fire-and-forget); the
+    // service's fingerprint dedup keeps re-scans free.
+    const audioBearingMessageKeys: string[] = [];
 
     for (const message of messages) {
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
@@ -2838,8 +2853,50 @@ export function createScanQueue(deps: ScanQueueDeps) {
           await flushBatchedMessageWrites();
         }
       }
+      if (message.attachments.some((a) => a.kind === "voice_note" || a.kind === "audio")) {
+        // Both directions. The operator's own voice notes carry context
+        // the AI otherwise can't see (intent, tone, what they actually
+        // said), so transcribing them too means a future "what did I tell
+        // them about X" question can reach into the operator's outbound
+        // audio the same way it reaches into inbound text.
+        audioBearingMessageKeys.push(key);
+      }
     }
     await flushBatchedMessageWrites();
+
+    // Transcription enqueue. We resolve the persisted Message ids in a
+    // single query rather than per-message lookups, then hand each one to
+    // the optional hook. Fire-and-forget: scans never block on OpenAI
+    // latency, and the transcription service's audioFingerprint dedup
+    // means re-scans of the same audio are free.
+    if (audioBearingMessageKeys.length > 0 && deps.onAudioMessage) {
+      try {
+        const persistedAudioRows = await prisma.message.findMany({
+          where: {
+            threadId: thread.id,
+            platformMessageKey: { in: audioBearingMessageKeys }
+          },
+          select: { id: true }
+        });
+        for (const row of persistedAudioRows) {
+          try {
+            deps.onAudioMessage({ messageId: row.id });
+          } catch (error) {
+            console.warn(
+              `[scan-queue] onAudioMessage hook threw for message ${row.id}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[scan-queue] failed to resolve audio message ids for thread ${thread.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
 
     // System-event placeholders (e.g. LinkedIn "X turned on read receipts")
     // shouldn't drive needs-reply state or surface as the latest preview —
@@ -2856,20 +2913,41 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // the inbox row still surfaces "this message has been deleted" so
     // the operator can see what happened.
     const SYSTEM_EVENT_PLACEHOLDER = "[system event]";
-    const notSystemEvent = { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } } as const;
+    // iMessage "kept an audio message" system events. Substring filter
+    // is narrow enough — the exact phrase rarely appears in normal
+    // user text. Read-side defence in depth: the iMessage adapter
+    // drops these at ingestion going forward; this filter catches
+    // historical rows already in the DB.
+    const KEPT_AUDIO_CONTAINS = "kept an audio message";
+    const notSystemEvent = {
+      AND: [
+        { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } },
+        { NOT: { text: { contains: KEPT_AUDIO_CONTAINS } } }
+      ]
+    };
     const NON_REAL_INBOUND_TEXTS = [
       SYSTEM_EVENT_PLACEHOLDER,
       ...DELETED_INBOUND_PLACEHOLDER_STRINGS
     ];
     const notNonRealInbound = {
-      text: { notIn: NON_REAL_INBOUND_TEXTS }
-    } as const;
+      AND: [
+        { text: { notIn: NON_REAL_INBOUND_TEXTS } },
+        { NOT: { text: { contains: KEPT_AUDIO_CONTAINS } } }
+      ]
+    };
 
     const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage, latestRealMessage] = await Promise.all([
       prisma.message.findMany({
         where: { threadId: thread.id },
         orderBy: { timestamp: "desc" },
-        take: maxMessages
+        take: maxMessages,
+        // Pull the audio transcription row alongside each message so the
+        // AI context builders (summary, reply brief, classifier, suggested
+        // replies) can fold the transcript text into prompts. Most
+        // messages have no transcription row; Prisma returns null cleanly
+        // and renderMessageBody in services/ai.ts falls back to the
+        // message text as before.
+        include: { audioTranscription: true }
       }),
       prisma.message.aggregate({
         where: { threadId: thread.id },
@@ -2967,11 +3045,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         previousRemember: thread.rememberJson
           ? (JSON.parse(thread.rememberJson) as RememberItem[])
           : [],
-        messages: latestMessages.map((message) => ({
-          direction: message.direction,
-          text: message.text,
-          timestamp: message.timestamp.toISOString()
-        })),
+        messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
         needsReply: resolvedNeedsReply
       });
 
@@ -3000,11 +3074,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         .classifyThreadCategory({
           platform: thread.platform as PlatformName,
           displayName: person.displayName,
-          messages: latestMessages.map((message) => ({
-            direction: message.direction,
-            text: message.text,
-            timestamp: message.timestamp.toISOString()
-          })),
+          messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
           summary: summary ?? null,
           whatTheyWant: whatTheyWant ?? null
         })
@@ -3050,11 +3120,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
             (m) =>
               m.direction !== "IN" || !isNonActionableInboundPlaceholder(m.text)
           )
-          .map((message) => ({
-            direction: message.direction,
-            text: message.text,
-            timestamp: message.timestamp.toISOString()
-          }));
+          .map(prismaMessageToPrompt)
+          .filter(isAiVisibleMessage);
         const verdict = await deps.aiService
           .classifyThreadClosed({
             displayName: person.displayName,

@@ -10,6 +10,7 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { sendIMessage } from "./imessage-send";
@@ -138,7 +139,12 @@ export class IMessageAdapter implements PlatformAdapter {
     // proper scroll-back without re-scanning.
     const effectiveLimit = Math.max(limit, 500);
     const rows = db.fetchMessages(thread.platformThreadId, effectiveLimit);
-    return rows.map((r) => {
+    // Drop iMessage "kept an audio message" system events at ingestion so
+    // they never become persisted rows. Existing stored rows are filtered
+    // again at the read paths (scan-queue aggregates, AI context, thread
+    // render, inbox preview) so the operator never sees them either way.
+    const filteredRows = rows.filter((r) => !isNonContentIMessageSystemEvent(r.text));
+    return filteredRows.map((r) => {
       // Persist reactions + reply parent on rawJson. Both fields are read
       // back by the dashboard's thread page; absent fields stay omitted so
       // we don't write empty {} for plain bubbles (keeps rawJson nullable
