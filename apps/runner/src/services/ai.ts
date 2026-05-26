@@ -1183,11 +1183,11 @@ where_it_stands:
 
 on_you:
 - Plainly state whether the contact has actually asked the operator for anything.
-- If the contact has NOT asked anything explicit, say so directly. Example wording: "He hasn't asked you anything. Acknowledge the offer, ask what he's looking at now, and you're done."
-- If the contact has asked ONE thing, name it. Example: "She asked whether Friday works. Confirm yes, or suggest another time."
+- If the contact has NOT asked anything explicit, say so directly. Example wording: "Nothing asked — a light acknowledgement is enough."
+- If the contact has asked ONE thing, name it. Example: "She asked whether Friday works."
 - If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
 - Never invent obligations. If the contact is simply updating the operator, say a light social reply is enough.
-- 1-3 sentences. No tasking the operator on things the contact didn't raise.
+- ONE sentence, ~140 characters max. The on_you block is the obligation read, not a paragraph. Resist stacking guidance ("acknowledge X; follow up on Y; keep the door open") — that pattern reliably blows past the budget and the dashboard truncates it mid-word. Pick the single most important obligation. Anything else goes in required_points or optional_followups.
 
 required_points (status = "required"):
 - Things that would make the reply feel incomplete if ignored.
