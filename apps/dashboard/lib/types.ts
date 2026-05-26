@@ -323,6 +323,25 @@ export interface ThreadMessage {
     kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "unknown";
     byteSize?: number;
   }>;
+  /**
+   * Audio-transcription summary for messages that carry a voice / audio
+   * attachment. Populated when AUDIO_TRANSCRIPTION_ENABLED is on and the
+   * runner has finished a /v1/audio/transcriptions call. Null when no
+   * audio attachment exists or transcription is disabled. The thread
+   * page renders a calm one-line transcript / status hint under the
+   * existing audio control.
+   */
+  audioTranscription?: {
+    status: "pending" | "transcribed" | "failed" | "skipped" | string;
+    transcript: string | null;
+    /**
+     * Stable error / skip reason. The dashboard checks for `missing_file`
+     * to render a calm "Voice message unavailable" line instead of the
+     * transcribe button, since retrying audio that's gone from disk is
+     * pointless.
+     */
+    errorMessage?: string | null;
+  } | null;
 }
 
 export interface ThreadResponse {

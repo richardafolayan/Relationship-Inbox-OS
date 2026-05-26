@@ -28,6 +28,11 @@ packages/core/generated
 /.claude/
 /.codex-disabled-*/
 migration-log.md
+# Worktree-only convenience symlinks to the main checkout's data/ dir and
+# one-shot operator scripts (filenames prefixed `_`) stay outside the
+# committed project surface.
+data
+apps/runner/scripts/_*.mjs
 
 # Personal operator-profile seed (local voice data; never committed).
 # See apps/runner/operator-profile.seed.example.json for the shape.

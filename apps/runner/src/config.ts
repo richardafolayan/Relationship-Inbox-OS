@@ -82,6 +82,39 @@ export interface RunnerConfig {
      */
     birthdaySyncEnabled: boolean;
   };
+  audioTranscription: {
+    /**
+     * Master switch. Default false so the runner never makes an OpenAI
+     * /v1/audio/transcriptions call without an explicit opt-in. When false
+     * the scan-side enqueue path short-circuits before the API client is
+     * even consulted, mirroring how AI features are gated elsewhere.
+     */
+    enabled: boolean;
+    /**
+     * Default `gpt-4o-mini-transcribe`. Override to `gpt-4o-transcribe` for
+     * higher accuracy at higher cost. Other audio model ids accepted by
+     * /v1/audio/transcriptions are also permitted but unsupported.
+     */
+    model: string;
+    /**
+     * Soft cap. Audio files larger than this are recorded as `skipped` so
+     * the runner never streams a multi-hour file at OpenAI. Default 25 MiB,
+     * matching the documented OpenAI request-size ceiling.
+     */
+    maxBytes: number;
+    /**
+     * Duration cap in seconds. Applied only when the source attachment
+     * exposes a duration (iMessage's chat.db does not, so this acts as a
+     * second line of defence behind maxBytes). Default 600 (10 minutes).
+     */
+    maxSeconds: number;
+    /**
+     * BCP-47 language hint passed to OpenAI's transcription endpoint. The
+     * model auto-detects when unset; a hint stabilises output for known
+     * single-language operators. Default `en`.
+     */
+    language: string;
+  };
   screenshotDir: string;
   domDumpDir: string;
   selectorDir: string;
@@ -368,6 +401,24 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
         !["false", "0", "no", "off"].includes(
           (env.CONTACTS_BIRTHDAY_SYNC ?? "").trim().toLowerCase()
         )
+    },
+    audioTranscription: {
+      // Off by default. The runner never calls OpenAI's audio endpoint
+      // unless this is flipped on AND OPENAI_API_KEY is set; the service
+      // also marks `skipped` when the key is missing, so a misconfigured
+      // enable does not crash ingestion.
+      enabled:
+        (env.AUDIO_TRANSCRIPTION_ENABLED ?? "").trim().toLowerCase() === "true",
+      // Default to gpt-4o-mini-transcribe: the cheaper, sufficiently
+      // accurate OpenAI transcription model. Operators wanting higher
+      // quality can set AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe.
+      // Realtime / streaming models (gpt-realtime-whisper) are not used
+      // for stored voice notes; see the audio transcription section of
+      // docs/reference.md.
+      model: env.AUDIO_TRANSCRIPTION_MODEL?.trim() || "gpt-4o-mini-transcribe",
+      maxBytes: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_MAX_BYTES, 25 * 1024 * 1024),
+      maxSeconds: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_MAX_SECONDS, 600),
+      language: env.AUDIO_TRANSCRIPTION_LANGUAGE?.trim() || "en"
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),

@@ -35,6 +35,23 @@ export interface DemoSeedManifest {
   domDumpFiles: string[];
 }
 
+/**
+ * Shape every AI context builder accepts for the message log. The
+ * legacy fields are unchanged so callers compile without touching the
+ * type; `audioTranscription` is additive and optional and lets the
+ * runner weave a voice-note transcript into prompts via the
+ * renderMessageBody helper in services/ai.ts.
+ */
+export interface MessageForPrompt {
+  direction: "IN" | "OUT";
+  text: string;
+  timestamp: string;
+  audioTranscription?: {
+    status: string;
+    transcript: string | null;
+  } | null;
+}
+
 export interface EventBus {
   nextEventId(): number;
   emit(event: RunnerEventInput): RunnerEvent;
@@ -129,7 +146,7 @@ export interface AiService {
     previousOpenLoops: string[];
     /** Last persisted remember items — kept as the fallback if the AI call fails. */
     previousRemember: RememberItem[];
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     /** Drives mode-aware framing: when false, what_they_want and open_loops are reframed as reconnect hooks. */
     needsReply: boolean;
   }): Promise<SummaryOutput>;
@@ -140,7 +157,7 @@ export interface AiService {
     /** Last ~6 turns oldest-first. Lets the model see the operator's own recent
      *  replies and respond to the actual conversational turn. Also calibrates
      *  voice register against the operator's recent OUT entries here. */
-    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    recentMessages: MessageForPrompt[];
     /** False = no pending reply; the prompt switches to "reopen mode" and
      *  generates conversation starters grounded in transcript details. */
     needsReply: boolean;
@@ -204,7 +221,7 @@ export interface AiService {
      * patterns. Output enum stays the same across both tiers. */
     platform: PlatformName;
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     /** Pass the thread's rollingSummary so classifier can spot a pivot pattern. */
     summary?: string | null;
     /** Pass the thread's whatTheyWant for additional intent signal. */
@@ -219,7 +236,7 @@ export interface AiService {
    */
   classifyThreadClosed(input: {
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     summary?: string | null;
   }): Promise<{ status: "closed" | "open"; reason: string } | null>;
   /**
@@ -235,7 +252,7 @@ export interface AiService {
     daysDormant: number;
     operatorOutboundCount: number;
     totalMessageCount: number;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     summary?: string | null;
   }): Promise<{ score: number; reason: string } | null>;
   /**
@@ -282,7 +299,7 @@ export interface AiService {
     voiceSamples: string[];
     /** The full thread for context. Recent inbound message in particular
      *  drives whether the rewrite should reference / acknowledge anything. */
-    threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    threadMessages: MessageForPrompt[];
     /**
      * Cross-thread context for the same Person. Drives "don't repeat
      * questions answered elsewhere" and "match the warmth you've used
@@ -342,7 +359,7 @@ export interface AiService {
   summarisePersonForFriendship(input: {
     /** Contact's name (the person being characterised). */
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
   }): Promise<FriendshipSummaryOutput>;
   /**
    * Free-form Q&A about a person. Grounded in messages, enrichment, and
@@ -354,7 +371,7 @@ export interface AiService {
     /** Contact's name (the person being asked about). */
     displayName: string;
     question: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     contact?: ContactProfileSnapshot | null;
     notes?: string | null;
     tags?: string[];
@@ -387,7 +404,7 @@ export interface AiService {
     displayName: string;
     draft: string;
     openLoops: string[];
-    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    recentMessages: MessageForPrompt[];
   }): Promise<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>;
 }
 
