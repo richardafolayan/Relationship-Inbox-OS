@@ -54,7 +54,12 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       },
       {
         id: "scan-full",
-        label: "Full LinkedIn rescan",
+        // #338/#362: label signals "advanced / rare", not a recommended
+        // default. The normal "Run scan now" entry above already does
+        // incremental update-mode; this entry is the opt-in escape hatch
+        // for the rare case the operator wants to re-walk every persisted
+        // thread (e.g. after a data migration or suspected corruption).
+        label: "Full LinkedIn rescan · advanced · rechecks every thread",
         glyph: "scan",
         run: () => {
           void apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" }).catch(() => undefined);

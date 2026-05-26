@@ -17,8 +17,12 @@ const {
   selectCandidates
 } = await import("../apps/runner/src/services/overdue-digest.ts");
 
-const { DEFAULT_OVERDUE_DIGEST_SETTINGS, isDigestDue, buildStateKey, isDeletedPlaceholder } =
-  await import("../packages/core/src/overdue-digest.ts");
+const { DEFAULT_OVERDUE_DIGEST_SETTINGS, isDigestDue, buildStateKey } = await import(
+  "../packages/core/src/overdue-digest.ts"
+);
+const { isNonActionableInboundPlaceholder } = await import(
+  "../packages/core/src/deleted-placeholder.ts"
+);
 
 const NOW = "2026-05-26T12:00:00.000Z";
 const TODAY_LOCAL_DATE = "2026-05-26";
@@ -121,38 +125,44 @@ test("selectCandidates: keeps RED+AMBER needs-reply, drops GREEN / replied / arc
   );
 });
 
-test("selectCandidates: skips deleted-placeholder rows (#360 amendment 3)", () => {
+test("selectCandidates: skips rows where BOTH preview and whatTheyWant are placeholders", () => {
+  // Post-#364, scan-queue already keeps deleted placeholders out of
+  // `lastInboundAt` and needs-reply state. A row reaching the digest
+  // with a placeholder preview but a real `whatTheyWant` means the AI
+  // saw a genuine earlier inbound the operator still owes a reply to —
+  // those rows are KEPT. Rows where both signals collapse to placeholder
+  // text get skipped as a last-resort guard.
   const settings = defaults();
   const rows = [
     row({
-      threadId: "t-deleted",
-      personId: "p-deleted",
+      threadId: "t-deleted-both",
+      personId: "p-deleted-both",
       preview: "This message has been deleted",
       whatTheyWant: "This message has been deleted"
     }),
     row({
-      threadId: "t-deleted-no-ai",
-      personId: "p-deleted-no-ai",
-      preview: "[message deleted]",
-      whatTheyWant: null
+      threadId: "t-deleted-with-ai",
+      personId: "p-deleted-with-ai",
+      personName: "Deleted-but-AI-has-context",
+      preview: "This message was deleted",
+      whatTheyWant: "Wants to grab a coffee"
     }),
     row({ threadId: "t-keep", personId: "p-keep", personName: "Keep" })
   ];
   const out = selectCandidates({ rows, settings, nowIso: NOW });
   assert.deepEqual(
     out.map((c) => c.personId),
-    ["p-keep"]
+    ["p-deleted-with-ai", "p-keep"]
   );
 });
 
-test("isDeletedPlaceholder catches common platform phrasings", () => {
-  assert.equal(isDeletedPlaceholder("This message has been deleted"), true);
-  assert.equal(isDeletedPlaceholder("This message was deleted"), true);
-  assert.equal(isDeletedPlaceholder("[deleted]"), true);
-  assert.equal(isDeletedPlaceholder("Sam unsent a message"), true);
-  assert.equal(isDeletedPlaceholder("Looking forward to chatting"), false);
-  assert.equal(isDeletedPlaceholder(""), false);
-  assert.equal(isDeletedPlaceholder(null), false);
+test("isNonActionableInboundPlaceholder catches the documented platform phrasings", () => {
+  assert.equal(isNonActionableInboundPlaceholder("This message has been deleted"), true);
+  assert.equal(isNonActionableInboundPlaceholder("This message was deleted"), true);
+  assert.equal(isNonActionableInboundPlaceholder("Message unsent"), true);
+  assert.equal(isNonActionableInboundPlaceholder("Looking forward to chatting"), false);
+  assert.equal(isNonActionableInboundPlaceholder(""), false);
+  assert.equal(isNonActionableInboundPlaceholder(null), false);
 });
 
 test("selectCandidates: drops rows outside the 30-day horizon", () => {

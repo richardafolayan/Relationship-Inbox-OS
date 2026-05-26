@@ -6,4 +6,5 @@ export * from "./selectors.js";
 export * from "./defaults.js";
 export * from "./autoscan.js";
 export * from "./birthday.js";
+export * from "./deleted-placeholder.js";
 export * from "./overdue-digest.js";
