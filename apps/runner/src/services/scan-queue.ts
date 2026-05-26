@@ -5,7 +5,12 @@ import type {
   RememberItem,
   ThreadStub
 } from "@inbox-os/core";
-import { calculateRisk, stableHash } from "@inbox-os/core";
+import {
+  calculateRisk,
+  DELETED_INBOUND_PLACEHOLDER_STRINGS,
+  isNonActionableInboundPlaceholder,
+  stableHash
+} from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
@@ -2833,8 +2838,25 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // shouldn't drive needs-reply state or surface as the latest preview —
     // they aren't real messages from the other party. Exclude them from
     // inbound/outbound aggregates and from lastMessage selection.
+    //
+    // Deleted/retracted inbound placeholders ("This message has been
+    // deleted.") are non-actionable too: the other party unsent the
+    // message, so it must not flip a thread back into needs-reply state
+    // and must not become the "closing beat" the closed-status
+    // classifier sees. They are excluded from the *inbound* side only —
+    // the operator deleting their own messages is a separate concern,
+    // and the preview side (latestRealMessage) keeps the placeholder so
+    // the inbox row still surfaces "this message has been deleted" so
+    // the operator can see what happened.
     const SYSTEM_EVENT_PLACEHOLDER = "[system event]";
     const notSystemEvent = { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } } as const;
+    const NON_REAL_INBOUND_TEXTS = [
+      SYSTEM_EVENT_PLACEHOLDER,
+      ...DELETED_INBOUND_PLACEHOLDER_STRINGS
+    ];
+    const notNonRealInbound = {
+      text: { notIn: NON_REAL_INBOUND_TEXTS }
+    } as const;
 
     const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage, latestRealMessage] = await Promise.all([
       prisma.message.findMany({
@@ -2847,7 +2869,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         _max: { timestamp: true }
       }),
       prisma.message.aggregate({
-        where: { threadId: thread.id, direction: "IN", ...notSystemEvent },
+        where: { threadId: thread.id, direction: "IN", ...notNonRealInbound },
         _max: { timestamp: true }
       }),
       prisma.message.aggregate({
@@ -2855,7 +2877,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         _max: { timestamp: true }
       }),
       prisma.message.findFirst({
-        where: { threadId: thread.id, direction: "IN", ...notSystemEvent },
+        where: { threadId: thread.id, direction: "IN", ...notNonRealInbound },
         orderBy: { timestamp: "desc" }
       }),
       prisma.message.findFirst({
@@ -3011,14 +3033,25 @@ export function createScanQueue(deps: ScanQueueDeps) {
         `closed-v2|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
       );
       if (closedKey !== thread.closedStatusCacheKey) {
+        // Hide deleted-inbound placeholders from the classifier so the
+        // prompt sees the prior real turn as the "closing beat". A
+        // retracted message must not be treated as a fresh inbound that
+        // forces the verdict to OPEN. Operator OUT messages pass through
+        // untouched (we only filter the inbound side).
+        const classifierMessages = latestMessages
+          .filter(
+            (m) =>
+              m.direction !== "IN" || !isNonActionableInboundPlaceholder(m.text)
+          )
+          .map((message) => ({
+            direction: message.direction,
+            text: message.text,
+            timestamp: message.timestamp.toISOString()
+          }));
         const verdict = await deps.aiService
           .classifyThreadClosed({
             displayName: person.displayName,
-            messages: latestMessages.map((message) => ({
-              direction: message.direction,
-              text: message.text,
-              timestamp: message.timestamp.toISOString()
-            })),
+            messages: classifierMessages,
             summary: summary ?? null
           })
           .catch(() => null);
