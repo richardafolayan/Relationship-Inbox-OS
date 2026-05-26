@@ -323,6 +323,18 @@ export interface ThreadMessage {
     kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "unknown";
     byteSize?: number;
   }>;
+  /**
+   * Audio-transcription summary for messages that carry a voice / audio
+   * attachment. Populated when AUDIO_TRANSCRIPTION_ENABLED is on and the
+   * runner has finished a /v1/audio/transcriptions call. Null when no
+   * audio attachment exists or transcription is disabled. The thread
+   * page renders a calm one-line transcript / status hint under the
+   * existing audio control.
+   */
+  audioTranscription?: {
+    status: "pending" | "transcribed" | "failed" | "skipped" | string;
+    transcript: string | null;
+  } | null;
 }
 
 export interface ThreadResponse {

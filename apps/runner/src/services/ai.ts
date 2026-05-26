@@ -21,6 +21,7 @@ import type {
   ConversationStartersOutput,
   ConversationStarterCitedField,
   FriendshipSummaryOutput,
+  MessageForPrompt,
   OperatorProfile,
   PilotReportTriage,
   SettingsStore,
@@ -195,6 +196,74 @@ export function getVoiceTier(platform: PlatformName): VoiceTier {
 
 export function selectVoicePrompt(platform: PlatformName): string {
   return getVoiceTier(platform) === "formal" ? FORMAL_VOICE_PROMPT : CASUAL_VOICE_PROMPT;
+}
+
+/**
+ * Return the body string a prompt should render for this message.
+ * Successful transcripts are folded in alongside (or in place of) the
+ * existing text, in the same `[Voice message transcript: "..."]` shape
+ * everywhere. Pending / failed / skipped states deliberately do NOT
+ * append anything — the AI sees the message's original text only (the
+ * iMessage adapter already substitutes "[Voice note]" when the message
+ * has no text and only audio, so the AI still knows audio exists).
+ */
+export function renderMessageBody(
+  message: Pick<MessageForPrompt, "text" | "audioTranscription">
+): string {
+  const transcription = message.audioTranscription;
+  if (
+    transcription &&
+    transcription.status === "transcribed" &&
+    transcription.transcript &&
+    transcription.transcript.trim().length > 0
+  ) {
+    const transcript = transcription.transcript.trim();
+    const text = message.text ?? "";
+    if (text.trim().length === 0) {
+      return `[Voice message transcript: "${transcript}"]`;
+    }
+    return `${text} [Voice message transcript: "${transcript}"]`;
+  }
+  return message.text ?? "";
+}
+
+/**
+ * Canonical `speaker (timestamp): body` line every prompt builder uses
+ * for the bulk message log. Centralised so transcript injection (and any
+ * future tweak to attribution shape) is a single edit. Divergent
+ * formats elsewhere in this file (closed-status, reconnect-score,
+ * draft-coverage) call `renderMessageBody` directly to keep their own
+ * prefix shape while still benefiting from transcript injection.
+ */
+export function formatMessageForPrompt(message: MessageForPrompt): string {
+  const speaker = message.direction === "OUT" ? "operator" : "contact";
+  return `${speaker} (${message.timestamp}): ${renderMessageBody(message)}`;
+}
+
+/**
+ * Shape a Prisma Message row (optionally with the audioTranscription
+ * relation included) into the `MessageForPrompt` the AI service
+ * consumes. Callers that omit the relation pass through unchanged —
+ * `audioTranscription` becomes null and the helpers above fall back to
+ * the message text as before.
+ */
+export function prismaMessageToPrompt<
+  T extends {
+    direction: string;
+    text: string;
+    timestamp: Date | string;
+    audioTranscription?: { status: string; transcript: string | null } | null;
+  }
+>(message: T): MessageForPrompt {
+  const direction = message.direction === "OUT" ? "OUT" : "IN";
+  const timestamp =
+    typeof message.timestamp === "string" ? message.timestamp : message.timestamp.toISOString();
+  return {
+    direction,
+    text: message.text,
+    timestamp,
+    audioTranscription: message.audioTranscription ?? null
+  };
 }
 
 // Platform-appropriate noun used in the composeInVoice user prompt
@@ -609,6 +678,59 @@ function parseAiJson<T>(content: string, model: string): T {
  */
 function shouldUseJsonResponseFormat(_provider: AiProvider, _model: string): boolean {
   return true;
+}
+
+/**
+ * Default reason rendered when the model's "partly covered" reason fails
+ * the post-parse sanitiser (banned guilt phrasing, empty after stripping,
+ * etc.). Calm, neutral, British English. Stays under the 120-char cap so
+ * the dashboard sub-line never truncates.
+ */
+export const PARTIAL_REASON_FALLBACK = "Nearly covered. Add the missing detail before sending.";
+
+/**
+ * Substrings that turn a partial-coverage reason into guilt phrasing.
+ * Tested case-insensitive against the trimmed reason. The model is
+ * prompt-instructed to avoid these (see SYSTEM_PROMPT + checkDraftCoverage
+ * prompt), but defence in depth: if one slips through, fall back to the
+ * neutral PARTIAL_REASON_FALLBACK so the dashboard never renders
+ * something that reads as a tick-off.
+ */
+const PARTIAL_REASON_BANNED_PHRASES = [
+  "you forgot",
+  "you missed",
+  "you should have",
+  "ignored",
+  "neglected",
+  "failed to"
+];
+
+/**
+ * Clean and cap the "partly covered" reason returned from
+ * checkDraftCoverage. Strips em / en dashes, replaces banned guilt
+ * phrasing with the neutral fallback, and truncates to 120 chars so the
+ * dashboard sub-line stays within its visual budget. Returns
+ * `undefined` when the input is empty or whitespace-only so the caller
+ * drops the row (a partial entry without a reason is dropped upstream).
+ */
+export function sanitisePartialReason(raw: string | null | undefined): string | undefined {
+  const trimmed = (raw ?? "").trim();
+  if (trimmed.length === 0) return undefined;
+  // Strip em / en dashes the system prompt forbids. Reuse the existing
+  // applyVoiceRules so all post-parse paths converge on the same rule
+  // (dash to comma, etc.).
+  const cleaned = applyVoiceRules(trimmed);
+  const lowered = cleaned.toLowerCase();
+  for (const phrase of PARTIAL_REASON_BANNED_PHRASES) {
+    if (lowered.includes(phrase)) {
+      return PARTIAL_REASON_FALLBACK;
+    }
+  }
+  if (cleaned.length === 0) return PARTIAL_REASON_FALLBACK;
+  if (cleaned.length > 120) {
+    return cleaned.slice(0, 120).trim();
+  }
+  return cleaned;
 }
 
 // Strip the punctuation forms the system prompt forbids. Defensive — even
@@ -1047,7 +1169,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     previousOpenLoops: string[];
     /** Last persisted remember items — kept as the fallback if the AI call fails. */
     previousRemember: RememberItem[];
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     /**
      * True when the contact's last message is newer than the operator's —
      * i.e. an active ask is pending. False when the operator already
@@ -1108,10 +1230,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // `direction: "IN"` = contact (the recipient). Reinforced in the
     // system prompt's ATTRIBUTION DISCIPLINE section.
     const transcript = input.messages
-      .map((m) => {
-        const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker} (${m.timestamp}): ${m.text}`;
-      })
+      .map((m) => formatMessageForPrompt(m))
       .join("\n");
 
     // Summaries refer to the operator in second person ("you") regardless
@@ -1347,7 +1466,7 @@ ${transcript}`;
      * reply must respond to the clarification, not treat it as a cold
      * ask). Each entry includes the speaker direction.
      */
-    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    recentMessages: MessageForPrompt[];
     /**
      * True when the contact's last message is newer than the operator's.
      * When false, the prompt switches to "reopen mode": generates three
@@ -1458,7 +1577,7 @@ ${transcript}`;
     const recentExchange = input.recentMessages
       .map((m) => {
         const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker}: ${m.text}`;
+        return `${speaker}: ${renderMessageBody(m)}`;
       })
       .join("\n");
 
@@ -1643,7 +1762,7 @@ ${recentExchange || "(no recent messages)"}`;
      * everything else → casual messaging-app outreach patterns). */
     platform: PlatformName;
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     summary?: string | null;
     whatTheyWant?: string | null;
   }): Promise<"outreach" | "genuine" | null> {
@@ -1655,7 +1774,7 @@ ${recentExchange || "(no recent messages)"}`;
     const inboundMessages = input.messages
       .filter((m) => m.direction === "IN")
       .slice(0, 5)
-      .map((m) => safeTruncate(m.text, 600))
+      .map((m) => safeTruncate(renderMessageBody(m), 600))
       .filter((t) => t.trim().length > 0);
 
     if (inboundMessages.length === 0) {
@@ -1861,7 +1980,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     platform: PlatformName;
     displayName: string;
     voiceSamples: string[];
-    threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    threadMessages: MessageForPrompt[];
     relationshipContext?: {
       otherThreadCount: number;
       recentExchanges: Array<{
@@ -1899,7 +2018,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     // the rewrite match their tempo rather than only the last line.
     const recipientSamples = input.threadMessages
       .filter((m) => m.direction === "IN")
-      .map((m) => m.text.trim())
+      .map((m) => renderMessageBody(m).trim())
       .filter((t) => t.length > 0)
       .slice(-4);
 
@@ -2104,7 +2223,7 @@ If the message has no time hint, return { "suggestions": [] }.`;
   async function summarisePersonForFriendship(input: {
     /** Contact's name (the person we're characterising). */
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
   }): Promise<FriendshipSummaryOutput> {
     const fallback: FriendshipSummaryOutput = {
       how_you_know_each_other: "Not enough message history yet to summarise.",
@@ -2118,10 +2237,7 @@ If the message has no time hint, return { "suggestions": [] }.`;
     }
 
     const transcript = input.messages
-      .map((m) => {
-        const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker} (${m.timestamp}): ${m.text}`;
-      })
+      .map((m) => formatMessageForPrompt(m))
       .join("\n");
 
     const prompt = `Return strict JSON matching this exact shape:
@@ -2170,7 +2286,7 @@ ${transcript}`;
     /** Contact's name (the person being asked about). */
     displayName: string;
     question: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     contact?: ContactProfileSnapshot | null;
     notes?: string | null;
     tags?: string[];
@@ -2184,10 +2300,7 @@ ${transcript}`;
     const transcript =
       input.messages.length > 0
         ? input.messages
-            .map((m) => {
-              const speaker = m.direction === "OUT" ? "operator" : "contact";
-              return `${speaker} (${m.timestamp}): ${m.text}`;
-            })
+            .map((m) => formatMessageForPrompt(m))
             .join("\n")
         : "(no messages on record)";
 
@@ -2326,7 +2439,7 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
     displayName: string;
     /** Oldest-first; the prompt examples include direction labels so
      *  attribution discipline applies. */
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     summary?: string | null;
   }): Promise<{ status: "closed" | "open"; reason: string } | null> {
     const { client, model, provider } = await resolveActive();
@@ -2340,7 +2453,7 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
       .slice(-3)
       .map((m) => ({
         direction: m.direction,
-        text: safeTruncate(m.text, 600)
+        text: safeTruncate(renderMessageBody(m), 600)
       }))
       .filter((m) => m.text.trim().length > 0);
 
@@ -2417,7 +2530,7 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
     operatorOutboundCount: number;
     totalMessageCount: number;
     /** Oldest-first; up to 4 most recent turns is plenty for the model. */
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     summary?: string | null;
   }): Promise<{ score: number; reason: string } | null> {
     const { client, model, provider } = await resolveActive();
@@ -2427,7 +2540,7 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
 
     const recentTurns = input.messages
       .slice(-4)
-      .map((m) => ({ direction: m.direction, text: safeTruncate(m.text, 500) }))
+      .map((m) => ({ direction: m.direction, text: safeTruncate(renderMessageBody(m), 500) }))
       .filter((m) => m.text.trim().length > 0);
 
     if (recentTurns.length === 0) {
@@ -2496,7 +2609,7 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
     openLoops: string[];
     /** Last few turns oldest-first for context (lets the model judge whether
      *  a short ack like "yes" actually addresses the specific loop). */
-    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    recentMessages: MessageForPrompt[];
   }): Promise<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }> {
     if (input.openLoops.length === 0 || !input.draft.trim()) {
       return { items: [] };
@@ -2511,7 +2624,7 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
       .slice(-4)
       .map((m) => {
         const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker}: ${safeTruncate(m.text, 400)}`;
+        return `${speaker}: ${safeTruncate(renderMessageBody(m), 400)}`;
       })
       .join("\n");
 
@@ -2569,7 +2682,11 @@ ${safeTruncate(input.draft, 2000)}`;
       // asks for copies, but models occasionally paraphrase; dropping
       // mismatches stops the dashboard from trying to render a row that
       // doesn't exist in its local state. Also drop "partial" without a
-      // reason — the whole point of the partial signal is the why.
+      // reason — the whole point of the partial signal is the why. The
+      // reason is then sanitised: dashes stripped, banned guilt phrasing
+      // replaced with a static fallback, length capped at 120 chars per
+      // the pilot feedback brief (R-0023). Without this the model can
+      // slip a stray em-dash or a "you forgot" past the system prompt.
       const loopSet = new Set(input.openLoops);
       const seen = new Set<string>();
       const items = parsed.items
@@ -2583,7 +2700,7 @@ ${safeTruncate(input.draft, 2000)}`;
         .map((item) => ({
           loop: item.loop,
           status: item.status,
-          reason: item.reason?.trim() || undefined
+          reason: item.status === "partial" ? sanitisePartialReason(item.reason) : undefined
         }));
       return { items };
     } catch (error) {

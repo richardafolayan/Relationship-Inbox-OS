@@ -1,0 +1,359 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { existsSync, mkdirSync, statSync } from "node:fs";
+import { extname, join } from "node:path";
+import { tmpdir } from "node:os";
+import { promisify } from "node:util";
+import type { PrismaClient } from "@prisma/client";
+import type { AttachmentPlaceholder } from "@inbox-os/core";
+import { buildAudioFingerprint } from "./fingerprint";
+import type {
+  TranscriptionOutcome,
+  TranscriptionProvider,
+  TranscriptionRequest
+} from "./provider";
+
+const execFileAsync = promisify(execFile);
+
+/**
+ * MIME types OpenAI's audio.transcriptions endpoint accepts directly.
+ * Apple's .caf voice notes are NOT in this list and must be converted
+ * to m4a (audio/mp4) first; conversion is handled inline before the
+ * provider call.
+ */
+const SUPPORTED_MIME_TYPES = new Set<string>([
+  "audio/mpeg",
+  "audio/mp4",
+  "audio/m4a",
+  "audio/x-m4a",
+  "audio/webm",
+  "audio/ogg",
+  "audio/wav",
+  "audio/x-wav",
+  "audio/aac",
+  "audio/flac",
+  "audio/x-flac"
+]);
+
+/**
+ * Apple identifies voice notes either by mime (`audio/x-caf` /
+ * `com.apple.coreaudio-format`) or by the magic filename "Audio
+ * Message.caf". We accept both and route them through afconvert.
+ */
+function isCafSource(input: { mimeType: string | null; filename: string | null; transferName: string | null }): boolean {
+  const mime = (input.mimeType ?? "").toLowerCase();
+  const name = (input.transferName ?? input.filename ?? "").toLowerCase();
+  if (mime.includes("caf") || mime.includes("coreaudio")) return true;
+  if (/\.caf($|\?)/.test(name)) return true;
+  if (name.includes("audio message")) return true;
+  return false;
+}
+
+/**
+ * Resolve a stored audio attachment to a (path, mime) the provider can
+ * upload. Returns `null` when the attachment cannot be located on disk
+ * or cannot be converted to a supported format; callers treat null as
+ * "skip silently".
+ */
+export interface AttachmentResolution {
+  absolutePath: string;
+  mimeType: string;
+  filename: string;
+  /** True when the audio is already in a provider-accepted format. */
+  ready: boolean;
+}
+
+export interface AttachmentResolver {
+  /**
+   * Given an attachment's platform-side identifier (iMessage guid), return
+   * the file metadata needed to upload it. Implementations should read
+   * the platform's authoritative store (chat.db for iMessage) and never
+   * trust the dashboard's attachmentsJson alone.
+   */
+  resolve(attachmentId: string): Promise<{
+    absolutePath: string;
+    mimeType: string | null;
+    filename: string | null;
+    transferName: string | null;
+  } | null>;
+}
+
+export interface TranscriptionServiceConfig {
+  enabled: boolean;
+  apiKey: string | null;
+  model: string;
+  language: string;
+  maxBytes: number;
+  maxSeconds: number;
+}
+
+interface TranscriptionServiceDeps {
+  prisma: PrismaClient;
+  provider: TranscriptionProvider | null;
+  attachmentResolver: AttachmentResolver | null;
+  config: TranscriptionServiceConfig;
+  /**
+   * Optional override for the per-attachment conversion step. Tests can
+   * stub this to skip the macOS-only afconvert dependency.
+   */
+  convertCafToM4a?: (absolutePath: string) => Promise<string | null>;
+  /** Log channel; defaults to console.warn. Tests stub to silence noise. */
+  warn?: (message: string) => void;
+}
+
+export interface TranscriptionService {
+  /** Fire-and-forget; never throws. Scans must not block on this. */
+  enqueueMessage(messageId: string): void;
+  /**
+   * Synchronous entrypoint for tests and the future manual "retry
+   * transcription" admin action. Resolves to a brief outcome summary so
+   * callers can log without re-querying the DB.
+   */
+  transcribeMessage(messageId: string): Promise<TranscribeMessageOutcome>;
+}
+
+export type TranscribeMessageOutcome =
+  | { kind: "disabled" }
+  | { kind: "no_audio" }
+  | { kind: "missing_message" }
+  | { kind: "processed"; attachments: number; ok: number; failed: number; skipped: number };
+
+export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
+  const warn = deps.warn ?? ((message) => console.warn(message));
+  const cafConverter = deps.convertCafToM4a ?? defaultCafConverter;
+  const inflight = new Set<string>();
+
+  function enqueueMessage(messageId: string): void {
+    if (!deps.config.enabled) return;
+    if (inflight.has(messageId)) return;
+    inflight.add(messageId);
+    queueMicrotask(() => {
+      void transcribeMessage(messageId)
+        .catch((error) => {
+          warn(
+            `[transcription] unhandled error for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
+          );
+        })
+        .finally(() => {
+          inflight.delete(messageId);
+        });
+    });
+  }
+
+  async function transcribeMessage(messageId: string): Promise<TranscribeMessageOutcome> {
+    if (!deps.config.enabled) return { kind: "disabled" };
+    if (!deps.provider || !deps.attachmentResolver || !deps.config.apiKey) {
+      // Defensive: a misconfigured runner (enabled but missing key /
+      // resolver) records skipped rows so the operator can see why
+      // nothing happened, then bails.
+      return { kind: "disabled" };
+    }
+
+    const message = await deps.prisma.message.findUnique({
+      where: { id: messageId },
+      select: {
+        id: true,
+        platformMessageKey: true,
+        attachmentsJson: true
+      }
+    });
+    if (!message) return { kind: "missing_message" };
+
+    const audioAttachments = collectAudioAttachments(message.attachmentsJson);
+    if (audioAttachments.length === 0) return { kind: "no_audio" };
+
+    let ok = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    for (const { attachment, index } of audioAttachments) {
+      const fingerprint = buildAudioFingerprint({
+        platformMessageKey: message.platformMessageKey,
+        attachmentGuid: attachment.guid,
+        attachmentIndex: index
+      });
+
+      // Idempotency: any prior row for this fingerprint wins. We don't
+      // auto-retry failed transcriptions because most failures are
+      // structural (file unsupported, OpenAI quota exhausted) and a
+      // tight retry loop just burns money. A future admin reset endpoint
+      // can delete the row to force a retry.
+      const existing = await deps.prisma.messageAudioTranscription.findUnique({
+        where: { audioFingerprint: fingerprint },
+        select: { id: true, status: true }
+      });
+      if (existing) {
+        skipped += 1;
+        continue;
+      }
+
+      const attachmentId = attachment.guid ?? `idx-${index}`;
+      const outcome = await transcribeAttachment(attachment, attachmentId);
+
+      const baseFields = {
+        messageId,
+        attachmentId,
+        audioFingerprint: fingerprint
+      };
+
+      if (outcome.kind === "ok") {
+        await deps.prisma.messageAudioTranscription.create({
+          data: {
+            ...baseFields,
+            status: "transcribed",
+            transcript: outcome.result.text,
+            provider: "openai",
+            model: outcome.result.model,
+            language: outcome.result.language ?? deps.config.language,
+            durationSeconds: outcome.result.durationSeconds ?? null,
+            errorMessage: null
+          }
+        });
+        ok += 1;
+      } else if (outcome.kind === "skipped") {
+        await deps.prisma.messageAudioTranscription.create({
+          data: {
+            ...baseFields,
+            status: "skipped",
+            errorMessage: outcome.reason
+          }
+        });
+        skipped += 1;
+      } else {
+        await deps.prisma.messageAudioTranscription.create({
+          data: {
+            ...baseFields,
+            status: "failed",
+            provider: "openai",
+            model: deps.config.model,
+            errorMessage: outcome.errorMessage
+          }
+        });
+        failed += 1;
+        warn(
+          `[transcription] failed message=${messageId} attachment=${attachmentId}: ${outcome.errorMessage}`
+        );
+      }
+    }
+
+    return { kind: "processed", attachments: audioAttachments.length, ok, failed, skipped };
+  }
+
+  async function transcribeAttachment(
+    attachment: AttachmentPlaceholder,
+    attachmentId: string
+  ): Promise<TranscriptionOutcome> {
+    if (!attachment.guid) {
+      return { kind: "skipped", reason: "attachment has no guid" };
+    }
+    const resolved = await deps.attachmentResolver!.resolve(attachment.guid);
+    if (!resolved) {
+      return { kind: "skipped", reason: "attachment not found on disk" };
+    }
+
+    if (!existsSync(resolved.absolutePath)) {
+      return { kind: "skipped", reason: "attachment file missing on disk" };
+    }
+    const stat = statSync(resolved.absolutePath);
+    if (stat.size > deps.config.maxBytes) {
+      return { kind: "skipped", reason: `attachment exceeds size cap (${stat.size} bytes)` };
+    }
+
+    // CAF voice notes need converting to m4a before OpenAI will accept
+    // them. Conversion is cached on disk by source path + mtime so a
+    // re-run never repeats the afconvert call. Failed conversions are
+    // treated as "skipped" with a clear reason; the runner does not crash.
+    const sourceIsCaf = isCafSource({
+      mimeType: resolved.mimeType,
+      filename: resolved.filename,
+      transferName: resolved.transferName
+    });
+
+    let request: TranscriptionRequest;
+    if (sourceIsCaf) {
+      const converted = await cafConverter(resolved.absolutePath);
+      if (!converted) {
+        return { kind: "skipped", reason: "caf to m4a conversion failed" };
+      }
+      request = {
+        filePath: converted,
+        mimeType: "audio/mp4",
+        filename: resolved.transferName ?? "voice-note.m4a",
+        language: deps.config.language,
+        model: deps.config.model
+      };
+    } else {
+      const mimeType = (resolved.mimeType ?? "").toLowerCase();
+      if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
+        return { kind: "skipped", reason: `unsupported mime type ${mimeType || "<unknown>"}` };
+      }
+      request = {
+        filePath: resolved.absolutePath,
+        mimeType,
+        filename: resolved.transferName ?? resolved.filename ?? `audio${extname(resolved.absolutePath) || ""}`,
+        language: deps.config.language,
+        model: deps.config.model
+      };
+    }
+
+    return deps.provider!.transcribe(request);
+  }
+
+  return { enqueueMessage, transcribeMessage };
+}
+
+/**
+ * Parse the attachmentsJson column into the list of likely audio
+ * attachments (with their original positional index, used as a fallback
+ * id when an attachment has no guid).
+ */
+export function collectAudioAttachments(
+  attachmentsJson: string | null
+): Array<{ attachment: AttachmentPlaceholder; index: number }> {
+  if (!attachmentsJson) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(attachmentsJson);
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(parsed)) return [];
+  const out: Array<{ attachment: AttachmentPlaceholder; index: number }> = [];
+  parsed.forEach((entry, index) => {
+    if (!entry || typeof entry !== "object") return;
+    const candidate = entry as AttachmentPlaceholder;
+    if (candidate.kind === "voice_note" || candidate.kind === "audio") {
+      out.push({ attachment: candidate, index });
+    }
+  });
+  return out;
+}
+
+/**
+ * Convert a CAF voice note to m4a via macOS afconvert. Results are
+ * cached in the OS tmp dir, keyed by source path + mtime, so repeat
+ * calls are free. Returns the converted path or null on failure.
+ *
+ * Lifted from the same pattern in imessage-attachment-server.ts (which
+ * uses it to serve audio to the dashboard). Keeping it inline here
+ * means the transcription service doesn't reach into the dashboard's
+ * attachment HTTP layer, and tests can substitute a no-op converter
+ * via deps.convertCafToM4a.
+ */
+const CAF_CACHE_DIR = join(tmpdir(), "inbox-os-transcription-converted");
+async function defaultCafConverter(absolutePath: string): Promise<string | null> {
+  if (!existsSync(absolutePath)) return null;
+  mkdirSync(CAF_CACHE_DIR, { recursive: true });
+  const stat = statSync(absolutePath);
+  const key = createHash("sha1").update(`${absolutePath}|${stat.mtimeMs}|m4a`).digest("hex");
+  const dst = join(CAF_CACHE_DIR, `${key}.m4a`);
+  if (existsSync(dst)) return dst;
+  try {
+    await execFileAsync("afconvert", [absolutePath, dst, "-d", "aac", "-f", "m4af"], {
+      timeout: 30_000
+    });
+    return existsSync(dst) ? dst : null;
+  } catch {
+    return null;
+  }
+}

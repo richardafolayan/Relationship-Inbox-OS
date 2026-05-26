@@ -337,6 +337,7 @@ model Message {
   senderName         String?
   rawJson            String?
   attachmentsJson    String?
+  audioTranscription MessageAudioTranscription?
   // Provenance for OUT messages. "automation" when send.ts (this runner)
   // wrote it. Null on inbound messages and on OUT messages that were only
   // observed via scan — those could have been sent from the LinkedIn web
@@ -365,6 +366,52 @@ model Message {
   @@index([threadId, timestamp])
   @@index([replyToMessageId])
   @@map("messages")
+}
+
+// Opt-in transcription of voice / audio attachments on inbound messages.
+// One row per Message; created by the runner's transcription service after
+// a voice-note attachment is detected during scan persist. Status moves
+// through pending -> transcribed | failed | skipped and never retries
+// automatically: a stable audioFingerprint (platform message key plus the
+// attachment guid or url hash) dedupes re-scans against the same audio.
+//
+// Transcripts flow into every AI context builder (summary, reply brief,
+// suggested replies, closed/open classifier) via a single helper in
+// services/ai.ts so the AI reasons about voice content the same way it
+// reads text. The thread UI surfaces the transcript quietly under the
+// existing audio control.
+//
+// Gated entirely behind AUDIO_TRANSCRIPTION_ENABLED — when off, no rows
+// are written and the AI / UI behave exactly as before. See the audio
+// transcription section in docs/reference.md.
+model MessageAudioTranscription {
+  id               String   @id @default(cuid())
+  messageId        String   @unique
+  message          Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  // The attachment guid (iMessage) or per-message attachment index that
+  // produced this transcript. Stored so the dashboard can match a
+  // transcript back to its specific attachment when a message carries
+  // more than one. Nullable when the source attachment lacks a stable id.
+  attachmentId     String?
+  // Stable dedup key. Today: `${platformMessageKey}|${attachmentId ?? "idx-N"}`.
+  // Lets re-scans short-circuit before they spend an OpenAI call on
+  // already-known audio. Globally unique so a single retry path covers
+  // both same-message rescans and cross-thread reuse.
+  audioFingerprint String   @unique
+  // pending | transcribed | failed | skipped
+  status           String
+  transcript       String?
+  provider         String?
+  model            String?
+  language         String?
+  durationSeconds  Int?
+  // Short, safe human-readable error message; never the raw OpenAI body.
+  errorMessage     String?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status])
+  @@map("message_audio_transcriptions")
 }
 
 model Draft {

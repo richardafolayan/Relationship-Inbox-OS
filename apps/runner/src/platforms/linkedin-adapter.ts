@@ -6443,6 +6443,12 @@ export class LinkedInAdapter implements PlatformAdapter {
             // braces filter out anything nested inside a profile picture.
             const attachmentScope =
               bubbleEl.querySelector(".msg-s-event-listitem__message-bubble") ?? bubbleEl;
+            // TODO(audio-transcription): LinkedIn voice messages render as
+            // an interactive widget rather than a downloadable media node,
+            // so they are not captured here today. Adding them would need
+            // a dedicated DOM probe + a stable URL or blob path the runner
+            // can fetch. Out of scope for the v1 transcription PR; the
+            // iMessage adapter is the only audio source for now.
             const attachmentMatches = attachmentScope.querySelectorAll(
               ".msg-s-event-listitem__attachment, .msg-s-event-listitem__inline-image, video, a[download], a[href*='attachment']"
             );

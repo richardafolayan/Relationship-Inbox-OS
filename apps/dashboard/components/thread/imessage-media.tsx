@@ -6,6 +6,46 @@ interface IMessageMediaProps {
   attachment: ThreadMessage["attachments"][number];
 }
 
+interface VoiceMessageTranscriptProps {
+  transcription: NonNullable<ThreadMessage["audioTranscription"]>;
+}
+
+/**
+ * Quiet status line rendered under a voice / audio attachment when the
+ * runner has run a transcription for the message. Stays visually
+ * secondary (12px, ink-3, no badge) so it never competes with the audio
+ * control or the message text. Skipped silently when the transcription
+ * was deliberately skipped (no api key, file too big, etc.) since the
+ * user already sees the audio control and the skip is internal noise.
+ */
+export function VoiceMessageTranscript({ transcription }: VoiceMessageTranscriptProps) {
+  if (transcription.status === "transcribed" && transcription.transcript && transcription.transcript.trim().length > 0) {
+    return (
+      <span className="block whitespace-pre-wrap text-[12px] leading-[1.45] text-ink-3">
+        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3">
+          voice message transcript
+        </span>
+        <span className="ml-[6px]">{transcription.transcript}</span>
+      </span>
+    );
+  }
+  if (transcription.status === "pending") {
+    return (
+      <span className="block text-[12px] italic leading-[1.45] text-ink-3">
+        Transcribing voice message...
+      </span>
+    );
+  }
+  if (transcription.status === "failed") {
+    return (
+      <span className="block text-[12px] leading-[1.45] text-ink-3">
+        Voice message could not be transcribed
+      </span>
+    );
+  }
+  return null;
+}
+
 /**
  * Render a single iMessage attachment inline. Photos as <img>, videos as
  * <video controls>, voice notes / audio as <audio controls>, everything
