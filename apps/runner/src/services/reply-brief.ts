@@ -1,4 +1,9 @@
-import type { ReplyBrief, ReplyBriefPoint, ReplyBriefPointStatus } from "@inbox-os/core";
+import type {
+  ReplyBrief,
+  ReplyBriefPoint,
+  ReplyBriefPointStatus,
+  ReplyBriefSubstancePoint
+} from "@inbox-os/core";
 import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
 
 // Caps mirror the legacy open_loops cap (0-6) for required, and stay tight
@@ -6,6 +11,13 @@ import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
 export const MAX_REQUIRED_POINTS = 6;
 export const MAX_OPTIONAL_POINTS = 4;
 export const MAX_HANDLED_POINTS = 6;
+// Substance bullets from the latest unanswered inbound. Capped slightly
+// tighter than required_points — the rail needs to fit context, substance,
+// and the obligation read inside the operator's 10-second scan budget.
+export const MAX_THEY_SAID_POINTS = 6;
+// Each bullet caps at ~200 chars so the rendered list stays one line per
+// detail on a typical viewport. Longer details belong in fuller_context.
+const THEY_SAID_TEXT_CAP = 220;
 
 // Phrases the brief must never use in default-visible sections. These are
 // the abstract coaching strings the rail used to drift towards — "deepen
@@ -100,6 +112,43 @@ function dedupeByText(points: ReplyBriefPoint[]): ReplyBriefPoint[] {
   return out;
 }
 
+function coerceSubstancePoint(raw: unknown, index: number): ReplyBriefSubstancePoint | null {
+  if (typeof raw === "string") {
+    const text = safeTruncate(
+      stripUnpairedSurrogates(stripBannedPhrases(raw)).trim(),
+      THEY_SAID_TEXT_CAP
+    );
+    if (!text) return null;
+    return { id: shortSlug(text, index), text };
+  }
+  if (raw && typeof raw === "object") {
+    const obj = raw as Record<string, unknown>;
+    const text = typeof obj.text === "string"
+      ? safeTruncate(
+          stripUnpairedSurrogates(stripBannedPhrases(obj.text)).trim(),
+          THEY_SAID_TEXT_CAP
+        )
+      : "";
+    if (!text) return null;
+    const id =
+      typeof obj.id === "string" && obj.id.trim() ? obj.id.trim().slice(0, 48) : shortSlug(text, index);
+    return { id, text };
+  }
+  return null;
+}
+
+function dedupeSubstance(points: ReplyBriefSubstancePoint[]): ReplyBriefSubstancePoint[] {
+  const seen = new Set<string>();
+  const out: ReplyBriefSubstancePoint[] = [];
+  for (const p of points) {
+    const key = p.text.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(p);
+  }
+  return out;
+}
+
 // Sanitise a raw `reply_brief` value (already-parsed JSON, but with no
 // internal-consistency guarantees) into a well-formed ReplyBrief.
 // Enforces the spec's three classification invariants:
@@ -170,6 +219,13 @@ export function sanitizeReplyBrief(raw: unknown): ReplyBrief | null {
     (p) => !requiredTextSet.has(p.text.toLowerCase()) && !handledTextSet.has(p.text.toLowerCase())
   ).slice(0, MAX_OPTIONAL_POINTS);
 
+  const rawTheySaid = Array.isArray(obj.they_said) ? obj.they_said : [];
+  const theySaid = dedupeSubstance(
+    rawTheySaid
+      .map((p, i) => coerceSubstancePoint(p, i))
+      .filter((p): p is ReplyBriefSubstancePoint => p !== null)
+  ).slice(0, MAX_THEY_SAID_POINTS);
+
   const fullerContext = typeof obj.fuller_context === "string"
     ? safeTruncate(stripUnpairedSurrogates(stripBannedPhrases(obj.fuller_context)).trim(), 800)
     : null;
@@ -190,6 +246,7 @@ export function sanitizeReplyBrief(raw: unknown): ReplyBrief | null {
     required_points: requiredAfterHandledDrop,
     optional_followups: optionalAfterRequiredDrop,
     handled_points: handled.slice(0, MAX_HANDLED_POINTS),
+    they_said: theySaid,
     fuller_context: fullerContext || null,
     durable_context: durableContext || null,
     tone_steer: toneSteer || null,
@@ -254,6 +311,7 @@ export function synthesiseFallbackBrief(args: {
     required_points: required,
     optional_followups: [],
     handled_points: [],
+    they_said: [],
     fuller_context: summaryClean && summaryClean !== whereItStands ? summaryClean : null,
     durable_context: null,
     tone_steer: null,
@@ -268,4 +326,16 @@ export function synthesiseFallbackBrief(args: {
 export function mirrorRequiredToOpenLoops(brief: ReplyBrief | null): string[] | null {
   if (!brief) return null;
   return brief.required_points.map((p) => p.text);
+}
+
+// Stable string signature of the brief content that influences suggested
+// replies. Used by the cache-key for /data/thread + predraft so a brief
+// change (new substance bullets, new required points, refreshed obligation
+// read) invalidates the suggested-replies cache and a new generation kicks
+// off. Both call sites import this so the keys stay in lockstep.
+export function briefSignatureForCache(brief: ReplyBrief | null): string {
+  if (!brief) return "";
+  const substance = (brief.they_said ?? []).map((p) => p.text).join("·");
+  const required = brief.required_points.map((p) => p.text).join("·");
+  return `${brief.where_it_stands}|${brief.on_you}|${substance}|${required}`;
 }

@@ -2,6 +2,7 @@ import type {
   AppSettings,
   PlatformName,
   PlatformStatus,
+  ReplyBrief,
   RunnerEvent,
   SelectorOverrideStore,
   SelectorRegistry,
@@ -203,6 +204,16 @@ export interface AiService {
      * to mirror. Null when there isn't enough history.
      */
     contactStyle?: StyleProfile | null;
+    /**
+     * The compressed reply brief from the most recent thread analysis.
+     * When present, the prompt feeds the substance bullets (they_said)
+     * and the obligation read (on_you) into the model so the generated
+     * replies engage with every reply-relevant beat — not just the first
+     * surface point. Null on cold paths (cache hit before brief
+     * generation, or AI summary failed and synthesised fallback has no
+     * substance to carry).
+     */
+    replyBrief?: ReplyBrief | null;
   }): Promise<SuggestedRepliesOutput>;
   transformReply(input: {
     mode: "SHORTEN" | "MAKE_WARMER";

@@ -264,6 +264,20 @@ export interface ReplyBriefPoint {
   reason?: string;
 }
 
+/**
+ * A single substance bullet pulled from the latest unanswered inbound. Used
+ * to surface the reply-relevant details (decisions, constraints, reasons,
+ * news, updates) in a scannable list so the operator can write a reply
+ * without rereading the message. Distinct from `ReplyBriefPoint` — these
+ * are NOT actions the operator should take, they're what the contact said.
+ */
+export interface ReplyBriefSubstancePoint {
+  /** Stable id within this brief — short slug, used as a UI key. */
+  id: string;
+  /** One short line capturing a single reply-relevant detail. */
+  text: string;
+}
+
 export interface ReplyBrief {
   /**
    * The compressed trace. Explains what the operator previously said
@@ -284,6 +298,15 @@ export interface ReplyBrief {
   required_points: ReplyBriefPoint[];
   optional_followups: ReplyBriefPoint[];
   handled_points?: ReplyBriefPoint[];
+  /**
+   * Substance bullets from the latest unanswered inbound message — the
+   * reply-relevant details (decisions, constraints, reasons, news,
+   * updates) the contact actually shared. Surfaced by default below
+   * `where_it_stands` so the operator can write a thoughtful reply
+   * without rereading the raw message. Empty array in reconnect mode
+   * (no inbound is waiting on the operator).
+   */
+  they_said?: ReplyBriefSubstancePoint[] | null;
   /** Longer context for the expanded "More" section, when useful. */
   fuller_context?: string | null;
   /** Durable relationship context (who they are, how the operator knows them). */

@@ -72,6 +72,10 @@ export function ReplyBriefPanel({
   // pushing the panel out of its 10-second budget.
   const where = useMemo(() => brief.where_it_stands?.trim() ?? "", [brief.where_it_stands]);
   const onYou = useMemo(() => brief.on_you?.trim() ?? "", [brief.on_you]);
+  const theySaid = useMemo(
+    () => (brief.they_said ?? []).filter((p) => p.text.trim().length > 0),
+    [brief.they_said]
+  );
 
   return (
     <section data-testid="reply-brief" className="flex flex-col gap-7">
@@ -81,6 +85,28 @@ export function ReplyBriefPanel({
             Where it stands
           </p>
           <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
+        </div>
+      ) : null}
+
+      {theySaid.length > 0 ? (
+        <div>
+          <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+            They said
+          </p>
+          <ul className="m-0 list-none space-y-[7px] p-0">
+            {theySaid.map((point) => (
+              <li
+                key={`they:${point.id}`}
+                className="flex items-start gap-2 text-[13.5px] leading-[1.55] text-ink-2"
+              >
+                <span
+                  aria-hidden
+                  className="mt-[8px] h-[5px] w-[5px] shrink-0 rounded-full bg-hairline-strong"
+                />
+                <span className="min-w-0 flex-1">{point.text}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       ) : null}
 
@@ -118,7 +144,7 @@ export function ReplyBriefPanel({
               {brief.optional_followups.length > 0 ? (
                 <div>
                   <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                    Optional follow-up
+                    Optional follow-ups
                   </p>
                   <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
                     Suggestions the AI noticed. They didn't ask, so it's just a
