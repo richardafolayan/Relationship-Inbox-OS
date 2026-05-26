@@ -644,6 +644,37 @@ export default function ThreadPage() {
           messagePage: olderKept.length > 0 ? current.messagePage : fresh.messagePage
         };
       });
+      // Ghost-reconcile pendingSends against the freshly-fetched message
+      // list. The primary clear paths are the MESSAGE_SENT SSE event and
+      // the send-queue poll, both of which key off `clientSendId`. When
+      // either misses (SSE drop, race between the event and the page
+      // mount, sibling-thread routing on iMessage so the event's threadId
+      // doesn't match the user's view) the optimistic bubble used to
+      // linger forever, double-rendering on top of the real Message row.
+      // Any pending whose text matches a recent OUT message in the
+      // freshly-loaded window can be safely dropped — the real bubble is
+      // already on screen, the optimistic one is now noise.
+      const RECONCILE_WINDOW_MS = 5 * 60 * 1000;
+      const freshOutTexts = new Map<string, number>();
+      for (const m of fresh.messages) {
+        if (m.direction !== "OUT") continue;
+        const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
+        if (Number.isNaN(ts)) continue;
+        const prior = freshOutTexts.get(m.text);
+        if (prior === undefined || ts > prior) {
+          freshOutTexts.set(m.text, ts);
+        }
+      }
+      setPendingSends((prev) =>
+        prev.filter((pending) => {
+          if (pending.failed) return true; // keep failed bubbles so the operator can retry
+          const ts = freshOutTexts.get(pending.text);
+          if (ts === undefined) return true;
+          const pendingTs = Date.parse(pending.sentAt);
+          if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
+          return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
+        })
+      );
       setComposer((prev) => {
         if (prev) return prev; // operator already typed something
         const explicitDraft = threadResult.value.draft;
