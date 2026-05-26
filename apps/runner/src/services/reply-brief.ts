@@ -116,8 +116,15 @@ export function sanitizeReplyBrief(raw: unknown): ReplyBrief | null {
   const whereItStands = typeof obj.where_it_stands === "string"
     ? safeTruncate(stripUnpairedSurrogates(stripBannedPhrases(obj.where_it_stands)).trim(), 600)
     : "";
+  // #348: on_you used to allow up to 360 chars. In practice the model
+  // would stack obligations ("acknowledge X; follow up on Y; keep the
+  // door open for Z") and the resulting string blew past the Today
+  // hero's visual budget AND the rail truncated it mid-word. The prompt
+  // now hard-targets 1 sentence ~140 chars; this cap is the safety net
+  // for occasional overage. Existing rows on disk re-sanitise on read,
+  // so legacy long on_you values get clipped at load time too.
   const onYou = typeof obj.on_you === "string"
-    ? safeTruncate(stripUnpairedSurrogates(stripBannedPhrases(obj.on_you)).trim(), 360)
+    ? safeTruncate(stripUnpairedSurrogates(stripBannedPhrases(obj.on_you)).trim(), 200)
     : "";
 
   if (!whereItStands && !onYou) {
