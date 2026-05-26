@@ -148,7 +148,15 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
       </span>
     );
   }
-  const url = `/runner/data/imessage-attachment/${encodeURIComponent(attachment.guid)}`;
+  // LinkedIn voice notes set the message URN (`urn:li:msg_message:...`)
+  // as the attachment guid; the runner serves them from a separate
+  // endpoint that reads the captured bytes off disk. iMessage guids are
+  // UUID-shaped (no `urn:` prefix), so the runtime check is unambiguous
+  // without needing a separate `platform` prop here.
+  const isLinkedInUrn = attachment.guid.startsWith("urn:li:");
+  const url = isLinkedInUrn
+    ? `/runner/data/linkedin-voice-message/${encodeURIComponent(attachment.guid)}`
+    : `/runner/data/imessage-attachment/${encodeURIComponent(attachment.guid)}`;
 
   if (attachment.kind === "photo" || attachment.kind === "sticker") {
     return (

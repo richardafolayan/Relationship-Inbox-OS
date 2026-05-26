@@ -38,6 +38,11 @@ import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
+import {
+  LINKEDIN_VOICE_MIME,
+  hasLinkedInVoice,
+  linkedInVoicePath
+} from "./services/linkedin-voice-store";
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import {
@@ -268,6 +273,42 @@ const imessageAttachmentResolver: AttachmentResolver | null = runnerConfig.imess
     }
   : null;
 
+// LinkedIn voice messages have their bytes captured during scan
+// (linkedin-adapter.ts -> captureLinkedInVoiceMessage) and persisted
+// under data/linkedin-voice-messages/<sha256(urn)>.m4a. The resolver
+// just rebuilds that path from the URN we set as the attachment guid.
+// Returns null when the file isn't on disk yet (e.g. the scan happened
+// before the audio fetch landed) so the transcription service records a
+// `missing_file` skip the operator can manually re-attempt.
+const linkedinAttachmentResolver: AttachmentResolver = {
+  async resolve(urn: string) {
+    if (!hasLinkedInVoice(urn)) return null;
+    return {
+      absolutePath: linkedInVoicePath(urn),
+      mimeType: LINKEDIN_VOICE_MIME,
+      filename: "voice-message.m4a",
+      transferName: "Voice message"
+    };
+  }
+};
+
+// Composite resolver dispatched on the guid format. iMessage attachments
+// are UUID-shaped (`3C3CA15E-7C18-...`); LinkedIn voice notes set the
+// URN as the guid (`urn:li:msg_message:...`). Falls back to null when
+// neither resolver recognises the id so the transcription service skips
+// gracefully instead of crashing.
+const compositeAttachmentResolver: AttachmentResolver | null =
+  imessageAttachmentResolver || linkedinAttachmentResolver
+    ? {
+        async resolve(id: string) {
+          if (id.startsWith("urn:li:")) {
+            return linkedinAttachmentResolver.resolve(id);
+          }
+          return imessageAttachmentResolver?.resolve(id) ?? null;
+        }
+      }
+    : null;
+
 const transcriptionProvider =
   runnerConfig.audioTranscription.enabled && runnerConfig.openAiApiKey
     ? createOpenAITranscriptionProvider({ apiKey: runnerConfig.openAiApiKey })
@@ -276,7 +317,7 @@ const transcriptionProvider =
 const transcriptionService = createTranscriptionService({
   prisma,
   provider: transcriptionProvider,
-  attachmentResolver: imessageAttachmentResolver,
+  attachmentResolver: compositeAttachmentResolver,
   config: {
     enabled: runnerConfig.audioTranscription.enabled,
     apiKey: runnerConfig.openAiApiKey ?? null,
@@ -1383,6 +1424,29 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
   } finally {
     db.close();
   }
+}));
+
+// Stream a LinkedIn voice-message audio file to the dashboard. Mirror
+// of /data/imessage-attachment but for the bytes captured by the
+// LinkedIn adapter during scan (`captureLinkedInVoiceMessage`). The
+// URN doubles as the lookup key — the resolver and the store agree on
+// hashing the URN to derive the on-disk filename. 404s when the file
+// hasn't been captured yet (e.g. the operator opened the dashboard
+// before the deep-fetch scan picked the message up).
+app.get("/data/linkedin-voice-message/:urn", asyncRoute(async (req, res) => {
+  const rawUrn = req.params.urn;
+  const urnParam = typeof rawUrn === "string" ? rawUrn : "";
+  const { urn } = z
+    .object({ urn: z.string().min(8).max(400).startsWith("urn:li:") })
+    .parse({ urn: decodeURIComponent(urnParam) });
+  if (!hasLinkedInVoice(urn)) {
+    res.status(404).json({ error: "linkedin voice message not yet captured" });
+    return;
+  }
+  const path = linkedInVoicePath(urn);
+  res.setHeader("Content-Type", LINKEDIN_VOICE_MIME);
+  res.setHeader("Cache-Control", "private, max-age=3600");
+  createReadStream(path).pipe(res);
 }));
 
 app.get("/data/settings", asyncRoute(async (_req, res) => {
