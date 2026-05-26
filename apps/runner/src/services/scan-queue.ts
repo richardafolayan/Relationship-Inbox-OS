@@ -2864,6 +2864,39 @@ export function createScanQueue(deps: ScanQueueDeps) {
     }
     await flushBatchedMessageWrites();
 
+    // Sweep retroactively-failed outbound sends. Messages.app accepts a
+    // send (our 5s post-send poll passes), then later flips the bubble
+    // to "Not Delivered" via chat.db.error — most common with
+    // SMS-fallback on a recipient whose iMessage activation lags. Hard-
+    // delete the Message rows so the thread reflects what the recipient
+    // saw (i.e. nothing). Best-effort: a chat.db read error here must
+    // not abort the rest of the scan.
+    if (adapter.collectRetractedOutboundKeys) {
+      try {
+        const retractedKeys = await adapter.collectRetractedOutboundKeys(candidate);
+        if (retractedKeys.length > 0) {
+          const removed = await prisma.message.deleteMany({
+            where: {
+              threadId: thread.id,
+              direction: "OUT",
+              platformMessageKey: { in: retractedKeys }
+            }
+          });
+          if (removed.count > 0) {
+            console.log(
+              `[scan] removed ${removed.count} failed outbound message(s) from thread ${thread.id}`
+            );
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[scan] retracted-key sweep failed for thread ${thread.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
     // Transcription enqueue. We resolve the persisted Message ids in a
     // single query rather than per-message lookups, then hand each one to
     // the optional hook. Fire-and-forget: scans never block on OpenAI

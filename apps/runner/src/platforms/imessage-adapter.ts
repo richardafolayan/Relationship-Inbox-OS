@@ -179,6 +179,10 @@ export class IMessageAdapter implements PlatformAdapter {
     });
   }
 
+  async collectRetractedOutboundKeys(thread: ThreadStub): Promise<string[]> {
+    return this.getDb().findFailedOutboundGuids(thread.platformThreadId);
+  }
+
   async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
     const db = this.getDb();
     // Look up the chat to recover handle + group flag. We re-list one row;
