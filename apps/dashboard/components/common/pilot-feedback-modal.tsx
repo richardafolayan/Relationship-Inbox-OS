@@ -173,45 +173,25 @@ export function PilotFeedbackModal() {
       screenshots: screenshots.map((shot) => ({ name: shot.name, dataUrl: shot.dataUrl }))
     });
     lastPayloadRef.current = payload;
-    // Keep the screenshots with their picked ids so the failure handler
-    // below can restore them as-is; the payload has the rest of the form.
-    const screenshotsSnapshot = screenshots;
-    // Send without making the tester wait on the modal: close it and let a
-    // toast carry the outcome. On failure the modal reopens with the report
-    // restored from the snapshot so it can be retried or copied.
-    const toastId = `pilot-feedback-${Date.now()}`;
-    showToast({ id: toastId, kind: "pending", title: "Sending your report…" });
-    setOpen(false);
-    // Clear right away so a reopen during the in-flight call shows a fresh
-    // form, not the just-submitted report (#286).
-    resetForm();
+    // Issue #337 / R-0026. Send work is ongoing, not an event, so it stays
+    // local to the modal: the submit button reads "Sending…" with a spinner
+    // and the form stays put. No static popup toast for the in-flight state.
+    // Only the discrete outcomes ("Report sent" / "Couldn't send") use the
+    // toast surface, which is reserved for actual events.
     apiPost<{ ok: boolean; reportId?: string; error?: string }>(
       "/runner/control/pilot-feedback",
       payload
     )
       .then((res) => {
-        if (res.ok && res.reportId) {
-          showToast({ id: toastId, kind: "success", title: `Report sent: ${res.reportId}` });
-        } else {
+        if (!res.ok || !res.reportId) {
           throw new Error(res.error || "Could not send the report.");
         }
+        showToast({ kind: "success", title: `Report sent: ${res.reportId}` });
+        setOpen(false);
+        resetForm();
       })
       .catch((err) => {
-        showToast({
-          id: toastId,
-          kind: "error",
-          title: "Your report didn't send",
-          description: "Reopen feedback to try again or copy it.",
-          durationMs: 9000
-        });
-        setType(payload.type);
-        setTitle(payload.title);
-        setDescription(payload.description);
-        setExpected(payload.expected);
-        setPrivacyAck(payload.privacyAck);
-        setScreenshots(screenshotsSnapshot);
         setSubmitError(err instanceof Error ? err.message : "Could not send the report.");
-        setOpen(true);
       })
       .finally(() => setSubmitting(false));
   }, [canSubmit, type, title, description, expected, privacyAck, screenshots, pathname, resetForm]);
@@ -259,13 +239,21 @@ export function PilotFeedbackModal() {
 
   if (!open) return null;
 
+  // While the report is in flight the modal locks: backdrop click, Esc, and
+  // the close X are NOOPs so the operator can't dismiss the form before the
+  // request resolves (which would leave the success/error nowhere to land).
+  const requestClose = () => {
+    if (submitting) return;
+    setOpen(false);
+  };
+
   return (
     <div
       className="fixed inset-0 z-[100] grid place-items-start justify-items-center bg-[color-mix(in_oklch,var(--ink)_38%,transparent)] pt-[10vh] backdrop-blur-md"
-      onClick={() => setOpen(false)}
+      onClick={requestClose}
       onKeyDown={(event) => {
         event.stopPropagation();
-        if (event.key === "Escape") setOpen(false);
+        if (event.key === "Escape") requestClose();
       }}
     >
       <div
@@ -299,10 +287,11 @@ export function PilotFeedbackModal() {
           ) : null}
           <button
             type="button"
-            onClick={() => setOpen(false)}
+            onClick={requestClose}
+            disabled={submitting}
             aria-label="Close"
-            title="Close (Esc)"
-            className="ml-auto grid h-7 w-7 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+            title={submitting ? "Sending… please wait" : "Close (Esc)"}
+            className="ml-auto grid h-7 w-7 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
           >
             <X className="h-[15px] w-[15px]" strokeWidth={1.7} />
           </button>
