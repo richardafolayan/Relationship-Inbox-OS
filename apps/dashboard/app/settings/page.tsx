@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
@@ -8,6 +8,13 @@ import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 import { notificationsSupported, requestNotificationPermission } from "@/lib/notifications";
+import { localDateString } from "@/lib/overdue-digest";
+import type {
+  OverdueDigestCadence,
+  OverdueDigestCandidate,
+  OverdueDigestPreview,
+  OverdueDigestSettings
+} from "@/lib/overdue-digest";
 import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
@@ -133,6 +140,7 @@ export default function SettingsPage() {
           desc="Show a system notification when a new message arrives. Clicking it jumps you to the thread. Quiet hours still apply, and nothing fires while this tab is in focus."
           trailing={<NotificationsPermissionControl />}
         />
+        <OverdueDigestRow />
       </SettingsGroup>
 
       <SettingsGroup head="Browser">
@@ -313,6 +321,280 @@ function NotificationsPermissionControl() {
       )}
     >
       {busy ? "Asking…" : "Enable desktop notifications"}
+    </button>
+  );
+}
+
+// #360: calm overdue-reply digest. Quiet, opt-in, low-frequency. Sits
+// under Notifications because it shares the desktop-notification gate;
+// the cadence selector defaults to Off and the operator can dismiss today
+// or snooze individual people from here without disabling the feature.
+function OverdueDigestRow() {
+  const [settings, setSettings] = useState<OverdueDigestSettings | null>(null);
+  const [candidates, setCandidates] = useState<OverdueDigestCandidate[]>([]);
+  const [snoozed, setSnoozed] = useState<OverdueDigestPreview["snoozed"]>([]);
+  const [permission, setPermission] = useState<NotificationPermission | "unsupported">(
+    "unsupported"
+  );
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState<"idle" | "saved" | "error">("idle");
+
+  const refresh = useCallback(async () => {
+    const preview = await apiGet<OverdueDigestPreview>(
+      "/runner/data/overdue-digest/preview"
+    ).catch(() => null);
+    if (!preview) return;
+    setSettings(preview.settings);
+    setCandidates(preview.candidates);
+    setSnoozed(preview.snoozed);
+  }, []);
+
+  useEffect(() => {
+    if (notificationsSupported()) {
+      setPermission(Notification.permission);
+    } else {
+      setPermission("unsupported");
+    }
+    void refresh();
+  }, [refresh]);
+
+  const writeCadence = async (cadence: OverdueDigestCadence) => {
+    if (busy) return;
+    setBusy(true);
+    setStatus("idle");
+    try {
+      const next = await apiPost<OverdueDigestSettings>(
+        "/runner/control/overdue-digest/settings",
+        { cadence }
+      );
+      setSettings(next);
+      setStatus("saved");
+    } catch {
+      setStatus("error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const dismissToday = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const next = await apiPost<OverdueDigestSettings>(
+        "/runner/control/overdue-digest/dismiss-today",
+        { localDate: localDateString() }
+      );
+      setSettings(next);
+      setStatus("saved");
+    } catch {
+      setStatus("error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const snoozePerson = async (personId: string, displayName: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await apiPost("/runner/control/overdue-digest/snooze-person", {
+        personId,
+        displayName,
+        days: 7
+      });
+      await refresh();
+      setStatus("saved");
+    } catch {
+      setStatus("error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const unsnoozePerson = async (personId: string) => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      await apiPost("/runner/control/overdue-digest/unsnooze-person", { personId });
+      await refresh();
+      setStatus("saved");
+    } catch {
+      setStatus("error");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const cadence = settings?.cadence ?? "off";
+  const localDateToday = localDateString();
+  const alreadyDismissedToday = settings?.dismissForLocalDate === localDateToday;
+  const desktopNotEnabled = permission !== "granted";
+
+  return (
+    <div className="grid grid-cols-[1fr_auto] items-start gap-6 border-t border-hairline px-1 py-[16px]">
+      <div>
+        <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">Overdue reply digest</p>
+        <p
+          className="m-0 max-w-[54ch] text-[12.5px] leading-[1.5] text-ink-3"
+          style={{ textWrap: "pretty" }}
+        >
+          One calm reminder for overdue replies. Off by default. Choose daily or weekly if you
+          want a single digest. Clicks open Today, so you can work through the queue in your
+          own time.
+        </p>
+        {desktopNotEnabled ? (
+          <p className="m-0 mt-[8px] font-mono text-[11px] text-ink-3">
+            Enable desktop notifications first.
+          </p>
+        ) : null}
+
+        <div className="mt-[14px] flex flex-wrap items-center gap-[8px]">
+          <CadenceOption
+            label="Off"
+            selected={cadence === "off"}
+            disabled={busy}
+            onClick={() => void writeCadence("off")}
+          />
+          <CadenceOption
+            label="Daily"
+            selected={cadence === "daily"}
+            disabled={busy || desktopNotEnabled}
+            onClick={() => void writeCadence("daily")}
+          />
+          <CadenceOption
+            label="Weekly"
+            selected={cadence === "weekly"}
+            disabled={busy || desktopNotEnabled}
+            onClick={() => void writeCadence("weekly")}
+          />
+          {status === "saved" ? (
+            <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+              saved
+            </span>
+          ) : status === "error" ? (
+            <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
+              failed
+            </span>
+          ) : null}
+        </div>
+
+        {cadence !== "off" ? (
+          <div className="mt-[16px] rounded-[10px] border border-hairline bg-paper-2/40 p-[12px]">
+            <p className="m-0 mb-[8px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+              Preview
+            </p>
+            {candidates.length === 0 ? (
+              <p className="m-0 text-[12.5px] text-ink-3">
+                Nothing waiting on you right now.
+              </p>
+            ) : (
+              <ul className="m-0 flex list-none flex-col gap-[6px] p-0">
+                {candidates.map((c) => (
+                  <li
+                    key={`${c.threadId}:${c.personId}`}
+                    className="flex items-center justify-between gap-[12px] text-[12.5px] text-ink-2"
+                  >
+                    <span className="truncate">
+                      <span
+                        className={cn(
+                          "mr-[8px] inline-block h-[6px] w-[6px] rounded-full align-middle",
+                          c.riskLevel === "RED" ? "bg-risk-overdue" : "bg-risk-waiting"
+                        )}
+                        aria-hidden
+                      />
+                      {c.personName}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void snoozePerson(c.personId, c.personName)}
+                      disabled={busy}
+                      className="font-mono text-[11px] text-ink-3 underline decoration-hairline-strong underline-offset-2 transition-colors duration-calm hover:text-ink"
+                    >
+                      Snooze 7 days
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {candidates.length > 0 ? (
+              <div className="mt-[12px] flex flex-wrap items-center gap-[10px]">
+                <button
+                  type="button"
+                  onClick={() => void dismissToday()}
+                  disabled={busy || alreadyDismissedToday}
+                  className={cn(
+                    "inline-flex items-center rounded-pill border border-hairline px-[12px] py-[6px] font-mono text-[11px] text-ink-2 transition-colors duration-calm",
+                    "hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
+                    (busy || alreadyDismissedToday) && "cursor-not-allowed opacity-60"
+                  )}
+                >
+                  {alreadyDismissedToday ? "Dismissed for today" : "Dismiss for today"}
+                </button>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
+        {snoozed.length > 0 ? (
+          <div className="mt-[14px]">
+            <p className="m-0 mb-[6px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+              Snoozed people
+            </p>
+            <p className="m-0 mb-[8px] text-[12px] text-ink-3">
+              Snoozed people stay out of the digest until the snooze ends.
+            </p>
+            <ul className="m-0 flex list-none flex-col gap-[6px] p-0">
+              {snoozed.map((s) => (
+                <li
+                  key={s.personId}
+                  className="flex items-center justify-between gap-[12px] text-[12.5px] text-ink-2"
+                >
+                  <span className="truncate">{s.displayName}</span>
+                  <button
+                    type="button"
+                    onClick={() => void unsnoozePerson(s.personId)}
+                    disabled={busy}
+                    className="font-mono text-[11px] text-ink-3 underline decoration-hairline-strong underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Unsnooze
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
+      </div>
+      <div />
+    </div>
+  );
+}
+
+function CadenceOption({
+  label,
+  selected,
+  disabled,
+  onClick
+}: {
+  label: string;
+  selected: boolean;
+  disabled?: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      aria-pressed={selected}
+      className={cn(
+        "inline-flex items-center rounded-pill border px-[14px] py-[6px] font-mono text-[11px] transition-colors duration-calm",
+        selected
+          ? "border-ink bg-ink text-paper"
+          : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
+        disabled && "cursor-not-allowed opacity-60"
+      )}
+    >
+      {label}
     </button>
   );
 }
