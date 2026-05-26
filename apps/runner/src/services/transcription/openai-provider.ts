@@ -43,13 +43,17 @@ export function createOpenAITranscriptionProvider(input: {
           basename(request.filename || request.filePath),
           { type: request.mimeType }
         );
-        // `verbose_json` returns the duration field on gpt-4o-mini-transcribe
-        // and gpt-4o-transcribe; the SDK types it as part of the response.
+        // gpt-4o-mini-transcribe and gpt-4o-transcribe only accept the
+        // plain `json` response format; `verbose_json` (which carries
+        // duration + language) is whisper-1 only. Sticking with `json`
+        // keeps the request shape consistent across both modern
+        // transcription models; the duration / language fields below
+        // gracefully stay undefined when the response omits them.
         const response = await client.audio.transcriptions.create({
           file: upload,
           model: request.model,
           language: request.language,
-          response_format: "verbose_json"
+          response_format: "json"
         });
         // The shape varies subtly between models; treat everything beyond
         // `text` as optional to stay forward-compatible.
