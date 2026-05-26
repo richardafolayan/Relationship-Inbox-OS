@@ -363,6 +363,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
   let currentScanProgress:
     | {
         platform: PlatformName;
+        scope: ScanScope;
         processedRows: number;
         openedRows: number;
         total: number;
@@ -1427,6 +1428,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
               });
               currentScanProgress = {
                 platform: "LINKEDIN",
+                // #338/#362: surface scope so the dashboard's TopStatus can
+                // distinguish "checking for new" (update) from "rescanning
+                // every thread" (full). Without this the bar reads
+                // "Scanning LinkedIn · 5/167" for both, and an incremental
+                // scan visually impersonates a full inbox sweep.
+                scope: job.scope,
                 processedRows: 0,
                 openedRows: 0,
                 total: baselineThreadTotal,
@@ -3198,6 +3205,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       currentScanProgress
         ? {
             platform: currentScanProgress.platform,
+            scope: currentScanProgress.scope,
             processedRows: currentScanProgress.processedRows,
             openedRows: currentScanProgress.openedRows,
             total: currentScanProgress.total,
