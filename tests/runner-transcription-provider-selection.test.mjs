@@ -25,7 +25,15 @@ function makeFakePrisma() {
     },
     messageAudioTranscription: {
       async findUnique({ where }) {
-        return audioRows.get(where.audioFingerprint) ?? null;
+        if (where.audioFingerprint !== undefined) {
+          return audioRows.get(where.audioFingerprint) ?? null;
+        }
+        if (where.messageId !== undefined) {
+          for (const row of audioRows.values()) {
+            if (row.messageId === where.messageId) return row;
+          }
+        }
+        return null;
       },
       async create({ data }) {
         const row = { id: `row-${audioRows.size + 1}`, ...data };

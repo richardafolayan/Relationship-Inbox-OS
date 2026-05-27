@@ -220,6 +220,17 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let failed = 0;
     let skipped = 0;
 
+    // The schema enforces one transcription row per Message (`messageId
+    // @unique`). Dedup at the message level rather than per-attachment
+    // fingerprint so a re-run on a message whose attachment guid has
+    // since changed (e.g. older rows persisted before the adapter
+    // started prefixing `at_0_`) doesn't try to insert a duplicate and
+    // hit the @unique constraint on `messageId`.
+    const existingForMessage = await deps.prisma.messageAudioTranscription.findUnique({
+      where: { messageId },
+      select: { id: true, status: true }
+    });
+
     for (const { attachment, index } of audioAttachments) {
       const fingerprint = buildAudioFingerprint({
         platformMessageKey: message.platformMessageKey,
@@ -227,25 +238,26 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         attachmentIndex: index
       });
 
-      // Idempotency: any prior row for this fingerprint wins by default.
+      // Idempotency: any prior row for this message wins by default.
       // We don't auto-retry failed transcriptions because most failures
       // are structural (file unsupported, OpenAI quota exhausted) and a
       // tight retry loop just burns money. The manual "Try again"
       // affordance passes `options.force` to bypass dedup — the most
       // common case there is `missing_file` skips where the audio was
       // pending iCloud download at first run and is on disk now.
-      const existing = await deps.prisma.messageAudioTranscription.findUnique({
-        where: { audioFingerprint: fingerprint },
-        select: { id: true, status: true }
-      });
-      if (existing && !options.force) {
+      if (existingForMessage && !options.force) {
         skipped += 1;
         continue;
       }
-      if (existing && options.force) {
+      if (existingForMessage && options.force) {
         await deps.prisma.messageAudioTranscription.delete({
-          where: { audioFingerprint: fingerprint }
+          where: { messageId }
         });
+        // Clear the cached pointer so subsequent iterations don't
+        // re-enter the delete branch for an already-removed row.
+        // (Multi-attachment messages would otherwise loop into the
+        // create twice and crash on the second insert.)
+        (existingForMessage as { id: string | null }).id = null;
       }
 
       const attachmentId = attachment.guid ?? `idx-${index}`;
@@ -315,6 +327,13 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           `[transcription] failed message=${messageId} attachment=${attachmentId}: ${outcome.errorMessage}`
         );
       }
+      // The schema enforces one transcription row per Message. Once we
+      // wrote a row for this message (ok / skipped / failed), don't
+      // iterate to subsequent attachments — the next insert would trip
+      // the messageId @unique constraint. Multi-attachment voice
+      // messages are unusual on iMessage and the first attachment is
+      // overwhelmingly the actual voice content.
+      break;
     }
 
     return { kind: "processed", attachments: audioAttachments.length, ok, failed, skipped };
