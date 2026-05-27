@@ -46,9 +46,11 @@ import {
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
 import { createEnrichmentQueue } from "./services/enrichment-queue";
 import {
+  createLocalWhisperProvider,
   createOpenAITranscriptionProvider,
   createTranscriptionService,
-  type AttachmentResolver
+  type AttachmentResolver,
+  type TranscriptionProvider
 } from "./services/transcription";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
@@ -309,10 +311,51 @@ const compositeAttachmentResolver: AttachmentResolver | null =
       }
     : null;
 
-const transcriptionProvider =
-  runnerConfig.audioTranscription.enabled && runnerConfig.openAiApiKey
-    ? createOpenAITranscriptionProvider({ apiKey: runnerConfig.openAiApiKey })
-    : null;
+// Provider selection. With audio transcription off, the service stays
+// disabled and no provider is constructed. With it on, we pick exactly
+// one provider per the operator's `AUDIO_TRANSCRIPTION_PROVIDER`:
+//   - "local-whisper": runs whisper.cpp on this Mac. No OpenAI call.
+//   - "openai": uses /v1/audio/transcriptions. Kept as an explicit
+//     fallback for operators who don't have whisper.cpp set up yet
+//     or want a quality comparison.
+// A misconfigured provider (missing command/model for local, missing
+// API key for openai) leaves `provider = null` so the service marks
+// each row as skipped with the appropriate reason on the first run
+// rather than throwing.
+let transcriptionProvider: TranscriptionProvider | null = null;
+if (runnerConfig.audioTranscription.enabled) {
+  if (runnerConfig.audioTranscription.provider === "local-whisper") {
+    const lw = runnerConfig.audioTranscription.localWhisper;
+    if (!lw.command || !lw.modelPath) {
+      console.warn(
+        "[transcription] AUDIO_TRANSCRIPTION_PROVIDER=local-whisper but " +
+          "LOCAL_WHISPER_COMMAND or LOCAL_WHISPER_MODEL_PATH is unset; " +
+          "voice notes will be skipped with reason local_whisper_not_configured"
+      );
+    } else {
+      transcriptionProvider = createLocalWhisperProvider({
+        config: {
+          command: lw.command,
+          modelPath: lw.modelPath,
+          timeoutMs: lw.timeoutMs,
+          threads: lw.threads,
+          extraArgs: lw.extraArgs
+        }
+      });
+    }
+  } else {
+    if (!runnerConfig.openAiApiKey) {
+      console.warn(
+        "[transcription] AUDIO_TRANSCRIPTION_ENABLED=true but OPENAI_API_KEY is unset; voice notes will be skipped"
+      );
+    } else {
+      transcriptionProvider = createOpenAITranscriptionProvider({
+        apiKey: runnerConfig.openAiApiKey,
+        modelLabel: runnerConfig.audioTranscription.model
+      });
+    }
+  }
+}
 
 const transcriptionService = createTranscriptionService({
   prisma,
@@ -320,6 +363,10 @@ const transcriptionService = createTranscriptionService({
   attachmentResolver: compositeAttachmentResolver,
   config: {
     enabled: runnerConfig.audioTranscription.enabled,
+    // `apiKey` here is the disabled-path guard the service uses to
+    // refuse running when nothing's wired. For local-whisper that
+    // gate is the provider object itself; we pass the OpenAI key when
+    // present so the existing OpenAI-path check still works.
     apiKey: runnerConfig.openAiApiKey ?? null,
     model: runnerConfig.audioTranscription.model,
     language: runnerConfig.audioTranscription.language,
@@ -327,12 +374,6 @@ const transcriptionService = createTranscriptionService({
     maxSeconds: runnerConfig.audioTranscription.maxSeconds
   }
 });
-
-if (runnerConfig.audioTranscription.enabled && !runnerConfig.openAiApiKey) {
-  console.warn(
-    "[transcription] AUDIO_TRANSCRIPTION_ENABLED=true but OPENAI_API_KEY is unset; voice notes will be skipped"
-  );
-}
 
 const scanQueue = createScanQueue({
   adapters,

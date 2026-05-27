@@ -21,6 +21,8 @@ import type {
  */
 export function createOpenAITranscriptionProvider(input: {
   apiKey: string;
+  /** Echoed back on every persisted row's `model` column. */
+  modelLabel: string;
   /** Override factory for tests. */
   clientFactory?: (apiKey: string) => OpenAI;
 }): TranscriptionProvider {
@@ -30,6 +32,7 @@ export function createOpenAITranscriptionProvider(input: {
 
   return {
     id: "openai",
+    modelLabel: input.modelLabel,
     async transcribe(request: TranscriptionRequest): Promise<TranscriptionOutcome> {
       if (!existsSync(request.filePath)) {
         return { kind: "skipped", reason: "audio file missing on disk" };
