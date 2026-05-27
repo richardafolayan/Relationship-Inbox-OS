@@ -14,7 +14,15 @@ function makeFakePrisma() {
     },
     messageAudioTranscription: {
       async findUnique({ where }) {
-        return audioRows.get(where.audioFingerprint) ?? null;
+        if (where.audioFingerprint !== undefined) {
+          return audioRows.get(where.audioFingerprint) ?? null;
+        }
+        if (where.messageId !== undefined) {
+          for (const row of audioRows.values()) {
+            if (row.messageId === where.messageId) return row;
+          }
+        }
+        return null;
       },
       async create({ data }) {
         const row = { id: `row-${audioRows.size + 1}`, ...data };
@@ -22,12 +30,22 @@ function makeFakePrisma() {
         return row;
       },
       async delete({ where }) {
-        const existing = audioRows.get(where.audioFingerprint);
-        if (!existing) {
+        if (where.audioFingerprint !== undefined) {
+          const existing = audioRows.get(where.audioFingerprint);
+          if (!existing) throw new Error("row not found for delete");
+          audioRows.delete(where.audioFingerprint);
+          return existing;
+        }
+        if (where.messageId !== undefined) {
+          for (const [key, row] of audioRows.entries()) {
+            if (row.messageId === where.messageId) {
+              audioRows.delete(key);
+              return row;
+            }
+          }
           throw new Error("row not found for delete");
         }
-        audioRows.delete(where.audioFingerprint);
-        return existing;
+        throw new Error("delete: unsupported where clause");
       }
     }
   };
@@ -72,7 +90,8 @@ test("default call dedups when a row already exists", async () => {
   prisma.audioRows.set("k1|g-m1", {
     id: "old",
     status: "skipped",
-    errorMessage: "missing_file"
+    errorMessage: "missing_file",
+    messageId: "m1"
   });
   const provider = makeFakeProvider(() => ({
     kind: "ok",
@@ -98,7 +117,8 @@ test("force=true deletes the old row and re-attempts the call", async () => {
   prisma.audioRows.set("k1|g-m1", {
     id: "old",
     status: "skipped",
-    errorMessage: "missing_file"
+    errorMessage: "missing_file",
+    messageId: "m1"
   });
   // Resolver now returns the file (e.g. iCloud finished downloading
   // between the first auto-pass and this manual retry).
@@ -139,7 +159,8 @@ test("force=true on a still-missing file writes a fresh missing_file row", async
   prisma.audioRows.set("k1|g-m1", {
     id: "old",
     status: "skipped",
-    errorMessage: "missing_file"
+    errorMessage: "missing_file",
+    messageId: "m1"
   });
   const provider = makeFakeProvider(() => ({
     kind: "ok",
@@ -173,7 +194,8 @@ test("auto-path enqueueMessage still respects fingerprint dedup", async () => {
   prisma.audioRows.set("k1|g-m1", {
     id: "old",
     status: "skipped",
-    errorMessage: "missing_file"
+    errorMessage: "missing_file",
+    messageId: "m1"
   });
   const provider = makeFakeProvider(() => ({
     kind: "ok",

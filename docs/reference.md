@@ -59,17 +59,61 @@ Summaries, action items and drafts simply stop being generated.
 
 ## Audio transcription
 
-Voice and audio attachments captured during scans can be transcribed via
-OpenAI's `/v1/audio/transcriptions` endpoint, so summaries, the reply
-brief, the checklist, and predraft suggestions all read voice content as
-ordinary text. Off by default. iMessage is the only supported source in
-v1 (chat.db exposes the stored `.caf` voice notes); LinkedIn voice
-messages are not captured today.
+Voice and audio attachments captured during scans can be transcribed
+locally or via OpenAI, so summaries, the reply brief, the checklist,
+and predraft suggestions all read voice content as ordinary text. Off
+by default. iMessage is the supported source today.
 
-Enable with these `.env` variables (defaults shown):
+Two providers ship:
+
+- **`local-whisper`** (recommended). Runs `whisper.cpp` on this Mac.
+  Once the binary and a model file are in place, ongoing transcription
+  cost is local compute only. No per-minute fee.
+- **`openai`**. Hits `/v1/audio/transcriptions`. Kept as an explicit
+  fallback for operators without whisper.cpp set up, or for a quality
+  comparison against the local model.
+
+Pick one with `AUDIO_TRANSCRIPTION_PROVIDER`. The default is
+`local-whisper`, so the runner never spends OpenAI tokens unless the
+operator explicitly sets `AUDIO_TRANSCRIPTION_PROVIDER=openai`.
+Unknown / mis-spelled values fall through to `local-whisper` too —
+there's no path that silently bills against the OpenAI key.
+
+### Local Whisper setup
+
+1. Build / install whisper.cpp and confirm `whisper-cli` is on PATH
+   (or note its absolute path).
+2. Download a model file. Start with a small English model such as
+   `ggml-base.en.bin` for speed; move to larger files only if accuracy
+   isn't good enough. Model files are large and stay on local disk
+   only; never commit them to the repo.
+3. Set the env vars:
 
 ```
-AUDIO_TRANSCRIPTION_ENABLED=false
+AUDIO_TRANSCRIPTION_ENABLED=true
+AUDIO_TRANSCRIPTION_PROVIDER=local-whisper
+LOCAL_WHISPER_COMMAND=whisper-cli
+LOCAL_WHISPER_MODEL_PATH=/absolute/path/to/ggml-base.en.bin
+LOCAL_WHISPER_LANGUAGE=en
+LOCAL_WHISPER_THREADS=4
+LOCAL_WHISPER_TIMEOUT_MS=120000
+LOCAL_WHISPER_EXTRA_ARGS=
+```
+
+When the command or model path is missing the runner records each row
+as `skipped` with reason `local_whisper_not_configured`; the Transcribe
+button is still available, so once the config is fixed the operator
+can retry on demand without a re-scan.
+
+`LOCAL_WHISPER_EXTRA_ARGS` is whitespace-separated. There's no shell
+interpretation, so each token is a literal argv entry passed straight
+to `whisper-cli`.
+
+### OpenAI setup
+
+```
+AUDIO_TRANSCRIPTION_ENABLED=true
+AUDIO_TRANSCRIPTION_PROVIDER=openai
 AUDIO_TRANSCRIPTION_MODEL=gpt-4o-mini-transcribe
 AUDIO_TRANSCRIPTION_MAX_BYTES=26214400
 AUDIO_TRANSCRIPTION_MAX_SECONDS=600
@@ -79,8 +123,26 @@ AUDIO_TRANSCRIPTION_LANGUAGE=en
 `OPENAI_API_KEY` is reused; with the key blank the service marks every
 attachment `skipped` and warns once at startup. `gpt-4o-mini-transcribe`
 is the cheaper default; set `AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe`
-for higher quality at higher cost. Other model ids accepted by the
-endpoint are also passed through unchanged but are not supported.
+for higher quality at higher cost. Other audio model ids accepted by
+the endpoint pass through unchanged but are not supported.
+
+### Troubleshooting (local-whisper)
+
+- `local_whisper_not_configured`: `LOCAL_WHISPER_COMMAND` or
+  `LOCAL_WHISPER_MODEL_PATH` is empty. Fill in both and click
+  Transcribe again.
+- `local_whisper_command_failed`: the binary couldn't start. Confirm
+  it's executable and on PATH, or use an absolute path in
+  `LOCAL_WHISPER_COMMAND`. The runner also surfaces this when the
+  binary exits non-zero (bad model file, unsupported codec).
+- `local_whisper_timeout`: a long clip exceeded `LOCAL_WHISPER_TIMEOUT_MS`.
+  Raise the timeout, or pick a smaller model for faster runs.
+- `local_whisper_empty_output`: whisper-cli succeeded but produced no
+  text. The clip is probably silent or below the model's noise floor.
+- Missing historical iMessage audio files: Apple expires audio
+  messages on a user-configurable retention window. In Messages,
+  Settings > Messages set "Audio Messages > Expire" to Never so future
+  notes stay around long enough to transcribe.
 
 Supported MIME types: `audio/mpeg`, `audio/mp4`, `audio/m4a`,
 `audio/webm`, `audio/ogg`, `audio/wav`, `audio/aac`, `audio/flac`.

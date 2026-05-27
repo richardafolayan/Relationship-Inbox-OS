@@ -17,8 +17,15 @@ function makeFakePrisma() {
     },
     messageAudioTranscription: {
       async findUnique({ where }) {
-        const key = where.audioFingerprint;
-        return audioRows.get(key) ?? null;
+        if (where.audioFingerprint !== undefined) {
+          return audioRows.get(where.audioFingerprint) ?? null;
+        }
+        if (where.messageId !== undefined) {
+          for (const row of audioRows.values()) {
+            if (row.messageId === where.messageId) return row;
+          }
+        }
+        return null;
       },
       async create({ data }) {
         const row = { id: `row-${audioRows.size + 1}`, ...data };
@@ -223,8 +230,14 @@ test("idempotent: existing fingerprint row is skipped, provider never called", a
       { type: "voice_note", manualReview: false, kind: "voice_note", guid: "g1" }
     ])
   });
-  // Seed an existing transcribed row.
-  prisma.audioRows.set("k1|g1", { status: "transcribed", id: "old" });
+  // Seed an existing transcribed row. The service now dedups by
+  // messageId (the strict @unique constraint), so the seed must carry
+  // the messageId of the message the test is re-running.
+  prisma.audioRows.set("k1|g1", {
+    status: "transcribed",
+    id: "old",
+    messageId: "m1"
+  });
   const provider = makeFakeProvider(() => ({
     kind: "ok",
     result: { text: "x", model: "gpt-4o-mini-transcribe" }

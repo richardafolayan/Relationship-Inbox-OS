@@ -153,3 +153,30 @@ export async function convertVideoToAudioM4a(absolutePath: string): Promise<stri
     });
   });
 }
+
+/**
+ * Convert any macOS-decodable audio/video file to a 16 kHz mono signed
+ * 16-bit PCM WAV. whisper.cpp's CLI expects exactly this shape — feeding
+ * it an m4a or .mov leads to silent "empty output" runs because the
+ * decoder can't read AAC-in-MP4 directly. afconvert handles the
+ * resampling, channel-mixing, and container change in one pass.
+ *
+ * Cached on disk by source path + mtime so a re-run never repeats the
+ * conversion. Returns the converted file path or `null` when the source
+ * is missing or `afconvert` cannot read the container.
+ *
+ * Lives next to the existing converters so the cache is shared and the
+ * afconvert command stays in lockstep with the other shapes.
+ */
+export async function convertAudioToWhisperWav(absolutePath: string): Promise<string | null> {
+  // Cache extension (`whisper.wav`) is distinct from any other shape we
+  // emit so concurrent CAF / video / WAV conversions on the same source
+  // each get their own cache slot.
+  return convertOnce(absolutePath, "whisper.wav", async (src, dst) => {
+    await execFileAsync(
+      "afconvert",
+      [src, dst, "-d", "LEI16@16000", "-c", "1", "-f", "WAVE"],
+      { timeout: 60_000 }
+    );
+  });
+}

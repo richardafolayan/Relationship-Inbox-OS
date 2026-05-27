@@ -37,7 +37,19 @@ export type TranscriptionOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; errorMessage: string };
 
+export type TranscriptionProviderId = "openai" | "local-whisper";
+
 export interface TranscriptionProvider {
-  readonly id: "openai";
+  readonly id: TranscriptionProviderId;
+  /**
+   * Stable human-readable identifier persisted on each
+   * `MessageAudioTranscription` row's `model` column. For OpenAI this
+   * is the audio model id (`gpt-4o-mini-transcribe`); for local
+   * Whisper it's the basename of the ggml model file
+   * (`ggml-base.en.bin`). Lets the operator see in the DB which
+   * physical model produced a given transcript without having to
+   * track env state.
+   */
+  readonly modelLabel: string;
   transcribe(request: TranscriptionRequest): Promise<TranscriptionOutcome>;
 }
