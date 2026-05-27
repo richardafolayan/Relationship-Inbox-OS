@@ -9,6 +9,18 @@ import type {
   TranscriptionProvider,
   TranscriptionRequest
 } from "./provider";
+import {
+  pickHigherTier,
+  selectBestTranscript,
+  type Attempt as SelectorAttempt,
+  type AttemptTier,
+  type SelectedTranscript
+} from "./selection";
+import type {
+  RefinementContext,
+  RefinementNearbyMessage,
+  TextRefinementService
+} from "./text-refinement-service";
 
 /**
  * MIME types OpenAI's audio.transcriptions endpoint accepts directly.
@@ -101,9 +113,61 @@ export interface TranscriptionServiceConfig {
   maxSeconds: number;
 }
 
+/**
+ * Optional nearby-thread fetcher for the refinement step. The runner
+ * passes a closure that hits the same Prisma instance as the rest of
+ * the service. Pulled out as a typed dep so tests can stub it without
+ * mocking the full prisma message model.
+ */
+export interface NearbyMessagesResolver {
+  fetch(input: {
+    messageId: string;
+    threadId: string;
+    /** Approx number of messages before/after to return. */
+    radius: number;
+  }): Promise<RefinementNearbyMessage[]>;
+}
+
 interface TranscriptionServiceDeps {
   prisma: PrismaClient;
+  /**
+   * Single-model mode. When `providers` (below) is not given, the
+   * service falls back to this single-provider behaviour and the
+   * pipeline matches the pre-progressive shape (one row in
+   * `MessageAudioTranscription`, no attempt history). Existing tests
+   * exercise this path.
+   */
   provider: TranscriptionProvider | null;
+  /**
+   * Progressive (multi-tier) mode. When set, each configured tier is
+   * run sequentially; the highest-tier successful transcript becomes
+   * `MessageAudioTranscription.transcript`. Raw output of every tier
+   * is preserved in `MessageAudioTranscriptionAttempt`.
+   *
+   * Missing tier keys are simply skipped — the runner doesn't have to
+   * configure all three.
+   */
+  providers?: Partial<Record<"fast" | "standard" | "max", TranscriptionProvider>>;
+  /**
+   * Optional text-only refinement step. Runs after the local tiers in
+   * progressive mode. When undefined or null, refinement is skipped.
+   * The refiner itself enforces "no client → skip cleanly" so we don't
+   * have to gate on auth here.
+   */
+  refiner?: TextRefinementService | null;
+  /**
+   * Whether refinement is enabled by the operator. Even when `refiner`
+   * is non-null we keep this flag separate so the runner can flip
+   * refinement off without rewiring deps.
+   */
+  refinementEnabled?: boolean;
+  /**
+   * Pulls a few nearby messages for the refinement prompt. When not
+   * provided, refinement runs with an empty nearby-messages list; the
+   * refiner is still useful for clear ASR errors but loses context
+   * disambiguation.
+   */
+  nearbyMessages?: NearbyMessagesResolver | null;
   attachmentResolver: AttachmentResolver | null;
   config: TranscriptionServiceConfig;
   /**
@@ -125,12 +189,15 @@ interface TranscriptionServiceDeps {
 
 export interface TranscribeMessageOptions {
   /**
-   * When true, an existing transcription row for the same fingerprint
-   * is deleted before the attempt. Used by the manual "Try again"
+   * When true, an existing transcription row for the same message is
+   * deleted before the attempt. Used by the manual "Try again"
    * affordance in the dashboard: if a previous run wrote a
    * `missing_file` skip because the audio hadn't downloaded yet from
    * iCloud, the operator can ask the runner to re-check. Auto-scan
-   * never sets this — fingerprint dedup keeps scans cheap.
+   * never sets this — message-level dedup keeps scans cheap.
+   *
+   * In progressive mode, force=true cascade-deletes the attempts too
+   * (the parent row's onDelete: Cascade handles this for us).
    */
   force?: boolean;
 }
@@ -142,7 +209,7 @@ export interface TranscriptionService {
    * Synchronous entrypoint for tests and the manual "Transcribe / Try
    * again" affordance. Resolves to a brief outcome summary so callers
    * can log without re-querying the DB. Set `force: true` to bypass
-   * fingerprint dedup and re-attempt against the current disk state.
+   * message-level dedup and re-attempt against the current disk state.
    */
   transcribeMessage(
     messageId: string,
@@ -154,7 +221,23 @@ export type TranscribeMessageOutcome =
   | { kind: "disabled" }
   | { kind: "no_audio" }
   | { kind: "missing_message" }
-  | { kind: "processed"; attachments: number; ok: number; failed: number; skipped: number };
+  | {
+      kind: "processed";
+      attachments: number;
+      ok: number;
+      failed: number;
+      skipped: number;
+    };
+
+/**
+ * Internal shape returned by `prepareRequest`: either a ready-to-send
+ * TranscriptionRequest, or a skip reason that should be persisted as
+ * the parent row's terminal state. Centralised so single-mode and
+ * progressive mode share identical conversion + size-cap behaviour.
+ */
+type PreparedRequest =
+  | { kind: "ok"; request: TranscriptionRequest; resolvedPath: string }
+  | { kind: "skipped"; reason: string };
 
 export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
   const warn = deps.warn ?? ((message) => console.warn(message));
@@ -169,6 +252,18 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
   // surfaces the warning again if the situation repeats hours later.
   const RETENTION_WARNING_COOLDOWN_MS = 6 * 60 * 60 * 1000;
   let retentionWarningAt = 0;
+
+  // Progressive mode is active when at least one tier provider is
+  // wired. The runner decides which tiers to populate based on the
+  // operator's env config — we don't second-guess it here. The tier
+  // type is narrowed to the local tiers only; refinement is handled
+  // separately and never appears in this list.
+  type LocalTier = "fast" | "standard" | "max";
+  const progressiveTiers: LocalTier[] = [];
+  if (deps.providers?.fast) progressiveTiers.push("fast");
+  if (deps.providers?.standard) progressiveTiers.push("standard");
+  if (deps.providers?.max) progressiveTiers.push("max");
+  const progressiveActive = progressiveTiers.length > 0;
 
   function enqueueMessage(messageId: string): void {
     if (!deps.config.enabled) return;
@@ -192,22 +287,20 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     options: TranscribeMessageOptions = {}
   ): Promise<TranscribeMessageOutcome> {
     if (!deps.config.enabled) return { kind: "disabled" };
-    if (!deps.provider || !deps.attachmentResolver) {
+    if (!progressiveActive && !deps.provider) {
       // Defensive: a misconfigured runner (enabled but no provider /
-      // resolver wired up) bails before touching prisma. The OpenAI
-      // and local-whisper providers each carry their own configured
-      // credentials / paths, so we no longer gate on `config.apiKey`
-      // here — that field is OpenAI-only and would falsely disable
-      // the local-whisper path when the operator hasn't set
-      // OPENAI_API_KEY at all.
+      // resolver wired up) bails before touching prisma.
       return { kind: "disabled" };
     }
+    if (!deps.attachmentResolver) return { kind: "disabled" };
 
     const message = await deps.prisma.message.findUnique({
       where: { id: messageId },
       select: {
         id: true,
         platformMessageKey: true,
+        threadId: true,
+        direction: true,
         attachmentsJson: true
       }
     });
@@ -216,106 +309,125 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     const audioAttachments = collectAudioAttachments(message.attachmentsJson);
     if (audioAttachments.length === 0) return { kind: "no_audio" };
 
-    let ok = 0;
-    let failed = 0;
-    let skipped = 0;
-
-    // The schema enforces one transcription row per Message (`messageId
-    // @unique`). Dedup at the message level rather than per-attachment
-    // fingerprint so a re-run on a message whose attachment guid has
-    // since changed (e.g. older rows persisted before the adapter
-    // started prefixing `at_0_`) doesn't try to insert a duplicate and
-    // hit the @unique constraint on `messageId`.
+    // Message-level dedup: any prior row for this message wins by
+    // default. The schema enforces one row per messageId. The manual
+    // "Try again" affordance passes options.force to bypass dedup;
+    // see force-handling below.
     const existingForMessage = await deps.prisma.messageAudioTranscription.findUnique({
       where: { messageId },
       select: { id: true, status: true }
     });
 
-    for (const { attachment, index } of audioAttachments) {
+    if (existingForMessage && !options.force) {
+      // Already processed. Don't re-enter the loop, don't run more
+      // tiers, don't bill OpenAI / spin whisper.cpp.
+      return {
+        kind: "processed",
+        attachments: audioAttachments.length,
+        ok: 0,
+        failed: 0,
+        skipped: 1
+      };
+    }
+    if (existingForMessage && options.force) {
+      // Cascade-deletes attempts too. Progressive force-retry starts
+      // completely fresh.
+      await deps.prisma.messageAudioTranscription.delete({
+        where: { messageId }
+      });
+    }
+
+    if (progressiveActive) {
+      return runProgressive({
+        message,
+        attachments: audioAttachments
+      });
+    }
+    return runSingleModel({
+      message,
+      attachments: audioAttachments
+    });
+  }
+
+  // -------------------------------------------------------------------
+  // Single-model orchestration (pre-progressive behaviour).
+  //
+  // Preserved verbatim from the previous service so existing operators
+  // and tests keep working when no `providers` map is wired. Writes
+  // exactly one row to MessageAudioTranscription per message, no
+  // attempts.
+  // -------------------------------------------------------------------
+  async function runSingleModel(input: {
+    message: { id: string; platformMessageKey: string };
+    attachments: Array<{ attachment: AttachmentPlaceholder; index: number }>;
+  }): Promise<TranscribeMessageOutcome> {
+    const { message, attachments } = input;
+    let ok = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    for (const { attachment, index } of attachments) {
       const fingerprint = buildAudioFingerprint({
         platformMessageKey: message.platformMessageKey,
         attachmentGuid: attachment.guid,
         attachmentIndex: index
       });
-
-      // Idempotency: any prior row for this message wins by default.
-      // We don't auto-retry failed transcriptions because most failures
-      // are structural (file unsupported, OpenAI quota exhausted) and a
-      // tight retry loop just burns money. The manual "Try again"
-      // affordance passes `options.force` to bypass dedup — the most
-      // common case there is `missing_file` skips where the audio was
-      // pending iCloud download at first run and is on disk now.
-      if (existingForMessage && !options.force) {
-        skipped += 1;
-        continue;
-      }
-      if (existingForMessage && options.force) {
-        await deps.prisma.messageAudioTranscription.delete({
-          where: { messageId }
-        });
-        // Clear the cached pointer so subsequent iterations don't
-        // re-enter the delete branch for an already-removed row.
-        // (Multi-attachment messages would otherwise loop into the
-        // create twice and crash on the second insert.)
-        (existingForMessage as { id: string | null }).id = null;
-      }
-
       const attachmentId = attachment.guid ?? `idx-${index}`;
-      const outcome = await transcribeAttachment(attachment, attachmentId);
+      const prepared = await prepareRequest(attachment, deps.provider!.modelLabel);
 
-      const baseFields = {
-        messageId,
-        attachmentId,
-        audioFingerprint: fingerprint
-      };
+      if (prepared.kind === "skipped") {
+        await deps.prisma.messageAudioTranscription.create({
+          data: {
+            messageId: message.id,
+            attachmentId,
+            audioFingerprint: fingerprint,
+            status: "skipped",
+            errorMessage: prepared.reason
+          }
+        });
+        skipped += 1;
+        maybeRetentionWarn(prepared.reason);
+        break;
+      }
 
+      const outcome = await deps.provider!.transcribe(prepared.request);
       if (outcome.kind === "ok") {
         await deps.prisma.messageAudioTranscription.create({
           data: {
-            ...baseFields,
+            messageId: message.id,
+            attachmentId,
+            audioFingerprint: fingerprint,
             status: "transcribed",
             transcript: outcome.result.text,
-            // Provider + model come from the active provider instance,
-            // so a row written under local-whisper persists
-            // provider="local-whisper" / model="ggml-base.en.bin" while
-            // an OpenAI run persists provider="openai" /
-            // model="gpt-4o-mini-transcribe". `outcome.result.model`
-            // is the per-call echo from the provider (preserves the
-            // exact OpenAI model id when present) and falls through
-            // to the provider's own label otherwise.
             provider: deps.provider!.id,
             model: outcome.result.model || deps.provider!.modelLabel,
             language: outcome.result.language ?? deps.config.language,
             durationSeconds: outcome.result.durationSeconds ?? null,
-            errorMessage: null
+            errorMessage: null,
+            selectedTier: null,
+            selectedModel: outcome.result.model || deps.provider!.modelLabel,
+            selectedProvider: deps.provider!.id
           }
         });
         ok += 1;
       } else if (outcome.kind === "skipped") {
         await deps.prisma.messageAudioTranscription.create({
           data: {
-            ...baseFields,
+            messageId: message.id,
+            attachmentId,
+            audioFingerprint: fingerprint,
             status: "skipped",
             errorMessage: outcome.reason
           }
         });
         skipped += 1;
-        if (outcome.reason === "missing_file") {
-          const now = Date.now();
-          if (now - retentionWarningAt >= RETENTION_WARNING_COOLDOWN_MS) {
-            retentionWarningAt = now;
-            warn(
-              "[transcription] iMessage voice note missing from disk before transcription could run. " +
-                "Apple Messages may be expiring audio files before Inbox OS reads them. " +
-                "Open Messages, Settings > Messages, and set Audio Messages > Expire to Never (or Keep) " +
-                "to stop future voice notes being lost."
-            );
-          }
-        }
+        maybeRetentionWarn(outcome.reason);
       } else {
         await deps.prisma.messageAudioTranscription.create({
           data: {
-            ...baseFields,
+            messageId: message.id,
+            attachmentId,
+            audioFingerprint: fingerprint,
             status: "failed",
             provider: deps.provider!.id,
             model: deps.provider!.modelLabel,
@@ -324,124 +436,449 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         });
         failed += 1;
         warn(
-          `[transcription] failed message=${messageId} attachment=${attachmentId}: ${outcome.errorMessage}`
+          `[transcription] failed message=${message.id} attachment=${attachmentId}: ${outcome.errorMessage}`
         );
       }
-      // The schema enforces one transcription row per Message. Once we
-      // wrote a row for this message (ok / skipped / failed), don't
-      // iterate to subsequent attachments — the next insert would trip
-      // the messageId @unique constraint. Multi-attachment voice
-      // messages are unusual on iMessage and the first attachment is
-      // overwhelmingly the actual voice content.
+      // One row per messageId by schema constraint — never iterate.
       break;
     }
-
-    return { kind: "processed", attachments: audioAttachments.length, ok, failed, skipped };
+    return { kind: "processed", attachments: attachments.length, ok, failed, skipped };
   }
 
-  async function transcribeAttachment(
+  // -------------------------------------------------------------------
+  // Progressive (multi-tier) orchestration.
+  //
+  // Creates a parent MessageAudioTranscription row, runs each
+  // configured tier in sequence (fast → standard → max), writes one
+  // MessageAudioTranscriptionAttempt per tier, and updates the parent's
+  // selected transcript whenever a higher tier succeeds. Optionally
+  // runs GPT-5-nano text refinement at the end.
+  // -------------------------------------------------------------------
+  async function runProgressive(input: {
+    message: {
+      id: string;
+      platformMessageKey: string;
+      threadId: string;
+      direction: "IN" | "OUT" | string;
+    };
+    attachments: Array<{ attachment: AttachmentPlaceholder; index: number }>;
+  }): Promise<TranscribeMessageOutcome> {
+    const { message, attachments } = input;
+
+    // We only process the first audio attachment per message (matches
+    // single-mode behaviour). Voice notes with multiple voice tracks
+    // are vanishingly rare on iMessage.
+    const first = attachments[0];
+    if (!first) {
+      return { kind: "processed", attachments: 0, ok: 0, failed: 0, skipped: 0 };
+    }
+    const { attachment, index } = first;
+    const fingerprint = buildAudioFingerprint({
+      platformMessageKey: message.platformMessageKey,
+      attachmentGuid: attachment.guid,
+      attachmentIndex: index
+    });
+    const attachmentId = attachment.guid ?? `idx-${index}`;
+
+    // Resolve + convert ONCE, then loop providers. The converted
+    // (m4a) file is reused across all three tier calls — afconvert's
+    // cache makes this cheap even if we re-entered.
+    const prepared = await prepareRequest(attachment, "" /* model resolved per-tier */);
+    if (prepared.kind === "skipped") {
+      // Pre-tier skip (missing file, unsupported mime, etc.) becomes
+      // the parent row terminal state. No attempt rows: no provider
+      // was ever asked.
+      await deps.prisma.messageAudioTranscription.create({
+        data: {
+          messageId: message.id,
+          attachmentId,
+          audioFingerprint: fingerprint,
+          status: "skipped",
+          errorMessage: prepared.reason
+        }
+      });
+      maybeRetentionWarn(prepared.reason);
+      return {
+        kind: "processed",
+        attachments: attachments.length,
+        ok: 0,
+        failed: 0,
+        skipped: 1
+      };
+    }
+
+    // Pre-create the parent row in `pending` state so attempt rows
+    // have a FK target. The selected transcript is filled in as
+    // tiers complete.
+    const parent = await deps.prisma.messageAudioTranscription.create({
+      data: {
+        messageId: message.id,
+        attachmentId,
+        audioFingerprint: fingerprint,
+        status: "pending",
+        language: deps.config.language
+      }
+    });
+
+    let ok = 0;
+    let failed = 0;
+    let skipped = 0;
+    let currentSelection: SelectedTranscript | null = null;
+    const liveAttempts: SelectorAttempt[] = [];
+
+    for (const tier of progressiveTiers) {
+      const provider = deps.providers![tier]!;
+      const tierRequest: TranscriptionRequest = {
+        ...prepared.request,
+        model: provider.modelLabel || deps.config.model
+      };
+      const startedAt = Date.now();
+      const outcome = await provider.transcribe(tierRequest);
+      const elapsed = Date.now() - startedAt;
+
+      const attemptBase = {
+        transcriptionId: parent.id,
+        tier,
+        provider: provider.id,
+        model: provider.modelLabel || outcome.kind === "ok" ? provider.modelLabel : provider.modelLabel,
+        durationMs: elapsed
+      };
+
+      if (outcome.kind === "ok") {
+        const text = outcome.result.text?.trim() ?? "";
+        if (text.length === 0) {
+          // Empty transcript is recorded as a skip so the selector
+          // doesn't pick it up but we still have a row for debugging.
+          await deps.prisma.messageAudioTranscriptionAttempt.create({
+            data: {
+              ...attemptBase,
+              status: "skipped",
+              errorMessage: "empty_output"
+            }
+          });
+          skipped += 1;
+          continue;
+        }
+        await deps.prisma.messageAudioTranscriptionAttempt.create({
+          data: {
+            ...attemptBase,
+            status: "transcribed",
+            transcript: text,
+            errorMessage: null
+          }
+        });
+        liveAttempts.push({
+          tier,
+          model: provider.modelLabel,
+          provider: provider.id,
+          status: "transcribed",
+          transcript: text
+        });
+        const candidate: SelectedTranscript = {
+          tier,
+          model: provider.modelLabel,
+          provider: provider.id,
+          transcript: text
+        };
+        const previousSelection = currentSelection;
+        currentSelection = pickHigherTier(currentSelection, candidate);
+        if (currentSelection === candidate) {
+          // New higher-tier transcript: update parent. If we're
+          // replacing a previously selected transcript, flag the
+          // thread for AI refresh.
+          await deps.prisma.messageAudioTranscription.update({
+            where: { id: parent.id },
+            data: {
+              transcript: text,
+              provider: provider.id,
+              model: provider.modelLabel,
+              status: "transcribed",
+              selectedTier: tier,
+              selectedModel: provider.modelLabel,
+              selectedProvider: provider.id,
+              errorMessage: null,
+              needsAiRefresh: previousSelection !== null
+            }
+          });
+        }
+        ok += 1;
+      } else if (outcome.kind === "skipped") {
+        await deps.prisma.messageAudioTranscriptionAttempt.create({
+          data: {
+            ...attemptBase,
+            status: "skipped",
+            errorMessage: outcome.reason
+          }
+        });
+        skipped += 1;
+      } else {
+        await deps.prisma.messageAudioTranscriptionAttempt.create({
+          data: {
+            ...attemptBase,
+            status: "failed",
+            errorMessage: outcome.errorMessage
+          }
+        });
+        failed += 1;
+        warn(
+          `[transcription] tier=${tier} failed message=${message.id} attachment=${attachmentId}: ${outcome.errorMessage}`
+        );
+      }
+    }
+
+    // Refinement runs only when:
+    //   - operator enabled it
+    //   - we have a refiner wired
+    //   - at least one local tier produced a non-empty transcript
+    //   - at least the `standard` tier completed successfully (the
+    //     refiner needs reliable text to compare against; fast alone
+    //     isn't trustworthy enough to justify the token cost)
+    const standardOrMaxSucceeded = liveAttempts.some(
+      (a) => a.tier === "standard" || a.tier === "max"
+    );
+    if (
+      deps.refinementEnabled &&
+      deps.refiner &&
+      standardOrMaxSucceeded
+    ) {
+      const nearby = deps.nearbyMessages
+        ? await safeFetchNearby(deps.nearbyMessages, {
+            messageId: message.id,
+            threadId: message.threadId,
+            radius: 8
+          })
+        : [];
+      const refinementContext: RefinementContext = {
+        messageId: message.id,
+        threadId: message.threadId,
+        direction: message.direction === "OUT" ? "OUT" : "IN",
+        speakerRole: message.direction === "OUT" ? "operator" : "contact",
+        attempts: liveAttempts.map((a) => ({
+          tier: a.tier === "refinement" ? "max" : a.tier,
+          model: a.model,
+          transcript: a.transcript ?? ""
+        })),
+        nearbyMessages: nearby
+      };
+      const startedAt = Date.now();
+      const outcome = await deps.refiner.refine(refinementContext);
+      const elapsed = Date.now() - startedAt;
+
+      const attemptBase = {
+        transcriptionId: parent.id,
+        tier: "refinement" as const,
+        provider: "openai-text-refiner",
+        durationMs: elapsed
+      };
+      if (outcome.kind === "ok") {
+        await deps.prisma.messageAudioTranscriptionAttempt.create({
+          data: {
+            ...attemptBase,
+            model: outcome.result.model,
+            status: "transcribed",
+            transcript: outcome.result.correctedTranscript,
+            errorMessage: null
+          }
+        });
+        // Refinement wins over any local tier when it passes the
+        // sanitiser. Parent.transcript becomes the refined text;
+        // refinedTranscript + refinementJson carry the audit trail.
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: parent.id },
+          data: {
+            transcript: outcome.result.correctedTranscript,
+            selectedTier: "refinement",
+            selectedModel: outcome.result.model,
+            selectedProvider: "openai-text-refiner",
+            refinedTranscript: outcome.result.correctedTranscript,
+            refinementModel: outcome.result.model,
+            refinementConfidence: outcome.result.confidence,
+            refinementJson: outcome.result.rawJson,
+            needsAiRefresh: currentSelection !== null
+          }
+        });
+        currentSelection = {
+          tier: "refinement",
+          model: outcome.result.model,
+          provider: "openai-text-refiner",
+          transcript: outcome.result.correctedTranscript
+        };
+      } else if (outcome.kind === "skipped") {
+        await deps.prisma.messageAudioTranscriptionAttempt.create({
+          data: {
+            ...attemptBase,
+            model: deps.refiner ? "gpt-5-nano" : "unknown",
+            status: "skipped",
+            errorMessage: outcome.reason
+          }
+        });
+      } else {
+        await deps.prisma.messageAudioTranscriptionAttempt.create({
+          data: {
+            ...attemptBase,
+            model: "gpt-5-nano",
+            status: "failed",
+            errorMessage: outcome.errorMessage
+          }
+        });
+        warn(
+          `[transcription] refinement failed message=${message.id}: ${outcome.errorMessage}`
+        );
+      }
+    }
+
+    // Final parent status: derive from attempt outcomes.
+    if (currentSelection) {
+      // Already wrote status="transcribed" + selected* fields in the
+      // success branch above; no further update needed.
+    } else {
+      // No tier produced a usable transcript. Mark parent as skipped
+      // (operator can manually retry) or failed if everything failed.
+      const finalStatus = failed > 0 && skipped === 0 ? "failed" : "skipped";
+      await deps.prisma.messageAudioTranscription.update({
+        where: { id: parent.id },
+        data: {
+          status: finalStatus,
+          errorMessage:
+            finalStatus === "failed"
+              ? "all_tiers_failed"
+              : "all_tiers_skipped"
+        }
+      });
+    }
+
+    // Re-derive `ok` to reflect at-most-one-transcript-per-message:
+    // even when multiple tiers succeeded, only one transcript was
+    // selected. We expose the per-tier counts for log readability via
+    // the parent updates above, but the public return shape stays
+    // backwards-compatible.
+    return {
+      kind: "processed",
+      attachments: attachments.length,
+      ok: currentSelection ? 1 : 0,
+      failed,
+      skipped
+    };
+  }
+
+  // -------------------------------------------------------------------
+  // Helpers shared by single + progressive paths.
+  // -------------------------------------------------------------------
+
+  async function prepareRequest(
     attachment: AttachmentPlaceholder,
-    attachmentId: string
-  ): Promise<TranscriptionOutcome> {
+    defaultModelLabel: string
+  ): Promise<PreparedRequest> {
     if (!attachment.guid) {
       return { kind: "skipped", reason: "attachment has no guid" };
     }
     const resolved = await deps.attachmentResolver!.resolve(attachment.guid);
-    if (!resolved) {
-      // Stable code (rather than free-text "attachment not found...")
-      // so the dashboard and the retention-warning counter can both
-      // match a single string. Apple expires audio messages after the
-      // user-configurable retention window — if transcription was
-      // turned on after a thread had been running for a while, many
-      // historical rows resolve to this state.
-      return { kind: "skipped", reason: "missing_file" };
-    }
-
+    if (!resolved) return { kind: "skipped", reason: "missing_file" };
     if (!existsSync(resolved.absolutePath)) {
       return { kind: "skipped", reason: "missing_file" };
     }
 
-    // CAF voice notes and videos both need converting to m4a before
-    // OpenAI will accept the upload. Conversion is cached on disk by
-    // source path + mtime so a re-run never repeats the afconvert call.
-    // Failed conversions are treated as "skipped" with a clear reason;
-    // the runner does not crash.
     const sourceIsCaf = isCafSource({
       mimeType: resolved.mimeType,
       filename: resolved.filename,
       transferName: resolved.transferName
     });
-    const sourceIsVideo = !sourceIsCaf && isVideoSource({
-      kind: attachment.kind,
-      mimeType: resolved.mimeType,
-      filename: resolved.filename,
-      transferName: resolved.transferName
-    });
+    const sourceIsVideo =
+      !sourceIsCaf &&
+      isVideoSource({
+        kind: attachment.kind,
+        mimeType: resolved.mimeType,
+        filename: resolved.filename,
+        transferName: resolved.transferName
+      });
 
-    let request: TranscriptionRequest;
     if (sourceIsCaf) {
       const converted = await cafConverter(resolved.absolutePath);
-      if (!converted) {
-        return { kind: "skipped", reason: "caf to m4a conversion failed" };
-      }
-      // Size cap is enforced on the extracted m4a — for both CAF and
-      // video, the upload bytes are the converted m4a, not the original.
+      if (!converted) return { kind: "skipped", reason: "caf to m4a conversion failed" };
       const m4aSize = safeFileSize(converted);
       if (m4aSize > deps.config.maxBytes) {
         return { kind: "skipped", reason: `attachment exceeds size cap (${m4aSize} bytes)` };
       }
-      // The original transferName is "Audio Message.caf". OpenAI's
-      // /v1/audio/transcriptions endpoint sniffs the filename extension
-      // to decide whether the file format is supported, so the upload
-      // must advertise the converted `.m4a` shape rather than the
-      // original `.caf` name.
-      request = {
-        filePath: converted,
-        mimeType: "audio/mp4",
-        filename: "voice-note.m4a",
-        language: deps.config.language,
-        model: deps.config.model
-      };
-    } else if (sourceIsVideo) {
-      const converted = await videoAudioExtractor(resolved.absolutePath);
-      if (!converted) {
-        // afconvert refused the container (no audio track, or a codec
-        // macOS can't decode). Skipped, not failed — there's nothing
-        // for OpenAI to work with even if we did upload.
-        return { kind: "skipped", reason: "video to m4a conversion failed" };
-      }
-      const m4aSize = safeFileSize(converted);
-      if (m4aSize > deps.config.maxBytes) {
-        return { kind: "skipped", reason: `attachment exceeds size cap (${m4aSize} bytes)` };
-      }
-      request = {
-        filePath: converted,
-        mimeType: "audio/mp4",
-        // Generic name so OpenAI's filename-extension sniffer sees an
-        // audio/mp4 upload (not a `.mov` it would reject).
-        filename: "video-audio.m4a",
-        language: deps.config.language,
-        model: deps.config.model
-      };
-    } else {
-      const stat = statSync(resolved.absolutePath);
-      if (stat.size > deps.config.maxBytes) {
-        return { kind: "skipped", reason: `attachment exceeds size cap (${stat.size} bytes)` };
-      }
-      const mimeType = (resolved.mimeType ?? "").toLowerCase();
-      if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
-        return { kind: "skipped", reason: `unsupported mime type ${mimeType || "<unknown>"}` };
-      }
-      request = {
-        filePath: resolved.absolutePath,
-        mimeType,
-        filename: resolved.transferName ?? resolved.filename ?? `audio${extname(resolved.absolutePath) || ""}`,
-        language: deps.config.language,
-        model: deps.config.model
+      return {
+        kind: "ok",
+        resolvedPath: converted,
+        request: {
+          filePath: converted,
+          mimeType: "audio/mp4",
+          filename: "voice-note.m4a",
+          language: deps.config.language,
+          model: defaultModelLabel || deps.config.model
+        }
       };
     }
+    if (sourceIsVideo) {
+      const converted = await videoAudioExtractor(resolved.absolutePath);
+      if (!converted) return { kind: "skipped", reason: "video to m4a conversion failed" };
+      const m4aSize = safeFileSize(converted);
+      if (m4aSize > deps.config.maxBytes) {
+        return { kind: "skipped", reason: `attachment exceeds size cap (${m4aSize} bytes)` };
+      }
+      return {
+        kind: "ok",
+        resolvedPath: converted,
+        request: {
+          filePath: converted,
+          mimeType: "audio/mp4",
+          filename: "video-audio.m4a",
+          language: deps.config.language,
+          model: defaultModelLabel || deps.config.model
+        }
+      };
+    }
+    const stat = statSync(resolved.absolutePath);
+    if (stat.size > deps.config.maxBytes) {
+      return { kind: "skipped", reason: `attachment exceeds size cap (${stat.size} bytes)` };
+    }
+    const mimeType = (resolved.mimeType ?? "").toLowerCase();
+    if (!SUPPORTED_MIME_TYPES.has(mimeType)) {
+      return { kind: "skipped", reason: `unsupported mime type ${mimeType || "<unknown>"}` };
+    }
+    return {
+      kind: "ok",
+      resolvedPath: resolved.absolutePath,
+      request: {
+        filePath: resolved.absolutePath,
+        mimeType,
+        filename:
+          resolved.transferName ??
+          resolved.filename ??
+          `audio${extname(resolved.absolutePath) || ""}`,
+        language: deps.config.language,
+        model: defaultModelLabel || deps.config.model
+      }
+    };
+  }
 
-    return deps.provider!.transcribe(request);
+  function maybeRetentionWarn(reason: string): void {
+    if (reason !== "missing_file") return;
+    const now = Date.now();
+    if (now - retentionWarningAt < RETENTION_WARNING_COOLDOWN_MS) return;
+    retentionWarningAt = now;
+    warn(
+      "[transcription] iMessage voice note missing from disk before transcription could run. " +
+        "Apple Messages may be expiring audio files before Inbox OS reads them. " +
+        "Open Messages, Settings > Messages, and set Audio Messages > Expire to Never (or Keep) " +
+        "to stop future voice notes being lost."
+    );
+  }
+
+  async function safeFetchNearby(
+    resolver: NearbyMessagesResolver,
+    input: { messageId: string; threadId: string; radius: number }
+  ): Promise<RefinementNearbyMessage[]> {
+    try {
+      return await resolver.fetch(input);
+    } catch (error) {
+      warn(
+        `[transcription] nearby-messages lookup failed for ${input.messageId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+      return [];
+    }
   }
 
   function safeFileSize(path: string): number {
@@ -488,3 +925,7 @@ export function collectAudioAttachments(
   return out;
 }
 
+// Re-export pure selector helper so the runner / dashboard surface can
+// derive the selected transcript without importing the implementation.
+export { selectBestTranscript } from "./selection";
+export type { AttemptTier } from "./selection";

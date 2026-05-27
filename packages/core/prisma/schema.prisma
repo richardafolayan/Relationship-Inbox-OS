@@ -400,6 +400,10 @@ model MessageAudioTranscription {
   audioFingerprint String   @unique
   // pending | transcribed | failed | skipped
   status           String
+  // The selected transcript: the best one we've produced so far across
+  // all tiers + refinement. The rest of the app reads this column, so
+  // a fresh tier upgrade or a successful refinement simply rewrites it
+  // and the AI / UI consumers see the new text transparently.
   transcript       String?
   provider         String?
   model            String?
@@ -407,11 +411,82 @@ model MessageAudioTranscription {
   durationSeconds  Int?
   // Short, safe human-readable error message; never the raw OpenAI body.
   errorMessage     String?
+
+  // Progressive transcription bookkeeping (PR #382). Each tier
+  // (fast | standard | max | refinement) is a separate row in
+  // MessageAudioTranscriptionAttempt; these fields capture which one
+  // currently owns `transcript` so the selector and UI never have to
+  // re-derive it.
+  selectedTier         String?  // "fast" | "standard" | "max" | "refinement" | null when nothing selected
+  selectedModel        String?  // basename of the model that produced the selected transcript
+  selectedProvider     String?  // "local-whisper" | "openai-text-refiner"
+
+  // GPT-5 nano text-refinement output (env-gated, off by default).
+  // Stored alongside `transcript` so we can always inspect what the
+  // refiner did vs the raw local model attempts in
+  // MessageAudioTranscriptionAttempt.
+  refinedTranscript    String?
+  refinementModel      String?
+  refinementConfidence String?  // "low" | "medium" | "high" | null
+  // The full sanitised JSON payload from the refiner (changesMade,
+  // uncertainPhrases, etc.) so the dashboard can render diagnostics on
+  // demand. Kept as a string so SQLite + migrations stay simple.
+  refinementJson       String?
+
+  // Set true when a higher-tier transcript replaces an earlier one
+  // after a thread has already been summarised. The Reassess action
+  // clears this; we never auto-bill AI calls from here.
+  needsAiRefresh       Boolean  @default(false)
+
+  attempts         MessageAudioTranscriptionAttempt[]
+
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
   @@index([status])
+  @@index([needsAiRefresh])
   @@map("message_audio_transcriptions")
+}
+
+// One row per (transcription, tier, model) attempt. Lets us preserve
+// the raw output of every local Whisper model AND the refiner without
+// destroying earlier passes when a better one lands. The dashboard
+// "Refined from local transcript" tooltip and the future debug surface
+// both read from here.
+//
+// Crucially: a failed/empty higher tier writes a row here but does NOT
+// modify the selected transcript on MessageAudioTranscription. See
+// transcription-service.ts selectBestTranscript.
+model MessageAudioTranscriptionAttempt {
+  id              String   @id @default(cuid())
+  transcriptionId String
+  transcription   MessageAudioTranscription @relation(fields: [transcriptionId], references: [id], onDelete: Cascade)
+  // "fast" | "standard" | "max" | "refinement". Strings (not enum) so a
+  // future tier can be added without a migration.
+  tier            String
+  // "local-whisper" | "openai-text-refiner".
+  provider        String
+  model           String
+  // "transcribed" | "failed" | "skipped" | "pending". Empty-output rows
+  // are stored as "skipped" with errorMessage="empty_output" so the
+  // selector treats them the same as unrun.
+  status          String
+  transcript      String?
+  durationMs      Int?
+  // Short, safe error code (e.g. "local_whisper_empty_output"); never
+  // a raw API body.
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // One attempt per (transcription, tier, model) — re-running the same
+  // model is a no-op unless the operator manually clears the row first.
+  // This is what stops a scan loop from spending money on identical
+  // refinement calls.
+  @@unique([transcriptionId, tier, model])
+  @@index([transcriptionId])
+  @@index([status])
+  @@map("message_audio_transcription_attempts")
 }
 
 model Draft {

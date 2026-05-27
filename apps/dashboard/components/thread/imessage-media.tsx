@@ -80,12 +80,42 @@ export function VoiceMessageTranscript({
     local.transcript &&
     local.transcript.trim().length > 0
   ) {
+    // Progressive transcription: when the selected tier is below max
+    // / refinement AND the row was written in the last few minutes,
+    // a higher-quality pass may still upgrade the text on a re-read.
+    // We render a quiet "Improving transcript..." line so the
+    // operator knows a better version may land shortly. After the
+    // freshness window expires we hide the line — a "fast" selection
+    // that's been the same for ten minutes is the final state on
+    // this install (only the fast tier is configured).
+    const selected = local.selectedTier ?? null;
+    const updatedAtMs =
+      typeof local.updatedAt === "string" ? Date.parse(local.updatedAt) : NaN;
+    const isFresh =
+      Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs < 5 * 60 * 1000;
+    const isImproving =
+      isFresh && (selected === "fast" || selected === "standard");
+    // Refinement tooltip: GPT-5-nano corrected the transcript using
+    // the local model attempts + nearby messages. Doesn't change the
+    // visible text; just provides provenance for the curious.
+    const refined =
+      selected === "refinement" &&
+      (local.refinementConfidence === "medium" ||
+        local.refinementConfidence === "high");
     return (
       <span className="block whitespace-pre-wrap text-[12px] leading-[1.45] text-ink-3">
-        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3">
+        <span
+          className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3"
+          title={refined ? "Refined from local transcript" : undefined}
+        >
           {transcriptLabel}
         </span>
         <span className="ml-[6px]">{local.transcript}</span>
+        {isImproving ? (
+          <span className="mt-[2px] block text-[11px] italic text-ink-3">
+            Improving transcript...
+          </span>
+        ) : null}
       </span>
     );
   }

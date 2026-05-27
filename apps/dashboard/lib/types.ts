@@ -341,6 +341,22 @@ export interface ThreadMessage {
      * pointless.
      */
     errorMessage?: string | null;
+    /**
+     * Progressive transcription bookkeeping. When `selectedTier` is
+     * `"fast"` or `"standard"` and `updatedAt` is recent, the dashboard
+     * renders a muted `Improving transcript...` line to signal that a
+     * higher-tier model may still upgrade the text. `null` for rows
+     * written before progressive mode (single-model behaviour).
+     */
+    selectedTier?: "fast" | "standard" | "max" | "refinement" | null;
+    /**
+     * GPT-5-nano refinement confidence, when refinement was applied.
+     * Drives the optional "Refined from local transcript" tooltip on
+     * the transcript bubble.
+     */
+    refinementConfidence?: "low" | "medium" | "high" | null;
+    /** ISO timestamp of the last write to the transcription row. */
+    updatedAt?: string | null;
   } | null;
   /**
    * Server-resolved snippet of the parent message this one replies to,
