@@ -80,6 +80,18 @@ function makeFakePrisma() {
         attemptRows.push(row);
         return row;
       },
+      async findFirst({ where } = {}) {
+        if (!where) return attemptRows[0] ?? null;
+        return (
+          attemptRows.find(
+            (a) =>
+              (where.transcriptionId === undefined ||
+                a.transcriptionId === where.transcriptionId) &&
+              (where.tier === undefined || a.tier === where.tier) &&
+              (where.model === undefined || a.model === where.model)
+          ) ?? null
+        );
+      },
       async findMany({ where } = {}) {
         if (where && where.transcriptionId) {
           return attemptRows.filter((a) => a.transcriptionId === where.transcriptionId);

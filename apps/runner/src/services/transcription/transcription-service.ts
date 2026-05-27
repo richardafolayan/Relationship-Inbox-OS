@@ -11,7 +11,6 @@ import type {
 } from "./provider";
 import {
   pickHigherTier,
-  selectBestTranscript,
   type Attempt as SelectorAttempt,
   type AttemptTier,
   type SelectedTranscript
@@ -75,12 +74,6 @@ function isVideoSource(input: {
   return false;
 }
 
-/**
- * Resolve a stored audio attachment to a (path, mime) the provider can
- * upload. Returns `null` when the attachment cannot be located on disk
- * or cannot be converted to a supported format; callers treat null as
- * "skip silently".
- */
 export interface AttachmentResolution {
   absolutePath: string;
   mimeType: string;
@@ -113,12 +106,6 @@ export interface TranscriptionServiceConfig {
   maxSeconds: number;
 }
 
-/**
- * Optional nearby-thread fetcher for the refinement step. The runner
- * passes a closure that hits the same Prisma instance as the rest of
- * the service. Pulled out as a typed dep so tests can stub it without
- * mocking the full prisma message model.
- */
 export interface NearbyMessagesResolver {
   fetch(input: {
     messageId: string;
@@ -130,91 +117,59 @@ export interface NearbyMessagesResolver {
 
 interface TranscriptionServiceDeps {
   prisma: PrismaClient;
-  /**
-   * Single-model mode. When `providers` (below) is not given, the
-   * service falls back to this single-provider behaviour and the
-   * pipeline matches the pre-progressive shape (one row in
-   * `MessageAudioTranscription`, no attempt history). Existing tests
-   * exercise this path.
-   */
   provider: TranscriptionProvider | null;
   /**
    * Progressive (multi-tier) mode. When set, each configured tier is
-   * run sequentially; the highest-tier successful transcript becomes
-   * `MessageAudioTranscription.transcript`. Raw output of every tier
-   * is preserved in `MessageAudioTranscriptionAttempt`.
+   * run sequentially in the **manual** path; the **automatic** path
+   * (enqueueMessage) only runs `fast` and `standard` so a heavy `max`
+   * pass on one message can never starve fresh fast transcripts for
+   * other messages waiting in the queue. Refinement (GPT-5-nano)
+   * never runs from the auto path.
    *
    * Missing tier keys are simply skipped — the runner doesn't have to
    * configure all three.
    */
   providers?: Partial<Record<"fast" | "standard" | "max", TranscriptionProvider>>;
-  /**
-   * Optional text-only refinement step. Runs after the local tiers in
-   * progressive mode. When undefined or null, refinement is skipped.
-   * The refiner itself enforces "no client → skip cleanly" so we don't
-   * have to gate on auth here.
-   */
   refiner?: TextRefinementService | null;
-  /**
-   * Whether refinement is enabled by the operator. Even when `refiner`
-   * is non-null we keep this flag separate so the runner can flip
-   * refinement off without rewiring deps.
-   */
   refinementEnabled?: boolean;
-  /**
-   * Pulls a few nearby messages for the refinement prompt. When not
-   * provided, refinement runs with an empty nearby-messages list; the
-   * refiner is still useful for clear ASR errors but loses context
-   * disambiguation.
-   */
   nearbyMessages?: NearbyMessagesResolver | null;
   attachmentResolver: AttachmentResolver | null;
   config: TranscriptionServiceConfig;
-  /**
-   * Optional override for the per-attachment conversion step. Defaults
-   * to the shared `convertCafToM4a` helper exported by
-   * `services/imessage-attachment-server`. Tests stub this to skip the
-   * macOS-only afconvert dependency.
-   */
   convertCafToM4a?: (absolutePath: string) => Promise<string | null>;
-  /**
-   * Optional override for the video-to-audio extractor. Defaults to the
-   * shared `convertVideoToAudioM4a` helper. Tests stub this to skip
-   * macOS-only afconvert when running on CI / Linux.
-   */
   convertVideoToAudioM4a?: (absolutePath: string) => Promise<string | null>;
-  /** Log channel; defaults to console.warn. Tests stub to silence noise. */
   warn?: (message: string) => void;
 }
 
 export interface TranscribeMessageOptions {
   /**
-   * When true, an existing transcription row for the same message is
-   * deleted before the attempt. Used by the manual "Try again"
-   * affordance in the dashboard: if a previous run wrote a
-   * `missing_file` skip because the audio hadn't downloaded yet from
-   * iCloud, the operator can ask the runner to re-check. Auto-scan
-   * never sets this — message-level dedup keeps scans cheap.
-   *
-   * In progressive mode, force=true cascade-deletes the attempts too
-   * (the parent row's onDelete: Cascade handles this for us).
+   * Manual force-retry: delete the existing parent row + cascaded
+   * attempts, then re-run the full progressive chain. Used by the
+   * dashboard's `Try again` affordance. Auto-scan never sets this.
    */
   force?: boolean;
 }
 
 export interface TranscriptionService {
-  /** Fire-and-forget; never throws. Scans must not block on this. */
+  /** Fire-and-forget; never throws. Used by scan-time enqueue. */
   enqueueMessage(messageId: string): void;
   /**
-   * Synchronous entrypoint for tests and the manual "Transcribe / Try
-   * again" affordance. Resolves to a brief outcome summary so callers
-   * can log without re-querying the DB. Set `force: true` to bypass
-   * message-level dedup and re-attempt against the current disk state.
+   * Synchronous entrypoint used by manual `Transcribe / Try again`.
+   * Runs the FULL chain — every configured local tier (fast,
+   * standard, max) followed by refinement when enabled. The auto path
+   * (enqueueMessage) intentionally does NOT run this; it uses the
+   * fast-first priority queue instead.
    */
   transcribeMessage(
     messageId: string,
     options?: TranscribeMessageOptions
   ): Promise<TranscribeMessageOutcome>;
+  /**
+   * Returns the set of tier names currently queued or running for
+   * this message. Drives the dashboard's `Improving transcript...`
+   * hint without polling. Returns an empty array when nothing is in
+   * flight or progressive mode isn't active.
+   */
+  getPendingTiers(messageId: string): AttemptTier[];
 }
 
 export type TranscribeMessageOutcome =
@@ -229,69 +184,203 @@ export type TranscribeMessageOutcome =
       skipped: number;
     };
 
-/**
- * Internal shape returned by `prepareRequest`: either a ready-to-send
- * TranscriptionRequest, or a skip reason that should be persisted as
- * the parent row's terminal state. Centralised so single-mode and
- * progressive mode share identical conversion + size-cap behaviour.
- */
 type PreparedRequest =
   | { kind: "ok"; request: TranscriptionRequest; resolvedPath: string }
   | { kind: "skipped"; reason: string };
+
+type LocalTier = "fast" | "standard" | "max";
+
+interface QueueItem {
+  messageId: string;
+  tier: LocalTier;
+}
 
 export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
   const warn = deps.warn ?? ((message) => console.warn(message));
   const cafConverter = deps.convertCafToM4a ?? convertCafToM4a;
   const videoAudioExtractor = deps.convertVideoToAudioM4a ?? convertVideoToAudioM4a;
-  const inflight = new Set<string>();
-  // Retention-warning state. Emit a single calm warning per process the
-  // first time we see a missing-file skip while transcription is on, so
-  // the operator notices their Messages audio retention window is
-  // expiring files before the runner can transcribe them. Re-armed
-  // after RETENTION_WARNING_COOLDOWN_MS so a long-running process
-  // surfaces the warning again if the situation repeats hours later.
   const RETENTION_WARNING_COOLDOWN_MS = 6 * 60 * 60 * 1000;
   let retentionWarningAt = 0;
 
+  // Per-messageId mutex. Both the auto queue worker and the manual
+  // transcribeMessage path go through withSerial(messageId, ...) so a
+  // force-retry never races a queued tier on the same message.
+  const serialQueues = new Map<string, Promise<unknown>>();
+
   // Progressive mode is active when at least one tier provider is
-  // wired. The runner decides which tiers to populate based on the
-  // operator's env config — we don't second-guess it here. The tier
-  // type is narrowed to the local tiers only; refinement is handled
-  // separately and never appears in this list.
-  type LocalTier = "fast" | "standard" | "max";
-  const progressiveTiers: LocalTier[] = [];
-  if (deps.providers?.fast) progressiveTiers.push("fast");
-  if (deps.providers?.standard) progressiveTiers.push("standard");
-  if (deps.providers?.max) progressiveTiers.push("max");
-  const progressiveActive = progressiveTiers.length > 0;
+  // wired. Tier ordering for the manual path is strict: fast → standard
+  // → max. The queue (auto path) skips max and refinement entirely.
+  const configuredManualTiers: LocalTier[] = [];
+  if (deps.providers?.fast) configuredManualTiers.push("fast");
+  if (deps.providers?.standard) configuredManualTiers.push("standard");
+  if (deps.providers?.max) configuredManualTiers.push("max");
+  const configuredAutoTiers: LocalTier[] = configuredManualTiers.filter(
+    (t) => t === "fast" || t === "standard"
+  );
+  const progressiveActive = configuredManualTiers.length > 0;
+
+  // Fast-first scheduling state. Two physical queues — the worker
+  // always drains `fastQueue` to empty before touching `standardQueue`,
+  // so a batch of new messages all see their `fast` transcript before
+  // the runner spends time on any `standard` pass. `pendingTiersByMessage`
+  // tracks what's queued/running per message for the dashboard's
+  // truth-based `Improving transcript...` hint.
+  const fastQueue: QueueItem[] = [];
+  const standardQueue: QueueItem[] = [];
+  const pendingTiersByMessage = new Map<string, Set<AttemptTier>>();
+  let draining = false;
+
+  function getPendingTiers(messageId: string): AttemptTier[] {
+    const set = pendingTiersByMessage.get(messageId);
+    return set ? Array.from(set) : [];
+  }
+
+  function trackPending(messageId: string, tier: AttemptTier): void {
+    const set = pendingTiersByMessage.get(messageId);
+    if (set) {
+      set.add(tier);
+    } else {
+      pendingTiersByMessage.set(messageId, new Set([tier]));
+    }
+  }
+
+  function clearPending(messageId: string, tier: AttemptTier): void {
+    const set = pendingTiersByMessage.get(messageId);
+    if (!set) return;
+    set.delete(tier);
+    if (set.size === 0) pendingTiersByMessage.delete(messageId);
+  }
+
+  function withSerial<T>(messageId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = serialQueues.get(messageId) ?? Promise.resolve();
+    const guarded = previous.catch(() => undefined).then(() => fn());
+    // Store a swallowed version so a thrown error doesn't poison
+    // future calls but the actual result is still propagated to the
+    // caller via `guarded`.
+    const placeholder = guarded.catch(() => undefined);
+    serialQueues.set(messageId, placeholder);
+    placeholder.finally(() => {
+      if (serialQueues.get(messageId) === placeholder) {
+        serialQueues.delete(messageId);
+      }
+    });
+    return guarded;
+  }
 
   function enqueueMessage(messageId: string): void {
     if (!deps.config.enabled) return;
-    if (inflight.has(messageId)) return;
-    inflight.add(messageId);
-    queueMicrotask(() => {
-      void transcribeMessage(messageId)
-        .catch((error) => {
-          warn(
-            `[transcription] unhandled error for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
+    // Single-mode (no `providers` wired): use the legacy fire-and-
+    // forget shape — one call runs the one provider and returns.
+    if (!progressiveActive) {
+      if (!deps.provider) return;
+      queueMicrotask(() => {
+        void withSerial(messageId, () => transcribeMessage(messageId)).catch(
+          (error) => {
+            warn(
+              `[transcription] unhandled error for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        );
+      });
+      return;
+    }
+    // Progressive auto path: queue a `fast` task. The drainer will
+    // chain `standard` after a successful fast pass. Never queues
+    // `max` from this path — that's a manual-only tier.
+    if (configuredAutoTiers.length === 0) return;
+    // De-dupe: if any tier for this message is already queued / running,
+    // skip. The manual force=true path resets state by deleting the
+    // parent row before re-entering.
+    if (pendingTiersByMessage.has(messageId)) return;
+    if (configuredAutoTiers.includes("fast")) {
+      trackPending(messageId, "fast");
+      if (configuredAutoTiers.includes("standard")) {
+        trackPending(messageId, "standard");
+      }
+      fastQueue.push({ messageId, tier: "fast" });
+    } else if (configuredAutoTiers.includes("standard")) {
+      trackPending(messageId, "standard");
+      standardQueue.push({ messageId, tier: "standard" });
+    }
+    scheduleDrain();
+  }
+
+  function scheduleDrain(): void {
+    if (draining) return;
+    queueMicrotask(() => void drain());
+  }
+
+  async function drain(): Promise<void> {
+    if (draining) return;
+    draining = true;
+    try {
+      while (fastQueue.length > 0 || standardQueue.length > 0) {
+        // ALWAYS prefer fast tasks. This is the heart of the "fast
+        // across all messages first" guarantee — a slow `standard`
+        // pass in the queue waits while any newly-enqueued fast tasks
+        // run, so a batch of incoming voice notes all see their first
+        // transcript before any of them gets upgraded.
+        const item = fastQueue.shift() ?? standardQueue.shift();
+        if (!item) break;
+        try {
+          await withSerial(item.messageId, () =>
+            runOneTierForQueue(item)
           );
-        })
-        .finally(() => {
-          inflight.delete(messageId);
-        });
-    });
+        } catch (error) {
+          warn(
+            `[transcription] queue task failed (message=${item.messageId} tier=${item.tier}): ${error instanceof Error ? error.message : String(error)}`
+          );
+          clearPending(item.messageId, item.tier);
+        }
+      }
+    } finally {
+      draining = false;
+    }
+  }
+
+  async function runOneTierForQueue(item: QueueItem): Promise<void> {
+    const provider = deps.providers?.[item.tier];
+    if (!provider) {
+      clearPending(item.messageId, item.tier);
+      return;
+    }
+    const result = await runOneProgressiveTier(item.messageId, item.tier);
+    clearPending(item.messageId, item.tier);
+    // Chain: a successful `fast` queues the `standard` tier so the
+    // upgrade actually happens. A failed/skipped `fast` does not
+    // chain — the operator can manually retry.
+    if (
+      result === "ok" &&
+      item.tier === "fast" &&
+      configuredAutoTiers.includes("standard")
+    ) {
+      standardQueue.push({ messageId: item.messageId, tier: "standard" });
+      // standard was already marked pending at enqueue time; nothing
+      // to add here.
+    } else if (
+      result !== "ok" &&
+      item.tier === "fast" &&
+      configuredAutoTiers.includes("standard")
+    ) {
+      // Fast failed; drop the standard tracking so the dashboard
+      // doesn't show a stale "Improving transcript..." line forever.
+      clearPending(item.messageId, "standard");
+    }
   }
 
   async function transcribeMessage(
     messageId: string,
     options: TranscribeMessageOptions = {}
   ): Promise<TranscribeMessageOutcome> {
+    return withSerial(messageId, () => transcribeMessageLocked(messageId, options));
+  }
+
+  async function transcribeMessageLocked(
+    messageId: string,
+    options: TranscribeMessageOptions
+  ): Promise<TranscribeMessageOutcome> {
     if (!deps.config.enabled) return { kind: "disabled" };
-    if (!progressiveActive && !deps.provider) {
-      // Defensive: a misconfigured runner (enabled but no provider /
-      // resolver wired up) bails before touching prisma.
-      return { kind: "disabled" };
-    }
+    if (!progressiveActive && !deps.provider) return { kind: "disabled" };
     if (!deps.attachmentResolver) return { kind: "disabled" };
 
     const message = await deps.prisma.message.findUnique({
@@ -309,18 +398,11 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     const audioAttachments = collectAudioAttachments(message.attachmentsJson);
     if (audioAttachments.length === 0) return { kind: "no_audio" };
 
-    // Message-level dedup: any prior row for this message wins by
-    // default. The schema enforces one row per messageId. The manual
-    // "Try again" affordance passes options.force to bypass dedup;
-    // see force-handling below.
     const existingForMessage = await deps.prisma.messageAudioTranscription.findUnique({
       where: { messageId },
       select: { id: true, status: true }
     });
-
     if (existingForMessage && !options.force) {
-      // Already processed. Don't re-enter the loop, don't run more
-      // tiers, don't bill OpenAI / spin whisper.cpp.
       return {
         kind: "processed",
         attachments: audioAttachments.length,
@@ -330,18 +412,34 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       };
     }
     if (existingForMessage && options.force) {
-      // Cascade-deletes attempts too. Progressive force-retry starts
-      // completely fresh.
       await deps.prisma.messageAudioTranscription.delete({
         where: { messageId }
       });
+      // Also clear any in-memory queue state for this message; the
+      // manual retry is the new source of truth.
+      pendingTiersByMessage.delete(messageId);
     }
 
     if (progressiveActive) {
-      return runProgressive({
-        message,
-        attachments: audioAttachments
-      });
+      // Track pending tiers up front so a long-running manual call
+      // surfaces `isImproving=true` for the duration.
+      for (const tier of configuredManualTiers) {
+        trackPending(messageId, tier);
+      }
+      if (deps.refinementEnabled && deps.refiner) {
+        trackPending(messageId, "refinement");
+      }
+      try {
+        return await runProgressiveManual({
+          message,
+          attachments: audioAttachments
+        });
+      } finally {
+        for (const tier of configuredManualTiers) {
+          clearPending(messageId, tier);
+        }
+        clearPending(messageId, "refinement");
+      }
     }
     return runSingleModel({
       message,
@@ -350,12 +448,8 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
   }
 
   // -------------------------------------------------------------------
-  // Single-model orchestration (pre-progressive behaviour).
-  //
-  // Preserved verbatim from the previous service so existing operators
-  // and tests keep working when no `providers` map is wired. Writes
-  // exactly one row to MessageAudioTranscription per message, no
-  // attempts.
+  // Single-model orchestration (pre-progressive behaviour, kept for
+  // back-compat when no `providers` map is wired).
   // -------------------------------------------------------------------
   async function runSingleModel(input: {
     message: { id: string; platformMessageKey: string };
@@ -365,7 +459,6 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     let ok = 0;
     let failed = 0;
     let skipped = 0;
-
     for (const { attachment, index } of attachments) {
       const fingerprint = buildAudioFingerprint({
         platformMessageKey: message.platformMessageKey,
@@ -374,7 +467,6 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       });
       const attachmentId = attachment.guid ?? `idx-${index}`;
       const prepared = await prepareRequest(attachment, deps.provider!.modelLabel);
-
       if (prepared.kind === "skipped") {
         await deps.prisma.messageAudioTranscription.create({
           data: {
@@ -389,7 +481,6 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
         maybeRetentionWarn(prepared.reason);
         break;
       }
-
       const outcome = await deps.provider!.transcribe(prepared.request);
       if (outcome.kind === "ok") {
         await deps.prisma.messageAudioTranscription.create({
@@ -404,7 +495,6 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
             language: outcome.result.language ?? deps.config.language,
             durationSeconds: outcome.result.durationSeconds ?? null,
             errorMessage: null,
-            selectedTier: null,
             selectedModel: outcome.result.model || deps.provider!.modelLabel,
             selectedProvider: deps.provider!.id
           }
@@ -439,22 +529,17 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           `[transcription] failed message=${message.id} attachment=${attachmentId}: ${outcome.errorMessage}`
         );
       }
-      // One row per messageId by schema constraint — never iterate.
-      break;
+      break; // one row per message by schema
     }
     return { kind: "processed", attachments: attachments.length, ok, failed, skipped };
   }
 
   // -------------------------------------------------------------------
-  // Progressive (multi-tier) orchestration.
-  //
-  // Creates a parent MessageAudioTranscription row, runs each
-  // configured tier in sequence (fast → standard → max), writes one
-  // MessageAudioTranscriptionAttempt per tier, and updates the parent's
-  // selected transcript whenever a higher tier succeeds. Optionally
-  // runs GPT-5-nano text refinement at the end.
+  // Manual progressive: runs the FULL chain (all configured tiers +
+  // optional refinement) inline. The auto path uses runOneProgressiveTier
+  // via the queue instead.
   // -------------------------------------------------------------------
-  async function runProgressive(input: {
+  async function runProgressiveManual(input: {
     message: {
       id: string;
       platformMessageKey: string;
@@ -464,14 +549,98 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     attachments: Array<{ attachment: AttachmentPlaceholder; index: number }>;
   }): Promise<TranscribeMessageOutcome> {
     const { message, attachments } = input;
+    let ok = 0;
+    let failed = 0;
+    let skipped = 0;
+    const liveAttempts: SelectorAttempt[] = [];
+    let selection: SelectedTranscript | null = null;
 
-    // We only process the first audio attachment per message (matches
-    // single-mode behaviour). Voice notes with multiple voice tracks
-    // are vanishingly rare on iMessage.
-    const first = attachments[0];
-    if (!first) {
-      return { kind: "processed", attachments: 0, ok: 0, failed: 0, skipped: 0 };
+    for (const tier of configuredManualTiers) {
+      const result = await runOneProgressiveTier(message.id, tier);
+      if (result === "ok") ok += 1;
+      else if (result === "failed") failed += 1;
+      else skipped += 1;
     }
+    // Re-read attempt rows to drive refinement context.
+    const parent = await deps.prisma.messageAudioTranscription.findUnique({
+      where: { messageId: message.id },
+      select: { id: true, transcript: true, selectedTier: true, selectedProvider: true, selectedModel: true }
+    });
+    if (parent) {
+      const attemptRows = await deps.prisma.messageAudioTranscriptionAttempt.findMany({
+        where: { transcriptionId: parent.id }
+      });
+      for (const row of attemptRows) {
+        if (row.status === "transcribed" && row.transcript) {
+          liveAttempts.push({
+            tier: row.tier as AttemptTier,
+            model: row.model,
+            provider: row.provider,
+            status: row.status,
+            transcript: row.transcript
+          });
+        }
+      }
+      if (parent.selectedTier && parent.transcript) {
+        selection = {
+          tier: parent.selectedTier as AttemptTier,
+          model: parent.selectedModel ?? "",
+          provider: parent.selectedProvider ?? "",
+          transcript: parent.transcript
+        };
+      }
+    }
+
+    // Optional refinement step (manual path only).
+    if (
+      deps.refinementEnabled &&
+      deps.refiner &&
+      parent &&
+      liveAttempts.some((a) => a.tier === "standard" || a.tier === "max")
+    ) {
+      await runProgressiveRefinement({ message, parentId: parent.id, attempts: liveAttempts });
+    }
+
+    return {
+      kind: "processed",
+      attachments: attachments.length,
+      ok,
+      failed,
+      skipped
+    };
+  }
+
+  // -------------------------------------------------------------------
+  // Run ONE local tier for ONE message. Self-contained: looks up the
+  // message, prepares the audio, ensures a parent row exists, runs the
+  // provider, writes an attempt row, and updates the parent's selected
+  // transcript IF this tier outranks any previous selection. Used by
+  // BOTH the manual path (loops fast→standard→max) and the auto queue
+  // (one tier per dequeue).
+  // -------------------------------------------------------------------
+  async function runOneProgressiveTier(
+    messageId: string,
+    tier: LocalTier
+  ): Promise<"ok" | "failed" | "skipped"> {
+    const provider = deps.providers?.[tier];
+    if (!provider) return "skipped";
+    if (!deps.attachmentResolver) return "skipped";
+
+    const message = await deps.prisma.message.findUnique({
+      where: { id: messageId },
+      select: {
+        id: true,
+        platformMessageKey: true,
+        threadId: true,
+        direction: true,
+        attachmentsJson: true
+      }
+    });
+    if (!message) return "skipped";
+    const audio = collectAudioAttachments(message.attachmentsJson);
+    if (audio.length === 0) return "skipped";
+    const first = audio[0];
+    if (!first) return "skipped";
     const { attachment, index } = first;
     const fingerprint = buildAudioFingerprint({
       platformMessageKey: message.platformMessageKey,
@@ -480,289 +649,240 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     });
     const attachmentId = attachment.guid ?? `idx-${index}`;
 
-    // Resolve + convert ONCE, then loop providers. The converted
-    // (m4a) file is reused across all three tier calls — afconvert's
-    // cache makes this cheap even if we re-entered.
-    const prepared = await prepareRequest(attachment, "" /* model resolved per-tier */);
+    // Ensure parent exists. If a pre-tier failure (missing_file etc.)
+    // is hit, we write a parent-skip row WITHOUT attempts.
+    let parent = await deps.prisma.messageAudioTranscription.findUnique({
+      where: { messageId }
+    });
+    const prepared = await prepareRequest(attachment, provider.modelLabel || deps.config.model);
     if (prepared.kind === "skipped") {
-      // Pre-tier skip (missing file, unsupported mime, etc.) becomes
-      // the parent row terminal state. No attempt rows: no provider
-      // was ever asked.
-      await deps.prisma.messageAudioTranscription.create({
+      if (!parent) {
+        await deps.prisma.messageAudioTranscription.create({
+          data: {
+            messageId,
+            attachmentId,
+            audioFingerprint: fingerprint,
+            status: "skipped",
+            errorMessage: prepared.reason
+          }
+        });
+        maybeRetentionWarn(prepared.reason);
+      }
+      return "skipped";
+    }
+    if (!parent) {
+      parent = await deps.prisma.messageAudioTranscription.create({
         data: {
-          messageId: message.id,
+          messageId,
           attachmentId,
           audioFingerprint: fingerprint,
-          status: "skipped",
-          errorMessage: prepared.reason
+          status: "pending",
+          language: deps.config.language
         }
       });
-      maybeRetentionWarn(prepared.reason);
-      return {
-        kind: "processed",
-        attachments: attachments.length,
-        ok: 0,
-        failed: 0,
-        skipped: 1
-      };
     }
 
-    // Pre-create the parent row in `pending` state so attempt rows
-    // have a FK target. The selected transcript is filled in as
-    // tiers complete.
-    const parent = await deps.prisma.messageAudioTranscription.create({
-      data: {
-        messageId: message.id,
-        attachmentId,
-        audioFingerprint: fingerprint,
-        status: "pending",
-        language: deps.config.language
-      }
-    });
-
-    let ok = 0;
-    let failed = 0;
-    let skipped = 0;
-    let currentSelection: SelectedTranscript | null = null;
-    const liveAttempts: SelectorAttempt[] = [];
-
-    for (const tier of progressiveTiers) {
-      const provider = deps.providers![tier]!;
-      const tierRequest: TranscriptionRequest = {
-        ...prepared.request,
-        model: provider.modelLabel || deps.config.model
-      };
-      const startedAt = Date.now();
-      const outcome = await provider.transcribe(tierRequest);
-      const elapsed = Date.now() - startedAt;
-
-      const attemptBase = {
+    // Idempotency: if this tier+model already ran for this transcription
+    // (e.g. the queue worker re-entered after a force-retry race) skip
+    // without billing the provider again.
+    const existingAttempt = await deps.prisma.messageAudioTranscriptionAttempt.findFirst({
+      where: {
         transcriptionId: parent.id,
         tier,
-        provider: provider.id,
-        model: provider.modelLabel || outcome.kind === "ok" ? provider.modelLabel : provider.modelLabel,
-        durationMs: elapsed
-      };
-
-      if (outcome.kind === "ok") {
-        const text = outcome.result.text?.trim() ?? "";
-        if (text.length === 0) {
-          // Empty transcript is recorded as a skip so the selector
-          // doesn't pick it up but we still have a row for debugging.
-          await deps.prisma.messageAudioTranscriptionAttempt.create({
-            data: {
-              ...attemptBase,
-              status: "skipped",
-              errorMessage: "empty_output"
-            }
-          });
-          skipped += 1;
-          continue;
-        }
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: {
-            ...attemptBase,
-            status: "transcribed",
-            transcript: text,
-            errorMessage: null
-          }
-        });
-        liveAttempts.push({
-          tier,
-          model: provider.modelLabel,
-          provider: provider.id,
-          status: "transcribed",
-          transcript: text
-        });
-        const candidate: SelectedTranscript = {
-          tier,
-          model: provider.modelLabel,
-          provider: provider.id,
-          transcript: text
-        };
-        const previousSelection = currentSelection;
-        currentSelection = pickHigherTier(currentSelection, candidate);
-        if (currentSelection === candidate) {
-          // New higher-tier transcript: update parent. If we're
-          // replacing a previously selected transcript, flag the
-          // thread for AI refresh.
-          await deps.prisma.messageAudioTranscription.update({
-            where: { id: parent.id },
-            data: {
-              transcript: text,
-              provider: provider.id,
-              model: provider.modelLabel,
-              status: "transcribed",
-              selectedTier: tier,
-              selectedModel: provider.modelLabel,
-              selectedProvider: provider.id,
-              errorMessage: null,
-              needsAiRefresh: previousSelection !== null
-            }
-          });
-        }
-        ok += 1;
-      } else if (outcome.kind === "skipped") {
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: {
-            ...attemptBase,
-            status: "skipped",
-            errorMessage: outcome.reason
-          }
-        });
-        skipped += 1;
-      } else {
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: {
-            ...attemptBase,
-            status: "failed",
-            errorMessage: outcome.errorMessage
-          }
-        });
-        failed += 1;
-        warn(
-          `[transcription] tier=${tier} failed message=${message.id} attachment=${attachmentId}: ${outcome.errorMessage}`
-        );
+        model: provider.modelLabel
       }
+    });
+    if (existingAttempt) {
+      return existingAttempt.status === "transcribed" ? "ok" : "skipped";
     }
 
-    // Refinement runs only when:
-    //   - operator enabled it
-    //   - we have a refiner wired
-    //   - at least one local tier produced a non-empty transcript
-    //   - at least the `standard` tier completed successfully (the
-    //     refiner needs reliable text to compare against; fast alone
-    //     isn't trustworthy enough to justify the token cost)
-    const standardOrMaxSucceeded = liveAttempts.some(
-      (a) => a.tier === "standard" || a.tier === "max"
-    );
-    if (
-      deps.refinementEnabled &&
-      deps.refiner &&
-      standardOrMaxSucceeded
-    ) {
-      const nearby = deps.nearbyMessages
-        ? await safeFetchNearby(deps.nearbyMessages, {
-            messageId: message.id,
-            threadId: message.threadId,
-            radius: 8
-          })
-        : [];
-      const refinementContext: RefinementContext = {
-        messageId: message.id,
-        threadId: message.threadId,
-        direction: message.direction === "OUT" ? "OUT" : "IN",
-        speakerRole: message.direction === "OUT" ? "operator" : "contact",
-        attempts: liveAttempts.map((a) => ({
-          tier: a.tier === "refinement" ? "max" : a.tier,
-          model: a.model,
-          transcript: a.transcript ?? ""
-        })),
-        nearbyMessages: nearby
-      };
-      const startedAt = Date.now();
-      const outcome = await deps.refiner.refine(refinementContext);
-      const elapsed = Date.now() - startedAt;
+    const tierRequest: TranscriptionRequest = {
+      ...prepared.request,
+      model: provider.modelLabel || deps.config.model
+    };
+    const startedAt = Date.now();
+    const outcome = await provider.transcribe(tierRequest);
+    const elapsed = Date.now() - startedAt;
 
-      const attemptBase = {
-        transcriptionId: parent.id,
-        tier: "refinement" as const,
-        provider: "openai-text-refiner",
-        durationMs: elapsed
-      };
-      if (outcome.kind === "ok") {
+    const attemptBase = {
+      transcriptionId: parent.id,
+      tier,
+      provider: provider.id,
+      model: provider.modelLabel,
+      durationMs: elapsed
+    };
+
+    if (outcome.kind === "ok") {
+      const text = outcome.result.text?.trim() ?? "";
+      if (text.length === 0) {
         await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: {
-            ...attemptBase,
-            model: outcome.result.model,
-            status: "transcribed",
-            transcript: outcome.result.correctedTranscript,
-            errorMessage: null
-          }
+          data: { ...attemptBase, status: "skipped", errorMessage: "empty_output" }
         });
-        // Refinement wins over any local tier when it passes the
-        // sanitiser. Parent.transcript becomes the refined text;
-        // refinedTranscript + refinementJson carry the audit trail.
+        return "skipped";
+      }
+      await deps.prisma.messageAudioTranscriptionAttempt.create({
+        data: {
+          ...attemptBase,
+          status: "transcribed",
+          transcript: text,
+          errorMessage: null
+        }
+      });
+      // Selection rule: a successful tier replaces the parent
+      // transcript ONLY when it outranks the current selection.
+      const candidate: SelectedTranscript = {
+        tier,
+        model: provider.modelLabel,
+        provider: provider.id,
+        transcript: text
+      };
+      const currentSelection: SelectedTranscript | null = parent.selectedTier
+        ? {
+            tier: parent.selectedTier as AttemptTier,
+            model: parent.selectedModel ?? "",
+            provider: parent.selectedProvider ?? "",
+            transcript: parent.transcript ?? ""
+          }
+        : null;
+      const winner = pickHigherTier(currentSelection, candidate);
+      if (winner === candidate) {
         await deps.prisma.messageAudioTranscription.update({
           where: { id: parent.id },
           data: {
-            transcript: outcome.result.correctedTranscript,
-            selectedTier: "refinement",
-            selectedModel: outcome.result.model,
-            selectedProvider: "openai-text-refiner",
-            refinedTranscript: outcome.result.correctedTranscript,
-            refinementModel: outcome.result.model,
-            refinementConfidence: outcome.result.confidence,
-            refinementJson: outcome.result.rawJson,
+            transcript: text,
+            provider: provider.id,
+            model: provider.modelLabel,
+            status: "transcribed",
+            selectedTier: tier,
+            selectedModel: provider.modelLabel,
+            selectedProvider: provider.id,
+            errorMessage: null,
+            // Mark for AI refresh only when we replaced a previous
+            // selection. A first-write fast transcript is the BASE,
+            // not a "refresh trigger".
             needsAiRefresh: currentSelection !== null
           }
         });
-        currentSelection = {
-          tier: "refinement",
-          model: outcome.result.model,
-          provider: "openai-text-refiner",
-          transcript: outcome.result.correctedTranscript
-        };
-      } else if (outcome.kind === "skipped") {
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: {
-            ...attemptBase,
-            model: deps.refiner ? "gpt-5-nano" : "unknown",
-            status: "skipped",
-            errorMessage: outcome.reason
-          }
-        });
-      } else {
-        await deps.prisma.messageAudioTranscriptionAttempt.create({
-          data: {
-            ...attemptBase,
-            model: "gpt-5-nano",
-            status: "failed",
-            errorMessage: outcome.errorMessage
-          }
-        });
-        warn(
-          `[transcription] refinement failed message=${message.id}: ${outcome.errorMessage}`
-        );
       }
-    }
-
-    // Final parent status: derive from attempt outcomes.
-    if (currentSelection) {
-      // Already wrote status="transcribed" + selected* fields in the
-      // success branch above; no further update needed.
+      return "ok";
+    } else if (outcome.kind === "skipped") {
+      await deps.prisma.messageAudioTranscriptionAttempt.create({
+        data: { ...attemptBase, status: "skipped", errorMessage: outcome.reason }
+      });
+      // If parent is still in `pending` state (this is the first tier
+      // we ran and it skipped), record the skip on the parent so the
+      // dashboard renders the right copy.
+      if (!parent.selectedTier && parent.status === "pending") {
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: parent.id },
+          data: { status: "skipped", errorMessage: outcome.reason }
+        });
+      }
+      return "skipped";
     } else {
-      // No tier produced a usable transcript. Mark parent as skipped
-      // (operator can manually retry) or failed if everything failed.
-      const finalStatus = failed > 0 && skipped === 0 ? "failed" : "skipped";
-      await deps.prisma.messageAudioTranscription.update({
-        where: { id: parent.id },
+      await deps.prisma.messageAudioTranscriptionAttempt.create({
+        data: { ...attemptBase, status: "failed", errorMessage: outcome.errorMessage }
+      });
+      if (!parent.selectedTier && parent.status === "pending") {
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: parent.id },
+          data: { status: "failed", errorMessage: outcome.errorMessage }
+        });
+      }
+      warn(
+        `[transcription] tier=${tier} failed message=${messageId} attachment=${attachmentId}: ${outcome.errorMessage}`
+      );
+      return "failed";
+    }
+  }
+
+  async function runProgressiveRefinement(input: {
+    message: { id: string; threadId: string; direction: "IN" | "OUT" | string };
+    parentId: string;
+    attempts: SelectorAttempt[];
+  }): Promise<void> {
+    if (!deps.refiner) return;
+    const nearby = deps.nearbyMessages
+      ? await safeFetchNearby(deps.nearbyMessages, {
+          messageId: input.message.id,
+          threadId: input.message.threadId,
+          radius: 8
+        })
+      : [];
+    const refinementContext: RefinementContext = {
+      messageId: input.message.id,
+      threadId: input.message.threadId,
+      direction: input.message.direction === "OUT" ? "OUT" : "IN",
+      speakerRole: input.message.direction === "OUT" ? "operator" : "contact",
+      attempts: input.attempts.map((a) => ({
+        tier: a.tier === "refinement" ? "max" : (a.tier as "fast" | "standard" | "max"),
+        model: a.model,
+        transcript: a.transcript ?? ""
+      })),
+      nearbyMessages: nearby
+    };
+    const startedAt = Date.now();
+    const outcome = await deps.refiner.refine(refinementContext);
+    const elapsed = Date.now() - startedAt;
+
+    const attemptBase = {
+      transcriptionId: input.parentId,
+      tier: "refinement" as const,
+      provider: "openai-text-refiner",
+      durationMs: elapsed
+    };
+    if (outcome.kind === "ok") {
+      await deps.prisma.messageAudioTranscriptionAttempt.create({
         data: {
-          status: finalStatus,
-          errorMessage:
-            finalStatus === "failed"
-              ? "all_tiers_failed"
-              : "all_tiers_skipped"
+          ...attemptBase,
+          model: outcome.result.model,
+          status: "transcribed",
+          transcript: outcome.result.correctedTranscript,
+          errorMessage: null
         }
       });
+      const parent = await deps.prisma.messageAudioTranscription.findUnique({
+        where: { id: input.parentId },
+        select: { selectedTier: true }
+      });
+      await deps.prisma.messageAudioTranscription.update({
+        where: { id: input.parentId },
+        data: {
+          transcript: outcome.result.correctedTranscript,
+          selectedTier: "refinement",
+          selectedModel: outcome.result.model,
+          selectedProvider: "openai-text-refiner",
+          refinedTranscript: outcome.result.correctedTranscript,
+          refinementModel: outcome.result.model,
+          refinementConfidence: outcome.result.confidence,
+          refinementJson: outcome.result.rawJson,
+          needsAiRefresh: parent?.selectedTier !== null && parent?.selectedTier !== undefined
+        }
+      });
+    } else if (outcome.kind === "skipped") {
+      await deps.prisma.messageAudioTranscriptionAttempt.create({
+        data: {
+          ...attemptBase,
+          model: deps.refiner ? "gpt-5-nano" : "unknown",
+          status: "skipped",
+          errorMessage: outcome.reason
+        }
+      });
+    } else {
+      await deps.prisma.messageAudioTranscriptionAttempt.create({
+        data: {
+          ...attemptBase,
+          model: "gpt-5-nano",
+          status: "failed",
+          errorMessage: outcome.errorMessage
+        }
+      });
+      warn(`[transcription] refinement failed message=${input.message.id}: ${outcome.errorMessage}`);
     }
-
-    // Re-derive `ok` to reflect at-most-one-transcript-per-message:
-    // even when multiple tiers succeeded, only one transcript was
-    // selected. We expose the per-tier counts for log readability via
-    // the parent updates above, but the public return shape stays
-    // backwards-compatible.
-    return {
-      kind: "processed",
-      attachments: attachments.length,
-      ok: currentSelection ? 1 : 0,
-      failed,
-      skipped
-    };
   }
 
   // -------------------------------------------------------------------
-  // Helpers shared by single + progressive paths.
+  // Helpers.
   // -------------------------------------------------------------------
 
   async function prepareRequest(
@@ -889,16 +1009,9 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     }
   }
 
-  return { enqueueMessage, transcribeMessage };
+  return { enqueueMessage, transcribeMessage, getPendingTiers };
 }
 
-/**
- * Parse the attachmentsJson column into the list of attachments the
- * transcription pipeline can usefully run on (voice notes, generic
- * audio attachments, and videos whose audio track is extractable via
- * `convertVideoToAudioM4a`). Each entry carries its original positional
- * index, used as a fallback id when an attachment has no guid.
- */
 export function collectAudioAttachments(
   attachmentsJson: string | null
 ): Array<{ attachment: AttachmentPlaceholder; index: number }> {
@@ -925,7 +1038,5 @@ export function collectAudioAttachments(
   return out;
 }
 
-// Re-export pure selector helper so the runner / dashboard surface can
-// derive the selected transcript without importing the implementation.
 export { selectBestTranscript } from "./selection";
 export type { AttemptTier } from "./selection";

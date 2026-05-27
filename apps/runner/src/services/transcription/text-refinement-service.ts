@@ -171,26 +171,38 @@ export function createTextRefinementService(input: {
   };
 }
 
-const DEFAULT_SYSTEM_PROMPT = `You are correcting an automatic speech recognition transcript. You are not rewriting the speaker. Preserve the speaker's words, slang, hesitations, filler, tone, and rough phrasing. Only correct likely transcription errors when the competing transcripts or surrounding conversation make the correction strongly supported.
+const DEFAULT_SYSTEM_PROMPT = `You are correcting an automatic speech recognition transcript. You are NOT rewriting the speaker. You are NOT polishing the prose. You are NOT summarising. Your only job is to fix specific likely ASR mistakes.
 
-Rules:
-- Do not summarise.
-- Do not make the transcript sound polished.
-- Do not remove meaningful filler if it changes the speaker's style.
-- Do not add facts not present in the transcripts/context.
-- Preserve uncertainty.
-- Prefer the local transcript if unsure.
-- Use nearby conversation context only to resolve likely ASR mistakes, names, and obvious homophones.
-- Keep British English spelling where relevant.
-- Output JSON only.
+You will receive multiple competing local Whisper transcripts of the same audio plus nearby conversation context. The HIGHEST-TIER transcript is the most accurate; treat it as the ground truth for what was actually said. Use the others only to spot ambiguous moments where the models disagree.
 
-Required JSON shape:
+ABSOLUTE PRESERVATION RULES — these are non-negotiable:
+- Preserve all hesitations, filler ("um", "uh", "like", "you know"), repetitions, false starts, run-on sentences, and rough phrasing exactly as the highest-tier transcript has them.
+- Preserve the speaker's slang, casualness, and any awkward grammar.
+- Preserve any phrase that appears across two or more of the local transcripts — that's strong evidence the speaker actually said it, even if it reads as redundant or repetitive.
+- Do NOT collapse repeated phrases for readability. If the speaker said "a serious food shop like I used to do" and that appears in 2+ local transcripts, keep it.
+- Do NOT shorten the transcript. Word count should be within a few percent of the highest-tier local transcript.
+- Do NOT add punctuation, capitalisation, or sentence breaks beyond what's already there.
+- Do NOT add words or facts that don't appear in the local transcripts or nearby messages.
+
+WHAT YOU CAN CHANGE:
+- A clear ASR error where one local model heard one word ("future") and another heard a different word ("food shop") and the conversational context makes one of them obviously correct.
+- A homophone or near-homophone fix (e.g. "god" vs "good") supported by the surrounding messages.
+- A name that one model spelled incorrectly when context makes the right spelling clear.
+
+WHEN IN DOUBT:
+- Prefer the highest-tier local transcript verbatim.
+- Set confidence to "low" and leave changesMade empty.
+
+OUTPUT FORMAT:
+Output JSON only. Required shape:
 {
   "correctedTranscript": string,
   "confidence": "low" | "medium" | "high",
   "changesMade": Array<{ "from": string, "to": string, "reason": string }>,
   "uncertainPhrases": string[]
-}`;
+}
+
+Every entry in changesMade must correspond to an actual word-level change you made. If you didn't change anything, return the highest-tier local transcript verbatim and an empty changesMade array.`;
 
 /**
  * Build the user prompt. Exposed for tests so they can assert the
@@ -257,27 +269,59 @@ export function parseAndSanitise(
     return { kind: "skipped", reason: "refinement_empty_transcript" };
   }
   // Guard 1: corrected transcript must not be drastically shorter
-  // than the best local attempt. The exception is when the local
-  // attempt has heavy repetition that the refiner has trimmed —
-  // approximated by checking that >70% of corrected tokens appear in
-  // the local one AND the corrected text is still substantial
-  // (at least 40% of the local length OR at least 50 chars). Without
-  // that floor a single-word corrected transcript that happens to
-  // appear in the local would slip through.
+  // than the best local attempt. With the tightened system prompt the
+  // refiner shouldn't shrink at all, so the floor is intentionally
+  // strict: ANY shrink under 88% of the highest-tier local is
+  // treated as the refiner rewriting style, not fixing ASR. The old
+  // "duplicate trimming is fine" exception is removed because we
+  // explicitly tell the model in the system prompt NOT to collapse
+  // repeated phrases.
   const bestLocal = context.attempts[context.attempts.length - 1]?.transcript?.trim() ?? "";
   if (bestLocal.length > 0) {
-    const correctedLength = corrected.length;
-    const bestLocalLength = bestLocal.length;
-    const shrinkRatio = correctedLength / bestLocalLength;
-    if (shrinkRatio < 0.75) {
-      const correctedSubstantial =
-        correctedLength >= 50 || shrinkRatio >= 0.4;
-      const localTokens = new Set(tokenise(bestLocal));
-      const correctedTokens = tokenise(corrected);
-      const overlap = correctedTokens.filter((t) => localTokens.has(t)).length;
-      const overlapRatio = overlap / Math.max(correctedTokens.length, 1);
-      if (!correctedSubstantial || overlapRatio < 0.7) {
-        return { kind: "skipped", reason: "refinement_too_short" };
+    const shrinkRatio = corrected.length / bestLocal.length;
+    if (shrinkRatio < 0.88) {
+      return { kind: "skipped", reason: "refinement_too_short" };
+    }
+  }
+
+  // Guard 2: consensus phrase drops. A 3-gram (sequence of three
+  // adjacent ≥3-char tokens) that appears in TWO OR MORE local
+  // transcripts is strong evidence the speaker actually said it.
+  //
+  // We don't reject on the *count* of missing consensus grams
+  // (homophone fixes legitimately drop 1-2 grams clustered around the
+  // changed word). Instead we look for a RUN: ≥4 consecutive
+  // positions in the highest-tier local transcript where every
+  // consensus 3-gram is missing from the corrected output. A run
+  // that long can only come from removing a contiguous chunk of
+  // speech the speaker actually said, not from fixing an ASR error.
+  //
+  // For the Lanre regression — "a serious food shop like i used to
+  // do" cut from the corrected text — the missing 3-grams form a run
+  // of 7+ positions and the guard fires. A two-word homophone fix
+  // produces a missing run of length 2 and slips through cleanly.
+  if (context.attempts.length >= 2) {
+    const consensusGrams = computeConsensus3grams(context.attempts);
+    if (consensusGrams.size > 0) {
+      const highestTokens = tokenise(bestLocal);
+      const correctedGramsSet = new Set(buildTokenNgrams(tokenise(corrected), 3));
+      let currentRun = 0;
+      let longestRun = 0;
+      for (let i = 0; i + 3 <= highestTokens.length; i += 1) {
+        const gram = highestTokens.slice(i, i + 3).join("|");
+        if (!consensusGrams.has(gram)) {
+          currentRun = 0;
+          continue;
+        }
+        if (correctedGramsSet.has(gram)) {
+          currentRun = 0;
+        } else {
+          currentRun += 1;
+          if (currentRun > longestRun) longestRun = currentRun;
+        }
+      }
+      if (longestRun >= 4) {
+        return { kind: "skipped", reason: "refinement_dropped_consensus_phrases" };
       }
     }
   }
@@ -355,6 +399,50 @@ function tokenise(input: string): string[] {
     .replace(/[^a-z0-9'\s]/g, " ")
     .split(/\s+/)
     .filter((t) => t.length >= 3); // ignore very short filler / stopwords
+}
+
+/**
+ * Build all overlapping n-grams from a token stream as
+ * pipe-separated strings (so they're cheap to put in a Set).
+ * Returns an empty array when the input is shorter than `n`.
+ */
+function buildTokenNgrams(tokens: string[], n: number): string[] {
+  if (tokens.length < n) return [];
+  const out: string[] = [];
+  for (let i = 0; i + n <= tokens.length; i += 1) {
+    out.push(tokens.slice(i, i + n).join("|"));
+  }
+  return out;
+}
+
+/**
+ * Find every 3-gram that appears in TWO OR MORE of the local
+ * transcripts. These are the speaker's actual phrases — at least
+ * two independent ASR models agreed on them — so the refiner must
+ * preserve them. Dropping these is the signature of a stylistic
+ * rewrite, which is what the sanitiser rejects.
+ */
+function computeConsensus3grams(
+  attempts: ReadonlyArray<{ transcript: string }>
+): Set<string> {
+  const counts = new Map<string, number>();
+  for (const attempt of attempts) {
+    const tokens = tokenise(attempt.transcript);
+    const seenInThisAttempt = new Set<string>();
+    for (const gram of buildTokenNgrams(tokens, 3)) {
+      // Count each gram at most once per attempt so a transcript that
+      // genuinely repeats a phrase doesn't inflate the consensus
+      // count by itself.
+      if (seenInThisAttempt.has(gram)) continue;
+      seenInThisAttempt.add(gram);
+      counts.set(gram, (counts.get(gram) ?? 0) + 1);
+    }
+  }
+  const out = new Set<string>();
+  for (const [gram, count] of counts) {
+    if (count >= 2) out.add(gram);
+  }
+  return out;
 }
 
 /**

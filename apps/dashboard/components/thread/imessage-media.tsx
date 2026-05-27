@@ -80,26 +80,19 @@ export function VoiceMessageTranscript({
     local.transcript &&
     local.transcript.trim().length > 0
   ) {
-    // Progressive transcription: when the selected tier is below max
-    // / refinement AND the row was written in the last few minutes,
-    // a higher-quality pass may still upgrade the text on a re-read.
-    // We render a quiet "Improving transcript..." line so the
-    // operator knows a better version may land shortly. After the
-    // freshness window expires we hide the line — a "fast" selection
-    // that's been the same for ten minutes is the final state on
-    // this install (only the fast tier is configured).
-    const selected = local.selectedTier ?? null;
-    const updatedAtMs =
-      typeof local.updatedAt === "string" ? Date.parse(local.updatedAt) : NaN;
-    const isFresh =
-      Number.isFinite(updatedAtMs) && Date.now() - updatedAtMs < 5 * 60 * 1000;
-    const isImproving =
-      isFresh && (selected === "fast" || selected === "standard");
+    // Truth-based: only show `Improving transcript...` when the
+    // runner reports a higher-tier task is actually queued or
+    // running. Backed by the service's in-memory pending-tiers map.
+    // The previous time-window heuristic could lie (it lingered on
+    // single-tier installs and lied during long-running max tiers
+    // that had already finished); the field below is derived from
+    // real pipeline state.
+    const isImproving = local.isImproving === true;
     // Refinement tooltip: GPT-5-nano corrected the transcript using
     // the local model attempts + nearby messages. Doesn't change the
     // visible text; just provides provenance for the curious.
     const refined =
-      selected === "refinement" &&
+      local.selectedTier === "refinement" &&
       (local.refinementConfidence === "medium" ||
         local.refinementConfidence === "high");
     return (

@@ -3093,6 +3093,12 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
     }
   });
 
+  // Surface the truth-based pending-tiers map on the response so the
+  // dashboard immediately renders the right "Improving transcript..."
+  // state without a follow-up poll.
+  const isImproving = transcriptionService
+    .getPendingTiers(messageId)
+    .some((t) => t === "standard" || t === "max" || t === "refinement");
   res.json({
     ok: true,
     counts: {
@@ -3101,7 +3107,7 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
       failed: outcome.failed,
       skipped: outcome.skipped
     },
-    transcription: row ?? null
+    transcription: row ? { ...row, isImproving } : null
   });
 }));
 
@@ -4107,21 +4113,24 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
             transcript: message.audioTranscription.transcript,
             errorMessage: message.audioTranscription.errorMessage,
             // Progressive transcription bookkeeping. `selectedTier`
-            // tells the UI whether a higher-quality pass may still
-            // upgrade the text, and `refinementConfidence` drives the
-            // optional "Refined from local transcript" tooltip when
-            // GPT-5-nano refinement was applied. `updatedAt` lets the
-            // UI scope the "Improving transcript..." hint to the last
-            // few minutes so it doesn't linger forever on rows where
-            // the operator only configured a single tier.
+            // tells the UI which tier produced the visible text;
+            // `refinementConfidence` drives the optional "Refined
+            // from local transcript" tooltip when GPT-5-nano
+            // refinement was applied.
             selectedTier:
               (message.audioTranscription as { selectedTier?: string | null }).selectedTier ?? null,
             refinementConfidence:
               (message.audioTranscription as { refinementConfidence?: string | null })
                 .refinementConfidence ?? null,
-            updatedAt:
-              (message.audioTranscription as { updatedAt?: Date | null })
-                .updatedAt?.toISOString() ?? null
+            // Truth-based: only true when a higher-tier task is
+            // ACTUALLY queued/running. Derived from the service's
+            // in-memory `pendingTiersByMessage` map, not a time
+            // heuristic — so the moment the queue finishes (or fast
+            // fails and no upgrade was queued), the dashboard hides
+            // the "Improving transcript..." line.
+            isImproving: transcriptionService
+              .getPendingTiers(message.id)
+              .some((t) => t === "standard" || t === "max" || t === "refinement")
           }
         : null,
       // Server-resolved snippet of the parent this message replies to.
