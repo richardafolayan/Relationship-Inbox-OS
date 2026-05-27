@@ -84,36 +84,83 @@ export interface RunnerConfig {
   };
   audioTranscription: {
     /**
-     * Master switch. Default false so the runner never makes an OpenAI
-     * /v1/audio/transcriptions call without an explicit opt-in. When false
-     * the scan-side enqueue path short-circuits before the API client is
-     * even consulted, mirroring how AI features are gated elsewhere.
+     * Master switch. Default false so the runner never starts an audio
+     * transcription run (local or remote) without an explicit opt-in.
+     * When false the scan-side enqueue path short-circuits before any
+     * provider is consulted, mirroring how AI features are gated
+     * elsewhere.
      */
     enabled: boolean;
     /**
-     * Default `gpt-4o-mini-transcribe`. Override to `gpt-4o-transcribe` for
-     * higher accuracy at higher cost. Other audio model ids accepted by
-     * /v1/audio/transcriptions are also permitted but unsupported.
+     * Selects which transcription provider the runner uses.
+     *   - "local-whisper": runs `whisper.cpp` locally via the
+     *     `LOCAL_WHISPER_COMMAND` CLI. No OpenAI request is made. This
+     *     is the near-zero-cost path for ongoing use.
+     *   - "openai": uses the existing /v1/audio/transcriptions endpoint.
+     *     Kept as an explicit fallback / quality-comparison option,
+     *     never auto-used when local-whisper is selected.
+     * Default is "openai" so existing setups don't suddenly start
+     * skipping every voice note because they haven't installed
+     * whisper.cpp yet; new operators going through .env.example are
+     * recommended local-whisper.
+     */
+    provider: "openai" | "local-whisper";
+    /**
+     * OpenAI provider model. Default `gpt-4o-mini-transcribe`. Override
+     * to `gpt-4o-transcribe` for higher accuracy at higher cost. Other
+     * audio model ids accepted by /v1/audio/transcriptions also pass
+     * through unchanged but are unsupported.
      */
     model: string;
     /**
-     * Soft cap. Audio files larger than this are recorded as `skipped` so
-     * the runner never streams a multi-hour file at OpenAI. Default 25 MiB,
-     * matching the documented OpenAI request-size ceiling.
+     * Soft cap. Audio files larger than this are recorded as `skipped`
+     * so the runner never streams a multi-hour file at OpenAI. Default
+     * 25 MiB, matching the documented OpenAI request-size ceiling. Also
+     * applies to local-whisper to keep a single, predictable cap.
      */
     maxBytes: number;
     /**
      * Duration cap in seconds. Applied only when the source attachment
-     * exposes a duration (iMessage's chat.db does not, so this acts as a
-     * second line of defence behind maxBytes). Default 600 (10 minutes).
+     * exposes a duration (iMessage's chat.db does not, so this acts as
+     * a second line of defence behind maxBytes). Default 600 (10 min).
      */
     maxSeconds: number;
     /**
-     * BCP-47 language hint passed to OpenAI's transcription endpoint. The
-     * model auto-detects when unset; a hint stabilises output for known
-     * single-language operators. Default `en`.
+     * BCP-47 language hint. Forwarded to OpenAI's endpoint or to
+     * `whisper.cpp` (`-l`). Default `en`.
      */
     language: string;
+    localWhisper: {
+      /**
+       * Path / name of the whisper.cpp CLI binary. Default `whisper-cli`
+       * (the binary `make` produces in a vanilla whisper.cpp build);
+       * point at an absolute path on systems where it isn't on PATH.
+       */
+      command: string;
+      /**
+       * Absolute path to the local whisper.cpp `ggml-*.bin` model file.
+       * Empty when not configured; the runner short-circuits the
+       * provider in that case so we never invoke whisper-cli with a
+       * missing model.
+       */
+      modelPath: string;
+      /**
+       * Per-call timeout. Default 120 seconds covers most iMessage
+       * voice notes (typically under a minute of audio) without
+       * letting the CLI hang the runner indefinitely.
+       */
+      timeoutMs: number;
+      /**
+       * Thread count passed to whisper.cpp's `-t`. Default 4.
+       */
+      threads: number;
+      /**
+       * Extra CLI arguments appended verbatim. Operators can use this
+       * to flip non-default whisper.cpp options without code changes.
+       * Parsed with whitespace as a separator; no shell interpretation.
+       */
+      extraArgs: string[];
+    };
   };
   screenshotDir: string;
   domDumpDir: string;
@@ -403,12 +450,20 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
         )
     },
     audioTranscription: {
-      // Off by default. The runner never calls OpenAI's audio endpoint
-      // unless this is flipped on AND OPENAI_API_KEY is set; the service
-      // also marks `skipped` when the key is missing, so a misconfigured
-      // enable does not crash ingestion.
+      // Off by default. The runner never starts a transcription run
+      // (local or remote) unless this is flipped on; the service also
+      // skips safely when the active provider is mis-configured, so a
+      // wrong env doesn't crash ingestion.
       enabled:
         (env.AUDIO_TRANSCRIPTION_ENABLED ?? "").trim().toLowerCase() === "true",
+      // Default `openai` so existing setups (which have an API key and
+      // were already transcribing through #367 etc.) keep working
+      // without an env edit. New operators going through .env.example
+      // get a comment recommending local-whisper for cost.
+      provider:
+        env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase() === "local-whisper"
+          ? "local-whisper"
+          : "openai",
       // Default to gpt-4o-mini-transcribe: the cheaper, sufficiently
       // accurate OpenAI transcription model. Operators wanting higher
       // quality can set AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe.
@@ -418,7 +473,20 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       model: env.AUDIO_TRANSCRIPTION_MODEL?.trim() || "gpt-4o-mini-transcribe",
       maxBytes: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_MAX_BYTES, 25 * 1024 * 1024),
       maxSeconds: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_MAX_SECONDS, 600),
-      language: env.AUDIO_TRANSCRIPTION_LANGUAGE?.trim() || "en"
+      language: env.AUDIO_TRANSCRIPTION_LANGUAGE?.trim() || "en",
+      localWhisper: {
+        command: env.LOCAL_WHISPER_COMMAND?.trim() || "whisper-cli",
+        modelPath: env.LOCAL_WHISPER_MODEL_PATH?.trim() || "",
+        timeoutMs: parseIntOrDefault(env.LOCAL_WHISPER_TIMEOUT_MS, 120_000),
+        threads: parseIntOrDefault(env.LOCAL_WHISPER_THREADS, 4),
+        // Whitespace-separated extra args. No shell interpretation —
+        // the local provider spawns whisper.cpp directly, so each
+        // token is a literal argv entry.
+        extraArgs: (env.LOCAL_WHISPER_EXTRA_ARGS ?? "")
+          .trim()
+          .split(/\s+/)
+          .filter((arg) => arg.length > 0)
+      }
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),

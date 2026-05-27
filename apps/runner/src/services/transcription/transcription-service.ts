@@ -192,10 +192,14 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     options: TranscribeMessageOptions = {}
   ): Promise<TranscribeMessageOutcome> {
     if (!deps.config.enabled) return { kind: "disabled" };
-    if (!deps.provider || !deps.attachmentResolver || !deps.config.apiKey) {
-      // Defensive: a misconfigured runner (enabled but missing key /
-      // resolver) records skipped rows so the operator can see why
-      // nothing happened, then bails.
+    if (!deps.provider || !deps.attachmentResolver) {
+      // Defensive: a misconfigured runner (enabled but no provider /
+      // resolver wired up) bails before touching prisma. The OpenAI
+      // and local-whisper providers each carry their own configured
+      // credentials / paths, so we no longer gate on `config.apiKey`
+      // here — that field is OpenAI-only and would falsely disable
+      // the local-whisper path when the operator hasn't set
+      // OPENAI_API_KEY at all.
       return { kind: "disabled" };
     }
 
@@ -259,8 +263,16 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
             ...baseFields,
             status: "transcribed",
             transcript: outcome.result.text,
-            provider: "openai",
-            model: outcome.result.model,
+            // Provider + model come from the active provider instance,
+            // so a row written under local-whisper persists
+            // provider="local-whisper" / model="ggml-base.en.bin" while
+            // an OpenAI run persists provider="openai" /
+            // model="gpt-4o-mini-transcribe". `outcome.result.model`
+            // is the per-call echo from the provider (preserves the
+            // exact OpenAI model id when present) and falls through
+            // to the provider's own label otherwise.
+            provider: deps.provider!.id,
+            model: outcome.result.model || deps.provider!.modelLabel,
             language: outcome.result.language ?? deps.config.language,
             durationSeconds: outcome.result.durationSeconds ?? null,
             errorMessage: null
@@ -293,8 +305,8 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           data: {
             ...baseFields,
             status: "failed",
-            provider: "openai",
-            model: deps.config.model,
+            provider: deps.provider!.id,
+            model: deps.provider!.modelLabel,
             errorMessage: outcome.errorMessage
           }
         });
