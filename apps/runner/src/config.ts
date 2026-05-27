@@ -141,7 +141,9 @@ export interface RunnerConfig {
        * Absolute path to the local whisper.cpp `ggml-*.bin` model file.
        * Empty when not configured; the runner short-circuits the
        * provider in that case so we never invoke whisper-cli with a
-       * missing model.
+       * missing model. Used only when progressive mode is OFF — when
+       * progressive is ON the per-tier `progressive.fast/standard/max`
+       * model paths take over and this single path is ignored.
        */
       modelPath: string;
       /**
@@ -160,6 +162,57 @@ export interface RunnerConfig {
        * Parsed with whitespace as a separator; no shell interpretation.
        */
       extraArgs: string[];
+    };
+    /**
+     * Progressive (multi-tier) local-whisper mode. When `enabled` is
+     * true the runner runs three local Whisper models in sequence per
+     * voice note — fast, then standard, then max — so a transcript
+     * appears quickly and improves silently in the background. Each
+     * tier writes its own attempt row in
+     * `MessageAudioTranscriptionAttempt` so we can always inspect the
+     * raw output of every model; the selected text on the parent
+     * `MessageAudioTranscription.transcript` always reflects the best
+     * valid attempt under the never-downgrade rule.
+     *
+     * Default `enabled=true` only when at least one tier path is
+     * configured AND the master `enabled` switch is on; missing tier
+     * paths are skipped without failing the run. When all three paths
+     * are blank the runner falls back to the single-model
+     * `localWhisper.modelPath` shape so existing installs keep
+     * working unchanged.
+     */
+    progressive: {
+      enabled: boolean;
+      /** small.en model path — first transcript shown to the user. */
+      fastModelPath: string;
+      /** large-v3-turbo-q5_0 model path — the standard "good" pass. */
+      standardModelPath: string;
+      /** large-v3 model path — best local quality, slowest. */
+      maxModelPath: string;
+    };
+    /**
+     * Optional GPT-5-nano text refinement. Receives the local model
+     * attempts (text only — never the audio bytes) plus nearby thread
+     * messages and asks the chat model to correct likely ASR errors.
+     * Cost-safe: off by default, only invoked after at least the
+     * `standard` tier has succeeded, and never on threads where no
+     * local transcript exists. Output is post-parse sanitised so a
+     * runaway refinement can't overwrite a good local transcript with
+     * gibberish.
+     */
+    refinement: {
+      enabled: boolean;
+      /** Chat model id. Default `gpt-5-nano`. */
+      model: string;
+      /**
+       * Max number of nearby thread messages (each direction) shipped
+       * to the refiner as conversation context. Default 8 either side.
+       * Capped low because GPT-5-nano is cheap-but-not-free and most
+       * useful context lives in the immediately adjacent turns.
+       */
+      maxContextMessages: number;
+      /** Per-call wall-clock budget. Default 30 seconds. */
+      timeoutMs: number;
     };
   };
   screenshotDir: string;
@@ -488,6 +541,47 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
           .trim()
           .split(/\s+/)
           .filter((arg) => arg.length > 0)
+      },
+      progressive: (() => {
+        // Auto-enable progressive mode when the operator has set at
+        // least one tier path AND not explicitly disabled it. Empty
+        // tier paths fall through safely — the orchestrator only
+        // schedules tiers whose model path is configured.
+        const explicit = (env.AUDIO_TRANSCRIPTION_PROGRESSIVE_MODE ?? "")
+          .trim()
+          .toLowerCase();
+        const fastModelPath = env.AUDIO_TRANSCRIPTION_FAST_MODEL_PATH?.trim() || "";
+        const standardModelPath =
+          env.AUDIO_TRANSCRIPTION_STANDARD_MODEL_PATH?.trim() || "";
+        const maxModelPath = env.AUDIO_TRANSCRIPTION_MAX_MODEL_PATH?.trim() || "";
+        const anyConfigured =
+          fastModelPath !== "" || standardModelPath !== "" || maxModelPath !== "";
+        const enabled =
+          explicit === "true"
+            ? true
+            : explicit === "false"
+              ? false
+              : anyConfigured;
+        return {
+          enabled,
+          fastModelPath,
+          standardModelPath,
+          maxModelPath
+        };
+      })(),
+      refinement: {
+        // Default off in code so the runner never spends OpenAI text
+        // tokens unless the operator opts in. When on, the refiner
+        // only fires after at least the standard local tier has
+        // succeeded — see transcription-service progressive logic.
+        enabled:
+          (env.AUDIO_TRANSCRIPTION_REFINEMENT_ENABLED ?? "").trim().toLowerCase() === "true",
+        model: env.AUDIO_TRANSCRIPTION_REFINEMENT_MODEL?.trim() || "gpt-5-nano",
+        maxContextMessages: parseIntOrDefault(
+          env.AUDIO_TRANSCRIPTION_REFINEMENT_MAX_CONTEXT_MESSAGES,
+          8
+        ),
+        timeoutMs: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_REFINEMENT_TIMEOUT_MS, 30_000)
       }
     },
     screenshotDir: resolve(dataDir, "screenshots"),

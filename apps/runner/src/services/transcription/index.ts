@@ -2,8 +2,11 @@ export { buildAudioFingerprint } from "./fingerprint";
 export {
   collectAudioAttachments,
   createTranscriptionService,
+  selectBestTranscript,
   type AttachmentResolution,
   type AttachmentResolver,
+  type AttemptTier,
+  type NearbyMessagesResolver,
   type TranscribeMessageOutcome,
   type TranscriptionService,
   type TranscriptionServiceConfig
@@ -22,3 +25,16 @@ export type {
   TranscriptionRequest,
   TranscriptionSuccess
 } from "./provider";
+export {
+  buildUserPrompt as buildRefinementUserPrompt,
+  createTextRefinementService,
+  parseAndSanitise as parseRefinementResponse,
+  type ChatCompletionsClient,
+  type RefinementAttempt,
+  type RefinementContext,
+  type RefinementNearbyMessage,
+  type RefinementOutcome,
+  type RefinementServiceConfig,
+  type RefinementSuccess,
+  type TextRefinementService
+} from "./text-refinement-service";
