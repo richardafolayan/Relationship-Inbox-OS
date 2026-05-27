@@ -99,10 +99,10 @@ export interface RunnerConfig {
      *   - "openai": uses the existing /v1/audio/transcriptions endpoint.
      *     Kept as an explicit fallback / quality-comparison option,
      *     never auto-used when local-whisper is selected.
-     * Default is "openai" so existing setups don't suddenly start
-     * skipping every voice note because they haven't installed
-     * whisper.cpp yet; new operators going through .env.example are
-     * recommended local-whisper.
+     * Default is "local-whisper" so ongoing transcription is cost-
+     * safe — the runner never spends OpenAI tokens unless the operator
+     * explicitly sets AUDIO_TRANSCRIPTION_PROVIDER=openai. Unknown or
+     * mis-spelled values also fall through to local-whisper.
      */
     provider: "openai" | "local-whisper";
     /**
@@ -456,14 +456,16 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // wrong env doesn't crash ingestion.
       enabled:
         (env.AUDIO_TRANSCRIPTION_ENABLED ?? "").trim().toLowerCase() === "true",
-      // Default `openai` so existing setups (which have an API key and
-      // were already transcribing through #367 etc.) keep working
-      // without an env edit. New operators going through .env.example
-      // get a comment recommending local-whisper for cost.
+      // Default `local-whisper` so ongoing transcription is cost-safe
+      // by default — the runner never spends OpenAI tokens unless the
+      // operator explicitly opts in by setting
+      // `AUDIO_TRANSCRIPTION_PROVIDER=openai`. Unknown / mis-spelled
+      // values also fall through to local-whisper rather than
+      // silently picking the paid path.
       provider:
-        env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase() === "local-whisper"
-          ? "local-whisper"
-          : "openai",
+        env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase() === "openai"
+          ? "openai"
+          : "local-whisper",
       // Default to gpt-4o-mini-transcribe: the cheaper, sufficiently
       // accurate OpenAI transcription model. Operators wanting higher
       // quality can set AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe.

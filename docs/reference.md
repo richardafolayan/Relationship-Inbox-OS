@@ -73,9 +73,11 @@ Two providers ship:
   fallback for operators without whisper.cpp set up, or for a quality
   comparison against the local model.
 
-Pick one with `AUDIO_TRANSCRIPTION_PROVIDER`. The default is `openai`
-so existing setups keep working; new operators should switch to
-`local-whisper` once whisper.cpp is installed.
+Pick one with `AUDIO_TRANSCRIPTION_PROVIDER`. The default is
+`local-whisper`, so the runner never spends OpenAI tokens unless the
+operator explicitly sets `AUDIO_TRANSCRIPTION_PROVIDER=openai`.
+Unknown / mis-spelled values fall through to `local-whisper` too —
+there's no path that silently bills against the OpenAI key.
 
 ### Local Whisper setup
 
