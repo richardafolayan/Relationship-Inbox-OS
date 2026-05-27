@@ -303,11 +303,17 @@ test("progressive: refinement enabled but no standard/max success → no refiner
   const refiner = {
     async refine() {
       refinerCalls += 1;
-      return { kind: "ok", result: {
-        correctedTranscript: "refined", confidence: "high",
-        changesMade: [], uncertainPhrases: [], model: "gpt-5-nano",
-        rawJson: "{}"
-      } };
+      return {
+        kind: "ok",
+        result: {
+          baseModel: "ggml-small.en.bin",
+          corrections: [],
+          uncertainPhrases: [],
+          rejectReason: null,
+          model: "gpt-5-nano",
+          rawJson: "{}"
+        }
+      };
     }
   };
   const service = createTranscriptionService({
@@ -324,7 +330,7 @@ test("progressive: refinement enabled but no standard/max success → no refiner
   assert.equal(refinerCalls, 0, "refiner must not run without standard or max success");
 });
 
-test("progressive: refinement enabled + standard success → refiner runs and wins", async () => {
+test("progressive: refinement enabled + standard success → refiner runs and a safe patch is applied", async () => {
   const audioPath = makeAudioFile();
   const prisma = makeFakePrisma();
   prisma.message._messages.push(makeMessage("m1", "k1"));
@@ -335,10 +341,13 @@ test("progressive: refinement enabled + standard success → refiner runs and wi
       model: "ggml-small.en.bin"
     }
   }));
+  // Standard transcript becomes the BASE since no max tier is wired.
+  // The refiner proposes a single safe substring patch (future → food
+  // shop) which the orchestrator applies deterministically.
   const standard = makeProvider("local-whisper", "ggml-large-v3-turbo-q5_0.bin", () => ({
     kind: "ok",
     result: {
-      text: "yeah I did do well when I say food shop so loosely because food shop",
+      text: "yeah I did do well when I say food shop so loosely because the future is now",
       model: "ggml-large-v3-turbo-q5_0.bin"
     }
   }));
@@ -349,13 +358,20 @@ test("progressive: refinement enabled + standard success → refiner runs and wi
       return {
         kind: "ok",
         result: {
-          correctedTranscript:
-            "yeah I did do well when I say food shop so loosely because food shop",
-          confidence: "high",
-          changesMade: [{ from: "loosely.", to: "loosely.", reason: "ok" }],
+          baseModel: "ggml-large-v3-turbo-q5_0.bin",
+          corrections: [
+            {
+              from: "the future is now",
+              to: "the food shop is now",
+              type: "asr_word_error",
+              confidence: "high",
+              evidence: "context is about food shopping"
+            }
+          ],
           uncertainPhrases: [],
+          rejectReason: null,
           model: "gpt-5-nano",
-          rawJson: '{"correctedTranscript":"yeah ..."}'
+          rawJson: "{}"
         }
       };
     }
@@ -390,8 +406,9 @@ test("progressive: refinement enabled + standard success → refiner runs and wi
   assert.equal(parent.selectedTier, "refinement");
   assert.equal(parent.selectedProvider, "openai-text-refiner");
   assert.equal(parent.refinementModel, "gpt-5-nano");
-  assert.equal(parent.refinementConfidence, "high");
-  assert.match(parent.transcript, /food shop/);
+  // Patch applied: substring swap from base, no rewrite.
+  assert.match(parent.transcript, /the food shop is now/);
+  assert.ok(!/the future is now/.test(parent.transcript));
 
   // Attempts: fast + standard + refinement = 3
   assert.equal(prisma.attemptRows.length, 3);

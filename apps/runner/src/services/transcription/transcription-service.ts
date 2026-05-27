@@ -20,6 +20,10 @@ import type {
   RefinementNearbyMessage,
   TextRefinementService
 } from "./text-refinement-service";
+import {
+  applyRefinementPatches,
+  deriveOverallConfidence
+} from "./refinement-patches";
 
 /**
  * MIME types OpenAI's audio.transcriptions endpoint accepts directly.
@@ -832,33 +836,80 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
       durationMs: elapsed
     };
     if (outcome.kind === "ok") {
+      // Patch-based application (#386). The refiner returns a list of
+      // substring replacements rather than a whole transcript. We
+      // build the final text deterministically: highest-tier local is
+      // the base, each safe patch is applied in turn, then the three
+      // post-apply guards (duplicate / shrink / drift) decide whether
+      // we accept the result. The orchestrator — not the model —
+      // controls every byte of the selected transcript.
+      const base = input.attempts[input.attempts.length - 1]?.transcript?.trim() ?? "";
+      const application = applyRefinementPatches({
+        base,
+        corrections: outcome.result.corrections
+      });
+      const overallConfidence = deriveOverallConfidence(application.applied);
+      // The refinement attempt row stores whatever post-patch text we
+      // produced (even if a guard later rejects it) so the operator
+      // can debug. We persist the rejection reason in errorMessage so
+      // it shows up alongside the attempts list.
+      const attemptOutcomeStatus = application.rejection
+        ? "skipped"
+        : application.applied.length === 0
+          ? "skipped"
+          : "transcribed";
       await deps.prisma.messageAudioTranscriptionAttempt.create({
         data: {
           ...attemptBase,
           model: outcome.result.model,
-          status: "transcribed",
-          transcript: outcome.result.correctedTranscript,
-          errorMessage: null
+          status: attemptOutcomeStatus,
+          transcript: application.patched,
+          errorMessage:
+            application.rejection ??
+            (application.applied.length === 0 ? "no_safe_corrections" : null)
         }
       });
       const parent = await deps.prisma.messageAudioTranscription.findUnique({
         where: { id: input.parentId },
         select: { selectedTier: true }
       });
-      await deps.prisma.messageAudioTranscription.update({
-        where: { id: input.parentId },
-        data: {
-          transcript: outcome.result.correctedTranscript,
-          selectedTier: "refinement",
-          selectedModel: outcome.result.model,
-          selectedProvider: "openai-text-refiner",
-          refinedTranscript: outcome.result.correctedTranscript,
-          refinementModel: outcome.result.model,
-          refinementConfidence: outcome.result.confidence,
-          refinementJson: outcome.result.rawJson,
-          needsAiRefresh: parent?.selectedTier !== null && parent?.selectedTier !== undefined
-        }
-      });
+      // Update parent only when patches were accepted AND no guard
+      // rejected the result. Otherwise the base (which is already in
+      // parent.transcript as the max tier's output) stays untouched.
+      if (!application.rejection && application.applied.length > 0) {
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: input.parentId },
+          data: {
+            transcript: application.patched,
+            selectedTier: "refinement",
+            selectedModel: outcome.result.model,
+            selectedProvider: "openai-text-refiner",
+            refinedTranscript: application.patched,
+            refinementModel: outcome.result.model,
+            refinementConfidence: overallConfidence,
+            refinementJson: outcome.result.rawJson,
+            needsAiRefresh: parent?.selectedTier !== null && parent?.selectedTier !== undefined
+          }
+        });
+      } else if (application.rejection) {
+        // Persist the rejection on the parent for visibility, but do
+        // NOT change selectedTier — keep the highest-tier local
+        // transcript as the selection.
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: input.parentId },
+          data: { refinementJson: outcome.result.rawJson }
+        });
+        warn(
+          `[transcription] refinement rejected message=${input.message.id}: ${application.rejection}`
+        );
+      } else {
+        // application.applied.length === 0 → refiner saw no safe
+        // corrections. Persist the audit JSON but keep the base.
+        await deps.prisma.messageAudioTranscription.update({
+          where: { id: input.parentId },
+          data: { refinementJson: outcome.result.rawJson }
+        });
+      }
     } else if (outcome.kind === "skipped") {
       await deps.prisma.messageAudioTranscriptionAttempt.create({
         data: {
