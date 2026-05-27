@@ -342,6 +342,20 @@ export interface ThreadMessage {
      */
     errorMessage?: string | null;
   } | null;
+  /**
+   * Server-resolved snippet of the parent message this one replies to,
+   * if any. Resolves across sibling iMessage threads and outside the
+   * loaded window, so the dashboard can render the actual parent text
+   * even when the parent isn't in the current paginated batch. `null`
+   * when this message has no reply pointer at all; carries a generic
+   * "Earlier message no longer available" snippet when the parent guid
+   * cited by iMessage can't be located in the DB.
+   */
+  replyTo?: {
+    messageId?: string;
+    snippet: string;
+    direction?: "IN" | "OUT";
+  } | null;
 }
 
 export interface ThreadResponse {
