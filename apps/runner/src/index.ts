@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import multer from "multer";
+import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
@@ -48,6 +49,7 @@ import { createEnrichmentQueue } from "./services/enrichment-queue";
 import {
   createLocalWhisperProvider,
   createOpenAITranscriptionProvider,
+  createTextRefinementService,
   createTranscriptionService,
   type AttachmentResolver,
   type TranscriptionProvider
@@ -323,8 +325,60 @@ const compositeAttachmentResolver: AttachmentResolver | null =
 // each row as skipped with the appropriate reason on the first run
 // rather than throwing.
 let transcriptionProvider: TranscriptionProvider | null = null;
+const tierProviders: Partial<
+  Record<"fast" | "standard" | "max", TranscriptionProvider>
+> = {};
 if (runnerConfig.audioTranscription.enabled) {
-  if (runnerConfig.audioTranscription.provider === "local-whisper") {
+  const prog = runnerConfig.audioTranscription.progressive;
+  if (prog.enabled && runnerConfig.audioTranscription.provider === "local-whisper") {
+    // Progressive (multi-tier) local Whisper. Each configured tier
+    // gets its own provider instance — same CLI binary, same threads
+    // / timeout / extra args, different `ggml-*.bin` model file. The
+    // service runs them in sequence (fast → standard → max) and
+    // writes a separate attempt row per tier; missing tier paths are
+    // silently skipped.
+    const lw = runnerConfig.audioTranscription.localWhisper;
+    if (!lw.command) {
+      console.warn(
+        "[transcription] progressive mode enabled but LOCAL_WHISPER_COMMAND is unset; " +
+          "voice notes will be skipped with reason local_whisper_not_configured"
+      );
+    } else {
+      const baseLwConfig = {
+        command: lw.command,
+        timeoutMs: lw.timeoutMs,
+        threads: lw.threads,
+        extraArgs: lw.extraArgs
+      };
+      if (prog.fastModelPath) {
+        tierProviders.fast = createLocalWhisperProvider({
+          config: { ...baseLwConfig, modelPath: prog.fastModelPath }
+        });
+      }
+      if (prog.standardModelPath) {
+        tierProviders.standard = createLocalWhisperProvider({
+          config: { ...baseLwConfig, modelPath: prog.standardModelPath }
+        });
+      }
+      if (prog.maxModelPath) {
+        tierProviders.max = createLocalWhisperProvider({
+          config: { ...baseLwConfig, modelPath: prog.maxModelPath }
+        });
+      }
+      if (
+        !tierProviders.fast &&
+        !tierProviders.standard &&
+        !tierProviders.max
+      ) {
+        console.warn(
+          "[transcription] progressive mode enabled but no tier model paths set; " +
+            "voice notes will be skipped"
+        );
+      }
+    }
+  } else if (runnerConfig.audioTranscription.provider === "local-whisper") {
+    // Single-model local-whisper (pre-progressive behaviour). Kept
+    // intact for operators who haven't migrated to the tier env vars.
     const lw = runnerConfig.audioTranscription.localWhisper;
     if (!lw.command || !lw.modelPath) {
       console.warn(
@@ -357,9 +411,86 @@ if (runnerConfig.audioTranscription.enabled) {
   }
 }
 
+// GPT-5-nano text refinement is text-only — never receives audio
+// bytes. Constructed only when the operator opts in AND the OpenAI
+// key is present. The refiner itself short-circuits on a null client,
+// but we leave it null here so wiring is explicit.
+const refinementConfig = runnerConfig.audioTranscription.refinement;
+const refinementClient =
+  refinementConfig.enabled && runnerConfig.openAiApiKey
+    ? new OpenAI({ apiKey: runnerConfig.openAiApiKey })
+    : null;
+const textRefinementService = refinementConfig.enabled
+  ? createTextRefinementService({
+      client: refinementClient,
+      config: {
+        model: refinementConfig.model,
+        timeoutMs: refinementConfig.timeoutMs
+      }
+    })
+  : null;
+if (refinementConfig.enabled && !refinementClient) {
+  console.warn(
+    "[transcription] AUDIO_TRANSCRIPTION_REFINEMENT_ENABLED=true but OPENAI_API_KEY is unset; " +
+      "refinement will be skipped (local transcripts unaffected)"
+  );
+}
+
+// Nearby-thread resolver for the refinement prompt. Reads the same
+// prisma instance as the rest of the service; pulled into a small
+// dep so progressive tests can stub a fixed conversation context.
+const nearbyMessagesResolver = textRefinementService
+  ? {
+      async fetch(input: {
+        messageId: string;
+        threadId: string;
+        radius: number;
+      }) {
+        const radius = Math.max(1, Math.min(input.radius, 20));
+        const target = await prisma.message.findUnique({
+          where: { id: input.messageId },
+          select: { timestamp: true }
+        });
+        if (!target) return [];
+        const [before, after] = await Promise.all([
+          prisma.message.findMany({
+            where: {
+              threadId: input.threadId,
+              timestamp: { lt: target.timestamp }
+            },
+            orderBy: { timestamp: "desc" },
+            take: radius,
+            select: { direction: true, timestamp: true, text: true }
+          }),
+          prisma.message.findMany({
+            where: {
+              threadId: input.threadId,
+              timestamp: { gt: target.timestamp }
+            },
+            orderBy: { timestamp: "asc" },
+            take: radius,
+            select: { direction: true, timestamp: true, text: true }
+          })
+        ]);
+        return [...before.reverse(), ...after]
+          .filter((m) => (m.text ?? "").trim().length > 0)
+          .map((m) => ({
+            direction: m.direction === "OUT" ? ("OUT" as const) : ("IN" as const),
+            timestamp: m.timestamp.toISOString(),
+            text: m.text
+          }));
+      }
+    }
+  : null;
+
 const transcriptionService = createTranscriptionService({
   prisma,
   provider: transcriptionProvider,
+  providers:
+    Object.keys(tierProviders).length > 0 ? tierProviders : undefined,
+  refiner: textRefinementService,
+  refinementEnabled: refinementConfig.enabled,
+  nearbyMessages: nearbyMessagesResolver,
   attachmentResolver: compositeAttachmentResolver,
   config: {
     enabled: runnerConfig.audioTranscription.enabled,
@@ -2949,10 +3080,25 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
       model: true,
       language: true,
       durationSeconds: true,
-      errorMessage: true
+      errorMessage: true,
+      // Progressive bookkeeping: lets the on-demand "Try again" UI
+      // path render the same Improving transcript... hint as the
+      // initial scan path without a second round-trip.
+      selectedTier: true,
+      selectedModel: true,
+      selectedProvider: true,
+      refinementModel: true,
+      refinementConfidence: true,
+      updatedAt: true
     }
   });
 
+  // Surface the truth-based pending-tiers map on the response so the
+  // dashboard immediately renders the right "Improving transcript..."
+  // state without a follow-up poll.
+  const isImproving = transcriptionService
+    .getPendingTiers(messageId)
+    .some((t) => t === "standard" || t === "max" || t === "refinement");
   res.json({
     ok: true,
     counts: {
@@ -2961,7 +3107,7 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
       failed: outcome.failed,
       skipped: outcome.skipped
     },
-    transcription: row ?? null
+    transcription: row ? { ...row, isImproving } : null
   });
 }));
 
@@ -3965,7 +4111,26 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
         ? {
             status: message.audioTranscription.status,
             transcript: message.audioTranscription.transcript,
-            errorMessage: message.audioTranscription.errorMessage
+            errorMessage: message.audioTranscription.errorMessage,
+            // Progressive transcription bookkeeping. `selectedTier`
+            // tells the UI which tier produced the visible text;
+            // `refinementConfidence` drives the optional "Refined
+            // from local transcript" tooltip when GPT-5-nano
+            // refinement was applied.
+            selectedTier:
+              (message.audioTranscription as { selectedTier?: string | null }).selectedTier ?? null,
+            refinementConfidence:
+              (message.audioTranscription as { refinementConfidence?: string | null })
+                .refinementConfidence ?? null,
+            // Truth-based: only true when a higher-tier task is
+            // ACTUALLY queued/running. Derived from the service's
+            // in-memory `pendingTiersByMessage` map, not a time
+            // heuristic — so the moment the queue finishes (or fast
+            // fails and no upgrade was queued), the dashboard hides
+            // the "Improving transcript..." line.
+            isImproving: transcriptionService
+              .getPendingTiers(message.id)
+              .some((t) => t === "standard" || t === "max" || t === "refinement")
           }
         : null,
       // Server-resolved snippet of the parent this message replies to.

@@ -80,12 +80,35 @@ export function VoiceMessageTranscript({
     local.transcript &&
     local.transcript.trim().length > 0
   ) {
+    // Truth-based: only show `Improving transcript...` when the
+    // runner reports a higher-tier task is actually queued or
+    // running. Backed by the service's in-memory pending-tiers map.
+    // The previous time-window heuristic could lie (it lingered on
+    // single-tier installs and lied during long-running max tiers
+    // that had already finished); the field below is derived from
+    // real pipeline state.
+    const isImproving = local.isImproving === true;
+    // Refinement tooltip: GPT-5-nano corrected the transcript using
+    // the local model attempts + nearby messages. Doesn't change the
+    // visible text; just provides provenance for the curious.
+    const refined =
+      local.selectedTier === "refinement" &&
+      (local.refinementConfidence === "medium" ||
+        local.refinementConfidence === "high");
     return (
       <span className="block whitespace-pre-wrap text-[12px] leading-[1.45] text-ink-3">
-        <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3">
+        <span
+          className="font-mono text-[9px] uppercase tracking-[0.08em] text-ink-3"
+          title={refined ? "Refined from local transcript" : undefined}
+        >
           {transcriptLabel}
         </span>
         <span className="ml-[6px]">{local.transcript}</span>
+        {isImproving ? (
+          <span className="mt-[2px] block text-[11px] italic text-ink-3">
+            Improving transcript...
+          </span>
+        ) : null}
       </span>
     );
   }

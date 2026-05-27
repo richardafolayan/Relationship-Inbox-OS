@@ -341,6 +341,27 @@ export interface ThreadMessage {
      * pointless.
      */
     errorMessage?: string | null;
+    /**
+     * Tier that produced the currently visible transcript. `null` for
+     * rows written before progressive mode (single-model behaviour).
+     */
+    selectedTier?: "fast" | "standard" | "max" | "refinement" | null;
+    /**
+     * GPT-5-nano refinement confidence, when refinement was applied.
+     * Drives the optional "Refined from local transcript" tooltip on
+     * the transcript bubble.
+     */
+    refinementConfidence?: "low" | "medium" | "high" | null;
+    /**
+     * Truth-based pending-tier flag. The runner reports `true` only
+     * when a higher-tier transcription task is ACTUALLY queued or
+     * running for this message (read from the service's in-memory
+     * `pendingTiersByMessage` map, not derived from timestamps). The
+     * dashboard renders `Improving transcript...` iff this is true.
+     * When all configured tiers finish (or none are queued), the next
+     * poll returns `false` and the hint disappears.
+     */
+    isImproving?: boolean;
   } | null;
   /**
    * Server-resolved snippet of the parent message this one replies to,
