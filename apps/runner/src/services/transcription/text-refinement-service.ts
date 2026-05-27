@@ -1,20 +1,19 @@
 /**
- * Optional text-only refinement of local Whisper transcripts.
+ * Patch-based text refinement of local Whisper transcripts.
  *
- * The pipeline first produces one-to-three local-whisper attempts per
- * voice note (fast → standard → max). When the operator opts in to
- * refinement (env: AUDIO_TRANSCRIPTION_REFINEMENT_ENABLED=true), this
- * service sends ONLY the resulting text — never the audio bytes — to a
- * cheap chat model (default gpt-5-nano) along with nearby thread
- * messages, and asks it to correct likely ASR mistakes. Output is
- * post-parse sanitised so a runaway refinement can't quietly replace a
- * good local transcript with hallucinated content.
+ * Design (#386): the refiner is a *reviewer*, not a generator. It does
+ * NOT emit a whole transcript; it emits a short list of substring
+ * patches to apply against the highest-tier local transcript. The
+ * orchestrator (transcription-service.ts) verifies each patch's `from`
+ * exists in the base, drops low-confidence patches, and runs three
+ * post-apply guards (duplicate, shrink, drift) before selecting the
+ * patched text. Anything the model doesn't justify in a patch can't
+ * appear in the output.
  *
  * Cost-safety invariants enforced by the orchestrator (not this file):
  *   1. Refinement never runs unless at least the `standard` local tier
  *      has succeeded.
- *   2. Refinement never receives audio. Audio transcription is the
- *      local-whisper provider's job; this service is text→text only.
+ *   2. Refinement never receives audio. This service is text-to-text.
  *   3. The OpenAI client is constructed only when an `OPENAI_API_KEY`
  *      is present — the runner passes `client=null` otherwise and
  *      `refine` short-circuits with a stable skip reason.
@@ -53,24 +52,61 @@ export interface RefinementContext {
   direction: "IN" | "OUT";
   /** Speaker role of the voice note. */
   speakerRole: "contact" | "operator";
-  /** All local attempts that produced non-empty transcripts. */
+  /**
+   * All local attempts that produced non-empty transcripts. The first
+   * entry is the lowest-tier attempt; the LAST entry is the
+   * highest-tier and is treated as the authoritative base by the
+   * orchestrator. The refiner sees all of them — lower tiers are
+   * evidence only, never content sources.
+   */
   attempts: RefinementAttempt[];
   /** Thread context. The orchestrator already filtered system events. */
   nearbyMessages: RefinementNearbyMessage[];
 }
 
+/**
+ * Patch type classification. Stored on the row so we can audit later
+ * which categories of correction the operator opted in to.
+ */
+export type PatchType =
+  | "asr_word_error"
+  | "name_fix"
+  | "obvious_context_fix"
+  | "casing_only";
+
+export type PatchConfidence = "low" | "medium" | "high";
+
+export interface RefinementPatch {
+  /** Exact substring of the base (highest-tier) transcript. */
+  from: string;
+  /** Replacement text. */
+  to: string;
+  type: PatchType;
+  confidence: PatchConfidence;
+  /** One short sentence justifying the patch. */
+  evidence: string;
+}
+
 export interface RefinementSuccess {
-  /** The refiner's corrected transcript, after sanitisation. */
-  correctedTranscript: string;
-  confidence: "low" | "medium" | "high";
-  changesMade: Array<{ from: string; to: string; reason: string }>;
-  uncertainPhrases: string[];
   /** Echoed model id (e.g. "gpt-5-nano"). */
   model: string;
+  /** Echo of which local model the refiner treated as the base. */
+  baseModel: string;
+  /** Sanitised patch list (low-confidence and malformed already dropped). */
+  corrections: RefinementPatch[];
+  /** Phrases the refiner is uncertain about but didn't propose a patch for. */
+  uncertainPhrases: string[];
   /**
-   * The full sanitised payload re-stringified, for storage on
-   * `MessageAudioTranscription.refinementJson` so we can debug later
-   * without re-issuing the call.
+   * Optional self-reject signal from the refiner. When set, the
+   * orchestrator skips patch application and keeps the base verbatim.
+   * Surfaced for debugging only — the orchestrator's own guards are
+   * the authoritative gate.
+   */
+  rejectReason: string | null;
+  /**
+   * Full sanitised payload re-stringified, stored on
+   * `MessageAudioTranscription.refinementJson` so we can audit what
+   * the refiner returned without re-issuing the call.
    */
   rawJson: string;
 }
@@ -111,9 +147,8 @@ export interface RefinementServiceConfig {
 }
 
 /**
- * Build the refinement service. Returns `null` from `refine` (via a
- * stable skip reason) when `client` is null so the caller never has to
- * gate on auth state itself.
+ * Build the patch-based refinement service. When `client` is null the
+ * service short-circuits to a stable `refinement_no_client` skip.
  */
 export function createTextRefinementService(input: {
   client: ChatCompletionsClient | null;
@@ -127,9 +162,6 @@ export function createTextRefinementService(input: {
         return { kind: "skipped", reason: "refinement_no_client" };
       }
       if (context.attempts.length === 0) {
-        // Belt-and-braces: the orchestrator should never call us with an
-        // empty attempt list, but if it does we silently skip rather
-        // than spend a token call on nothing.
         return { kind: "skipped", reason: "refinement_no_attempts" };
       }
 
@@ -154,10 +186,7 @@ export function createTextRefinementService(input: {
         if (error instanceof Error && error.message === "refinement_timeout") {
           return { kind: "failed", errorMessage: "refinement_timeout" };
         }
-        return {
-          kind: "failed",
-          errorMessage: shortenError(error)
-        };
+        return { kind: "failed", errorMessage: shortenError(error) };
       }
 
       const raw = response.choices?.[0]?.message?.content ?? "";
@@ -171,42 +200,68 @@ export function createTextRefinementService(input: {
   };
 }
 
-const DEFAULT_SYSTEM_PROMPT = `You are correcting an automatic speech recognition transcript. You are NOT rewriting the speaker. You are NOT polishing the prose. You are NOT summarising. Your only job is to fix specific likely ASR mistakes.
+/**
+ * System prompt: the refiner is a patch reviewer. Concrete green-light
+ * examples are included so the model knows the kind of single-word
+ * fix it's expected to make, while the absolute preservation rules
+ * keep it from drifting back into "improving" prose.
+ */
+const DEFAULT_SYSTEM_PROMPT = `You are reviewing a transcript produced by Whisper. You will be given several competing Whisper transcripts of the same voice note. The HIGHEST-TIER transcript is the base. You are not rewriting it. You are not improving style. You are not removing filler. You are not merging lower-tier text into it.
 
-You will receive multiple competing local Whisper transcripts of the same audio plus nearby conversation context. The HIGHEST-TIER transcript is the most accurate; treat it as the ground truth for what was actually said. Use the others only to spot ambiguous moments where the models disagree.
+Your only job is to propose exact substring replacements (patches) for likely ASR errors in the base transcript.
 
-ABSOLUTE PRESERVATION RULES — these are non-negotiable:
-- Preserve all hesitations, filler ("um", "uh", "like", "you know"), repetitions, false starts, run-on sentences, and rough phrasing exactly as the highest-tier transcript has them.
-- Preserve the speaker's slang, casualness, and any awkward grammar.
-- Preserve any phrase that appears across two or more of the local transcripts — that's strong evidence the speaker actually said it, even if it reads as redundant or repetitive.
-- Do NOT collapse repeated phrases for readability. If the speaker said "a serious food shop like I used to do" and that appears in 2+ local transcripts, keep it.
-- Do NOT shorten the transcript. Word count should be within a few percent of the highest-tier local transcript.
-- Do NOT add punctuation, capitalisation, or sentence breaks beyond what's already there.
-- Do NOT add words or facts that don't appear in the local transcripts or nearby messages.
+Return JSON patches only. If there are no safe corrections, return an empty corrections array.
 
-WHAT YOU CAN CHANGE:
-- A clear ASR error where one local model heard one word ("future") and another heard a different word ("food shop") and the conversational context makes one of them obviously correct.
-- A homophone or near-homophone fix (e.g. "god" vs "good") supported by the surrounding messages.
-- A name that one model spelled incorrectly when context makes the right spelling clear.
+A correction is safe only if ALL of these hold:
+- the base substring is probably an ASR mistake
+- the replacement is strongly supported by another transcript, by nearby conversation context, or by the phrase itself
+- the correction does not remove filler, hesitation, repetition, slang, or rough speech
+- the correction does not add facts not present in the transcripts or context
 
-WHEN IN DOUBT:
-- Prefer the highest-tier local transcript verbatim.
-- Set confidence to "low" and leave changesMade empty.
+Do not correct grammar. Do not polish punctuation. Do not shorten. Do not summarise. Do not merge content from lower-tier transcripts into the base unless context strongly supports it as a missing word the highest-tier dropped.
 
-OUTPUT FORMAT:
-Output JSON only. Required shape:
+CONCRETE EXAMPLES of safe corrections you SHOULD propose when the context supports them:
+- "future" -> "food shop" (when the surrounding sentence is clearly about meal planning or shopping for ingredients)
+- "good just" -> "God just" (when the surrounding context is about theology)
+- "this place is getting long" -> "this voice note is getting long" (at the end of a voice note, referring to the recording itself)
+- "ill" -> "I'll", "im" -> "I'm" — only when context makes the intent obvious
+- name spelling fixes, when a nearby message uses the correct spelling
+
+What you MUST NOT do:
+- Return a whole new transcript.
+- Merge in clauses from lower-tier transcripts that the highest-tier doesn't have.
+- Change tense, person, or sentence structure.
+- "Tidy up" run-on sentences.
+- Remove duplicates the speaker actually said.
+
+OUTPUT FORMAT (JSON only):
 {
-  "correctedTranscript": string,
-  "confidence": "low" | "medium" | "high",
-  "changesMade": Array<{ "from": string, "to": string, "reason": string }>,
-  "uncertainPhrases": string[]
+  "baseModel": string,
+  "corrections": Array<{
+    "from": string,
+    "to": string,
+    "type": "asr_word_error" | "name_fix" | "obvious_context_fix" | "casing_only",
+    "confidence": "low" | "medium" | "high",
+    "evidence": string
+  }>,
+  "uncertainPhrases": string[],
+  "rejectReason": string | null
 }
 
-Every entry in changesMade must correspond to an actual word-level change you made. If you didn't change anything, return the highest-tier local transcript verbatim and an empty changesMade array.`;
+Each "from" MUST be an exact substring of the highest-tier transcript. The application code will verify this before applying. If you cannot find a safe substring boundary for a correction, omit it.
+
+If after reviewing the transcripts you don't see any safe corrections, return:
+{
+  "baseModel": "<echo>",
+  "corrections": [],
+  "uncertainPhrases": [],
+  "rejectReason": null
+}`;
 
 /**
- * Build the user prompt. Exposed for tests so they can assert the
- * model sees the attempts + context in the expected shape.
+ * Build the user prompt. The highest-tier attempt is labelled
+ * explicitly as the BASE; lower tiers are labelled as evidence.
+ * Exposed for tests so they can assert the shape.
  */
 export function buildUserPrompt(context: RefinementContext): string {
   const lines: string[] = [];
@@ -214,12 +269,32 @@ export function buildUserPrompt(context: RefinementContext): string {
   lines.push(`- direction: ${context.direction}`);
   lines.push(`- speaker: ${context.speakerRole}`);
   lines.push(``);
-  lines.push(`Local Whisper transcript attempts (best last):`);
-  for (const attempt of context.attempts) {
-    lines.push(`--- tier=${attempt.tier} model=${attempt.model}`);
-    lines.push(attempt.transcript.trim());
+
+  // The orchestrator orders attempts low → high; pull the last as
+  // the base. If only one attempt exists it's both base and only.
+  const last = context.attempts[context.attempts.length - 1];
+  const others = context.attempts.slice(0, -1);
+  if (!last) {
+    // Defensive: refine() short-circuits on empty attempts, but
+    // keep this branch for tests that build a context by hand.
+    lines.push(`No local transcripts available.`);
+    return lines.join("\n");
   }
+
+  lines.push(`BASE (highest-tier — this is the authoritative transcript; propose patches against this exact text):`);
+  lines.push(`--- tier=${last.tier} model=${last.model}`);
+  lines.push(last.transcript.trim());
   lines.push(``);
+
+  if (others.length > 0) {
+    lines.push(`OTHER ATTEMPTS (evidence only — do NOT merge their content into the base):`);
+    for (const attempt of others) {
+      lines.push(`--- tier=${attempt.tier} model=${attempt.model}`);
+      lines.push(attempt.transcript.trim());
+    }
+    lines.push(``);
+  }
+
   if (context.nearbyMessages.length > 0) {
     lines.push(`Nearby thread messages:`);
     for (const m of context.nearbyMessages) {
@@ -232,7 +307,9 @@ export function buildUserPrompt(context: RefinementContext): string {
     lines.push(`Nearby thread messages: (none)`);
   }
   lines.push(``);
-  lines.push(`Return JSON only. Prefer the highest-tier local transcript if uncertain.`);
+  lines.push(
+    `Return JSON only. Each "from" must be an exact substring of the BASE transcript. If you have no safe corrections, return an empty corrections array.`
+  );
   return lines.join("\n");
 }
 
@@ -242,14 +319,13 @@ type Parsed =
   | { kind: "failed"; errorMessage: string };
 
 /**
- * Post-parse sanitiser. Enforces the cost-safety + hallucination
- * guards described in the system prompt. Exposed for tests so they
- * can hit each branch with a hand-crafted JSON payload.
+ * Parse + sanitise the refiner's JSON response. The orchestrator does
+ * the harder guards (duplicate-introduction, drift detection) AFTER
+ * applying patches, because those need to see the base text. This
+ * function only validates structure and drops obviously-malformed
+ * patches (missing `from`, etc.).
  */
-export function parseAndSanitise(
-  rawContent: string,
-  context: RefinementContext
-): Parsed {
+export function parseAndSanitise(rawContent: string, context: RefinementContext): Parsed {
   if (!rawContent || rawContent.trim().length === 0) {
     return { kind: "skipped", reason: "refinement_empty_response" };
   }
@@ -263,110 +339,51 @@ export function parseAndSanitise(
     return { kind: "skipped", reason: "refinement_invalid_json" };
   }
   const obj = parsedJson as Record<string, unknown>;
-  const corrected =
-    typeof obj.correctedTranscript === "string" ? obj.correctedTranscript.trim() : "";
-  if (corrected.length === 0) {
-    return { kind: "skipped", reason: "refinement_empty_transcript" };
-  }
-  // Guard 1: corrected transcript must not be drastically shorter
-  // than the best local attempt. With the tightened system prompt the
-  // refiner shouldn't shrink at all, so the floor is intentionally
-  // strict: ANY shrink under 88% of the highest-tier local is
-  // treated as the refiner rewriting style, not fixing ASR. The old
-  // "duplicate trimming is fine" exception is removed because we
-  // explicitly tell the model in the system prompt NOT to collapse
-  // repeated phrases.
-  const bestLocal = context.attempts[context.attempts.length - 1]?.transcript?.trim() ?? "";
-  if (bestLocal.length > 0) {
-    const shrinkRatio = corrected.length / bestLocal.length;
-    if (shrinkRatio < 0.88) {
-      return { kind: "skipped", reason: "refinement_too_short" };
-    }
+
+  const baseModel =
+    typeof obj.baseModel === "string" && obj.baseModel.trim().length > 0
+      ? obj.baseModel.trim()
+      : (context.attempts[context.attempts.length - 1]?.model ?? "");
+
+  const rejectReason =
+    typeof obj.rejectReason === "string" && obj.rejectReason.trim().length > 0
+      ? stripDashes(obj.rejectReason.trim()).slice(0, 200)
+      : null;
+
+  // Patches: validate shape, drop malformed entries, cap at 20.
+  const corrections: RefinementPatch[] = [];
+  const rawCorrections = Array.isArray(obj.corrections) ? obj.corrections : [];
+  for (const entry of rawCorrections) {
+    if (!entry || typeof entry !== "object") continue;
+    const e = entry as Record<string, unknown>;
+    const from = typeof e.from === "string" ? e.from : "";
+    const to = typeof e.to === "string" ? e.to : "";
+    if (from.length === 0) continue;
+    // Drop patches whose `from` and `to` are identical — no-op.
+    if (from === to) continue;
+    // Validate against allowed enums; default to safest values.
+    const type = (
+      e.type === "name_fix" || e.type === "obvious_context_fix" || e.type === "casing_only"
+        ? e.type
+        : "asr_word_error"
+    ) as PatchType;
+    const confidence = (
+      e.confidence === "low" || e.confidence === "high" ? e.confidence : "medium"
+    ) as PatchConfidence;
+    const evidence =
+      typeof e.evidence === "string"
+        ? stripDashes(e.evidence.trim()).slice(0, 300)
+        : "";
+    corrections.push({
+      from: from.slice(0, 500),
+      to: stripDashes(to.slice(0, 500)),
+      type,
+      confidence,
+      evidence
+    });
+    if (corrections.length >= 20) break;
   }
 
-  // Guard 2: consensus phrase drops. A 3-gram (sequence of three
-  // adjacent ≥3-char tokens) that appears in TWO OR MORE local
-  // transcripts is strong evidence the speaker actually said it.
-  //
-  // We don't reject on the *count* of missing consensus grams
-  // (homophone fixes legitimately drop 1-2 grams clustered around the
-  // changed word). Instead we look for a RUN: ≥4 consecutive
-  // positions in the highest-tier local transcript where every
-  // consensus 3-gram is missing from the corrected output. A run
-  // that long can only come from removing a contiguous chunk of
-  // speech the speaker actually said, not from fixing an ASR error.
-  //
-  // For the Lanre regression — "a serious food shop like i used to
-  // do" cut from the corrected text — the missing 3-grams form a run
-  // of 7+ positions and the guard fires. A two-word homophone fix
-  // produces a missing run of length 2 and slips through cleanly.
-  if (context.attempts.length >= 2) {
-    const consensusGrams = computeConsensus3grams(context.attempts);
-    if (consensusGrams.size > 0) {
-      const highestTokens = tokenise(bestLocal);
-      const correctedGramsSet = new Set(buildTokenNgrams(tokenise(corrected), 3));
-      let currentRun = 0;
-      let longestRun = 0;
-      for (let i = 0; i + 3 <= highestTokens.length; i += 1) {
-        const gram = highestTokens.slice(i, i + 3).join("|");
-        if (!consensusGrams.has(gram)) {
-          currentRun = 0;
-          continue;
-        }
-        if (correctedGramsSet.has(gram)) {
-          currentRun = 0;
-        } else {
-          currentRun += 1;
-          if (currentRun > longestRun) longestRun = currentRun;
-        }
-      }
-      if (longestRun >= 4) {
-        return { kind: "skipped", reason: "refinement_dropped_consensus_phrases" };
-      }
-    }
-  }
-  // Guard 2: corrected transcript must not introduce content that
-  // doesn't appear in ANY local attempt OR the nearby messages. We
-  // approximate "doesn't appear" by token-overlap.
-  const haystackTokens = new Set<string>();
-  for (const attempt of context.attempts) {
-    tokenise(attempt.transcript).forEach((t) => haystackTokens.add(t));
-  }
-  for (const m of context.nearbyMessages) {
-    tokenise(m.text).forEach((t) => haystackTokens.add(t));
-  }
-  if (haystackTokens.size > 0) {
-    const correctedTokens = tokenise(corrected);
-    const novel = correctedTokens.filter((t) => !haystackTokens.has(t)).length;
-    const novelRatio = novel / Math.max(correctedTokens.length, 1);
-    if (novelRatio > 0.4) {
-      // More than 40% of tokens come from neither the local
-      // transcripts nor the nearby messages — that's the signature of
-      // a hallucinated rewrite. Drop the refinement and let the
-      // selector keep the local transcript.
-      return { kind: "skipped", reason: "refinement_hallucinated" };
-    }
-  }
-
-  const confidence: "low" | "medium" | "high" =
-    obj.confidence === "high" ? "high" : obj.confidence === "low" ? "low" : "medium";
-
-  // Cap arrays so a chatty model can't bloat the row size.
-  let changesMade: Array<{ from: string; to: string; reason: string }> = [];
-  if (Array.isArray(obj.changesMade)) {
-    changesMade = obj.changesMade
-      .filter(
-        (entry): entry is { from: unknown; to: unknown; reason: unknown } =>
-          entry !== null && typeof entry === "object"
-      )
-      .map((entry) => ({
-        from: stripDashes(String(entry.from ?? "").slice(0, 200)),
-        to: stripDashes(String(entry.to ?? "").slice(0, 200)),
-        reason: stripDashes(String(entry.reason ?? "").slice(0, 200))
-      }))
-      .filter((entry) => entry.from.length > 0 || entry.to.length > 0)
-      .slice(0, 10);
-  }
   let uncertainPhrases: string[] = [];
   if (Array.isArray(obj.uncertainPhrases)) {
     uncertainPhrases = obj.uncertainPhrases
@@ -377,72 +394,18 @@ export function parseAndSanitise(
   }
 
   const sanitised: Omit<RefinementSuccess, "model"> = {
-    correctedTranscript: stripDashes(corrected),
-    confidence,
-    changesMade,
+    baseModel,
+    corrections,
     uncertainPhrases,
+    rejectReason,
     rawJson: JSON.stringify({
-      correctedTranscript: stripDashes(corrected),
-      confidence,
-      changesMade,
-      uncertainPhrases
+      baseModel,
+      corrections,
+      uncertainPhrases,
+      rejectReason
     })
   };
-
   return { kind: "ok", result: sanitised };
-}
-
-/** Tokenise on word boundaries and lowercase. */
-function tokenise(input: string): string[] {
-  return input
-    .toLowerCase()
-    .replace(/[^a-z0-9'\s]/g, " ")
-    .split(/\s+/)
-    .filter((t) => t.length >= 3); // ignore very short filler / stopwords
-}
-
-/**
- * Build all overlapping n-grams from a token stream as
- * pipe-separated strings (so they're cheap to put in a Set).
- * Returns an empty array when the input is shorter than `n`.
- */
-function buildTokenNgrams(tokens: string[], n: number): string[] {
-  if (tokens.length < n) return [];
-  const out: string[] = [];
-  for (let i = 0; i + n <= tokens.length; i += 1) {
-    out.push(tokens.slice(i, i + n).join("|"));
-  }
-  return out;
-}
-
-/**
- * Find every 3-gram that appears in TWO OR MORE of the local
- * transcripts. These are the speaker's actual phrases — at least
- * two independent ASR models agreed on them — so the refiner must
- * preserve them. Dropping these is the signature of a stylistic
- * rewrite, which is what the sanitiser rejects.
- */
-function computeConsensus3grams(
-  attempts: ReadonlyArray<{ transcript: string }>
-): Set<string> {
-  const counts = new Map<string, number>();
-  for (const attempt of attempts) {
-    const tokens = tokenise(attempt.transcript);
-    const seenInThisAttempt = new Set<string>();
-    for (const gram of buildTokenNgrams(tokens, 3)) {
-      // Count each gram at most once per attempt so a transcript that
-      // genuinely repeats a phrase doesn't inflate the consensus
-      // count by itself.
-      if (seenInThisAttempt.has(gram)) continue;
-      seenInThisAttempt.add(gram);
-      counts.set(gram, (counts.get(gram) ?? 0) + 1);
-    }
-  }
-  const out = new Set<string>();
-  for (const [gram, count] of counts) {
-    if (count >= 2) out.add(gram);
-  }
-  return out;
 }
 
 /**

@@ -245,10 +245,10 @@ test("auto enqueue never calls refiner even when refinement is enabled", async (
       return {
         kind: "ok",
         result: {
-          correctedTranscript: "refined",
-          confidence: "high",
-          changesMade: [],
+          baseModel: "s",
+          corrections: [],
           uncertainPhrases: [],
+          rejectReason: null,
           model: "gpt-5-nano",
           rawJson: "{}"
         }
@@ -348,10 +348,10 @@ test("manual transcribeMessage runs full chain (including max + refinement)", as
       return {
         kind: "ok",
         result: {
-          correctedTranscript: "yeah refined transcript with food shop and more food shop content from local",
-          confidence: "high",
-          changesMade: [],
+          baseModel: "m",
+          corrections: [],
           uncertainPhrases: [],
+          rejectReason: null,
           model: "gpt-5-nano",
           rawJson: "{}"
         }
