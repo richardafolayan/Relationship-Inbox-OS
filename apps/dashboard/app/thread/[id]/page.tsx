@@ -2475,24 +2475,44 @@ export default function ThreadPage() {
                         : ""
                     }`}
                   >
-                    {hasReplyIntent ? (
-                      <button
-                        type="button"
-                        onClick={() => parentMessageId && focusOnParent(parentMessageId)}
-                        disabled={!parentMessageId}
-                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 disabled:cursor-default disabled:hover:bg-paper-2/60 disabled:hover:text-ink-3 disabled:hover:border-hairline ${
-                          message.direction === "OUT" ? "self-end" : "self-start"
-                        }`}
-                        title={`Focus thread: ${parentMessage?.text ?? "earlier message"}`}
-                      >
-                        <span className="text-ink-4" aria-hidden="true">↳</span>
-                        <span className="line-clamp-2 italic text-left min-h-[30px]">
-                          {parentMessage
-                            ? parentMessage.text.slice(0, 120) || "(media)"
-                            : "Replying to an earlier message"}
-                        </span>
-                      </button>
-                    ) : null}
+                    {hasReplyIntent ? (() => {
+                      // Prefer the in-window parent (we already have it
+                      // loaded, so the focus action can navigate to it)
+                      // but fall back to the server-resolved replyTo
+                      // snippet for parents that live outside the
+                      // pagination window or in a sibling iMessage
+                      // thread. Last resort: the generic literal stub.
+                      const localSnippet = parentMessage
+                        ? parentMessage.text.slice(0, 120) || "(media)"
+                        : null;
+                      const serverSnippet = message.replyTo?.snippet ?? null;
+                      const snippet =
+                        localSnippet ??
+                        serverSnippet ??
+                        "Replying to an earlier message";
+                      // The focus button only navigates when the parent
+                      // is loaded in the current window. For server-only
+                      // snippets we still show the text but make the
+                      // button non-interactive (focus would jump
+                      // nowhere).
+                      const navigable = Boolean(parentMessageId);
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => navigable && parentMessageId && focusOnParent(parentMessageId)}
+                          disabled={!navigable}
+                          className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 disabled:cursor-default disabled:hover:bg-paper-2/60 disabled:hover:text-ink-3 disabled:hover:border-hairline ${
+                            message.direction === "OUT" ? "self-end" : "self-start"
+                          }`}
+                          title={`Focus thread: ${snippet}`}
+                        >
+                          <span className="text-ink-4" aria-hidden="true">↳</span>
+                          <span className="line-clamp-2 italic text-left min-h-[30px]">
+                            {snippet}
+                          </span>
+                        </button>
+                      );
+                    })() : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
                         <button
