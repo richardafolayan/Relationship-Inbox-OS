@@ -77,6 +77,13 @@ function makeRequest(filePath) {
   };
 }
 
+// Default stub for the WAV converter: pretend afconvert ran and produced
+// a sibling .wav. Tests that need to assert the converter's input/output
+// override this directly.
+function passthroughConvertToWav(input) {
+  return Promise.resolve(input.replace(/\.[^./]+$/, ".wav"));
+}
+
 test("buildWhisperArgs assembles the expected CLI argv", () => {
   const args = buildWhisperArgs({
     modelPath: "/m/ggml.bin",
@@ -107,7 +114,8 @@ test("buildWhisperArgs assembles the expected CLI argv", () => {
 test("missing command short-circuits to local_whisper_not_configured", async () => {
   const provider = createLocalWhisperProvider({
     config: baseConfig({ command: "" }),
-    processRunner: { spawn: () => { throw new Error("should not be called"); } }
+    processRunner: { spawn: () => { throw new Error("should not be called"); } },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/x.m4a"));
   assert.equal(outcome.kind, "skipped");
@@ -117,7 +125,8 @@ test("missing command short-circuits to local_whisper_not_configured", async () 
 test("missing model path short-circuits to local_whisper_not_configured", async () => {
   const provider = createLocalWhisperProvider({
     config: baseConfig({ modelPath: "" }),
-    processRunner: { spawn: () => { throw new Error("should not be called"); } }
+    processRunner: { spawn: () => { throw new Error("should not be called"); } },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/x.m4a"));
   assert.equal(outcome.kind, "skipped");
@@ -126,6 +135,7 @@ test("missing model path short-circuits to local_whisper_not_configured", async 
 
 test("happy path reads transcript and surfaces it via outcome", async () => {
   let lastArgs;
+  let wavCalls = 0;
   const provider = createLocalWhisperProvider({
     config: baseConfig({ modelPath: "/m/ggml-base.en.bin" }),
     processRunner: {
@@ -135,6 +145,10 @@ test("happy path reads transcript and surfaces it via outcome", async () => {
         const outputBaseIdx = args.indexOf("-of") + 1;
         return fakeChildSuccess(" Hello from local whisper ", args[outputBaseIdx]);
       }
+    },
+    convertToWav: async (path) => {
+      wavCalls += 1;
+      return path.replace(/\.[^./]+$/, ".wav");
     }
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
@@ -144,7 +158,13 @@ test("happy path reads transcript and surfaces it via outcome", async () => {
   // the DB which model produced a given transcript.
   assert.equal(outcome.result.model, "ggml-base.en.bin");
   assert.ok(lastArgs.includes("-m"), "argv should include -m");
-  assert.ok(lastArgs.includes("/tmp/voice.m4a"), "argv should include the audio path");
+  // whisper-cli must be given the converted WAV, not the original m4a.
+  assert.equal(wavCalls, 1, "wav converter should run once");
+  assert.ok(lastArgs.includes("/tmp/voice.wav"), "argv should reference the WAV file");
+  assert.ok(
+    !lastArgs.includes("/tmp/voice.m4a"),
+    "argv must not still reference the source m4a"
+  );
 });
 
 test("non-zero exit becomes a failed outcome (no leaked stderr)", async () => {
@@ -152,7 +172,8 @@ test("non-zero exit becomes a failed outcome (no leaked stderr)", async () => {
     config: baseConfig(),
     processRunner: {
       spawn: () => fakeChildExit(2, "model file not loadable")
-    }
+    },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
   assert.equal(outcome.kind, "failed");
@@ -164,7 +185,8 @@ test("spawn error (command not found) is a skipped local_whisper_command_failed"
     config: baseConfig(),
     processRunner: {
       spawn: () => fakeChildSpawnError("ENOENT")
-    }
+    },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
   // ENOENT comes through as `error` event (vs synchronous throw); the
@@ -183,7 +205,8 @@ test("timeout kills the process and surfaces local_whisper_timeout", async () =>
         child = fakeChildHang();
         return child;
       }
-    }
+    },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
   assert.equal(outcome.kind, "failed");
@@ -200,11 +223,27 @@ test("empty transcript becomes skipped local_whisper_empty_output", async () => 
         // Whisper exits 0 but writes only whitespace.
         return fakeChildSuccess("   \n  ", outputBase);
       }
-    }
+    },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
   assert.equal(outcome.kind, "skipped");
   assert.equal(outcome.reason, "local_whisper_empty_output");
+});
+
+test("WAV conversion failure becomes skipped local_whisper_conversion_failed", async () => {
+  // afconvert refused the container (corrupted CAF, unsupported codec).
+  // Provider should never invoke whisper-cli — there's nothing to read.
+  const provider = createLocalWhisperProvider({
+    config: baseConfig(),
+    processRunner: {
+      spawn: () => { throw new Error("should not be called"); }
+    },
+    convertToWav: async () => null
+  });
+  const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
+  assert.equal(outcome.kind, "skipped");
+  assert.equal(outcome.reason, "local_whisper_conversion_failed");
 });
 
 test("temp dir is cleaned up after a successful run", async () => {
@@ -220,7 +259,8 @@ test("temp dir is cleaned up after a successful run", async () => {
         capturedOutputDir = outputBase.replace(/\/transcript$/, "");
         return fakeChildSuccess("done.", outputBase);
       }
-    }
+    },
+    convertToWav: passthroughConvertToWav
   });
   const outcome = await provider.transcribe(makeRequest("/tmp/voice.m4a"));
   assert.equal(outcome.kind, "ok");

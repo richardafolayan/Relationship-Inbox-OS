@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
+import { convertAudioToWhisperWav } from "../imessage-attachment-server";
 import type {
   TranscriptionOutcome,
   TranscriptionProvider,
@@ -62,8 +63,17 @@ export function createLocalWhisperProvider(input: {
   config: LocalWhisperProviderConfig;
   /** Override for tests; defaults to the real `spawn`. */
   processRunner?: ProcessRunner;
+  /**
+   * Override for tests. Defaults to {@link convertAudioToWhisperWav},
+   * which shells out to macOS `afconvert` to produce a 16 kHz mono PCM
+   * WAV — the only audio shape whisper.cpp's CLI reads reliably. Feed
+   * it an m4a / .mov and `whisper-cli` exits 0 with an empty transcript
+   * (the symptom is `local_whisper_empty_output` rows in prisma).
+   */
+  convertToWav?: (absolutePath: string) => Promise<string | null>;
 }): TranscriptionProvider {
   const runner = input.processRunner ?? defaultProcessRunner;
+  const wavConverter = input.convertToWav ?? convertAudioToWhisperWav;
   const { config } = input;
 
   return {
@@ -75,6 +85,17 @@ export function createLocalWhisperProvider(input: {
       }
       if (!config.modelPath) {
         return { kind: "skipped", reason: "local_whisper_not_configured" };
+      }
+
+      // whisper.cpp's decoder only handles 16 kHz mono PCM WAV. The
+      // service upstream gives us an m4a (post CAF-to-m4a conversion
+      // or video audio extraction), which `whisper-cli` accepts but
+      // silently produces no transcript text for. Convert here so the
+      // service stays platform-agnostic and OpenAI keeps receiving the
+      // m4a it expects.
+      const wavPath = await wavConverter(request.filePath);
+      if (!wavPath) {
+        return { kind: "skipped", reason: "local_whisper_conversion_failed" };
       }
 
       // Whisper writes its output to `<output-base>.txt`. Put the base
@@ -95,7 +116,7 @@ export function createLocalWhisperProvider(input: {
 
       const args = buildWhisperArgs({
         modelPath: config.modelPath,
-        audioPath: request.filePath,
+        audioPath: wavPath,
         language: request.language,
         threads: config.threads,
         outputBase,
