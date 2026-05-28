@@ -281,6 +281,20 @@ export interface RunnerConfig {
     secret?: string;
     statusUrl?: string;
   };
+  /**
+   * GitHub integration for the pilot-feedback flow. When `token` and
+   * `repo` are set, the runner auto-attaches each screenshot to the
+   * GitHub issue the Apps Script creates (uploads to repo/pilot-
+   * feedback-attachments/ then posts an issue comment with inline
+   * image refs). Without these, the Drive-linked Sheet row remains
+   * the only screenshot surface. Best-effort; webhook succeeds
+   * regardless.
+   */
+  github: {
+    token?: string;
+    repo: string;
+    attachmentsBranch: string;
+  };
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -616,6 +630,23 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       webhookUrl: env.PILOT_FEEDBACK_WEBHOOK_URL?.trim() || undefined,
       secret: env.PILOT_FEEDBACK_SECRET?.trim() || undefined,
       statusUrl: env.PILOT_FEEDBACK_STATUS_URL?.trim() || undefined
+    },
+    // GitHub integration for the pilot-feedback flow. When both are
+    // set, the runner auto-attaches screenshots to the GitHub issue
+    // the Apps Script creates (uploads to repo /pilot-feedback-
+    // attachments/, then posts an issue comment with inline image
+    // refs). Without these, the Apps Script's Sheet row + Drive link
+    // is the only screenshot surface. See services/github-attachments.ts.
+    github: {
+      // PAT with `repo` scope. Falls back to GH_TOKEN to match the
+      // gh CLI's env convention so operators can reuse the same token.
+      token: env.GITHUB_TOKEN?.trim() || env.GH_TOKEN?.trim() || undefined,
+      // "owner/name" — defaults to the project's main repo if unset.
+      repo: env.GITHUB_REPO?.trim() || "richardafolayan/Relationship-Inbox-OS",
+      // Where to commit the screenshot file. Defaults to the v1
+      // integration branch; operators can pin a different branch
+      // (e.g. "main" once v1 lands) without touching code.
+      attachmentsBranch: env.GITHUB_ATTACHMENTS_BRANCH?.trim() || "v1/strip-back-pr1"
     }
   };
 }
