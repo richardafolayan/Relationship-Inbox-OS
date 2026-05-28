@@ -166,6 +166,12 @@ export interface AiService {
     messages: MessageForPrompt[];
     /** Drives mode-aware framing: when false, what_they_want and open_loops are reframed as reconnect hooks. */
     needsReply: boolean;
+    /**
+     * Race two providers and keep the first valid result (issue #382 —
+     * pilot R-0029). Operator-initiated paths only — doubles provider
+     * spend per raced call.
+     */
+    race?: boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
     summary: string;
@@ -253,6 +259,11 @@ export interface AiService {
     summary?: string | null;
     /** Pass the thread's whatTheyWant for additional intent signal. */
     whatTheyWant?: string | null;
+    /**
+     * Race two providers and keep the first valid classification (issue
+     * #382 — pilot R-0029). Operator-initiated paths only.
+     */
+    race?: boolean;
   }): Promise<"outreach" | "genuine" | null>;
   /**
    * Conversation-end verdict (#287 phase 2.5). "closed" = last inbound

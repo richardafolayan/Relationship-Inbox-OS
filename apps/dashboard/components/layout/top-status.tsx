@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
+import { onReportSendChange } from "@/lib/pilot-report-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
@@ -105,6 +106,15 @@ type TickerState =
       // originates in the dashboard itself.
       kind: "reassessing";
       count: number;
+    }
+  | {
+      // Issue #421 / R-0047. Pilot-feedback report POST is async after
+      // the modal closes (issue #383 / R-0030). Pilot asked for an
+      // explicit "Sending report…" signal in the ticker rather than
+      // only a discrete success/error toast at the end. Dashboard-side
+      // state via lib/pilot-report-status.
+      kind: "sending_report";
+      count: number;
     };
 
 function formatRelativeScan(lastScanAt: string | null): string {
@@ -149,6 +159,7 @@ function computeTicker(input: {
   health: HealthResponse | null;
   queue: SendQueueResponse | null;
   reassessingCount: number;
+  reportSendCount: number;
 }): TickerState {
   const queueActive = input.queue?.active ?? [];
   const head = queueActive[0];
@@ -183,6 +194,14 @@ function computeTicker(input: {
   // so the operator's own action stays visible.
   if (input.reassessingCount > 0) {
     return { kind: "reassessing", count: input.reassessingCount };
+  }
+  // Issue #421. Pilot-feedback uploads sit at the same priority tier as
+  // reassess — both are operator-initiated, dashboard-originated
+  // actions that would otherwise vanish into a closed modal. Placed
+  // after reassess so a rapid Reassess-then-feedback sequence still
+  // shows the reassess copy first; in practice these don't overlap.
+  if (input.reportSendCount > 0) {
+    return { kind: "sending_report", count: input.reportSendCount };
   }
   if (blockedByScan) {
     const platform = input.health?.currentScanPlatform ?? null;
@@ -258,6 +277,12 @@ function tickerLabel(state: TickerState): string {
       return state.count === 1
         ? "Reassessing thread"
         : `Reassessing ${state.count} threads`;
+    case "sending_report":
+      // Pluralise the same way as reassess — concurrent submits are
+      // rare but possible if the operator opens the modal twice fast.
+      return state.count === 1
+        ? "Sending report"
+        : `Sending ${state.count} reports`;
     default:
       return "";
   }
@@ -295,6 +320,9 @@ export function TopStatus() {
   // (lib/reassess-status emits an event). Surface the count in the
   // ticker instead of a static pending toast.
   const [reassessingCount, setReassessingCount] = useState(0);
+  // Issue #421. Same pattern for pilot-feedback report uploads —
+  // signal originates in the (now-closed) feedback modal.
+  const [reportSendCount, setReportSendCount] = useState(0);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -326,6 +354,11 @@ export function TopStatus() {
   // the ticker surfaces "Reassessing thread" while a kebab → Reassess
   // click is running.
   useEffect(() => onReassessChange(setReassessingCount), []);
+
+  // Issue #421. Subscribe to pilot-feedback report-send signals so the
+  // ticker surfaces "Sending report" between modal-close and POST
+  // settlement.
+  useEffect(() => onReportSendChange(setReportSendCount), []);
 
   useEffect(() => {
     const onEvent = (event: Event) => {
@@ -379,12 +412,13 @@ export function TopStatus() {
 
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
 
-  const ticker = computeTicker({ health, queue, reassessingCount });
+  const ticker = computeTicker({ health, queue, reassessingCount, reportSendCount });
   const tickerIsActive =
     ticker.kind === "scanning" ||
     ticker.kind === "sending" ||
     ticker.kind === "enriching" ||
-    ticker.kind === "reassessing";
+    ticker.kind === "reassessing" ||
+    ticker.kind === "sending_report";
 
   // Cancelling a running scan is a legitimate user action — a scan
   // can sit on a single thread for tens of seconds and the operator
