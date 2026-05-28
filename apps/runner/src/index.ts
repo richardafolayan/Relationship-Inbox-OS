@@ -4087,6 +4087,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     riskLevel: thread.riskLevel,
     riskReason: thread.riskReason,
     snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
+    // Issue #392. Operator-supplied "remind me to…" text. Surfaces as
+    // a "Reminder: <text>" banner on the thread page so the operator
+    // remembers WHY the thread was snoozed when it returns.
+    reminderText: thread.reminderText ?? null,
     unreadCount: thread.unreadCount,
     needsReply: thread.needsReply,
     summary: thread.rollingSummary,
@@ -5561,6 +5565,73 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
   res.json({ status: "ok", dueAt: due.toISOString(), snoozedUntil: due.toISOString() });
 }));
 
+// Issue #392. Natural-language reminder endpoint. Operator types
+// "remind me to follow up with him next Tuesday" (or similar); we
+// parse via parseReminderRequest, snooze the thread until the
+// resolved time, and stash the reminder text on Thread.reminderText
+// so the dashboard surfaces "Reminder: <text>" when the thread
+// returns. Confidence: "low" responses skip the snooze and tell the
+// caller to re-prompt the operator for a clearer time hint.
+app.post("/control/thread/:threadId/remind", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z.object({ intent: z.string().min(1).max(600) }).parse(req.body);
+
+  const thread = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: { person: true }
+  });
+  if (!thread) {
+    res.status(404).json({ ok: false, error: "Thread not found" });
+    return;
+  }
+
+  const parsed = await aiService.parseReminderRequest({
+    intent: payload.intent,
+    referenceTimeIso: new Date().toISOString(),
+    displayName: thread.person.displayName
+  });
+
+  if (parsed.confidence === "low" || !parsed.remindAtIso) {
+    res.json({
+      ok: false,
+      needsClarification: true,
+      reminderText: parsed.reminderText,
+      reason: parsed.reason ?? "Couldn't parse the time. Try rewriting with a specific date or duration."
+    });
+    return;
+  }
+
+  const due = new Date(parsed.remindAtIso);
+  const targetIds = await actionTargetThreadIds(threadId);
+  await prisma.thread.updateMany({
+    where: { id: { in: targetIds } },
+    data: {
+      slaDueAt: due,
+      snoozedUntil: due,
+      reminderText: parsed.reminderText,
+      riskReason: "Reminder set for " + due.toISOString()
+    }
+  });
+
+  await auditService.log({
+    action: "REMIND",
+    stage: "Scan",
+    status: "OK",
+    details: {
+      threadId,
+      remindAt: due.toISOString(),
+      reminderText: parsed.reminderText,
+      propagatedTo: targetIds.length
+    }
+  });
+
+  res.json({
+    ok: true,
+    remindAt: due.toISOString(),
+    reminderText: parsed.reminderText
+  });
+}));
+
 app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
 
@@ -5569,6 +5640,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
     where: { id: { in: targetIds } },
     data: {
       snoozedUntil: null,
+      reminderText: null,
       riskReason: null
     }
   });

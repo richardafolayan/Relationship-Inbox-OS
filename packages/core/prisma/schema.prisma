@@ -275,6 +275,14 @@ model Thread {
   // resurface automatically once the timestamp passes. Cleared on unsnooze.
   snoozedUntil DateTime?
 
+  // Issue #392. Operator-supplied "remind me to…" text attached to a
+  // snooze, parsed from natural language ("remind me to follow up next
+  // Tuesday"). When set, the thread surfaces it as a "Reminder: <text>"
+  // banner so the operator remembers WHY the thread was snoozed when it
+  // returns. Cleared on manual unsnooze, on send, or when the operator
+  // dismisses the banner. Never sent to the contact.
+  reminderText String?
+
   // Coarse classification: "outreach" (cold pitches, sales, recruitment,
   // marketing, InMails) vs "genuine" (peer chats, ongoing relationships).
   // Set by the AI service on first scan-time persist of a thread; null until

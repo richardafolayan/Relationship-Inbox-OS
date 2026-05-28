@@ -2447,6 +2447,136 @@ If the message has no time hint, return { "suggestions": [] }.`;
   }
 
   /**
+   * Issue #392. Parse a free-text "remind me to…" intent typed by the
+   * operator into a structured {remindAtIso, reminderText} pair so the
+   * thread can be snoozed until the parsed time with the reminder note
+   * attached. Returns { confidence: "low" } when the time hint is
+   * ambiguous or missing — caller surfaces the parse back to the
+   * operator for confirmation rather than guessing.
+   *
+   * Examples of input:
+   *   "remind me to follow up with him next Tuesday"
+   *   "remind me to ask Brandon how the interviews went in 3 days"
+   *   "ping me about this tomorrow morning"
+   *
+   * The AI's job is to:
+   *   - Extract the time hint and resolve it against referenceTimeIso
+   *     into an absolute ISO timestamp. Default to 9am local-ish if
+   *     no time-of-day is named.
+   *   - Strip the "remind me to" / "ping me about" prefix from the
+   *     reminder text so the stored note reads as an action.
+   *   - Refuse to invent a time when none is named — the caller
+   *     handles low-confidence by asking the operator to rewrite.
+   */
+  async function parseReminderRequest(input: {
+    intent: string;
+    referenceTimeIso: string;
+    displayName: string;
+  }): Promise<{
+    remindAtIso: string | null;
+    reminderText: string;
+    confidence: "high" | "low";
+    reason?: string;
+  }> {
+    const trimmed = input.intent.trim();
+    if (!trimmed) {
+      return { remindAtIso: null, reminderText: "", confidence: "low", reason: "empty intent" };
+    }
+    const { client, model, provider } = await resolveActive();
+    if (!client) {
+      return {
+        remindAtIso: null,
+        reminderText: trimmed,
+        confidence: "low",
+        reason: "AI provider unavailable"
+      };
+    }
+
+    const prompt = `Parse the operator's "remind me to…" request into a structured reminder for ${input.displayName}.
+
+Reference time (now): ${input.referenceTimeIso}
+
+Operator's request: ${safeTruncate(trimmed, 600)}
+
+Your job:
+1. Find the time hint in the request ("next Tuesday", "in 3 days", "tomorrow morning", "later this week").
+2. Resolve it against the reference time into an absolute ISO timestamp. If the operator names a date but no time-of-day, default to 09:00 local. If they say "morning" default to 09:00, "afternoon" 14:00, "evening" 18:00.
+3. Extract the reminder text. Strip prefixes like "remind me to", "ping me about", "remember to". The stored note should read as an action ("Follow up on the offer", "Ask how the interviews went").
+4. Set confidence = "high" when the time hint is clear and unambiguous. Set "low" when the time is missing, vague ("eventually", "soon"), or could mean multiple things ("Tuesday" without specifying which one).
+5. NEVER invent a time when none is given. If confidence is "low", set remindAtIso to null and explain briefly in reason.
+
+Return strict JSON:
+{
+  "remindAtIso": "ISO timestamp string, or null when confidence is low",
+  "reminderText": "the action the operator wants to be reminded to do, 1 short clause",
+  "confidence": "high" | "low",
+  "reason": "short explanation when confidence is low; omit otherwise"
+}`;
+
+    try {
+      const response = await client.chat.completions.create({
+        model,
+        ...(shouldUseJsonResponseFormat(provider, model)
+          ? { response_format: { type: "json_object" as const } }
+          : {}),
+        messages: [
+          { role: "system", content: SYSTEM_PROMPT },
+          { role: "user", content: reinforceJsonPrompt(prompt, model) }
+        ],
+        ...providerOptions(provider, model),
+        ...geminiExtraBody(provider, model)
+      });
+      const content = response.choices[0]?.message?.content;
+      if (!content) {
+        return {
+          remindAtIso: null,
+          reminderText: trimmed,
+          confidence: "low",
+          reason: "empty AI response"
+        };
+      }
+      const parsed = z
+        .object({
+          remindAtIso: z.string().nullable(),
+          reminderText: z.string().min(1).max(240),
+          confidence: z.enum(["high", "low"]),
+          reason: z.string().max(240).optional()
+        })
+        .parse(parseAiJson(content, model));
+      // Belt-and-braces: if confidence is high but remindAtIso isn't
+      // a valid future ISO, demote to low rather than schedule
+      // something nonsensical.
+      if (parsed.confidence === "high" && parsed.remindAtIso) {
+        const ms = Date.parse(parsed.remindAtIso);
+        if (!Number.isFinite(ms) || ms <= Date.parse(input.referenceTimeIso)) {
+          return {
+            remindAtIso: null,
+            reminderText: parsed.reminderText,
+            confidence: "low",
+            reason: "parsed time was invalid or not in the future"
+          };
+        }
+      }
+      return {
+        remindAtIso: parsed.remindAtIso,
+        reminderText: applyVoiceRules(parsed.reminderText),
+        confidence: parsed.confidence,
+        reason: parsed.reason
+      };
+    } catch (error) {
+      console.warn(
+        `[ai] parseReminderRequest failed (provider=${provider}, model=${model}); returning low confidence. ${classifyLlmError(error, provider)}`
+      );
+      return {
+        remindAtIso: null,
+        reminderText: trimmed,
+        confidence: "low",
+        reason: "AI parse failed"
+      };
+    }
+  }
+
+  /**
    * Per-person friendship summary for iMessage contacts. Operates on the
    * union of messages across every thread the operator has with this
    * person. Produces four sections per Q9 of v0.3.0:
@@ -2965,6 +3095,7 @@ ${safeTruncate(input.draft, 2000)}`;
     generateConversationStarters,
     composeInVoice,
     suggestSnoozeTimings,
+    parseReminderRequest,
     summarisePersonForFriendship,
     askAboutPerson,
     summarisePilotReport,

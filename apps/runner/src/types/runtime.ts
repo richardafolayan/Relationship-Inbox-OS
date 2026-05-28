@@ -377,6 +377,24 @@ export interface AiService {
     whatTheyWant?: string | null;
   }): Promise<SnoozeSuggestionsOutput>;
   /**
+   * Issue #392. Parse a free-text "remind me to…" intent typed by the
+   * operator into { remindAtIso, reminderText, confidence } so the
+   * thread can be snoozed until the parsed time with the reminder note
+   * attached. Returns { confidence: "low" } when the time hint is
+   * ambiguous or missing — caller surfaces the parse back to the
+   * operator rather than guessing.
+   */
+  parseReminderRequest(input: {
+    intent: string;
+    referenceTimeIso: string;
+    displayName: string;
+  }): Promise<{
+    remindAtIso: string | null;
+    reminderText: string;
+    confidence: "high" | "low";
+    reason?: string;
+  }>;
+  /**
    * Per-person friendship summary - four sections covering how the
    * operator knows the contact, recent topics, inside jokes / running
    * threads, and the vibe of the relationship. Operates on the union of
