@@ -1,5 +1,9 @@
 export { buildAudioFingerprint } from "./fingerprint";
 export {
+  messageIdsAwaitingTranscriptRefresh,
+  type MessageWithTranscriptionRefreshFlag
+} from "./refresh-flag";
+export {
   collectAudioAttachments,
   createTranscriptionService,
   selectBestTranscript,

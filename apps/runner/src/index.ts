@@ -52,6 +52,7 @@ import {
   createOpenAITranscriptionProvider,
   createTextRefinementService,
   createTranscriptionService,
+  messageIdsAwaitingTranscriptRefresh,
   type AttachmentResolver,
   type TranscriptionProvider
 } from "./services/transcription";
@@ -3058,7 +3059,16 @@ async function resummarizeThreadById(
     race: options?.race
   });
 
-  await prisma.thread.update({
+  // Issue #385. The summariser just consumed these messages' current
+  // transcripts, so the fresh brief now reflects any higher-tier /
+  // refined text that had set needsAiRefresh. Clear the flag on exactly
+  // those rows in the SAME transaction as the summary write, so a
+  // (re)summarised thread never keeps advertising a stale brief — and a
+  // failed summary write never leaves the flag falsely cleared. We only
+  // ever clear here; AI spend stays gated behind the explicit Reassess
+  // click. The PrismaPromise below is lazy, so it executes exactly once
+  // (either inside $transaction or via the bare await).
+  const summaryWrite = prisma.thread.update({
     where: { id: thread.id },
     data: {
       rollingSummary: summary.summary,
@@ -3069,6 +3079,18 @@ async function resummarizeThreadById(
       replyBriefJson: summary.reply_brief ? JSON.stringify(summary.reply_brief) : null
     }
   });
+  const refreshedMessageIds = messageIdsAwaitingTranscriptRefresh(recentMessagesDesc);
+  if (refreshedMessageIds.length > 0) {
+    await prisma.$transaction([
+      summaryWrite,
+      prisma.messageAudioTranscription.updateMany({
+        where: { messageId: { in: refreshedMessageIds } },
+        data: { needsAiRefresh: false }
+      })
+    ]);
+  } else {
+    await summaryWrite;
+  }
 
   return {
     ok: true,
