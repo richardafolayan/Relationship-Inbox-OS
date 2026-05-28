@@ -15,6 +15,7 @@
     "test:selectors:linkedin": "tsx src/cli.ts test-selectors LINKEDIN",
     "linkedin:smoke": "tsx src/cli.ts linkedin-smoke",
     "repair:linkedin-threads": "tsx src/scripts/repair-linkedin-threads.ts",
+    "repair:linkedin-timestamps": "tsx src/scripts/repair-linkedin-synthetic-timestamps.ts",
     "db:reset:linkedin": "tsx src/scripts/reset-linkedin-inbox.ts --platform LINKEDIN --confirm RESET",
     "cleanup:artifacts": "tsx src/scripts/cleanup-artifacts.ts",
     "imessage:backfill-names": "tsx src/scripts/backfill-imessage-names.ts",
