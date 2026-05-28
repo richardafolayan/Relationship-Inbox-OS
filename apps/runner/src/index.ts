@@ -3058,17 +3058,30 @@ async function resummarizeThreadById(
     race: options?.race
   });
 
-  await prisma.thread.update({
-    where: { id: thread.id },
-    data: {
-      rollingSummary: summary.summary,
-      whatTheyWant: summary.what_they_want,
-      openLoopsJson: JSON.stringify(summary.open_loops),
-      toneNotesJson: JSON.stringify(summary.tone_notes),
-      rememberJson: JSON.stringify(summary.remember),
-      replyBriefJson: summary.reply_brief ? JSON.stringify(summary.reply_brief) : null
-    }
-  });
+  // #385: the fresh summary reflects the CURRENT transcripts of the messages
+  // it just summarised, so clear the `needsAiRefresh` staleness flag on those
+  // transcription rows — in the same transaction as the summary write. The
+  // flag is SET when a higher-tier or refined transcript replaces an earlier
+  // one (transcription-service.ts); without this it was never cleared and
+  // accumulated. Only the messages that fed this summary are cleared.
+  const summarizedMessageIds = recentMessagesDesc.map((m) => m.id);
+  await prisma.$transaction([
+    prisma.thread.update({
+      where: { id: thread.id },
+      data: {
+        rollingSummary: summary.summary,
+        whatTheyWant: summary.what_they_want,
+        openLoopsJson: JSON.stringify(summary.open_loops),
+        toneNotesJson: JSON.stringify(summary.tone_notes),
+        rememberJson: JSON.stringify(summary.remember),
+        replyBriefJson: summary.reply_brief ? JSON.stringify(summary.reply_brief) : null
+      }
+    }),
+    prisma.messageAudioTranscription.updateMany({
+      where: { messageId: { in: summarizedMessageIds }, needsAiRefresh: true },
+      data: { needsAiRefresh: false }
+    })
+  ]);
 
   return {
     ok: true,
