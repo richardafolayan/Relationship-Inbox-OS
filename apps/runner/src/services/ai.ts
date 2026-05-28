@@ -204,6 +204,29 @@ export const PREDRAFT_FIDELITY_REMINDER = [
   "Self-check before returning each reply: every substantive phrase should be traceable to something the contact actually said."
 ].join(" ");
 
+/**
+ * Issue #387 follow-up. Fidelity reminder for updateThreadSummary's
+ * reply-brief generation. PREDRAFT_FIDELITY_REMINDER covered the predraft
+ * generators in #389, but the brief generator was untouched — and its
+ * on_you example literally said "that's the big thing worth acknowledging",
+ * which the model dutifully reproduced on every Brandon-shaped thread.
+ *
+ * Same NO INVENTED FRAMING principle, applied at the brief level rather
+ * than the reply-text level. where_it_stands / on_you / they_said must
+ * paraphrase grounded facts without characterising them as "big", "weighty",
+ * "main", "huge", "significant", etc.
+ *
+ * Exported so tests can assert the language is present in the assembled
+ * prompt without snapshotting the whole template.
+ */
+export const BRIEF_FIDELITY_REMINDER = [
+  "FIDELITY (applies to every visible brief field — where_it_stands, they_said, on_you).",
+  "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation the contact did not express.",
+  "If they paused a decision for a stated reason, name the reason — don't characterise it as a \"big thing\", \"big move\", \"hard call\", \"huge step\", \"weighty\", \"the main thing\", or anything else they didn't say.",
+  "Worked example. Bad on_you: \"He's paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging\" (you invented \"big thing\"). Good on_you: \"He's paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough.\"",
+  "Self-check: every substantive phrase in the brief should be traceable to something the contact actually said in the transcript."
+].join(" ");
+
 // Voice profile tier — picks between the formal (professional) prompt and
 // the casual-DM prompt based on platform. Casual covers WhatsApp / iMessage
 // / Instagram / TikTok DMs; LinkedIn uses the professional register. Both
@@ -1402,6 +1425,8 @@ ${modeBlock}
 
 REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail. It must let the operator write a thoughtful reply WITHOUT scrolling up into the message history. The default visible card surfaces where_it_stands → they_said → on_you in that order, so structure the brief as: context (what was asked / what's the topic), substance (what the contact actually said), obligation (what's on the operator). The substance is the part operators consistently say is too compressed — do not over-summarise it.
 
+${BRIEF_FIDELITY_REMINDER}
+
 where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - 1-2 short sentences. Plain British English. ≤ 280 chars total.
 - Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether he'd started exploring executive search opportunities, or was still figuring out his next steps.", "You sent the slides and asked what she thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
@@ -1425,14 +1450,14 @@ on_you (THE OBLIGATION READ):
 - If the contact has NOT asked anything explicit, say so directly. Example wording: "Nothing asked — a light acknowledgement is enough."
 - If the contact has asked ONE thing, name it. Example: "She asked whether Friday works."
 - If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
-- For a message that's a multi-part personal update (decisions, constraints, news) without explicit asks, point at the single biggest acknowledgement-worthy beat. Example: "He's slightly paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging."
+- For a message that's a multi-part personal update (decisions, constraints, news) without explicit asks, point at the single beat that most calls for acknowledgement — but state it in the contact's own terms. Name the fact, do NOT characterise it as "big", "weighty", "main", "huge", or "the thing". Example (grounded): "He's paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough." NOT: "He paused the offer — that's the big thing worth acknowledging" (you invented "big thing").
 - Never invent obligations. If the contact is simply updating the operator, say a light social reply is enough.
 - ONE sentence, ~140 characters max. The on_you block is the obligation read, not a paragraph. Resist stacking guidance ("acknowledge X; follow up on Y; keep the door open") — that pattern reliably blows past the budget and the dashboard truncates it mid-word. Pick the single most important obligation. Anything else goes in required_points or optional_followups.
 
 required_points (status = "required") — the reply checklist:
 - BE CONSERVATIVE. Required points are the small set of things the operator MUST address. If a point is borderline, send it to optional_followups instead — the rail's job is to prevent invented homework, not to manufacture it. The substance the operator should read is already in they_said; required is only for "you owe a response on this".
 - Always belongs in required: direct questions to the operator, requests, decisions the contact asked the operator to make, things asked to send / confirm / check / arrange. A question the operator acknowledged but never actually answered counts as required.
-- Acknowledgement-worthy news: when the contact has NOT asked anything explicit but has shared a single weighty beat the operator should acknowledge (a paused job offer, a hard decision, a major life event), surface AT MOST ONE required point — "Acknowledge the [most significant beat]". Any further acknowledgements go in optional_followups. The high bar is: "would the contact feel actively unheard, not just under-engaged, if the reply ignored this?" A piece of explanation or background context they shared does NOT meet that bar — that's substance for they_said to surface, not a task.
+- Acknowledgement-worthy news: when the contact has NOT asked anything explicit but has shared a single substantive beat the operator would feel rude ignoring (a paused offer, a decision they made, a life event they named), surface AT MOST ONE required point. Phrase the point in grounded terms naming the beat in the contact's own words ("Acknowledge the paused offer", "Acknowledge the move to Lagos") — do NOT characterise the beat itself ("Acknowledge the big news", "Acknowledge the major decision"). Any further acknowledgements go in optional_followups. The high bar is: "would the contact feel actively unheard, not just under-engaged, if the reply ignored this?" A piece of explanation or background context they shared does NOT meet that bar — that's substance for they_said to surface, not a task.
 - For a multi-part inbound where the contact DID ask several distinct things, surface each ask as its own required point. Asks > acknowledgements.
 - "Ask how X is going" / "ask about Y" prompts are NEVER required — the contact did not ask the operator to ask back. They go in optional_followups.
 - Each text is a short follow-up prompt the operator can act on. Start with a verb. Examples: "Acknowledge the paused offer", "Send the deck Marianne asked about", "Confirm Friday at 11 works".
