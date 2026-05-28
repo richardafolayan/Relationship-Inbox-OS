@@ -34,6 +34,7 @@ import { IMessageDb } from "./platforms/imessage-db";
 import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
+import { runReassessForThread } from "./services/reassess-thread";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
@@ -3278,73 +3279,28 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
 // state rather than blanking the fields.
 app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
-
-  // 1. Resummarise (this also refreshes whatTheyWant + openLoops via the
-  // existing helper, which already persists the result).
-  //
-  // Issue #382 / pilot R-0029. Race two providers for both AI calls in
-  // this route — the user is staring at a spinner and wants the first
-  // valid result fast. PM scope: race ONLY this endpoint; do not
-  // extend to predrafts, classifiers during scan, or background AI
-  // without a separate cost conversation.
-  const resummarised = await resummarizeThreadById(threadId, { race: true });
-  if (!resummarised.ok) {
+  // Issue #382 / pilot R-0029. runReassessForThread opts both AI
+  // calls into the cross-provider race because the operator is
+  // staring at a spinner. PM scope: race ONLY this endpoint; do not
+  // extend to predrafts, classifiers during scan, or background AI.
+  // The orchestration lives in services/reassess-thread.ts so the
+  // race wiring is testable without booting Express (see
+  // tests/runner-reassess-thread-race.test.mjs).
+  const outcome = await runReassessForThread(
+    { prisma, aiService, resummarize: resummarizeThreadById },
+    threadId
+  );
+  if (outcome.kind === "not_found") {
     res.status(404).json({ error: "Thread not found" });
     return;
   }
-
-  // 2. Reclassify outreach vs genuine. Uses the freshly-resummarised
-  // fields as input so the classification reflects the latest state.
-  const thread = await prisma.thread.findUnique({
-    where: { id: threadId },
-    include: {
-      person: true,
-      messages: {
-        // Most RECENT 80, made chronological by the reverse below. An
-        // asc + take would classify off the OLDEST 80 and ignore where
-        // the thread has actually gone on long conversations.
-        orderBy: { timestamp: "desc" },
-        take: 80,
-        include: { audioTranscription: true }
-      }
-    }
-  });
-  if (!thread) {
-    res.status(404).json({ error: "Thread not found" });
-    return;
-  }
-  const orderedMessages = [...thread.messages].reverse();
-  const category = await aiService
-    .classifyThreadCategory({
-      platform: thread.platform as PlatformName,
-      displayName: thread.person.displayName,
-      messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-      summary: thread.rollingSummary,
-      whatTheyWant: thread.whatTheyWant,
-      race: true
-    })
-    .catch(() => null);
-
-  // 3. Burn the suggested-replies cache so the next /data/thread fetch
-  // regenerates them against the new summary / what-they-want / category /
-  // late-reply bucket. Persisting null on the cache key + json columns is
-  // the cheapest way to express "stale" without touching the schema.
-  await prisma.thread.update({
-    where: { id: thread.id },
-    data: {
-      ...(category ? { category } : {}),
-      suggestedRepliesCacheKey: null,
-      suggestedRepliesJson: null
-    }
-  });
-
   res.json({
     ok: true,
-    threadId,
-    summary: resummarised.summary,
-    whatTheyWant: resummarised.whatTheyWant,
-    openLoops: resummarised.openLoops,
-    category: category ?? thread.category ?? null
+    threadId: outcome.threadId,
+    summary: outcome.summary,
+    whatTheyWant: outcome.whatTheyWant,
+    openLoops: outcome.openLoops,
+    category: outcome.category
   });
 }));
 

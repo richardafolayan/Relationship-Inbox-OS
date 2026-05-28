@@ -22,7 +22,7 @@ function readSource(relativePath) {
   return readFileSync(resolve(process.cwd(), relativePath), "utf8");
 }
 
-test("reassess route enables race for both AI calls", () => {
+test("reassess route delegates to runReassessForThread (single seam)", () => {
   const indexTs = readSource("apps/runner/src/index.ts");
 
   // Locate the reassess route handler. The test fails loudly if the
@@ -34,20 +34,34 @@ test("reassess route enables race for both AI calls", () => {
   assert.ok(routeMatch, "/control/thread/:threadId/reassess route not found");
   const routeBody = routeMatch[0];
 
-  // The route calls resummarizeThreadById with race: true. That helper
-  // forwards race down to aiService.updateThreadSummary internally —
-  // the test for the forwarding is in the resummarizeThreadById block.
+  // The route is a thin wrapper around the extracted service so the
+  // race wiring is testable without booting Express. If someone
+  // re-inlines the AI calls back into the route, the behavioural
+  // test in runner-reassess-thread-race.test.mjs stops covering them.
   assert.match(
     routeBody,
-    /resummarizeThreadById\([^)]*\{\s*race:\s*true\s*\}/,
-    "reassess route must call resummarizeThreadById with { race: true }"
+    /runReassessForThread\(/,
+    "reassess route must delegate to runReassessForThread (see services/reassess-thread.ts)"
+  );
+});
+
+test("services/reassess-thread enables race for both AI calls", () => {
+  const reassessThreadTs = readSource("apps/runner/src/services/reassess-thread.ts");
+
+  // The service calls deps.resummarize with race: true. That helper
+  // (production: resummarizeThreadById) forwards race down to
+  // aiService.updateThreadSummary — covered by the next test.
+  assert.match(
+    reassessThreadTs,
+    /deps\.resummarize\(\s*[^)]*\{\s*race:\s*true\s*\}\s*\)/,
+    "runReassessForThread must call deps.resummarize with { race: true }"
   );
 
-  // The route calls aiService.classifyThreadCategory with race: true.
+  // The service calls aiService.classifyThreadCategory with race: true.
   assert.match(
-    routeBody,
+    reassessThreadTs,
     /classifyThreadCategory\(\s*\{[\s\S]*?race:\s*true[\s\S]*?\}\s*\)/,
-    "reassess route must call classifyThreadCategory with race: true"
+    "runReassessForThread must call classifyThreadCategory with race: true"
   );
 });
 
@@ -109,17 +123,20 @@ test("race option is only set in the reassess code path (defence in depth)", () 
   const files = [
     "apps/runner/src/services/scan-queue.ts",
     "apps/runner/src/services/reassess-all.ts",
-    "apps/runner/src/services/ai.ts"
+    "apps/runner/src/services/ai.ts",
+    "apps/runner/src/index.ts"
   ];
   for (const path of files) {
     const content = readSource(path);
     // ai.ts defines the option and the race wiring; it doesn't pass
-    // `race: true` as a literal. The other files are background paths.
-    // (The actual race opt-in lives only in index.ts.)
+    // `race: true` as a literal. scan-queue / reassess-all are
+    // background paths. index.ts route handler is a thin wrapper —
+    // the literal `race: true` opt-in lives only in
+    // services/reassess-thread.ts.
     assert.doesNotMatch(
       content,
       /\brace:\s*true\b/,
-      `${path} must not set race: true — race is only for the manual reassess endpoint`
+      `${path} must not set race: true — race is only for the manual reassess service`
     );
   }
 });
