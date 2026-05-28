@@ -42,6 +42,12 @@ interface ActionItemsChecklistProps {
    *   no AI signals at all.
    */
   aiCoverageMode?: "auto-tick" | "highlight" | "off";
+  /**
+   * Optional section heading override. #388 renders this checklist as the
+   * rail's top-level "Draft coverage" section, so the panel passes that
+   * label. When omitted, the default reply/reopen heading is used.
+   */
+  heading?: string;
 }
 
 // A reply checklist — a thinking aid for writing a real reply, not a task
@@ -55,7 +61,8 @@ export function ActionItemsChecklist({
   isReopenMode,
   onDismiss,
   aiCoverageItems,
-  aiCoverageMode = "off"
+  aiCoverageMode = "off",
+  heading: headingOverride
 }: ActionItemsChecklistProps) {
   const [state, setState] = useState<ActionItemChecklistState>(emptyChecklistState);
   const [hydrated, setHydrated] = useState(false);
@@ -83,7 +90,7 @@ export function ActionItemsChecklist({
     if (editingKey) editInputRef.current?.focus();
   }, [editingKey]);
 
-  const heading = isReopenMode ? "Conversation hooks" : "Things to address";
+  const heading = headingOverride ?? (isReopenMode ? "Conversation hooks" : "Things to address");
   const helper = isReopenMode
     ? "Worth picking up on when you reconnect. Tick each off as you write."
     : "Tick each off as you write your reply. This is just a checklist. It never changes your message.";
