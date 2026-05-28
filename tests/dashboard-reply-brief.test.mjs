@@ -26,8 +26,8 @@ function thread(partial = {}) {
   };
 }
 
-test("MORE_DISCLOSURE_LABEL exact wording from the spec", () => {
-  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge · checklist");
+test("MORE_DISCLOSURE_LABEL drops the checklist (now a top-level Draft coverage section, #388)", () => {
+  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge");
 });
 
 test("durableContextLabel returns the neutral 'Who they are' phrasing", () => {
@@ -161,11 +161,7 @@ test("moreSectionHasContent: empty brief + 0 required + 0 dismissed → no More 
     enough_to_reply_without_scrolling: true
   };
   assert.equal(
-    moreSectionHasContent({
-      brief: empty,
-      requiredPointsCount: 0,
-      dismissedOpenLoopsCount: 0
-    }),
+    moreSectionHasContent({ brief: empty }),
     false
   );
 });
@@ -183,11 +179,7 @@ test("moreSectionHasContent: an optional follow-up alone is enough to surface Mo
     enough_to_reply_without_scrolling: true
   };
   assert.equal(
-    moreSectionHasContent({
-      brief: briefWithOptional,
-      requiredPointsCount: 0,
-      dismissedOpenLoopsCount: 0
-    }),
+    moreSectionHasContent({ brief: briefWithOptional }),
     true
   );
 });
@@ -207,11 +199,7 @@ test("moreSectionHasContent: durable_context, tone_steer, fuller_context each su
   for (const field of ["fuller_context", "durable_context", "tone_steer"]) {
     const brief = { ...base, [field]: "Some content" };
     assert.equal(
-      moreSectionHasContent({
-        brief,
-        requiredPointsCount: 0,
-        dismissedOpenLoopsCount: 0
-      }),
+      moreSectionHasContent({ brief }),
       true,
       `expected More to surface when ${field} is set`
     );
@@ -267,11 +255,28 @@ test("moreSectionHasContent: handled_points alone surface More so the operator c
     enough_to_reply_without_scrolling: true
   };
   assert.equal(
-    moreSectionHasContent({
-      brief,
-      requiredPointsCount: 0,
-      dismissedOpenLoopsCount: 0
-    }),
+    moreSectionHasContent({ brief }),
     true
   );
+});
+
+test("moreSectionHasContent: required points alone no longer force More — Draft coverage owns the checklist now (#388)", () => {
+  const briefWithRequiredOnly = {
+    where_it_stands: "Trace.",
+    on_you: "Reply to both points.",
+    required_points: [
+      { id: "a", text: "Acknowledge the offer", status: "required" },
+      { id: "b", text: "Answer the timeline question", status: "required" }
+    ],
+    optional_followups: [],
+    handled_points: [],
+    they_said: [],
+    fuller_context: null,
+    durable_context: null,
+    tone_steer: null,
+    enough_to_reply_without_scrolling: true
+  };
+  // Pre-#388 this surfaced More via the embedded checklist; the checklist
+  // is now the top-level Draft coverage section, so More stays calm.
+  assert.equal(moreSectionHasContent({ brief: briefWithRequiredOnly }), false);
 });
