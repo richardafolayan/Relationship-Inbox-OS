@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { runActionWithFeedback } from "@/lib/feedback";
+import { onReassessChange } from "@/lib/reassess-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
@@ -94,7 +95,17 @@ type TickerState =
       queuedBehind: number;
     }
   | { kind: "send_failed"; personName: string; message: string }
-  | { kind: "send_succeeded"; personName: string };
+  | { kind: "send_succeeded"; personName: string }
+  | {
+      // Issue #369. Per-thread Reassess is a 5-15s LLM call. Previously
+      // surfaced as a static pending toast (violates the same rule
+      // #337 fixed for the pilot feedback modal — ongoing work belongs
+      // in the ticker). Dashboard-side state via lib/reassess-status,
+      // so no /runner/health round-trip needed for a click that
+      // originates in the dashboard itself.
+      kind: "reassessing";
+      count: number;
+    };
 
 function formatRelativeScan(lastScanAt: string | null): string {
   if (!lastScanAt) return "scan never";
@@ -137,6 +148,7 @@ function platformDisplay(platform: string): string {
 function computeTicker(input: {
   health: HealthResponse | null;
   queue: SendQueueResponse | null;
+  reassessingCount: number;
 }): TickerState {
   const queueActive = input.queue?.active ?? [];
   const head = queueActive[0];
@@ -163,6 +175,14 @@ function computeTicker(input: {
       }
       return { kind: "send_succeeded", personName: recentest.personName };
     }
+  }
+  // Issue #369. Reassess takes priority over scanning here because it's
+  // a discrete operator-initiated click — the scan ticker is the
+  // background heartbeat. If a scan happens to be running while the
+  // operator clicks Reassess, surface the more specific reassess copy
+  // so the operator's own action stays visible.
+  if (input.reassessingCount > 0) {
+    return { kind: "reassessing", count: input.reassessingCount };
   }
   if (blockedByScan) {
     const platform = input.health?.currentScanPlatform ?? null;
@@ -231,6 +251,13 @@ function tickerLabel(state: TickerState): string {
       return `Failed to send to ${state.personName}`;
     case "send_succeeded":
       return `Sent to ${state.personName}`;
+    case "reassessing":
+      // Multi-reassess only happens if the operator clicks Reassess on
+      // two threads in quick succession (rare). Pluralise so the copy
+      // never reads "Reassessing 1 threads".
+      return state.count === 1
+        ? "Reassessing thread"
+        : `Reassessing ${state.count} threads`;
     default:
       return "";
   }
@@ -264,6 +291,10 @@ export function TopStatus() {
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [platformActionBusy, setPlatformActionBusy] = useState<string | null>(null);
   const [scanTriggering, setScanTriggering] = useState(false);
+  // Issue #369. In-flight Reassess actions originate in the thread page
+  // (lib/reassess-status emits an event). Surface the count in the
+  // ticker instead of a static pending toast.
+  const [reassessingCount, setReassessingCount] = useState(0);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -290,6 +321,11 @@ export function TopStatus() {
     const timer = setInterval(() => setTick((n) => n + 1), 1000);
     return () => clearInterval(timer);
   }, []);
+
+  // Issue #369. Subscribe to per-thread Reassess in-flight signals so
+  // the ticker surfaces "Reassessing thread" while a kebab → Reassess
+  // click is running.
+  useEffect(() => onReassessChange(setReassessingCount), []);
 
   useEffect(() => {
     const onEvent = (event: Event) => {
@@ -343,9 +379,12 @@ export function TopStatus() {
 
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
 
-  const ticker = computeTicker({ health, queue });
+  const ticker = computeTicker({ health, queue, reassessingCount });
   const tickerIsActive =
-    ticker.kind === "scanning" || ticker.kind === "sending" || ticker.kind === "enriching";
+    ticker.kind === "scanning" ||
+    ticker.kind === "sending" ||
+    ticker.kind === "enriching" ||
+    ticker.kind === "reassessing";
 
   // Cancelling a running scan is a legitimate user action — a scan
   // can sit on a single thread for tens of seconds and the operator
