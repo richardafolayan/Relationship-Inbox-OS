@@ -36,6 +36,7 @@ import type {
 } from "@/lib/types";
 import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
+import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -1523,7 +1524,7 @@ export default function ThreadPage() {
   //   - bubbles with no displayable content at all (empty text + no
   //     playable attachments + no transcript) so the thread never
   //     paints a literally-blank bubble.
-  const visibleMessages: ThreadMessage[] = (thread?.messages ?? []).filter((m) => {
+  const visibleMessagesBeforeReactionFold: ThreadMessage[] = (thread?.messages ?? []).filter((m) => {
     if (isNonContentIMessageSystemEvent(m.text)) return false;
     const text = (m.text ?? "").trim();
     const hasText = text.length > 0;
@@ -1537,6 +1538,25 @@ export default function ThreadPage() {
       m.audioTranscription.transcript.trim().length > 0;
     return hasText || hasPlayable || hasTranscript;
   });
+  // #422: iMessage stores arbitrary-emoji reactions as "Reacted X to
+  // 'Y'" text bubbles when either party isn't on iOS 18. Collapse those
+  // synthesised bubbles into reaction stickers on the parent so the
+  // operator sees the same UI as native ❤️/👍 tapbacks.
+  const { synthesizedByParentId: synthesizedReactionsByParentId, hiddenMessageIds: synthesizedReactionHiddenIds } =
+    useMemo(
+      () =>
+        foldSynthesizedReactions(
+          visibleMessagesBeforeReactionFold.map((m) => ({
+            id: m.id,
+            direction: m.direction,
+            text: m.text ?? ""
+          }))
+        ),
+      [visibleMessagesBeforeReactionFold]
+    );
+  const visibleMessages: ThreadMessage[] = visibleMessagesBeforeReactionFold.filter(
+    (m) => !synthesizedReactionHiddenIds.has(m.id)
+  );
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
   // Threaded-reply lookups — unifies two sources:
@@ -2668,7 +2688,13 @@ export default function ThreadPage() {
                       const hasInlineMedia = playableAttachments.length > 0;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
-                      const reactions = (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                      const nativeReactions =
+                        (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                      const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
+                      const reactions: Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> = [
+                        ...nativeReactions,
+                        ...synthesizedReactions
+                      ];
                       return (
                         <div className="relative">
                           <div

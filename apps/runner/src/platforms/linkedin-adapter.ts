@@ -2974,14 +2974,25 @@ export class LinkedInAdapter implements PlatformAdapter {
     return inferAdapterFailureKindFromMessage(reason) ?? fallback;
   }
 
-  private normalizeTimestamp(rawValue: string | undefined, fallbackIso: string): string {
+  /**
+   * Parse a per-message timestamp string into ISO. Returns `undefined`
+   * when the input is missing or unparseable so callers can leave the
+   * adapter's `NormalizedMessage.timestamp` empty. The scan-queue then
+   * uses `candidateListTimestamp` for new rows and PRESERVES the
+   * existing timestamp on re-scrape (see `buildMessageUpsertPayload`
+   * `adapterReportedTimestamp:false`). This is what stops the #407
+   * drift: previously a synthesised `Date.now() - index * 1_000`
+   * fallback was reported as real, so every scrape pushed historical
+   * rows forward to "today minus a few seconds".
+   */
+  private normalizeTimestamp(rawValue: string | undefined): string | undefined {
     if (!rawValue) {
-      return fallbackIso;
+      return undefined;
     }
 
     const trimmed = rawValue.trim();
     if (!trimmed) {
-      return fallbackIso;
+      return undefined;
     }
 
     if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
@@ -3005,7 +3016,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       return parsedListTimestamp.toISOString();
     }
 
-    return fallbackIso;
+    return undefined;
   }
 
   private normalizeIdentity(value: string | undefined): string {
@@ -7522,11 +7533,10 @@ export class LinkedInAdapter implements PlatformAdapter {
               selectors,
               openMode === "full" ? 1000 : 120
             );
-            const baseTimestamp = Date.now() - parsedMessages.length * 1_000;
-            const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message, index) => ({
+            const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message) => ({
               ...message,
               direction: message.direction === "IN" ? "IN" : "OUT",
-              timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+              timestamp: this.normalizeTimestamp(message.timestamp),
               text: cleanMessageText(message.text),
               senderName: message.senderName,
               raw: message.raw
@@ -9010,11 +9020,10 @@ export class LinkedInAdapter implements PlatformAdapter {
         if (rawMessages.length <= 0) {
           fail("parse", "no_messages_parsed", "Smoke ingest could not parse visible message text.");
         }
-        const baseTimestamp = Date.now() - rawMessages.length * 1_000;
-        const messages: NormalizedMessage[] = rawMessages.map((message, index) => ({
+        const messages: NormalizedMessage[] = rawMessages.map((message) => ({
           platformMessageKey: message.platformMessageKey,
           direction: message.direction,
-          timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+          timestamp: this.normalizeTimestamp(message.timestamp),
           text: cleanMessageText(message.text),
           senderName: message.senderName,
           attachments: [],
@@ -9603,11 +9612,13 @@ export class LinkedInAdapter implements PlatformAdapter {
         });
         // Propagate resolved timestamps forward across "continuation" bubbles.
         // LinkedIn renders consecutive messages from the same sender under one
-        // visible time; only the first bubble has a <time> element. Without
-        // this, those bubbles fall back to scan-time in normalizeTimestamp
-        // below and creep forward on every rescan. Walk the messages in DOM
-        // order, and when a bubble has no parseable timestamp, inherit the
-        // previous bubble's time + 1ms (preserves conversational order).
+        // visible time; only the first bubble has a <time> element. Walk the
+        // messages in DOM order, and when a bubble has no parseable timestamp,
+        // inherit the previous bubble's time + 1ms (preserves conversational
+        // order). First-message-with-no-time stays empty — normalizeTimestamp
+        // returns undefined and the scan-queue preserves any existing row
+        // timestamp on re-scrape (see #407: synthesising a fallback caused
+        // months-old messages to drift to "today minus a few seconds").
         let lastResolvedMs: number | null = null;
         for (const m of messages) {
           const parsed = m.timestamp ? Date.parse(m.timestamp) : NaN;
@@ -9617,15 +9628,11 @@ export class LinkedInAdapter implements PlatformAdapter {
             lastResolvedMs += 1;
             m.timestamp = new Date(lastResolvedMs).toISOString();
           }
-          // First-message-with-no-time: leave empty; normalizeTimestamp will
-          // fall back to scan-time as before. Better than fabricating a wrong
-          // anchor and propagating it.
         }
-        const baseTimestamp = Date.now() - messages.length * 1_000;
-        return messages.map((message, index) => ({
+        return messages.map((message) => ({
           ...message,
           direction: message.direction === "IN" ? "IN" : "OUT",
-          timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+          timestamp: this.normalizeTimestamp(message.timestamp),
           text: cleanMessageText(message.text),
           senderName: message.senderName,
           raw: message.raw
