@@ -33,13 +33,17 @@ interface ReplyBriefPanelProps {
   aiCoverageMode?: "auto-tick" | "highlight" | "off";
 }
 
-// The thread right-rail Reply Brief. Default visible card holds only
-// Where it stands + On you so the operator can answer "what's the last
-// thing they said, why did they say it, and is anything actually on me?"
-// in under 10 seconds. Everything else sits behind a single collapsed
-// "More" disclosure: optional follow-ups, fuller / durable context,
-// tone steer, handled points, and the existing reply checklist (only
-// when there are 2+ required points or dismissed loops worth restoring).
+// The thread right-rail Reply Brief, ordered action-first (issue #388) so
+// it reads top-to-bottom in seconds and the operator knows what to send
+// without opening anything:
+//   1. Reply job — what this reply needs to do (the `on_you` read).
+//   2. They said — the contact's reply-relevant points, as bullets.
+//   3. Draft coverage — the reply obligations with their tick states
+//      against the in-flight draft; drives revisions.
+//   4. Where it stands — the narrative trace, demoted below the action
+//      sections but kept for operators who want the prose context.
+// Secondary material (optional follow-ups, fuller / durable context, tone
+// steer, handled points) stays behind a single collapsed "More" disclosure.
 //
 // Things to remember stays separate — it lives in its own section
 // alongside this panel because it surfaces durable life facts (exams,
@@ -61,11 +65,7 @@ export function ReplyBriefPanel({
     requiredPointsCount: requiredCount,
     dismissedOpenLoopsCount: dismissedOpenLoops.length
   });
-  const hasMore = moreSectionHasContent({
-    brief,
-    requiredPointsCount: requiredCount,
-    dismissedOpenLoopsCount: dismissedOpenLoops.length
-  });
+  const hasMore = moreSectionHasContent(brief);
 
   // Trim once for the visible card. The brief text is already sanitised
   // server-side, but defensive trimming keeps stray whitespace from
@@ -84,15 +84,21 @@ export function ReplyBriefPanel({
       data-tour="reply-brief"
       className="flex flex-col gap-7"
     >
-      {where ? (
-        <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
+      {/* 1. Reply job — the obligation read, promoted to lead the rail so
+          the operator sees what this reply needs to do first. Backed by the
+          existing `on_you` field; the data-demo-target stays the same so the
+          pilot tour keeps resolving this anchor. */}
+      {onYou ? (
+        <div data-demo-target="reply-brief-on-you" data-tour="reply-brief-on-you">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            Where it stands
+            Reply job
           </p>
-          <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
+          <p className="m-0 text-[14px] leading-[1.55] text-ink">{onYou}</p>
         </div>
       ) : null}
 
+      {/* 2. They said — the contact's reply-relevant points as bullets, so
+          the operator can answer without rereading the thread. */}
       {theySaid.length > 0 ? (
         <div>
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
@@ -115,12 +121,31 @@ export function ReplyBriefPanel({
         </div>
       ) : null}
 
-      {onYou ? (
-        <div data-demo-target="reply-brief-on-you" data-tour="reply-brief-on-you">
+      {/* 3. Draft coverage — promoted out of the "More" disclosure (issue
+          #388). The reply obligations and their tick states against the
+          in-flight draft, so coverage drives revisions instead of hiding
+          behind a click. Gated to 2+ required points or dismissed loops
+          worth restoring; a single obligation stays carried by Reply job. */}
+      {showChecklist ? (
+        <ActionItemsChecklist
+          threadId={threadId}
+          openLoops={openLoops}
+          dismissedOpenLoops={dismissedOpenLoops}
+          isReopenMode={false}
+          onDismiss={onDismissLoop}
+          aiCoverageItems={aiCoverageItems}
+          aiCoverageMode={aiCoverageMode}
+        />
+      ) : null}
+
+      {/* 4. Where it stands — the narrative trace, demoted below the action
+          sections but kept for operators who still want the prose. */}
+      {where ? (
+        <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            On you
+            Where it stands
           </p>
-          <p className="m-0 text-[14px] leading-[1.55] text-ink">{onYou}</p>
+          <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
         </div>
       ) : null}
 
@@ -233,18 +258,6 @@ export function ReplyBriefPanel({
                     ))}
                   </ul>
                 </div>
-              ) : null}
-
-              {showChecklist ? (
-                <ActionItemsChecklist
-                  threadId={threadId}
-                  openLoops={openLoops}
-                  dismissedOpenLoops={dismissedOpenLoops}
-                  isReopenMode={false}
-                  onDismiss={onDismissLoop}
-                  aiCoverageItems={aiCoverageItems}
-                  aiCoverageMode={aiCoverageMode}
-                />
               ) : null}
             </div>
           ) : null}

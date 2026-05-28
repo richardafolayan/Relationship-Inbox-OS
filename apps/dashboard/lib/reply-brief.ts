@@ -83,20 +83,16 @@ export function shouldShowChecklist(args: {
 //   - fuller / durable context strings
 //   - tone steer
 //   - handled points worth surfacing
-//   - the gated checklist (with required ≥ 2 or dismissed loops)
-// When everything is empty, the disclosure renders nothing so the panel
-// stays calm.
-export function moreSectionHasContent(args: {
-  brief: ReplyBrief;
-  requiredPointsCount: number;
-  dismissedOpenLoopsCount: number;
-}): boolean {
-  if (args.brief.optional_followups.length > 0) return true;
-  if (args.brief.fuller_context && args.brief.fuller_context.trim()) return true;
-  if (args.brief.durable_context && args.brief.durable_context.trim()) return true;
-  if (args.brief.tone_steer && args.brief.tone_steer.trim()) return true;
-  if (args.brief.handled_points && args.brief.handled_points.length > 0) return true;
-  if (shouldShowChecklist(args)) return true;
+// The reply checklist no longer lives here: issue #388 promoted it to its
+// own top-level "Draft coverage" section so the rail leads with the action.
+// When everything below is empty, the disclosure renders nothing so the
+// panel stays calm.
+export function moreSectionHasContent(brief: ReplyBrief): boolean {
+  if (brief.optional_followups.length > 0) return true;
+  if (brief.fuller_context && brief.fuller_context.trim()) return true;
+  if (brief.durable_context && brief.durable_context.trim()) return true;
+  if (brief.tone_steer && brief.tone_steer.trim()) return true;
+  if (brief.handled_points && brief.handled_points.length > 0) return true;
   return false;
 }
 
@@ -110,4 +106,4 @@ export function durableContextLabel(): string {
 
 // Single source of truth for the disclosure label so the test can pin
 // the exact wording from the spec.
-export const MORE_DISCLOSURE_LABEL = "More context · nudge · checklist";
+export const MORE_DISCLOSURE_LABEL = "More context · nudge";
