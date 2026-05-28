@@ -421,7 +421,7 @@ export default function TodayPage() {
 
   return (
     <Canvas className="max-w-[1240px] pb-10">
-      <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_82%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+      <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
         <div className="min-w-0">
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
             {dayLabel}
