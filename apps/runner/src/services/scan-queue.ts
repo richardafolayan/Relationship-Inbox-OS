@@ -16,6 +16,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
+import { effectiveLastOutboundAt } from "./reaction-effects.js";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
@@ -3011,7 +3012,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const latestMessages = [...latestMessagesDesc].reverse();
     const resolvedLastMessageAt = aggregateAny._max.timestamp ?? candidateListTimestamp;
     const resolvedLastInboundAt = aggregateInbound._max.timestamp ?? null;
-    const resolvedLastOutboundAt = aggregateOutbound._max.timestamp ?? null;
+    // Operator OUT reactions (iMessage tapbacks) are stored on the parent
+    // message's rawJson, not as standalone Message rows, so the aggregate
+    // OUT-message query misses them. Fold them into the effective
+    // lastOutboundAt so a thread where the operator reacted ❤️ instead
+    // of typing a reply no longer hangs as needsReply forever (#393 —
+    // pilot R-0033). See services/reaction-effects.ts for the helper.
+    const resolvedLastOutboundAt = effectiveLastOutboundAt(
+      aggregateOutbound._max.timestamp ?? null,
+      latestMessagesDesc
+    );
     const hasPersistedMessages = Boolean(aggregateAny._max.timestamp);
     const messageDerivedNeedsReply = Boolean(
       resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
