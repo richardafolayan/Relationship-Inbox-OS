@@ -2325,6 +2325,64 @@ export default function ThreadPage() {
                     }
                   },
                   {
+                    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
+                    // → AI parses → thread snoozes until then with the
+                    // reminder text saved on Thread.reminderText. When the
+                    // snooze expires the thread returns to inbox with a
+                    // "Reminder: <text>" banner. window.prompt for the
+                    // input is intentionally rough — see #392 for the
+                    // upcoming dedicated compose-mode polish.
+                    label: "Remind me…",
+                    onSelect: () => {
+                      if (!thread) return;
+                      const intent = window.prompt(
+                        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
+                      );
+                      if (!intent || !intent.trim()) return;
+                      apiPost<{
+                        ok: boolean;
+                        remindAt?: string;
+                        reminderText?: string;
+                        needsClarification?: boolean;
+                        reason?: string;
+                      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
+                        .then(async (res) => {
+                          if (res.ok && res.remindAt && res.reminderText) {
+                            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
+                              weekday: "short",
+                              month: "short",
+                              day: "numeric",
+                              hour: "numeric",
+                              minute: "2-digit"
+                            });
+                            showToast({
+                              kind: "success",
+                              title: `Reminder set for ${whenLabel}`,
+                              description: res.reminderText
+                            });
+                            await refresh();
+                          } else {
+                            showToast({
+                              kind: "error",
+                              title: "Couldn't set the reminder",
+                              description:
+                                res.reason ??
+                                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
+                              durationMs: 9000
+                            });
+                          }
+                        })
+                        .catch((err) => {
+                          showToast({
+                            kind: "error",
+                            title: "Reminder failed",
+                            description: err instanceof Error ? err.message : String(err),
+                            durationMs: 9000
+                          });
+                        });
+                    }
+                  },
+                  {
                     label: `Open in ${platformLabel}`,
                     onSelect: () =>
                       runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
@@ -2347,6 +2405,29 @@ export default function ThreadPage() {
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
+            {/* Issue #392. "Remind me to…" banner. Surfaces when the
+                operator set a reminder via the kebab menu — visible
+                whenever the thread is loaded, so the operator sees
+                WHY the thread is in front of them. Cleared on
+                unsnooze (server-side) and on the next reassess that
+                ships a fresh state. */}
+            {thread.reminderText ? (
+              <div className="self-center flex items-center gap-3 rounded-row border border-hairline bg-paper-2 px-3 py-[8px] text-[12.5px] text-ink-2">
+                <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Reminder</span>
+                <span>{thread.reminderText}</span>
+                {thread.snoozedUntil ? (
+                  <span className="font-mono text-[10.5px] text-ink-3">
+                    · resurfaces {new Date(thread.snoozedUntil).toLocaleString(undefined, {
+                      weekday: "short",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit"
+                    })}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
             {focusedThreadParentId ? (
               <div
                 data-focused-pill="true"

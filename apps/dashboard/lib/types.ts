@@ -389,6 +389,13 @@ export interface ThreadResponse {
   riskReason?: string | null;
   /** ISO timestamp until which this thread is snoozed; null when active. */
   snoozedUntil?: string | null;
+  /**
+   * Issue #392. Operator-supplied "remind me to…" text attached to a
+   * snooze. The thread page surfaces it as a "Reminder: <text>" banner
+   * when present, so the operator remembers WHY the thread was snoozed
+   * when it returns. Never sent to the contact. Cleared on unsnooze.
+   */
+  reminderText?: string | null;
   unreadCount: number;
   needsReply: boolean;
   summary?: string;
