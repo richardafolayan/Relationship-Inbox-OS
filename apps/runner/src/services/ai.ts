@@ -1143,6 +1143,35 @@ function snapshotForPrompt(snap: ContactProfileSnapshot | null): Record<string, 
   };
 }
 
+// #380 residual fix (R-0028). The draft generator (generateSuggestedReplies)
+// used to pick REOPEN purely from a timestamp flag: any operator message
+// newer than the contact's set needsReply=false, switching the drafts to
+// "reach into a quiet thread" openers. A single reply to one of several
+// contact topics tripped it, so the drafts stopped addressing the remaining
+// points. #410 fixed the same flip in the summary path; this reuses that
+// fix's output — the brief's required_points (the still-owed set, with
+// handled/optional already excluded) and its legacy open_loops mirror —
+// rather than re-deriving coverage. REOPEN only when the contact isn't
+// waiting AND no reply debt remains.
+export function selectSuggestedReplyMode(input: {
+  needsReply: boolean;
+  replyBrief?: ReplyBrief | null;
+  openLoops?: string[];
+}): "reply" | "reopen" {
+  // Contact's last message is newer — they're waiting. Always reply.
+  if (input.needsReply) return "reply";
+  // Operator replied last. Stay in reply mode while substance is still owed.
+  const remaining = (input.replyBrief?.required_points ?? [])
+    .map((point) => point.text?.trim() ?? "")
+    .filter((text) => text.length > 0);
+  if (remaining.length > 0) return "reply";
+  // Cold path with no brief: fall back to the legacy open_loops mirror.
+  const loops = (input.openLoops ?? []).map((loop) => loop.trim()).filter((loop) => loop.length > 0);
+  if (loops.length > 0) return "reply";
+  // No pending message and no remaining debt — genuinely quiet thread.
+  return "reopen";
+}
+
 export function createAiService(settingsStore: SettingsStore): AiService {
   // Build one client per provider up front, guarded by API key presence.
   // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
@@ -1912,7 +1941,12 @@ ${transcript}`;
     // small things the contact mentioned that would feel good to bring
     // up). The output shape is identical so the dashboard renders both
     // the same way.
-    const modeBlock = input.needsReply
+    const replyMode = selectSuggestedReplyMode({
+      needsReply: input.needsReply,
+      replyBrief: input.replyBrief,
+      openLoops: input.openLoops
+    });
+    const modeBlock = replyMode === "reply"
       ? `MODE: REPLY. The contact's last message is waiting on a response.
 
 What to generate: three sendable replies to the most recent contact message, accounting for the full recent exchange above. If the operator already responded to part of the topic earlier in this exchange, the replies must build on that — do NOT treat the contact's last message as a cold ask when the operator has already engaged.
