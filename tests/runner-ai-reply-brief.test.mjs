@@ -161,6 +161,80 @@ test("stripBannedPhrases: leaves clean text untouched", () => {
   assert.equal(stripBannedPhrases(clean), clean);
 });
 
+// ── Issue #397 — em/en dash strip in brief fields ──────────────────────
+
+test("stripBannedPhrases: replaces em dashes with comma-space (#397)", () => {
+  const dirty = "He paused the offer — clients were in the Middle East.";
+  const cleaned = stripBannedPhrases(dirty);
+  assert.equal(cleaned.includes("—"), false, "em dash must be gone");
+  assert.match(cleaned, /paused the offer, clients were in the Middle East/);
+});
+
+test("stripBannedPhrases: replaces en dashes with comma-space (#397)", () => {
+  const dirty = "She asked for Friday – Tuesday windows.";
+  const cleaned = stripBannedPhrases(dirty);
+  assert.equal(cleaned.includes("–"), false, "en dash must be gone");
+  assert.match(cleaned, /Friday, Tuesday windows/);
+});
+
+test("stripBannedPhrases: handles multiple em dashes in one string", () => {
+  const dirty = "First part — middle part — last part.";
+  const cleaned = stripBannedPhrases(dirty);
+  assert.equal(cleaned.includes("—"), false);
+  assert.match(cleaned, /First part, middle part, last part/);
+});
+
+test("sanitizeReplyBrief: scrubs em dashes from on_you (the canonical leak)", () => {
+  // Regression: the Brandon thread's on_you came back as "He's paused a
+  // job offer because the clients are in the Middle East — that's the
+  // big thing worth acknowledging." The "big thing" framing is handled
+  // by the fidelity prompts now (#390); the em-dash is handled here.
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "You asked Brandon whether he was exploring exec opportunities.",
+    on_you: "He's paused a job offer — the clients are based in the Middle East.",
+    required_points: [],
+    optional_followups: [],
+    handled_points: []
+  });
+  assert.ok(brief);
+  assert.equal(brief.on_you.includes("—"), false, "em dash must be stripped from on_you");
+});
+
+test("sanitizeReplyBrief: scrubs em dashes from where_it_stands and fuller_context", () => {
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "She sent two messages — both about the trip.",
+    on_you: "Reply with the dates.",
+    fuller_context: "Started in March — covers both the move and the new role.",
+    durable_context: "Old uni friend — works in product now.",
+    tone_steer: "Warm — not corporate.",
+    required_points: [{ id: "x", text: "Pick a date — Friday works.", status: "required" }],
+    optional_followups: [],
+    handled_points: []
+  });
+  assert.ok(brief);
+  assert.equal(brief.where_it_stands.includes("—"), false);
+  assert.equal((brief.fuller_context ?? "").includes("—"), false);
+  assert.equal((brief.durable_context ?? "").includes("—"), false);
+  assert.equal((brief.tone_steer ?? "").includes("—"), false);
+  assert.equal(brief.required_points[0].text.includes("—"), false);
+});
+
+test("sanitizeReplyBrief: scrubs em dashes from they_said bullets", () => {
+  const brief = sanitizeReplyBrief({
+    where_it_stands: "You asked about exec search.",
+    on_you: "Acknowledge the paused offer.",
+    they_said: [
+      { id: "x", text: "He paused the offer — region was Middle East." }
+    ],
+    required_points: [],
+    optional_followups: [],
+    handled_points: []
+  });
+  assert.ok(brief);
+  assert.equal(brief.they_said.length, 1);
+  assert.equal(brief.they_said[0].text.includes("—"), false);
+});
+
 test("synthesiseFallbackBrief: a quiet thread with no needsReply yields a no-pending on_you", () => {
   const brief = synthesiseFallbackBrief({
     rollingSummary: "Brandon — peer, last spoke about hiring six weeks ago.",

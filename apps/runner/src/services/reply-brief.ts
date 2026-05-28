@@ -39,6 +39,15 @@ export function stripBannedPhrases(text: string | null | undefined): string {
   for (const re of BANNED_PHRASES) {
     out = out.replace(re, "");
   }
+  // Issue #397: strip em/en dashes from every brief field. The voice
+  // prompts forbid these in AI output, applyVoiceRules (ai.ts) catches
+  // them in suggested replies and composed text, but updateThreadSummary's
+  // reply_brief fields previously bypassed that scrub and rendered straight
+  // into the right rail. Mirrors applyVoiceRules's em → ", " and en → ", "
+  // substitutions so the rail and chips read the same way. Kept inline
+  // rather than imported from ai.ts because ai.ts already imports from
+  // this module — bringing in applyVoiceRules would create a cycle.
+  out = out.replace(/—/g, ", ").replace(/–/g, ", ");
   return out.replace(/\s{2,}/g, " ").replace(/\s+([.,!?])/g, "$1").trim();
 }
 
