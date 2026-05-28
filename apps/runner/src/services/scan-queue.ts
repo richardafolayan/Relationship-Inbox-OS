@@ -104,6 +104,8 @@ type ScanJob = {
   maxOpens?: number;
   forceFallback?: boolean;
   scope: ScanScope;
+  /** Drives per-platform adaptive backoff bookkeeping in runJob (#403). */
+  fromScheduler?: boolean;
 };
 
 interface TraceAwareAdapter {
@@ -204,6 +206,13 @@ type EnqueueScanOptions = {
   forceFallback?: boolean;
   /** Default "update". See ScanScope for what each value means. */
   scope?: ScanScope;
+  /**
+   * Internal-only flag set by the cadence scheduler so the runner can
+   * tell scheduled scans from manual API-triggered ones. Drives the
+   * per-platform adaptive backoff (#403) — only scheduler-driven runs
+   * count toward the backoff counter, manual scans always go through.
+   */
+  fromScheduler?: boolean;
 };
 
 type LinkedInFallbackDecision = {
@@ -320,6 +329,37 @@ export function shouldUseForceFallback(value: unknown, nodeEnv = process.env.NOD
   return value === true && nodeEnv !== "production";
 }
 
+/**
+ * #403 adaptive backoff multiplier — 1x for the first 3 no-change
+ * scans, then steps 2x → 3x → 4x. Cap at 4x so the longest stretch
+ * is, e.g., 4×60s = 4 minutes (or 4×300s = 20 minutes) — generous
+ * but never silently disables the platform.
+ */
+export function adaptiveBackoffMultiplier(consecutiveNoChange: number): number {
+  if (consecutiveNoChange <= 2) return 1;
+  if (consecutiveNoChange <= 4) return 2;
+  if (consecutiveNoChange <= 6) return 3;
+  return 4;
+}
+
+export interface AdaptiveBackoffState {
+  lastScheduledScanAt: number;
+  consecutiveNoChange: number;
+}
+
+/** Exported for testing. Pure function — see `recordPlatformScanOutcome`. */
+export function applyAdaptiveBackoffOutcome(
+  state: AdaptiveBackoffState | undefined,
+  updatedThreads: number,
+  options: { fromScheduler: boolean; now: number }
+): AdaptiveBackoffState {
+  const base = state ?? { lastScheduledScanAt: 0, consecutiveNoChange: 0 };
+  return {
+    lastScheduledScanAt: options.fromScheduler ? options.now : base.lastScheduledScanAt,
+    consecutiveNoChange: updatedThreads > 0 ? 0 : base.consecutiveNoChange + 1
+  };
+}
+
 export function evaluateLinkedInFallbackDecision(input: {
   fallbackEnabled: boolean;
   forceFallback: boolean;
@@ -391,6 +431,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
   let abortReason: string | null = null;
   const activeRunLoggerByPlatform = new Map<PlatformName, RunLogger>();
   const latestRunSummaryByPlatform = new Map<PlatformName, RunTraceSummary>();
+  // Issue #403. Per-platform adaptive backoff for the SCHEDULED scan
+  // path: after N consecutive scans that found no changes, the
+  // scheduler stretches that platform's effective interval out by
+  // 2x → 3x → 4x of the configured base. Manual scans are unaffected
+  // (the user explicitly asked for them). Any scan that finds
+  // changes resets the counter to 0.
+  //
+  // This addresses the "scan LinkedIn less aggressively when nothing
+  // is happening" half of R-0040 without going down a LinkedIn
+  // WebSocket reverse-engineering rabbit hole (PM-approved scope).
+  const adaptiveBackoffByPlatform = new Map<
+    PlatformName,
+    { lastScheduledScanAt: number; consecutiveNoChange: number }
+  >();
   const runTraceBaseDir = resolve(process.env.RUN_TRACE_DIR ?? "./logs/runs");
 
   const personKey = deps.personKey ?? "default";
@@ -422,6 +476,30 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
   function lockKey(platform: PlatformName): string {
     return `${personKey}:${platform}`;
+  }
+
+  function isPlatformDueForScheduledScan(
+    platform: PlatformName,
+    baseIntervalMs: number,
+    now: number
+  ): boolean {
+    const state = adaptiveBackoffByPlatform.get(platform);
+    if (!state) return true;
+    const adaptiveIntervalMs = baseIntervalMs * adaptiveBackoffMultiplier(state.consecutiveNoChange);
+    return now - state.lastScheduledScanAt >= adaptiveIntervalMs;
+  }
+
+  function recordPlatformScanOutcome(
+    platform: PlatformName,
+    updatedThreads: number,
+    options: { fromScheduler: boolean }
+  ): void {
+    const next = applyAdaptiveBackoffOutcome(
+      adaptiveBackoffByPlatform.get(platform),
+      updatedThreads,
+      { fromScheduler: options.fromScheduler, now: Date.now() }
+    );
+    adaptiveBackoffByPlatform.set(platform, next);
   }
 
   async function writeLatestLinkedInScanPointer(input: {
@@ -822,7 +900,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
       maxThreads: normalizePositiveScanCap(options?.maxThreads),
       maxOpens: normalizePositiveScanCap(options?.maxOpens),
       forceFallback: shouldUseForceFallback(options?.forceFallback),
-      scope: options?.scope ?? "update"
+      scope: options?.scope ?? "update",
+      fromScheduler: options?.fromScheduler === true
     };
 
     queue.push(job);
@@ -850,8 +929,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
       clearInterval(scheduler);
     }
 
-    let lastRunAt = 0;
-
     scheduler = setInterval(() => {
       void (async () => {
         const settings = await deps.settingsStore.getSettings();
@@ -861,12 +938,27 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
         const now = Date.now();
         const intervalMs = settings.scanIntervalSeconds * 1000;
-        if (processing || now - lastRunAt < intervalMs) {
+        if (processing) {
           return;
         }
 
-        lastRunAt = now;
-        enqueueScan(undefined, { respectCooldown: true });
+        // Per-platform adaptive backoff: queue separate scan jobs only
+        // for platforms whose adaptive interval has elapsed. Platforms
+        // with active backoff (#403) are skipped this tick and picked
+        // up on a later one. The queue serialises jobs so this never
+        // produces parallel scans of different platforms.
+        const enabledPlatforms = settings.enabledPlatforms.filter((platform) =>
+          allPlatforms.includes(platform)
+        );
+        for (const platform of enabledPlatforms) {
+          if (!isPlatformDueForScheduledScan(platform, intervalMs, now)) {
+            continue;
+          }
+          enqueueScan(platform, {
+            respectCooldown: true,
+            fromScheduler: true
+          });
+        }
       })().catch((error) => {
         void deps.auditLog({
           stage: "Scan",
@@ -2338,6 +2430,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
             error: runError
           });
           latestRunSummaryByPlatform.set(platform, summary);
+          // #403: feed per-platform outcomes into the adaptive-backoff
+          // bookkeeping. `fromScheduler:false` callers don't bump
+          // lastScheduledScanAt — manual scans don't reset the clock,
+          // but they DO reset consecutiveNoChange if they found changes.
+          recordPlatformScanOutcome(platform, platformUpdatedThreads, {
+            fromScheduler: job.fromScheduler === true
+          });
         }
       });
 
