@@ -41,6 +41,7 @@ import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
+import { ActionButton } from "@/components/ui/action-button";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
@@ -2228,18 +2229,18 @@ export default function ThreadPage() {
                   </p>
                 </div>
               </button>
-              <Button
+              <ActionButton
                 variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                    setError
-                  )
+                runningLabel="Saving…"
+                doneLabel="Saved"
+                onError={setError}
+                action={() =>
+                  apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
                 }
                 className="px-3 py-1.5 text-[12px]"
               >
                 Save draft
-              </Button>
+              </ActionButton>
               {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
                 <Button
                   variant="ghost"
@@ -2278,19 +2279,17 @@ export default function ThreadPage() {
                   Snooze
                 </Button>
               )}
-              <Button
+              <ActionButton
                 variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                    setError,
-                    refresh
-                  )
-                }
+                runningLabel="Marking…"
+                doneLabel="Handled"
+                onError={setError}
+                onSuccess={refresh}
+                action={() => apiPost(`/runner/control/thread/${thread.id}/mark-done`, {})}
                 className="px-3 py-1.5 text-[12px]"
               >
                 Mark as handled
-              </Button>
+              </ActionButton>
               <Button
                 variant="ghost"
                 disabled={archiving}
@@ -3591,19 +3590,36 @@ export default function ThreadPage() {
               ) : null}
             </div>
             {composeDraft ? (
-              <div className="mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink">
+              // #436.4: "try again" re-runs composeFromIntent, which keeps the
+              // old draft mounted while the new one streams. Fade the stale
+              // text and swap the actions for a Regenerating… indicator so two
+              // suggestions never sit side by side.
+              <div
+                className={`mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
+                  composing ? "opacity-40" : "opacity-100"
+                }`}
+              >
                 <p className="m-0 whitespace-pre-wrap">{composeDraft}</p>
                 <div className="mt-3 flex items-center gap-3">
-                  <Button variant="quiet" onClick={useDraft}>
-                    Use this
-                  </Button>
-                  <button
-                    type="button"
-                    onClick={() => void composeFromIntent()}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    try again
-                  </button>
+                  {composing ? (
+                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                      Regenerating…
+                    </span>
+                  ) : (
+                    <>
+                      <Button variant="quiet" onClick={useDraft}>
+                        Use this
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => void composeFromIntent()}
+                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                      >
+                        try again
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}
