@@ -24,6 +24,7 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { NotificationCta } from "@/components/common/notification-cta";
 import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
 import { isTourSeen, markTourSeen, startPilotTour } from "@/lib/pilot-tour";
@@ -444,6 +445,8 @@ export default function TodayPage() {
           last scan {health ? formatRelative(health.lastScanAt) : "never"}
         </div>
       </header>
+
+      <NotificationCta />
 
       {welcomeDismissed === false ? (
         <PilotWelcomeCard

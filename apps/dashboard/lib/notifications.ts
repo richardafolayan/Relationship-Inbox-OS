@@ -69,6 +69,80 @@ function contextLine(row: InboxRow): string {
   return "Open the conversation to catch up.";
 }
 
+// Title / body / route for a new-message notice. The same shape feeds both
+// the desktop Notification (hidden tab) and the in-app toast (focused tab),
+// so the wording stays identical however the operator is alerted.
+export interface NewMessageNotice {
+  title: string;
+  body: string;
+  href: string;
+}
+
+export function buildNewMessageNotice(row: InboxRow): NewMessageNotice {
+  return {
+    title: `${row.personName} messaged you`,
+    body: contextLine(row),
+    href: `/thread/${row.id}`
+  };
+}
+
+export function buildNewMessageDigestNotice(rows: InboxRow[]): NewMessageNotice {
+  const [first, ...rest] = rows;
+  const body = first
+    ? `${first.personName} and ${rest.length} ${rest.length === 1 ? "other" : "others"} are waiting on a reply.`
+    : "Several conversations are waiting on a reply.";
+  return {
+    title: `${rows.length} new messages`,
+    body,
+    href: "/today"
+  };
+}
+
+// Where a batch of fresh inbound messages should surface. One decision
+// function so the matrix is testable without a DOM and the AppShell stays
+// thin:
+//   - nothing fresh                     -> "none"
+//   - tab hidden, quiet hours on        -> "none" (do-not-disturb window)
+//   - tab hidden, 1-3 fresh             -> "desktop-single" (one OS ping each)
+//   - tab hidden, 4+ fresh              -> "desktop-digest" (one roll-up ping)
+//   - tab focused, 1-3 fresh            -> "toast-single" (one in-app toast each)
+//   - tab focused, 4+ fresh             -> "toast-digest" (one roll-up toast)
+// Quiet hours only gates the desktop ping: an in-app toast is passive and
+// is only ever seen when the operator is already looking at the app.
+export type NewMessageNoticePlan =
+  | "none"
+  | "desktop-single"
+  | "desktop-digest"
+  | "toast-single"
+  | "toast-digest";
+
+export function planNewMessageNotice(input: {
+  freshCount: number;
+  tabHidden: boolean;
+  quietHoursActive: boolean;
+}): NewMessageNoticePlan {
+  if (input.freshCount <= 0) return "none";
+  if (input.tabHidden) {
+    if (input.quietHoursActive) return "none";
+    return input.freshCount <= 3 ? "desktop-single" : "desktop-digest";
+  }
+  return input.freshCount <= 3 ? "toast-single" : "toast-digest";
+}
+
+// The Today permission CTA shows only when the browser supports
+// notifications, the operator has not yet decided (permission "default"),
+// and they have not dismissed the prompt. Granted / denied / unsupported
+// all hide it, so it never nags and never re-asks a settled browser. This
+// keeps the #359 rule: permission is requested behind an explicit gesture,
+// never on a cold mount.
+export function shouldShowNotificationCta(input: {
+  supported: boolean;
+  permission: NotificationPermission | "unsupported";
+  dismissed: boolean;
+}): boolean {
+  return input.supported && input.permission === "default" && !input.dismissed;
+}
+
 function show(title: string, body: string, tag: string, onClick: () => void): void {
   if (!notificationsSupported() || Notification.permission !== "granted") return;
   try {
@@ -87,19 +161,15 @@ function show(title: string, body: string, tag: string, onClick: () => void): vo
 // One context-rich notification for a single new message. `tag` keys it to
 // the thread so a re-poll of the same message never stacks a duplicate.
 export function notifyNewMessage(row: InboxRow, onOpen: (threadId: string) => void): void {
-  show(`${row.personName} messaged you`, contextLine(row), `inbox-os:thread:${row.id}`, () =>
-    onOpen(row.id)
-  );
+  const notice = buildNewMessageNotice(row);
+  show(notice.title, notice.body, `inbox-os:thread:${row.id}`, () => onOpen(row.id));
 }
 
 // A single roll-up when several messages land at once (e.g. a scan that
 // catches up a stale inbox) - notifying per-thread would be a storm.
 export function notifyNewMessageDigest(rows: InboxRow[], onOpen: () => void): void {
-  const [first, ...rest] = rows;
-  const body = first
-    ? `${first.personName} and ${rest.length} ${rest.length === 1 ? "other" : "others"} are waiting on a reply.`
-    : "Several conversations are waiting on a reply.";
-  show(`${rows.length} new messages`, body, "inbox-os:digest", onOpen);
+  const notice = buildNewMessageDigestNotice(rows);
+  show(notice.title, notice.body, "inbox-os:digest", onOpen);
 }
 
 // The calm overdue-reply digest (#360). One notification per cadence tick,
