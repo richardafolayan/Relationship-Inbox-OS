@@ -51,6 +51,22 @@ test("CONTACT_NAME_DISCIPLINE is wired into all three contact-referencing prompt
   );
 });
 
+test("CONTACT_NAME_DISCIPLINE explicitly bans operator/contact confusion (#400)", () => {
+  // Pilot R-0039: AI wrote the OPERATOR's name (Richard) when it
+  // should have written the CONTACT's name (Seyi). The operator's
+  // name leaks via the operator profile block and/or via the contact
+  // addressing the operator by name in inbound messages ("Hi Richard").
+  // The constant must explicitly name this failure mode so the model
+  // doesn't repeat it.
+  assert.match(CONTACT_NAME_DISCIPLINE, /OPERATOR's own name as the contact's name/);
+  // The Seyi/Richard worked example must be present as the canonical
+  // regression fixture (parallels the Mayowa/Ayo example for #399).
+  assert.match(CONTACT_NAME_DISCIPLINE, /Seyi/);
+  assert.match(CONTACT_NAME_DISCIPLINE, /Richard/);
+  // Must teach the model to re-read the displayName when uncertain.
+  assert.match(CONTACT_NAME_DISCIPLINE, /re-read the recipient\/displayName/i);
+});
+
 test("CONTACT_NAME_DISCIPLINE allows natural name shortening (Ayo Johnson → Ayo)", () => {
   // The rule must explicitly allow shortening — operators say "Ayo" not
   // "Ayo Johnson" in casual replies. The example in the constant pins
