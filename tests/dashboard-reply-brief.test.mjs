@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 // import below resolves at runtime.
 const {
   chooseDisplayBrief,
-  shouldShowChecklist,
+  shouldShowDraftCoverage,
   moreSectionHasContent,
   durableContextLabel,
   MORE_DISCLOSURE_LABEL
@@ -27,7 +27,9 @@ function thread(partial = {}) {
 }
 
 test("MORE_DISCLOSURE_LABEL exact wording from the spec", () => {
-  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge · checklist");
+  // #388 promoted the checklist to its own "Draft coverage" section, so the
+  // disclosure no longer advertises a checklist.
+  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge");
 });
 
 test("durableContextLabel returns the neutral 'Who they are' phrasing", () => {
@@ -113,37 +115,30 @@ test("chooseDisplayBrief: needsReply=true with no real ask produces the soft pro
   assert.equal(/No clear ask yet/i.test(result.on_you), false);
 });
 
-test("shouldShowChecklist: hidden by default with 0 required points and no dismissed loops", () => {
+test("shouldShowDraftCoverage: hidden when there are no open or dismissed loops", () => {
   assert.equal(
-    shouldShowChecklist({ requiredPointsCount: 0, dismissedOpenLoopsCount: 0 }),
+    shouldShowDraftCoverage({ openLoopsCount: 0, dismissedOpenLoopsCount: 0 }),
     false
   );
 });
 
-test("shouldShowChecklist: hidden by default for a single required point", () => {
-  // Spec Step 8: 1 required → state in On you, no bulky checklist.
+test("shouldShowDraftCoverage: shown for even a single open loop (#388 always-visible)", () => {
+  // Unlike the old 2+-required gate, the promoted Draft coverage section
+  // surfaces as soon as there's any reply work to track.
   assert.equal(
-    shouldShowChecklist({ requiredPointsCount: 1, dismissedOpenLoopsCount: 0 }),
-    false
-  );
-});
-
-test("shouldShowChecklist: surfaces the checklist once 2+ required points exist", () => {
-  assert.equal(
-    shouldShowChecklist({ requiredPointsCount: 2, dismissedOpenLoopsCount: 0 }),
+    shouldShowDraftCoverage({ openLoopsCount: 1, dismissedOpenLoopsCount: 0 }),
     true
   );
   assert.equal(
-    shouldShowChecklist({ requiredPointsCount: 5, dismissedOpenLoopsCount: 0 }),
+    shouldShowDraftCoverage({ openLoopsCount: 5, dismissedOpenLoopsCount: 0 }),
     true
   );
 });
 
-test("shouldShowChecklist: also surfaces when there's something to restore", () => {
-  // Otherwise the dismissed-set is hidden behind the checklist and
-  // there's no path to bring a loop back.
+test("shouldShowDraftCoverage: shown when there's a dismissed loop to restore", () => {
+  // Otherwise the set-aside list (and the restore path) would be unreachable.
   assert.equal(
-    shouldShowChecklist({ requiredPointsCount: 0, dismissedOpenLoopsCount: 1 }),
+    shouldShowDraftCoverage({ openLoopsCount: 0, dismissedOpenLoopsCount: 1 }),
     true
   );
 });

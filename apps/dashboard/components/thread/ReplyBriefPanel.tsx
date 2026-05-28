@@ -8,7 +8,7 @@ import {
   MORE_DISCLOSURE_LABEL,
   durableContextLabel,
   moreSectionHasContent,
-  shouldShowChecklist
+  shouldShowDraftCoverage
 } from "@/lib/reply-brief";
 import { ActionItemsChecklist } from "./ActionItemsChecklist";
 
@@ -33,13 +33,14 @@ interface ReplyBriefPanelProps {
   aiCoverageMode?: "auto-tick" | "highlight" | "off";
 }
 
-// The thread right-rail Reply Brief. Default visible card holds only
-// Where it stands + On you so the operator can answer "what's the last
-// thing they said, why did they say it, and is anything actually on me?"
-// in under 10 seconds. Everything else sits behind a single collapsed
-// "More" disclosure: optional follow-ups, fuller / durable context,
-// tone steer, handled points, and the existing reply checklist (only
-// when there are 2+ required points or dismissed loops worth restoring).
+// The thread right-rail Reply Brief, reorganised action-first (#388). Order:
+//   1. Reply job (brief.on_you)        — what the operator owes in this reply
+//   2. They said (brief.they_said)     — supporting evidence
+//   3. Draft coverage (the checklist)  — the action surface; always visible
+//      whenever there are open/dismissed loops, with ✓ / partial / unticked
+//   4. Where it stands (narrative)     — demoted to secondary context
+//   5. "More" disclosure               — optional follow-ups, fuller / durable
+//      context, tone steer, handled points
 //
 // Things to remember stays separate — it lives in its own section
 // alongside this panel because it surfaces durable life facts (exams,
@@ -57,8 +58,11 @@ export function ReplyBriefPanel({
   const moreId = useId();
 
   const requiredCount = brief.required_points.length;
-  const showChecklist = shouldShowChecklist({
-    requiredPointsCount: requiredCount,
+  // #388: the reply checklist is now a top-level "Draft coverage" section,
+  // shown whenever there's reply work to track (active or dismissed loops),
+  // rather than being gated to 2+ required points inside "More".
+  const showDraftCoverage = shouldShowDraftCoverage({
+    openLoopsCount: openLoops.length,
     dismissedOpenLoopsCount: dismissedOpenLoops.length
   });
   const hasMore = moreSectionHasContent({
@@ -79,12 +83,14 @@ export function ReplyBriefPanel({
 
   return (
     <section data-testid="reply-brief" className="flex flex-col gap-7">
-      {where ? (
+      {/* #388: Reply job leads — the obligation the operator owes in this
+          reply, framed as "what do I need to do here?". */}
+      {onYou ? (
         <div>
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            Where it stands
+            Reply job
           </p>
-          <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
+          <p className="m-0 text-[14px] leading-[1.55] text-ink">{onYou}</p>
         </div>
       ) : null}
 
@@ -110,12 +116,28 @@ export function ReplyBriefPanel({
         </div>
       ) : null}
 
-      {onYou ? (
+      {/* #388: Draft coverage — the action surface, promoted out of "More"
+          to always-visible whenever there's reply work to track. */}
+      {showDraftCoverage ? (
+        <ActionItemsChecklist
+          threadId={threadId}
+          openLoops={openLoops}
+          dismissedOpenLoops={dismissedOpenLoops}
+          isReopenMode={false}
+          onDismiss={onDismissLoop}
+          aiCoverageItems={aiCoverageItems}
+          aiCoverageMode={aiCoverageMode}
+        />
+      ) : null}
+
+      {/* #388: Where it stands — narrative recap, demoted below the action
+          surface and rendered quieter so it reads as secondary context. */}
+      {where ? (
         <div>
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            On you
+            Where it stands
           </p>
-          <p className="m-0 text-[14px] leading-[1.55] text-ink">{onYou}</p>
+          <p className="m-0 text-[13px] leading-[1.55] text-ink-2">{where}</p>
         </div>
       ) : null}
 
@@ -228,18 +250,6 @@ export function ReplyBriefPanel({
                     ))}
                   </ul>
                 </div>
-              ) : null}
-
-              {showChecklist ? (
-                <ActionItemsChecklist
-                  threadId={threadId}
-                  openLoops={openLoops}
-                  dismissedOpenLoops={dismissedOpenLoops}
-                  isReopenMode={false}
-                  onDismiss={onDismissLoop}
-                  aiCoverageItems={aiCoverageItems}
-                  aiCoverageMode={aiCoverageMode}
-                />
               ) : null}
             </div>
           ) : null}

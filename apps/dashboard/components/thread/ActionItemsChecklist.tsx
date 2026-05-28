@@ -83,7 +83,7 @@ export function ActionItemsChecklist({
     if (editingKey) editInputRef.current?.focus();
   }, [editingKey]);
 
-  const heading = isReopenMode ? "Conversation hooks" : "Things to address";
+  const heading = isReopenMode ? "Conversation hooks" : "Draft coverage";
   const helper = isReopenMode
     ? "Worth picking up on when you reconnect. Tick each off as you write."
     : "Tick each off as you write your reply. This is just a checklist. It never changes your message.";
