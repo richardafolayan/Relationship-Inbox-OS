@@ -2534,7 +2534,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         text: payload.text,
         clientSendId: payload.clientSendId,
         scheduledFor: new Date(payload.scheduledFor),
-        attachments: stagedAttachments
+        attachments: stagedAttachments,
+        replyToMessageId: payload.replyToMessageId
       });
       res.json({
         clientSendId: scheduleResult.clientSendId,
@@ -4262,10 +4263,11 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/data/logs", asyncRoute(async (req, res) => {
-  const limit = Number(req.query.limit ?? 200);
+  const requested = Number(req.query.limit);
+  const limit = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 1000) : 200;
   const logs = await prisma.auditLog.findMany({
     orderBy: { timestamp: "desc" },
-    take: Number.isNaN(limit) ? 200 : limit
+    take: limit
   });
 
   res.json(

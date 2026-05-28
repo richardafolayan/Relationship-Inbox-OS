@@ -446,7 +446,7 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
 
 export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): RunnerConfig {
   return {
-    port: Number(env.RUNNER_PORT ?? 4001),
+    port: parseIntOrDefault(env.RUNNER_PORT, 4001),
     openAiApiKey: env.OPENAI_API_KEY,
     // Default to gpt-5-nano: cheapest GPT-5 family member, sufficient for the
     // dashboard's short generations (summary, 3 reply drafts, classifier,
@@ -501,7 +501,7 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // Mac-only adapter. Default off so Linux/CI runners don't try to open
       // a non-existent chat.db. Set IMESSAGE_ENABLED=true on a Mac with
       // Full Disk Access granted to the runner's parent process.
-      enabled: env.IMESSAGE_ENABLED === "true" && process.platform === "darwin",
+      enabled: (env.IMESSAGE_ENABLED ?? "").trim().toLowerCase() === "true" && process.platform === "darwin",
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
       watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")

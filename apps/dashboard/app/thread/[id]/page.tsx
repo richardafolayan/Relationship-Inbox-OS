@@ -918,6 +918,12 @@ export default function ThreadPage() {
           ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
+      // Send succeeded — the optimistic clear above already removed these
+      // from the composer, so release their image preview object URLs. (On
+      // failure we instead restore them below, keeping the URLs alive.)
+      for (const a of attachmentsToSend) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
     } catch (sendError) {
       const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
       setPendingSends((prev) =>
@@ -954,6 +960,21 @@ export default function ThreadPage() {
       return next;
     });
   }, []);
+
+  // Revoke any outstanding image preview object URLs when the thread view
+  // unmounts (e.g. navigating away mid-compose) so they don't leak.
+  const composerAttachmentsRef = useRef(composerAttachments);
+  useEffect(() => {
+    composerAttachmentsRef.current = composerAttachments;
+  }, [composerAttachments]);
+  useEffect(
+    () => () => {
+      for (const a of composerAttachmentsRef.current) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+    },
+    []
+  );
 
   const startRecording = useCallback(async () => {
     if (recording) return;
@@ -1457,8 +1478,14 @@ export default function ThreadPage() {
   // operator keeps typing or switches threads mid-flight.
   const draftCoverageThreadIdRef = useRef<string | null>(null);
   const draftCoverageDraftRef = useRef<string>("");
+  // Depend on the specific primitives this effect reads, not the whole
+  // `thread` object — `thread` is a fresh reference on every background
+  // poll/SSE refresh, which would otherwise re-arm the 1.4s debounce timer
+  // continuously and could starve the coverage check during event bursts.
+  const draftCoverageThreadId = thread?.id ?? null;
+  const draftCoverageOpenLoopCount = thread?.openLoops.length ?? 0;
   useEffect(() => {
-    if (!thread) return;
+    if (!draftCoverageThreadId) return;
     const aiLevel = profile?.aiHelpLevel ?? "writing_support";
     // Functional updater + ref-equal short-circuit so clearing on every
     // re-render doesn't itself become a dependency that re-fires the
@@ -1470,11 +1497,11 @@ export default function ThreadPage() {
       return;
     }
     const trimmed = composer.trim();
-    if (trimmed.length < 20 || thread.openLoops.length === 0) {
+    if (trimmed.length < 20 || draftCoverageOpenLoopCount === 0) {
       clearIfNotEmpty();
       return;
     }
-    const threadId = thread.id;
+    const threadId = draftCoverageThreadId;
     draftCoverageThreadIdRef.current = threadId;
     draftCoverageDraftRef.current = trimmed;
     const handle = window.setTimeout(() => {
@@ -1505,7 +1532,7 @@ export default function ThreadPage() {
         });
     }, 1400);
     return () => window.clearTimeout(handle);
-  }, [composer, thread, profile?.aiHelpLevel]);
+  }, [composer, draftCoverageThreadId, draftCoverageOpenLoopCount, profile?.aiHelpLevel]);
 
   // Reset AI coverage when the thread changes — local state from the
   // previous thread shouldn't bleed into a new one.

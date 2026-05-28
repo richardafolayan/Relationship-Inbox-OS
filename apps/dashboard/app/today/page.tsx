@@ -172,8 +172,10 @@ export default function TodayPage() {
     const onRunnerEvent = (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string }>).detail;
       const type = detail?.type;
+      // MESSAGE_SENT is handled by the advanceHero effect below (which also
+      // refreshes), so it's intentionally not listed here — otherwise a
+      // single send triggers two refreshes.
       if (
-        type === "MESSAGE_SENT" ||
         type === "MESSAGE_SEND_FAILED" ||
         type === "THREAD_UPDATED" ||
         type === "SCAN_FINISHED"
@@ -213,8 +215,14 @@ export default function TodayPage() {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
       if (!detail || !detail.threadId) return;
       if (detail.type === "MESSAGE_SENT") {
+        // Only advance (and bump the "Tonight's outline" done counter) when
+        // the sent thread is actually in Today's queue. Replying to an
+        // off-queue thread from the thread page must not inflate Today's
+        // counts. A non-Today send still refreshes via THREAD_UPDATED.
         const matching = data?.rows.find((row) => row.id === detail.threadId);
-        advanceHero(detail.threadId, "Sent, next up", matching?.riskLevel ?? "GREEN");
+        if (matching) {
+          advanceHero(detail.threadId, "Sent, next up", matching.riskLevel);
+        }
       }
     };
     window.addEventListener("runner-event", handler);

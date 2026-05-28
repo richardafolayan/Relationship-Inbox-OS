@@ -351,12 +351,25 @@ export interface AdaptiveBackoffState {
 export function applyAdaptiveBackoffOutcome(
   state: AdaptiveBackoffState | undefined,
   updatedThreads: number,
-  options: { fromScheduler: boolean; now: number }
+  options: { fromScheduler: boolean; now: number; success: boolean }
 ): AdaptiveBackoffState {
   const base = state ?? { lastScheduledScanAt: 0, consecutiveNoChange: 0 };
+  // consecutiveNoChange drives the scheduled-scan backoff. Only a clean
+  // SCHEDULED scan that genuinely found no changes should inflate it.
+  // Manual scans, failed scans, and cooldown-blocked runs all reach this
+  // path with updatedThreads === 0 but must NOT be treated as a quiet
+  // inbox — otherwise a few manual refreshes or transient failures stretch
+  // the automatic interval out to 4x. A scan (any source) that DID find
+  // changes still resets the counter to 0.
+  const consecutiveNoChange =
+    updatedThreads > 0
+      ? 0
+      : options.fromScheduler && options.success
+        ? base.consecutiveNoChange + 1
+        : base.consecutiveNoChange;
   return {
     lastScheduledScanAt: options.fromScheduler ? options.now : base.lastScheduledScanAt,
-    consecutiveNoChange: updatedThreads > 0 ? 0 : base.consecutiveNoChange + 1
+    consecutiveNoChange
   };
 }
 
@@ -492,12 +505,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
   function recordPlatformScanOutcome(
     platform: PlatformName,
     updatedThreads: number,
-    options: { fromScheduler: boolean }
+    options: { fromScheduler: boolean; success: boolean }
   ): void {
     const next = applyAdaptiveBackoffOutcome(
       adaptiveBackoffByPlatform.get(platform),
       updatedThreads,
-      { fromScheduler: options.fromScheduler, now: Date.now() }
+      { fromScheduler: options.fromScheduler, now: Date.now(), success: options.success }
     );
     adaptiveBackoffByPlatform.set(platform, next);
   }
@@ -874,16 +887,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
           retryAfterSeconds: cooldown.retryAfterSeconds
         }
       });
-      const blockedSummary = blockedLogger.flush({
+      // Flush for the trace folder + decision log, but do NOT overwrite
+      // latestRunSummaryByPlatform — a cooldown block must not hide the
+      // genuine last-scan result that getLatestRunSummary surfaces.
+      blockedLogger.flush({
         success: false,
         stopReason: "cooldown_active",
         counters: {
           retryAfterSeconds: cooldown.retryAfterSeconds
         }
       });
-      if (platform) {
-        latestRunSummaryByPlatform.set(platform, blockedSummary);
-      }
       return {
         ok: false,
         blocked: true,
@@ -952,6 +965,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         );
         for (const platform of enabledPlatforms) {
           if (!isPlatformDueForScheduledScan(platform, intervalMs, now)) {
+            continue;
+          }
+          // Skip platforms currently in retry cooldown. A cooldown block
+          // never advances the scheduled clock, so without this guard the
+          // 1s tick re-enqueues every second for the whole cooldown window,
+          // spinning enqueueScan and churning trace folders.
+          if (retryController.getCooldown(platform).blocked) {
             continue;
           }
           enqueueScan(platform, {
@@ -2435,7 +2455,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
           // lastScheduledScanAt — manual scans don't reset the clock,
           // but they DO reset consecutiveNoChange if they found changes.
           recordPlatformScanOutcome(platform, platformUpdatedThreads, {
-            fromScheduler: job.fromScheduler === true
+            fromScheduler: job.fromScheduler === true,
+            success: runSuccess
           });
         }
       });

@@ -17,7 +17,7 @@ import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
 
-type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "snoozed";
+type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
 type SortMode = "oldest" | "recent" | "name";
@@ -27,7 +27,7 @@ const TABS: { key: RiskTab; label: string }[] = [
   { key: "overdue", label: "Overdue" },
   { key: "waiting", label: "Waiting" },
   { key: "fresh", label: "Fresh" },
-  { key: "snoozed", label: "Snoozed" }
+  { key: "scheduled", label: "Scheduled" }
 ];
 
 const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
@@ -59,7 +59,7 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
 
 function applyTab(row: InboxRow, tab: RiskTab): boolean {
   if (tab === "all") return !row.scheduledSendAt;
-  if (tab === "snoozed") return !!row.scheduledSendAt;
+  if (tab === "scheduled") return !!row.scheduledSendAt;
   if (row.scheduledSendAt) return false;
   if (tab === "overdue") return row.riskLevel === "RED";
   if (tab === "waiting") return row.riskLevel === "AMBER";
@@ -144,7 +144,7 @@ function hiddenLabel(breakdown: { older: number; closed: number }): string {
 // #433 R-0055: empty-state headline for a specific risk tab whose badge is
 // non-zero but whose feed is empty because every match sits behind the
 // recency horizon. The tab label already reads as a noun
-// ("Overdue"/"Waiting"/"Fresh"/"Snoozed"); lowercase it and agree the verb
+// ("Overdue"/"Waiting"/"Fresh"/"Scheduled"); lowercase it and agree the verb
 // with the count so the line reads "197 overdue are set aside."
 function setAsidePhrase(tab: RiskTab, count: number): string {
   const noun: Record<RiskTab, string> = {
@@ -152,7 +152,7 @@ function setAsidePhrase(tab: RiskTab, count: number): string {
     overdue: "overdue",
     waiting: "waiting",
     fresh: "fresh",
-    snoozed: "snoozed"
+    scheduled: "scheduled"
   };
   return `${count} ${noun[tab]} ${count === 1 ? "is" : "are"} set aside.`;
 }
@@ -166,7 +166,7 @@ interface SectionGroup {
 // Inbox - search box, a risk tab bar, then a thin secondary filter row
 // (platform / kind / sort). The "All" tab buckets the feed into Overdue /
 // Waiting / Fresh sections so a long list scans top-down by urgency; a
-// single-risk or Snoozed tab is already homogeneous and renders as one
+// single-risk or Scheduled tab is already homogeneous and renders as one
 // flat list. Older / likely-closed threads are hidden by default
 // (issue #287) and surfaced via the Show all affordance.
 export default function InboxPage() {
@@ -256,7 +256,7 @@ export default function InboxPage() {
       overdue: live.filter((r) => r.riskLevel === "RED").length,
       waiting: live.filter((r) => r.riskLevel === "AMBER").length,
       fresh: live.filter((r) => r.riskLevel === "GREEN").length,
-      snoozed: scoped.filter((r) => !!r.scheduledSendAt).length
+      scheduled: scoped.filter((r) => !!r.scheduledSendAt).length
     };
   }, [allRows, category, platformFilter]);
 
