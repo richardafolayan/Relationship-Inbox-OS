@@ -73,6 +73,34 @@ export function formatRelative(value?: string | number | null): string {
   return "Just now";
 }
 
+// Same time buckets as formatRelative but without the trailing "ago",
+// for captions that already supply their own preposition — e.g.
+// "quiet for 99d" rather than the ungrammatical "quiet for 99d ago"
+// (#436 R-0058).
+export function formatDuration(value?: string | number | null): string {
+  const date = parseDateValue(value);
+  if (!date) {
+    return "-";
+  }
+
+  const diffMs = Math.max(0, Date.now() - date.getTime());
+  const minutes = Math.floor(diffMs / (60 * 1_000));
+  const hours = Math.floor(diffMs / (60 * 60 * 1_000));
+  const days = Math.floor(diffMs / (24 * 60 * 60 * 1_000));
+
+  if (days > 0) {
+    return `${days}d`;
+  }
+  if (hours > 0) {
+    return `${hours}h`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m`;
+  }
+
+  return "moments";
+}
+
 export function formatClock(value?: string | number | null): string {
   const date = parseDateValue(value);
   if (!date) {

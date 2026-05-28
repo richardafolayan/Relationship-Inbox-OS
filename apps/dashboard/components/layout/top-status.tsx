@@ -323,6 +323,12 @@ export function TopStatus() {
   // Issue #421. Same pattern for pilot-feedback report uploads —
   // signal originates in the (now-closed) feedback modal.
   const [reportSendCount, setReportSendCount] = useState(0);
+  // Issue #435 (R-0057). False until the first poll settles. Until then
+  // the bar shows a calm "Connecting…" instead of "0/2 connected · scan
+  // never · Scan now", which read as the operator's real status going
+  // wrong during a cold mount / reload. Soft navigation keeps this true
+  // (TopStatus lives in the persistent shell), so it only shows once.
+  const [ready, setReady] = useState(false);
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -334,6 +340,7 @@ export function TopStatus() {
     if (healthData) setHealth(healthData);
     if (queueData) setQueue(queueData);
     if (platformData) setPlatforms(platformData);
+    setReady(true);
   }, []);
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
@@ -490,7 +497,14 @@ export function TopStatus() {
       aria-live="polite"
       className="sticky top-0 z-30 flex h-[44px] items-center gap-3 border-b border-hairline bg-paper/95 px-6 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur"
     >
-      {hasDegraded ? (
+      {!ready ? (
+        // #435: cold-mount placeholder. A grey pip + "Connecting…" instead
+        // of a confident "0/2 connected" before the first poll resolves.
+        <span className="inline-flex items-center gap-[6px]" title="Connecting to runner…">
+          <span className="h-[6px] w-[6px] rounded-full bg-ink-3" aria-hidden />
+          <span className="text-ink-3">Connecting…</span>
+        </span>
+      ) : hasDegraded ? (
         <button
           type="button"
           onClick={() => setReconnectOpen(true)}
@@ -555,8 +569,10 @@ export function TopStatus() {
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
-        <span>{scanLabel}</span>
-        {ticker.kind !== "scanning" ? (
+        {/* #435: suppress "scan never" / "Scan now" until the first poll
+            settles so a cold mount doesn't imply the runner has never run. */}
+        {ready ? <span>{scanLabel}</span> : null}
+        {ready && ticker.kind !== "scanning" ? (
           <>
             <span aria-hidden className="text-ink-3/60">·</span>
             <button

@@ -422,37 +422,35 @@ function NotificationsPermissionControl() {
     );
   }
 
-  if (permission === "granted") {
-    return (
-      <span className="inline-flex items-center gap-[6px] font-mono text-[11px] text-ink-3">
-        <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" />
-        Enabled
-      </span>
-    );
-  }
+  // #436 R-0058: present the same caption + pill shape as every other
+  // Notifications row instead of a bespoke "● Enabled" label. The browser
+  // permission can't be flipped off from JS once granted/denied, so those
+  // states render a read-only pill and the caption names where the real
+  // control lives. "default" is the only in-app actionable state: the OFF
+  // pill requests permission on click — an explicit gesture, so it keeps
+  // the #359 fix that avoids low-quality cold prompts.
+  const on = permission === "granted";
+  const caption =
+    permission === "granted"
+      ? "On · turn off in your browser"
+      : permission === "denied"
+        ? "Blocked · re-enable in your browser"
+        : busy
+          ? "asking…"
+          : "Off";
 
-  if (permission === "denied") {
-    return (
-      <span className="font-mono text-[11px] text-ink-3">
-        Blocked - re-enable in your browser settings
-      </span>
-    );
-  }
-
-  // permission === "default" — actionable enable button
   return (
-    <button
-      type="button"
-      onClick={() => void enable()}
-      disabled={busy}
-      className={cn(
-        "inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm",
-        "hover:border-hairline-strong hover:bg-paper-2 hover:text-ink",
-        busy && "cursor-not-allowed opacity-60"
-      )}
-    >
-      {busy ? "Asking…" : "Enable desktop notifications"}
-    </button>
+    <div className="flex items-center gap-[10px]">
+      <span className="font-mono text-[11px] text-ink-3">{caption}</span>
+      <Toggle
+        on={on}
+        disabled={busy || permission !== "default"}
+        onChange={() => {
+          if (permission === "default") void enable();
+        }}
+        label="Desktop notifications"
+      />
+    </div>
   );
 }
 
@@ -764,15 +762,33 @@ function Toggle({
       disabled={disabled}
       onClick={onChange}
       className={cn(
-        "relative h-[20px] w-[36px] rounded-pill transition-colors duration-calm",
-        on ? "bg-ink" : "bg-hairline",
+        // shrink-0 so the surrounding flex row (state caption + pill)
+        // can't compress the track below 36px — when it did, the 16px
+        // knob's on/off offsets collapsed and the switch read as
+        // reversed/ambiguous (#429 R-0052).
+        "relative h-[20px] w-[36px] shrink-0 rounded-pill transition-colors duration-calm",
+        // Accent fill ON vs neutral track OFF reads clearly in BOTH
+        // light and dark mode. The old bg-ink/bg-hairline pair was two
+        // near-identical darks in dark mode, so the states were
+        // indistinguishable without reading the label (#429 R-0052).
+        on ? "bg-accent" : "bg-hairline-strong",
         disabled ? "cursor-not-allowed opacity-50" : "cursor-pointer"
       )}
     >
       <span
         aria-hidden
         className={cn(
-          "absolute top-[2px] h-[16px] w-[16px] rounded-full bg-paper shadow-[0_1px_3px_rgba(0,0,0,0.15)] transition-transform duration-calm",
+          // Fixed white knob (not theme paper) so it contrasts on the
+          // grey OFF track and the accent ON track in either mode. OFF =
+          // left, ON = right per platform convention.
+          //
+          // left-0 anchors the knob to the track's left edge. Without it
+          // the absolute knob's static position resolved to the RIGHT
+          // (computed left:18px), so the off-state translate-x-[2px] put
+          // the knob at ~20px — i.e. the switch read reversed: off showed
+          // the knob on the right (#429 R-0052). The transform classes
+          // were always correct; the missing anchor was the real bug.
+          "absolute left-0 top-[2px] h-[16px] w-[16px] rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.3)] transition-transform duration-calm",
           on ? "translate-x-[18px]" : "translate-x-[2px]"
         )}
       />
