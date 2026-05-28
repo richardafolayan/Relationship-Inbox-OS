@@ -1397,41 +1397,51 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // walked that back — the name in the sidebar greeting is enough,
     // summaries read better in second person).
 
-    // The summary now operates in one of two modes, switched on
-    // `needsReply`. Active-reply mode (contact's message is newest) asks
-    // for a recap of the current exchange + loops adjacent to the active
-    // topic. Reconnect mode (operator already replied or thread is
-    // dormant) asks for warm callbacks the operator could use to reopen —
-    // remembered details, things the contact said they'd do, hooks worth
-    // bringing up. The data shape is identical so the dashboard renders
-    // it the same way; only the content adapts.
-    const modeBlock = input.needsReply
-      ? `MODE: ACTIVE REPLY. The contact is waiting on the operator.
+    // Mode is decided by the MODEL based on whether the recent exchange
+    // has unaddressed contact substance, NOT by the operator-vs-contact
+    // timestamp alone. Pilot R-0028 (#380) flagged the bug: when the
+    // contact sent five messages and the operator only replied to one,
+    // lastOutbound > lastInbound flipped needsReply to false and the
+    // prompt switched to reconnect framing — even though four topics
+    // were still open. The fix: pass the timestamp signal as CONTEXT,
+    // ask the model to evaluate substance, and gate reconnect framing
+    // behind "no remaining reply-worthy contact points".
+    const modeBlock = `TIMESTAMP SIGNAL (context only, NOT a verdict):
+- The operator has ${input.needsReply ? "NOT yet replied" : "ALREADY replied"} since the contact's most recent message.
+- IMPORTANT: this is a context signal only. It does NOT prove the operator addressed everything. A single inbound from the contact often carries multiple distinct beats (a question + an update + a piece of news + a follow-up ask). The operator may have covered some and left others open. Read the recent exchange and decide what reply debt actually remains — DO NOT use the timestamp signal alone to decide mode.
 
-what_they_want guidance (active reply):
+MODE DECISION (made by you, the model, after reading the transcript):
+- ACTIVE REPLY (the default for any thread where the contact has unaddressed substance) — produce a brief framed around responding to what's still open. Reply debt drives the output. Use this even when lastOutbound > lastInbound if the operator's last reply only partially covered the contact's recent points.
+- RECONNECT (use ONLY when ALL of these hold) —
+    1. Every distinct beat from the contact's recent inbound has a substantive reply from the operator (or the operator clearly declined / moved past it). A vague acknowledgement does NOT count as covering multiple distinct points.
+    2. The last meaningful exchange is old enough to read as genuinely dormant (think weeks or months of silence, not hours since the operator's last reply).
+    3. The operator hasn't already moved the conversation forward in their latest reply (e.g. asking a fresh question that's still hanging).
+  In RECONNECT mode, what_they_want and open_loops reframe as warm callbacks the operator could send to reopen the thread.
+
+what_they_want guidance (ACTIVE REPLY):
 - 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
 - Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
 - Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
-- Examples: "Sultan asked if you've watched the MJ movie — he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch — he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
+- Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
 
-open_loops guidance (active reply):
+open_loops guidance (ACTIVE REPLY):
 - Work through the recent inbound messages ONE AT A TIME. For each unanswered inbound message, pull out every distinct thing the operator still needs to respond to: a question, a request, a decision they were asked to weigh in on, a piece of news that deserves a reaction. A single message often holds two or three separate loops — surface each one, never collapse a multi-part message into one vague loop.
 - Focus on what is still LIVE. The most recent 2-3 inbound messages define the active topic.
+- PARTIAL-COVER RULE (the #380 regression). When the operator's last reply only addressed SOME of the contact's recent points, the rest STAY OPEN. Do NOT mark them handled just because the operator typed something afterwards. Contact sent four topics, operator covered one → three are still required_points. A vague "thanks" or "fairs" from the operator does not cover multiple distinct contact points.
 - DROP any older loops where the conversation has clearly moved on to an unrelated topic. If the recent exchange is about a movie and the old loops are about a months-old logistics request, do not surface those — they're stale.
 - EXCLUDE any loop where the operator (or the contact themselves) already answered or substantively addressed it later in the same transcript.
 - A loop is still open if it was acknowledged ("yeah good question") but never actually answered.
 - Be specific and grounded in the message. "Tell her which day works for the call" beats "Reply about scheduling" — name the actual thing the contact raised.
 - 0-6 loops. Cover every genuinely open point, but do not pad with things already handled. Quality and completeness over volume.
-- Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".`
-      : `MODE: RECONNECT. The operator has the floor — the contact is not currently waiting on anything specific. The summary's job here is to help the operator reopen the conversation warmly, not to surface tasks.
+- Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".
 
-what_they_want guidance (reconnect):
+what_they_want guidance (RECONNECT — only when the three criteria above all hold):
 - 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
 - Frame as: "what's the warmest, most natural way for the operator to reopen this thread, grounded in something specific the contact has shared." Reference a real detail from the transcript — something they mentioned doing, a thing they were working through, a small life update.
 - Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
-- Examples: "Sultan mentioned exam stress last month — a 'how'd they go?' check-in is natural.", "She was deciding between two job offers — worth asking how that landed.", "He said he'd send the doc but went quiet; a light nudge would land well."
+- Examples: "Sultan mentioned exam stress last month, a 'how'd they go?' check-in is natural.", "She was deciding between two job offers, worth asking how that landed.", "He said he'd send the doc but went quiet, a light nudge would land well."
 
-open_loops guidance (reconnect):
+open_loops guidance (RECONNECT):
 - These become "warm callbacks" — small specific things from the transcript that would feel good to bring up. Things the contact shared, mentioned, or said they'd do. Things the operator could genuinely remember and ask about.
 - Lean on specificity. "Ask how the new role is going" beats "Catch up on work". "Follow up on whether they found Tolu" beats "Check in on logistics".
 - DROP anything where bringing it up would feel like dredging up an awkward stale request. If the transcript moved past a topic months ago, leave it.
