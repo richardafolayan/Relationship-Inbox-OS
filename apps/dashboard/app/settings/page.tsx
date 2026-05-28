@@ -228,7 +228,7 @@ function ReassessAllControl() {
   const handleClick = async () => {
     if (status === "running") return;
     const ok = window.confirm(
-      "Clear cached AI briefs and suggested replies for every active thread? This cannot be undone — each thread will regenerate lazily as it is next viewed or reassessed."
+      "Clear cached AI briefs and suggested replies for every active thread? This cannot be undone. Each thread will regenerate lazily as it is next viewed or reassessed."
     );
     if (!ok) return;
     setStatus("running");
