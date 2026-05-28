@@ -219,6 +219,35 @@ export const PREDRAFT_FIDELITY_REMINDER = [
  * Exported so tests can assert the language is present in the assembled
  * prompt without snapshotting the whole template.
  */
+/**
+ * Issue #396 / #399. Contact-name discipline injected into every prompt
+ * that produces user-facing text referencing the contact.
+ *
+ * Two pilot bugs in one shape:
+ *   - #396: the model wrote "the contact" instead of using the person's
+ *     actual name (e.g. "Ayo") even though we passed the name in.
+ *   - #399: the model picked a name out of the transcript content
+ *     (e.g. "Mayowa" appearing in one of the operator's own outbound
+ *     messages) and used it as the contact's name, ignoring the
+ *     authoritative displayName ("Ayo Johnson") in the prompt header.
+ *
+ * Same root cause: no explicit rule telling the model that the
+ * recipient/displayName field is the SINGLE source of truth for the
+ * contact's name, and that any name appearing in message bodies is
+ * untrusted (could be a nickname, honorific, third party, friend's
+ * name, etc.).
+ *
+ * Exported so tests can pin the language without snapshotting whole
+ * prompt templates.
+ */
+export const CONTACT_NAME_DISCIPLINE = [
+  "CONTACT NAME (strict).",
+  "The contact's name is ALWAYS the value passed as \"Recipient: <name>\" / \"displayName\" in this prompt. Use that name (or a natural shortening of it — e.g. \"Ayo\" when the displayName is \"Ayo Johnson\") whenever you reference the contact in user-facing text.",
+  "NEVER write \"the contact\", \"the user\", \"the recipient\", or \"the other person\" generically when the displayName is available. If the recipient is \"Ayo Johnson\" the brief says \"Ayo\" (or \"Ayo Johnson\"), not \"the contact\".",
+  "NEVER pick a name from the transcript content. Operators sometimes write nicknames, honorifics, friends' names, third-party names, or random fragments in their own outbound messages. Those names are NOT the contact's name. \"Mayowa\" appearing inside an operator: message in a thread whose displayName is \"Ayo Johnson\" means the contact is still Ayo, not Mayowa.",
+  "If the displayName looks like a placeholder (\"+44…\", a phone number, an email, an empty string), it is acceptable to fall back to \"they/them\" or to omit a name. Do not invent one."
+].join(" ");
+
 export const BRIEF_FIDELITY_REMINDER = [
   "FIDELITY (applies to every visible brief field — where_it_stands, they_said, on_you).",
   "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation the contact did not express.",
@@ -1427,6 +1456,8 @@ REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail.
 
 ${BRIEF_FIDELITY_REMINDER}
 
+${CONTACT_NAME_DISCIPLINE}
+
 where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - 1-2 short sentences. Plain British English. ≤ 280 chars total.
 - Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether he'd started exploring executive search opportunities, or was still figuring out his next steps.", "You sent the slides and asked what she thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
@@ -1836,6 +1867,8 @@ colons. Match the conversation's register: warm if it's warm, formal if
 it's formal.
 
 ${PREDRAFT_FIDELITY_REMINDER}
+
+${CONTACT_NAME_DISCIPLINE}
 
 ${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
@@ -2267,6 +2300,8 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     const prompt = `Rewrite the operator's intent below as a complete, sendable ${platformMessageNoun(input.platform)} in the operator's voice. Match the length and energy of the recipient's last message (reciprocity rule from system prompt). When in doubt, err shorter. The voice samples below are additional calibration for this thread, the few-shot examples in the system prompt are the primary reference.
 
 ${PREDRAFT_FIDELITY_REMINDER}
+
+${CONTACT_NAME_DISCIPLINE}
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
 
