@@ -2881,7 +2881,22 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private async navigateInbox(selectors: SelectorRegistry): Promise<Page> {
     const navigate = async (target: Page): Promise<void> => {
-      await target.bringToFront();
+      // Issue #420 / pilot R-0046 (and the desktop-switch half of
+      // #403). Background scans must not steal focus. navigateInbox
+      // is only called from background paths (scanInboxThreadsStream,
+      // scanInboxThreadsDirectFallback, ensureConnected,
+      // scanUnreadThreads, fetchRecentThreads, fetchThreadMessages) —
+      // each one a scheduled or status-driven scan, never an operator
+      // click. Operator-initiated openThread() and openProfileUrl()
+      // call bringToFront separately, so deliberate "open this thing"
+      // actions still raise the window.
+      //
+      // The bringToFront() that used to live here was likely
+      // defensive against Chromium background-throttling, but
+      // Patchright already disables the timer-throttling flags and
+      // goto + waitForLoadState exercise the page enough to keep it
+      // hydrated. If scan reliability regresses, revert this and
+      // investigate a non-focus-stealing alternative.
       await this.tracedGoto(target, selectors.inbox_url, {
         stage: "navigate",
         note: "navigate_inbox",
