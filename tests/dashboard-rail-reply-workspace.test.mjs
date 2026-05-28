@@ -64,6 +64,21 @@ test("Draft coverage uses the existing checklist and sits OUTSIDE the More discl
     checklist < moreDisclosure,
     "Draft coverage (the checklist) must render above/outside the More disclosure"
   );
+  // The promoted section must read "Draft coverage" (#388), so the panel
+  // passes that heading to the reused checklist.
+  assert.match(source, /heading="Draft coverage"/);
+});
+
+test("ActionItemsChecklist honours the Draft coverage heading override (#388)", () => {
+  const checklistSource = readFileSync(
+    fileURLToPath(
+      new URL("../apps/dashboard/components/thread/ActionItemsChecklist.tsx", import.meta.url)
+    ),
+    "utf8"
+  );
+  // The heading must fall back to the override when provided rather than
+  // always using the default reply/reopen label.
+  assert.match(checklistSource, /heading = headingOverride \?\?/);
 });
 
 test("Draft coverage is gated so reconnect / no-open-loop threads hide it cleanly (#388)", () => {

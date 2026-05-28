@@ -131,6 +131,7 @@ export function ReplyBriefPanel({
             onDismiss={onDismissLoop}
             aiCoverageItems={aiCoverageItems}
             aiCoverageMode={aiCoverageMode}
+            heading="Draft coverage"
           />
         </div>
       ) : null}
