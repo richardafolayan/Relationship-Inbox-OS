@@ -2241,7 +2241,10 @@ export default function ThreadPage() {
               >
                 Save draft
               </ActionButton>
-              {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+              {/* Clear-thread cluster: wrapped so the guided tour can spotlight
+                  snooze + mark-done + archive together (data-demo-target). */}
+              <div data-demo-target="thread-actions" className="flex items-center gap-2">
+                {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
                 <Button
                   variant="ghost"
                   onClick={() =>
@@ -2315,6 +2318,7 @@ export default function ThreadPage() {
               >
                 {archiving ? "Archiving…" : "Archive"}
               </Button>
+              </div>
               <Button
                 variant={aiOpen ? "primary" : "quiet"}
                 onClick={() => setAiOpen((v) => !v)}

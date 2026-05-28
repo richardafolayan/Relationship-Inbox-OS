@@ -62,6 +62,12 @@ export interface ThreadRowSource {
 
 export interface ShapedThreadRow {
   id: string;
+  /**
+   * Platform-side stable id of the thread (e.g. iMessage chat guid).
+   * Surfaced so the dashboard can target showcase demo threads by
+   * their deterministic platformThreadId from data-demo-target attrs.
+   */
+  platformThreadId: string;
   personId: string;
   personName: string;
   /**
@@ -274,6 +280,7 @@ export function toInboxRow(
     "No summary yet";
   return {
     id: source.id,
+    platformThreadId: source.platformThreadId,
     personId: source.personId,
     personName: source.person.displayName,
     personInferredName: source.person.inferredName ?? null,
