@@ -13,11 +13,16 @@ export interface ToastInput {
   description?: string;
   receiptId?: string;
   durationMs?: number;
+  // Optional in-app route. When set, the toast becomes clickable and
+  // navigates here (e.g. a new-message toast opens the thread). Action
+  // feedback toasts leave this unset and stay non-interactive.
+  href?: string;
 }
 
 export interface Toast extends Required<Pick<ToastInput, "id" | "kind" | "title" | "durationMs">> {
   description?: string;
   receiptId?: string;
+  href?: string;
   createdAt: number;
 }
 
@@ -37,6 +42,7 @@ export function showToast(input: ToastInput): void {
     title: input.title,
     description: input.description,
     receiptId: input.receiptId,
+    href: input.href,
     durationMs:
       input.durationMs ??
       (input.kind === "pending" ? 60_000 : input.kind === "error" ? 8000 : 3500),

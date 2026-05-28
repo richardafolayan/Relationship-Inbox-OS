@@ -14,14 +14,18 @@ import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiPost } from "@/lib/api";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
+  buildNewMessageDigestNotice,
+  buildNewMessageNotice,
   detectNewInbound,
   notificationsSupported,
   notifyNewMessage,
   notifyNewMessageDigest,
   notifyOverdueReplyDigest,
+  planNewMessageNotice,
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
+import { showToast } from "@/lib/feedback";
 import {
   localDateString,
   shouldQueryDigestTick,
@@ -129,12 +133,14 @@ export function AppShell({ children }: { children: ReactNode }) {
       }),
     []
   );
-  // Diff the latest inbox poll against the previous one and raise a
-  // desktop notification for any thread that gained a new inbound
-  // message. Gated so it stays a signal, not noise: silent on the first
-  // poll (baseline only), silent while the tab is focused (the Today feed
-  // already shows it), silent during quiet hours, and rolled up into one
-  // digest when a batch lands at once.
+  // Diff the latest inbox poll against the previous one and surface any
+  // thread that gained a new inbound message. Gated so it stays a signal,
+  // not noise: silent on the first poll (baseline only) and rolled up when
+  // a batch lands at once. How it surfaces depends on where the operator
+  // is (see planNewMessageNotice):
+  //   - tab hidden: a desktop notification (suppressed during quiet hours),
+  //   - tab focused: a quiet, clickable in-app toast, so a new message is
+  //     visible without having to open the thread to discover it.
   const maybeNotify = useCallback(
     (rows: InboxRow[]) => {
       const previous = inboxSnapshotRef.current;
@@ -143,16 +149,50 @@ export function AppShell({ children }: { children: ReactNode }) {
         notificationsPrimedRef.current = true;
         return;
       }
-      if (typeof document !== "undefined" && document.visibilityState !== "hidden") return;
-      if (isQuietHoursActive()) return;
       const fresh = detectNewInbound(previous, rows);
-      if (fresh.length === 0) return;
-      if (fresh.length <= 3) {
-        for (const row of fresh) {
-          notifyNewMessage(row, (threadId) => router.push(`/thread/${threadId}`));
+      const tabHidden =
+        typeof document !== "undefined" && document.visibilityState === "hidden";
+      const plan = planNewMessageNotice({
+        freshCount: fresh.length,
+        tabHidden,
+        quietHoursActive: isQuietHoursActive()
+      });
+      switch (plan) {
+        case "none":
+          return;
+        case "desktop-single":
+          for (const row of fresh) {
+            notifyNewMessage(row, (threadId) => router.push(`/thread/${threadId}`));
+          }
+          return;
+        case "desktop-digest":
+          notifyNewMessageDigest(fresh, () => router.push("/today"));
+          return;
+        case "toast-single":
+          for (const row of fresh) {
+            const notice = buildNewMessageNotice(row);
+            showToast({
+              id: `new-message:${row.id}`,
+              kind: "info",
+              title: notice.title,
+              description: notice.body,
+              href: notice.href,
+              durationMs: 6000
+            });
+          }
+          return;
+        case "toast-digest": {
+          const notice = buildNewMessageDigestNotice(fresh);
+          showToast({
+            id: "new-message:digest",
+            kind: "info",
+            title: notice.title,
+            description: notice.body,
+            href: notice.href,
+            durationMs: 6000
+          });
+          return;
         }
-      } else {
-        notifyNewMessageDigest(fresh, () => router.push("/today"));
       }
     },
     [router]
