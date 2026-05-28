@@ -24,6 +24,11 @@ import {
   isAiVisibleMessage,
   prismaMessageToPrompt
 } from "./services/ai";
+import {
+  isInferredStyleEmpty,
+  selectStyleSampleTexts,
+  STYLE_ANALYSIS_MIN_SAMPLE
+} from "./services/reply-style-analysis";
 import { briefSignatureForCache, sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
 import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
@@ -4920,6 +4925,36 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);
   res.json(updated);
+}));
+
+// Issue #438 (pilot R-0059). Opt-in: infer the operator's reply-style fields
+// from a sample of their OWN recently sent messages so Settings can prefill
+// the form. Reads only OUT messages, never saves — the dashboard reviews the
+// suggestion and the operator saves it explicitly. Always 200; a thin
+// { ok:false, reason } lets the dashboard show a calm message rather than
+// catching an error.
+app.post("/control/operator-profile/analyze-style", asyncRoute(async (_req, res) => {
+  const rows = await prisma.message.findMany({
+    where: { direction: "OUT" },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: 600,
+    select: { text: true, direction: true, sentVia: true }
+  });
+  const sampleTexts = selectStyleSampleTexts(rows);
+  if (sampleTexts.length < STYLE_ANALYSIS_MIN_SAMPLE) {
+    res.json({ ok: false, reason: "not_enough_messages", sampleCount: sampleTexts.length, suggestion: null });
+    return;
+  }
+  const { suggestion, aiRan } = await aiService.inferReplyStyle({ sampleTexts });
+  if (!aiRan) {
+    res.json({ ok: false, reason: "ai_unavailable", sampleCount: sampleTexts.length, suggestion: null });
+    return;
+  }
+  if (isInferredStyleEmpty(suggestion)) {
+    res.json({ ok: false, reason: "low_confidence", sampleCount: sampleTexts.length, suggestion: null });
+    return;
+  }
+  res.json({ ok: true, sampleCount: sampleTexts.length, suggestion });
 }));
 
 // Pilot feedback intake. The dashboard posts a tester's bug / feedback

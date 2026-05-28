@@ -22,6 +22,7 @@ import type {
   ConversationStartersOutput,
   ConversationStarterCitedField,
   FriendshipSummaryOutput,
+  InferredReplyStyle,
   MessageForPrompt,
   OperatorProfile,
   PilotReportTriage,
@@ -29,6 +30,12 @@ import type {
   StyleProfile
 } from "../types/runtime";
 import { describeContactStyle, describeOperatorStyle } from "./style";
+import {
+  buildReplyStyleAnalysisPrompt,
+  emptyInferredStyle,
+  normaliseInferredStyle,
+  replyStyleAnalysisSchema
+} from "./reply-style-analysis";
 import { describeReactionsForPrompt, parseReactionsFromRawJson } from "./reaction-effects.js";
 import {
   providerRegistry,
@@ -2891,6 +2898,25 @@ ${safeTruncate(trimmed, 1_000)}`;
     return result;
   }
 
+  // Issue #438 (pilot R-0059). Infer the operator's reply-style fields from a
+  // sample of their own sent messages. The sample is selected upstream; here
+  // we just build the prompt, parse + normalise the model JSON, and report
+  // whether a provider actually ran (so the caller can distinguish an AI
+  // outage from a genuinely empty/low-confidence read). Never saves.
+  async function inferReplyStyle(input: {
+    sampleTexts: string[];
+  }): Promise<{ suggestion: InferredReplyStyle; aiRan: boolean }> {
+    const fallback = emptyInferredStyle();
+    if (input.sampleTexts.length === 0) {
+      return { suggestion: fallback, aiRan: false };
+    }
+    const prompt = buildReplyStyleAnalysisPrompt(input.sampleTexts);
+    const { result, source } = await modelJson(prompt, fallback, (value) =>
+      normaliseInferredStyle(replyStyleAnalysisSchema.parse(value))
+    );
+    return { suggestion: result, aiRan: source?.providerId != null };
+  }
+
   /**
    * Optional triage of a pilot bug / feedback report. Operates ONLY on the
    * tester's typed words and safe metadata — never a screenshot, never
@@ -3272,6 +3298,7 @@ ${safeTruncate(input.draft, 2000)}`;
     summarisePersonForFriendship,
     askAboutPerson,
     summarisePilotReport,
-    checkDraftCoverage
+    checkDraftCoverage,
+    inferReplyStyle
   };
 }
