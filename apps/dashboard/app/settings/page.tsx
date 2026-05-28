@@ -107,9 +107,21 @@ export default function SettingsPage() {
         <SettingRow
           name="Auto-scan"
           desc="Pull new messages from every connected platform on a fixed cadence."
+          onActivate={toggleAutoScan}
+          disabled={autoScanDisabled}
           trailing={
             <div className="flex items-center gap-[10px]">
-              <span className="font-mono text-[11px] text-ink-3">every 10 min</span>
+              {/* Issue #394. Explicit On/Off state next to the saved
+                  cadence so the toggle's intent is unambiguous even
+                  when the visual switch is the same colour as the page
+                  background. */}
+              <span className="font-mono text-[11px] text-ink-3">
+                {autoScanDisabled
+                  ? "off (disabled in this build)"
+                  : autoScan
+                    ? "On · every 10 min"
+                    : "Off · every 10 min when on"}
+              </span>
               <Toggle
                 on={autoScan && !autoScanDisabled}
                 disabled={autoScanDisabled}
@@ -125,9 +137,18 @@ export default function SettingsPage() {
         <SettingRow
           name="Quiet hours"
           desc="After 22:00, mute the attention dot and pause auto-scan."
+          onActivate={toggleQuietHours}
           trailing={
             <div className="flex items-center gap-[10px]">
-              <span className="font-mono text-[11px] text-ink-3">22:00-06:00</span>
+              {/* Issue #394 / R-0034 root cause: this caption used to
+                  read "22:00-06:00" alone, with the toggle showing
+                  off. Pilot read that as "broken" because the saved
+                  schedule was visible while the switch said off.
+                  Explicit "On"/"Off" + "saved schedule" wording makes
+                  the relationship clear. */}
+              <span className="font-mono text-[11px] text-ink-3">
+                {quietHours ? "On · 22:00-06:00" : "Off · 22:00-06:00 saved"}
+              </span>
               <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
             </div>
           }
@@ -147,16 +168,23 @@ export default function SettingsPage() {
         <SettingRow
           name="Headless browser"
           desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you AND keep a full human fingerprint. Turn on only for CI/speed. Headless is one of the strongest bot signals and is far more detectable for LinkedIn."
+          onActivate={toggleHeadless}
+          disabled={!headlessReady || headlessStatus === "saving"}
           trailing={
             <div className="flex items-center gap-[10px]">
+              {/* Issue #394. Same clarity treatment as the other
+                  toggles: lead with the explicit state, then any
+                  saving/error context. */}
               <span className="font-mono text-[11px] text-ink-3">
-                {headlessStatus === "saving"
-                  ? "saving…"
-                  : headlessStatus === "error"
-                    ? <span className="text-risk-overdue">failed</span>
-                    : headless
-                      ? "headless"
-                      : "visible"}
+                {headlessStatus === "saving" ? (
+                  "saving…"
+                ) : headlessStatus === "error" ? (
+                  <span className="text-risk-overdue">failed</span>
+                ) : headless ? (
+                  "On · headless"
+                ) : (
+                  "Off · visible"
+                )}
               </span>
               <Toggle
                 on={headless}
@@ -297,14 +325,50 @@ function SettingsGroup({ head, children }: { head: string; children: React.React
 function SettingRow({
   name,
   desc,
-  trailing
+  trailing,
+  onActivate,
+  disabled
 }: {
   name: string;
   desc?: string;
   trailing: React.ReactNode;
+  /**
+   * Issue #394. When set, the entire row is clickable — not just the
+   * tiny switch in the trailing area. Pilot R-0034 read the toggle
+   * as "broken" partly because the click target was too small and the
+   * row had no obvious affordance. Passing onActivate makes the row
+   * a button-like target while still routing the same action.
+   *
+   * The trailing element (typically <Toggle>) stops propagation on
+   * its own onClick so a click on the switch itself doesn't double-fire.
+   */
+  onActivate?: () => void;
+  /** Disables the row click target without changing the trailing visual. */
+  disabled?: boolean;
 }) {
+  const interactive = onActivate && !disabled;
   return (
-    <div className="grid grid-cols-[1fr_auto] items-center gap-6 border-t border-hairline px-1 py-[16px]">
+    <div
+      role={interactive ? "button" : undefined}
+      tabIndex={interactive ? 0 : undefined}
+      onClick={interactive ? onActivate : undefined}
+      onKeyDown={
+        interactive
+          ? (event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                onActivate?.();
+              }
+            }
+          : undefined
+      }
+      className={cn(
+        "grid grid-cols-[1fr_auto] items-center gap-6 border-t border-hairline px-1 py-[16px]",
+        interactive
+          ? "cursor-pointer rounded-[6px] transition-colors duration-calm hover:bg-paper-2/60 focus:bg-paper-2/60 focus:outline-none"
+          : null
+      )}
+    >
       <div>
         <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">{name}</p>
         {desc ? (
@@ -313,7 +377,7 @@ function SettingRow({
           </p>
         ) : null}
       </div>
-      <div>{trailing}</div>
+      <div onClick={(event) => event.stopPropagation()}>{trailing}</div>
     </div>
   );
 }
