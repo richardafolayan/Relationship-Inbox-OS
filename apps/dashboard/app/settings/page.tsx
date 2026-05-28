@@ -208,16 +208,19 @@ export default function SettingsPage() {
   );
 }
 
-// "Mark all threads for reassess" admin action. Wraps POST to
+// "Reset all threads for reassessment" admin action. Wraps POST to
 // /runner/control/threads/mark-all-for-reassess. The endpoint is fast
-// (single SQL update) but the action is broad — clears AI caches on
-// every active thread — so the click goes through a window.confirm
-// gate. Inline status mirrors the headless toggle's pattern so the
-// operator sees running / success / error without a toast.
+// (single SQL update) but the action is broad — clears cached AI
+// briefs and suggested replies on every active thread — so the click
+// goes through a window.confirm gate that names the irreversibility
+// and the lazy regen behaviour explicitly. Inline status mirrors the
+// headless toggle's pattern so the operator sees running / success /
+// error without a toast.
 //
 // Idle / running / done / error states show inline next to the button.
-// The success label includes the count so the action feels concrete
-// ("345 marked") rather than just "done".
+// The success line names the count concretely ("345 active threads
+// reset for reassessment") rather than a vague "done", so the action
+// feels grounded.
 function ReassessAllControl() {
   const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
   const [count, setCount] = useState<number | null>(null);
@@ -225,7 +228,7 @@ function ReassessAllControl() {
   const handleClick = async () => {
     if (status === "running") return;
     const ok = window.confirm(
-      "Clear AI briefs and suggested replies for every active thread? They'll regenerate against the current prompts as each thread is next viewed or scanned."
+      "Clear cached AI briefs and suggested replies for every active thread? This cannot be undone — each thread will regenerate lazily as it is next viewed or reassessed."
     );
     if (!ok) return;
     setStatus("running");
@@ -245,7 +248,7 @@ function ReassessAllControl() {
     <div className="flex items-center gap-[10px]">
       {status === "done" && count !== null ? (
         <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
-          {count} marked
+          {count} active threads reset for reassessment
         </span>
       ) : status === "error" ? (
         <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
@@ -258,7 +261,7 @@ function ReassessAllControl() {
         disabled={status === "running"}
         className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
       >
-        {status === "running" ? "Marking…" : "Mark all for reassess"}
+        {status === "running" ? "Resetting…" : "Reset all for reassessment"}
       </button>
     </div>
   );
