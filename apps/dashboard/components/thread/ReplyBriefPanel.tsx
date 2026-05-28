@@ -57,15 +57,12 @@ export function ReplyBriefPanel({
   const moreId = useId();
 
   const requiredCount = brief.required_points.length;
-  const showChecklist = shouldShowChecklist({
+  // #388: the checklist is now the top-level "Draft coverage" section.
+  const showDraftCoverage = shouldShowChecklist({
     requiredPointsCount: requiredCount,
     dismissedOpenLoopsCount: dismissedOpenLoops.length
   });
-  const hasMore = moreSectionHasContent({
-    brief,
-    requiredPointsCount: requiredCount,
-    dismissedOpenLoopsCount: dismissedOpenLoops.length
-  });
+  const hasMore = moreSectionHasContent({ brief });
 
   // Trim once for the visible card. The brief text is already sanitised
   // server-side, but defensive trimming keeps stray whitespace from
@@ -84,15 +81,20 @@ export function ReplyBriefPanel({
       data-tour="reply-brief"
       className="flex flex-col gap-7"
     >
-      {where ? (
-        <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
+      {/* Reply job — leads the rail with the action this reply must do
+          (#388), sourced from brief.on_you. The data anchors are kept so
+          the pilot tour / demo still target the same content. */}
+      {onYou ? (
+        <div data-demo-target="reply-brief-on-you" data-tour="reply-brief-on-you">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            Where it stands
+            Reply job
           </p>
-          <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
+          <p className="m-0 text-[14px] leading-[1.55] text-ink">{onYou}</p>
         </div>
       ) : null}
 
+      {/* They said — supporting evidence: the contact's relevant points as
+          bullets, so the operator needn't reread the thread. */}
       {theySaid.length > 0 ? (
         <div>
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
@@ -115,12 +117,32 @@ export function ReplyBriefPanel({
         </div>
       ) : null}
 
-      {onYou ? (
-        <div data-demo-target="reply-brief-on-you" data-tour="reply-brief-on-you">
+      {/* Draft coverage — promoted out of "More" (#388). Shows ✓ addressed
+          / ~ partly covered / ○ not yet against the reply obligations,
+          driven by the in-flight draft (#331). Hidden cleanly when there
+          is nothing to cover (reconnect / no open loops). */}
+      {showDraftCoverage ? (
+        <div data-demo-target="reply-brief-draft-coverage" data-tour="reply-brief-draft-coverage">
+          <ActionItemsChecklist
+            threadId={threadId}
+            openLoops={openLoops}
+            dismissedOpenLoops={dismissedOpenLoops}
+            isReopenMode={false}
+            onDismiss={onDismissLoop}
+            aiCoverageItems={aiCoverageItems}
+            aiCoverageMode={aiCoverageMode}
+          />
+        </div>
+      ) : null}
+
+      {/* Where it stands — narrative summary, demoted below the action
+          sections (#388). Kept for operators who still want the prose. */}
+      {where ? (
+        <div data-demo-target="reply-brief-where-it-stands" data-tour="reply-brief-where-it-stands">
           <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-            On you
+            Where it stands
           </p>
-          <p className="m-0 text-[14px] leading-[1.55] text-ink">{onYou}</p>
+          <p className="m-0 text-[14px] leading-[1.55] text-ink">{where}</p>
         </div>
       ) : null}
 
@@ -233,18 +255,6 @@ export function ReplyBriefPanel({
                     ))}
                   </ul>
                 </div>
-              ) : null}
-
-              {showChecklist ? (
-                <ActionItemsChecklist
-                  threadId={threadId}
-                  openLoops={openLoops}
-                  dismissedOpenLoops={dismissedOpenLoops}
-                  isReopenMode={false}
-                  onDismiss={onDismissLoop}
-                  aiCoverageItems={aiCoverageItems}
-                  aiCoverageMode={aiCoverageMode}
-                />
               ) : null}
             </div>
           ) : null}

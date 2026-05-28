@@ -63,12 +63,14 @@ export function chooseDisplayBrief(thread: Pick<
   };
 }
 
-// Gating rules for the checklist surface — see Step 8 of the spec.
-//   0 required → no checklist by default.
-//   1 required → "On you" carries it directly; no bulky checklist.
-//   2+ required → checklist surfaced inside the More disclosure.
-// We also reveal the checklist when there are dismissed loops the
-// operator might want to restore — otherwise restoring is hidden.
+// Gating rules for the Draft coverage surface (the checklist). #388
+// promoted it from the More disclosure to a top-level section; the
+// visibility rule is unchanged:
+//   0 required → no coverage list by default.
+//   1 required → "Reply job" carries it directly; no bulky list.
+//   2+ required → the coverage checklist is surfaced.
+// We also reveal it when there are dismissed loops the operator might
+// want to restore — otherwise restoring is hidden.
 export function shouldShowChecklist(args: {
   requiredPointsCount: number;
   dismissedOpenLoopsCount: number;
@@ -83,20 +85,16 @@ export function shouldShowChecklist(args: {
 //   - fuller / durable context strings
 //   - tone steer
 //   - handled points worth surfacing
-//   - the gated checklist (with required ≥ 2 or dismissed loops)
-// When everything is empty, the disclosure renders nothing so the panel
-// stays calm.
-export function moreSectionHasContent(args: {
-  brief: ReplyBrief;
-  requiredPointsCount: number;
-  dismissedOpenLoopsCount: number;
-}): boolean {
+// The Draft coverage checklist is no longer part of More (#388 promoted
+// it to a top-level section), so it no longer counts here. When
+// everything is empty, the disclosure renders nothing so the panel stays
+// calm.
+export function moreSectionHasContent(args: { brief: ReplyBrief }): boolean {
   if (args.brief.optional_followups.length > 0) return true;
   if (args.brief.fuller_context && args.brief.fuller_context.trim()) return true;
   if (args.brief.durable_context && args.brief.durable_context.trim()) return true;
   if (args.brief.tone_steer && args.brief.tone_steer.trim()) return true;
   if (args.brief.handled_points && args.brief.handled_points.length > 0) return true;
-  if (shouldShowChecklist(args)) return true;
   return false;
 }
 
@@ -110,4 +108,4 @@ export function durableContextLabel(): string {
 
 // Single source of truth for the disclosure label so the test can pin
 // the exact wording from the spec.
-export const MORE_DISCLOSURE_LABEL = "More context · nudge · checklist";
+export const MORE_DISCLOSURE_LABEL = "More context · nudge";
