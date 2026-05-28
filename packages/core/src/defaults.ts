@@ -16,6 +16,8 @@ export const defaultSettings: AppSettings = {
   maxMessagesPerThread: 15,
   enabledPlatforms: ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"],
   demoMode: false,
+  presenterDemoMode: "off",
+  presenterReadOnly: false,
   recentThreadSweepCount: 30,
   aiProvider: "openai"
 };
