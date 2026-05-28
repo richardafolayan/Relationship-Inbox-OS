@@ -20,7 +20,8 @@ import {
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import { runActionWithFeedback } from "@/lib/feedback";
+import { runActionWithFeedback, showToast } from "@/lib/feedback";
+import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
 import type {
   AuditLogRow,
@@ -1320,24 +1321,34 @@ export default function ThreadPage() {
   const reassessThread = () => {
     if (!thread || reassessing) return;
     setReassessing(true);
-    // #347: route through runActionWithFeedback so the kebab → Reassess
-    // click surfaces a running toast immediately, then resolves to a
-    // success or failure toast on completion. Without this the action
-    // fired silently and the operator had no way to tell whether the
-    // reassessment was in flight, succeeded, or quietly failed — the
-    // same UX rule the iMessage scan toast already follows.
-    const request = apiPost(`/runner/control/thread/${thread.id}/reassess`, {});
-    runActionWithFeedback(request, {
-      pending: "Reassessing thread…",
-      success: "Reply Brief refreshed",
-      failure: "Reassess failed",
-      setError,
-      onDone: () => refresh()
-    });
-    // Clear the local in-flight flag regardless of outcome. Own catch on
-    // the chain so we don't double-report — runActionWithFeedback has
-    // already surfaced any error toast.
-    request.catch(() => undefined).finally(() => setReassessing(false));
+    // Issue #369. Reassess is a 5-15s LLM call — ongoing work, not an
+    // event. Surface the in-flight state in TopStatus (via
+    // signalReassessStart) instead of a static pending toast. The
+    // discrete outcome (success / error) still uses the toast surface
+    // because those ARE events. This mirrors the surface rule
+    // established by #337 for the pilot feedback modal.
+    const threadId = thread.id;
+    const stopTickerSignal = signalReassessStart(threadId);
+    apiPost(`/runner/control/thread/${threadId}/reassess`, {})
+      .then(async () => {
+        showToast({ kind: "success", title: "Reply Brief refreshed" });
+        setError(null);
+        await refresh();
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        showToast({
+          kind: "error",
+          title: "Reassess failed",
+          description: message,
+          durationMs: 9000
+        });
+        setError(message);
+      })
+      .finally(() => {
+        stopTickerSignal();
+        setReassessing(false);
+      });
   };
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
