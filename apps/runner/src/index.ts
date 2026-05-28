@@ -2943,7 +2943,18 @@ function isStaleSummary(rollingSummary: string | null | undefined, displayName: 
 // self-heal path when a stored summary still matches the fallback
 // updateThreadSummary writes on AI failure (no API key / quota /
 // model error).
-async function resummarizeThreadById(threadId: string): Promise<
+async function resummarizeThreadById(
+  threadId: string,
+  options?: {
+    /**
+     * Race two AI providers and keep the first valid result (issue
+     * #382 — pilot R-0029). Only set this from operator-initiated,
+     * user-visible paths (Reassess endpoint). Doubles provider spend
+     * per raced call.
+     */
+    race?: boolean;
+  }
+): Promise<
   | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
   | { ok: false; reason: "not_found" }
 > {
@@ -2991,7 +3002,8 @@ async function resummarizeThreadById(threadId: string): Promise<
       ? (JSON.parse(thread.rememberJson) as RememberItem[])
       : [],
     messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-    needsReply: computedNeedsReply
+    needsReply: computedNeedsReply,
+    race: options?.race
   });
 
   await prisma.thread.update({
@@ -3269,7 +3281,13 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
 
   // 1. Resummarise (this also refreshes whatTheyWant + openLoops via the
   // existing helper, which already persists the result).
-  const resummarised = await resummarizeThreadById(threadId);
+  //
+  // Issue #382 / pilot R-0029. Race two providers for both AI calls in
+  // this route — the user is staring at a spinner and wants the first
+  // valid result fast. PM scope: race ONLY this endpoint; do not
+  // extend to predrafts, classifiers during scan, or background AI
+  // without a separate cost conversation.
+  const resummarised = await resummarizeThreadById(threadId, { race: true });
   if (!resummarised.ok) {
     res.status(404).json({ error: "Thread not found" });
     return;
@@ -3302,7 +3320,8 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
       displayName: thread.person.displayName,
       messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
       summary: thread.rollingSummary,
-      whatTheyWant: thread.whatTheyWant
+      whatTheyWant: thread.whatTheyWant,
+      race: true
     })
     .catch(() => null);
 

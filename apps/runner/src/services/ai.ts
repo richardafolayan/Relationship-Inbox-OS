@@ -36,6 +36,7 @@ import {
   classifyLlmError as classifyLlmErrorImpl,
   type AiErrorClassification
 } from "./ai-providers";
+import { raceAiProviders } from "./ai-race";
 
 // Re-exported so existing tests + callers continue to import from ai.ts.
 export const classifyLlmError = classifyLlmErrorImpl;
@@ -1172,6 +1173,27 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     return { client: openAiClient, model: runnerConfig.openAiModel };
   }
 
+  /**
+   * Pick a race partner for the given active provider (issue #382).
+   * Returns the first configured provider whose client is reachable
+   * and whose id differs from the active one. Falls back to `null`
+   * when no second provider is configured — in that case the caller
+   * skips racing and runs a single modelJson call as before.
+   *
+   * Order preference: openai → glm → gemini (openai first because
+   * latency is the most predictable; the goal of the race is to
+   * shave the slow tail, not to swap models). The active provider
+   * is filtered out so the race always pits two distinct providers.
+   */
+  function pickRaceSecondary(activeId: AiProvider): AiProvider | null {
+    const ordered: AiProvider[] = ["openai", "glm", "gemini"];
+    for (const candidate of ordered) {
+      if (candidate === activeId) continue;
+      if (resolveProvider(candidate).client) return candidate;
+    }
+    return null;
+  }
+
   async function resolveActive(): Promise<{ client: OpenAI | null; model: string; provider: AiProvider }> {
     // Settings.aiProvider is the live override; runnerConfig.aiProvider is
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
@@ -1262,38 +1284,56 @@ export function createAiService(settingsStore: SettingsStore): AiService {
    * produced the result and, when fallback was used, why the active
    * provider was skipped — surfaced to the dashboard for suggested
    * replies so the operator knows their selection didn't run.
+   *
+   * `opts.forceProviderId` — pin the chain to a single provider (still
+   * honours that provider's retry budget). Used by the race wiring
+   * (issue #382) to run two parallel modelJson calls against different
+   * providers without each one walking its own fallback chain in
+   * parallel. On all-attempts-fail returns the caller fallback with
+   * `source.providerId = null`, just like the chained path.
    */
   async function modelJson<T>(
     prompt: string,
     fallback: T,
     parser: (value: unknown) => T,
-    systemContent?: string
+    systemContent?: string,
+    opts?: { forceProviderId?: AiProvider }
   ): Promise<{ result: T; source: AiSource | null }> {
     const { provider: activeId, model: activeModel } = await resolveActive();
-    const chain: AiProvider[] = [activeId, ...fallbackChain.filter((id) => id !== activeId)];
+    const chain: AiProvider[] = opts?.forceProviderId
+      ? [opts.forceProviderId]
+      : [activeId, ...fallbackChain.filter((id) => id !== activeId)];
 
     let activeFailure: AiErrorClassification | null = null;
 
     for (let i = 0; i < chain.length; i++) {
       const providerId = chain[i]!;
-      const isActive = i === 0;
-      // Active provider honours the user's model override from settings;
-      // fallback providers use the runtime config default.
-      const model = isActive ? activeModel : resolveProvider(providerId).model;
+      // Honour the user's model-override for the active provider only.
+      // When forceProviderId pins to a non-active provider (race wiring,
+      // issue #382), use that provider's default model — the settings
+      // override is tied to the user's primary selection, not to the
+      // race partner.
+      const isActiveProvider = providerId === activeId;
+      const isFirstInChain = i === 0;
+      const model = isActiveProvider ? activeModel : resolveProvider(providerId).model;
       const outcome = await tryProvider(providerId, model, prompt, parser, systemContent);
       if (outcome.ok) {
         const entry = providerRegistry[providerId];
+        // `fellBack` describes the chain walk (active failed, fallback
+        // ran). When forceProviderId is set, there was no walk to
+        // describe — collapse to "no fallback" regardless.
+        const fellBack = !opts?.forceProviderId && !isFirstInChain;
         const source: AiSource = {
           providerId,
           providerDisplayName: entry.displayName,
-          fellBackFromProviderId: isActive ? null : activeId,
-          fellBackFromProviderDisplayName: isActive ? null : providerRegistry[activeId].displayName,
-          fellBackReason: isActive ? null : activeFailure?.kind ?? null,
-          fellBackMessage: isActive ? null : activeFailure?.message ?? null
+          fellBackFromProviderId: fellBack ? activeId : null,
+          fellBackFromProviderDisplayName: fellBack ? providerRegistry[activeId].displayName : null,
+          fellBackReason: fellBack ? activeFailure?.kind ?? null : null,
+          fellBackMessage: fellBack ? activeFailure?.message ?? null : null
         };
         return { result: outcome.result, source };
       }
-      if (isActive) {
+      if (isFirstInChain) {
         activeFailure = outcome.classification;
       }
     }
@@ -1316,6 +1356,72 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     return { result: fallback, source };
   }
 
+  /**
+   * Race two providers for `modelJson` (issue #382 — pilot R-0029).
+   * Dispatches the same prompt against the active provider and one
+   * pinned secondary in parallel and returns the FIRST one whose
+   * response carries a real provider source (i.e. the underlying
+   * tryProvider actually produced a result rather than exhausting
+   * retries and returning the caller fallback).
+   *
+   * Behaviour:
+   *   - When no second provider is configured, falls through to the
+   *     normal chained modelJson — race is purely additive.
+   *   - When both raced calls return the caller fallback (both
+   *     providers exhausted), walks the chained modelJson path as a
+   *     last resort. The chain re-tries the providers we just tried,
+   *     but it's the only way to honour fallbackChain consistency
+   *     with the non-race path; in practice both-fail is rare enough
+   *     that the duplicate cost is acceptable.
+   *
+   * Use only for operator-initiated, user-visible AI calls. Doubles
+   * provider spend per raced call.
+   */
+  async function raceModelJson<T>(
+    prompt: string,
+    fallback: T,
+    parser: (value: unknown) => T,
+    systemContent: string | undefined,
+    raceLabel: string
+  ): Promise<{ result: T; source: AiSource | null }> {
+    const { provider: activeId } = await resolveActive();
+    const secondaryId = pickRaceSecondary(activeId);
+    if (!secondaryId) {
+      return modelJson(prompt, fallback, parser, systemContent);
+    }
+    try {
+      const outcome = await raceAiProviders<{ result: T; source: AiSource | null }>({
+        primary: {
+          providerId: activeId,
+          call: () => modelJson(prompt, fallback, parser, systemContent, { forceProviderId: activeId })
+        },
+        secondary: {
+          providerId: secondaryId,
+          call: () => modelJson(prompt, fallback, parser, systemContent, { forceProviderId: secondaryId })
+        },
+        // Real provider source means the underlying tryProvider
+        // succeeded; the caller fallback ships with source.providerId
+        // === null, which is the signal we use to wait on the other
+        // participant.
+        validate: (value) => value.source !== null && value.source.providerId !== null
+      });
+      const loser = outcome.loser;
+      const loserDescription =
+        loser.kind === "still_running"
+          ? `${loser.providerId}/still_running`
+          : `${loser.providerId}/${loser.kind}/${Math.round(loser.durationMs)}ms`;
+      console.log(
+        `[ai-race ${raceLabel}] winner=${outcome.winnerProviderId}/${Math.round(outcome.winnerDurationMs)}ms ${loserDescription}`
+      );
+      return outcome.result;
+    } catch (error) {
+      console.warn(
+        `[ai-race ${raceLabel}] both ${activeId} and ${secondaryId} failed; falling back to chained modelJson. ${error instanceof Error ? error.message : String(error)}`
+      );
+      return modelJson(prompt, fallback, parser, systemContent);
+    }
+  }
+
   function sleep(ms: number): Promise<void> {
     return new Promise((resolve) => setTimeout(resolve, ms));
   }
@@ -1336,6 +1442,14 @@ export function createAiService(settingsStore: SettingsStore): AiService {
      * reopening the conversation rather than items to address.
      */
     needsReply: boolean;
+    /**
+     * Race the call across two providers and keep the first valid
+     * response (issue #382 — pilot R-0029). Only set this from
+     * operator-initiated, user-visible paths (Reassess endpoint).
+     * Doubles provider spend per call, so do NOT enable for scans or
+     * background AI without a separate cost conversation.
+     */
+    race?: boolean;
   }): Promise<SummaryOutput> {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
@@ -1585,7 +1699,17 @@ Previous remember items: ${JSON.stringify(input.previousRemember)}
 Transcript:
 ${transcript}`;
 
-    const { result } = await modelJson(prompt, fallback, (value) => summarySchema.parse(value));
+    // Issue #382. When `race` is set, dispatch the call against the
+    // active provider and one pinned secondary in parallel and keep
+    // the first response that comes back with a real provider source
+    // (not the caller-supplied fallback). On both-fail or no second
+    // provider configured, walk the normal chained modelJson path so
+    // the call is purely additive — the worst case is identical to
+    // today.
+    const parseSummary = (value: unknown) => summarySchema.parse(value);
+    const { result } = input.race
+      ? await raceModelJson(prompt, fallback, parseSummary, undefined, "reassess-summary")
+      : await modelJson(prompt, fallback, parseSummary);
     // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
     // returns longer prose; this keeps the Today hero headline within its
     // 4-line budget. safeTruncate trims at the code-point boundary and
@@ -2004,12 +2128,14 @@ ${recentExchange || "(no recent messages)"}`;
     messages: MessageForPrompt[];
     summary?: string | null;
     whatTheyWant?: string | null;
+    /**
+     * Race the call across two providers and keep the first valid
+     * classification (issue #382 — pilot R-0029). Same caveat as
+     * updateThreadSummary's race option: operator-initiated paths
+     * only, doubles spend per raced call.
+     */
+    race?: boolean;
   }): Promise<"outreach" | "genuine" | null> {
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return null;
-    }
-
     const inboundMessages = input.messages
       .filter((m) => m.direction === "IN")
       .slice(0, 5)
@@ -2035,29 +2161,74 @@ ${whatTheyWantLine}
 Inbound messages (oldest first):
 ${inboundMessages.map((m, i) => `${i + 1}. ${m}`).join("\n")}`;
 
-    try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return null;
-      const parsed = categorySchema.parse(parseAiJson(content, model));
-      return parsed.category;
-    } catch (error) {
-      console.warn(
-        `[ai] classifyThreadCategory failed (provider=${provider}, model=${model}); returning null. ${classifyLlmError(error, provider)}`
-      );
-      return null;
+    // One single-provider call. Returns null on any failure so the race
+    // path can treat "still running but slow" and "failed silently" the
+    // same way — caller already handles null.
+    const callOne = async (providerId: AiProvider): Promise<"outreach" | "genuine" | null> => {
+      const { client, model } = resolveProvider(providerId);
+      if (!client) return null;
+      try {
+        const response = await client.chat.completions.create({
+          model,
+          ...(shouldUseJsonResponseFormat(providerId, model)
+            ? { response_format: { type: "json_object" as const } }
+            : {}),
+          messages: [
+            { role: "system", content: SYSTEM_PROMPT },
+            { role: "user", content: reinforceJsonPrompt(prompt, model) }
+          ],
+          ...providerOptions(providerId, model),
+          ...geminiExtraBody(providerId, model)
+        });
+        const content = response.choices[0]?.message?.content;
+        if (!content) return null;
+        const parsed = categorySchema.parse(parseAiJson(content, model));
+        return parsed.category;
+      } catch (error) {
+        console.warn(
+          `[ai] classifyThreadCategory failed (provider=${providerId}, model=${model}); returning null. ${classifyLlmError(error, providerId)}`
+        );
+        return null;
+      }
+    };
+
+    const { provider: activeId } = await resolveActive();
+
+    // Issue #382. Race two providers when the operator-initiated path
+    // opts in. Falls back to a single active-provider call when no
+    // secondary is configured (race has nothing to race) — purely
+    // additive.
+    if (input.race) {
+      const secondaryId = pickRaceSecondary(activeId);
+      if (secondaryId) {
+        try {
+          const outcome = await raceAiProviders<"outreach" | "genuine" | null>({
+            primary: { providerId: activeId, call: () => callOne(activeId) },
+            secondary: { providerId: secondaryId, call: () => callOne(secondaryId) },
+            validate: (value) => value !== null
+          });
+          const loser = outcome.loser;
+          const loserDescription =
+            loser.kind === "still_running"
+              ? `${loser.providerId}/still_running`
+              : `${loser.providerId}/${loser.kind}/${Math.round(loser.durationMs)}ms`;
+          console.log(
+            `[ai-race reassess-classify] winner=${outcome.winnerProviderId}/${Math.round(outcome.winnerDurationMs)}ms ${loserDescription}`
+          );
+          return outcome.result;
+        } catch (error) {
+          // Both providers returned null (already logged per-provider).
+          // Treat the same way the non-race path would: classification
+          // unavailable, caller falls back to the existing category.
+          console.warn(
+            `[ai-race reassess-classify] both ${activeId} and ${secondaryId} returned null. ${error instanceof Error ? error.message : String(error)}`
+          );
+          return null;
+        }
+      }
     }
+
+    return callOne(activeId);
   }
 
   /**
