@@ -526,12 +526,14 @@ function OverdueDigestRow() {
             label="Daily"
             selected={cadence === "daily"}
             disabled={busy || desktopNotEnabled}
+            disabledReason={desktopNotEnabled ? "notifications off" : undefined}
             onClick={() => void writeCadence("daily")}
           />
           <CadenceOption
             label="Weekly"
             selected={cadence === "weekly"}
             disabled={busy || desktopNotEnabled}
+            disabledReason={desktopNotEnabled ? "notifications off" : undefined}
             onClick={() => void writeCadence("weekly")}
           />
           {status === "saved" ? (
@@ -640,11 +642,19 @@ function CadenceOption({
   label,
   selected,
   disabled,
+  disabledReason,
   onClick
 }: {
   label: string;
   selected: boolean;
   disabled?: boolean;
+  /**
+   * Surfaced beside the label when disabled, so the operator can see
+   * WHY the button does nothing (pilot R-0034 — "the toggle is just
+   * broken" was likely the cadence buttons being silently disabled
+   * pending notifications permission). Tooltip alone wasn't enough.
+   */
+  disabledReason?: string;
   onClick: () => void;
 }) {
   return (
@@ -653,6 +663,7 @@ function CadenceOption({
       onClick={onClick}
       disabled={disabled}
       aria-pressed={selected}
+      title={disabled && disabledReason ? disabledReason : undefined}
       className={cn(
         "inline-flex items-center rounded-pill border px-[14px] py-[6px] font-mono text-[11px] transition-colors duration-calm",
         selected
@@ -662,6 +673,9 @@ function CadenceOption({
       )}
     >
       {label}
+      {disabled && disabledReason ? (
+        <span className="ml-1 text-ink-3">({disabledReason})</span>
+      ) : null}
     </button>
   );
 }
