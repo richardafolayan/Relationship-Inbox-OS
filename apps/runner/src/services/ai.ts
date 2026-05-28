@@ -29,6 +29,7 @@ import type {
   StyleProfile
 } from "../types/runtime";
 import { describeContactStyle, describeOperatorStyle } from "./style";
+import { describeReactionsForPrompt, parseReactionsFromRawJson } from "./reaction-effects.js";
 import {
   providerRegistry,
   fallbackChain,
@@ -283,9 +284,10 @@ export function selectVoicePrompt(platform: PlatformName): string {
  * has no text and only audio, so the AI still knows audio exists).
  */
 export function renderMessageBody(
-  message: Pick<MessageForPrompt, "text" | "audioTranscription">
+  message: Pick<MessageForPrompt, "text" | "audioTranscription" | "reactions">
 ): string {
   const transcription = message.audioTranscription;
+  let body: string;
   if (
     transcription &&
     transcription.status === "transcribed" &&
@@ -295,11 +297,19 @@ export function renderMessageBody(
     const transcript = transcription.transcript.trim();
     const text = message.text ?? "";
     if (text.trim().length === 0) {
-      return `[Voice message transcript: "${transcript}"]`;
+      body = `[Voice message transcript: "${transcript}"]`;
+    } else {
+      body = `${text} [Voice message transcript: "${transcript}"]`;
     }
-    return `${text} [Voice message transcript: "${transcript}"]`;
+  } else {
+    body = message.text ?? "";
   }
-  return message.text ?? "";
+  // Issue #393. Annotate the message with any tapback / reaction state
+  // so the AI knows the operator reacted ❤️ instead of typing a reply
+  // (or that the contact reacted to one of the operator's messages).
+  // Empty string for plain messages with no reactions.
+  const reactionNote = describeReactionsForPrompt(message.reactions ?? []);
+  return reactionNote ? `${body}${reactionNote}` : body;
 }
 
 /**
@@ -366,16 +376,23 @@ export function prismaMessageToPrompt<
     text: string;
     timestamp: Date | string;
     audioTranscription?: { status: string; transcript: string | null } | null;
+    rawJson?: string | null;
   }
 >(message: T): MessageForPrompt {
   const direction = message.direction === "OUT" ? "OUT" : "IN";
   const timestamp =
     typeof message.timestamp === "string" ? message.timestamp : message.timestamp.toISOString();
+  // Issue #393. Pull reactions out of rawJson so the AI prompt builder
+  // can annotate the message with "[operator reacted ❤️]" etc. Silently
+  // returns [] when rawJson is missing, malformed, or has no reactions
+  // key — the helper is defensive.
+  const reactions = parseReactionsFromRawJson(message.rawJson ?? null);
   return {
     direction,
     text: message.text,
     timestamp,
-    audioTranscription: message.audioTranscription ?? null
+    audioTranscription: message.audioTranscription ?? null,
+    reactions: reactions.length > 0 ? reactions : undefined
   };
 }
 
