@@ -51,6 +51,19 @@ test("CONTACT_NAME_DISCIPLINE is wired into all three contact-referencing prompt
   );
 });
 
+test("CONTACT_NAME_DISCIPLINE bans guessing gendered pronouns (#416)", () => {
+  // Pilot R-0045: AI guessed "he" for Praise (a girl). Names cross
+  // cultures — gendered guesses misfire. The rule must require
+  // name-or-neutral when pronoun is uncertain.
+  assert.match(CONTACT_NAME_DISCIPLINE, /GENDER \/ PRONOUNS/);
+  // Specific ban on guessing.
+  assert.match(CONTACT_NAME_DISCIPLINE, /NEVER guess/);
+  // Acceptable fallback path: name or they/them.
+  assert.match(CONTACT_NAME_DISCIPLINE, /name.*they\/them|they\/them/i);
+  // Worked example using "Praise" — pilot's regression case.
+  assert.match(CONTACT_NAME_DISCIPLINE, /Praise/);
+});
+
 test("CONTACT_NAME_DISCIPLINE explicitly bans operator/contact confusion (#400)", () => {
   // Pilot R-0039: AI wrote the OPERATOR's name (Richard) when it
   // should have written the CONTACT's name (Seyi). The operator's
