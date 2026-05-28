@@ -8,7 +8,9 @@ const {
   buildNewMessageNotice,
   buildNewMessageDigestNotice,
   planNewMessageNotice,
-  shouldShowNotificationCta
+  shouldShowNotificationCta,
+  notifyNewMessage,
+  notifyNewMessageDigest
 } = await import("../apps/dashboard/lib/notifications.ts");
 
 // Minimal InboxRow stand-in: the builders only read these fields.
@@ -126,4 +128,93 @@ test("shouldShowNotificationCta: only when supported, undecided, and not dismiss
     shouldShowNotificationCta({ supported: false, permission: "unsupported", dismissed: false }),
     false
   );
+});
+
+// Desktop-notification path (tab hidden). Mirrors the Notification-API shim
+// used in dashboard-overdue-digest.test.mjs: notifications.ts inspects
+// `"Notification" in window` and reads `Notification.permission` off the
+// global, and `show()` calls `new Notification(...)` then `window.focus()`
+// from the click handler. Stub both so we can assert what gets constructed.
+function withGrantedNotification(run) {
+  const instances = [];
+  let focused = 0;
+  class FakeNotification {
+    constructor(title, init) {
+      this.title = title;
+      this.init = init || {};
+      this.onclick = null;
+      instances.push(this);
+    }
+    close() {
+      this.closed = true;
+    }
+    static permission = "granted";
+    static requestPermission() {
+      return Promise.resolve("granted");
+    }
+  }
+  const prevWindow = globalThis.window;
+  const prevNotification = globalThis.Notification;
+  globalThis.window = { Notification: FakeNotification, focus: () => { focused += 1; } };
+  globalThis.Notification = FakeNotification;
+  try {
+    return run({ instances, getFocused: () => focused });
+  } finally {
+    globalThis.window = prevWindow;
+    if (prevNotification === undefined) delete globalThis.Notification;
+    else globalThis.Notification = prevNotification;
+  }
+}
+
+test("notifyNewMessage builds one desktop notification keyed to the thread; click focuses + opens it", () => {
+  withGrantedNotification(({ instances, getFocused }) => {
+    let openedId = null;
+    notifyNewMessage(row(), (id) => {
+      openedId = id;
+    });
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].title, "Davina messaged you");
+    assert.equal(instances[0].init.body, "Wants to confirm Friday's call.");
+    assert.equal(instances[0].init.tag, "inbox-os:thread:t-1");
+    // Not opened until the operator actually clicks the notification.
+    assert.equal(openedId, null);
+    instances[0].onclick();
+    assert.equal(openedId, "t-1");
+    assert.equal(getFocused(), 1);
+  });
+});
+
+test("notifyNewMessageDigest builds one roll-up desktop notification", () => {
+  withGrantedNotification(({ instances }) => {
+    notifyNewMessageDigest(
+      [row({ id: "t-1", personName: "Davina" }), row({ id: "t-2", personName: "Joseph" })],
+      () => {}
+    );
+    assert.equal(instances.length, 1);
+    assert.equal(instances[0].title, "2 new messages");
+    assert.equal(instances[0].init.tag, "inbox-os:digest");
+  });
+});
+
+test("desktop notifications are not constructed when permission is not granted", () => {
+  const prevWindow = globalThis.window;
+  const prevNotification = globalThis.Notification;
+  const constructed = [];
+  class DeniedNotification {
+    constructor(title, init) {
+      constructed.push({ title, init });
+    }
+    static permission = "denied";
+  }
+  globalThis.window = { Notification: DeniedNotification, focus() {} };
+  globalThis.Notification = DeniedNotification;
+  try {
+    notifyNewMessage(row(), () => {});
+    notifyNewMessageDigest([row()], () => {});
+    assert.equal(constructed.length, 0);
+  } finally {
+    globalThis.window = prevWindow;
+    if (prevNotification === undefined) delete globalThis.Notification;
+    else globalThis.Notification = prevNotification;
+  }
 });
