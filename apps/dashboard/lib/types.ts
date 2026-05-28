@@ -384,6 +384,15 @@ export interface ThreadResponse {
   personId: string;
   personName: string;
   personAvatarUrl?: string | null;
+  /**
+   * Issue #412. Contact birthday as "MM-DD" (year-less). Optional —
+   * threads on contacts without a captured birthday omit the field.
+   * The thread page renders a "🎂 birthday in N days" pill when the
+   * birthday falls within the next ~30 days.
+   */
+  personBirthday?: string | null;
+  /** Birth year if known; lets the rail render "turns 30" when surfacing the birthday pill. */
+  personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;

@@ -4083,6 +4083,14 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     personId: thread.person.id,
     personName: thread.person.displayName,
     personAvatarUrl: thread.person.avatarUrl ?? null,
+    // Issue #412. Carry the contact's birthday into the thread page so
+    // the rail can show a "🎂 birthday in N days" pill when it's
+    // within the next month. The 14-day horizon constant is reused
+    // from the inbox row; the thread page renders a wider 30-day
+    // window because the operator opened this specific thread —
+    // anything birthday-relevant in the next month is worth surfacing.
+    personBirthday: thread.person.birthday ?? null,
+    personBirthYear: thread.person.birthYear ?? null,
     platform: thread.platform,
     riskLevel: thread.riskLevel,
     riskReason: thread.riskReason,
