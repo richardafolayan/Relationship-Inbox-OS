@@ -25,7 +25,9 @@ import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { NotificationCta } from "@/components/common/notification-cta";
+import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
+import { isTourSeen, markTourSeen, startPilotTour } from "@/lib/pilot-tour";
 
 // "Today" - the home. Hero card (most-overdue first) with keyboard hints
 // on each action, a "queue peek" of the next few people below it, and a
@@ -98,6 +100,9 @@ export default function TodayPage() {
   // First-run pilot welcome card. `undefined` until localStorage is read,
   // so the card never flashes for testers who already dismissed it.
   const [welcomeDismissed, setWelcomeDismissed] = useState<boolean | undefined>(undefined);
+  // First-run pilot tour invite. `undefined` until localStorage is read so
+  // the card never flashes for testers who already saw or skipped it.
+  const [tourSeen, setTourSeen] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -148,6 +153,7 @@ export default function TodayPage() {
 
   useEffect(() => {
     setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
+    setTourSeen(isTourSeen(window.localStorage));
   }, []);
 
   // Restore tonight's cleared-thread counts so the right-rail outline keeps
@@ -451,6 +457,20 @@ export default function TodayPage() {
         />
       ) : null}
 
+      {welcomeDismissed === true && tourSeen === false ? (
+        <PilotTourInviteCard
+          onStart={() => {
+            // The PilotTour component (mounted in AppShell) listens for
+            // this event and drives the sandbox + walkthrough.
+            startPilotTour();
+          }}
+          onSkip={() => {
+            markTourSeen(window.localStorage);
+            setTourSeen(true);
+          }}
+        />
+      ) : null}
+
       {needsSetup ? (
         <div data-testid="voice-setup-card" className="mb-8">
           <UserVoiceProfile variant="onboarding" onCompleted={loadProfile} />
@@ -487,6 +507,7 @@ export default function TodayPage() {
             <article
               ref={heroRef}
               data-testid="today-hero"
+              data-demo-target="today-hero"
               className={`relative mb-4 flex min-h-[300px] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >

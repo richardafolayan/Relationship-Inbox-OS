@@ -1,10 +1,11 @@
-import type { PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
+import type { PlatformAdapter, PlatformName, SendReceipt, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import { Prisma } from "@prisma/client";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
+import { buildDemoSendReceipt } from "./demo-send";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -237,24 +238,44 @@ export function createSendService(deps: SendServiceDeps) {
         details: { threadId: thread.id, clientSendId: input.clientSendId }
       });
 
-      if (!adapter) {
-        throw new Error(
-          `Platform ${thread.platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`
-        );
-      }
+      // Presenter sandbox safety branch — ALWAYS evaluated before adapter
+      // selection. When the runner is in sandbox demo mode and the target
+      // thread is in the seeded demo manifest, route through
+      // buildDemoSendReceipt() and skip the platform adapter entirely.
+      // The routing branch — not a downstream manifest check — is the
+      // safety boundary for adapter-touching operations. If the thread is
+      // not in the manifest while sandbox is on, refuse to send.
+      const settings = await deps.settingsStore.getSettings();
+      const inSandbox = settings.presenterDemoMode === "sandbox";
+      let receipt: SendReceipt;
       const stagedAttachments = sendRequest.attachmentsJson
         ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
         : [];
-      const receipt = await adapter.sendMessage(
-        threadStub,
-        input.text,
-        stagedAttachments.map((a) => ({
-          absolutePath: a.absolutePath,
-          displayName: a.displayName,
-          mimeType: a.mimeType,
-          kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
-        }))
-      );
+      if (inSandbox) {
+        const manifest = await deps.settingsStore.getDemoSeedManifest();
+        if (!manifest || !manifest.threadIds.includes(thread.id)) {
+          throw new Error(
+            "demo-mode-foreign-thread: sandbox demo refuses to send to a thread outside the seeded demo manifest"
+          );
+        }
+        receipt = buildDemoSendReceipt();
+      } else {
+        if (!adapter) {
+          throw new Error(
+            `Platform ${thread.platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`
+          );
+        }
+        receipt = await adapter.sendMessage(
+          threadStub,
+          input.text,
+          stagedAttachments.map((a) => ({
+            absolutePath: a.absolutePath,
+            displayName: a.displayName,
+            mimeType: a.mimeType,
+            kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
+          }))
+        );
+      }
 
       // Persist platform-side attachments on the OUT row when the adapter
       // captured them post-send (iMessage adapter looks them up from
@@ -309,7 +330,6 @@ export function createSendService(deps: SendServiceDeps) {
         }
       });
 
-      const settings = await deps.settingsStore.getSettings();
       const risk = calculateRisk({
         lastInboundAt: thread.lastInboundAt,
         lastOutboundAt: new Date(receipt.sentAt),

@@ -9,6 +9,8 @@ import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
+import { PilotTour } from "@/components/common/PilotTour";
+import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiPost } from "@/lib/api";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
@@ -488,12 +490,14 @@ export function AppShell({ children }: { children: ReactNode }) {
         operatorDisplayName={operatorDisplayName}
       />
       <div className="flex h-screen min-h-0 flex-col">
+        <FullDemoBanner />
         <TopStatus />
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />
+      <PilotTour />
     </div>
   );
 }
