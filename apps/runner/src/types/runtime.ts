@@ -51,6 +51,22 @@ export interface MessageForPrompt {
     status: string;
     transcript: string | null;
   } | null;
+  /**
+   * iMessage tapbacks / reactions on this message, surfaced to the AI so
+   * it knows when the operator reacted with ❤️ (etc.) instead of typing
+   * a reply, or when the contact reacted to one of the operator's
+   * messages. Optional — non-iMessage adapters and historical rows have
+   * no reactions. The AI prompt builder (formatMessageForPrompt /
+   * renderMessageBody in services/ai.ts) appends a "[operator reacted
+   * ❤️]" annotation when present. See services/reaction-effects.ts for
+   * the parser and helpers.
+   */
+  reactions?: Array<{
+    direction: "IN" | "OUT";
+    emoji: string;
+    kind: "love" | "like" | "dislike" | "laugh" | "emphasis" | "question";
+    timestamp?: string;
+  }>;
 }
 
 export interface EventBus {
