@@ -182,6 +182,28 @@ export const SYSTEM_PROMPT = [
   "If the inbound is a sales pitch, recruitment outreach, marketing, InMail, or cold solicitation, replace the \"Clarifying question\" reply with a \"Polite decline\" (a short, friendly \"not interested\" reply, ~1 sentence)."
 ].join("\n");
 
+/**
+ * Issue #387. Inline fidelity reminder injected near the top of every
+ * suggested-replies user prompt (and any other predraft user prompt that
+ * wants the extra anchor). Reinforces the NO INVENTED FRAMING clause that
+ * the voice prompts now carry — repeated at the per-call layer because
+ * long voice scaffolds can fade from the model's attention by the time it
+ * reaches the actual draft.
+ *
+ * Kept intentionally short. The voice prompts (CASUAL_VOICE_PROMPT /
+ * FORMAL_VOICE_PROMPT) carry the worked example and the full ban list;
+ * this constant is a top-of-context anchor, not a restatement.
+ *
+ * Exported so tests can assert the language is present in the assembled
+ * prompt without snapshotting the whole template.
+ */
+export const PREDRAFT_FIDELITY_REMINDER = [
+  "FIDELITY (read before drafting).",
+  "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation they didn't express.",
+  "If they paused a decision for a stated reason, acknowledge the stated reason — don't characterise it as a \"big move\", \"huge step\", \"exciting opportunity\", or anything else they didn't say. The interpretation must come from them, not you.",
+  "Self-check before returning each reply: every substantive phrase should be traceable to something the contact actually said."
+].join(" ");
+
 // Voice profile tier — picks between the formal (professional) prompt and
 // the casual-DM prompt based on platform. Casual covers WhatsApp / iMessage
 // / Instagram / TikTok DMs; LinkedIn uses the professional register. Both
@@ -320,7 +342,7 @@ function platformMessageNoun(platform: PlatformName): string {
 // configured, this scaffold alone produces a plain, neutral, friendly
 // register. It must never assume a specific identity, slang set, or
 // nationality.
-const FORMAL_VOICE_PROMPT = [
+export const FORMAL_VOICE_PROMPT = [
   "You are helping the operator write a professional message (LinkedIn-style) in their OWN voice. Conversational and peer-to-peer, never corporate or salesy.",
   "",
   "WHOSE VOICE",
@@ -340,6 +362,7 @@ const FORMAL_VOICE_PROMPT = [
   "- No em dashes, en dashes, semicolons, or colons.",
   "- Don't end with a question if the situation doesn't warrant one. A polite decline is acknowledgement-only, no follow-up question.",
   "- HALLUCINATION GUARD (strict). ONLY use details that are literally in their message or in the thread history. The test: if you can't quote the relevant phrase back from their text, don't include it. \"Enjoying it\" does NOT license \"new job\", \"steep learning curve\", or any other invented context, even if it sounds plausible. Stick to the words they actually used or close synonyms. Don't invent job context, emotional context, motivations, or backstory. Don't add compliments they didn't earn. Phrases like \"appreciate you sticking with it\", \"glad you reached out\", \"thanks for being patient\" are forbidden unless they said something that warrants them. If you're tempted to add warmth or context that isn't grounded in what they wrote, cut it. Words drawn from the operator's configured voice profile are register, not claims about the recipient, and are exempt from this guard.",
+  "- NO INVENTED FRAMING (subtler than the guard above). Don't assign emotional weight, stakes, significance, or characterisation the contact didn't express. If they state a fact neutrally (\"the clients were based in the Middle East, so I paused that offer\"), paraphrase the fact in their register — do NOT add \"big move\", \"huge step\", \"tough call\", \"exciting opportunity\", \"sounds like a lot\", or any other interpretation they didn't use. Worked example. Bad: \"Middle East is a big move so makes sense to hold off\" (you invented \"big move\" — they only said the clients were in the Middle East). Good: \"Fair enough on pausing that offer if the clients were based in the Middle East.\" Self-check: if a phrase in your reply explains why their choice is reasonable, hard, significant, or exciting — and they didn't say so themselves — cut it.",
   "- If a name is used, put it at the start in the \"Hey [name],\" form. Do NOT embed names mid-sentence. The name can be omitted entirely where the message reads more naturally without it.",
   "- Don't greet by name unless the intent calls for it.",
   "- If a late-reply acknowledgement is requested, phrase it naturally, not as a templated apology."
@@ -570,7 +593,7 @@ Examples of good reasons (style only, not actual outputs):
 // injected via operatorProfileFragment(). With no profile set, this
 // produces a plain, natural, everyday casual style. It must never assume
 // a specific identity, slang set, emoji palette, or nationality.
-const CASUAL_VOICE_PROMPT = `You are helping the operator write a casual message (WhatsApp, iMessage, Instagram DM, or TikTok DM) in their OWN voice — the relaxed, everyday register they would use with people they know.
+export const CASUAL_VOICE_PROMPT = `You are helping the operator write a casual message (WhatsApp, iMessage, Instagram DM, or TikTok DM) in their OWN voice — the relaxed, everyday register they would use with people they know.
 
 WHOSE VOICE
 - If the user message includes a "WRITE AS THIS PERSON" block, that is the operator's configured voice profile. Follow it closely: their name, how they describe their own messaging style, their preferred tone, the words and phrases they use, the words and phrases they avoid, and any emoji habit they describe.
@@ -586,6 +609,12 @@ EMOJI
 
 HALLUCINATION GUARD
 Only use details that are literally in the input message or conversation history. Words drawn from the operator's configured voice profile are register, not content claims, and do not need grounding. Specific facts about what the recipient is up to or how they feel must come from what they actually said. Do not invent shared experiences, jobs, places, or events.
+
+NO INVENTED FRAMING (the subtler failure mode)
+Do not assign emotional weight, stakes, significance, or characterisation the contact did not express. If they state a fact neutrally, paraphrase the fact in their register — do NOT editorialise it. The interpretation must come from them, not you.
+- Worked example. They say "the clients were based in the Middle East, so I paused that offer" — grounded reply: "Fair enough on pausing that offer if the clients were based in the Middle East." NOT grounded: "Middle East is a big move so makes sense to hold off" (you invented "big move" — they never said moving was the issue).
+- Banned moves: adding "big move", "huge step", "tough call", "exciting opportunity", "no pressure", "sounds like a lot", or any other phrase that characterises their decision or situation when they characterised it neutrally.
+- Self-check before returning: if a phrase in your reply explains why their choice is reasonable, hard, significant, or exciting — and they did not say so themselves — cut it. The contact's actual wording always beats your interpretation of what they meant.
 
 RECIPROCITY RULE
 Match the recipient's length and energy. A short message back gets a short reply. A multi-paragraph deep-share deserves real engagement. Do not over-deliver on a one-liner or under-deliver on a vulnerable share.
@@ -726,6 +755,25 @@ function shouldUseJsonResponseFormat(_provider: AiProvider, _model: string): boo
  * the dashboard sub-line never truncates.
  */
 export const PARTIAL_REASON_FALLBACK = "Nearly covered. Add the missing detail before sending.";
+
+/**
+ * Issue #387. Grounding clause injected into the checkDraftCoverage
+ * prompt. Extends the ADDRESSED/PARTIAL distinction so that a draft
+ * which addresses a loop using framing the contact didn't express
+ * counts as PARTIAL — not ADDRESSED — and the reason names the invented
+ * framing. Without this clause the coverage check would happily tick
+ * "Middle East is a big move" as addressing the paused-offer loop, even
+ * though the contact never characterised it as a "big move".
+ *
+ * Exported so the fidelity tests can assert the language is present in
+ * the assembled prompt without snapshotting the full template.
+ */
+export const DRAFT_COVERAGE_GROUNDING_CLAUSE = [
+  "GROUNDING CHECK (counts as PARTIAL, not ADDRESSED).",
+  "If the draft addresses the loop by adding emotional weight, stakes, significance, or characterisation the contact did not express, mark it PARTIAL — the reason should name the invented framing.",
+  "Worked example. Contact said \"the clients were based in the Middle East, so I paused that offer\"; draft says \"Middle East is a big move so makes sense to hold off\" → PARTIAL with reason \"adds 'big move' framing the contact didn't use\".",
+  "Mark ADDRESSED only when the draft engages with the loop using language traceable to what the contact actually said. When the draft adds interpretation the contact didn't express, prefer PARTIAL even if the topic is covered."
+].join(" ");
 
 /**
  * Substrings that turn a partial-coverage reason into guilt phrasing.
@@ -1762,6 +1810,8 @@ Each reply text must be a complete, sendable message under 280 characters,
 colons. Match the conversation's register: warm if it's warm, formal if
 it's formal.
 
+${PREDRAFT_FIDELITY_REMINDER}
+
 ${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
@@ -2190,6 +2240,8 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       .join("");
 
     const prompt = `Rewrite the operator's intent below as a complete, sendable ${platformMessageNoun(input.platform)} in the operator's voice. Match the length and energy of the recipient's last message (reciprocity rule from system prompt). When in doubt, err shorter. The voice samples below are additional calibration for this thread, the few-shot examples in the system prompt are the primary reference.
+
+${PREDRAFT_FIDELITY_REMINDER}
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
 
@@ -2740,6 +2792,8 @@ Each loop falls into one of three buckets:
 - ADDRESSED: the draft genuinely responds to it — answers the question, makes the decision, acknowledges the news, or confirms the action.
 - PARTIAL: the draft mentions or touches the loop but does NOT actually answer it. e.g. acknowledges the trip without naming dates, names the date without saying yes/no, mentions the question without resolving it.
 - (omitted): the draft says nothing on this loop. Do not include these in the output.
+
+${DRAFT_COVERAGE_GROUNDING_CLAUSE}
 
 Return strict JSON matching this exact shape:
 {
