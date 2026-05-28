@@ -3,6 +3,7 @@ import type {
   PlatformAdapter,
   PlatformName,
   RememberItem,
+  ReplyBrief,
   ThreadStub
 } from "@inbox-os/core";
 import {
@@ -23,6 +24,12 @@ import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapte
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
+import {
+  persistedNeedsReplyFromBrief,
+  priorReplyDebtExists,
+  resolveModeNeedsReply,
+  sanitizeReplyBrief
+} from "./reply-brief";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
   ScanRetryController,
@@ -3183,6 +3190,28 @@ export function createScanQueue(deps: ScanQueueDeps) {
     let rememberJson = thread.rememberJson;
     let replyBriefJson = thread.replyBriefJson;
 
+    // #380 follow-up: keep the brief in ACTIVE-REPLY mode after a PARTIAL
+    // reply. `resolvedNeedsReply` is purely lastInbound>lastOutbound, so it
+    // flips false the instant the operator replies once — which tipped the
+    // summariser into "reconnect/restart" framing and cleared the nudge even
+    // with contact topics still open. Fold the open-loops/required-points
+    // signal in: bias the model toward active framing while reply debt
+    // remained, and derive the persisted flag from the CURRENT brief so it
+    // settles once everything is genuinely handled.
+    const previousReplyBrief = thread.replyBriefJson
+      ? sanitizeReplyBrief(JSON.parse(thread.replyBriefJson))
+      : null;
+    const priorReplyDebt = priorReplyDebtExists({
+      previousReplyBrief,
+      previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+      dismissedOpenLoops: thread.dismissedOpenLoopsJson
+        ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
+        : []
+    });
+    // The brief that will actually be persisted this round: the freshly
+    // generated one when we resummarise, else the thread's existing brief.
+    let effectiveReplyBrief: ReplyBrief | null = previousReplyBrief;
+
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
         displayName: person.displayName,
@@ -3192,7 +3221,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           ? (JSON.parse(thread.rememberJson) as RememberItem[])
           : [],
         messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-        needsReply: resolvedNeedsReply
+        needsReply: resolveModeNeedsReply(resolvedNeedsReply, priorReplyDebt)
       });
 
       // Defensive sanitiser: AI output (or its fallback path) can contain
@@ -3208,7 +3237,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
       // inside updateThreadSummary. Persisted as a single JSON blob; the
       // dashboard parses on read.
       replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
+      effectiveReplyBrief = aiSummary.reply_brief ?? null;
     }
+
+    // Persisted thread.needsReply: true when the operator hasn't replied since
+    // the last inbound (timestamp) OR the current brief still lists required
+    // points. Using the CURRENT brief (not the previous one) means the flag
+    // clears the moment the model confirms every point is handled.
+    const persistedNeedsReply = persistedNeedsReplyFromBrief(resolvedNeedsReply, effectiveReplyBrief);
 
     // Phase 3: classify on first encounter only. Once a thread has a
     // category we don't re-spend tokens on every scan. Re-classification
@@ -3341,7 +3377,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
           : resolvedNeedsReply
             ? "Awaiting reply (list preview signal)"
             : risk.riskReason,
-        needsReply: resolvedNeedsReply,
+        needsReply: persistedNeedsReply,
         rollingSummary: summary,
         whatTheyWant,
         openLoopsJson,
@@ -3404,7 +3440,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         threadId: thread.id,
         platformThreadId: candidate.platformThreadId,
         messageCount: latestMessages.length,
-        needsReply: resolvedNeedsReply
+        needsReply: persistedNeedsReply
       }
     });
     runLogger?.logAction({
@@ -3413,7 +3449,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       result: "ok",
       counts: {
         messageCount: latestMessages.length,
-        needsReply: resolvedNeedsReply
+        needsReply: persistedNeedsReply
       },
       note: candidate.displayName
     });

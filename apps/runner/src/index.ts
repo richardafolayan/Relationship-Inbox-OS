@@ -24,7 +24,14 @@ import {
   isAiVisibleMessage,
   prismaMessageToPrompt
 } from "./services/ai";
-import { briefSignatureForCache, sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
+import {
+  briefSignatureForCache,
+  persistedNeedsReplyFromBrief,
+  priorReplyDebtExists,
+  resolveModeNeedsReply,
+  sanitizeReplyBrief,
+  synthesiseFallbackBrief
+} from "./services/reply-brief";
 import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
@@ -2991,10 +2998,23 @@ async function resummarizeThreadById(
   // stale-summary self-heal path. Recompute needsReply from the thread's
   // own message ordering so the mode-aware prompt picks the right
   // framing (active reply vs reopen).
-  const computedNeedsReply = Boolean(
+  const timestampNeedsReply = Boolean(
     thread.lastInboundAt &&
       (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
   );
+  // #380 follow-up: a single partial reply must not tip the brief into
+  // reconnect framing while contact topics are still open. Bias the model
+  // toward active framing when the thread still carried reply debt before
+  // this reply (open-loops/required-points signal), not on the raw timestamp.
+  const priorReplyDebt = priorReplyDebtExists({
+    previousReplyBrief: thread.replyBriefJson
+      ? sanitizeReplyBrief(JSON.parse(thread.replyBriefJson))
+      : null,
+    previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    dismissedOpenLoops: thread.dismissedOpenLoopsJson
+      ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
+      : []
+  });
   const summary = await aiService.updateThreadSummary({
     displayName: thread.person.displayName,
     previousSummary: thread.rollingSummary ?? undefined,
@@ -3003,13 +3023,18 @@ async function resummarizeThreadById(
       ? (JSON.parse(thread.rememberJson) as RememberItem[])
       : [],
     messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-    needsReply: computedNeedsReply,
+    needsReply: resolveModeNeedsReply(timestampNeedsReply, priorReplyDebt),
     race: options?.race
   });
+
+  // Persist the settled flag from the CURRENT brief so the dashboard nudge
+  // reflects remaining required points, and clears once everything is handled.
+  const resolvedNeedsReply = persistedNeedsReplyFromBrief(timestampNeedsReply, summary.reply_brief ?? null);
 
   await prisma.thread.update({
     where: { id: thread.id },
     data: {
+      needsReply: resolvedNeedsReply,
       rollingSummary: summary.summary,
       whatTheyWant: summary.what_they_want,
       openLoopsJson: JSON.stringify(summary.open_loops),

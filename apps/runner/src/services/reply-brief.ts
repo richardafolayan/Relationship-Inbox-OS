@@ -337,6 +337,62 @@ export function mirrorRequiredToOpenLoops(brief: ReplyBrief | null): string[] | 
   return brief.required_points.map((p) => p.text);
 }
 
+// #380 follow-up — keep the brief in ACTIVE-REPLY mode after a PARTIAL reply.
+//
+// The legacy needsReply signal is purely `lastInbound > lastOutbound`, so it
+// flips false the instant the operator sends one reply. That false signal then
+// tipped the summariser into RECONNECT framing ("restart the conversation")
+// even when the contact still had several unanswered topics, and cleared the
+// dashboard nudge. These pure helpers fold the open-loops / required-points
+// signal into the decision so a single partial reply can't drop a thread that
+// still owes responses.
+
+// Did the thread still carry unanswered reply debt as of its last summary —
+// i.e. before the operator's most recent reply? Prefers the structured brief's
+// required_points; falls back to the legacy open_loops minus any the operator
+// explicitly dismissed.
+export function priorReplyDebtExists(args: {
+  previousReplyBrief: ReplyBrief | null;
+  previousOpenLoops: string[];
+  dismissedOpenLoops: string[];
+}): boolean {
+  if (args.previousReplyBrief) {
+    return args.previousReplyBrief.required_points.length > 0;
+  }
+  const dismissed = new Set(
+    args.dismissedOpenLoops.map((loop) => loop.trim().toLowerCase()).filter(Boolean)
+  );
+  return args.previousOpenLoops.some((loop) => {
+    const key = loop.trim().toLowerCase();
+    return key.length > 0 && !dismissed.has(key);
+  });
+}
+
+// The mode signal handed INTO the summariser. True keeps it in ACTIVE-REPLY
+// framing. We OR the crude timestamp signal with "there was still reply debt
+// outstanding" so a partial reply can't tip the model into reconnect framing
+// while topics remain open. Genuine dormancy is still gated by the prompt's
+// RECONNECT criteria (which require weeks/months of silence), so this never
+// forces active framing on a truly dead thread.
+export function resolveModeNeedsReply(
+  timestampNeedsReply: boolean,
+  priorReplyDebt: boolean
+): boolean {
+  return timestampNeedsReply || priorReplyDebt;
+}
+
+// The persisted `thread.needsReply` flag. Derived from the CURRENT generation's
+// required_points (NOT the previous brief) so it settles: once the model
+// confirms every contact point is handled, required_points is empty and the
+// flag clears even though the operator replied after the last inbound. Falls
+// back to the timestamp signal when no brief was produced (AI failure path).
+export function persistedNeedsReplyFromBrief(
+  timestampNeedsReply: boolean,
+  brief: ReplyBrief | null
+): boolean {
+  return timestampNeedsReply || (brief?.required_points.length ?? 0) > 0;
+}
+
 // Stable string signature of the brief content that influences suggested
 // replies. Used by the cache-key for /data/thread + predraft so a brief
 // change (new substance bullets, new required points, refreshed obligation
