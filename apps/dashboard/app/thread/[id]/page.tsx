@@ -23,6 +23,8 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
+import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
+import { cn } from "@/lib/utils";
 import type {
   AuditLogRow,
   InboxResponse,
@@ -2405,6 +2407,34 @@ export default function ThreadPage() {
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
+            {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
+                the contact's birthday is within the next 30 days
+                (pilot wanted "in the next month"). Wider than the
+                7-day inbox-row threshold because the operator opened
+                this specific thread — anything birthday-relevant in
+                the next month is worth flagging. Renders the age
+                ("turns 30") when birthYear is known. */}
+            {(() => {
+              if (!thread.personBirthday) return null;
+              const days = daysUntilBirthday(thread.personBirthday);
+              if (days === null || days > 30) return null;
+              const label = birthdayCountdownLabel(days);
+              const age = ageOnNextBirthday(thread.personBirthYear ?? null, thread.personBirthday);
+              return (
+                <div
+                  className={cn(
+                    "self-center flex items-center gap-2 rounded-pill border border-hairline px-3 py-[6px] text-[12.5px]",
+                    days === 0 ? "border-accent-ink text-accent-ink" : "text-ink-2"
+                  )}
+                >
+                  <span>🎂</span>
+                  <span>
+                    {thread.personName}'s birthday {label}
+                    {age ? ` · turns ${age}` : ""}
+                  </span>
+                </div>
+              );
+            })()}
             {/* Issue #392. "Remind me to…" banner. Surfaces when the
                 operator set a reminder via the kebab menu — visible
                 whenever the thread is loaded, so the operator sees
