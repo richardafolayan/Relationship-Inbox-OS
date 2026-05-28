@@ -1,7 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Loader2 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { ChevronRight, Loader2 } from "lucide-react";
 import { onToast, type Toast } from "@/lib/feedback";
 
 const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: string }> = {
@@ -30,6 +31,10 @@ const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: stri
 // How far (px) a pointer-drag must travel before the toast is dismissed on
 // release. Below the threshold it springs back.
 const SWIPE_DISMISS_PX = 80;
+
+// A release within this travel counts as a click rather than a swipe, so a
+// clickable toast (one with an href) navigates instead of springing back.
+const CLICK_SLOP_PX = 6;
 
 export function ToastHost() {
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -107,10 +112,21 @@ function ToastCard({
   toast: Toast;
   onDismiss: (id: string) => void;
 }) {
+  const router = useRouter();
   const style = kindStyles[toast.kind];
   const [dragX, setDragX] = useState(0);
   const startXRef = useRef<number | null>(null);
   const [dragging, setDragging] = useState(false);
+
+  const interactive = Boolean(toast.href);
+
+  // Navigate to the toast's route and clear it. Used by both a pointer
+  // click (release within CLICK_SLOP_PX) and the keyboard handler.
+  const activate = useCallback(() => {
+    if (!toast.href) return;
+    onDismiss(toast.id);
+    router.push(toast.href);
+  }, [router, onDismiss, toast.href, toast.id]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     // Don't start a swipe from the dismiss button.
@@ -137,6 +153,10 @@ function ToastCard({
     }
     if (Math.abs(travelled) > SWIPE_DISMISS_PX) {
       onDismiss(toast.id);
+    } else if (interactive && Math.abs(travelled) <= CLICK_SLOP_PX) {
+      // A near-stationary release on a clickable toast is a click, not a
+      // swipe: open the linked thread / view.
+      activate();
     } else {
       setDragX(0);
     }
@@ -147,8 +167,17 @@ function ToastCard({
 
   return (
     <div
-      className={`pointer-events-auto select-none rounded-xl bg-paper p-3 shadow-sm ${style.ring}`}
-      role={toast.kind === "error" ? "alert" : "status"}
+      data-toast-href={toast.href ?? undefined}
+      className={`pointer-events-auto select-none rounded-xl bg-paper p-3 shadow-sm transition-shadow ${style.ring} ${
+        interactive ? "cursor-pointer hover:ring-hairline-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" : ""
+      }`}
+      role={interactive ? "button" : toast.kind === "error" ? "alert" : "status"}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={
+        interactive
+          ? `${toast.title}${toast.description ? `. ${toast.description}` : ""}. Open.`
+          : undefined
+      }
       style={{
         transform: `translateX(${dragX}px)`,
         opacity,
@@ -159,6 +188,16 @@ function ToastCard({
       onPointerMove={onPointerMove}
       onPointerUp={endDrag}
       onPointerCancel={endDrag}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                activate();
+              }
+            }
+          : undefined
+      }
     >
       <div className="flex items-start gap-2">
         {toast.kind === "pending" ? (
@@ -182,6 +221,13 @@ function ToastCard({
             </div>
           ) : null}
         </div>
+        {interactive ? (
+          <ChevronRight
+            aria-hidden
+            className="mt-[1px] h-[14px] w-[14px] flex-none text-ink-3"
+            strokeWidth={1.7}
+          />
+        ) : null}
         <button
           type="button"
           data-toast-close
