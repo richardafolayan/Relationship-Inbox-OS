@@ -141,6 +141,22 @@ function hiddenLabel(breakdown: { older: number; closed: number }): string {
   return `${closed} closed conversation${closed === 1 ? "" : "s"}`;
 }
 
+// #433 R-0055: empty-state headline for a specific risk tab whose badge is
+// non-zero but whose feed is empty because every match sits behind the
+// recency horizon. The tab label already reads as a noun
+// ("Overdue"/"Waiting"/"Fresh"/"Snoozed"); lowercase it and agree the verb
+// with the count so the line reads "197 overdue are set aside."
+function setAsidePhrase(tab: RiskTab, count: number): string {
+  const noun: Record<RiskTab, string> = {
+    all: "",
+    overdue: "overdue",
+    waiting: "waiting",
+    fresh: "fresh",
+    snoozed: "snoozed"
+  };
+  return `${count} ${noun[tab]} ${count === 1 ? "is" : "are"} set aside.`;
+}
+
 interface SectionGroup {
   key: string;
   label: string | null;
@@ -222,18 +238,27 @@ export default function InboxPage() {
 
   const allRows = data?.rows ?? [];
 
-  // Per-tab counts, computed against the full data set so the tab badges
-  // don't shift as the operator filters by platform / search / category.
+  // Per-tab counts. Scoped to the active platform + category chips so the
+  // badges reflect the current filter — e.g. filtering to LinkedIn shows
+  // how many LinkedIn threads sit in each risk bucket, not the global
+  // totals (#433 R-0055). Search and the recency horizon are deliberately
+  // left out: search is a transient find (the "N of M" header already
+  // tracks it), and the horizon's "set aside" threads still belong to
+  // their bucket — the empty-state copy below explains that split rather
+  // than hiding them from the badge.
   const counts = useMemo(() => {
-    const live = allRows.filter((row) => !row.scheduledSendAt);
+    const scoped = allRows.filter(
+      (row) => applyCategory(row, category) && applyPlatform(row, platformFilter)
+    );
+    const live = scoped.filter((row) => !row.scheduledSendAt);
     return {
       all: live.length,
       overdue: live.filter((r) => r.riskLevel === "RED").length,
       waiting: live.filter((r) => r.riskLevel === "AMBER").length,
       fresh: live.filter((r) => r.riskLevel === "GREEN").length,
-      snoozed: allRows.filter((r) => !!r.scheduledSendAt).length
+      snoozed: scoped.filter((r) => !!r.scheduledSendAt).length
     };
-  }, [allRows]);
+  }, [allRows, category, platformFilter]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -580,17 +605,39 @@ export default function InboxPage() {
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
       ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
         <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
-          <p className="m-0 text-[16px] font-medium text-ink">You’re caught up.</p>
-          <p className="m-0 text-[14px] text-ink-2">
-            {hiddenLabel(hiddenBreakdown)} set aside.{" "}
-            <button
-              type="button"
-              onClick={() => setShowAll(true)}
-              className="underline underline-offset-2 hover:text-ink"
-            >
-              Show all
-            </button>
-          </p>
+          {tab === "all" ? (
+            <>
+              <p className="m-0 text-[16px] font-medium text-ink">You’re caught up.</p>
+              <p className="m-0 text-[14px] text-ink-2">
+                {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+                <button
+                  type="button"
+                  onClick={() => setShowAll(true)}
+                  className="underline underline-offset-2 hover:text-ink"
+                >
+                  Show all
+                </button>
+              </p>
+            </>
+          ) : (
+            // #433 R-0055: the badge the user just clicked is non-zero, so
+            // "You’re caught up." reads as a contradiction. Lead with the
+            // actionable count and offer to lift the horizon in one click.
+            <>
+              <p className="m-0 text-[16px] font-medium text-ink">
+                {setAsidePhrase(tab, hiddenByHorizon)}
+              </p>
+              <p className="m-0 text-[14px] text-ink-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAll(true)}
+                  className="underline underline-offset-2 hover:text-ink"
+                >
+                  Show all
+                </button>
+              </p>
+            </>
+          )}
         </div>
       ) : visible.length === 0 ? (
         <CaughtUp

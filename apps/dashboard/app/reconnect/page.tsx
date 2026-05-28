@@ -11,7 +11,7 @@ import {
   isReconnectCandidate,
   rankReconnectCandidates
 } from "@/lib/reconnect";
-import { formatRelative } from "@/lib/time";
+import { formatDuration } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 
 // Phase 3 of #287. Old LinkedIn threads do not vanish - they sit here as
@@ -198,7 +198,7 @@ function ReconnectRow({ row, suggested }: ReconnectRowProps) {
   const preview = normalizePreview(row.preview);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${preview}` : preview;
-  const quietFor = formatRelative(row.lastMessageAt);
+  const quietFor = formatDuration(row.lastMessageAt);
   const reason = row.reconnectScoreReason?.trim() || null;
   return (
     <Link

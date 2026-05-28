@@ -92,7 +92,15 @@ export function AppShell({ children }: { children: ReactNode }) {
   useEffect(() => {
     recordThreadSource(pathname);
   }, [pathname]);
-  const [health, setHealth] = useState<HealthResponse | null>(null);
+  // Issue #435 (R-0057). Tri-state, not a binary. `undefined` means the
+  // first /health fetch hasn't resolved yet (a cold mount / reload),
+  // which the sidebar renders as a calm "Connecting…" rather than the
+  // alarming "Runner offline". `null` means a fetch actually completed
+  // and failed with no prior success — that's a truthful offline. An
+  // object is the last good health. Soft navigation keeps this state
+  // (AppShell lives in the root layout), so this only ever shows on a
+  // genuine fresh mount.
+  const [health, setHealth] = useState<HealthResponse | null | undefined>(undefined);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
@@ -100,7 +108,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Operator display name for the sidebar footer (#332). Sourced from
   // operator_profile_v1 so a fresh install still falls back to "Operator"
   // rather than baking any persona into the shell.
-  const [operatorDisplayName, setOperatorDisplayName] = useState<string | null>(null);
+  // #435: `undefined` while the first profile fetch is in flight so the
+  // sidebar shows a skeleton instead of flashing the generic "Operator"
+  // fallback before the real name resolves. `null` = loaded, no profile.
+  const [operatorDisplayName, setOperatorDisplayName] = useState<string | null | undefined>(undefined);
   const autoScanInFlightRef = useRef(false);
   // New-message desktop notifications: the previous inbox snapshot to diff
   // against, plus a flag so the first poll only establishes a baseline
@@ -157,7 +168,11 @@ export function AppShell({ children }: { children: ReactNode }) {
       apiGet<InboxResponse>("/runner/data/inbox").catch(() => null)
     ]);
 
-    if (healthData) setHealth(healthData);
+    // healthData ?? prev ?? null: a fresh result wins; a failed poll
+    // keeps the last good value (no mid-session blip to "offline"); and
+    // a first poll that fails (prev === undefined) resolves to null so
+    // the sidebar can stop saying "Connecting…" and tell the truth.
+    setHealth((prev) => healthData ?? prev ?? null);
     if (inboxData) {
       const count = inboxData.rows.filter(
         (row) => row.riskLevel === "RED" || row.riskLevel === "AMBER"
@@ -201,7 +216,10 @@ export function AppShell({ children }: { children: ReactNode }) {
     const loadProfile = () => {
       void apiGet<OperatorProfile>("/runner/data/operator-profile")
         .then((profile) => setOperatorDisplayName(profile?.displayName ?? null))
-        .catch(() => undefined);
+        // If the very first load fails, fall back to the "Operator"
+        // label (null) rather than leaving the skeleton up forever; a
+        // later transient failure keeps whatever name we already had.
+        .catch(() => setOperatorDisplayName((prev) => prev ?? null));
     };
     loadProfile();
     window.addEventListener("operator-profile-saved", loadProfile);

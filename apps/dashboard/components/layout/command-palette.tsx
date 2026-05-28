@@ -16,7 +16,11 @@ interface CommandPaletteProps {
 interface PaletteItem {
   id: string;
   label: string;
-  glyph: string;
+  // Right-column type tag. One consistent system across every row:
+  // "Page" / "Action" for commands, the platform label for threads.
+  // The "press enter" affordance (↵) is shown only on the active row,
+  // not baked per-item — so we don't mix ↩/scan/↗ glyphs (#436 R-0058).
+  kind: string;
   run: () => void;
 }
 
@@ -33,21 +37,26 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     if (!open) return;
     setQuery("");
     setActiveIndex(0);
+    // Index the full inbox, not just the first 30 rows. With hundreds of
+    // threads the old slice(0, 30) silently dropped most contacts from
+    // search — e.g. a LinkedIn thread last active 12d ago would never
+    // match by name even though it's right there in the inbox (#434
+    // R-0056). The list is already fetched whole for the inbox page.
     void apiGet<InboxResponse>("/runner/data/inbox")
-      .then((data) => setThreads(data.rows.slice(0, 30)))
+      .then((data) => setThreads(data.rows))
       .catch(() => undefined);
   }, [open]);
 
   const items: PaletteItem[] = useMemo(() => {
     const pages: PaletteItem[] = [
-      { id: "today", label: "Go to Today", glyph: "↵", run: () => router.push("/today") },
-      { id: "inbox", label: "Go to Inbox", glyph: "↵", run: () => router.push("/inbox") },
-      { id: "archived", label: "Go to Archived", glyph: "↵", run: () => router.push("/archived") },
-      { id: "settings", label: "Go to Settings", glyph: "↵", run: () => router.push("/settings") },
+      { id: "today", label: "Go to Today", kind: "Page", run: () => router.push("/today") },
+      { id: "inbox", label: "Go to Inbox", kind: "Page", run: () => router.push("/inbox") },
+      { id: "archived", label: "Go to Archived", kind: "Page", run: () => router.push("/archived") },
+      { id: "settings", label: "Go to Settings", kind: "Page", run: () => router.push("/settings") },
       {
         id: "scan-now",
         label: "Run scan now",
-        glyph: "scan",
+        kind: "Action",
         run: () => {
           void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined);
         }
@@ -60,7 +69,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         // for the rare case the operator wants to re-walk every persisted
         // thread (e.g. after a data migration or suspected corruption).
         label: "Full LinkedIn rescan · advanced · rechecks every thread",
-        glyph: "scan",
+        kind: "Action",
         run: () => {
           void apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "full" }).catch(() => undefined);
         }
@@ -68,13 +77,13 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       {
         id: "send-feedback",
         label: "Send feedback",
-        glyph: "↗",
+        kind: "Action",
         run: () => openPilotFeedback("feedback")
       },
       {
         id: "report-bug",
         label: "Report a bug",
-        glyph: "↗",
+        kind: "Action",
         run: () => openPilotFeedback("bug")
       }
     ];
@@ -83,13 +92,13 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       return {
         id: `thread-${thread.id}`,
         label: `${thread.personName} - ${preview.slice(0, 60)}${preview.length > 60 ? "…" : ""}`,
-        glyph: PLATFORM_LABEL[thread.platform],
+        kind: PLATFORM_LABEL[thread.platform],
         run: () => router.push(`/thread/${thread.id}`)
       };
     });
     const all = [...pages, ...threadItems];
     if (!query.trim()) return all.slice(0, 8);
-    return all.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())).slice(0, 8);
+    return all.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())).slice(0, 12);
   }, [query, router, threads]);
 
   useEffect(() => {
@@ -146,7 +155,12 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
               }`}
             >
               <span className="flex-1 truncate">{item.label}</span>
-              <span className="ml-auto font-mono text-[11px] text-ink-3">{item.glyph}</span>
+              <span className="ml-auto flex shrink-0 items-center gap-[8px] font-mono text-[11px] text-ink-3">
+                <span>{item.kind}</span>
+                {index === activeIndex ? (
+                  <span aria-hidden className="text-ink-4">↵</span>
+                ) : null}
+              </span>
             </li>
           ))}
           {!items.length ? (

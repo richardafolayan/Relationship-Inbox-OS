@@ -19,15 +19,19 @@ import { openPilotFeedback } from "@/lib/pilot";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 
 interface SidebarProps {
-  health: HealthResponse | null;
+  // `undefined` = the first /health fetch is still in flight (cold mount);
+  // rendered as a calm "Connecting…" rather than "Runner offline" (#435).
+  // `null` = a fetch completed and failed → genuine offline.
+  health: HealthResponse | null | undefined;
   attentionCount: number;
   onOpenSearch: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
   /**
    * Operator's preferred display name, sourced from the operator_profile_v1
-   * setting. Empty / undefined → falls back to the literal "Operator" so the
-   * footer never collapses on a fresh install.
+   * setting. `undefined` = still loading (footer shows a skeleton); `null`
+   * / empty → falls back to the literal "Operator" so the footer never
+   * collapses on a fresh install.
    */
   operatorDisplayName?: string | null;
 }
@@ -64,18 +68,24 @@ export function Sidebar({
   onToggleCollapsed,
   operatorDisplayName
 }: SidebarProps) {
+  const profileLoading = operatorDisplayName === undefined;
   const operatorLabel = operatorDisplayName?.trim() || "Operator";
   const pathname = usePathname();
-  // Three runner states the sidebar can surface, in priority order:
-  //   - unreachable: dashboard couldn't fetch /runner/health (network or
-  //     the runner process is genuinely down) → red dot, "Runner offline".
-  //   - busy:       runner reachable but mid-task (scanning, sending, or
-  //                 draining the enrichment queue) → amber dot, "Runner busy".
-  //   - online:     reachable + idle → green dot, "Runner online".
+  // Four runner states the sidebar can surface, in priority order:
+  //   - unknown:     first /health fetch hasn't resolved yet (cold mount /
+  //                  reload) → grey dot, "Connecting…". Distinct from
+  //                  offline so a slow runner doesn't read as a dead one
+  //                  while the dashboard is still asking (#435 / R-0057).
+  //   - unreachable: a fetch completed and failed (network or the runner
+  //                  process is genuinely down) → red dot, "Runner offline".
+  //   - busy:        runner reachable but mid-task (scanning, sending, or
+  //                  draining the enrichment queue) → amber dot, "Runner busy".
+  //   - online:      reachable + idle → green dot, "Runner online".
   // The previous binary check (runnerStatus === "ONLINE") collapsed busy
   // into "Runner offline", which read as broken when the runner was
   // actually working as intended.
-  const runnerLabel: { kind: "online" | "busy" | "offline"; text: string } = (() => {
+  const runnerLabel: { kind: "online" | "busy" | "offline" | "unknown"; text: string } = (() => {
+    if (health === undefined) return { kind: "unknown", text: "Connecting…" };
     if (!health) return { kind: "offline", text: "Runner offline" };
     if (health.runnerStatus !== "ONLINE") return { kind: "busy", text: "Runner busy" };
     if ((health.enrichmentQueue?.total ?? 0) > 0) return { kind: "busy", text: "Runner busy" };
@@ -86,7 +96,9 @@ export function Sidebar({
       ? "bg-risk-fresh"
       : runnerLabel.kind === "busy"
         ? "bg-risk-waiting"
-        : "bg-risk-overdue";
+        : runnerLabel.kind === "unknown"
+          ? "bg-ink-3"
+          : "bg-risk-overdue";
 
   const ToggleIcon = collapsed ? PanelLeftOpen : PanelLeftClose;
   const toggleTitle = collapsed ? "Expand sidebar ([)" : "Collapse sidebar ([)";
@@ -263,7 +275,11 @@ export function Sidebar({
         {!collapsed ? (
           <>
             <div className="min-w-0 flex-1">
-              <p className="m-0 truncate text-[12px] font-medium text-ink">{operatorLabel}</p>
+              {profileLoading ? (
+                <span className="block h-[12px] w-20 rounded bg-paper-2" aria-hidden />
+              ) : (
+                <p className="m-0 truncate text-[12px] font-medium text-ink">{operatorLabel}</p>
+              )}
               <p className="m-0 truncate whitespace-nowrap text-[11px] text-ink-3">
                 {runnerLabel.text}
               </p>
