@@ -5055,6 +5055,45 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
       screenshots
     }
   });
+
+  // Fire-and-forget: attach screenshots to the GitHub issue the Apps
+  // Script just created. Doesn't block the response — if it fails,
+  // the Drive-linked Sheet row remains the source of truth. See
+  // services/github-attachments.ts for the rationale.
+  if (
+    result.ok &&
+    result.reportId &&
+    screenshots.length > 0 &&
+    runnerConfig.github.token &&
+    runnerConfig.github.repo
+  ) {
+    const { attachScreenshotsToIssue } = await import("./services/github-attachments.js");
+    attachScreenshotsToIssue({
+      reportId: result.reportId,
+      screenshots,
+      repo: runnerConfig.github.repo,
+      token: runnerConfig.github.token,
+      branch: runnerConfig.github.attachmentsBranch
+    })
+      .then((outcome) => {
+        if (outcome.ok) {
+          console.log(
+            `[pilot-feedback] attached ${outcome.uploadedUrls?.length ?? 0} screenshot(s) to issue #${outcome.issueNumber} (${outcome.commentUrl})`
+          );
+        } else {
+          console.warn(
+            `[pilot-feedback] screenshot attach skipped for ${result.reportId}: ${outcome.reason}`
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `[pilot-feedback] screenshot attach errored for ${result.reportId}:`,
+          error
+        );
+      });
+  }
+
   res.json(result);
 }));
 
