@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { ChevronLeft, ImageUp, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { showToast } from "@/lib/feedback";
+import { signalReportSendStart } from "@/lib/pilot-report-status";
 import {
   ALLOWED_SCREENSHOT_TYPES,
   MAX_SCREENSHOTS,
@@ -167,8 +168,15 @@ export function PilotFeedbackModal() {
     // while the report sends. The send runs in the background and the
     // outcome (success / error) lands as a toast. There is no in-flight
     // UI here — the toast surface owns the result.
+    //
+    // Issue #421 / R-0047. The trade-off above (no in-flight UI) left
+    // the operator with no signal that the report was still uploading,
+    // only a discrete completion toast. Signal in-flight to the
+    // TopStatus ticker so "Sending report…" appears alongside the
+    // other ticker states until the POST settles.
     setOpen(false);
     resetForm();
+    const stopReportSendSignal = signalReportSendStart();
     apiPost<{ ok: boolean; reportId?: string; error?: string }>(
       "/runner/control/pilot-feedback",
       payload
@@ -190,7 +198,8 @@ export function PilotFeedbackModal() {
           description: err instanceof Error ? err.message : String(err),
           durationMs: 9000
         });
-      });
+      })
+      .finally(() => stopReportSendSignal());
   }, [canSubmit, type, title, description, expected, privacyAck, screenshots, pathname, resetForm]);
 
   const openReports = useCallback(async () => {
