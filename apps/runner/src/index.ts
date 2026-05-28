@@ -3329,6 +3329,27 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   });
 }));
 
+// Bulk "mark for reassess". Clears the AI output caches on every
+// non-archived thread so they regenerate against the current prompts on
+// next view / scan. Intended for one-shot use after a prompt change
+// ships — the operator clicks this once to invalidate stale briefs and
+// predrafts across the whole inbox without paying for an immediate
+// fan-out of AI calls.
+//
+// See apps/runner/src/services/reassess-all.ts for the rationale on
+// lazy vs eager invalidation. The dashboard will fall back to the
+// synthesised brief for any thread until it's next reassessed/scanned.
+app.post(
+  "/control/threads/mark-all-for-reassess",
+  asyncRoute(async (_req, res) => {
+    const { markAllThreadsForReassess } = await import(
+      "./services/reassess-all.js"
+    );
+    const result = await markAllThreadsForReassess(prisma);
+    res.json({ ok: true, ...result });
+  })
+);
+
 app.get("/data/inbox", asyncRoute(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
