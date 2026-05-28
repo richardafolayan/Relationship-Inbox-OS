@@ -169,6 +169,14 @@ export default function SettingsPage() {
         />
       </SettingsGroup>
 
+      <SettingsGroup head="AI">
+        <SettingRow
+          name="Reassess all threads"
+          desc="Clear cached briefs and suggested replies on every active thread so they regenerate against the latest AI prompts. Each thread refreshes lazily when next viewed or scanned. Use after a prompt change ships."
+          trailing={<ReassessAllControl />}
+        />
+      </SettingsGroup>
+
       <UserVoiceProfile variant="settings" />
 
       <section className="mt-10">
@@ -197,6 +205,65 @@ export default function SettingsPage() {
         </div>
       </section>
     </Canvas>
+  );
+}
+
+// "Reset all threads for reassessment" admin action. Wraps POST to
+// /runner/control/threads/mark-all-for-reassess. The endpoint is fast
+// (single SQL update) but the action is broad — clears cached AI
+// briefs and suggested replies on every active thread — so the click
+// goes through a window.confirm gate that names the irreversibility
+// and the lazy regen behaviour explicitly. Inline status mirrors the
+// headless toggle's pattern so the operator sees running / success /
+// error without a toast.
+//
+// Idle / running / done / error states show inline next to the button.
+// The success line names the count concretely ("345 active threads
+// reset for reassessment") rather than a vague "done", so the action
+// feels grounded.
+function ReassessAllControl() {
+  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [count, setCount] = useState<number | null>(null);
+
+  const handleClick = async () => {
+    if (status === "running") return;
+    const ok = window.confirm(
+      "Clear cached AI briefs and suggested replies for every active thread? This cannot be undone — each thread will regenerate lazily as it is next viewed or reassessed."
+    );
+    if (!ok) return;
+    setStatus("running");
+    try {
+      const result = await apiPost<{ ok: true; threadsMarked: number }>(
+        "/runner/control/threads/mark-all-for-reassess",
+        {}
+      );
+      setCount(result.threadsMarked);
+      setStatus("done");
+    } catch {
+      setStatus("error");
+    }
+  };
+
+  return (
+    <div className="flex items-center gap-[10px]">
+      {status === "done" && count !== null ? (
+        <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+          {count} active threads reset for reassessment
+        </span>
+      ) : status === "error" ? (
+        <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
+          failed
+        </span>
+      ) : null}
+      <button
+        type="button"
+        onClick={handleClick}
+        disabled={status === "running"}
+        className="inline-flex items-center rounded-pill border border-hairline px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {status === "running" ? "Resetting…" : "Reset all for reassessment"}
+      </button>
+    </div>
   );
 }
 
