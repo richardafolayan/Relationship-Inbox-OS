@@ -27,7 +27,9 @@ function thread(partial = {}) {
 }
 
 test("MORE_DISCLOSURE_LABEL exact wording from the spec", () => {
-  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge · checklist");
+  // Issue #388 promoted the checklist to its own "Draft coverage" section,
+  // so the disclosure label no longer advertises a checklist.
+  assert.equal(MORE_DISCLOSURE_LABEL, "More context · nudge");
 });
 
 test("durableContextLabel returns the neutral 'Who they are' phrasing", () => {
@@ -160,14 +162,7 @@ test("moreSectionHasContent: empty brief + 0 required + 0 dismissed → no More 
     tone_steer: null,
     enough_to_reply_without_scrolling: true
   };
-  assert.equal(
-    moreSectionHasContent({
-      brief: empty,
-      requiredPointsCount: 0,
-      dismissedOpenLoopsCount: 0
-    }),
-    false
-  );
+  assert.equal(moreSectionHasContent(empty), false);
 });
 
 test("moreSectionHasContent: an optional follow-up alone is enough to surface More", () => {
@@ -182,14 +177,7 @@ test("moreSectionHasContent: an optional follow-up alone is enough to surface Mo
     tone_steer: null,
     enough_to_reply_without_scrolling: true
   };
-  assert.equal(
-    moreSectionHasContent({
-      brief: briefWithOptional,
-      requiredPointsCount: 0,
-      dismissedOpenLoopsCount: 0
-    }),
-    true
-  );
+  assert.equal(moreSectionHasContent(briefWithOptional), true);
 });
 
 test("moreSectionHasContent: durable_context, tone_steer, fuller_context each surface More", () => {
@@ -207,11 +195,7 @@ test("moreSectionHasContent: durable_context, tone_steer, fuller_context each su
   for (const field of ["fuller_context", "durable_context", "tone_steer"]) {
     const brief = { ...base, [field]: "Some content" };
     assert.equal(
-      moreSectionHasContent({
-        brief,
-        requiredPointsCount: 0,
-        dismissedOpenLoopsCount: 0
-      }),
+      moreSectionHasContent(brief),
       true,
       `expected More to surface when ${field} is set`
     );
@@ -266,12 +250,28 @@ test("moreSectionHasContent: handled_points alone surface More so the operator c
     tone_steer: null,
     enough_to_reply_without_scrolling: true
   };
-  assert.equal(
-    moreSectionHasContent({
-      brief,
-      requiredPointsCount: 0,
-      dismissedOpenLoopsCount: 0
-    }),
-    true
-  );
+  assert.equal(moreSectionHasContent(brief), true);
+});
+
+test("moreSectionHasContent: required points alone no longer surface More (#388 promoted the checklist to its own Draft coverage section)", () => {
+  // Before #388 the gated checklist lived inside More, so 2+ required
+  // points would open the disclosure. Now the checklist is its own
+  // top-level "Draft coverage" section, so required points must NOT pull
+  // the disclosure open on their own — only genuinely secondary material
+  // (optional follow-ups, context, tone, handled) does.
+  const briefWithLoopsOnly = {
+    where_it_stands: "Trace.",
+    on_you: "Two things to answer.",
+    required_points: [
+      { id: "a", text: "Answer A", status: "required" },
+      { id: "b", text: "Answer B", status: "required" }
+    ],
+    optional_followups: [],
+    handled_points: [],
+    fuller_context: null,
+    durable_context: null,
+    tone_steer: null,
+    enough_to_reply_without_scrolling: true
+  };
+  assert.equal(moreSectionHasContent(briefWithLoopsOnly), false);
 });

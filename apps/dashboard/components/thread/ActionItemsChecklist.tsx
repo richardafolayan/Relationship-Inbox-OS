@@ -83,10 +83,10 @@ export function ActionItemsChecklist({
     if (editingKey) editInputRef.current?.focus();
   }, [editingKey]);
 
-  const heading = isReopenMode ? "Conversation hooks" : "Things to address";
+  const heading = isReopenMode ? "Conversation hooks" : "Draft coverage";
   const helper = isReopenMode
     ? "Worth picking up on when you reconnect. Tick each off as you write."
-    : "Tick each off as you write your reply. This is just a checklist. It never changes your message.";
+    : "What this reply still needs to cover. Tick each off as your draft handles it. It never changes your message.";
 
   // The user's explicit click always wins over the AI suggestion. When
   // `state.checked[key]` is undefined (operator hasn't touched the box)
