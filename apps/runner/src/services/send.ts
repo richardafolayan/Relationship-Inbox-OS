@@ -1,10 +1,11 @@
-import type { PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
+import type { PlatformAdapter, PlatformName, SendReceipt, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
 import { Prisma } from "@prisma/client";
 import { v4 as uuid } from "uuid";
 import { prisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
+import type { PrivateApiHelper } from "../platforms/imessage-private-api";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -13,6 +14,11 @@ interface SendServiceDeps {
   adapters: Partial<Record<PlatformName, PlatformAdapter>>;
   eventBus: EventBus;
   settingsStore: SettingsStore;
+  // #273: opt-in "opportunistic native send" layer. When reachable, an
+  // iMessage threaded reply goes out as a REAL native threaded reply instead
+  // of a plain text bubble. Always present (a disabled helper just reports
+  // unreachable), so processSendRequest never has to null-check it.
+  privateApiHelper: PrivateApiHelper;
   auditLog: (input: {
     platform?: PlatformName;
     stage?: string;
@@ -245,16 +251,63 @@ export function createSendService(deps: SendServiceDeps) {
       const stagedAttachments = sendRequest.attachmentsJson
         ? (JSON.parse(sendRequest.attachmentsJson) as Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>)
         : [];
-      const receipt = await adapter.sendMessage(
-        threadStub,
-        input.text,
-        stagedAttachments.map((a) => ({
-          absolutePath: a.absolutePath,
-          displayName: a.displayName,
-          mimeType: a.mimeType,
-          kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
-        }))
-      );
+      const replyToMessageId = sendRequest.replyToMessageId ?? null;
+
+      // #273: opportunistic native send. When the opt-in private-API helper
+      // is reachable and this is a text-only iMessage threaded reply, send a
+      // REAL native threaded reply through the helper so the recipient sees
+      // the quoted parent in Messages.app — not a plain bubble. Anything that
+      // doesn't qualify (non-iMessage, no parent, attachments present, helper
+      // unreachable, parent guid unknown) or any helper failure falls through
+      // to the existing adapter send below with deliveredNative=false.
+      let receipt: SendReceipt | undefined;
+      let deliveredNative = false;
+      const nativeReplyEligible =
+        thread.platform === "IMESSAGE" &&
+        !!replyToMessageId &&
+        stagedAttachments.length === 0 &&
+        input.text.trim().length > 0;
+      if (nativeReplyEligible && (await deps.privateApiHelper.isReachable())) {
+        const parent = await prisma.message.findUnique({
+          where: { id: replyToMessageId! },
+          select: { platformMessageKey: true }
+        });
+        if (parent?.platformMessageKey) {
+          try {
+            const native = await deps.privateApiHelper.sendThreadedReply({
+              chatGuid: thread.platformThreadId,
+              parentMessageGuid: parent.platformMessageKey,
+              text: input.text
+            });
+            deliveredNative = true;
+            receipt = {
+              sentAt: new Date().toISOString(),
+              verifiedBy: "best_effort",
+              // The helper returns the new message's Apple guid when it can;
+              // using it as the platformMessageKey lets a later chat.db scan
+              // recognise this row instead of inserting a duplicate.
+              platformMessageKey: native.messageGuid,
+              attachments: []
+            };
+          } catch {
+            // Already logged inside the helper. Fall back to plain text.
+            deliveredNative = false;
+          }
+        }
+      }
+
+      if (!receipt) {
+        receipt = await adapter.sendMessage(
+          threadStub,
+          input.text,
+          stagedAttachments.map((a) => ({
+            absolutePath: a.absolutePath,
+            displayName: a.displayName,
+            mimeType: a.mimeType,
+            kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
+          }))
+        );
+      }
 
       // Persist platform-side attachments on the OUT row when the adapter
       // captured them post-send (iMessage adapter looks them up from
@@ -267,18 +320,19 @@ export function createSendService(deps: SendServiceDeps) {
           : null;
       // App-level threading: when the operator hit "Reply" in the
       // focused-thread view, the SendRequest row carries the parent
-      // Message.id. Copy it onto the resulting outbound row so the
-      // dashboard renders the new bubble inline under its parent on the
-      // next refresh. The send itself goes out as a normal text bubble
-      // — the recipient on Messages.app sees no threading at all.
-      const replyToMessageId = sendRequest.replyToMessageId ?? null;
+      // Message.id (resolved into `replyToMessageId` above). Copy it onto
+      // the resulting outbound row so the dashboard renders the new bubble
+      // inline under its parent on the next refresh. When deliveredNative is
+      // false the send went out as a plain text bubble (the recipient sees
+      // no threading); when true the private-API helper sent a real native
+      // threaded reply (#273).
       // Prefer the platform-side stable id when the adapter could
       // recover it (iMessage polls chat.db post-send for the row's
-      // guid). Falling back to a synthetic stableHash for adapters
-      // that can't observe the real id (LinkedIn web UI, group chats
-      // without a delivery-status path). Aligning the key with what a
-      // later scan writes is how we avoid the same outbound message
-      // showing up twice in the timeline.
+      // guid; the native helper returns it directly). Falling back to a
+      // synthetic stableHash for adapters that can't observe the real id
+      // (LinkedIn web UI, group chats without a delivery-status path).
+      // Aligning the key with what a later scan writes is how we avoid the
+      // same outbound message showing up twice in the timeline.
       const platformMessageKey =
         receipt.platformMessageKey ??
         stableHash(`${thread.id}|${receipt.sentAt}|OUT|${input.text}`);
@@ -295,7 +349,8 @@ export function createSendService(deps: SendServiceDeps) {
           timestamp: new Date(receipt.sentAt),
           sentVia: "automation",
           attachmentsJson,
-          replyToMessageId
+          replyToMessageId,
+          deliveredNative
         },
         create: {
           threadId: thread.id,
@@ -305,7 +360,8 @@ export function createSendService(deps: SendServiceDeps) {
           text: input.text,
           sentVia: "automation",
           attachmentsJson,
-          replyToMessageId
+          replyToMessageId,
+          deliveredNative
         }
       });
 
@@ -354,7 +410,9 @@ export function createSendService(deps: SendServiceDeps) {
         status: "OK",
         details: {
           threadId: thread.id,
-          verifiedBy: receipt.verifiedBy
+          verifiedBy: receipt.verifiedBy,
+          deliveredNative,
+          sendPath: deliveredNative ? "private_api" : "fallback"
         },
         screenshotFile: receipt.screenshotFile
       });

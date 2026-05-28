@@ -48,6 +48,16 @@ import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 
+// #273: the six native iMessage tapbacks the minimal trigger offers.
+const TAPBACK_CHOICES: Array<{ kind: string; glyph: string; label: string }> = [
+  { kind: "heart", glyph: "❤️", label: "Love" },
+  { kind: "like", glyph: "👍", label: "Like" },
+  { kind: "dislike", glyph: "👎", label: "Dislike" },
+  { kind: "laugh", glyph: "😂", label: "Laugh" },
+  { kind: "emphasize", glyph: "‼️", label: "Emphasize" },
+  { kind: "question", glyph: "❓", label: "Question" }
+];
+
 // Thread workspace - landscape layout.
 //
 //   ┌──────────── chat column (fills) ─────────┬── context rail (360) ──┐
@@ -368,6 +378,12 @@ export default function ThreadPage() {
   const threadId = params.id;
 
   const [thread, setThread] = useState<ThreadResponse | null>(null);
+  // #273: minimal tapback trigger. `openTapbackFor` is the message whose
+  // glyph picker is open; `tapbackBusy` is the message id mid-send;
+  // `tapbackError` flags the last message whose tapback failed.
+  const [openTapbackFor, setOpenTapbackFor] = useState<string | null>(null);
+  const [tapbackBusy, setTapbackBusy] = useState<string | null>(null);
+  const [tapbackError, setTapbackError] = useState<string | null>(null);
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
   const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
@@ -718,6 +734,27 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // #273: send an outbound tapback. The runner persists the canonical
+  // reaction row first (so it shows even if the native wire send fails), then
+  // opportunistically delivers it natively when the private-API helper is up.
+  // We refresh afterwards so the merged reaction badge appears.
+  const handleTapback = useCallback(
+    async (messageId: string, kind: string) => {
+      setTapbackBusy(messageId);
+      setTapbackError(null);
+      try {
+        await apiPost(`/runner/control/thread/${threadId}/tapback`, { messageId, kind });
+        setOpenTapbackFor(null);
+        await refresh();
+      } catch {
+        setTapbackError(messageId);
+      } finally {
+        setTapbackBusy(null);
+      }
+    },
+    [threadId, refresh]
+  );
 
   // Load the operator voice profile once. Reloads on a profile-saved
   // event so an AI-help-level change in Settings lands without a reload.
@@ -2754,6 +2791,47 @@ export default function ThreadPage() {
                         >
                           · {replyCount} {replyCount === 1 ? "Reply" : "Replies"}
                         </button>
+                      ) : null}
+                      {/* #273: minimal native-tapback trigger. Only shown when
+                          the operator opted into the private-API layer. Native
+                          delivery happens when the helper is up; otherwise the
+                          reaction is persisted dashboard-only. */}
+                      {thread.nativeTapbackAvailable ? (
+                        <span className="relative inline-flex items-center">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setOpenTapbackFor((cur) => (cur === message.id ? null : message.id))
+                            }
+                            className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                            title="React with a tapback"
+                            aria-haspopup="true"
+                            aria-expanded={openTapbackFor === message.id}
+                          >
+                            · {tapbackBusy === message.id
+                              ? "reacting…"
+                              : tapbackError === message.id
+                                ? "react failed, retry"
+                                : "react"}
+                          </button>
+                          {openTapbackFor === message.id ? (
+                            <span className="absolute bottom-[18px] left-0 z-10 flex gap-1 rounded-full border border-hairline-strong bg-paper px-2 py-1 shadow-md">
+                              {TAPBACK_CHOICES.map((choice) => (
+                                <button
+                                  key={choice.kind}
+                                  type="button"
+                                  disabled={tapbackBusy === message.id}
+                                  onClick={() => handleTapback(message.id, choice.kind)}
+                                  className="flex h-[26px] w-[26px] items-center justify-center rounded-full text-[15px] leading-none hover:bg-paper-2 disabled:opacity-40"
+                                  title={choice.label}
+                                  aria-label={choice.label}
+                                >
+                                  {choice.glyph}
+                                </button>
+                              ))}
+                            </span>
+                          ) : null}
+                        </span>
                       ) : null}
                     </span>
                   </div>

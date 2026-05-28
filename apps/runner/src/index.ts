@@ -33,6 +33,7 @@ import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
+import { createPrivateApiHelper, PrivateApiError } from "./platforms/imessage-private-api";
 import { createScanQueue } from "./services/scan-queue";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
@@ -520,10 +521,28 @@ const scanQueue = createScanQueue({
   onAudioMessage: (input) => transcriptionService.enqueueMessage(input.messageId)
 }) as ScanQueueWithSmokeIngest;
 
+// #273: opt-in "opportunistic native send" layer for iMessage. Off unless
+// IMESSAGE_PRIVATE_API_ENABLED=true AND an external helper bundle is actually
+// listening on the socket. Shared by the send service (native threaded
+// replies) and the tapback control endpoint (native tapbacks).
+const privateApiHelper = createPrivateApiHelper({
+  enabled: runnerConfig.imessage.privateApi.enabled,
+  socketPath: runnerConfig.imessage.privateApi.socketPath,
+  requestTimeoutMs: runnerConfig.imessage.privateApi.requestTimeoutMs,
+  healthCacheMs: runnerConfig.imessage.privateApi.healthCacheMs,
+  log: ({ level, msg, detail }) =>
+    (level === "warn" ? console.warn : console.info)(
+      `[imessage-private-api] ${msg}`,
+      detail ?? ""
+    )
+});
+console.info(`[boot] ${privateApiHelper.describe()}`);
+
 const sendService = createSendService({
   adapters,
   eventBus,
   settingsStore,
+  privateApiHelper,
   auditLog: (input) => auditService.log(input)
 });
 
@@ -2594,6 +2613,208 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   }
 }));
 
+// #272 / #273: outbound tapback. Persists the operator's chosen reaction as a
+// canonical MessageReaction row FIRST (so the dashboard renders it instantly
+// and it survives wire-layer regressions), THEN opportunistically delivers it
+// as a real native tapback when the private-API helper is reachable.
+//
+// - Helper reachable + send ok  → deliveredNative=true, sentVia="automation".
+//   The contact sees the tapback in Messages.app within seconds.
+// - Helper unreachable / failed / kind unsupported natively → the row stays
+//   deliveredNative=false, sentVia="dashboard_only": the operator sees it, the
+//   contact does not. This is the honest fallback on the strip-back branch,
+//   which has no UI-scripting tapback path (#256 was removed).
+const TAPBACK_KINDS = ["heart", "like", "dislike", "laugh", "emphasize", "question"] as const;
+// Glyphs the dashboard badge renders for each native tapback kind.
+const TAPBACK_EMOJI: Record<(typeof TAPBACK_KINDS)[number], string> = {
+  heart: "❤️",
+  like: "👍",
+  dislike: "👎",
+  laugh: "😂",
+  emphasize: "‼️",
+  question: "❓"
+};
+
+/**
+ * Merge canonical app-level reactions (#272) into the `raw` blob the
+ * dashboard already renders reaction badges from (`raw.reactions` as
+ * `{emoji,kind,direction}[]`). Deduped on `(direction, kind)` so a reaction
+ * reconciled in from chat.db and its optimistic app-level twin collapse into
+ * one badge. Returns the (possibly newly-created) raw object, or the original
+ * value untouched when there is nothing to add.
+ */
+function mergeAppReactions(
+  rawJson: string | null,
+  reactions: Array<{ kind: string; sender: string; deliveredNative: boolean }>
+): unknown {
+  let raw: Record<string, unknown> | null = null;
+  if (rawJson) {
+    try {
+      raw = JSON.parse(rawJson) as Record<string, unknown>;
+    } catch {
+      raw = null;
+    }
+  }
+  if (reactions.length === 0) {
+    return raw;
+  }
+  const existing = Array.isArray(raw?.reactions)
+    ? (raw!.reactions as Array<{ emoji?: string; kind?: string; direction?: string }>)
+    : [];
+  const seen = new Set(existing.map((r) => `${r.direction}|${r.kind}`));
+  const merged = [...existing];
+  for (const r of reactions) {
+    const direction = r.sender === "me" ? "OUT" : "IN";
+    const key = `${direction}|${r.kind}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push({
+      emoji: TAPBACK_EMOJI[r.kind as (typeof TAPBACK_KINDS)[number]] ?? "",
+      kind: r.kind,
+      direction,
+      // Extra fields the current badge ignores but a future UI can use to
+      // dim a reaction the recipient never actually saw on the wire.
+      appReaction: true,
+      deliveredNative: r.deliveredNative
+    } as { emoji: string; kind: string; direction: string; appReaction: boolean; deliveredNative: boolean });
+  }
+  return { ...(raw ?? {}), reactions: merged };
+}
+
+app.post("/control/thread/:threadId/tapback", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  const payload = z
+    .object({
+      messageId: z.string().min(1),
+      kind: z.enum(TAPBACK_KINDS),
+      action: z.enum(["add", "remove"]).default("add")
+    })
+    .parse(req.body);
+
+  // Resolve the target message and assert it belongs to the URL's thread
+  // (defensive against a stale dashboard pointing at a moved/merged row).
+  const message = await prisma.message.findUnique({
+    where: { id: payload.messageId },
+    select: {
+      id: true,
+      threadId: true,
+      platformMessageKey: true,
+      thread: { select: { platform: true, platformThreadId: true } }
+    }
+  });
+  // iMessage merges messages across a person's sibling threads (phone- and
+  // email-handle chats), so the target may live on a sibling of the URL
+  // thread. Validate membership in that cohort rather than strict equality.
+  const cohortThreadIds = await actionTargetThreadIds(threadId);
+  if (!message || !cohortThreadIds.includes(message.threadId)) {
+    res.status(404).json({ error: "message not found in thread" });
+    return;
+  }
+  if (message.thread.platform !== "IMESSAGE") {
+    res.status(400).json({ error: "tapbacks are only supported on iMessage threads" });
+    return;
+  }
+
+  const sender = "me";
+  const reactionKey = {
+    messageId_sender_kind: { messageId: message.id, sender, kind: payload.kind }
+  };
+
+  if (payload.action === "remove") {
+    // Best-effort native removal, then drop the local row regardless so the
+    // dashboard reflects the operator's choice even if the wire removal fails.
+    if (await privateApiHelper.isReachable()) {
+      try {
+        await privateApiHelper.sendTapback({
+          chatGuid: message.thread.platformThreadId,
+          targetMessageGuid: message.platformMessageKey,
+          kind: payload.kind,
+          action: "remove"
+        });
+      } catch {
+        // Logged inside the helper; local removal still proceeds.
+      }
+    }
+    await prisma.messageReaction.deleteMany({
+      where: { messageId: message.id, sender, kind: payload.kind }
+    });
+    await auditService.log({
+      platform: "IMESSAGE",
+      stage: "Send",
+      action: "TAPBACK_REMOVED",
+      status: "OK",
+      details: { threadId, messageId: message.id, kind: payload.kind }
+    });
+    res.json({ messageId: message.id, kind: payload.kind, action: "remove", removed: true });
+    return;
+  }
+
+  // action === "add": canonical row first (optimistic), then try native.
+  await prisma.messageReaction.upsert({
+    where: reactionKey,
+    update: {},
+    create: {
+      messageId: message.id,
+      sender,
+      kind: payload.kind,
+      sentVia: "dashboard_only",
+      deliveredNative: false
+    }
+  });
+
+  let deliveredNative = false;
+  let unsupportedNative = false;
+  if (await privateApiHelper.isReachable()) {
+    try {
+      await privateApiHelper.sendTapback({
+        chatGuid: message.thread.platformThreadId,
+        targetMessageGuid: message.platformMessageKey,
+        kind: payload.kind,
+        action: "add"
+      });
+      deliveredNative = true;
+    } catch (error) {
+      // iOS 18+ expanded-emoji tapbacks can be unsupported even with the
+      // private API; surface that distinctly so the dashboard can hint it,
+      // but keep the canonical row (operator still sees their reaction).
+      if (error instanceof PrivateApiError && error.code === "unsupported_kind") {
+        unsupportedNative = true;
+      }
+    }
+  }
+
+  if (deliveredNative) {
+    await prisma.messageReaction.update({
+      where: reactionKey,
+      data: { deliveredNative: true, sentVia: "automation" }
+    });
+  }
+
+  await auditService.log({
+    platform: "IMESSAGE",
+    stage: "Send",
+    action: "TAPBACK_SENT",
+    status: "OK",
+    details: {
+      threadId,
+      messageId: message.id,
+      kind: payload.kind,
+      deliveredNative,
+      sendPath: deliveredNative ? "private_api" : "dashboard_only",
+      unsupportedNative
+    }
+  });
+
+  res.json({
+    messageId: message.id,
+    kind: payload.kind,
+    action: "add",
+    deliveredNative,
+    sentVia: deliveredNative ? "automation" : "dashboard_only",
+    unsupportedNative
+  });
+}));
+
 app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   // Either text, scheduledFor, or both. Empty body 400s — there's
@@ -3700,6 +3921,23 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     if (p.platformMessageKey) parentByPlatformKey.set(p.platformMessageKey, p);
   }
 
+  // #272/#273: canonical app-level reactions for the in-flight page, batched
+  // into one query and merged into each message's raw.reactions below.
+  const reactionRows =
+    pageMessages.length > 0
+      ? await prisma.messageReaction.findMany({
+          where: { messageId: { in: pageMessages.map((m) => m.id) } },
+          orderBy: { createdAt: "asc" },
+          select: { messageId: true, kind: true, sender: true, deliveredNative: true }
+        })
+      : [];
+  const reactionsByMessageId = new Map<string, typeof reactionRows>();
+  for (const r of reactionRows) {
+    const list = reactionsByMessageId.get(r.messageId) ?? [];
+    list.push(r);
+    reactionsByMessageId.set(r.messageId, list);
+  }
+
   function buildReplyToSnippet(
     parent:
       | (typeof parentsById)[number]
@@ -4116,6 +4354,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
     relationshipMemory,
+    // #273: gates the dashboard's minimal tapback trigger. True when the
+    // operator has opted into the private-API layer (independent of current
+    // reachability) — so they can click-test both the native path (helper up)
+    // and the dashboard-only fallback (helper down). Off by default, which
+    // keeps the strip-back UI untouched for everyone who hasn't opted in.
+    nativeTapbackAvailable: privateApiHelper.enabled,
     messages: pageMessages
       // Hide iMessage "kept an audio message" system events from the
       // thread view entirely. The iMessage adapter drops these at
@@ -4134,7 +4378,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       // Apple-native `raw.replyToGuid` when both are present so threads
       // started from the dashboard's focused composer reconcile correctly.
       replyToMessageId: message.replyToMessageId ?? null,
-      raw: message.rawJson ? JSON.parse(message.rawJson) : null,
+      // Merge canonical app-level reactions (#272) into the raw blob the
+      // dashboard renders badges from, so the operator's chosen tapback shows
+      // immediately and survives wire-layer regressions.
+      raw: mergeAppReactions(message.rawJson, reactionsByMessageId.get(message.id) ?? []),
       attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : [],
       // Audio transcription status + text, when the runner ran one for
       // this message. Null when the message has no audio attachment or

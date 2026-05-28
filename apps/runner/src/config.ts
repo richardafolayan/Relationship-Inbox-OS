@@ -72,6 +72,23 @@ export interface RunnerConfig {
      * to real display names. Default: data/contacts.vcf if present.
      */
     contactsVcfPath: string | undefined;
+    /**
+     * Opt-in "opportunistic native send" layer (#273). When enabled and an
+     * external private-API helper bundle is reachable on `socketPath`, the
+     * runner sends threaded replies and tapbacks as real native iMessage
+     * actions instead of plain bubbles / dashboard-only rows. OFF by default
+     * — the helper requires disabling SIP and is installed outside this repo.
+     * See docs/imessage-private-api.md.
+     */
+    privateApi: {
+      enabled: boolean;
+      /** UNIX domain socket the injected helper listens on. */
+      socketPath: string;
+      /** Per-request timeout for helper calls (ms). */
+      requestTimeoutMs: number;
+      /** How long an isReachable() probe result is cached (ms). */
+      healthCacheMs: number;
+    };
   };
   contacts: {
     /**
@@ -504,7 +521,24 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       enabled: env.IMESSAGE_ENABLED === "true" && process.platform === "darwin",
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
       watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
-      contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
+      contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf"),
+      privateApi: {
+        // Off by default. Flipping this on does nothing unless the external
+        // helper bundle is actually installed and listening — the runner
+        // degrades to the existing plain-text / dashboard-only paths when
+        // the socket is unreachable.
+        enabled:
+          (env.IMESSAGE_PRIVATE_API_ENABLED ?? "").trim().toLowerCase() === "true" &&
+          process.platform === "darwin",
+        // Deliberately outside the repo/data dir: the external helper and the
+        // runner must agree on a fixed path regardless of where the runner is
+        // checked out. Overridable for the mock helper used in local testing.
+        socketPath:
+          env.IMESSAGE_PRIVATE_API_SOCKET?.trim() ||
+          resolve(env.HOME ?? "/Users/richard", ".relationship-inbox", "imessage-helper.sock"),
+        requestTimeoutMs: parseIntOrDefault(env.IMESSAGE_PRIVATE_API_TIMEOUT_MS, 5_000),
+        healthCacheMs: parseIntOrDefault(env.IMESSAGE_PRIVATE_API_HEALTH_CACHE_MS, 3_000)
+      }
     },
     contacts: {
       // Mac-only. Enabled by default on macOS; the AddressBook reader is a

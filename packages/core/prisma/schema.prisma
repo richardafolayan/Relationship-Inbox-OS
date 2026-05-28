@@ -354,26 +354,73 @@ model Message {
   sentVia            String?
   /**
    * App-level threading: when the operator hits "Reply" in the dashboard
-   * focused-thread view, we set this to the parent Message.id (cuid). The
-   * message itself sends as a normal text bubble via the existing
+   * focused-thread view, we set this to the parent Message.id (cuid).
+   *
+   * By default the message sends as a normal text bubble via the existing
    * AppleScript verb — no native iMessage thread linkage on the wire — so
-   * the recipient on Messages.app sees a plain bubble. Dashboard users
+   * the recipient on Messages.app sees a plain bubble, and dashboard users
    * see the threading because we render off this column (alongside the
    * Apple-native chat.db `thread_originator_guid` we stash on rawJson).
+   * When the opt-in private-API helper is reachable (see #273) the same
+   * reply instead goes out as a real native threaded reply and we set
+   * `deliveredNative=true`.
    *
    * Nullable: standalone messages and Apple-native replies (where the
    * parent is captured via rawJson.replyToGuid → platformMessageKey)
    * leave this null.
    */
   replyToMessageId   String?
+  /**
+   * Whether this OUT message went out over the wire via the opt-in
+   * private-API helper (a real native threaded reply / native send) rather
+   * than the plain-text AppleScript fallback. False for the fallback path
+   * and for inbound or scan-observed rows. Lets the dashboard tell when the
+   * recipient saw the native experience vs. a plain bubble. See #273.
+   */
+  deliveredNative    Boolean   @default(false)
   createdAt          DateTime  @default(now())
 
-  thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  thread       Thread            @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  appReactions MessageReaction[]
 
   @@unique([threadId, platformMessageKey])
   @@index([threadId, timestamp])
   @@index([replyToMessageId])
   @@map("messages")
+}
+
+/**
+ * App-level outbound tapback storage (#272 data model, used by the #273
+ * opportunistic native-send layer). One row per (message, sender, kind).
+ *
+ * The dashboard renders the operator's chosen reaction off these rows
+ * regardless of whether the underlying wire send succeeded — so a reaction
+ * shows up instantly and survives UI-script / private-API regressions.
+ * `deliveredNative` records whether the contact actually saw the tapback in
+ * their Messages.app; `sentVia` records how we tried to deliver it.
+ */
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  // "heart" | "like" | "dislike" | "laugh" | "emphasize" | "question"
+  kind      String
+  // "me" for the operator, or a contact handle/cuid when reconciled inbound.
+  sender    String
+  createdAt DateTime @default(now())
+  // "automation" when the private-API helper delivered it natively,
+  // "dashboard_only" when we persisted the operator's choice without a wire
+  // send (helper unreachable and no UI-script path), null when reconciled
+  // in from chat.db.
+  sentVia   String?
+  // Whether the native iMessage tapback actually went out on the wire. False
+  // means the dashboard shows it but the recipient never saw it.
+  deliveredNative Boolean @default(false)
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, sender, kind])
+  @@index([messageId])
+  @@map("message_reactions")
 }
 
 // Opt-in transcription of voice / audio attachments on inbound messages.

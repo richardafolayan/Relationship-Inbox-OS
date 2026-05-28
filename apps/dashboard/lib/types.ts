@@ -428,6 +428,13 @@ export interface ThreadResponse {
   replyBrief?: ReplyBrief | null;
   draft: string;
   contextUpdatedAt: string;
+  /**
+   * #273: true when the operator opted into the iMessage private-API native
+   * send layer. Gates the minimal per-bubble tapback trigger. Optional /
+   * defaults off so a dashboard talking to an older runner (or one without
+   * the layer enabled) simply doesn't show the trigger.
+   */
+  nativeTapbackAvailable?: boolean;
   messages: ThreadMessage[];
   messagePage: {
     hasOlder: boolean;

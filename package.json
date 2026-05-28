@@ -20,6 +20,7 @@
     "db:migrate": "DATABASE_URL=file:$(pwd)/data/inbox-os.sqlite prisma migrate dev --schema packages/core/prisma/schema.prisma",
     "dev:dashboard": "npm run dev --workspace @inbox-os/dashboard",
     "dev:runner": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && npm run dev --workspace @inbox-os/runner",
+    "mock:imessage-helper": "node tools/mock-imessage-helper/server.mjs",
     "scan": "npm run scan --workspace @inbox-os/runner",
     "connect:linkedin": "npm run connect:linkedin --workspace @inbox-os/runner",
     "test:selectors:linkedin": "npm run test:selectors:linkedin --workspace @inbox-os/runner",
