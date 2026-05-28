@@ -177,6 +177,7 @@ export function Sidebar({
             <Link
               key={item.href}
               href={item.href}
+              data-demo-target={`nav-${item.href.replace(/^\//, "")}`}
               title={collapsed ? item.label : undefined}
               className={cn(
                 "relative flex items-center rounded-[10px] text-[13px] tracking-[-0.005em]",
@@ -233,6 +234,8 @@ export function Sidebar({
         onClick={() => openPilotFeedback("feedback")}
         aria-label="Send feedback"
         title={collapsed ? "Send feedback" : undefined}
+        data-demo-target="feedback"
+        data-tour="feedback"
         className={cn(
           "mt-auto flex items-center rounded-[10px] text-[13px] tracking-[-0.005em] text-ink-2",
           "transition-[color,background-color] duration-calm hover:bg-paper-2 hover:text-ink",

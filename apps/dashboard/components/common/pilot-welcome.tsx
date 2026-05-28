@@ -52,7 +52,7 @@ export function PilotWelcomeCard({ onDismiss }: { onDismiss?: () => void }) {
         </ul>
 
         <p className="m-0 mt-4 border-t border-hairline pt-4 text-[13px] leading-[1.6] text-ink-2">
-          You write the reply. AI help is optional, and nothing sends unless you choose to send it.
+          You write the reply. AI can help shape it. You stay in control of what gets sent.
         </p>
 
         {onDismiss ? (
