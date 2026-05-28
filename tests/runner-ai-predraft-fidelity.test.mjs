@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import {
+  BRIEF_FIDELITY_REMINDER,
   CASUAL_VOICE_PROMPT,
   DRAFT_COVERAGE_GROUNDING_CLAUSE,
   FORMAL_VOICE_PROMPT,
@@ -216,5 +217,91 @@ test("DRAFT_COVERAGE_GROUNDING_CLAUSE is wired into the coverage-check prompt", 
   assert.ok(
     occurrences >= 2,
     `expected at least 2 references to DRAFT_COVERAGE_GROUNDING_CLAUSE in compiled ai.js (export + checkDraftCoverage), found ${occurrences}`
+  );
+});
+
+// ── Brief-fidelity reminder (#387 follow-up — updateThreadSummary path) ─
+
+test("BRIEF_FIDELITY_REMINDER is exported and primes the brief generator against invented framing", () => {
+  assert.equal(typeof BRIEF_FIDELITY_REMINDER, "string");
+  assert.ok(BRIEF_FIDELITY_REMINDER.length > 0, "reminder must be non-empty");
+  // Names FIDELITY as a hard rule, applies to every visible brief field.
+  assert.match(BRIEF_FIDELITY_REMINDER, /FIDELITY/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /where_it_stands/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /on_you/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /they_said/);
+  // Names the specific Brandon-thread regression in on_you ("big thing").
+  assert.match(BRIEF_FIDELITY_REMINDER, /big thing/i);
+  // Banned-moves list explicitly covers the brief-side framings.
+  assert.match(BRIEF_FIDELITY_REMINDER, /weighty/i);
+  // The meta rule lives in the brief reminder too.
+  assert.match(
+    BRIEF_FIDELITY_REMINDER,
+    /traceable to something the contact actually said/i
+  );
+});
+
+test("BRIEF_FIDELITY_REMINDER is wired into the compiled brief-generation prompt", () => {
+  // Expect at least 2 references in the compiled output: the export
+  // declaration + the reference inside updateThreadSummary's template.
+  const aiJsPath = fileURLToPath(
+    new URL("../apps/runner/dist/services/ai.js", import.meta.url)
+  );
+  const source = readFileSync(aiJsPath, "utf8");
+  const occurrences = source.split("BRIEF_FIDELITY_REMINDER").length - 1;
+  assert.ok(
+    occurrences >= 2,
+    `expected at least 2 references to BRIEF_FIDELITY_REMINDER in compiled ai.js (export + updateThreadSummary), found ${occurrences}`
+  );
+});
+
+test("updateThreadSummary's on_you guidance no longer contains the editorialised 'big thing worth acknowledging' example", () => {
+  // The pre-fix on_you example said: "He's slightly paused a job offer
+  // because the clients are in the Middle East — that's the big thing
+  // worth acknowledging." The model was reproducing the "that's the big
+  // thing worth acknowledging" framing verbatim on Brandon-shaped threads.
+  // After this fix, the bad framing must only appear as a NEGATIVE
+  // example (labelled "NOT" or in a banned-moves list), never as a
+  // positive shape the model should imitate.
+  const aiJsPath = fileURLToPath(
+    new URL("../apps/runner/dist/services/ai.js", import.meta.url)
+  );
+  const source = readFileSync(aiJsPath, "utf8");
+
+  // Pre-fix shape — the editorialised example as a positive template.
+  // If this pattern reappears as positive guidance, the regression is back.
+  assert.doesNotMatch(
+    source,
+    /Example:\s*"[^"]*that's the big thing worth acknowledging[^"]*"/,
+    "the 'big thing worth acknowledging' phrase must not appear as a positive Example: again"
+  );
+
+  // The grounded counter-example must be there.
+  assert.match(source, /A short acknowledgement is enough/);
+});
+
+test("updateThreadSummary's required_points guidance no longer leans on 'weighty beat' / 'major life event' classifier hints", () => {
+  // The original guidance categorised acknowledgement-worthy news using
+  // "weighty beat", "hard decision", "major life event" — language that
+  // biases the model's output framing. The fix replaces this with
+  // grounded classifier language and adds an explicit phrasing rule.
+  const aiJsPath = fileURLToPath(
+    new URL("../apps/runner/dist/services/ai.js", import.meta.url)
+  );
+  const source = readFileSync(aiJsPath, "utf8");
+
+  // The old hint strings should be gone from the required_points
+  // guidance (they survive elsewhere only in the negative-example lists
+  // inside BRIEF_FIDELITY_REMINDER, which is fine).
+  assert.doesNotMatch(
+    source,
+    /shared a single weighty beat the operator should acknowledge \(a paused job offer, a hard decision, a major life event\)/,
+    "the 'weighty beat / hard decision / major life event' classifier phrasing must be gone from required_points guidance"
+  );
+
+  // The replacement guidance must be present.
+  assert.match(
+    source,
+    /do NOT characterise the beat itself \("Acknowledge the big news", "Acknowledge the major decision"\)/
   );
 });
