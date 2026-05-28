@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
-import { Check, ChevronLeft, Copy, ExternalLink, ImageUp, Loader2, X } from "lucide-react";
+import { ChevronLeft, ImageUp, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { showToast } from "@/lib/feedback";
 import {
@@ -12,17 +12,11 @@ import {
   PILOT_REPORT_TYPE_LABELS,
   buildPilotReportPayload,
   collectPilotMeta,
-  formatReportForCopy,
   onPilotFeedback,
   validateScreenshotFile,
-  type PilotReportPayload,
   type PilotReportType
 } from "@/lib/pilot";
 import { cn } from "@/lib/utils";
-
-// Optional external fallback form, shown only if the failure state is hit
-// and the URL is configured. Never the primary path.
-const fallbackFormUrl = process.env.NEXT_PUBLIC_FEEDBACK_FORM_URL?.trim() || null;
 
 interface StatusReport {
   reportId: string;
@@ -68,15 +62,16 @@ export function PilotFeedbackModal() {
   const [privacyAck, setPrivacyAck] = useState(false);
   const [dragOver, setDragOver] = useState(false);
 
-  const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
+  // Submit closes the modal immediately and runs the POST in the
+  // background (issue #383 / R-0030 — reverses the earlier decision to
+  // lock the form while in flight). Result lands as a success / error
+  // toast so the operator can do other things while it sends. No local
+  // submitting state, no inline error, no close-lock.
 
   const [reports, setReports] = useState<StatusReport[] | null>(null);
   const [reportsError, setReportsError] = useState<string | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const lastPayloadRef = useRef<PilotReportPayload | null>(null);
   const screenshotIdRef = useRef(0);
 
   const resetForm = useCallback(() => {
@@ -86,7 +81,6 @@ export function PilotFeedbackModal() {
     setScreenshots([]);
     setScreenshotError(null);
     setPrivacyAck(false);
-    setSubmitError(null);
   }, []);
 
   useEffect(
@@ -94,7 +88,6 @@ export function PilotFeedbackModal() {
       onPilotFeedback((nextType) => {
         setType(nextType);
         setView("form");
-        setSubmitError(null);
         setOpen(true);
       }),
     []
@@ -156,13 +149,10 @@ export function PilotFeedbackModal() {
   const canSubmit =
     title.trim().length > 0 &&
     description.trim().length > 0 &&
-    !submitting &&
     (screenshots.length === 0 || privacyAck);
 
   const submit = useCallback(() => {
     if (!canSubmit) return;
-    setSubmitting(true);
-    setSubmitError(null);
     const payload = buildPilotReportPayload({
       type,
       title,
@@ -172,12 +162,13 @@ export function PilotFeedbackModal() {
       meta: collectPilotMeta(pathname),
       screenshots: screenshots.map((shot) => ({ name: shot.name, dataUrl: shot.dataUrl }))
     });
-    lastPayloadRef.current = payload;
-    // Issue #337 / R-0026. Send work is ongoing, not an event, so it stays
-    // local to the modal: the submit button reads "Sending…" with a spinner
-    // and the form stays put. No static popup toast for the in-flight state.
-    // Only the discrete outcomes ("Report sent" / "Couldn't send") use the
-    // toast surface, which is reserved for actual events.
+    // Issue #383 / R-0030. Reverses the #337 decision: pilot asked for
+    // the form to close immediately on submit so they can keep working
+    // while the report sends. The send runs in the background and the
+    // outcome (success / error) lands as a toast. There is no in-flight
+    // UI here — the toast surface owns the result.
+    setOpen(false);
+    resetForm();
     apiPost<{ ok: boolean; reportId?: string; error?: string }>(
       "/runner/control/pilot-feedback",
       payload
@@ -187,35 +178,20 @@ export function PilotFeedbackModal() {
           throw new Error(res.error || "Could not send the report.");
         }
         showToast({ kind: "success", title: `Report sent: ${res.reportId}` });
-        setOpen(false);
-        resetForm();
       })
       .catch((err) => {
-        setSubmitError(err instanceof Error ? err.message : "Could not send the report.");
-      })
-      .finally(() => setSubmitting(false));
-  }, [canSubmit, type, title, description, expected, privacyAck, screenshots, pathname, resetForm]);
-
-  const copyReport = useCallback(async () => {
-    const payload =
-      lastPayloadRef.current ??
-      buildPilotReportPayload({
-        type,
-        title,
-        description,
-        expected,
-        privacyAck,
-        meta: collectPilotMeta(pathname),
-        screenshots: []
+        // Trade-off: closing immediately means we lose the form state on
+        // failure (the user has to re-type to retry). Failures should be
+        // rare (local runner) and the toast surfaces the error message
+        // and the report ID so the operator can resubmit if needed.
+        showToast({
+          kind: "error",
+          title: "Couldn't send pilot feedback",
+          description: err instanceof Error ? err.message : String(err),
+          durationMs: 9000
+        });
       });
-    try {
-      await navigator.clipboard.writeText(formatReportForCopy(payload));
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2200);
-    } catch {
-      setCopied(false);
-    }
-  }, [type, title, description, expected, privacyAck, pathname]);
+  }, [canSubmit, type, title, description, expected, privacyAck, screenshots, pathname, resetForm]);
 
   const openReports = useCallback(async () => {
     setView("reports");
@@ -239,11 +215,9 @@ export function PilotFeedbackModal() {
 
   if (!open) return null;
 
-  // While the report is in flight the modal locks: backdrop click, Esc, and
-  // the close X are NOOPs so the operator can't dismiss the form before the
-  // request resolves (which would leave the success/error nowhere to land).
+  // Close is always allowed: submit itself closes the modal too (issue
+  // #383 / R-0030), so there is no in-flight state that needs locking.
   const requestClose = () => {
-    if (submitting) return;
     setOpen(false);
   };
 
@@ -288,10 +262,9 @@ export function PilotFeedbackModal() {
           <button
             type="button"
             onClick={requestClose}
-            disabled={submitting}
             aria-label="Close"
-            title={submitting ? "Sending… please wait" : "Close (Esc)"}
-            className="ml-auto grid h-7 w-7 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-3"
+            title="Close (Esc)"
+            className="ml-auto grid h-7 w-7 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
           >
             <X className="h-[15px] w-[15px]" strokeWidth={1.7} />
           </button>
@@ -337,39 +310,11 @@ export function PilotFeedbackModal() {
           </div>
         ) : (
           <div className="overflow-y-auto px-5 py-4">
-            {submitError ? (
-              <div className="mb-4 rounded-row border border-risk-overdue/40 bg-risk-overdue/8 px-3 py-[10px]">
-                <p className="m-0 text-[12.5px] leading-[1.5] text-ink">{submitError}</p>
-                <p className="m-0 mt-1 text-[12px] leading-[1.5] text-ink-3">
-                  Your report is still here. Try again, or copy it and send it across.
-                </p>
-                <div className="mt-2 flex flex-wrap items-center gap-[10px]">
-                  <button
-                    type="button"
-                    onClick={() => void copyReport()}
-                    className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-3 py-[6px] text-[11.5px] font-medium text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                  >
-                    {copied ? (
-                      <Check className="h-[13px] w-[13px]" strokeWidth={2} />
-                    ) : (
-                      <Copy className="h-[13px] w-[13px]" strokeWidth={1.7} />
-                    )}
-                    {copied ? "Copied" : "Copy report"}
-                  </button>
-                  {fallbackFormUrl ? (
-                    <a
-                      href={fallbackFormUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-3 py-[6px] text-[11.5px] font-medium text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                    >
-                      <ExternalLink className="h-[13px] w-[13px]" strokeWidth={1.7} />
-                      Open the feedback form
-                    </a>
-                  ) : null}
-                </div>
-              </div>
-            ) : null}
+            {/* Issue #383 / R-0030: the inline error block was removed —
+                submit now closes the modal immediately and surfaces the
+                outcome via toast. The fallback form URL is still
+                referenced from the strategy docs if an operator wants
+                to bypass the in-app flow entirely. */}
 
             <Field label="What kind of report is this?">
               <div className="flex flex-wrap gap-2">
@@ -527,8 +472,7 @@ export function PilotFeedbackModal() {
                 disabled={!canSubmit}
                 className="inline-flex items-center gap-2 rounded-pill bg-ink px-[18px] py-[9px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {submitting ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : null}
-                {submitting ? "Sending…" : "Submit report"}
+                Submit report
               </button>
               <span className="text-[11.5px] leading-[1.45] text-ink-3">
                 Goes to the pilot log. No message content is included.
