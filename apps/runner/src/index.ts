@@ -5060,38 +5060,43 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
   // Script just created. Doesn't block the response — if it fails,
   // the Drive-linked Sheet row remains the source of truth. See
   // services/github-attachments.ts for the rationale.
-  if (
-    result.ok &&
-    result.reportId &&
-    screenshots.length > 0 &&
-    runnerConfig.github.token &&
-    runnerConfig.github.repo
-  ) {
-    const { attachScreenshotsToIssue } = await import("./services/github-attachments.js");
-    attachScreenshotsToIssue({
-      reportId: result.reportId,
-      screenshots,
-      repo: runnerConfig.github.repo,
-      token: runnerConfig.github.token,
-      branch: runnerConfig.github.attachmentsBranch
-    })
-      .then((outcome) => {
+  if (result.ok && result.reportId && screenshots.length > 0 && runnerConfig.github.repo) {
+    const reportId = result.reportId;
+    (async () => {
+      // Prefer GITHUB_TOKEN / GH_TOKEN from env; fall back to the
+      // local `gh` CLI's keyring auth so operators don't have to
+      // paste a PAT into .env when they're already signed in via
+      // gh CLI (the common case on dev machines).
+      const { resolveGitHubToken } = await import("./services/gh-cli-token.js");
+      const token = await resolveGitHubToken({ envToken: runnerConfig.github.token });
+      if (!token) {
+        console.warn(
+          `[pilot-feedback] screenshot attach skipped for ${reportId}: no GITHUB_TOKEN in env and gh CLI auth unavailable`
+        );
+        return;
+      }
+      const { attachScreenshotsToIssue } = await import("./services/github-attachments.js");
+      try {
+        const outcome = await attachScreenshotsToIssue({
+          reportId,
+          screenshots,
+          repo: runnerConfig.github.repo,
+          token,
+          branch: runnerConfig.github.attachmentsBranch
+        });
         if (outcome.ok) {
           console.log(
             `[pilot-feedback] attached ${outcome.uploadedUrls?.length ?? 0} screenshot(s) to issue #${outcome.issueNumber} (${outcome.commentUrl})`
           );
         } else {
           console.warn(
-            `[pilot-feedback] screenshot attach skipped for ${result.reportId}: ${outcome.reason}`
+            `[pilot-feedback] screenshot attach skipped for ${reportId}: ${outcome.reason}`
           );
         }
-      })
-      .catch((error) => {
-        console.warn(
-          `[pilot-feedback] screenshot attach errored for ${result.reportId}:`,
-          error
-        );
-      });
+      } catch (error) {
+        console.warn(`[pilot-feedback] screenshot attach errored for ${reportId}:`, error);
+      }
+    })();
   }
 
   res.json(result);
