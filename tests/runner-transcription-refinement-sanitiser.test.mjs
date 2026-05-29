@@ -4,10 +4,16 @@ import {
   buildRefinementUserPrompt,
   parseRefinementResponse
 } from "../apps/runner/dist/services/transcription/index.js";
+import {
+  onlyPatchedRegionsChanged,
+  pickBaseAttempt
+} from "../apps/runner/dist/services/transcription/text-refinement-service.js";
 
-// Unit tests for the GPT-5-nano refinement sanitiser. The orchestrator
-// guarantees that refinement only runs after at least one local tier
-// succeeds, so every test here passes a non-empty attempts array.
+// Unit tests for the PATCH-based refinement sanitiser (#386). The
+// refiner proposes substring corrections against the highest-tier
+// local transcript (the base). The app, not the model, applies only
+// safe patches deterministically by splicing them into the base, and
+// rejects (keeps the base verbatim) on any guard.
 
 function ctx(overrides = {}) {
   return {
@@ -17,9 +23,9 @@ function ctx(overrides = {}) {
     speakerRole: "contact",
     attempts: [
       {
-        tier: "standard",
-        model: "ggml-large-v3-turbo-q5_0.bin",
-        transcript: "yeah I did do well when I say food shop I use food shop so loosely"
+        tier: "max",
+        model: "ggml-large-v3.bin",
+        transcript: "yeah i did do well when i say future i use food shop so loosely"
       }
     ],
     nearbyMessages: [
@@ -30,13 +36,49 @@ function ctx(overrides = {}) {
   };
 }
 
-test("buildRefinementUserPrompt includes attempts and nearby context", () => {
+function patch(from, to, extra = {}) {
+  return {
+    from,
+    to,
+    type: "asr_word_error",
+    confidence: "high",
+    evidence: "context",
+    ...extra
+  };
+}
+
+function payload(corrections, extra = {}) {
+  return JSON.stringify({
+    baseModel: "ggml-large-v3.bin",
+    corrections,
+    uncertainPhrases: [],
+    rejectReason: null,
+    ...extra
+  });
+}
+
+test("buildRefinementUserPrompt presents the base as authoritative and asks for patches", () => {
   const prompt = buildRefinementUserPrompt(ctx());
-  assert.match(prompt, /tier=standard/);
-  assert.match(prompt, /ggml-large-v3-turbo-q5_0\.bin/);
+  assert.match(prompt, /BASE transcript/);
+  assert.match(prompt, /ggml-large-v3\.bin/);
   assert.match(prompt, /food shop/);
   assert.match(prompt, /Did you do a food shop\?/);
-  assert.match(prompt, /Return JSON only/);
+  assert.match(prompt, /Return JSON patches only/);
+});
+
+test("buildRefinementUserPrompt labels lower tiers as evidence only", () => {
+  const prompt = buildRefinementUserPrompt(
+    ctx({
+      attempts: [
+        { tier: "standard", model: "v3-turbo", transcript: "lower tier text here" },
+        { tier: "max", model: "v3", transcript: "the authoritative base text" }
+      ]
+    })
+  );
+  assert.match(prompt, /BASE transcript \(model=v3, tier=max\)/);
+  assert.match(prompt, /the authoritative base text/);
+  assert.match(prompt, /EVIDENCE ONLY/);
+  assert.match(prompt, /tier=standard/);
 });
 
 test("buildRefinementUserPrompt notes empty nearby context", () => {
@@ -44,216 +86,191 @@ test("buildRefinementUserPrompt notes empty nearby context", () => {
   assert.match(prompt, /Nearby thread messages: \(none\)/);
 });
 
-test("parseAndSanitise returns the corrected transcript for a clean response", () => {
+test("pickBaseAttempt picks the highest tier, breaking ties by last entry", () => {
+  const base = pickBaseAttempt([
+    { tier: "fast", model: "f", transcript: "fast" },
+    { tier: "max", model: "m", transcript: "max" },
+    { tier: "standard", model: "s", transcript: "standard" }
+  ]);
+  assert.equal(base.tier, "max");
+  assert.equal(pickBaseAttempt([]), null);
+});
+
+test("applies a safe patch and returns the patched transcript", () => {
   const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript:
-        "yeah I did do well when I say food shop I use food shop so loosely because the way I do a food shop is I buy ingredients",
-      confidence: "high",
-      changesMade: [
-        { from: "future", to: "food shop", reason: "context: previous message" }
-      ],
-      uncertainPhrases: []
-    }),
+    payload([patch("future", "food shop", { evidence: "meal planning context" })]),
     ctx()
   );
   assert.equal(out.kind, "ok");
-  assert.match(out.result.correctedTranscript, /food shop/);
-  assert.equal(out.result.confidence, "high");
+  assert.equal(
+    out.result.correctedTranscript,
+    "yeah i did do well when i say food shop i use food shop so loosely"
+  );
   assert.equal(out.result.changesMade.length, 1);
+  assert.equal(out.result.changesMade[0].from, "future");
+  assert.equal(out.result.changesMade[0].to, "food shop");
+  assert.equal(out.result.changesMade[0].reason, "meal planning context");
+  assert.equal(out.result.confidence, "high");
 });
 
-test("parseAndSanitise drops a refinement that's drastically shorter than the local transcript", () => {
-  const longLocal = "yeah I did do well when I say food shop I use food shop so loosely because the way I do a food shop is I buy the ingredients for the meal I want to cook";
+test("drops a patch whose from is not a substring of the base", () => {
+  const out = parseRefinementResponse(payload([patch("kubernetes pods", "food shop")]), ctx());
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_all_patches_dropped");
+});
+
+test("a from that exists only in a lower tier (not the base) cannot anchor a patch", () => {
   const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript: "yeah",
-      confidence: "low",
-      changesMade: [],
-      uncertainPhrases: []
-    }),
+    payload([patch("loweronly", "food shop")]),
     ctx({
       attempts: [
-        { tier: "standard", model: "v3-turbo-q5", transcript: longLocal }
+        { tier: "standard", model: "v3-turbo", transcript: "this has loweronly token" },
+        { tier: "max", model: "v3", transcript: "the base has no such token here at all" }
       ]
     })
+  );
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_all_patches_dropped");
+});
+
+test("drops a low-confidence patch", () => {
+  const out = parseRefinementResponse(
+    payload([patch("future", "food shop", { confidence: "low" })]),
+    ctx()
+  );
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_all_patches_dropped");
+});
+
+test("empty corrections keeps the base verbatim (skipped, base stays selected)", () => {
+  const out = parseRefinementResponse(payload([]), ctx());
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_no_corrections");
+});
+
+test("honours the model's own rejectReason", () => {
+  const out = parseRefinementResponse(
+    payload([patch("future", "food shop")], { rejectReason: "too garbled to patch" }),
+    ctx()
+  );
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_self_rejected");
+});
+
+test("rejects invalid JSON", () => {
+  const out = parseRefinementResponse("not json", ctx());
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_invalid_json");
+});
+
+test("rejects an empty response", () => {
+  const out = parseRefinementResponse("   ", ctx());
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_empty_response");
+});
+
+test("rejects a patch whose replacement introduces a duplicated window", () => {
+  // The Lanre "looking at different videos online ... looking at
+  // different videos online" failure: a patch whose `to` duplicates a
+  // phrase already in the base is rejected outright.
+  const base =
+    "i was just like kind of looking at different videos online and just trying to see different perspectives you know";
+  const out = parseRefinementResponse(
+    payload([
+      patch(
+        "and just trying to see different perspectives",
+        "and just like kind of looking at different videos online",
+        { type: "obvious_context_fix" }
+      )
+    ]),
+    ctx({ attempts: [{ tier: "max", model: "v3", transcript: base }] })
+  );
+  assert.equal(out.kind, "skipped");
+  assert.equal(out.reason, "refinement_introduced_duplicate");
+});
+
+test("rejects a patch that shrinks the transcript below 88% of the base", () => {
+  const base =
+    "yeah i did do well when i say food shop i use food shop so loosely because the way i do a food shop is i buy the ingredients for the meal i want to cook";
+  const out = parseRefinementResponse(
+    payload([
+      patch(
+        "because the way i do a food shop is i buy the ingredients for the meal i want to cook",
+        ""
+      )
+    ]),
+    ctx({ attempts: [{ tier: "max", model: "v3", transcript: base }] })
   );
   assert.equal(out.kind, "skipped");
   assert.equal(out.reason, "refinement_too_short");
 });
 
-test("parseAndSanitise drops a hallucinated refinement (novel content)", () => {
+test("caps changesMade and uncertainPhrases at 10", () => {
+  const tokens = Array.from({ length: 16 }, (_, i) => String.fromCharCode(97 + i).repeat(2));
+  const base = tokens.join(" ");
+  const corrections = tokens.slice(0, 12).map((tok) => patch(tok, tok.toUpperCase()));
+  const uncertain = Array.from({ length: 16 }, (_, i) => `phrase${i}`);
   const out = parseRefinementResponse(
-    JSON.stringify({
-      // Completely unrelated content — no tokens overlap with the
-      // local transcript or nearby messages.
-      correctedTranscript:
-        "kubernetes pods orchestration manifest deployment ingress controller",
-      confidence: "high",
-      changesMade: [],
-      uncertainPhrases: []
-    }),
-    ctx()
-  );
-  assert.equal(out.kind, "skipped");
-  assert.equal(out.reason, "refinement_hallucinated");
-});
-
-test("parseAndSanitise caps changesMade and uncertainPhrases at 10 each", () => {
-  const manyChanges = Array.from({ length: 20 }, (_, i) => ({
-    from: `from${i}`,
-    to: `to${i}`,
-    reason: `reason${i}`
-  }));
-  const manyUncertain = Array.from({ length: 20 }, (_, i) => `phrase${i}`);
-  const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript:
-        "yeah I did do well when I say food shop I use food shop so loosely",
-      confidence: "medium",
-      changesMade: manyChanges,
-      uncertainPhrases: manyUncertain
-    }),
-    ctx()
+    payload(corrections, { uncertainPhrases: uncertain }),
+    ctx({ attempts: [{ tier: "max", model: "v3", transcript: base }] })
   );
   assert.equal(out.kind, "ok");
   assert.equal(out.result.changesMade.length, 10);
   assert.equal(out.result.uncertainPhrases.length, 10);
 });
 
-test("parseAndSanitise strips em / en dashes from output", () => {
-  // Keep the corrected text close to the local transcript so the
-  // hallucination guard doesn't fire — we're only checking dash
-  // stripping here. The em / en dashes are inserted in places that
-  // wouldn't normally appear in raw Whisper output.
+test("strips em / en dashes from the patched output and metadata", () => {
   const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript:
-        "yeah I did do well — when I say food shop I use food shop – so loosely",
-      confidence: "medium",
-      changesMade: [{ from: "future—nope", to: "food shop", reason: "fix dash" }],
+    payload([patch("future", "food — shop", { confidence: "medium", evidence: "fix – dash" })], {
       uncertainPhrases: ["weird — phrase"]
     }),
     ctx()
   );
   assert.equal(out.kind, "ok");
-  assert.ok(!/[—–]/.test(out.result.correctedTranscript), "no em/en dash should remain");
-  assert.ok(!/[—–]/.test(out.result.changesMade[0].from), "changes must be dash-free");
-  assert.ok(!/[—–]/.test(out.result.uncertainPhrases[0]));
+  assert.ok(!/[—–]/.test(out.result.correctedTranscript), "no dash in transcript");
+  assert.ok(!/[—–]/.test(out.result.changesMade[0].to), "no dash in change.to");
+  assert.ok(!/[—–]/.test(out.result.uncertainPhrases[0]), "no dash in uncertain");
+  assert.equal(out.result.confidence, "medium");
 });
 
-test("parseAndSanitise rejects empty or non-string correctedTranscript", () => {
-  const empty = parseRefinementResponse(
-    JSON.stringify({ correctedTranscript: "", confidence: "low" }),
+test("drift guard: onlyPatchedRegionsChanged accepts a clean splice, rejects a silent edit", () => {
+  // The splice in parseAndSanitise makes out-of-patch drift impossible
+  // by construction, so it cannot be triggered through the public
+  // parser. We test the guard function directly: a clean output passes,
+  // a silent edit OUTSIDE the patch span ("foo" -> "FOO") is caught.
+  const base = "hello world foo bar";
+  const patches = [{ to: "WORLD", baseStart: 6, baseEnd: 11 }];
+  assert.equal(onlyPatchedRegionsChanged(base, "hello WORLD foo bar", patches), true);
+  assert.equal(onlyPatchedRegionsChanged(base, "hello WORLD FOO bar", patches), false);
+});
+
+test("applies multiple non-overlapping patches in base order", () => {
+  const base = "the good lord and the futur are near";
+  const out = parseRefinementResponse(
+    payload([
+      patch("futur", "future"),
+      patch("good lord", "Good Lord", { type: "casing_only" })
+    ]),
+    ctx({ attempts: [{ tier: "max", model: "v3", transcript: base }] })
+  );
+  assert.equal(out.kind, "ok");
+  assert.equal(out.result.correctedTranscript, "the Good Lord and the future are near");
+  assert.equal(out.result.changesMade.length, 2);
+});
+
+test("rawJson records accepted corrections and dropped patches for audit", () => {
+  const out = parseRefinementResponse(
+    payload([
+      patch("future", "food shop"),
+      patch("not in base", "whatever"),
+      patch("food", "FOOD", { confidence: "low" })
+    ]),
     ctx()
   );
-  assert.equal(empty.kind, "skipped");
-  assert.equal(empty.reason, "refinement_empty_transcript");
-});
-
-test("parseAndSanitise rejects invalid JSON", () => {
-  const out = parseRefinementResponse("not json", ctx());
-  assert.equal(out.kind, "skipped");
-  assert.equal(out.reason, "refinement_invalid_json");
-});
-
-test("parseAndSanitise rejects a refinement that drops a phrase present in 2+ local attempts", () => {
-  // Mirrors the Lanre regression: two local models both transcribed
-  // "a serious food shop like i used to do" but the refiner removed
-  // it for readability. With consensus 3-grams the sanitiser catches
-  // this as a stylistic rewrite, not an ASR correction.
-  //
-  // The total transcript is long enough that dropping the consensus
-  // phrase keeps shrinkRatio comfortably above 0.88 (so it's the
-  // consensus guard that fires, not the shrink guard). This mirrors
-  // the real Lanre proportions: ~1500 chars, ~40 chars dropped.
-  const longTail =
-    " and then um what's it called i didn't end up reading i don't even know what i wanted to do i think i wanted to read my non-fiction book well like non-fiction just i just have no desire to read it plus when i was about to read i got distracted because i basically saw this video on tiktok and it made me think about something like really deeply and i was just the concept of like is god just or like the argument is that god isn't just or like god can't be just and then all knowing and then all loving and all those things and all powerful and stuff like that so i was genuinely starting to think about what it actually means to be just so i was just sitting down and i was just like actually just writing about it and just like kind of looking at different videos online and just trying to see different perspectives i come to my own like thoughts you know and then it was just so hot so after i did that like i just laid on my bed naked and then i just fell asleep and then i woke up again and then what did i do after that oh i cleaned my room a bit and then this place is getting long oh oh";
-  const phraseInBoth =
-    "yeah i did do well when i say food shop i use food shop so loosely because the way i do a food shop is i buy the ingredients for the meal i want to cook like in time if i was doing like a serious food shop like i used to do like i'd buy for things i wanted to cook for the week" +
-    longTail;
-  const ctxWithRepeats = ctx({
-    attempts: [
-      { tier: "standard", model: "v3-turbo-q5", transcript: phraseInBoth },
-      { tier: "max", model: "v3", transcript: phraseInBoth }
-    ]
-  });
-  // Refiner dropped "a serious food shop like i used to do" — every
-  // 3-gram inside that span is now missing.
-  const droppedSpan =
-    "yeah i did do well when i say food shop i use food shop so loosely because the way i do a food shop is i buy the ingredients for the meal i want to cook like in time if i was doing like i'd buy for things i wanted to cook for the week" +
-    longTail;
-  const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript: droppedSpan,
-      confidence: "high",
-      changesMade: [],
-      uncertainPhrases: []
-    }),
-    ctxWithRepeats
-  );
-  assert.equal(out.kind, "skipped");
-  assert.equal(out.reason, "refinement_dropped_consensus_phrases");
-});
-
-test("parseAndSanitise accepts a refinement that fixes a homophone without changing structure", () => {
-  // The Lanre theology fix ("good just" → "god just") should still
-  // pass: the corrected text preserves every consensus 3-gram and the
-  // shrink ratio is roughly 1.0.
-  const local1 =
-    "i was thinking about whether god is just or whether good is just it was on tiktok and it made me think really deeply about what it actually means to be just";
-  const local2 =
-    "i was thinking about whether god is just or whether good is just it was on tiktok and it made me think really deeply about what it actually means to be just";
-  const ctxHomophone = ctx({
-    attempts: [
-      { tier: "standard", model: "v3-turbo-q5", transcript: local1 },
-      { tier: "max", model: "v3", transcript: local2 }
-    ]
-  });
-  const corrected =
-    "i was thinking about whether god is just or whether god is just it was on tiktok and it made me think really deeply about what it actually means to be just";
-  const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript: corrected,
-      confidence: "high",
-      changesMade: [{ from: "good", to: "god", reason: "context: theology" }],
-      uncertainPhrases: []
-    }),
-    ctxHomophone
-  );
   assert.equal(out.kind, "ok");
-  assert.match(out.result.correctedTranscript, /whether god is just or whether god/);
-});
-
-test("parseAndSanitise consensus guard does not fire with only one local attempt", () => {
-  // Consensus by definition requires 2+ attempts. A single attempt
-  // can't form consensus, so the guard short-circuits.
-  const onlyOne = ctx({
-    attempts: [
-      {
-        tier: "max",
-        model: "v3",
-        transcript:
-          "yeah I did do well when I say food shop I use food shop so loosely because the way I do a food shop is I buy ingredients"
-      }
-    ]
-  });
-  // Heavily edited corrected; shrinkRatio is still > 0.88 so the
-  // short-text guard doesn't fire either.
-  const corrected =
-    "yeah I did do well when I say food shop I use food shop so loosely because how I food shop is I buy ingredients";
-  const out = parseRefinementResponse(
-    JSON.stringify({
-      correctedTranscript: corrected,
-      confidence: "medium",
-      changesMade: [],
-      uncertainPhrases: []
-    }),
-    onlyOne
-  );
-  // Passes — no consensus to enforce. (The single-attempt case is
-  // best-effort; the orchestrator only runs refinement when standard
-  // OR max produced text, so in production there's usually one local
-  // attempt to compare against.)
-  assert.equal(out.kind, "ok");
+  const audit = JSON.parse(out.result.rawJson);
+  assert.equal(audit.corrections.length, 1);
+  assert.equal(audit.corrections[0].from, "future");
+  assert.ok(audit.dropped.some((d) => d.reason === "patch_from_not_found"));
+  assert.ok(audit.dropped.some((d) => d.reason === "low_confidence"));
 });
