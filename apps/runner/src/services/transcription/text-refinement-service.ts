@@ -80,6 +80,30 @@ export type RefinementOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; errorMessage: string };
 
+/** Category for a single proposed substring correction. */
+export type RefinementPatchType =
+  | "asr_word_error"
+  | "name_fix"
+  | "obvious_context_fix"
+  | "casing_only";
+
+/**
+ * One proposed substring replacement against the authoritative base
+ * transcript. The model only ever proposes these; the app verifies
+ * each `from` exists in the base and splices the approved ones in
+ * deterministically (see {@link parseAndSanitise}).
+ */
+export interface RefinementCorrection {
+  /** Exact substring of the base transcript to replace. */
+  from: string;
+  /** Replacement text. */
+  to: string;
+  type: RefinementPatchType;
+  confidence: "low" | "medium" | "high";
+  /** One short sentence justifying the patch. */
+  evidence: string;
+}
+
 export interface TextRefinementService {
   refine(context: RefinementContext): Promise<RefinementOutcome>;
 }
@@ -171,57 +195,73 @@ export function createTextRefinementService(input: {
   };
 }
 
-const DEFAULT_SYSTEM_PROMPT = `You are correcting an automatic speech recognition transcript. You are NOT rewriting the speaker. You are NOT polishing the prose. You are NOT summarising. Your only job is to fix specific likely ASR mistakes.
+const DEFAULT_SYSTEM_PROMPT = `You are reviewing a transcript produced by Whisper. The highest-tier transcript is the base. Do not rewrite it. Do not improve style. Do not remove filler. Do not merge lower-tier text into it.
 
-You will receive multiple competing local Whisper transcripts of the same audio plus nearby conversation context. The HIGHEST-TIER transcript is the most accurate; treat it as the ground truth for what was actually said. Use the others only to spot ambiguous moments where the models disagree.
+Your job is only to propose exact substring replacements for likely ASR errors.
 
-ABSOLUTE PRESERVATION RULES — these are non-negotiable:
-- Preserve all hesitations, filler ("um", "uh", "like", "you know"), repetitions, false starts, run-on sentences, and rough phrasing exactly as the highest-tier transcript has them.
-- Preserve the speaker's slang, casualness, and any awkward grammar.
-- Preserve any phrase that appears across two or more of the local transcripts — that's strong evidence the speaker actually said it, even if it reads as redundant or repetitive.
-- Do NOT collapse repeated phrases for readability. If the speaker said "a serious food shop like I used to do" and that appears in 2+ local transcripts, keep it.
-- Do NOT shorten the transcript. Word count should be within a few percent of the highest-tier local transcript.
-- Do NOT add punctuation, capitalisation, or sentence breaks beyond what's already there.
-- Do NOT add words or facts that don't appear in the local transcripts or nearby messages.
+Return JSON patches only. If there are no safe corrections, return an empty corrections array.
 
-WHAT YOU CAN CHANGE:
-- A clear ASR error where one local model heard one word ("future") and another heard a different word ("food shop") and the conversational context makes one of them obviously correct.
-- A homophone or near-homophone fix (e.g. "god" vs "good") supported by the surrounding messages.
-- A name that one model spelled incorrectly when context makes the right spelling clear.
+A correction is safe only if:
+- the base substring is probably an ASR mistake
+- the replacement is strongly supported by another transcript, nearby conversation context, or the phrase itself
+- the correction does not remove filler, hesitation, repetition, slang, or rough speech
+- the correction does not add new facts
 
-WHEN IN DOUBT:
-- Prefer the highest-tier local transcript verbatim.
-- Set confidence to "low" and leave changesMade empty.
+Do not correct grammar. Do not polish punctuation. Do not shorten. Do not summarise.
 
-OUTPUT FORMAT:
-Output JSON only. Required shape:
+Each "from" MUST be copied verbatim from the BASE transcript (character for character, including its existing casing and punctuation) so the app can locate it. If you cannot anchor a fix to an exact base substring, do not propose it. Keep each "from" tight: the few words around the mistake, not a whole sentence.
+
+Green-light examples (only when the surrounding context supports them):
+- "future" -> "food shop" when the talk is about meal planning
+- "good just" -> "God just" when the talk is about theology
+- "this place is getting long" -> "this voice note is getting long" at the end of a voice note about itself
+- obvious homophone fixes and name-spelling fixes the context makes clear
+
+If the transcript is too garbled to patch safely, set "rejectReason" to a short explanation and return an empty corrections array.
+
+OUTPUT FORMAT - output JSON only, with exactly this shape:
 {
-  "correctedTranscript": string,
-  "confidence": "low" | "medium" | "high",
-  "changesMade": Array<{ "from": string, "to": string, "reason": string }>,
-  "uncertainPhrases": string[]
-}
-
-Every entry in changesMade must correspond to an actual word-level change you made. If you didn't change anything, return the highest-tier local transcript verbatim and an empty changesMade array.`;
+  "baseModel": string,
+  "corrections": Array<{
+    "from": string,
+    "to": string,
+    "type": "asr_word_error" | "name_fix" | "obvious_context_fix" | "casing_only",
+    "confidence": "low" | "medium" | "high",
+    "evidence": string
+  }>,
+  "uncertainPhrases": string[],
+  "rejectReason": string | null
+}`;
 
 /**
  * Build the user prompt. Exposed for tests so they can assert the
  * model sees the attempts + context in the expected shape.
  */
 export function buildUserPrompt(context: RefinementContext): string {
+  const base = pickBaseAttempt(context.attempts);
   const lines: string[] = [];
   lines.push(`Voice message metadata:`);
   lines.push(`- direction: ${context.direction}`);
   lines.push(`- speaker: ${context.speakerRole}`);
   lines.push(``);
-  lines.push(`Local Whisper transcript attempts (best last):`);
-  for (const attempt of context.attempts) {
-    lines.push(`--- tier=${attempt.tier} model=${attempt.model}`);
-    lines.push(attempt.transcript.trim());
+  if (base) {
+    lines.push(
+      `BASE transcript (model=${base.model}, tier=${base.tier}). This is the authoritative text. Anchor every "from" to an exact substring of THIS text:`
+    );
+    lines.push(base.transcript.trim());
+    lines.push(``);
   }
-  lines.push(``);
+  const others = context.attempts.filter((a) => a !== base);
+  if (others.length > 0) {
+    lines.push(`Lower-tier transcripts (EVIDENCE ONLY, never copy from these directly):`);
+    for (const attempt of others) {
+      lines.push(`--- tier=${attempt.tier} model=${attempt.model}`);
+      lines.push(attempt.transcript.trim());
+    }
+    lines.push(``);
+  }
   if (context.nearbyMessages.length > 0) {
-    lines.push(`Nearby thread messages:`);
+    lines.push(`Nearby thread messages (context only):`);
     for (const m of context.nearbyMessages) {
       const who = m.direction === "OUT" ? "operator" : "contact";
       const text = m.text.trim();
@@ -232,7 +272,7 @@ export function buildUserPrompt(context: RefinementContext): string {
     lines.push(`Nearby thread messages: (none)`);
   }
   lines.push(``);
-  lines.push(`Return JSON only. Prefer the highest-tier local transcript if uncertain.`);
+  lines.push(`Return JSON patches only. If there are no safe corrections, return an empty corrections array.`);
   return lines.join("\n");
 }
 
@@ -241,10 +281,58 @@ type Parsed =
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; errorMessage: string };
 
+const TIER_RANK: Record<RefinementTier, number> = { fast: 1, standard: 2, max: 3 };
+
 /**
- * Post-parse sanitiser. Enforces the cost-safety + hallucination
- * guards described in the system prompt. Exposed for tests so they
- * can hit each branch with a hand-crafted JSON payload.
+ * Pick the authoritative base attempt: highest tier wins, ties broken
+ * by the later entry (the orchestrator appends best-last). Null for an
+ * empty attempt list.
+ */
+export function pickBaseAttempt(
+  attempts: ReadonlyArray<RefinementAttempt>
+): RefinementAttempt | null {
+  let best: RefinementAttempt | null = null;
+  for (const a of attempts) {
+    if (!best || TIER_RANK[a.tier] >= TIER_RANK[best.tier]) best = a;
+  }
+  return best;
+}
+
+const PATCH_TYPES: readonly RefinementPatchType[] = [
+  "asr_word_error",
+  "name_fix",
+  "obvious_context_fix",
+  "casing_only"
+];
+
+interface AppliedPatch {
+  from: string;
+  to: string;
+  type: RefinementPatchType;
+  confidence: "medium" | "high";
+  evidence: string;
+  /** Span consumed in the base transcript. */
+  baseStart: number;
+  baseEnd: number;
+}
+
+/**
+ * Post-parse sanitiser for the PATCH-based refinement contract.
+ *
+ * The model proposes substring corrections against the highest-tier
+ * local transcript (the base). The app, not the model, builds the
+ * final string by splicing accepted patches into the base, so the
+ * output can only ever differ from the base inside an explicitly
+ * approved patch region. Cross-tier merging and silent rewrites are
+ * therefore impossible by construction; the guards below catch the
+ * residual hazards (a replacement that introduces a duplicate, a net
+ * shrink, or a bug in application).
+ *
+ * Every rejection path returns `kind:"skipped"` (the orchestrator
+ * keeps the base verbatim and persists an audit row); `kind:"ok"` is
+ * returned only when at least one safe patch survived every guard.
+ * Exposed for tests so they can hit each branch with a hand-crafted
+ * JSON payload.
  */
 export function parseAndSanitise(
   rawContent: string,
@@ -263,110 +351,111 @@ export function parseAndSanitise(
     return { kind: "skipped", reason: "refinement_invalid_json" };
   }
   const obj = parsedJson as Record<string, unknown>;
-  const corrected =
-    typeof obj.correctedTranscript === "string" ? obj.correctedTranscript.trim() : "";
-  if (corrected.length === 0) {
-    return { kind: "skipped", reason: "refinement_empty_transcript" };
-  }
-  // Guard 1: corrected transcript must not be drastically shorter
-  // than the best local attempt. With the tightened system prompt the
-  // refiner shouldn't shrink at all, so the floor is intentionally
-  // strict: ANY shrink under 88% of the highest-tier local is
-  // treated as the refiner rewriting style, not fixing ASR. The old
-  // "duplicate trimming is fine" exception is removed because we
-  // explicitly tell the model in the system prompt NOT to collapse
-  // repeated phrases.
-  const bestLocal = context.attempts[context.attempts.length - 1]?.transcript?.trim() ?? "";
-  if (bestLocal.length > 0) {
-    const shrinkRatio = corrected.length / bestLocal.length;
-    if (shrinkRatio < 0.88) {
-      return { kind: "skipped", reason: "refinement_too_short" };
-    }
+
+  const baseAttempt = pickBaseAttempt(context.attempts);
+  const base = baseAttempt?.transcript?.trim() ?? "";
+  if (base.length === 0) {
+    return { kind: "skipped", reason: "refinement_no_base" };
   }
 
-  // Guard 2: consensus phrase drops. A 3-gram (sequence of three
-  // adjacent ≥3-char tokens) that appears in TWO OR MORE local
-  // transcripts is strong evidence the speaker actually said it.
-  //
-  // We don't reject on the *count* of missing consensus grams
-  // (homophone fixes legitimately drop 1-2 grams clustered around the
-  // changed word). Instead we look for a RUN: ≥4 consecutive
-  // positions in the highest-tier local transcript where every
-  // consensus 3-gram is missing from the corrected output. A run
-  // that long can only come from removing a contiguous chunk of
-  // speech the speaker actually said, not from fixing an ASR error.
-  //
-  // For the Lanre regression — "a serious food shop like i used to
-  // do" cut from the corrected text — the missing 3-grams form a run
-  // of 7+ positions and the guard fires. A two-word homophone fix
-  // produces a missing run of length 2 and slips through cleanly.
-  if (context.attempts.length >= 2) {
-    const consensusGrams = computeConsensus3grams(context.attempts);
-    if (consensusGrams.size > 0) {
-      const highestTokens = tokenise(bestLocal);
-      const correctedGramsSet = new Set(buildTokenNgrams(tokenise(corrected), 3));
-      let currentRun = 0;
-      let longestRun = 0;
-      for (let i = 0; i + 3 <= highestTokens.length; i += 1) {
-        const gram = highestTokens.slice(i, i + 3).join("|");
-        if (!consensusGrams.has(gram)) {
-          currentRun = 0;
-          continue;
-        }
-        if (correctedGramsSet.has(gram)) {
-          currentRun = 0;
-        } else {
-          currentRun += 1;
-          if (currentRun > longestRun) longestRun = currentRun;
-        }
-      }
-      if (longestRun >= 4) {
-        return { kind: "skipped", reason: "refinement_dropped_consensus_phrases" };
-      }
-    }
-  }
-  // Guard 2: corrected transcript must not introduce content that
-  // doesn't appear in ANY local attempt OR the nearby messages. We
-  // approximate "doesn't appear" by token-overlap.
-  const haystackTokens = new Set<string>();
-  for (const attempt of context.attempts) {
-    tokenise(attempt.transcript).forEach((t) => haystackTokens.add(t));
-  }
-  for (const m of context.nearbyMessages) {
-    tokenise(m.text).forEach((t) => haystackTokens.add(t));
-  }
-  if (haystackTokens.size > 0) {
-    const correctedTokens = tokenise(corrected);
-    const novel = correctedTokens.filter((t) => !haystackTokens.has(t)).length;
-    const novelRatio = novel / Math.max(correctedTokens.length, 1);
-    if (novelRatio > 0.4) {
-      // More than 40% of tokens come from neither the local
-      // transcripts nor the nearby messages — that's the signature of
-      // a hallucinated rewrite. Drop the refinement and let the
-      // selector keep the local transcript.
-      return { kind: "skipped", reason: "refinement_hallucinated" };
-    }
+  // The refiner may self-reject the whole pass (e.g. transcript too
+  // garbled to patch safely).
+  if (typeof obj.rejectReason === "string" && obj.rejectReason.trim().length > 0) {
+    return { kind: "skipped", reason: "refinement_self_rejected" };
   }
 
-  const confidence: "low" | "medium" | "high" =
-    obj.confidence === "high" ? "high" : obj.confidence === "low" ? "low" : "medium";
-
-  // Cap arrays so a chatty model can't bloat the row size.
-  let changesMade: Array<{ from: string; to: string; reason: string }> = [];
-  if (Array.isArray(obj.changesMade)) {
-    changesMade = obj.changesMade
-      .filter(
-        (entry): entry is { from: unknown; to: unknown; reason: unknown } =>
-          entry !== null && typeof entry === "object"
-      )
-      .map((entry) => ({
-        from: stripDashes(String(entry.from ?? "").slice(0, 200)),
-        to: stripDashes(String(entry.to ?? "").slice(0, 200)),
-        reason: stripDashes(String(entry.reason ?? "").slice(0, 200))
-      }))
-      .filter((entry) => entry.from.length > 0 || entry.to.length > 0)
-      .slice(0, 10);
+  const rawCorrections = Array.isArray(obj.corrections) ? obj.corrections : [];
+  if (rawCorrections.length === 0) {
+    // Nothing to do: the base stands verbatim. The orchestrator still
+    // persists a skipped audit row and keeps selectedTier at max.
+    return { kind: "skipped", reason: "refinement_no_corrections" };
   }
+
+  const accepted: AppliedPatch[] = [];
+  const dropped: Array<{ from: string; reason: string }> = [];
+  const consumed: Array<[number, number]> = [];
+
+  for (const entry of rawCorrections) {
+    if (!entry || typeof entry !== "object") {
+      dropped.push({ from: "", reason: "malformed" });
+      continue;
+    }
+    const c = entry as Record<string, unknown>;
+    const from = typeof c.from === "string" ? c.from : "";
+    const to = typeof c.to === "string" ? stripDashes(c.to.slice(0, 400)) : "";
+    const confidence =
+      c.confidence === "high" ? "high" : c.confidence === "medium" ? "medium" : "low";
+    const type: RefinementPatchType = PATCH_TYPES.includes(c.type as RefinementPatchType)
+      ? (c.type as RefinementPatchType)
+      : "asr_word_error";
+    const evidence = stripDashes(String(c.evidence ?? "").slice(0, 200));
+
+    if (from.length === 0) {
+      dropped.push({ from, reason: "empty_from" });
+      continue;
+    }
+    if (confidence === "low") {
+      // Low-confidence patches are dropped, never applied.
+      dropped.push({ from, reason: "low_confidence" });
+      continue;
+    }
+    if (from === to) {
+      dropped.push({ from, reason: "noop" });
+      continue;
+    }
+    const at = firstFreeOccurrence(base, from, consumed);
+    if (at === -1) {
+      // `from` is not a verbatim substring of the base (or only
+      // overlaps an already-patched span). Cannot anchor it safely.
+      dropped.push({ from, reason: "patch_from_not_found" });
+      continue;
+    }
+    const end = at + from.length;
+    consumed.push([at, end]);
+    accepted.push({ from, to, type, confidence, evidence, baseStart: at, baseEnd: end });
+  }
+
+  if (accepted.length === 0) {
+    return { kind: "skipped", reason: "refinement_all_patches_dropped" };
+  }
+
+  accepted.sort((a, b) => a.baseStart - b.baseStart);
+  const output = applyAcceptedPatches(base, accepted);
+
+  // Drift guard (belt-and-braces): splicing guarantees the output
+  // differs from the base only inside accepted patch spans. Verify the
+  // invariant held; any violation means a bug in application, never a
+  // model rewrite.
+  if (!onlyPatchedRegionsChanged(base, output, accepted)) {
+    return { kind: "skipped", reason: "refinement_silent_edits" };
+  }
+
+  // Shrink guard (carried over from #384): a net shrink under 88% of
+  // the base means patches stripped speech rather than fixing words.
+  if (output.length / base.length < 0.88) {
+    return { kind: "skipped", reason: "refinement_too_short" };
+  }
+
+  // Duplicate guard: a replacement must not introduce a repeated
+  // 5-10 word window the base didn't already repeat (the Lanre
+  // "looking at different videos online ... looking at different
+  // videos online" failure).
+  if (introducesDuplicateWindow(base, output)) {
+    return { kind: "skipped", reason: "refinement_introduced_duplicate" };
+  }
+
+  const confidence: "low" | "medium" | "high" = accepted.some((p) => p.confidence === "medium")
+    ? "medium"
+    : "high";
+
+  const changesMade = accepted
+    .map((p) => ({
+      from: stripDashes(p.from.slice(0, 200)),
+      to: p.to.slice(0, 200),
+      reason: p.evidence
+    }))
+    .slice(0, 10);
+
   let uncertainPhrases: string[] = [];
   if (Array.isArray(obj.uncertainPhrases)) {
     uncertainPhrases = obj.uncertainPhrases
@@ -376,15 +465,26 @@ export function parseAndSanitise(
       .slice(0, 10);
   }
 
+  const baseModel =
+    typeof obj.baseModel === "string" && obj.baseModel.length > 0
+      ? obj.baseModel
+      : baseAttempt?.model ?? "";
+
   const sanitised: Omit<RefinementSuccess, "model"> = {
-    correctedTranscript: stripDashes(corrected),
+    correctedTranscript: output,
     confidence,
     changesMade,
     uncertainPhrases,
     rawJson: JSON.stringify({
-      correctedTranscript: stripDashes(corrected),
-      confidence,
-      changesMade,
+      baseModel,
+      corrections: accepted.map((p) => ({
+        from: p.from,
+        to: p.to,
+        type: p.type,
+        confidence: p.confidence,
+        evidence: p.evidence
+      })),
+      dropped,
       uncertainPhrases
     })
   };
@@ -392,57 +492,104 @@ export function parseAndSanitise(
   return { kind: "ok", result: sanitised };
 }
 
-/** Tokenise on word boundaries and lowercase. */
-function tokenise(input: string): string[] {
+/**
+ * Index of the first occurrence of `sub` in `base` whose span does not
+ * overlap an already-consumed region. -1 when none exists.
+ */
+function firstFreeOccurrence(
+  base: string,
+  sub: string,
+  consumed: ReadonlyArray<[number, number]>
+): number {
+  let from = 0;
+  for (;;) {
+    const idx = base.indexOf(sub, from);
+    if (idx === -1) return -1;
+    const end = idx + sub.length;
+    const overlaps = consumed.some(([s, e]) => idx < e && s < end);
+    if (!overlaps) return idx;
+    from = idx + 1;
+  }
+}
+
+/**
+ * Splice accepted patches (sorted by baseStart, non-overlapping spans)
+ * into the base. The output differs from the base only inside the
+ * patched spans, where each base span is replaced by the patch `to`.
+ */
+function applyAcceptedPatches(base: string, accepted: ReadonlyArray<AppliedPatch>): string {
+  let out = "";
+  let cursor = 0;
+  for (const p of accepted) {
+    out += base.slice(cursor, p.baseStart);
+    out += p.to;
+    cursor = p.baseEnd;
+  }
+  out += base.slice(cursor);
+  return out;
+}
+
+/**
+ * Walking diff: confirm `output` equals `base` everywhere EXCEPT inside
+ * the accepted patch spans, where it equals each patch's `to`. Patches
+ * must be sorted by baseStart and have non-overlapping spans. Exposed
+ * for direct testing of the drift guard.
+ */
+export function onlyPatchedRegionsChanged(
+  base: string,
+  output: string,
+  accepted: ReadonlyArray<{ to: string; baseStart: number; baseEnd: number }>
+): boolean {
+  let bCur = 0;
+  let oCur = 0;
+  for (const p of accepted) {
+    const gap = p.baseStart - bCur;
+    if (gap < 0) return false;
+    if (base.slice(bCur, p.baseStart) !== output.slice(oCur, oCur + gap)) return false;
+    oCur += gap;
+    if (output.slice(oCur, oCur + p.to.length) !== p.to) return false;
+    oCur += p.to.length;
+    bCur = p.baseEnd;
+  }
+  return base.slice(bCur) === output.slice(oCur);
+}
+
+/**
+ * True when `output` contains a repeated 5-10 word window that appears
+ * fewer than twice in `base` (i.e. the repetition is newly introduced
+ * by a patch). Exposed for direct testing of the duplicate guard.
+ */
+export function introducesDuplicateWindow(base: string, output: string): boolean {
+  const baseTokens = wordTokens(base);
+  const outTokens = wordTokens(output);
+  for (let n = 5; n <= 10; n += 1) {
+    if (outTokens.length < n) break;
+    const outCounts = windowCounts(outTokens, n);
+    const baseCounts = windowCounts(baseTokens, n);
+    for (const [window, count] of outCounts) {
+      if (count >= 2 && (baseCounts.get(window) ?? 0) < 2) return true;
+    }
+  }
+  return false;
+}
+
+/** Lowercased word tokens (punctuation stripped, all lengths kept). */
+function wordTokens(input: string): string[] {
   return input
     .toLowerCase()
     .replace(/[^a-z0-9'\s]/g, " ")
     .split(/\s+/)
-    .filter((t) => t.length >= 3); // ignore very short filler / stopwords
+    .filter((t) => t.length > 0);
 }
 
-/**
- * Build all overlapping n-grams from a token stream as
- * pipe-separated strings (so they're cheap to put in a Set).
- * Returns an empty array when the input is shorter than `n`.
- */
-function buildTokenNgrams(tokens: string[], n: number): string[] {
-  if (tokens.length < n) return [];
-  const out: string[] = [];
-  for (let i = 0; i + n <= tokens.length; i += 1) {
-    out.push(tokens.slice(i, i + n).join("|"));
-  }
-  return out;
-}
-
-/**
- * Find every 3-gram that appears in TWO OR MORE of the local
- * transcripts. These are the speaker's actual phrases — at least
- * two independent ASR models agreed on them — so the refiner must
- * preserve them. Dropping these is the signature of a stylistic
- * rewrite, which is what the sanitiser rejects.
- */
-function computeConsensus3grams(
-  attempts: ReadonlyArray<{ transcript: string }>
-): Set<string> {
+/** Count every contiguous n-word window in a token stream. */
+function windowCounts(tokens: ReadonlyArray<string>, n: number): Map<string, number> {
   const counts = new Map<string, number>();
-  for (const attempt of attempts) {
-    const tokens = tokenise(attempt.transcript);
-    const seenInThisAttempt = new Set<string>();
-    for (const gram of buildTokenNgrams(tokens, 3)) {
-      // Count each gram at most once per attempt so a transcript that
-      // genuinely repeats a phrase doesn't inflate the consensus
-      // count by itself.
-      if (seenInThisAttempt.has(gram)) continue;
-      seenInThisAttempt.add(gram);
-      counts.set(gram, (counts.get(gram) ?? 0) + 1);
-    }
+  for (let i = 0; i + n <= tokens.length; i += 1) {
+    const window = tokens.slice(i, i + n).join(" ");
+    counts.set(window, (counts.get(window) ?? 0) + 1);
   }
-  const out = new Set<string>();
-  for (const [gram, count] of counts) {
-    if (count >= 2) out.add(gram);
-  }
-  return out;
+  return counts;
 }
 
 /**
