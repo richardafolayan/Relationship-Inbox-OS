@@ -116,3 +116,38 @@ test("foldSynthesizedReactions: chained reaction texts don't attribute to each o
   assert.equal(hiddenMessageIds.has("m3"), true);
   assert.equal(synthesizedByParentId.get("m1")?.length, 2);
 });
+
+test("foldSynthesizedReactions: prefers an exact match over a more-recent prefix bubble", () => {
+  const messages = [
+    { id: "m1", direction: "OUT", text: "Hi" },
+    { id: "m2", direction: "OUT", text: "Hi there, are you free?" },
+    { id: "m3", direction: "IN", text: 'Reacted 👍 to "Hi"' }
+  ];
+  const { synthesizedByParentId, hiddenMessageIds } = foldSynthesizedReactions(messages);
+  assert.equal(hiddenMessageIds.has("m3"), true);
+  // The exact "Hi" wins; the longer bubble that merely starts with "Hi"
+  // must not steal the reaction.
+  assert.equal(synthesizedByParentId.has("m1"), true);
+  assert.equal(synthesizedByParentId.has("m2"), false);
+});
+
+test("foldSynthesizedReactions: folds a truncated (ellipsis) quote onto its unique parent", () => {
+  const messages = [
+    { id: "m1", direction: "OUT", text: "Can you send me the full report by tomorrow afternoon?" },
+    { id: "m2", direction: "IN", text: 'Reacted ❤ to "Can you send me the full…"' }
+  ];
+  const { synthesizedByParentId, hiddenMessageIds } = foldSynthesizedReactions(messages);
+  assert.equal(hiddenMessageIds.has("m2"), true);
+  assert.equal(synthesizedByParentId.has("m1"), true);
+});
+
+test("foldSynthesizedReactions: leaves a truncated quote visible when the prefix is ambiguous", () => {
+  const messages = [
+    { id: "m1", direction: "OUT", text: "Thanks so much for everything you did" },
+    { id: "m2", direction: "OUT", text: "Thanks so much for the quick turnaround" },
+    { id: "m3", direction: "IN", text: 'Reacted ❤ to "Thanks so much for…"' }
+  ];
+  const { synthesizedByParentId, hiddenMessageIds } = foldSynthesizedReactions(messages);
+  assert.equal(hiddenMessageIds.has("m3"), false);
+  assert.equal(synthesizedByParentId.size, 0);
+});

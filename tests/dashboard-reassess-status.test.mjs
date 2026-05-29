@@ -37,18 +37,19 @@ test("signalReassessStart: increments in-flight count", () => {
   assert.equal(_reassessCountForTests(), 0);
 });
 
-test("signalReassessStart: same threadId is idempotent (counts as one)", () => {
+test("signalReassessStart: same threadId counts once but stays in flight until the last stop", () => {
   const s1 = signalReassessStart("thread-b");
   const s2 = signalReassessStart("thread-b");
-  // Two starts for the same thread should not double-count — the
-  // ticker doesn't show "Reassessing 2 threads" for one operator
-  // double-click.
+  // The ticker still shows one distinct thread, not "Reassessing 2 threads".
   assert.equal(_reassessCountForTests(), 1);
   s1();
-  // The second stop should be a no-op since the first already cleared
-  // the thread from in-flight.
-  assert.equal(_reassessCountForTests(), 0);
+  // The first stop must NOT clear the indicator while a sibling reassess of
+  // the same thread is still running (the bug this fix addresses).
+  assert.equal(_reassessCountForTests(), 1);
   s2();
+  assert.equal(_reassessCountForTests(), 0);
+  // Idempotent: a redundant stop must not under-count.
+  s1();
   assert.equal(_reassessCountForTests(), 0);
 });
 

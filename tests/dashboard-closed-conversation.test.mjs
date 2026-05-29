@@ -32,10 +32,20 @@ test("farewells read as closed", () => {
   assert.equal(closed("take care"), true);
 });
 
-test("pure emoji reactions read as closed", () => {
-  assert.equal(closed("👍"), true);
-  assert.equal(closed("🙏"), true);
-  assert.equal(closed("❤️"), true);
+test("bare reactions do not close on the heuristic-only path", () => {
+  // A bare emoji or a "liked" tapback might be reacting to an unanswered
+  // ask we sent, so without an AI verdict the thread stays visible.
+  assert.equal(closed("👍"), false);
+  assert.equal(closed("🙏"), false);
+  assert.equal(closed("❤️"), false);
+  assert.equal(closed("liked your message"), false);
+});
+
+test("a bare reaction still closes when the AI verdict says closed", () => {
+  assert.equal(
+    isLikelyClosed({ preview: "👍", lastMessageDirection: IN, closedStatus: "closed" }),
+    true
+  );
 });
 
 test("a question or ask keeps the thread open even if it starts with thanks", () => {
