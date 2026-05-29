@@ -7,6 +7,7 @@ import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { openPilotFeedback } from "@/lib/pilot";
+import { paletteItemMatches } from "@/lib/command-palette-search";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -21,6 +22,10 @@ interface PaletteItem {
   // The "press enter" affordance (↵) is shown only on the active row,
   // not baked per-item — so we don't mix ↩/scan/↗ glyphs (#436 R-0058).
   kind: string;
+  // Full searchable text (#132): person name + the whole latest-message
+  // preview, so a number past the truncated label is still findable.
+  // Omitted for page/action entries — their label is already the whole text.
+  search?: string;
   run: () => void;
 }
 
@@ -92,13 +97,14 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       return {
         id: `thread-${thread.id}`,
         label: `${thread.personName} - ${preview.slice(0, 60)}${preview.length > 60 ? "…" : ""}`,
+        search: `${thread.personName} ${preview}`,
         kind: PLATFORM_LABEL[thread.platform],
         run: () => router.push(`/thread/${thread.id}`)
       };
     });
     const all = [...pages, ...threadItems];
     if (!query.trim()) return all.slice(0, 8);
-    return all.filter((item) => item.label.toLowerCase().includes(query.toLowerCase())).slice(0, 12);
+    return all.filter((item) => paletteItemMatches(item, query)).slice(0, 12);
   }, [query, router, threads]);
 
   useEffect(() => {
