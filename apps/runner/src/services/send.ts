@@ -466,6 +466,7 @@ export function createSendService(deps: SendServiceDeps) {
     clientSendId: string;
     scheduledFor: Date;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    replyToMessageId?: string;
   }): Promise<ScheduleSendResult> {
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -507,6 +508,7 @@ export function createSendService(deps: SendServiceDeps) {
           requestText: input.text,
           status: "SCHEDULED",
           scheduledFor: input.scheduledFor,
+          replyToMessageId: input.replyToMessageId ?? null,
           attachmentsJson: input.attachments && input.attachments.length > 0
             ? JSON.stringify(input.attachments)
             : null

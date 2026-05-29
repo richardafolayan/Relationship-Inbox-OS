@@ -14,6 +14,7 @@ import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
 import {
   mirrorRequiredToOpenLoops,
   sanitizeReplyBrief,
+  stripBannedPhrases,
   synthesiseFallbackBrief
 } from "./reply-brief";
 import type {
@@ -1792,12 +1793,16 @@ ${transcript}`;
     // Build the typed SummaryOutput explicitly — `result.reply_brief` is
     // `unknown` per the permissive zod schema, so we cannot just return
     // `result` directly without a type clash against SummaryOutput.
+    // User-facing summary fields share the brief's scrub: strip banned
+    // coaching phrases + em/en dashes (the hard UI-copy rule) before they
+    // render into the Today hero, thread rail, and inbox preview. Mirrors
+    // what reply_brief fields already get via sanitizeReplyBrief.
     const output: SummaryOutput = {
-      summary: result.summary,
-      what_they_want: result.what_they_want,
-      open_loops: finalOpenLoops,
+      summary: stripBannedPhrases(result.summary),
+      what_they_want: safeTruncate(stripBannedPhrases(result.what_they_want), 120),
+      open_loops: finalOpenLoops.map((loop) => stripBannedPhrases(loop)).filter((loop) => loop.length > 0),
       remember: result.remember,
-      tone_notes: result.tone_notes,
+      tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
       needs_reply: result.needs_reply,
       urgency_hint: result.urgency_hint,
       reply_brief: finalBrief
@@ -2494,7 +2499,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       if (
         gapDays < 14 ||
         !lastInbound ||
-        (lastOutbound && lastInbound.timestamp < lastOutbound.timestamp)
+        (Number.isFinite(lastOutboundAt) && lastInboundAt < lastOutboundAt)
       ) {
         return "";
       }
@@ -2507,7 +2512,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       } else {
         suggestions = `e.g. "Sorry for the late reply", "sorry only just seeing this"`;
       }
-      return `\nThe operator hasn't replied in ${days} days. Open with a brief, natural acknowledgement of the gap in his register (${suggestions}) — pick whichever fits, don't dwell on it, name it once and move on.`;
+      return `\nThe operator hasn't replied in ${days} days. Open with a brief, natural acknowledgement of the gap in their register (${suggestions}) — pick whichever fits, don't dwell on it, name it once and move on.`;
     })();
 
     // Cross-thread relationship hint. Pulled from the dashboard's
@@ -2551,7 +2556,7 @@ Recipient: ${input.displayName}
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
 ${recipientSamples.length > 0 ? `\nRecipient's recent messages on this thread (oldest first — match their tempo, length, and warmth, not just the last line):\n${recipientSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n")}` : ""}
-${lastInbound ? `\nLast message from recipient: ${safeTruncate(lastInbound.text, 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(renderMessageBody(lastInbound), 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -2620,7 +2625,7 @@ Pick at most 3 snooze targets. Each target is:
 - hours: integer hours to snooze, between 1 and 72 (max 3 days, matches the snooze route limit)
 - reason: 1 short sentence quoting the trigger phrase from the message
 
-Return strict JSON: { "suggestions": [{ "label": "string", "hours": 1-168, "reason": "string" }] }
+Return strict JSON: { "suggestions": [{ "label": "string", "hours": 1-72, "reason": "string" }] }
 If the message has no time hint, return { "suggestions": [] }.`;
 
     try {
@@ -2638,20 +2643,29 @@ If the message has no time hint, return { "suggestions": [] }.`;
       });
       const content = response.choices[0]?.message?.content;
       if (!content) return { suggestions: [] };
-      const parsed = z
-        .object({
-          suggestions: z
-            .array(
-              z.object({
-                label: z.string().min(1).max(40),
-                hours: z.number().int().min(1).max(72),
-                reason: z.string().min(1).max(220)
-              })
-            )
-            .max(3)
+      const itemSchema = z.object({
+        label: z.string().min(1).max(40),
+        hours: z.number().int().min(1).max(72),
+        reason: z.string().min(1).max(220)
+      });
+      const raw = parseAiJson(content, model) as { suggestions?: unknown };
+      const rawList = Array.isArray(raw?.suggestions) ? raw.suggestions : [];
+      // Validate per-item and keep the valid ones. A single malformed or
+      // out-of-range entry (e.g. the model returns a 96h "next week" target)
+      // must not throw out the whole batch; clamp hours into [1,72] first so
+      // a slightly-too-large hint is kept at the ceiling rather than dropped.
+      const suggestions = rawList
+        .map((entry) => {
+          const candidate =
+            entry && typeof entry === "object" && "hours" in entry && typeof (entry as { hours: unknown }).hours === "number"
+              ? { ...(entry as Record<string, unknown>), hours: Math.min(72, Math.max(1, Math.round((entry as { hours: number }).hours))) }
+              : entry;
+          const result = itemSchema.safeParse(candidate);
+          return result.success ? result.data : null;
         })
-        .parse(parseAiJson(content, model));
-      return parsed;
+        .filter((entry): entry is z.infer<typeof itemSchema> => entry !== null)
+        .slice(0, 3);
+      return { suggestions };
     } catch (error) {
       console.warn(
         `[ai] suggestSnoozeTimings failed (provider=${provider}, model=${model}); returning empty list. ${classifyLlmError(error, provider)}`

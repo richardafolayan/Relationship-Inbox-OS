@@ -11,6 +11,7 @@ import type {
 } from "./provider";
 import {
   pickHigherTier,
+  TIER_RANK,
   type Attempt as SelectorAttempt,
   type AttemptTier,
   type SelectedTranscript
@@ -581,6 +582,11 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           });
         }
       }
+      // findMany returns rows in no guaranteed order, but the refiner treats
+      // the LAST attempt as the highest-tier ground truth (best last). Sort
+      // by tier rank so a fast/standard/max ordering is enforced regardless
+      // of how SQLite returns the rows.
+      liveAttempts.sort((a, b) => (TIER_RANK[a.tier] ?? 0) - (TIER_RANK[b.tier] ?? 0));
       if (parent.selectedTier && parent.transcript) {
         selection = {
           tier: parent.selectedTier as AttemptTier,
