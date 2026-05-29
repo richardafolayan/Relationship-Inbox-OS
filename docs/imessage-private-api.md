@@ -152,9 +152,17 @@ kind with `unsupported_kind` (to exercise the degrade path);
 
 ## Installing the real helper (advanced, external)
 
-The runner integrates with a helper; it does **not** ship one. Two open-source
-projects already implement native iMessage send via Messages.app's private API,
-and the connector portion of either can be adapted to speak the protocol above:
+> **The supported real-delivery path is the BlueBubbles bridge** —
+> `tools/bluebubbles-helper-bridge.mjs` (run via `npm run bridge:bluebubbles`).
+> It speaks the protocol above and forwards to a local BlueBubbles server, so
+> you don't have to build/inject your own bundle. Follow the step-by-step
+> [real-helper runbook](./imessage-real-helper-runbook.md) — SIP-off,
+> BlueBubbles install, and verification included.
+
+The runner integrates with a helper; it does **not** ship an injector. Two
+open-source projects already implement native iMessage send via Messages.app's
+private API; the BlueBubbles bridge above reuses one of them, but the connector
+portion of either can also be adapted to speak the protocol directly:
 
 - **imessage-rs** — Rust core plus a dedicated Swift Private API connector. The
   Swift connector is the cleanly separable part.
