@@ -19,6 +19,7 @@ import { prisma } from "../db";
 import { effectiveLastOutboundAt } from "./reaction-effects.js";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
+import { shouldRefreshGroupDisplayName } from "../platforms/imessage-group-name";
 import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
@@ -2678,6 +2679,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       (await prisma.person.create({
         data: {
           displayName: candidate.displayName,
+          displayNameSource: "auto",
           platform,
           avatarUrl: candidateAvatarUrl,
           profileUrl: candidateProfileUrl,
@@ -2742,6 +2744,35 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     });
 
+    // Group rename refresh. v1 models a group as a Thread pointing at a
+    // synthetic Person whose displayName IS the group name, so the whole
+    // dashboard reads the group name off person.displayName. When a group
+    // is renamed the platform-authoritative name (candidate.groupName)
+    // changes, but the person-identity lookup above keys on displayName and
+    // therefore misses the existing synthetic row — leaving the established
+    // thread link pointing at the stale name. Re-stamp the existing thread's
+    // linked person directly, under the same no-clobber rule as profileUrl:
+    // an operator rename ("manual") is never overwritten.
+    if (existing && candidate.isGroup && candidate.groupName) {
+      const linkedPerson = await prisma.person.findUnique({
+        where: { id: existing.personId }
+      });
+      if (
+        linkedPerson &&
+        shouldRefreshGroupDisplayName({
+          isGroup: candidate.isGroup,
+          groupName: candidate.groupName,
+          currentDisplayName: linkedPerson.displayName,
+          currentSource: linkedPerson.displayNameSource
+        })
+      ) {
+        await prisma.person.update({
+          where: { id: existing.personId },
+          data: { displayName: candidate.groupName, displayNameSource: "auto" }
+        });
+      }
+    }
+
     const thread =
       existing ??
       (await prisma.thread.create({
@@ -2753,7 +2784,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           unreadCount: candidate.unreadCount ?? 0,
           lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
           lastMessageAt: candidateListTimestamp ?? undefined,
-          needsReply: Boolean(candidate.needsReplyFromList)
+          needsReply: Boolean(candidate.needsReplyFromList),
+          isGroup: Boolean(candidate.isGroup),
+          groupName: candidate.groupName ?? null
         }
       }));
 
@@ -3299,6 +3332,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // first resolution still applies on first creation.
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
+        // Keep the thread's group flags current, but never wipe a known
+        // name: a group renamed on another device reports isGroup with no
+        // groupName, and we'd rather keep the last name we saw than blank it.
+        isGroup: candidate.isGroup ?? thread.isGroup,
+        groupName: candidate.groupName ?? thread.groupName,
         lastMessagePreview: resolvedLastMessagePreview || null,
         // Phase 2: track who sent the most recent message + its text, so the
         // inbox-row preview reflects the latest of either party. Without

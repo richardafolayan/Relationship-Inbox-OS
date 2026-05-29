@@ -13,6 +13,7 @@ import type {
 import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
+import { groupStubFields } from "./imessage-group-name";
 import { sendIMessage } from "./imessage-send";
 import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
 
@@ -110,7 +111,8 @@ export class IMessageAdapter implements PlatformAdapter {
         : row.lastMessagePreview,
       lastMessageAt: row.lastMessageAt,
       isUnreadCandidate: isUnread,
-      isRecentCandidate: isRecent
+      isRecentCandidate: isRecent,
+      ...groupStubFields(row)
     };
   }
 
