@@ -41,6 +41,7 @@ import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
+import { resummarizeThread } from "./services/resummarize-thread";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
@@ -3002,88 +3003,19 @@ function isStaleSummary(rollingSummary: string | null | undefined, displayName: 
 // self-heal path when a stored summary still matches the fallback
 // updateThreadSummary writes on AI failure (no API key / quota /
 // model error).
-async function resummarizeThreadById(
+// Thin wrapper over services/resummarize-thread.ts. The pipeline (and the
+// issue #385 transcript-refresh clearing wired into the summary write) lives
+// there so it is testable without booting Express. `race` opts two AI
+// providers into the cross-provider race; only operator-initiated paths
+// (Reassess) set it — it doubles provider spend per raced call.
+function resummarizeThreadById(
   threadId: string,
-  options?: {
-    /**
-     * Race two AI providers and keep the first valid result (issue
-     * #382 — pilot R-0029). Only set this from operator-initiated,
-     * user-visible paths (Reassess endpoint). Doubles provider spend
-     * per raced call.
-     */
-    race?: boolean;
-  }
+  options?: { race?: boolean }
 ): Promise<
   | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
   | { ok: false; reason: "not_found" }
 > {
-  const thread = await prisma.thread.findUnique({
-    where: { id: threadId },
-    include: { person: true }
-  });
-  if (!thread) {
-    return { ok: false, reason: "not_found" };
-  }
-
-  // Mirror the live /data/thread view: for iMessage, merge messages
-  // across sibling threads for the same Person (chat.db splits a single
-  // human's phone vs email handles into separate chats). LinkedIn stays
-  // thread-scoped.
-  const messageThreadFilter =
-    thread.platform === "IMESSAGE"
-      ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
-      : { threadId: thread.id };
-  // Fetch the most RECENT 120 messages (desc + take) then reverse to
-  // chronological order. An `asc + take` returns the OLDEST 120 — on a
-  // long thread that starves the summariser of the live conversation and
-  // it summarises stale opening banter instead.
-  const recentMessagesDesc = await prisma.message.findMany({
-    where: messageThreadFilter,
-    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
-    take: 120,
-    include: { audioTranscription: true }
-  });
-  const orderedMessages = [...recentMessagesDesc].reverse();
-
-  // Resummarize is driven by the operator clicking "Reassess" or by the
-  // stale-summary self-heal path. Recompute needsReply from the thread's
-  // own message ordering so the mode-aware prompt picks the right
-  // framing (active reply vs reopen).
-  const computedNeedsReply = Boolean(
-    thread.lastInboundAt &&
-      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
-  );
-  const summary = await aiService.updateThreadSummary({
-    displayName: thread.person.displayName,
-    previousSummary: thread.rollingSummary ?? undefined,
-    previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    previousRemember: thread.rememberJson
-      ? (JSON.parse(thread.rememberJson) as RememberItem[])
-      : [],
-    messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-    needsReply: computedNeedsReply,
-    race: options?.race
-  });
-
-  await prisma.thread.update({
-    where: { id: thread.id },
-    data: {
-      rollingSummary: summary.summary,
-      whatTheyWant: summary.what_they_want,
-      openLoopsJson: JSON.stringify(summary.open_loops),
-      toneNotesJson: JSON.stringify(summary.tone_notes),
-      rememberJson: JSON.stringify(summary.remember),
-      replyBriefJson: summary.reply_brief ? JSON.stringify(summary.reply_brief) : null
-    }
-  });
-
-  return {
-    ok: true,
-    summary: summary.summary,
-    whatTheyWant: summary.what_they_want,
-    openLoops: summary.open_loops,
-    needsReply: summary.needs_reply
-  };
+  return resummarizeThread({ prisma, aiService, siblingThreadIds }, threadId, options);
 }
 
 app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
