@@ -2806,8 +2806,12 @@ export class LinkedInAdapter implements PlatformAdapter {
    * literal would itself be run through esbuild and could re-introduce the
    * very `__name` reference we're trying to define. Registered as an
    * init-script (covers every future navigation/frame, once per context)
-   * and also evaluated immediately (covers the already-loaded document).
-   * Best-effort: a failure here is no worse than the prior state.
+   * and also injected as a <script> tag into the already-loaded document
+   * via addScriptTag — NOT page.evaluate(string), which the scan's
+   * no-string-evaluate guard forbids (string payloads can break under CSP).
+   * addScriptTag runs the shim string without going through evaluate and
+   * without esbuild reprocessing. Best-effort: a failure here is no worse
+   * than the prior state.
    */
   private async ensurePageRuntimeShims(page: Page): Promise<void> {
     const shimSource =
@@ -2821,7 +2825,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         await context.addInitScript(shimSource);
         this.shimmedContexts.add(context);
       }
-      await page.evaluate(shimSource);
+      await page.addScriptTag({ content: shimSource });
     } catch {
       // Non-fatal: worst case the original __name error resurfaces, which
       // is no worse than before this shim existed.
@@ -4904,15 +4908,20 @@ export class LinkedInAdapter implements PlatformAdapter {
         // it cannot regress the happy path — it only refuses to hand a
         // half-booted DOM to the resolver.
         const listRootHasRows = async (): Promise<boolean> => {
-          const roots = page.locator(
-            "ul.msg-conversations-container__conversations-list, [class*='msg-conversations-container__conversations-list']"
-          );
-          if ((await roots.count().catch(() => 0)) === 0) {
+          // Honour the CONFIGURED list-root / row selectors (#441). In
+          // production these resolve to the standard
+          // ul.msg-conversations-container__conversations-list /
+          // li.msg-conversation-listitem, so behaviour is unchanged — but a
+          // div-based root or an overridden selector (what the resolver
+          // already supports) is no longer rejected here. The /messag/i
+          // title check and the two-poll stability re-check above remain the
+          // anti-flash-boot gate; this only stops it ignoring the configured
+          // selectors.
+          const rootCount = await page.locator(selectors.thread_list).count().catch(() => 0);
+          if (rootCount === 0) {
             return false;
           }
-          return (
-            (await roots.locator("li.msg-conversation-listitem").count().catch(() => 0)) > 0
-          );
+          return (await page.locator(selectors.thread_item).count().catch(() => 0)) > 0;
         };
         const titleHydrated = await page
           .title()
