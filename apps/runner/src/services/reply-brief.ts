@@ -309,10 +309,11 @@ export function synthesiseFallbackBrief(args: {
       ? "They're waiting on a reply, but nothing specific has been asked. A short acknowledgement is enough."
       : "Nothing pending from them right now.";
 
-  const required = (args.openLoops ?? [])
-    .map((loop, i) => coercePoint(loop, "required", i))
-    .filter((p): p is ReplyBriefPoint => p !== null)
-    .slice(0, MAX_REQUIRED_POINTS);
+  const required = dedupeByText(
+    (args.openLoops ?? [])
+      .map((loop, i) => coercePoint(loop, "required", i))
+      .filter((p): p is ReplyBriefPoint => p !== null)
+  ).slice(0, MAX_REQUIRED_POINTS);
 
   return {
     where_it_stands: whereItStands,
