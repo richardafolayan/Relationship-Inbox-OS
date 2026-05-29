@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synthetic LinkedIn profile (grouped sub-roles) | LinkedIn</title>
+    <style>
+      body {
+        margin: 16px;
+        font-family: Arial, sans-serif;
+      }
+      section {
+        border: 1px solid #d1d5db;
+        padding: 8px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- A single company entry with two nested sub-role <li>s. The parser
+           must surface exactly ONE top-level experience entry (the company
+           row), not three, and must not double-count the nested roles. -->
+      <section>
+        <h2><span aria-hidden="true">Experience</span></h2>
+        <ul>
+          <li>
+            <div><span aria-hidden="true">Acme Corporation</span></div>
+            <div><span aria-hidden="true">Full-time &middot; 6 yrs</span></div>
+            <ul>
+              <li>
+                <div><span aria-hidden="true">Senior Engineer</span></div>
+                <div><span aria-hidden="true">2022 - Present</span></div>
+              </li>
+              <li>
+                <div><span aria-hidden="true">Engineer</span></div>
+                <div><span aria-hidden="true">2020 - 2022</span></div>
+              </li>
+            </ul>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>

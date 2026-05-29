@@ -494,20 +494,11 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
         if (candidates[0]) aboutText = candidates[0];
       }
 
-      // ----- Experience / Education / Skills / Licenses -----
-      // The new UI replaced semantic <li> rows with hashed-class <div>
-      // sub-components, and there's no stable structural marker for an
-      // entry boundary. Doing this reliably is a bigger DOM-exploration
-      // exercise — left for a follow-up. We surface presence-only signals
-      // here (a flag the AI prompts can use later) and return empty
-      // arrays for now, which is honest rather than fabricating partial
-      // structured data.
-      const presence = {
-        experience: !!findSectionByH2("Experience"),
-        education: !!findSectionByH2("Education"),
-        skills: !!findSectionByH2("Skills"),
-        licenses: !!findSectionByH2("Licenses & certifications")
-      };
+      // Experience / Education / Skills / Services / Licenses are parsed by
+      // extractProfileSections() in a separate pass (see below). Splitting
+      // the structural section parser out of this top-card evaluate lets it
+      // be unit-tested against DOM fixtures in isolation; this evaluate
+      // intentionally stops at the header / top-card fields.
 
       const textNotFound = (document.body?.innerText ?? "").toLowerCase().includes("page not found");
 
@@ -520,15 +511,9 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
         location: locationText,
         currentRole,
         currentCompany,
-        experience: [] as Array<{ title: string | null; company: string | null; dates: string | null; description: string | null }>,
-        education: [] as Array<{ institution: string | null; degree: string | null; field: string | null; dates: string | null }>,
-        skills: [] as string[],
-        services: [] as string[],
-        licenses: [] as Array<{ name: string | null; issuer: string | null; dates: string | null }>,
         followersCount,
         mutualCount,
         mutualNames,
-        presence,
         textNotFound
       };
     })
@@ -563,6 +548,29 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
     };
   }
 
+  // Structured sections (experience / education / skills / services /
+  // licenses) are parsed in a separate pass on the same loaded page. A
+  // null result (evaluate threw) degrades to empty arrays — the top-card
+  // fields above are still worth persisting on their own.
+  const sections = (await extractProfileSections(page)) ?? {
+    experience: [],
+    education: [],
+    skills: [],
+    services: [],
+    licenses: [],
+    presence: { experience: false, education: false, skills: false, services: false, licenses: false }
+  };
+  // Fail loud, don't fabricate: if a section heading is present but the
+  // structural parser pulled zero entries, LinkedIn's per-entry DOM has
+  // likely shifted. Log it and keep the array empty rather than guessing.
+  for (const key of ["experience", "education", "skills", "services", "licenses"] as const) {
+    if (sections.presence[key] && (sections[key] as unknown[]).length === 0) {
+      console.warn(
+        `[linkedin-profile-adapter] "${key}" section present but 0 entries parsed for ${raw.slug || profileUrl} — selectors may be outdated (kept empty, not fabricated)`
+      );
+    }
+  }
+
   return {
     headline: raw.headline ? safeTruncate(cleanText(raw.headline), 240) : null,
     about: raw.about ? safeTruncate(cleanText(raw.about), 4_000) : null,
@@ -571,21 +579,21 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
     currentRole: raw.currentRole ? safeTruncate(cleanText(raw.currentRole), 160) : null,
     mutualCount: typeof raw.mutualCount === "number" && Number.isFinite(raw.mutualCount) ? raw.mutualCount : null,
     followersCount: typeof raw.followersCount === "number" && Number.isFinite(raw.followersCount) ? raw.followersCount : null,
-    experience: (raw.experience ?? []).map((e) => ({
+    experience: (sections.experience ?? []).map((e) => ({
       title: e.title ? safeTruncate(cleanText(e.title), 160) : null,
       company: e.company ? safeTruncate(cleanText(e.company), 160) : null,
       dates: e.dates ? safeTruncate(cleanText(e.dates), 80) : null,
       description: e.description ? safeTruncate(cleanText(e.description), 600) : null
     })),
-    education: (raw.education ?? []).map((e) => ({
+    education: (sections.education ?? []).map((e) => ({
       institution: e.institution ? safeTruncate(cleanText(e.institution), 160) : null,
       degree: e.degree ? safeTruncate(cleanText(e.degree), 120) : null,
       field: e.field ? safeTruncate(cleanText(e.field), 120) : null,
       dates: e.dates ? safeTruncate(cleanText(e.dates), 80) : null
     })),
-    skills: (raw.skills ?? []).slice(0, 12).map((s) => safeTruncate(cleanText(s), 120)),
-    services: (raw.services ?? []).slice(0, 8).map((s) => safeTruncate(cleanText(s), 120)),
-    licenses: (raw.licenses ?? []).slice(0, 10).map((l) => ({
+    skills: (sections.skills ?? []).slice(0, 12).map((s) => safeTruncate(cleanText(s), 120)),
+    services: (sections.services ?? []).slice(0, 8).map((s) => safeTruncate(cleanText(s), 120)),
+    licenses: (sections.licenses ?? []).slice(0, 10).map((l) => ({
       name: l.name ? safeTruncate(cleanText(l.name), 160) : null,
       issuer: l.issuer ? safeTruncate(cleanText(l.issuer), 160) : null,
       dates: l.dates ? safeTruncate(cleanText(l.dates), 80) : null
@@ -595,6 +603,226 @@ async function extractMainProfile(page: Page, profileUrl: string): Promise<Profi
     recentReactions: [],
     mutualNames: (raw.mutualNames ?? []).slice(0, 8).map((s) => safeTruncate(cleanText(s), 120))
   };
+}
+
+export interface ProfileSections {
+  experience: Array<{
+    title: string | null;
+    company: string | null;
+    dates: string | null;
+    description: string | null;
+  }>;
+  education: Array<{
+    institution: string | null;
+    degree: string | null;
+    field: string | null;
+    dates: string | null;
+  }>;
+  skills: string[];
+  services: string[];
+  licenses: Array<{ name: string | null; issuer: string | null; dates: string | null }>;
+  presence: {
+    experience: boolean;
+    education: boolean;
+    skills: boolean;
+    services: boolean;
+    licenses: boolean;
+  };
+}
+
+/**
+ * Parse the structured profile sections (Experience, Education, Skills,
+ * Services, Licenses & certifications) from an already-loaded profile
+ * page. Runs as its own `page.evaluate` so it can be unit-tested against
+ * DOM fixtures in isolation — production calls it from extractMainProfile
+ * once the profile page is loaded; it performs no navigation of its own.
+ *
+ * The parser is purely structural and uses no hashed class names:
+ *  - sections are located by their <h2> heading text;
+ *  - entries are the top-level <li> rows under a section (nested sub-role
+ *    and description <li>s are excluded);
+ *  - each entry's visible lines are read from `span[aria-hidden="true"]`
+ *    whose nearest <li> ancestor is the entry itself (LinkedIn renders
+ *    each line as a visible aria-hidden span plus an off-screen
+ *    `.visually-hidden` twin — reading only the aria-hidden side avoids
+ *    duplicates).
+ *
+ * It deliberately never fabricates: a present-but-unparseable section
+ * yields an empty array (the caller logs a fail-loud warning). Returns
+ * null only if the evaluate itself throws.
+ */
+export async function extractProfileSections(page: Page): Promise<ProfileSections | null> {
+  return page
+    .evaluate(() => {
+      function clean(value: string | null | undefined): string {
+        return (value ?? "").replace(/\s+/g, " ").trim();
+      }
+
+      function findSectionByH2(label: string): HTMLElement | null {
+        const sections = Array.from(document.querySelectorAll("section"));
+        return (sections.find((s) => {
+          const h2 = s.querySelector("h2") as HTMLElement | null;
+          if (!h2) return false;
+          const t = (h2.innerText || "").trim();
+          // Headings can carry a count suffix, e.g. "Skills (15)".
+          return t === label || t.startsWith(`${label} (`);
+        }) ?? null) as HTMLElement | null;
+      }
+
+      // A line is a "date" line if it carries a 4-digit year or "Present".
+      const dateRe = /\b(?:19|20)\d{2}\b|\bpresent\b/i;
+
+      // Top-level entry rows under a section: <li>s that hold at least one
+      // header span and are not themselves nested inside another <li> of
+      // the same section (which excludes grouped sub-roles and the
+      // description bullet list).
+      function entryItems(section: HTMLElement): HTMLElement[] {
+        const lis = Array.from(section.querySelectorAll("li")) as HTMLElement[];
+        return lis.filter((li) => {
+          if (!li.querySelector('span[aria-hidden="true"]')) return false;
+          const parentLi = li.parentElement ? li.parentElement.closest("li") : null;
+          if (parentLi && section.contains(parentLi)) return false;
+          return true;
+        });
+      }
+
+      // Visible header lines of a single entry, in document order, with
+      // consecutive duplicates collapsed. Only spans whose nearest <li>
+      // ancestor is THIS entry count — spans inside nested role/description
+      // <li>s are skipped.
+      function headerLines(entry: HTMLElement): string[] {
+        const spans = Array.from(
+          entry.querySelectorAll('span[aria-hidden="true"]')
+        ) as HTMLElement[];
+        const out: string[] = [];
+        for (const s of spans) {
+          if (s.closest("li") !== entry) continue;
+          const t = clean(s.textContent);
+          if (!t) continue;
+          if (out.length && out[out.length - 1] === t) continue;
+          out.push(t);
+        }
+        return out;
+      }
+
+      // Free-text role description: the longest aria-hidden blob in the
+      // entry that isn't already one of the short header lines.
+      function descriptionOf(entry: HTMLElement, used: string[]): string | null {
+        const spans = Array.from(
+          entry.querySelectorAll('span[aria-hidden="true"]')
+        ) as HTMLElement[];
+        let best: string | null = null;
+        for (const s of spans) {
+          const t = clean(s.textContent);
+          if (t.length <= 60 || used.includes(t)) continue;
+          if (!best || t.length > best.length) best = t;
+        }
+        return best;
+      }
+
+      function firstDate(lines: string[]): string | null {
+        return lines.find((l) => dateRe.test(l)) ?? null;
+      }
+
+      // "Acme Corp · Full-time" → "Acme Corp"; "BSc, Computer Science" left
+      // intact (only the middot separator is stripped here).
+      function beforeMiddot(value: string | null): string | null {
+        if (!value) return value;
+        const head = value.split(/\s+·\s+/)[0] ?? value;
+        return head.trim() || null;
+      }
+
+      // Flat list of names for chip-style sections (Skills / Services):
+      // one name per entry, falling back to splitting the section body on
+      // separators when the section has no <li> rows.
+      function nameList(section: HTMLElement | null): string[] {
+        if (!section) return [];
+        const entries = entryItems(section);
+        const names: string[] = [];
+        if (entries.length) {
+          for (const e of entries) {
+            const line = headerLines(e)[0];
+            if (line) names.push(line);
+          }
+        } else {
+          const heading = (section.querySelector("h2") as HTMLElement | null)?.innerText ?? "";
+          const body = clean((section.innerText || "").replace(heading, ""));
+          for (const part of body.split(/\s*[·,\n]\s*/)) {
+            const t = clean(part);
+            if (t) names.push(t);
+          }
+        }
+        // De-dupe while preserving order.
+        const seen = new Set<string>();
+        return names.filter((n) => (seen.has(n) ? false : (seen.add(n), true)));
+      }
+
+      const experienceSection = findSectionByH2("Experience");
+      const educationSection = findSectionByH2("Education");
+      const skillsSection = findSectionByH2("Skills");
+      const servicesSection = findSectionByH2("Services");
+      const licensesSection = findSectionByH2("Licenses & certifications");
+
+      const experience = experienceSection
+        ? entryItems(experienceSection).map((entry) => {
+            const lines = headerLines(entry);
+            const dates = firstDate(lines);
+            const companyLine = lines[1] && !dateRe.test(lines[1]) ? lines[1] : null;
+            const used = [lines[0], lines[1], dates].filter(Boolean) as string[];
+            return {
+              title: lines[0] || null,
+              company: beforeMiddot(companyLine),
+              dates,
+              description: descriptionOf(entry, used)
+            };
+          })
+        : [];
+
+      const education = educationSection
+        ? entryItems(educationSection).map((entry) => {
+            const lines = headerLines(entry);
+            const dates = firstDate(lines);
+            // Second line is usually "Degree, Field of study".
+            const degreeLine = lines[1] && !dateRe.test(lines[1]) ? lines[1] : null;
+            let degree: string | null = degreeLine;
+            let field: string | null = null;
+            if (degreeLine && degreeLine.includes(",")) {
+              const idx = degreeLine.indexOf(",");
+              degree = degreeLine.slice(0, idx).trim() || null;
+              field = degreeLine.slice(idx + 1).trim() || null;
+            }
+            return { institution: lines[0] || null, degree, field, dates };
+          })
+        : [];
+
+      const licenses = licensesSection
+        ? entryItems(licensesSection).map((entry) => {
+            const lines = headerLines(entry);
+            const dates = firstDate(lines);
+            return {
+              name: lines[0] || null,
+              issuer: lines[1] && lines[1] !== dates ? lines[1] : null,
+              dates
+            };
+          })
+        : [];
+
+      return {
+        experience,
+        education,
+        skills: nameList(skillsSection),
+        services: nameList(servicesSection),
+        licenses,
+        presence: {
+          experience: !!experienceSection,
+          education: !!educationSection,
+          skills: !!skillsSection,
+          services: !!servicesSection,
+          licenses: !!licensesSection
+        }
+      };
+    })
+    .catch(() => null);
 }
 
 async function extractRecentPosts(
