@@ -31,6 +31,7 @@ import { createSelectorTestService, isSelectorTestServiceError } from "./service
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
+import { groupStubFields } from "./platforms/imessage-group-name";
 import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
@@ -1518,7 +1519,8 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
         platformThreadId: r.guid,
         displayName: resolveName(r),
         lastMessagePreview: r.lastMessagePreview ?? "",
-        lastMessageAt: r.lastMessageAt
+        lastMessageAt: r.lastMessageAt,
+        ...groupStubFields(r)
       };
       try {
         // High maxMessages so a full year of even chatty threads is
@@ -4711,7 +4713,9 @@ app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
     }
     const updated = await prisma.person.update({
       where: { id: personId },
-      data: { displayName: person.inferredName, inferredName: null }
+      // "manual" locks the name: auto-refresh (e.g. the iMessage group-name
+      // sync in scan-queue) must never overwrite an operator's choice.
+      data: { displayName: person.inferredName, displayNameSource: "manual", inferredName: null }
     });
     res.json({ status: "ok", displayName: updated.displayName });
     return;
@@ -4723,7 +4727,7 @@ app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
     }
     const updated = await prisma.person.update({
       where: { id: personId },
-      data: { displayName: payload.name, inferredName: null }
+      data: { displayName: payload.name, displayNameSource: "manual", inferredName: null }
     });
     res.json({ status: "ok", displayName: updated.displayName });
     return;

@@ -75,6 +75,12 @@ model Platform {
 model Person {
   id          String   @id @default(cuid())
   displayName String
+  // Provenance for displayName: "auto" when the row scanner set it from a
+  // platform-authoritative source (e.g. an iMessage group's chat name),
+  // "manual" when the operator confirmed/edited it via the dashboard, null
+  // for legacy rows. Auto-refresh never overwrites a manual value — mirrors
+  // profileUrlSource below.
+  displayNameSource String?
   // For platforms that don't expose a real name (iMessage stores phone
   // numbers / emails), we run a heuristic over outbound greetings ("Hi
   // Marianne") to guess one. Surfaced in the dashboard as a "Maybe …"
