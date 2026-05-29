@@ -32,6 +32,16 @@ export interface ThreadStub {
   needsReplyFromList?: boolean;
   isUnreadCandidate?: boolean;
   isRecentCandidate?: boolean;
+  /** True when the platform reports this thread as a group conversation. */
+  isGroup?: boolean;
+  /**
+   * The user-set group name as reported by the platform (e.g. the iMessage
+   * chat display name). Only populated for groups that have an explicit
+   * name. Downstream persists it onto the group thread's synthetic Person
+   * under `displayNameSource = "auto"`, so a manual rename is never
+   * overwritten.
+   */
+  groupName?: string;
 }
 
 export interface AttachmentPlaceholder {
