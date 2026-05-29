@@ -576,13 +576,13 @@ documented here instead of changed).
 - **CORE-6** `apps/runner/src/platforms/imessage-db.ts` — the unread-count subquery counted inbound tapbacks/reactions as unread messages. Now excludes the tapback ranges.
 - **CORE-7** `apps/runner/src/platforms/imessage-db.ts` — the inbox preview/last-author could be a tapback row ("[reaction or attachment]" with the reactor as author). The last-message subqueries now exclude tapbacks, mirroring the timeline filter.
 
-## PR2 — LinkedIn scraper hardening (Confirmed)
+## PR2 — LinkedIn scraper hardening (Fixed)
 
-- **LI-1** [high] `linkedin-adapter.ts` `collectThreadMessagesWithBackfill` — deep-fetch stamps a message with today's date when its group `<li>` lacks a date heading (later groups in a date run inherit no heading), reintroducing the timestamp drift #431 addressed. Fix: carry an inherited date heading like `collectVisibleThreadMessages` does.
-- **LI-2** [high] `linkedin-adapter.ts` `getActiveThreadDescriptor` — when no row carries the active CSS class it falls back to the FIRST inbox row, attributing the opened thread (and in the deep-fetch path, a canonical thread id) to the wrong person. Fix: return an empty descriptor; add aria-current/aria-selected signals.
-- **LI-3** [med] `linkedin-adapter.ts` — messages without a stable id get a positional fallback key that shifts across backfill scroll passes, duplicating timeline entries. Fix: content-fingerprint fallback key.
-- **LI-4** [med] `linkedin/linkedinIdentity.ts` — a `urn:li:msg_thread:` id is lowercased when it arrives via query param but not via the path token, so one thread can split into two records. Fix: route the path token through `extractStableLinkedInUrn` too.
-- **LI-6** [low] `linkedin-adapter.ts` — a read row is counted unread=1 when an empty unread-count container is present; multi-digit counts truncate. Fix: require a numeric badge; strip commas.
+- **LI-1** [high] `linkedin-adapter.ts` `collectThreadMessagesWithBackfill` — deep-fetch stamped a message with today's date when its group `<li>` lacked a date heading (later groups in a date run inherit no heading), reintroducing the timestamp drift #431 addressed. Fixed: carry an inherited date heading like `collectVisibleThreadMessages` does.
+- **LI-2** [high] `linkedin-adapter.ts` `getActiveThreadDescriptor` — when no row carried the active CSS class it fell back to the FIRST inbox row, attributing the opened thread (and in the deep-fetch path, a canonical thread id) to the wrong person. Fixed: return an empty descriptor (caller degrades to `page.url()`); add aria-current/aria-selected signals.
+- **LI-3** [med] `linkedin-adapter.ts` — messages without a stable id got a positional fallback key that shifted across backfill scroll passes, duplicating timeline entries. Fixed: content-fingerprint fallback key.
+- **LI-4** [med] `linkedin/linkedinIdentity.ts` — a `urn:li:msg_thread:` id was lowercased when it arrived via query param but not via the path token, so one thread could split into two records. Fixed: route the path token through `extractStableLinkedInUrn` too. Regression test: `tests/runner-linkedin-identity.test.mjs`.
+- **LI-6** [low] `linkedin-adapter.ts` — a read row was counted unread=1 when an empty unread-count container was present; multi-digit counts truncated at the comma. Fixed: require non-empty badge text; strip thousands separators.
 
 ## PR3 — Send / concurrency hardening (Confirmed)
 
