@@ -20,6 +20,24 @@ function selectorsForInbox(inboxUrl) {
   };
 }
 
+// Real LinkedIn sets a "...Messaging | LinkedIn" document title only after
+// the messaging app hydrates, and the adapter's hydration gate requires it
+// (a deliberate guard against returning rows on a half-booted SPA flash).
+// These fixtures model a hydrated inbox, so FORCE that title — most fixture
+// files carry their own descriptive <title> ("LinkedIn streaming ...
+// fixture") that doesn't match the adapter's /messag/i check, so we replace
+// it. The intentional list_hydration_timeout fixture opts out (it must NOT
+// hydrate) via createFixture({ hydratedTitle: false }).
+function ensureMessagingTitle(html) {
+  const title = "<title>Messaging | LinkedIn</title>";
+  if (/<title[^>]*>[\s\S]*?<\/title>/i.test(html)) {
+    return html.replace(/<title[^>]*>[\s\S]*?<\/title>/i, title);
+  }
+  if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => `${m}${title}`);
+  if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${title}</head>`);
+  return `${title}${html}`;
+}
+
 async function createFixture(options = {}) {
   const fixtureName = options.fixtureName ?? "streaming-virtualized.html";
   const selectorOverrides = options.selectorOverrides ?? {};
@@ -39,7 +57,8 @@ async function createFixture(options = {}) {
   const screenshotDir = await mkdtemp(join(tmpdir(), "linkedin-stream-screens-"));
   const domDumpDir = await mkdtemp(join(tmpdir(), "linkedin-stream-dom-"));
   const fixturePath = join(process.cwd(), "tests", "fixtures", "linkedin", fixtureName);
-  const html = typeof options.html === "string" ? options.html : await readFile(fixturePath, "utf8");
+  const rawHtml = typeof options.html === "string" ? options.html : await readFile(fixturePath, "utf8");
+  const html = options.hydratedTitle === false ? rawHtml : ensureMessagingTitle(rawHtml);
   const inboxUrl = `data:text/html;charset=utf-8,${encodeURIComponent(html)}${urlHash ? (urlHash.startsWith("#") ? urlHash : `#${urlHash}`) : ""}`;
 
   const adapter = new LinkedInAdapter({
@@ -310,7 +329,10 @@ test("LinkedIn streaming scan waits for delayed list hydration and proceeds with
 
 test("LinkedIn streaming scan classifies list hydration timeout and emits artifacts", async (t) => {
   const fixture = await createFixture({
-    fixtureName: "streaming-hydration-timeout.html"
+    fixtureName: "streaming-hydration-timeout.html",
+    // This fixture must NOT hydrate — keep its non-messaging title so the
+    // hydration gate genuinely times out (that's what this test asserts).
+    hydratedTitle: false
   });
   if (fixture.skipped) {
     t.skip(fixture.reason);
