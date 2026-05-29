@@ -37,6 +37,7 @@ import { extractFailureUrl, resolveConnectFailureResponse } from "./services/fai
 import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
+import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
 import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
@@ -2852,6 +2853,64 @@ app.post("/control/person/:personId/open-profile", asyncRoute(async (req, res) =
         action: "OPEN_PROFILE_FAIL",
         status: "FAIL",
         details: { personId: person.id, profileUrl: person.profileUrl, ...summarizeError(error) }
+      });
+      throw error;
+    }
+  });
+}));
+
+// React to a single message (#408, Phase 1). User-triggered only, like
+// /send: it creates a visible side-effect on the contact's conversation, so
+// it goes through the presenter guard and the per-platform control lock.
+// Adapters without a reaction surface (iMessage today) return a clean 400.
+app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async (req, res) => {
+  const { threadId, messageId } = z
+    .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
+    .parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "react to a message", kind: "thread-mutation" })) return;
+  const payload = z.object({ emoji: z.string().trim().min(1).max(16) }).parse(req.body ?? {});
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.threadId !== threadId) {
+    res.status(404).json({ error: "message not found in thread" });
+    return;
+  }
+
+  const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
+  if (!adapter.reactToMessage) {
+    res.status(400).json({ error: `${target.platform} adapter does not support message reactions` });
+    return;
+  }
+  const threadStub: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+
+  await withPlatformControlLock(target.platform, async () => {
+    try {
+      await adapter.reactToMessage!(threadStub, message.platformMessageKey, payload.emoji);
+      // Persist the operator's reaction onto rawJson so the dashboard badge
+      // renders immediately, without waiting for a re-scan to read it back.
+      const updatedRawJson = appendOutboundReaction(message.rawJson, payload.emoji);
+      await prisma.message.update({ where: { id: message.id }, data: { rawJson: updatedRawJson } });
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "MESSAGE_REACT",
+        status: "OK",
+        details: { threadId, messageId, emoji: payload.emoji }
+      });
+      res.json({ status: "ok", emoji: payload.emoji });
+    } catch (error) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "MESSAGE_REACT_FAIL",
+        status: "FAIL",
+        details: { threadId, messageId, emoji: payload.emoji, ...summarizeError(error) }
       });
       throw error;
     }
