@@ -16,7 +16,7 @@ function BirthdayRow({ birthday }: { birthday: UpcomingBirthday }) {
   const age = ageOnNextBirthday(birthday.birthYear, birthday.monthDay);
   const isToday = birthday.daysUntil <= 0;
   const body = (
-    <span className="group flex items-center gap-3 rounded-[8px] px-2 py-[9px] transition-colors duration-calm hover:bg-paper">
+    <span className="group flex items-center gap-3 rounded-[8px] px-2 py-[9px] transition-colors duration-calm hover:bg-paper-2">
       <PersonAvatar
         name={birthday.personName}
         avatarUrl={birthday.personAvatarUrl}
@@ -89,8 +89,10 @@ export function UpcomingBirthdays() {
   });
 
   return (
-    <section className="mb-12 rounded-card border border-hairline bg-paper-2 px-6 py-5">
-      <p className="mb-[14px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+    // Open titled section (no card box) so it sits on the page beside
+    // Tonight's progress, matching the dissolved-cards redesign.
+    <section>
+      <p className="mb-[18px] flex items-center gap-[8px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
         <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
         Upcoming birthdays
       </p>

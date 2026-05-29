@@ -90,14 +90,16 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
               onChanged={() => onPersonChanged?.()}
             />
           ) : null}
+          {/* Metadata tags are space-separated (no glyph) — the row-top
+              flex gap provides the spacing. */}
           {categoryLabel ? (
             <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
-              · {categoryLabel}
+              {categoryLabel}
             </span>
           ) : null}
           {needsReplyMarker ? (
             <span className="font-mono text-[11px] tracking-[0.02em] text-risk-overdue">
-              · needs reply
+              needs reply
             </span>
           ) : null}
           {birthdayMarker ? (
@@ -106,7 +108,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
                 birthdayDays === 0 ? "text-accent-ink" : "text-ink-3"
               }`}
             >
-              · birthday {birthdayMarker}
+              birthday {birthdayMarker}
             </span>
           ) : null}
           {row.personThreadCount && row.personThreadCount > 1 ? (
@@ -114,7 +116,7 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
               className="font-mono text-[11px] tracking-[0.02em] text-ink-3"
               title="Same contact has multiple separate conversations visible"
             >
-              · {row.personThreadCount} threads
+              {row.personThreadCount} threads
             </span>
           ) : null}
         </span>
