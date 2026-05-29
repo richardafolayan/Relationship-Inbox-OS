@@ -279,9 +279,14 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     // let a crash-during-pace drop the in-memory recentVisits ring, so the
     // very next boot could fire a visit immediately and bypass the
     // automation-detection guard the pacing is supposed to provide.
+    // Mark RUNNING for crash recovery, but do NOT bump attempts yet — the job
+    // may still defer on a busy enrich-lock below without ever visiting a
+    // profile. Burning an attempt there let repeated lock contention push a
+    // job to permanent FAILED with zero real visits. attempts is incremented
+    // only on the failure path, where a visit was actually attempted.
     await prisma.enrichmentJob.update({
       where: { id: job.id },
-      data: { status: "RUNNING", attempts: job.attempts + 1 }
+      data: { status: "RUNNING" }
     });
 
     // Pacing — randomised gap in [paceMinMs, paceMaxMs] since the last
@@ -332,6 +337,10 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
         where: { id: job.id },
         data: {
           status: giveUp ? "FAILED" : "PENDING",
+          // Persist the real attempt count here (no longer bumped at the
+          // RUNNING step) so the next run's give-up check sees an accurate
+          // number that only counts attempts where a visit actually ran.
+          attempts,
           lastError: `${result.reason}${result.detail ? `: ${result.detail}` : ""}`,
           nextAttemptAt: giveUp ? null : new Date(Date.now() + exponentialDelayMs(attempts))
         }

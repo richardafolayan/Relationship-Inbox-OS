@@ -590,13 +590,13 @@ documented here instead of changed).
 - **RT-2** [med] `send.ts` — a send during a scan drove the same managed Playwright page concurrently (the platform lease only counts active holders, it doesn't serialize). Fixed: `processSendRequest` now wraps `adapter.sendMessage` in `withPlatformLock`, the SAME per-platform mutex key (`<personKey>:<platform>`) the scan queue uses, so sends and scans serialize on the shared page.
 - **RT-5** [low] `send.ts` `enqueueSend` — an idempotent replay of a SCHEDULED/CANCELLED `clientSendId` was mis-reported as `PENDING`; the SCHEDULED case told the dashboard it was queued though the PENDING worker never drains it. Fixed: PENDING is handled explicitly; SCHEDULED/CANCELLED now throw a conflict error (mirroring `enqueueScheduledSend`).
 
-## PR4 — Beta / hidden correctness (Confirmed)
+## PR4 — Beta / hidden correctness (Fixed)
 
-- **CORE-1** [high within beta] `beta-adapter.ts` — IG/TikTok direction is derived from English substrings in hashed classnames, so virtually every inbound message is labelled OUT. Fix: robust inbound heuristic; default ambiguous rows to IN.
-- **CORE-2** [med] `beta-adapter.ts` — multi-line IG/TikTok messages are flattened by `cleanText`; should use `cleanMessageText`.
-- **CORE-9** [low] `beta-adapter.ts` — index-based `stableKey` fallback duplicates a thread across scrapes when name+preview+href are all missing. Fix: drop the positional index.
-- **CORE-10** [low] `beta-adapter.ts` — TikTok auth detection (`/log in/ && !/messages/`) is effectively inert. Fix: detect via login URL + login-form DOM.
-- **SC-1** [high] `enrichment-queue.ts` — a job that defers on a busy enrich-lock still burns a retry attempt (the increment precedes the lock acquire), so lock contention can permanently FAIL a job that never visited a profile. Fix: increment attempts only after a real visit is attempted.
+- **CORE-1** [high within beta] `beta-adapter.ts` — IG/TikTok direction was derived from English substrings in hashed classnames, so virtually every inbound message was labelled OUT (wrongly marking threads as "you replied last"). Fixed: check inbound and outbound keyword sets explicitly and default the ambiguous case to IN, the safe error for an unread inbox.
+- **CORE-2** [med] `beta-adapter.ts` — multi-line IG/TikTok messages were flattened by `cleanText`. Fixed: use `cleanMessageText` (preserves line breaks), matching the iMessage/LinkedIn paths.
+- **CORE-9** [low] `beta-adapter.ts` — the index-based `stableKey` fallback duplicated a thread across scrapes when name+preview+href were all missing. Fixed: key off the row's text instead of its scroll index.
+- **CORE-10** [low] `beta-adapter.ts` — TikTok auth detection (`/log in/ && !/messages/`) was inert (the messages surface contains "messages"). Fixed: removed the dead/false-positive-prone check; detection relies on the QR phrases + the `/login` URL match.
+- **SC-1** [high] `enrichment-queue.ts` — a job that deferred on a busy enrich-lock still burned a retry attempt (the increment preceded the lock acquire), so lock contention could permanently FAIL a job that never visited a profile. Fixed: attempts is incremented only on the failure path (a real visit), not at the RUNNING step; give-up progression for real failures is unchanged.
 
 ## Deferred (documented, not changed this pass)
 
