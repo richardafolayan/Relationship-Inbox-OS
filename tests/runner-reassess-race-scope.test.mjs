@@ -66,21 +66,27 @@ test("services/reassess-thread enables race for both AI calls", () => {
 });
 
 test("resummarizeThreadById forwards race option to updateThreadSummary", () => {
+  // Issue #385 extracted the pipeline into services/resummarize-thread.ts so
+  // the summary write (and the transcript-refresh clearing wired onto it) is
+  // testable. index.ts's resummarizeThreadById is now a thin wrapper that
+  // forwards `options` through; the race wiring into the AI call lives in the
+  // service. Pin both halves so the race scope can't silently regress.
   const indexTs = readSource("apps/runner/src/index.ts");
-  const fnMatch = indexTs.match(
-    /async function resummarizeThreadById[\s\S]*?\n\}\n/
-  );
+  const fnMatch = indexTs.match(/function resummarizeThreadById[\s\S]*?\n\}\n/);
   assert.ok(fnMatch, "resummarizeThreadById not found");
-  const fnBody = fnMatch[0];
-
-  // The race option must thread through to the AI call. options?.race
-  // is the exact wiring — if someone refactors to options.race without
-  // the optional chain, that's fine; if they drop it entirely the
-  // test fails.
   assert.match(
-    fnBody,
+    fnMatch[0],
+    /resummarizeThread\(\s*\{[\s\S]*?\},\s*threadId,\s*options\s*\)/,
+    "resummarizeThreadById must delegate to resummarizeThread, forwarding options"
+  );
+
+  const serviceTs = readSource("apps/runner/src/services/resummarize-thread.ts");
+  // options?.race is the exact wiring — if someone refactors to options.race
+  // without the optional chain that's fine; if they drop it entirely, fail.
+  assert.match(
+    serviceTs,
     /updateThreadSummary\(\s*\{[\s\S]*?race:\s*options\?\.race[\s\S]*?\}\s*\)/,
-    "resummarizeThreadById must forward race to aiService.updateThreadSummary"
+    "resummarizeThread must forward race to aiService.updateThreadSummary"
   );
 });
 
