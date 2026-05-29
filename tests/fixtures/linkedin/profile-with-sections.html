@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synthetic LinkedIn profile fixture | LinkedIn</title>
+    <style>
+      body {
+        margin: 16px;
+        font-family: Arial, sans-serif;
+      }
+      /* Mirror LinkedIn's screen-reader twin: each visible line is an
+         aria-hidden span plus an off-screen .visually-hidden duplicate.
+         The parser reads only the aria-hidden side. */
+      .visually-hidden {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip: rect(0 0 0 0);
+        white-space: nowrap;
+      }
+      section {
+        border: 1px solid #d1d5db;
+        padding: 8px;
+        margin-bottom: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- Top card (not parsed by extractProfileSections, present for realism) -->
+      <section>
+        <div><span aria-hidden="true">Jordan Sample</span></div>
+        <div><span aria-hidden="true">Platform Engineer at Acme Corporation</span></div>
+        <div><span aria-hidden="true">London, United Kingdom</span></div>
+        <div><span aria-hidden="true">Contact info</span></div>
+      </section>
+
+      <section>
+        <h2><span aria-hidden="true">Experience</span></h2>
+        <ul>
+          <li>
+            <div>
+              <span aria-hidden="true">Senior Software Engineer</span>
+              <span class="visually-hidden">Senior Software Engineer</span>
+            </div>
+            <div>
+              <span aria-hidden="true">Acme Corporation &middot; Full-time</span>
+              <span class="visually-hidden">Acme Corporation &middot; Full-time</span>
+            </div>
+            <div>
+              <span aria-hidden="true">Jan 2020 - Present &middot; 6 yrs</span>
+              <span class="visually-hidden">Jan 2020 - Present &middot; 6 yrs</span>
+            </div>
+            <div>
+              <span aria-hidden="true">London, United Kingdom</span>
+            </div>
+            <div>
+              <span aria-hidden="true">Leading the platform team building distributed systems and mentoring engineers across the organisation.</span>
+              <span class="visually-hidden">Leading the platform team building distributed systems and mentoring engineers across the organisation.</span>
+            </div>
+          </li>
+          <li>
+            <div><span aria-hidden="true">Software Engineer</span></div>
+            <div><span aria-hidden="true">Globex &middot; Full-time</span></div>
+            <div><span aria-hidden="true">2016 - 2019 &middot; 3 yrs</span></div>
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2><span aria-hidden="true">Education</span></h2>
+        <ul>
+          <li>
+            <div><span aria-hidden="true">University of Example</span></div>
+            <div><span aria-hidden="true">Bachelor of Science, Computer Science</span></div>
+            <div><span aria-hidden="true">2012 - 2016</span></div>
+          </li>
+        </ul>
+      </section>
+
+      <section>
+        <h2><span aria-hidden="true">Skills (3)</span></h2>
+        <ul>
+          <li>
+            <span aria-hidden="true">JavaScript</span>
+            <span aria-hidden="true">Endorsed by 12 colleagues</span>
+          </li>
+          <li><span aria-hidden="true">TypeScript</span></li>
+          <li><span aria-hidden="true">Distributed Systems</span></li>
+        </ul>
+      </section>
+
+      <!-- Services rendered as a chip line with no <li> rows, to exercise
+           the body-split fallback path in nameList(). -->
+      <section>
+        <h2><span aria-hidden="true">Services</span></h2>
+        <div>
+          <span aria-hidden="true">Web Development &middot; Cloud Consulting &middot; Technical Writing</span>
+        </div>
+      </section>
+
+      <section>
+        <h2><span aria-hidden="true">Licenses &amp; certifications</span></h2>
+        <ul>
+          <li>
+            <div><span aria-hidden="true">AWS Certified Solutions Architect</span></div>
+            <div><span aria-hidden="true">Amazon Web Services</span></div>
+            <div><span aria-hidden="true">Issued Mar 2021 &middot; Expires Mar 2024</span></div>
+          </li>
+        </ul>
+      </section>
+    </main>
+  </body>
+</html>
