@@ -584,11 +584,11 @@ documented here instead of changed).
 - **LI-4** [med] `linkedin/linkedinIdentity.ts` — a `urn:li:msg_thread:` id was lowercased when it arrived via query param but not via the path token, so one thread could split into two records. Fixed: route the path token through `extractStableLinkedInUrn` too. Regression test: `tests/runner-linkedin-identity.test.mjs`.
 - **LI-6** [low] `linkedin-adapter.ts` — a read row was counted unread=1 when an empty unread-count container was present; multi-digit counts truncated at the comma. Fixed: require non-empty badge text; strip thousands separators.
 
-## PR3 — Send / concurrency hardening (Confirmed)
+## PR3 — Send / concurrency hardening (Fixed)
 
-- **RT-1** [high] `apps/runner/src/index.ts` `/retry-send` — re-queues text only, dropping the original send's attachments and `replyToMessageId`. Fix: parse `attachmentsJson` and forward both.
-- **RT-2** [med] `send.ts` / `session-manager.ts` — a send during a scan drives the same Playwright page concurrently (the platform lease only counts, it doesn't serialize). Fix: acquire the same `operationMutex` key the scan path uses.
-- **RT-5** [low] `send.ts` `enqueueSend` — an idempotent replay of a SCHEDULED/CANCELLED `clientSendId` is mis-reported as `PENDING`; the SCHEDULED case tells the dashboard it's queued though nothing sends. Fix: branch on the real status.
+- **RT-1** [high] `apps/runner/src/index.ts` `/retry-send` — re-queued text only, dropping the original send's attachments and `replyToMessageId`. Fixed: parse `attachmentsJson` and forward both (staged files persist after a FAILED send, so the paths are still valid).
+- **RT-2** [med] `send.ts` — a send during a scan drove the same managed Playwright page concurrently (the platform lease only counts active holders, it doesn't serialize). Fixed: `processSendRequest` now wraps `adapter.sendMessage` in `withPlatformLock`, the SAME per-platform mutex key (`<personKey>:<platform>`) the scan queue uses, so sends and scans serialize on the shared page.
+- **RT-5** [low] `send.ts` `enqueueSend` — an idempotent replay of a SCHEDULED/CANCELLED `clientSendId` was mis-reported as `PENDING`; the SCHEDULED case told the dashboard it was queued though the PENDING worker never drains it. Fixed: PENDING is handled explicitly; SCHEDULED/CANCELLED now throw a conflict error (mirroring `enqueueScheduledSend`).
 
 ## PR4 — Beta / hidden correctness (Confirmed)
 

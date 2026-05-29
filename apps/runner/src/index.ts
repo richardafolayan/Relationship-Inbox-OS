@@ -533,7 +533,10 @@ const sendService = createSendService({
   adapters,
   eventBus,
   settingsStore,
-  auditLog: (input) => auditService.log(input)
+  auditLog: (input) => auditService.log(input),
+  // Same per-platform mutex key the scan queue uses, so a send and a scan
+  // never drive the shared managed page at the same time.
+  withPlatformLock: withPlatformControlLock
 });
 
 // Async send worker. The /control/thread/:id/send endpoint inserts a PENDING
@@ -2745,12 +2748,31 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     return;
   }
 
+  // Preserve the original send's attachments and reply-threading so a retry
+  // re-sends the same message, not a text-only stub. Staged attachment files
+  // persist after a FAILED send (the send service doesn't unlink them), so the
+  // original absolutePath references are still valid.
+  let retryAttachments:
+    | Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
+    | undefined;
+  if (original.attachmentsJson) {
+    try {
+      const parsed = JSON.parse(original.attachmentsJson);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        retryAttachments = parsed;
+      }
+    } catch {
+      retryAttachments = undefined;
+    }
+  }
   const newClientSendId = randomUUID();
   try {
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: original.requestText,
-      clientSendId: newClientSendId
+      clientSendId: newClientSendId,
+      attachments: retryAttachments,
+      replyToMessageId: original.replyToMessageId ?? undefined
     });
     res.json({ ...queueResult, clientSendId: newClientSendId });
   } catch (error) {
