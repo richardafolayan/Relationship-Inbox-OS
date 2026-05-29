@@ -1,9 +1,34 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Loader2, Sparkles } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AiHelpLevel, OperatorProfile, ReplyStyle } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+// The reply-style fields that "Analyse my sent messages" (#438) can fill.
+// displayName (identity) and aiHelpLevel (a preference) are never inferred.
+type StyleReview = Pick<
+  OperatorProfile,
+  "about" | "preferredStyle" | "commonPhrases" | "avoidedPhrases" | "interests"
+>;
+
+type AnalyzeStyleResponse = {
+  ok: boolean;
+  reason?: "not_enough_messages" | "ai_unavailable" | "low_confidence";
+  sampleCount: number;
+  suggestion: StyleReview | null;
+};
+
+function analyzeReasonMessage(reason: AnalyzeStyleResponse["reason"]): string {
+  if (reason === "not_enough_messages") {
+    return "Not enough of your own sent messages yet to read a style. Once you've sent more, try again, or just fill this in yourself.";
+  }
+  if (reason === "ai_unavailable") {
+    return "Couldn't reach the AI just now. Try again in a moment.";
+  }
+  return "Couldn't read a clear style from your messages. Fill in what fits. You can edit anytime.";
+}
 
 // The user's voice + identity setup. Used in two places:
 //   - Settings, as the "Your reply style" section (variant="settings")
@@ -65,6 +90,13 @@ export function UserVoiceProfile({
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [finishing, setFinishing] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Reply-style analysis (#438). `review` holds an editable suggestion that
+  // is NOT persisted until the operator clicks Save, so analysis never writes
+  // behind their back.
+  const [review, setReview] = useState<StyleReview | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [savingReview, setSavingReview] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   useEffect(() => {
     void apiGet<OperatorProfile>("/runner/data/operator-profile")
@@ -127,6 +159,78 @@ export function UserVoiceProfile({
     },
     [persist]
   );
+
+  // While a suggestion is under review, the reply-style fields read + write
+  // through the `review` buffer (no auto-save); otherwise they use the
+  // normal debounced/immediate persist.
+  const styleText = (field: keyof StyleReview): string =>
+    review ? (review[field] as string) : (profile[field] as string);
+  const onStyleText = useCallback(
+    (field: keyof StyleReview, value: string) => {
+      if (review) setReview((prev) => (prev ? { ...prev, [field]: value } : prev));
+      else onTextChange(field, value);
+    },
+    [review, onTextChange]
+  );
+  const toneValue: ReplyStyle | "" = review ? review.preferredStyle : profile.preferredStyle;
+  const onStyleTone = useCallback(
+    (value: ReplyStyle) => {
+      if (review) {
+        setReview((prev) =>
+          prev ? { ...prev, preferredStyle: prev.preferredStyle === value ? "" : value } : prev
+        );
+      } else {
+        onStylePick(value);
+      }
+    },
+    [review, onStylePick]
+  );
+
+  const runAnalyze = useCallback(async () => {
+    if (analyzing) return;
+    setAnalyzing(true);
+    setAnalyzeError(null);
+    try {
+      const res = await apiPost<AnalyzeStyleResponse>(
+        "/runner/control/operator-profile/analyze-style",
+        {}
+      );
+      if (!res.ok || !res.suggestion) {
+        setAnalyzeError(analyzeReasonMessage(res.reason));
+        return;
+      }
+      const s = res.suggestion;
+      // Seed the review with the suggestion, keeping any existing value where
+      // the AI had nothing — analysis never blanks a field already filled.
+      setReview({
+        about: s.about || profile.about,
+        preferredStyle: s.preferredStyle || profile.preferredStyle,
+        commonPhrases: s.commonPhrases || profile.commonPhrases,
+        avoidedPhrases: s.avoidedPhrases || profile.avoidedPhrases,
+        interests: s.interests || profile.interests
+      });
+    } catch (err) {
+      setAnalyzeError(err instanceof Error ? err.message : "Couldn't analyse just now. Try again.");
+    } finally {
+      setAnalyzing(false);
+    }
+  }, [analyzing, profile]);
+
+  const saveReview = useCallback(async () => {
+    if (!review) return;
+    setSavingReview(true);
+    try {
+      await persist(review);
+      setReview(null);
+    } finally {
+      setSavingReview(false);
+    }
+  }, [persist, review]);
+
+  const discardReview = useCallback(() => {
+    setReview(null);
+    setAnalyzeError(null);
+  }, []);
 
   const finishSetup = useCallback(async () => {
     setFinishing(true);
@@ -199,14 +303,85 @@ export function UserVoiceProfile({
           />
         </Field>
 
+        <div className="rounded-row border border-hairline bg-paper-2/40 p-3">
+          {review ? (
+            <div className="flex flex-col gap-2">
+              <p className="m-0 text-[13px] leading-[1.5] text-ink">
+                Suggested from your recent sent messages. Review and edit anything below, then save.
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void saveReview()}
+                  disabled={savingReview}
+                  data-testid="voice-review-save"
+                  className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-3 py-[7px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {savingReview ? (
+                    <>
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                      Saving…
+                    </>
+                  ) : (
+                    "Save"
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={discardReview}
+                  disabled={savingReview}
+                  className="rounded-pill border border-hairline px-3 py-[7px] text-[13px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong disabled:opacity-50"
+                >
+                  Discard
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                <button
+                  type="button"
+                  onClick={() => void runAnalyze()}
+                  disabled={!loaded || analyzing}
+                  data-testid="voice-analyze"
+                  className="inline-flex shrink-0 items-center gap-1.5 rounded-pill border border-hairline px-3 py-[7px] text-[13px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {analyzing ? (
+                    <>
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                      Analysing…
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      Analyse my sent messages
+                    </>
+                  )}
+                </button>
+                <span className="text-[12px] leading-[1.45] text-ink-3">
+                  Optional. Reads your own recent sent messages to suggest the reply-style fields below. Nothing saves until you review and Save.
+                </span>
+              </div>
+              {analyzeError ? (
+                <p
+                  className="m-0 text-[12px] leading-[1.45] text-risk-overdue"
+                  aria-live="polite"
+                >
+                  {analyzeError}
+                </p>
+              ) : null}
+            </div>
+          )}
+        </div>
+
         <Field
           label="How do you usually message people?"
           hint="A sentence or two in your own words. Plain, warm, short, formal, whatever fits."
         >
           <textarea
             rows={3}
-            value={profile.about}
-            onChange={(event) => onTextChange("about", event.target.value)}
+            value={styleText("about")}
+            onChange={(event) => onStyleText("about", event.target.value)}
             placeholder="e.g. Short and friendly. I get to the point but I'm never cold about it."
             disabled={!loaded}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
@@ -219,12 +394,12 @@ export function UserVoiceProfile({
         >
           <div className="flex flex-wrap gap-2">
             {REPLY_STYLES.map((style) => {
-              const active = profile.preferredStyle === style.value;
+              const active = toneValue === style.value;
               return (
                 <button
                   key={style.value}
                   type="button"
-                  onClick={() => onStylePick(style.value)}
+                  onClick={() => onStyleTone(style.value)}
                   aria-pressed={active}
                   className={cn(
                     "rounded-pill border px-3 py-[6px] text-[13px] transition-colors duration-calm",
@@ -243,8 +418,8 @@ export function UserVoiceProfile({
         <Field label="Words you use often" hint="Optional. Add phrases that sound natural for you.">
           <textarea
             rows={2}
-            value={profile.commonPhrases}
-            onChange={(event) => onTextChange("commonPhrases", event.target.value)}
+            value={styleText("commonPhrases")}
+            onChange={(event) => onStyleText("commonPhrases", event.target.value)}
             placeholder="e.g. no worries, sounds good, let's do it"
             disabled={!loaded}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
@@ -254,8 +429,8 @@ export function UserVoiceProfile({
         <Field label="Words to avoid" hint="Optional. Add phrases you would never say.">
           <textarea
             rows={2}
-            value={profile.avoidedPhrases}
-            onChange={(event) => onTextChange("avoidedPhrases", event.target.value)}
+            value={styleText("avoidedPhrases")}
+            onChange={(event) => onStyleText("avoidedPhrases", event.target.value)}
             placeholder="e.g. circle back, touch base, reach out"
             disabled={!loaded}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
@@ -268,8 +443,8 @@ export function UserVoiceProfile({
         >
           <textarea
             rows={2}
-            value={profile.interests}
-            onChange={(event) => onTextChange("interests", event.target.value)}
+            value={styleText("interests")}
+            onChange={(event) => onStyleText("interests", event.target.value)}
             placeholder="e.g. design, running, keeping in touch with old friends"
             disabled={!loaded}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"

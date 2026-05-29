@@ -132,6 +132,17 @@ export interface OperatorProfile {
 }
 
 /**
+ * The subset of OperatorProfile that reply-style analysis (issue #438) can
+ * infer from the operator's own sent messages. Identity (displayName) and
+ * the aiHelpLevel preference are deliberately excluded — analysis never
+ * touches them.
+ */
+export type InferredReplyStyle = Pick<
+  OperatorProfile,
+  "about" | "preferredStyle" | "commonPhrases" | "avoidedPhrases" | "interests"
+>;
+
+/**
  * Observed writing style measured from a set of real messages (one
  * speaker's). Computed at runtime by `analyzeStyle` in services/style —
  * never hardcoded — and rendered into the draft prompts so suggestions
@@ -462,6 +473,17 @@ export interface AiService {
     openLoops: string[];
     recentMessages: MessageForPrompt[];
   }): Promise<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>;
+  /**
+   * Issue #438 (pilot R-0059). Infer the operator's reply-style fields from a
+   * sample of their OWN sent messages so Settings can prefill the form.
+   * `sampleTexts` are pre-filtered operator sends (see
+   * services/reply-style-analysis). `aiRan` is false when no provider was
+   * reachable, letting the caller tell "AI down" apart from "nothing to
+   * suggest". Never saves — the dashboard reviews and saves.
+   */
+  inferReplyStyle(input: {
+    sampleTexts: string[];
+  }): Promise<{ suggestion: InferredReplyStyle; aiRan: boolean }>;
 }
 
 export interface PilotReportTriage {
