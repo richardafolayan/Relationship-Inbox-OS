@@ -740,11 +740,11 @@ export default function ThreadPage() {
   // opportunistically delivers it natively when the private-API helper is up.
   // We refresh afterwards so the merged reaction badge appears.
   const handleTapback = useCallback(
-    async (messageId: string, kind: string) => {
+    async (messageId: string, kind: string, action: "add" | "remove" = "add") => {
       setTapbackBusy(messageId);
       setTapbackError(null);
       try {
-        await apiPost(`/runner/control/thread/${threadId}/tapback`, { messageId, kind });
+        await apiPost(`/runner/control/thread/${threadId}/tapback`, { messageId, kind, action });
         setOpenTapbackFor(null);
         await refresh();
       } catch {
@@ -2796,7 +2796,13 @@ export default function ThreadPage() {
                           the operator opted into the private-API layer. Native
                           delivery happens when the helper is up; otherwise the
                           reaction is persisted dashboard-only. */}
-                      {thread.nativeTapbackAvailable ? (
+                      {thread.nativeTapbackAvailable ? (() => {
+                        // At most one tapback per message from the operator
+                        // ("OUT"). Drives the picker's active state and toggle.
+                        const myTapbackKind =
+                          ((message.raw?.reactions as Array<{ kind: string; direction: string }> | undefined) ?? [])
+                            .find((r) => r.direction === "OUT")?.kind ?? null;
+                        return (
                         <span className="relative inline-flex items-center">
                           <button
                             type="button"
@@ -2812,27 +2818,39 @@ export default function ThreadPage() {
                               ? "reacting…"
                               : tapbackError === message.id
                                 ? "react failed, retry"
-                                : "react"}
+                                : myTapbackKind
+                                  ? "change react"
+                                  : "react"}
                           </button>
                           {openTapbackFor === message.id ? (
                             <span className="absolute bottom-[18px] left-0 z-10 flex gap-1 rounded-full border border-hairline-strong bg-paper px-2 py-1 shadow-md">
-                              {TAPBACK_CHOICES.map((choice) => (
+                              {TAPBACK_CHOICES.map((choice) => {
+                                const active = choice.kind === myTapbackKind;
+                                return (
                                 <button
                                   key={choice.kind}
                                   type="button"
                                   disabled={tapbackBusy === message.id}
-                                  onClick={() => handleTapback(message.id, choice.kind)}
-                                  className="flex h-[26px] w-[26px] items-center justify-center rounded-full text-[15px] leading-none hover:bg-paper-2 disabled:opacity-40"
-                                  title={choice.label}
-                                  aria-label={choice.label}
+                                  // One per message: tapping the active kind
+                                  // clears it, any other kind replaces it (the
+                                  // runner enforces the same invariant).
+                                  onClick={() => handleTapback(message.id, choice.kind, active ? "remove" : "add")}
+                                  className={`flex h-[26px] w-[26px] items-center justify-center rounded-full text-[15px] leading-none hover:bg-paper-2 disabled:opacity-40 ${
+                                    active ? "bg-paper-2 ring-1 ring-hairline-strong" : ""
+                                  }`}
+                                  title={active ? `${choice.label} (tap to remove)` : choice.label}
+                                  aria-label={active ? `${choice.label} (tap to remove)` : choice.label}
+                                  aria-pressed={active}
                                 >
                                   {choice.glyph}
                                 </button>
-                              ))}
+                                );
+                              })}
                             </span>
                           ) : null}
                         </span>
-                      ) : null}
+                        );
+                      })() : null}
                     </span>
                   </div>
                 </div>

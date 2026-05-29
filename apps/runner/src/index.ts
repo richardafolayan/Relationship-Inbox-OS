@@ -2749,7 +2749,36 @@ app.post("/control/thread/:threadId/tapback", asyncRoute(async (req, res) => {
     return;
   }
 
-  // action === "add": canonical row first (optimistic), then try native.
+  // One tapback per (message, sender): a person holds at most one reaction on
+  // a message in iMessage, and re-reacting swaps it. So adding a kind first
+  // clears any other kind this sender already has on the message — best-effort
+  // native removal of the old kind (so the recipient sees the swap, not two
+  // stacked tapbacks), then drop the superseded local rows.
+  const superseded = await prisma.messageReaction.findMany({
+    where: { messageId: message.id, sender, kind: { not: payload.kind } },
+    select: { kind: true }
+  });
+  if (superseded.length > 0) {
+    if (await privateApiHelper.isReachable()) {
+      for (const old of superseded) {
+        try {
+          await privateApiHelper.sendTapback({
+            chatGuid: message.thread.platformThreadId,
+            targetMessageGuid: message.platformMessageKey,
+            kind: old.kind as (typeof TAPBACK_KINDS)[number],
+            action: "remove"
+          });
+        } catch {
+          // Logged inside the helper; local removal still proceeds.
+        }
+      }
+    }
+    await prisma.messageReaction.deleteMany({
+      where: { messageId: message.id, sender, kind: { not: payload.kind } }
+    });
+  }
+
+  // canonical row first (optimistic), then try native.
   await prisma.messageReaction.upsert({
     where: reactionKey,
     update: {},
