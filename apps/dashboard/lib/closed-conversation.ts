@@ -15,9 +15,16 @@ import { normalizePreview } from "./preview";
 
 /**
  * Lower-cased trimmed previews that read as a closing beat — short
- * acknowledgements, brief thanks, farewells, or emoji reactions. Each
- * pattern is anchored so substrings inside a longer sentence don't
- * accidentally close an otherwise open message.
+ * acknowledgements, brief thanks, or farewells. Each pattern is anchored
+ * so substrings inside a longer sentence don't accidentally close an
+ * otherwise open message.
+ *
+ * Note what is deliberately absent: a contentless reaction (a bare emoji,
+ * or a LinkedIn "liked your message" placeholder). A reaction to our last
+ * message might be reacting to a question we asked and never got answered,
+ * so the preview alone can't justify closing the thread. Those close only
+ * on an explicit AI "closed" verdict (handled in isLikelyClosed), never on
+ * this regex-only fallback.
  */
 const CLOSED_PATTERNS: RegExp[] = [
   // Bare acknowledgements / thanks (allow trailing punctuation + emoji)
@@ -25,11 +32,7 @@ const CLOSED_PATTERNS: RegExp[] = [
   // Brief affirmatives
   /^(ok|okay|kk|k|sure|yes|yeah|yep|yup|alright|right|will do|sweet)[!.\s🙏👍]*$/i,
   // Farewells
-  /^(talk soon|speak soon|chat soon|catch up soon|see you|see ya|tty[sl]|night|goodnight|take care|have a (good|great|nice) (one|day|night|week|weekend|evening))[!.\s🙏👍❤️]*$/i,
-  // Pure emoji reactions (a small handful of acknowledging glyphs)
-  /^[\s]*[👍❤️🙏✨🔥💯🎉🙌👏😂😄😊]+[\s]*$/u,
-  // LinkedIn-style "X liked your message" placeholders
-  /^liked( your message)?$/i
+  /^(talk soon|speak soon|chat soon|catch up soon|see you|see ya|tty[sl]|night|goodnight|take care|have a (good|great|nice) (one|day|night|week|weekend|evening))[!.\s🙏👍❤️]*$/i
 ];
 
 /**

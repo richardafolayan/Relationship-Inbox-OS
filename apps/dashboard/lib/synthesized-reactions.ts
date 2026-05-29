@@ -79,6 +79,13 @@ function normaliseQuoteText(text: string): string {
     .trim();
 }
 
+/**
+ * Below this length a quote is too short to safely match by prefix, so the
+ * truncation fallback requires an exact match instead. Guards against a
+ * stray short quote attaching to an unrelated longer bubble.
+ */
+const MIN_TRUNCATION_PREFIX = 4;
+
 export interface FoldOutput {
   /** Reactions folded onto each parent message (by message id). */
   synthesizedByParentId: Map<string, SynthesizedReaction[]>;
@@ -112,20 +119,41 @@ export function foldSynthesizedReactions(
 
     const want = normaliseQuoteText(parsed.quotedParentText);
     let parentId: string | null = null;
+    // Pass 1: an exact (normalised) match is unambiguous. Prefer the
+    // most-recent prior non-hidden bubble whose text equals the quote.
+    // Hidden rows are skipped so a chain of reactions doesn't attribute
+    // later ones to earlier ones.
     for (let j = i - 1; j >= 0; j -= 1) {
       const candidateParent = messagesInChronologicalOrder[j]!;
-      // Skip other synthesised-reaction rows so a chain of reactions
-      // doesn't accidentally attribute later ones to earlier ones.
       if (hiddenMessageIds.has(candidateParent.id)) continue;
       const parentText = normaliseQuoteText(candidateParent.text);
       if (!parentText) continue;
-      // Apple sometimes truncates the quoted text with an ellipsis,
-      // and sometimes the parent's text has trailing variation
-      // selectors that NFC normalisation handles. Equal first; then
-      // startsWith fallback for truncation.
-      if (parentText === want || parentText.startsWith(want)) {
+      if (parentText === want) {
         parentId = candidateParent.id;
         break;
+      }
+    }
+    // Pass 2: Apple truncates long quotes with a trailing ellipsis. Only
+    // when there was no exact match AND the quote is genuinely truncated,
+    // strip the ellipsis and accept a prefix match — but solely when it is
+    // unique, so a short quote that prefixes several bubbles is never
+    // misattributed.
+    if (!parentId) {
+      const stripped = want.replace(/(?:…|\.\.\.)\s*$/u, "").trim();
+      if (stripped !== want && stripped.length >= MIN_TRUNCATION_PREFIX) {
+        let uniqueParentId: string | null = null;
+        let matchCount = 0;
+        for (let j = i - 1; j >= 0; j -= 1) {
+          const candidateParent = messagesInChronologicalOrder[j]!;
+          if (hiddenMessageIds.has(candidateParent.id)) continue;
+          const parentText = normaliseQuoteText(candidateParent.text);
+          if (!parentText) continue;
+          if (parentText.startsWith(stripped)) {
+            if (matchCount === 0) uniqueParentId = candidateParent.id;
+            matchCount += 1;
+          }
+        }
+        if (matchCount === 1) parentId = uniqueParentId;
       }
     }
     if (!parentId) continue;

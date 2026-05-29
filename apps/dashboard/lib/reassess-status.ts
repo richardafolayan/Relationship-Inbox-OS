@@ -17,7 +17,12 @@
 
 const EVENT_NAME = "inbox-reassess-status";
 
-const inFlight = new Set<string>();
+// threadId -> number of concurrent reassesses in flight for that thread.
+// A refcount (not a Set) so two overlapping reassesses of the same thread
+// both have to settle before the "Reassessing…" indicator clears — a single
+// stop() must not clear it while a sibling reassess is still running. The
+// emitted/observed count is the number of distinct threads (inFlight.size).
+const inFlight = new Map<string, number>();
 
 function emit() {
   if (typeof window === "undefined") return;
@@ -31,22 +36,28 @@ function emit() {
  * should invoke it (typically from a Promise.finally) regardless of
  * success or failure so the ticker doesn't get stuck "Reassessing…".
  *
- * Idempotent for the same threadId — calling start twice for the
- * same thread counts as one in-flight reassess. The returned stop
- * is also idempotent.
+ * Concurrent reassesses of the same threadId are refcounted: the thread
+ * stays in flight (and the ticker stays up) until the LAST of them stops.
+ * The returned stop is idempotent — calling it more than once decrements
+ * only on the first call.
  */
 export function signalReassessStart(threadId: string): () => void {
   if (typeof window === "undefined") return () => undefined;
-  if (!inFlight.has(threadId)) {
-    inFlight.add(threadId);
-    emit();
-  }
+  const prev = inFlight.get(threadId) ?? 0;
+  inFlight.set(threadId, prev + 1);
+  // Only the 0 -> 1 transition changes the distinct-thread count.
+  if (prev === 0) emit();
   let stopped = false;
   return () => {
     if (stopped) return;
     stopped = true;
-    inFlight.delete(threadId);
-    emit();
+    const current = inFlight.get(threadId) ?? 0;
+    if (current <= 1) {
+      inFlight.delete(threadId);
+      emit();
+    } else {
+      inFlight.set(threadId, current - 1);
+    }
   };
 }
 

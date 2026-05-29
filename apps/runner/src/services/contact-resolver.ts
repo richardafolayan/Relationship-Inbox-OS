@@ -14,8 +14,13 @@ import { existsSync, readFileSync } from "node:fs";
  *     so "+447538705144" / "07538705144" / "07538 705144" all match.
  *   - Emails are lowercased.
  *
- * If two contacts share a phone number, the last one parsed wins. The
- * operator can still confirm/edit via the dashboard pill.
+ * Each normalized handle is mapped to the single contact that owns it. A
+ * handle that two distinct contacts share (a shared landline, or two
+ * numbers that collapse to the same trailing-10-digit key) is marked
+ * ambiguous and attributed to neither: a wrong guess would mislabel a
+ * thread and, via siblingHandles -> send-handle selection, could route a
+ * reply to the wrong person. The operator can still confirm/edit via the
+ * dashboard pill.
  */
 
 interface VcardEntry {
@@ -125,42 +130,57 @@ export function loadContactResolver(vcfPath: string | undefined): ContactResolve
     return NULL_RESOLVER;
   }
   const entries = parseVcardEntries(raw);
-  const phoneMap = new Map<string, string>();
-  const emailMap = new Map<string, string>();
-  // name → entry, for siblingHandles(). Last-wins on name collision matches
-  // the resolve() last-wins semantics.
-  const entryByName = new Map<string, VcardEntry>();
+  // Each normalized handle maps to the entry that owns it, or to null when
+  // more than one distinct contact claims it (ambiguous). Keying by handle
+  // rather than by display name is what stops a namesake's handles from
+  // leaking into another contact's send pool.
+  const ownerByHandle = new Map<string, VcardEntry | null>();
+  const claimHandle = (key: string, entry: VcardEntry): void => {
+    if (!ownerByHandle.has(key)) {
+      ownerByHandle.set(key, entry);
+    } else if (ownerByHandle.get(key) !== entry) {
+      ownerByHandle.set(key, null);
+    }
+  };
   for (const entry of entries) {
     for (const phone of entry.phones) {
       const key = normalizePhone(phone);
-      if (key) phoneMap.set(key, entry.name);
+      if (key) claimHandle(`tel:${key}`, entry);
     }
     for (const email of entry.emails) {
       const key = normalizeEmail(email);
-      if (key) emailMap.set(key, entry.name);
+      if (key) claimHandle(`mailto:${key}`, entry);
     }
-    entryByName.set(entry.name, entry);
   }
-  function resolveName(handle: string): string | null {
+  function handleKey(handle: string): string | null {
     if (!handle) return null;
     const trimmed = handle.trim();
+    if (!trimmed) return null;
     if (trimmed.includes("@")) {
-      return emailMap.get(trimmed.toLowerCase()) ?? null;
+      const email = normalizeEmail(trimmed);
+      return email ? `mailto:${email}` : null;
     }
     const key = normalizePhone(trimmed);
-    return key ? phoneMap.get(key) ?? null : null;
+    return key ? `tel:${key}` : null;
+  }
+  function ownerEntry(handle: string): VcardEntry | null {
+    const key = handleKey(handle);
+    if (!key) return null;
+    // get() is null for a known-but-ambiguous handle and undefined for an
+    // unknown one; both collapse to "no confident owner".
+    return ownerByHandle.get(key) ?? null;
   }
   return {
-    resolve: resolveName,
+    resolve(handle: string): string | null {
+      return ownerEntry(handle)?.name ?? null;
+    },
     siblingHandles(handle: string): string[] {
-      const name = resolveName(handle);
-      if (!name) return [handle];
-      const entry = entryByName.get(name);
+      const entry = ownerEntry(handle);
       if (!entry) return [handle];
       return [...entry.phones, ...entry.emails];
     },
     size(): number {
-      return phoneMap.size + emailMap.size;
+      return ownerByHandle.size;
     }
   };
 }
