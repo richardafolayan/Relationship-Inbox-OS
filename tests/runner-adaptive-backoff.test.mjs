@@ -31,11 +31,11 @@ test("adaptiveBackoffMultiplier: capped at 4x", () => {
   assert.equal(adaptiveBackoffMultiplier(9999), 4);
 });
 
-test("applyAdaptiveBackoffOutcome: increments counter on no-change scheduled scan", () => {
+test("applyAdaptiveBackoffOutcome: increments counter on a clean no-change scheduled scan", () => {
   const next = applyAdaptiveBackoffOutcome(
     { lastScheduledScanAt: 0, consecutiveNoChange: 0 },
     0,
-    { fromScheduler: true, now: 1_000 }
+    { fromScheduler: true, now: 1_000, success: true }
   );
   assert.equal(next.consecutiveNoChange, 1);
   assert.equal(next.lastScheduledScanAt, 1_000);
@@ -45,28 +45,42 @@ test("applyAdaptiveBackoffOutcome: resets counter when changes are found", () =>
   const next = applyAdaptiveBackoffOutcome(
     { lastScheduledScanAt: 100, consecutiveNoChange: 5 },
     1,
-    { fromScheduler: true, now: 2_000 }
+    { fromScheduler: true, now: 2_000, success: true }
   );
   assert.equal(next.consecutiveNoChange, 0);
   assert.equal(next.lastScheduledScanAt, 2_000);
 });
 
-test("applyAdaptiveBackoffOutcome: manual (non-scheduler) scan increments counter on no change but does NOT bump lastScheduledScanAt", () => {
+test("applyAdaptiveBackoffOutcome: manual (non-scheduler) no-change scan does NOT inflate the counter and does NOT bump lastScheduledScanAt", () => {
+  // SC-2: a manual refresh that finds nothing must not be treated as a
+  // quiet inbox — otherwise a few manual scans stretch the scheduled
+  // cadence out to 4x. Counter stays put.
   const next = applyAdaptiveBackoffOutcome(
     { lastScheduledScanAt: 100, consecutiveNoChange: 3 },
     0,
-    { fromScheduler: false, now: 2_000 }
+    { fromScheduler: false, now: 2_000, success: true }
   );
-  assert.equal(next.consecutiveNoChange, 4);
-  // lastScheduledScanAt stays at the original — the scheduler clock
-  // shouldn't tick from a manual scan, so the next scheduled scan
-  // still fires when the adaptive interval has passed since the
-  // last *scheduled* scan, not the manual one.
+  assert.equal(next.consecutiveNoChange, 3);
   assert.equal(next.lastScheduledScanAt, 100);
 });
 
+test("applyAdaptiveBackoffOutcome: a FAILED scheduled scan does NOT inflate the counter", () => {
+  // SC-2: a scan that errored or was blocked reaches this path with
+  // updatedThreads === 0 and success === false. A failure isn't a quiet
+  // inbox, so the backoff counter is left unchanged (the retry controller
+  // owns failure cadence). The scheduled clock still advances so the tick
+  // doesn't immediately re-fire.
+  const next = applyAdaptiveBackoffOutcome(
+    { lastScheduledScanAt: 100, consecutiveNoChange: 2 },
+    0,
+    { fromScheduler: true, now: 2_000, success: false }
+  );
+  assert.equal(next.consecutiveNoChange, 2);
+  assert.equal(next.lastScheduledScanAt, 2_000);
+});
+
 test("applyAdaptiveBackoffOutcome: handles undefined prior state", () => {
-  const next = applyAdaptiveBackoffOutcome(undefined, 0, { fromScheduler: true, now: 50 });
+  const next = applyAdaptiveBackoffOutcome(undefined, 0, { fromScheduler: true, now: 50, success: true });
   assert.equal(next.consecutiveNoChange, 1);
   assert.equal(next.lastScheduledScanAt, 50);
 });
@@ -78,7 +92,7 @@ test("applyAdaptiveBackoffOutcome: a manual scan that finds changes resets the c
   const next = applyAdaptiveBackoffOutcome(
     { lastScheduledScanAt: 500, consecutiveNoChange: 7 },
     1,
-    { fromScheduler: false, now: 1_000 }
+    { fromScheduler: false, now: 1_000, success: true }
   );
   assert.equal(next.consecutiveNoChange, 0);
   assert.equal(next.lastScheduledScanAt, 500);

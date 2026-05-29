@@ -37,7 +37,7 @@ export interface SelectedTranscript {
   transcript: string;
 }
 
-const TIER_RANK: Record<AttemptTier, number> = {
+export const TIER_RANK: Record<AttemptTier, number> = {
   fast: 1,
   standard: 2,
   max: 3,
