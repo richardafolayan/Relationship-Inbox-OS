@@ -23,6 +23,15 @@ interface SendServiceDeps {
     screenshotFile?: string;
     domDumpFile?: string;
   }) => Promise<string>;
+  /**
+   * Serializes the page-driving send against scans. Must wrap work in the
+   * SAME per-platform mutex key the scan queue uses (`<personKey>:<platform>`)
+   * so a send can't drive the shared managed Playwright page while a scan is
+   * mid-flight on it. The platform "lease" only counts active holders; it is
+   * NOT mutually exclusive, so without this a send and a scan interleave
+   * navigations/DOM reads on one page.
+   */
+  withPlatformLock: <T>(platform: PlatformName, work: () => Promise<T>) => Promise<T>;
 }
 
 interface SendResult {
@@ -150,7 +159,16 @@ export function createSendService(deps: SendServiceDeps) {
           errorMessage: parseFailedSendMessage(existing.errorJson)
         };
       }
-      return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+      if (existing.status === "PENDING") {
+        return { clientSendId: input.clientSendId, status: "PENDING", replayed: true };
+      }
+      // SCHEDULED / CANCELLED: the immediate-send path can't replay these. A
+      // SCHEDULED row is drained by the scheduled-send promoter, not the
+      // PENDING worker, and a CANCELLED row is intentionally dead. Returning
+      // "PENDING" here would tell the dashboard the send is queued while
+      // nothing ever sends. Surface the real state (mirrors
+      // enqueueScheduledSend's conflict throw).
+      throw new Error(`Send request ${input.clientSendId} already exists in status ${existing.status}`);
     }
 
     try {
@@ -265,15 +283,19 @@ export function createSendService(deps: SendServiceDeps) {
             `Platform ${thread.platform} is not supported by this runner. Supported platforms: ${Object.keys(deps.adapters).join(", ")}.`
           );
         }
-        receipt = await adapter.sendMessage(
-          threadStub,
-          input.text,
-          stagedAttachments.map((a) => ({
-            absolutePath: a.absolutePath,
-            displayName: a.displayName,
-            mimeType: a.mimeType,
-            kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
-          }))
+        // Serialize the page-driving send against scans on the shared managed
+        // page. The demo branch above drives no page, so it stays unlocked.
+        receipt = await deps.withPlatformLock(thread.platform as PlatformName, () =>
+          adapter.sendMessage(
+            threadStub,
+            input.text,
+            stagedAttachments.map((a) => ({
+              absolutePath: a.absolutePath,
+              displayName: a.displayName,
+              mimeType: a.mimeType,
+              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
+            }))
+          )
         );
       }
 
