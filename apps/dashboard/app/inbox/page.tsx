@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
@@ -18,6 +18,17 @@ import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
+import {
+  OXBLOOD_PAGE_VARS,
+  TOOL_CLASS,
+  XIcon,
+  FilterGlyph,
+  SelectGlyph,
+  useDismiss,
+  SortMenu,
+  PopSection,
+  PopOpt
+} from "@/components/common/list-controls";
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
@@ -58,24 +69,6 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
   INSTAGRAM: "ig",
   TIKTOK: "tt"
 };
-
-// Inbox-scoped oxblood palette — mirrors the Today page so the redesign
-// reads as one family. CSS-var overrides on the Inbox canvas only: the
-// sidebar / app-shell render outside this subtree and other pages keep the
-// global coral tokens. (Kept local to avoid touching globals.css.)
-const OXBLOOD_INBOX_VARS = {
-  "--accent": "#7B1F1F",
-  "--accent-ink": "#7B1F1F",
-  "--accent-soft": "rgba(123,31,31,0.08)",
-  "--risk-overdue": "#7B1F1F",
-  "--risk-waiting": "#9a6a12",
-  "--risk-fresh": "#1f6b3a"
-} as CSSProperties;
-
-// Shared "tool" button styling for the bar cluster (Sort / Filters /
-// Select), matching the prototype's `.tool`.
-const TOOL_CLASS =
-  "inline-flex items-center gap-[6px] rounded-[8px] px-[10px] py-[6px] text-[12px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
 
 function applyTab(row: InboxRow, tab: RiskTab): boolean {
   if (tab === "all") return !row.scheduledSendAt;
@@ -520,7 +513,7 @@ export default function InboxPage() {
   );
 
   return (
-    <Canvas style={OXBLOOD_INBOX_VARS}>
+    <Canvas style={OXBLOOD_PAGE_VARS}>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
@@ -604,7 +597,7 @@ export default function InboxPage() {
           })}
         </div>
         <div className="flex items-center gap-[4px] pb-[6px]">
-          <SortMenu sortMode={sortMode} onChange={setSortMode} />
+          <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
           <FiltersPopover
             platformFilter={platformFilter}
             category={category}
@@ -861,120 +854,6 @@ export default function InboxPage() {
   );
 }
 
-// ---- Small inline glyphs (the prototype's tool icons, drawn directly so
-// the bar matches the design without adding icon-name dependencies) ----
-function XIcon() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.9}>
-      <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
-    </svg>
-  );
-}
-function ChevronGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} className="opacity-50">
-      <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-function CheckGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2.2}>
-      <path d="M5 12l5 5 9-10" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-function SortGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.7}>
-      <path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-function FilterGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.7}>
-      <path d="M3 5h18M6 12h12M10 19h4" strokeLinecap="round" />
-    </svg>
-  );
-}
-function SelectGlyph() {
-  return (
-    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.7}>
-      <rect x="4" y="4" width="16" height="16" rx="3" />
-      <path d="M8.5 12l2.5 2.5 4.5-5" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
-}
-
-// Close an open popover/menu on outside-click or Escape.
-function useDismiss(open: boolean, onClose: () => void) {
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (!open) return;
-    const onDoc = (event: MouseEvent) => {
-      if (ref.current && !ref.current.contains(event.target as Node)) onClose();
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
-    };
-    document.addEventListener("mousedown", onDoc);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDoc);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open, onClose]);
-  return ref;
-}
-
-// Sort: a small menu-button (oldest wait / most recent / name A–Z).
-function SortMenu({ sortMode, onChange }: { sortMode: SortMode; onChange: (value: SortMode) => void }) {
-  const [open, setOpen] = useState(false);
-  const ref = useDismiss(open, () => setOpen(false));
-  const label = SORT_MODES.find((s) => s.key === sortMode)?.label ?? "";
-  return (
-    <div ref={ref} className="relative">
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className={cn(TOOL_CLASS, open ? "bg-paper-2 text-ink" : "")}
-        aria-expanded={open}
-      >
-        <SortGlyph />
-        <span className="font-mono">{label}</span>
-        <ChevronGlyph />
-      </button>
-      {open ? (
-        <div className="absolute right-0 top-[calc(100%+6px)] z-30 min-w-[180px] rounded-[12px] border border-hairline bg-paper p-[6px] shadow-pop">
-          {SORT_MODES.map((s) => {
-            const sel = sortMode === s.key;
-            return (
-              <button
-                key={s.key}
-                type="button"
-                onClick={() => {
-                  onChange(s.key);
-                  setOpen(false);
-                }}
-                className={cn(
-                  "flex w-full items-center gap-2 rounded-[7px] px-[10px] py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2",
-                  sel ? "text-ink" : "text-ink-2 hover:text-ink"
-                )}
-              >
-                <span className="flex-1">{s.label}</span>
-                <span className={cn("text-accent-ink", sel ? "opacity-100" : "opacity-0")}>
-                  <CheckGlyph />
-                </span>
-              </button>
-            );
-          })}
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
 // Filters: Platform + Kind collapsed into one popover with an active-count
 // badge — replacing the old stack of inline <select>s (the "convoluted"
 // part Richard flagged).
@@ -1040,41 +919,6 @@ function FiltersPopover({
         </div>
       ) : null}
     </div>
-  );
-}
-
-function PopSection({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <p className="m-0 mb-[10px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{label}</p>
-      <div className="flex flex-wrap gap-[6px]">{children}</div>
-    </div>
-  );
-}
-
-function PopOpt({
-  selected,
-  onClick,
-  children
-}: {
-  selected: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={selected}
-      className={cn(
-        "rounded-[8px] border px-[11px] py-[5px] text-[12px] transition-colors duration-calm",
-        selected
-          ? "border-ink bg-ink text-paper"
-          : "border-hairline text-ink-2 hover:border-hairline-strong hover:text-ink"
-      )}
-    >
-      {children}
-    </button>
   );
 }
 
