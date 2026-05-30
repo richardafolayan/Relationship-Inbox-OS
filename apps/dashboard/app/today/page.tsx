@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
@@ -15,12 +15,13 @@ import type {
   ThreadResponse
 } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { isInTodayQueue } from "@/lib/today";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
+import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
@@ -88,6 +89,20 @@ function writeTonightProgress(value: TonightProgress): void {
     // Storage disabled or over quota: progress just won't survive a reload.
   }
 }
+
+// Today-scoped oxblood palette — match the redesign prototype's colours
+// ("colours and all"). These CSS-var overrides live on the Today canvas
+// ONLY: the sidebar / app-shell render outside this subtree, and every
+// other page keeps the app's global coral tokens. Accent + overdue +
+// needs-reply go oxblood; waiting stays amber, fresh stays green.
+const OXBLOOD_TODAY_VARS = {
+  "--accent": "#7B1F1F",
+  "--accent-ink": "#7B1F1F",
+  "--accent-soft": "rgba(123,31,31,0.08)",
+  "--risk-overdue": "#7B1F1F",
+  "--risk-waiting": "#9a6a12",
+  "--risk-fresh": "#1f6b3a"
+} as CSSProperties;
 
 export default function TodayPage() {
   const router = useRouter();
@@ -456,7 +471,7 @@ export default function TodayPage() {
   const allDone = rows.length === 0 && clearedTotal > 0;
 
   return (
-    <Canvas className="max-w-[1240px] pb-10">
+    <Canvas className="max-w-[1240px] pb-10" style={OXBLOOD_TODAY_VARS}>
       <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
         <div className="min-w-0">
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
@@ -549,7 +564,7 @@ export default function TodayPage() {
                 className="pointer-events-none absolute inset-0"
                 style={{
                   background:
-                    "radial-gradient(135% 130% at 100% 0%, color-mix(in oklch, var(--accent) 12%, transparent) 0%, color-mix(in oklch, var(--accent) 4%, transparent) 36%, transparent 64%)"
+                    "radial-gradient(135% 130% at 100% 0%, color-mix(in srgb, var(--accent) 12%, transparent) 0%, color-mix(in srgb, var(--accent) 4%, transparent) 36%, transparent 64%)"
                 }}
               />
               <div className="relative flex flex-col">
@@ -569,23 +584,7 @@ export default function TodayPage() {
                   {heroHeadline || "Catching up with someone"}
                 </h2>
                 <div className="mb-[18px] flex items-center gap-3">
-                  {hero.personAvatarUrl ? (
-                    <span className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-paper-2">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={hero.personAvatarUrl}
-                        alt=""
-                        width={28}
-                        height={28}
-                        referrerPolicy="no-referrer"
-                        className="h-full w-full object-cover"
-                      />
-                    </span>
-                  ) : (
-                    <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[11px] font-semibold text-white">
-                      {initials(hero.personName)}
-                    </span>
-                  )}
+                  <PersonAvatar name={hero.personName} avatarUrl={hero.personAvatarUrl} size={28} />
                   <span className="font-medium text-ink">{hero.personName}</span>
                   <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
                 </div>
@@ -852,30 +851,12 @@ function PeekAvatar({
   avatarUrl?: string | null;
   offset: number;
 }) {
-  if (avatarUrl) {
-    return (
-      <span
-        className="grid h-[22px] w-[22px] place-items-center overflow-hidden rounded-full border-2 border-paper bg-paper-2"
-        style={{ marginLeft: offset === 0 ? 0 : -6 }}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={avatarUrl}
-          alt=""
-          width={22}
-          height={22}
-          referrerPolicy="no-referrer"
-          className="h-full w-full object-cover"
-        />
-      </span>
-    );
-  }
+  // Reuse PersonAvatar so the peek tiles carry the same per-name hashed
+  // tone as the list rows (matching the prototype's coloured avatars); the
+  // wrapper just supplies the overlap offset + paper ring.
   return (
-    <span
-      className="grid h-[22px] w-[22px] place-items-center rounded-full border-2 border-paper bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[9.5px] font-semibold text-white"
-      style={{ marginLeft: offset === 0 ? 0 : -6 }}
-    >
-      {initials(name)}
+    <span className="inline-flex" style={{ marginLeft: offset === 0 ? 0 : -6 }}>
+      <PersonAvatar name={name} avatarUrl={avatarUrl} size={22} className="border-2 border-paper" />
     </span>
   );
 }
