@@ -92,8 +92,7 @@ export function UpcomingBirthdays() {
     // Open titled section (no card box) so it sits on the page beside
     // Tonight's progress, matching the dissolved-cards redesign.
     <section>
-      <p className="mb-[18px] flex items-center gap-[8px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
-        <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
+      <p className="mb-[18px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
         Upcoming birthdays
       </p>
       <div className="flex flex-col gap-[2px]">
