@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
@@ -59,6 +59,24 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
   TIKTOK: "tt"
 };
 
+// Inbox-scoped oxblood palette — mirrors the Today page so the redesign
+// reads as one family. CSS-var overrides on the Inbox canvas only: the
+// sidebar / app-shell render outside this subtree and other pages keep the
+// global coral tokens. (Kept local to avoid touching globals.css.)
+const OXBLOOD_INBOX_VARS = {
+  "--accent": "#7B1F1F",
+  "--accent-ink": "#7B1F1F",
+  "--accent-soft": "rgba(123,31,31,0.08)",
+  "--risk-overdue": "#7B1F1F",
+  "--risk-waiting": "#9a6a12",
+  "--risk-fresh": "#1f6b3a"
+} as CSSProperties;
+
+// Shared "tool" button styling for the bar cluster (Sort / Filters /
+// Select), matching the prototype's `.tool`.
+const TOOL_CLASS =
+  "inline-flex items-center gap-[6px] rounded-[8px] px-[10px] py-[6px] text-[12px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent";
+
 function applyTab(row: InboxRow, tab: RiskTab): boolean {
   if (tab === "all") return !row.scheduledSendAt;
   if (tab === "scheduled") return !!row.scheduledSendAt;
@@ -109,21 +127,24 @@ function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
   }
 }
 
+// Right-hand timestamp. Per the redesign only "overdue" carries colour
+// (oxblood "… overdue"); waiting and fresh times read as quiet grey so the
+// list stays calm and the overdue rows are the thing that pulls the eye.
 function rightLabelFor(row: InboxRow): { text: string; tone: string } {
   const risk = toDisplayRisk(row.riskLevel);
   const rel = formatRelative(row.lastInboundAt ?? row.lastMessageAt);
   if (risk === "overdue")
     return { text: `${rel} overdue`, tone: "text-risk-overdue font-medium" };
-  if (risk === "waiting")
-    return { text: rel, tone: "text-risk-waiting font-medium" };
-  return { text: rel, tone: "text-ink-2" };
+  return { text: rel, tone: "text-ink-3" };
 }
 
+// Status dot: overdue = oxblood, waiting = amber, fresh = muted grey
+// (the redesign mutes the fresh dot rather than colouring it green).
 function dotFor(row: InboxRow): string {
   const risk = toDisplayRisk(row.riskLevel);
   if (risk === "overdue") return "bg-risk-overdue";
   if (risk === "waiting") return "bg-risk-waiting";
-  return "bg-risk-fresh";
+  return "bg-ink-4";
 }
 
 // Human-readable label for the "N older or closed conversations set aside"
@@ -499,7 +520,7 @@ export default function InboxPage() {
   );
 
   return (
-    <Canvas>
+    <Canvas style={OXBLOOD_INBOX_VARS}>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
@@ -514,71 +535,110 @@ export default function InboxPage() {
         }
       />
 
-      <div className="mb-[14px] flex items-center gap-2 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-ink-3">
-        <Search className="h-[14px] w-[14px]" strokeWidth={1.6} />
+      {/* Ghost search — a subtle field, not a heavy box (the redesign's
+          calmer default). The border darkens on hover/focus; a clear
+          button appears once there's a query. */}
+      <label
+        className={cn(
+          "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+          query
+            ? "border-hairline-strong"
+            : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
+        )}
+      >
+        <Search className="h-[16px] w-[16px] shrink-0 text-ink-3" strokeWidth={1.6} />
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search people, keywords…"
+          autoComplete="off"
           className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
         />
-      </div>
-
-      <div className="flex flex-wrap items-center gap-[2px] border-b border-hairline">
-        {TABS.map((entry) => {
-          const active = tab === entry.key;
-          const count = counts[entry.key];
-          const tone =
-            entry.key === "overdue"
-              ? "text-risk-overdue"
-              : entry.key === "waiting"
-                ? "text-risk-waiting"
-                : "text-ink-4";
-          return (
-            <button
-              key={entry.key}
-              type="button"
-              onClick={() => setTab(entry.key)}
-              className={cn(
-                "relative -mb-px px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
-                active ? "font-medium text-ink" : "text-ink-3 hover:text-ink"
-              )}
-            >
-              {entry.label}
-              <span className={cn("ml-[5px] font-mono text-[10px]", active ? "text-ink-2" : tone)}>
-                {count}
-              </span>
-              {active ? (
-                <span
-                  aria-hidden
-                  className="absolute bottom-[-1px] left-[14px] right-[14px] h-[2px] bg-ink"
-                />
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="mb-1 mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[11px]">
-        <FilterSelect
-          label="platform"
-          value={platformFilter}
-          onChange={setPlatformFilter}
-          options={PLATFORM_FILTERS}
-        />
-        <FilterSelect label="kind" value={category} onChange={setCategory} options={CATEGORY_FILTERS} />
-        <FilterSelect label="sort" value={sortMode} onChange={setSortMode} options={SORT_MODES} />
-        {!selectMode && orderedRows.length > 0 ? (
+        {query ? (
           <button
             type="button"
-            onClick={() => setForceSelectMode(true)}
-            className="ml-auto uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
+            onClick={() => setQuery("")}
+            aria-label="Clear search"
+            className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
           >
-            Select
+            <XIcon />
           </button>
         ) : null}
+      </label>
+
+      {/* Status tabs (the lens you switch most) + a compact tools cluster.
+          Platform + Kind now live behind the Filters popover so this bar
+          stays one calm row instead of the old stack of dropdowns. */}
+      <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
+        <div className="flex flex-1 flex-wrap gap-[1px]">
+          {TABS.map((entry) => {
+            const active = tab === entry.key;
+            const count = counts[entry.key];
+            const zero = count === 0;
+            return (
+              <button
+                key={entry.key}
+                type="button"
+                onClick={() => setTab(entry.key)}
+                className={cn(
+                  "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                  active
+                    ? "border-accent font-medium text-ink"
+                    : zero
+                      ? "text-ink-4 hover:text-ink-2"
+                      : "text-ink-3 hover:text-ink"
+                )}
+              >
+                {entry.label}
+                <span
+                  className={cn(
+                    "ml-[5px] font-mono text-[11px]",
+                    active ? "text-accent-ink" : "text-ink-3"
+                  )}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-[4px] pb-[6px]">
+          <SortMenu sortMode={sortMode} onChange={setSortMode} />
+          <FiltersPopover
+            platformFilter={platformFilter}
+            category={category}
+            onPlatform={setPlatformFilter}
+            onCategory={setCategory}
+            onClear={() => {
+              setPlatformFilter("all");
+              setCategory("any");
+            }}
+          />
+          {orderedRows.length > 0 || selectMode ? (
+            <button
+              type="button"
+              onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
+              className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
+              aria-pressed={selectMode}
+            >
+              <SelectGlyph />
+              <span>Select</span>
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      <ChipsRow
+        platformFilter={platformFilter}
+        category={category}
+        onClearPlatform={() => setPlatformFilter("all")}
+        onClearCategory={() => setCategory("any")}
+        onClearAll={() => {
+          setPlatformFilter("all");
+          setCategory("any");
+        }}
+      />
 
       {degraded ? (
         <DegradedBanner
@@ -656,48 +716,6 @@ export default function InboxPage() {
         />
       ) : (
         <>
-          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
-            <p className="mb-3 mt-3 flex flex-wrap items-baseline gap-x-3 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-              {showAll ? (
-                <span>
-                  Showing all conversations.{" "}
-                  <button
-                    type="button"
-                    onClick={() => setShowAll(false)}
-                    className="underline underline-offset-2 hover:text-ink"
-                  >
-                    Show recent only
-                  </button>
-                </span>
-              ) : (
-                <span>
-                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
-                  <button
-                    type="button"
-                    onClick={() => setShowAll(true)}
-                    className="underline underline-offset-2 hover:text-ink"
-                  >
-                    Show all
-                  </button>
-                </span>
-              )}
-              {/* #287 F1: trigger AI close-status classification for
-                  threads that have never been classified (or pre-date
-                  the v2 cache with reasons). Sits next to the existing
-                  Show all / Show recent toggle so the affordance is in
-                  the same place the operator already looks. */}
-              <button
-                type="button"
-                onClick={() => void handleRefreshClosedVerdicts()}
-                disabled={closedRefreshState.kind === "running"}
-                className={`underline underline-offset-2 transition-colors duration-calm hover:text-ink disabled:opacity-60 ${closedRefreshTone}`}
-                data-testid="inbox-refresh-closed-verdicts"
-                aria-live="polite"
-              >
-                {closedRefreshLabel}
-              </button>
-            </p>
-          ) : null}
           {grouped ? (
             sections.map((section, index) => (
               <section key={section.key}>
@@ -732,7 +750,49 @@ export default function InboxPage() {
       )}
 
       {loaded ? (
-        <div className="mt-14 flex justify-center border-t border-hairline pt-6">
+        <div className="mt-14 flex flex-col items-center gap-3 border-t border-hairline pt-6">
+          {/* Older / closed set-aside disclosure — an end-of-list affordance
+              (moved here from the header per the redesign), sitting next to
+              View archived threads where end-of-list disclosures belong. */}
+          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
+            <p className="m-0 flex flex-wrap items-baseline justify-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+              {showAll ? (
+                <span>
+                  Showing all conversations.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(false)}
+                    className="underline underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Show recent only
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="underline underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Show all
+                  </button>
+                </span>
+              )}
+              {/* #287 F1: trigger AI close-status classification for threads
+                  never classified (or pre-dating the v2 cache with reasons). */}
+              <button
+                type="button"
+                onClick={() => void handleRefreshClosedVerdicts()}
+                disabled={closedRefreshState.kind === "running"}
+                className={`underline underline-offset-2 transition-colors duration-calm hover:text-ink disabled:opacity-60 ${closedRefreshTone}`}
+                data-testid="inbox-refresh-closed-verdicts"
+                aria-live="polite"
+              >
+                {closedRefreshLabel}
+              </button>
+            </p>
+          ) : null}
           <Link
             href="/archived"
             className="inline-flex items-center gap-[7px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
@@ -801,29 +861,283 @@ export default function InboxPage() {
   );
 }
 
-interface FilterSelectProps<K extends string> {
-  label: string;
-  value: K;
-  onChange: (value: K) => void;
-  options: readonly { key: K; label: string }[];
+// ---- Small inline glyphs (the prototype's tool icons, drawn directly so
+// the bar matches the design without adding icon-name dependencies) ----
+function XIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={1.9}>
+      <path d="M6 6l12 12M18 6L6 18" strokeLinecap="round" />
+    </svg>
+  );
+}
+function ChevronGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" strokeWidth={2} className="opacity-50">
+      <path d="M6 9l6 6 6-6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function CheckGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" strokeWidth={2.2}>
+      <path d="M5 12l5 5 9-10" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function SortGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <path d="M7 4v16M7 20l-3-3M7 20l3-3M17 20V4M17 4l-3 3M17 4l3 3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function FilterGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <path d="M3 5h18M6 12h12M10 19h4" strokeLinecap="round" />
+    </svg>
+  );
+}
+function SelectGlyph() {
+  return (
+    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" strokeWidth={1.7}>
+      <rect x="4" y="4" width="16" height="16" rx="3" />
+      <path d="M8.5 12l2.5 2.5 4.5-5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
-function FilterSelect<K extends string>({ label, value, onChange, options }: FilterSelectProps<K>) {
+// Close an open popover/menu on outside-click or Escape.
+function useDismiss(open: boolean, onClose: () => void) {
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) onClose();
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("mousedown", onDoc);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDoc);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+  return ref;
+}
+
+// Sort: a small menu-button (oldest wait / most recent / name A–Z).
+function SortMenu({ sortMode, onChange }: { sortMode: SortMode; onChange: (value: SortMode) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useDismiss(open, () => setOpen(false));
+  const label = SORT_MODES.find((s) => s.key === sortMode)?.label ?? "";
   return (
-    <label className="flex items-center gap-[6px] text-ink-3">
-      <span>{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as K)}
-        className="cursor-pointer bg-transparent text-ink-2 outline-none transition-colors duration-calm hover:text-ink"
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn(TOOL_CLASS, open ? "bg-paper-2 text-ink" : "")}
+        aria-expanded={open}
       >
-        {options.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
+        <SortGlyph />
+        <span className="font-mono">{label}</span>
+        <ChevronGlyph />
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 min-w-[180px] rounded-[12px] border border-hairline bg-paper p-[6px] shadow-pop">
+          {SORT_MODES.map((s) => {
+            const sel = sortMode === s.key;
+            return (
+              <button
+                key={s.key}
+                type="button"
+                onClick={() => {
+                  onChange(s.key);
+                  setOpen(false);
+                }}
+                className={cn(
+                  "flex w-full items-center gap-2 rounded-[7px] px-[10px] py-[7px] text-left text-[13px] transition-colors duration-calm hover:bg-paper-2",
+                  sel ? "text-ink" : "text-ink-2 hover:text-ink"
+                )}
+              >
+                <span className="flex-1">{s.label}</span>
+                <span className={cn("text-accent-ink", sel ? "opacity-100" : "opacity-0")}>
+                  <CheckGlyph />
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+// Filters: Platform + Kind collapsed into one popover with an active-count
+// badge — replacing the old stack of inline <select>s (the "convoluted"
+// part Richard flagged).
+function FiltersPopover({
+  platformFilter,
+  category,
+  onPlatform,
+  onCategory,
+  onClear
+}: {
+  platformFilter: PlatformFilter;
+  category: CategoryFilter;
+  onPlatform: (value: PlatformFilter) => void;
+  onCategory: (value: CategoryFilter) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useDismiss(open, () => setOpen(false));
+  const activeCount = (platformFilter !== "all" ? 1 : 0) + (category !== "any" ? 1 : 0);
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn(TOOL_CLASS, open ? "bg-paper-2 text-ink" : "", activeCount > 0 ? "text-accent-ink" : "")}
+        aria-expanded={open}
+      >
+        <FilterGlyph />
+        <span>Filters</span>
+        {activeCount > 0 ? (
+          <span className="grid h-[16px] min-w-[16px] place-items-center rounded-full bg-accent px-[4px] font-mono text-[10px] font-medium text-white">
+            {activeCount}
+          </span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-[248px] rounded-[12px] border border-hairline bg-paper p-4 shadow-pop">
+          <PopSection label="Platform">
+            {PLATFORM_FILTERS.map((o) => (
+              <PopOpt key={o.key} selected={platformFilter === o.key} onClick={() => onPlatform(o.key)}>
+                {o.label}
+              </PopOpt>
+            ))}
+          </PopSection>
+          <div className="mt-4">
+            <PopSection label="Kind">
+              {CATEGORY_FILTERS.map((o) => (
+                <PopOpt key={o.key} selected={category === o.key} onClick={() => onCategory(o.key)}>
+                  {o.label}
+                </PopOpt>
+              ))}
+            </PopSection>
+          </div>
+          <div className="mt-4 flex justify-end border-t border-hairline pt-3">
+            <button
+              type="button"
+              onClick={onClear}
+              className="font-mono text-[12px] text-ink-3 transition-colors duration-calm hover:text-accent-ink"
+            >
+              Clear filters
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PopSection({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <p className="m-0 mb-[10px] font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{label}</p>
+      <div className="flex flex-wrap gap-[6px]">{children}</div>
+    </div>
+  );
+}
+
+function PopOpt({
+  selected,
+  onClick,
+  children
+}: {
+  selected: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-pressed={selected}
+      className={cn(
+        "rounded-[8px] border px-[11px] py-[5px] text-[12px] transition-colors duration-calm",
+        selected
+          ? "border-ink bg-ink text-paper"
+          : "border-hairline text-ink-2 hover:border-hairline-strong hover:text-ink"
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+// Applied-filter chips — only rendered when a platform/kind filter is set,
+// so the resting bar stays calm.
+function ChipsRow({
+  platformFilter,
+  category,
+  onClearPlatform,
+  onClearCategory,
+  onClearAll
+}: {
+  platformFilter: PlatformFilter;
+  category: CategoryFilter;
+  onClearPlatform: () => void;
+  onClearCategory: () => void;
+  onClearAll: () => void;
+}) {
+  const chips: { key: string; label: string; value: string; onRemove: () => void }[] = [];
+  if (platformFilter !== "all") {
+    chips.push({
+      key: "platform",
+      label: "Platform",
+      value: PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label ?? platformFilter,
+      onRemove: onClearPlatform
+    });
+  }
+  if (category !== "any") {
+    chips.push({
+      key: "kind",
+      label: "Kind",
+      value: CATEGORY_FILTERS.find((c) => c.key === category)?.label ?? category,
+      onRemove: onClearCategory
+    });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-[14px]">
+      {chips.map((c) => (
+        <span
+          key={c.key}
+          className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2"
+        >
+          <span className="opacity-60">{c.label}</span>
+          {c.value}
+          <button
+            type="button"
+            onClick={c.onRemove}
+            aria-label={`Remove ${c.label} filter`}
+            className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
+          >
+            <XIcon />
+          </button>
+        </span>
+      ))}
+      <button
+        type="button"
+        onClick={onClearAll}
+        className="font-mono text-[11.5px] text-ink-3 transition-colors duration-calm hover:text-accent-ink"
+      >
+        Clear all
+      </button>
+    </div>
   );
 }
 
