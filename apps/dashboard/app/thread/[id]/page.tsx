@@ -414,6 +414,10 @@ export default function ThreadPage() {
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  // Synchronous re-entrancy guard. The `sending` state lags a render, so a
+  // held Cmd+Enter autorepeat (or click + shortcut in one frame) can clear
+  // two distinct clientSendIds before it flips — sending the message twice.
+  const sendingRef = useRef(false);
   const [reassessing, setReassessing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
@@ -721,6 +725,30 @@ export default function ThreadPage() {
     });
   }, [refresh]);
 
+  // Thread-local composer + AI state must NOT leak across threads. The page
+  // does not remount when navigating /thread/A -> /thread/B (same App Router
+  // dynamic segment), so without this reset a reply typed for A, staged
+  // attachments, in-flight optimistic sends, and A's AI snooze suggestions
+  // would carry into B — risking A's draft being sent to B. Keyed on the
+  // route param so it clears the instant navigation starts, before B loads.
+  useEffect(() => {
+    setComposer("");
+    setComposerSource("empty");
+    setComposeIntent("");
+    setComposeDraft("");
+    setComposeError(null);
+    setAskAnswer(null);
+    setSnoozeSuggestions(null);
+    setSnoozeMenuOpen(false);
+    setPendingSends([]);
+    setComposerAttachments((prev) => {
+      for (const a of prev) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+      return [];
+    });
+  }, [threadId]);
+
   // Load the operator voice profile once. Reloads on a profile-saved
   // event so an AI-help-level change in Settings lands without a reload.
   useEffect(() => {
@@ -878,8 +906,9 @@ export default function ThreadPage() {
   };
 
   const onSend = useCallback(async () => {
-    if (!thread || sending) return;
+    if (!thread || sending || sendingRef.current) return;
     if (!composer.trim() && composerAttachments.length === 0) return;
+    sendingRef.current = true;
     const clientSendId = uuid();
     const text = composer;
     const attachmentsToSend = composerAttachments;
@@ -935,6 +964,7 @@ export default function ThreadPage() {
       setComposer(text);
       setComposerAttachments(attachmentsToSend);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
