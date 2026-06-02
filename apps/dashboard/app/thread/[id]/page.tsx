@@ -3018,6 +3018,7 @@ export default function ThreadPage() {
             ) : null}
             <div
               data-thread-composer="true"
+              data-demo-target="composer-input"
               // Predraft state earns a tinted accent border + soft ring
               // (#350): the textarea on its own looks like a passive
               // surface, so operators read the AI predraft as static
