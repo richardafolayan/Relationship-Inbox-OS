@@ -15,8 +15,7 @@ import type {
 import { formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
-import { isWithinHorizon } from "@/lib/horizon";
-import { isLikelyClosed } from "@/lib/closed-conversation";
+import { isInTodayQueue } from "@/lib/today";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { ThreadRow } from "@/components/common/thread-row";
@@ -106,6 +105,10 @@ export default function TodayPage() {
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of the filtered Today queue (`rows`, computed below) so the
+  // MESSAGE_SENT handler credits a send as "done" only when the thread is
+  // actually in tonight's queue, not just anywhere in the inbox.
+  const todayRowsRef = useRef<InboxRow[]>([]);
   // Per-day "done" counter so the right-rail outline ticks up as the
   // operator clears overdue / waiting threads. Keyed by ISO date string
   // so it resets at local midnight.
@@ -224,9 +227,9 @@ export default function TodayPage() {
       if (detail.type === "MESSAGE_SENT") {
         // Only advance (and bump the "Tonight's outline" done counter) when
         // the sent thread is actually in Today's queue. Replying to an
-        // off-queue thread from the thread page must not inflate Today's
-        // counts. A non-Today send still refreshes via THREAD_UPDATED.
-        const matching = data?.rows.find((row) => row.id === detail.threadId);
+        // off-queue thread (or a scheduled send firing) must not inflate
+        // Today's counts. A non-Today send still refreshes via THREAD_UPDATED.
+        const matching = todayRowsRef.current.find((row) => row.id === detail.threadId);
         if (matching) {
           advanceHero(detail.threadId, "Sent, next up", matching.riskLevel);
         }
@@ -234,7 +237,7 @@ export default function TodayPage() {
     };
     window.addEventListener("runner-event", handler);
     return () => window.removeEventListener("runner-event", handler);
-  }, [advanceHero, data?.rows]);
+  }, [advanceHero]);
 
   useEffect(() => () => {
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
@@ -253,20 +256,16 @@ export default function TodayPage() {
   // "show all" toggle still appears there, and a new inbound message
   // immediately pulls a thread back into Today.
   const rows = useMemo(
-    () =>
-      allRows.filter(
-        (row) =>
-          row.needsReply !== false &&
-          !row.scheduledSendAt &&
-          !removedIds.has(row.id) &&
-          isWithinHorizon(row.lastMessageAt) &&
-          !isLikelyClosed(row)
-      ),
+    () => allRows.filter((row) => isInTodayQueue(row, removedIds)),
     [allRows, removedIds]
   );
   const overdueCount = rows.filter((row) => row.riskLevel === "RED").length;
   const waitingCount = rows.filter((row) => row.riskLevel === "AMBER").length;
   const freshCount = rows.filter((row) => row.riskLevel === "GREEN").length;
+
+  useEffect(() => {
+    todayRowsRef.current = rows;
+  }, [rows]);
 
   const sortedRows = useMemo(() => {
     const rank = (level: string) => (level === "RED" ? 0 : level === "AMBER" ? 1 : 2);
