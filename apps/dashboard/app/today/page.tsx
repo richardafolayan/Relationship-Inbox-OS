@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
+import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
+import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type {
@@ -243,7 +245,15 @@ export default function TodayPage() {
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
   }, []);
 
-  const allRows = data?.rows ?? [];
+  const { sandboxActive } = useFullDemo();
+  // While a sandbox guided flow (pilot tour / presenter sandbox) is active,
+  // Today shows only the demo-seeded threads so the walkthrough resolves its
+  // targets instead of pointing at the operator's real hero. Outside a sandbox
+  // flow this is a no-op and the real inbox shows as normal.
+  const allRows = useMemo(
+    () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
+    [data, sandboxActive]
+  );
   // Today is the "tonight's work" view. Two filters narrow the runner's
   // raw needs-reply set into things that genuinely need the operator
   // tonight (issue #287):

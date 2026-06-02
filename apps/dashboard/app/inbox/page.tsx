@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
+import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import { Archive, Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
@@ -236,7 +238,15 @@ export default function InboxPage() {
     };
   }, [refresh]);
 
-  const allRows = data?.rows ?? [];
+  const { sandboxActive } = useFullDemo();
+  // In a sandbox guided flow (pilot tour / presenter sandbox), the Inbox shows
+  // only demo-seeded threads so the walkthrough stays inside sandbox data and
+  // its targets resolve on a busy real inbox. Outside a sandbox flow this is a
+  // no-op.
+  const allRows = useMemo(
+    () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
+    [data, sandboxActive]
+  );
 
   // Per-tab counts. Scoped to the active platform + category chips so the
   // badges reflect the current filter — e.g. filtering to LinkedIn shows
