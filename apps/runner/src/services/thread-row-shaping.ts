@@ -1,4 +1,4 @@
-import { formatSlaCountdown, type PlatformName } from "@inbox-os/core";
+import { calculateRisk, formatSlaCountdown, type PlatformName } from "@inbox-os/core";
 import {
   isTemporaryLinkedInId,
   normalizeCanonicalLinkedInThreadId
@@ -264,11 +264,29 @@ function prefersCandidate(current: ShapedThreadGroupRow, next: ShapedThreadGroup
   return next.source.id > current.source.id;
 }
 
+export interface RiskThresholds {
+  amberHours: number;
+  redHours: number;
+}
+
 export function toInboxRow(
   row: ShapedThreadGroupRow,
-  personThreadCount: number = 1
+  personThreadCount: number,
+  thresholds: RiskThresholds
 ): ShapedThreadRow {
   const source = row.source;
+  // Risk is purely time-dependent (it ages amber -> red as the clock advances),
+  // so recompute it at request time from the timestamps + current thresholds
+  // rather than trusting the level frozen at the last scan/send. Otherwise a
+  // thread keeps showing a stale risk level until a rescan rewrites it, which
+  // is unbounded when scans are paused (cooldown, idle/disabled platform,
+  // demo mode) — the Today/inbox views would then misstate urgency.
+  const risk = calculateRisk({
+    lastInboundAt: source.lastInboundAt,
+    lastOutboundAt: source.lastOutboundAt,
+    amberHours: thresholds.amberHours,
+    redHours: thresholds.redHours
+  });
   // Prefer the latest-message text (which respects direction) over the
   // legacy lastMessagePreview field (which only tracks inbound). Falls
   // through to AI-summary fields when neither is set, then a constant.
@@ -291,18 +309,17 @@ export function toInboxRow(
     preview: previewText,
     lastMessageDirection: source.lastMessageDirection ?? null,
     unreadCount: source.unreadCount,
-    riskLevel: source.riskLevel,
+    riskLevel: risk.level,
     needsReply: row.needsReply,
     lastMessageAt: source.lastMessageAt?.toISOString() ?? null,
     lastInboundAt: source.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: source.lastOutboundAt?.toISOString() ?? null,
-    riskReason: source.riskReason,
-    // `row.needsReply` is recomputed from lastInboundAt vs lastOutboundAt;
-    // `source.slaDueAt` is the raw DB value written by the last risk scan.
-    // If the operator has replied since that scan, slaDueAt is stale and
-    // would render as "Overdue Xh" on a row that no longer needs a reply
-    // (issue #200). Suppress the countdown when nothing is owed.
-    slaCountdown: row.needsReply ? formatSlaCountdown(source.slaDueAt) : "",
+    riskReason: risk.riskReason,
+    // slaDueAt is recomputed above from lastInboundAt + the current amber
+    // threshold, so the countdown is live. Still suppress it when nothing is
+    // owed (the operator has replied) so a no-longer-pending row doesn't read
+    // "Overdue Xh" (issue #200).
+    slaCountdown: row.needsReply ? formatSlaCountdown(risk.slaDueAt) : "",
     identityWarning: row.identityWarning,
     messageCount: row.messageCount,
     category: source.category ?? null,
