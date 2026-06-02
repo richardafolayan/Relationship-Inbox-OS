@@ -9,7 +9,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
@@ -985,13 +985,15 @@ async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
   // "overdue" stays in lockstep with what Today calls overdue (#360
   // amendment 2). loadVisibleThreadRows already hides archived rows and
   // thread-level snoozes; the digest service does the rest of the filtering.
-  const [visibleRows, scheduledSends] = await Promise.all([
+  const [visibleRows, scheduledSends, riskSettings] = await Promise.all([
     loadVisibleThreadRows(),
     prisma.sendRequest.findMany({
       where: { status: "SCHEDULED" },
       select: { threadId: true, scheduledFor: true }
-    })
+    }),
+    settingsStore.getSettings()
   ]);
+  const riskThresholds = { amberHours: riskSettings.amberHours, redHours: riskSettings.redHours };
   const counts = personThreadCounts(visibleRows);
   const scheduledByThread = new Map<string, Date>();
   for (const row of scheduledSends) {
@@ -1003,7 +1005,7 @@ async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
   }
   return visibleRows.map((row) => {
     const count = counts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
-    const shaped = toInboxRow(row, count);
+    const shaped = toInboxRow(row, count, riskThresholds);
     const scheduledFor = scheduledByThread.get(shaped.id);
     return {
       threadId: shaped.id,
@@ -3428,10 +3430,12 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
     }
   }
 
+  const inboxRiskSettings = await settingsStore.getSettings();
+  const riskThresholds = { amberHours: inboxRiskSettings.amberHours, redHours: inboxRiskSettings.redHours };
   const visibleCounts = personThreadCounts(visibleRows);
   const dedupedRows = visibleRows.map((row) => {
     const count = visibleCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
-    const shaped = toInboxRow(row, count);
+    const shaped = toInboxRow(row, count, riskThresholds);
     const scheduledFor = scheduledSendByThread.get(shaped.id);
     return {
       ...shaped,
@@ -4078,6 +4082,18 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       latestInboundText: lastInbound?.text ?? null
     });
 
+  // Recompute risk live from the thread's timestamps + current thresholds,
+  // mirroring the inbox shaper, so the thread page's risk pill never disagrees
+  // with the list (risk ages amber -> red with the clock; the persisted value
+  // is frozen at the last scan).
+  const threadRiskSettings = await settingsStore.getSettings();
+  const liveThreadRisk = calculateRisk({
+    lastInboundAt: thread.lastInboundAt,
+    lastOutboundAt: thread.lastOutboundAt,
+    amberHours: threadRiskSettings.amberHours,
+    redHours: threadRiskSettings.redHours
+  });
+
   res.json({
     id: thread.id,
     personId: thread.person.id,
@@ -4092,8 +4108,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     personBirthday: thread.person.birthday ?? null,
     personBirthYear: thread.person.birthYear ?? null,
     platform: thread.platform,
-    riskLevel: thread.riskLevel,
-    riskReason: thread.riskReason,
+    riskLevel: liveThreadRisk.level,
+    riskReason: liveThreadRisk.riskReason,
     snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
     // Issue #392. Operator-supplied "remind me to…" text. Surfaces as
     // a "Reminder: <text>" banner on the thread page so the operator
@@ -4370,9 +4386,11 @@ app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
 // Archived view counterpart to /data/inbox — same shape, only archived rows.
 app.get("/data/archived", asyncRoute(async (_req, res) => {
   const archivedRows = await loadVisibleThreadRows({ archived: true });
+  const archivedRiskSettings = await settingsStore.getSettings();
+  const archivedRiskThresholds = { amberHours: archivedRiskSettings.amberHours, redHours: archivedRiskSettings.redHours };
   const archivedCounts = personThreadCounts(archivedRows);
   const rows = archivedRows
-    .map((row) => toInboxRow(row, archivedCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1))
+    .map((row) => toInboxRow(row, archivedCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1, archivedRiskThresholds))
     .sort((a, b) => {
       const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
       const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
@@ -4496,11 +4514,13 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
     });
   }
 
+  const peopleRiskSettings = await settingsStore.getSettings();
+  const peopleRiskThresholds = { amberHours: peopleRiskSettings.amberHours, redHours: peopleRiskSettings.redHours };
   const peopleCounts = personThreadCounts(visibleThreadGroups);
   const groupedByPerson = new Map<string, ReturnType<typeof toInboxRow>[]>();
   for (const group of visibleThreadGroups) {
     const count = peopleCounts.get(personThreadCountKey(group.source.platform, group.source.personId)) ?? 1;
-    const shaped = toInboxRow(group, count);
+    const shaped = toInboxRow(group, count, peopleRiskThresholds);
     const bucket = groupedByPerson.get(shaped.personId) ?? [];
     bucket.push(shaped);
     groupedByPerson.set(shaped.personId, bucket);
