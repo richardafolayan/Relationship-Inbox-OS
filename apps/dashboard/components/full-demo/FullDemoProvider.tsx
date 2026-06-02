@@ -54,6 +54,14 @@ interface FullDemoContextValue {
   flow: FullDemoFlow;
   /** Walkthrough mode if presenter is active, otherwise null. */
   mode: FullDemoMode | null;
+  /**
+   * True while a guided flow is showing SANDBOX (demo-seeded) data: the pilot
+   * tour, or the presenter walkthrough in sandbox mode. Today/Inbox narrow to
+   * demo threads only while this is true, so the curated tour resolves its
+   * targets regardless of how full the real inbox is. False in presenter live
+   * / read-only mode, where real threads stay visible.
+   */
+  sandboxActive: boolean;
   /** Index into FULL_DEMO_SCRIPT, filtered to steps in the current mode. */
   stepIndex: number;
   /** Total visible steps in the current mode. */
@@ -97,6 +105,17 @@ const AUTOPLAY_DEFAULT_MS = 6000;
 function presenterFlagsOn(settings: AppSettings | null): boolean {
   if (!settings) return false;
   return (settings.presenterDemoMode && settings.presenterDemoMode !== "off") || !!settings.presenterReadOnly;
+}
+
+// Starting / exiting a sandbox changes which threads the runner returns from
+// /data/inbox (demo rows are seeded in, then torn down). Today and Inbox keep
+// their own inbox copy and refetch on the "runner-resync" event, so nudge them
+// once the seed/teardown has landed. Without this the sandbox filter runs
+// against stale (real) data and Today renders empty during the tour.
+function signalInboxResync(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("runner-resync"));
+  }
 }
 
 export function FullDemoProvider({ children }: { children: React.ReactNode }) {
@@ -278,6 +297,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
         liveThreadIds: threadIds ?? []
       });
       await refreshSettings();
+      signalInboxResync();
     },
     [refreshSettings]
   );
@@ -309,6 +329,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     setMode("sandbox");
     setLiveThreadIds([]);
     await refreshSettings();
+    signalInboxResync();
   }, [flow, refreshSettings]);
 
   const goToStepId = useCallback((id: string) => {
@@ -359,6 +380,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     setLiveThreadIds([]);
     clearFullDemoState();
     await refreshSettings();
+    signalInboxResync();
   }, [refreshSettings]);
   // `next` is declared above `exit` and needs to trigger teardown when
   // pressed on the final step. Keep a ref so that callback can reach the
@@ -371,11 +393,17 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   // mounts the same teardown path on exit.
   const recoveryNeeded = flow === null && presenterFlagsOn(serverSettings);
 
+  // The pilot tour and the presenter sandbox run against demo-seeded threads;
+  // only then should Today/Inbox hide real threads. Presenter live / read-only
+  // mode keeps real threads visible (it demos over the operator's real data).
+  const sandboxActive = flow === "pilot" || (flow === "presenter" && mode === "sandbox");
+
   const value = useMemo<FullDemoContextValue>(
     () => ({
       active,
       flow,
       mode,
+      sandboxActive,
       stepIndex,
       visibleStepCount: visibleSteps.length,
       currentStep,
@@ -397,6 +425,7 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
       active,
       flow,
       mode,
+      sandboxActive,
       stepIndex,
       visibleSteps.length,
       currentStep,
