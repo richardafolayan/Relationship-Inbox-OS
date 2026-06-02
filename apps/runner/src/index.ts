@@ -3218,7 +3218,12 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
         // asc + take would feed composeInVoice the OLDEST 80 and miss
         // the live conversation on long threads.
         orderBy: { timestamp: "desc" },
-        take: 80
+        take: 80,
+        // Voice-note transcripts must reach composeInVoice. Without this,
+        // a contact whose last message is an audio note is rendered to the
+        // model as the bare "[Voice note]" placeholder and the draft answers
+        // nothing the contact actually said.
+        include: { audioTranscription: { select: { status: true, transcript: true } } }
       }
     }
   });
@@ -3271,11 +3276,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
-    threadMessages: orderedMessages.map((m) => ({
-      direction: m.direction as "IN" | "OUT",
-      text: m.text,
-      timestamp: m.timestamp.toISOString()
-    })),
+    threadMessages: orderedMessages.map(prismaMessageToPrompt),
     relationshipContext,
     operatorProfile: composeOperatorProfile,
     contact: composeContactSnapshot,
@@ -3917,7 +3918,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
   let suggested: SuggestedRepliesOutput | undefined;
   let suggestedRepliesStatus: "ready" | "generating" = "ready";
-  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+  // On a paginated (older-history) fetch, recentMessages is an older window,
+  // so the recomputed cacheKey can never match the live one. Serve the
+  // persisted replies as-is and never regenerate/persist — otherwise
+  // scrolling up regenerates suggestions from stale context and clobbers the
+  // live cache (wasted AI spend + flapping suggestions on the next fetch).
+  const servePersistedOnly = Boolean(beforeMessageId);
+  if ((servePersistedOnly || thread.suggestedRepliesCacheKey === cacheKey) && thread.suggestedRepliesJson) {
     try {
       suggested = JSON.parse(thread.suggestedRepliesJson);
     } catch {
@@ -3927,7 +3934,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   }
   if (!suggested) {
     const inFlightKey = `${thread.id}:${cacheKey}`;
-    if (!suggestedRepliesInFlight.has(inFlightKey)) {
+    if (!servePersistedOnly && !suggestedRepliesInFlight.has(inFlightKey)) {
       const inFlight = withInFlightTimeout(
         aiService.generateSuggestedReplies(aiInputs),
         `generateSuggestedReplies(${thread.id})`
@@ -5488,8 +5495,14 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
       person: true,
       // Most RECENT 80, made chronological by the reverse below. An asc
       // + take would calibrate voice off the OLDEST 80 messages and miss
-      // how the operator currently writes to this contact.
-      messages: { orderBy: { timestamp: "desc" }, take: 80 }
+      // how the operator currently writes to this contact. Includes the
+      // audio transcript so a voice-note last message reaches composeInVoice
+      // as its transcribed text, not the bare "[Voice note]" placeholder.
+      messages: {
+        orderBy: { timestamp: "desc" },
+        take: 80,
+        include: { audioTranscription: { select: { status: true, transcript: true } } }
+      }
     }
   });
   if (!thread) {
@@ -5519,11 +5532,7 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
-    threadMessages: orderedMessages.map((m) => ({
-      direction: m.direction as "IN" | "OUT",
-      text: m.text,
-      timestamp: m.timestamp.toISOString()
-    })),
+    threadMessages: orderedMessages.map(prismaMessageToPrompt),
     operatorProfile: rewriteOperatorProfile,
     contact: rewriteContactSnapshot,
     operatorStyle,
