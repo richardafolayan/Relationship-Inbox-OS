@@ -1,7 +1,7 @@
-import { createReadStream, existsSync, mkdirSync, openSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import multer from "multer";
@@ -146,6 +146,25 @@ function maybeMultipart(req: express.Request, res: express.Response, next: expre
     next();
   }
 }
+
+// #462 (pilot R-0061): voice-to-text dictation. The composer records a short
+// audio clip and posts it here as a single `audio` field; we transcribe it
+// with the existing provider and return the text for the operator to review.
+// Clips land in their own temp dir and are removed once transcription
+// completes (success or failure) — nothing is persisted as a Message.
+const dictationUploadRoot = resolve(dataDir, "dictation-uploads");
+mkdirSync(dictationUploadRoot, { recursive: true });
+const uploadDictation = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = resolve(dictationUploadRoot, uuid());
+      mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => cb(null, file.originalname || "dictation.webm")
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 } // ~ several minutes of speech
+}).single("audio");
 
 function kindFromMime(mime: string | undefined, filename: string | undefined): "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" {
   const m = (mime ?? "").toLowerCase();
@@ -418,6 +437,20 @@ if (runnerConfig.audioTranscription.enabled) {
       });
     }
   }
+}
+
+// #462: the best provider available for one-shot dictation. Prefers the
+// single configured provider, else the balanced "standard" progressive tier
+// (then max, then fast). Null when transcription isn't configured at all, in
+// which case the dictation route and capability probe both report it off.
+function pickDictationProvider(): TranscriptionProvider | null {
+  return (
+    transcriptionProvider ??
+    tierProviders.standard ??
+    tierProviders.max ??
+    tierProviders.fast ??
+    null
+  );
 }
 
 // GPT-5-nano text refinement is text-only — never receives audio
@@ -3139,6 +3172,78 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
     transcription: row ? { ...row, isImproving } : null
   });
 }));
+
+// #462 (pilot R-0061): does the runner have a transcription provider wired
+// up? The composer reads this once to decide whether to enable the Dictate
+// control (vs. show it disabled with an explanation).
+app.get("/data/transcription-capabilities", asyncRoute(async (_req, res) => {
+  res.json({ dictationAvailable: pickDictationProvider() !== null });
+}));
+
+// #462 (pilot R-0061): transcribe a one-shot dictation clip into text. Posts
+// a single `audio` field (multipart); returns { ok, text }. Nothing is
+// persisted — the operator reviews/edits the text in the composer before any
+// send. The temp upload is always cleaned up.
+app.post(
+  "/control/transcribe-dictation",
+  (req, res, next) =>
+    uploadDictation(req, res, (err: unknown) => {
+      if (err) {
+        res
+          .status(400)
+          .json({ ok: false, error: err instanceof Error ? err.message : "Upload failed." });
+        return;
+      }
+      next();
+    }),
+  asyncRoute(async (req, res) => {
+    const file = req.file as Express.Multer.File | undefined;
+    const cleanup = () => {
+      if (file) {
+        try {
+          rmSync(dirname(file.path), { recursive: true, force: true });
+        } catch {
+          /* best-effort temp cleanup */
+        }
+      }
+    };
+    if (!file) {
+      res.status(400).json({ ok: false, error: "No audio uploaded." });
+      return;
+    }
+    const provider = pickDictationProvider();
+    if (!provider) {
+      cleanup();
+      res.status(503).json({
+        ok: false,
+        reason: "unavailable",
+        error:
+          "Voice transcription is not configured on the runner. Enable AUDIO_TRANSCRIPTION_ENABLED (local Whisper or OpenAI) to use dictation."
+      });
+      return;
+    }
+    try {
+      const outcome = await provider.transcribe({
+        filePath: file.path,
+        mimeType: file.mimetype || "audio/webm",
+        filename: file.originalname || "dictation.webm",
+        language: runnerConfig.audioTranscription.language,
+        // local-whisper ignores this (model is baked into the provider);
+        // the OpenAI provider uses it as the audio model id.
+        model: runnerConfig.audioTranscription.model
+      });
+      if (outcome.kind === "ok") {
+        res.json({ ok: true, text: outcome.result.text });
+      } else if (outcome.kind === "skipped") {
+        res.status(422).json({ ok: false, reason: "skipped", error: outcome.reason });
+      } else {
+        res.status(502).json({ ok: false, reason: "failed", error: outcome.errorMessage });
+      }
+    } finally {
+      cleanup();
+    }
+  })
+);
 
 // Issue #331. Reads the operator's in-flight draft against the thread's
 // active open loops and returns the subset the draft already addresses.
