@@ -11,6 +11,8 @@ import {
   markTourActive,
   markTourSeen,
   onPilotTourStart,
+  planPilotSkip,
+  shouldTearDownDeferredSkip,
   PILOT_TOUR_ACTIVE_KEY
 } from "@/lib/pilot-tour";
 
@@ -43,6 +45,11 @@ export function PilotTour() {
     bootstrapping: false
   });
   const endingRef = useRef(false);
+  // True when the operator pressed Skip while the sandbox was still
+  // bootstrapping. The in-flight startPilotSandbox() will still resolve and
+  // commit flow="pilot"/sandboxActive=true; the resolve path checks this flag
+  // and tears the sandbox down so the real inbox is restored.
+  const skipPendingRef = useRef(false);
 
   const endTour = useCallback(
     async (markSeen: boolean) => {
@@ -72,10 +79,14 @@ export function PilotTour() {
 
   const skipTour = useCallback(() => {
     if (!state.active) return;
-    // If the sandbox is still bootstrapping, just close the card and
-    // mark seen. The provider's exit handler is reentrant; calling it
-    // here on a half-seeded sandbox would race.
-    if (state.bootstrapping) {
+    const plan = planPilotSkip(state.bootstrapping);
+    if (plan.kind === "defer-teardown") {
+      // The sandbox is still seeding. Closing the card and calling exit() now
+      // would race the in-flight startPilotSandbox(), which then resolves and
+      // re-commits flow="pilot"/sandboxActive=true — leaving the real inbox
+      // hidden with no recovery. Instead, close the card now and flag the
+      // skip; the bootstrap-resolve path tears the sandbox down once it lands.
+      skipPendingRef.current = true;
       if (typeof window !== "undefined") {
         markTourSeen(window.localStorage);
         clearTourActive(window.localStorage);
@@ -91,14 +102,26 @@ export function PilotTour() {
       if (typeof window !== "undefined") markTourActive(window.localStorage);
       setState({ active: true, stepIndex: 0, bootstrapping: true });
       endingRef.current = false;
+      skipPendingRef.current = false;
       try {
         await fullDemo.startPilotSandbox();
       } catch {
+        // Start POST failed, so the runner was never flipped into the sandbox;
+        // nothing to tear down. Clear any pending skip and close the card.
+        skipPendingRef.current = false;
         if (typeof window !== "undefined") {
           markTourSeen(window.localStorage);
           clearTourActive(window.localStorage);
         }
         setState({ active: false, stepIndex: 0, bootstrapping: false });
+        return;
+      }
+      // The sandbox is now seeded. If the operator skipped mid-bootstrap, honour
+      // it: tear the sandbox down so flow returns to null and the real inbox is
+      // restored. This runs strictly after the start resolved, so no race.
+      if (shouldTearDownDeferredSkip(skipPendingRef.current)) {
+        skipPendingRef.current = false;
+        void endTour(true);
         return;
       }
       setState((prev) => (prev.active ? { ...prev, bootstrapping: false } : prev));
