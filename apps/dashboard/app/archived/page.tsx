@@ -52,7 +52,7 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
 const ARCH_SORTS: { key: ArchSort; label: string }[] = [
   { key: "recent", label: "most recent" },
   { key: "oldest", label: "oldest first" },
-  { key: "name", label: "name A–Z" }
+  { key: "name", label: "name A-Z" }
 ];
 
 // A future "until <when>" label for a snoozed thread: a weekday inside the
