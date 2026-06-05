@@ -1840,6 +1840,7 @@ app.get("/data/overdue-digest/settings", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/overdue-digest/settings", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "change overdue-digest settings", kind: "operator-write" })) return;
   const payload = z
     .object({ cadence: z.enum(["off", "daily", "weekly"]) })
     .parse(req.body ?? {});
@@ -1864,6 +1865,7 @@ app.get("/data/overdue-digest/preview", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/overdue-digest/tick", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "run the overdue-digest tick", kind: "operator-write" })) return;
   const payload = z.object({ localDate: localDateSchema }).parse(req.body ?? {});
   const [settings, rows] = await Promise.all([overdueDigestStore.get(), loadOverdueDigestRows()]);
   const result = computeTick({
@@ -1876,6 +1878,7 @@ app.post("/control/overdue-digest/tick", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "acknowledge the overdue digest", kind: "operator-write" })) return;
   const payload = z
     .object({
       included: z
@@ -1908,6 +1911,7 @@ app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/overdue-digest/dismiss-today", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "dismiss today's overdue digest", kind: "operator-write" })) return;
   const payload = z.object({ localDate: localDateSchema }).parse(req.body ?? {});
   const current = await overdueDigestStore.get();
   const next = await overdueDigestStore.put(applyDismissToday(current, payload.localDate));
@@ -1915,6 +1919,7 @@ app.post("/control/overdue-digest/dismiss-today", asyncRoute(async (req, res) =>
 }));
 
 app.post("/control/overdue-digest/snooze-person", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "snooze a person in the overdue digest", kind: "operator-write" })) return;
   const payload = z
     .object({
       personId: z.string().min(1),
@@ -1931,6 +1936,7 @@ app.post("/control/overdue-digest/snooze-person", asyncRoute(async (req, res) =>
 }));
 
 app.post("/control/overdue-digest/unsnooze-person", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "unsnooze a person in the overdue digest", kind: "operator-write" })) return;
   const payload = z.object({ personId: z.string().min(1) }).parse(req.body ?? {});
   const current = await overdueDigestStore.get();
   const next = await overdueDigestStore.put(applyUnsnoozePerson(current, payload.personId));
@@ -2877,6 +2883,7 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "open the thread in the browser", kind: "external-action" })) return;
   const target = await getThreadStub(threadId);
   const adapter = requireAdapter(target.platform);
 
@@ -3212,6 +3219,7 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
 // twice).
 app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) => {
   const { messageId } = z.object({ messageId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { action: "transcribe a voice message", kind: "external-action" })) return;
 
   // Manual clicks always force a fresh attempt. Auto-scan keeps
   // fingerprint dedup; the operator's deliberate "Try again" should
@@ -5223,6 +5231,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 // { ok:false, reason } lets the dashboard show a calm message rather than
 // catching an error.
 app.post("/control/operator-profile/analyze-style", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "analyse your writing style", kind: "external-action" })) return;
   const rows = await prisma.message.findMany({
     where: { direction: "OUT" },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -5950,6 +5959,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 // caller to re-prompt the operator for a clearer time hint.
 app.post("/control/thread/:threadId/remind", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "set a reminder", kind: "thread-mutation" })) return;
   const payload = z.object({ intent: z.string().min(1).max(600) }).parse(req.body);
 
   const thread = await prisma.thread.findUnique({
