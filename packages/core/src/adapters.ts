@@ -37,5 +37,14 @@ export interface PlatformAdapter {
    * signal leave this unset.
    */
   collectRetractedOutboundKeys?(thread: ThreadStub): Promise<string[]>;
+  /**
+   * Optional. Adds an emoji reaction to a single message identified by its
+   * `platformMessageKey`. Used by the dashboard's message-bubble reaction
+   * affordance (issue #408). Resolves once the reaction is confirmed applied,
+   * throws an AdapterFailure otherwise. Platforms without a reaction surface
+   * (or not yet implemented) leave this unset; callers must check before
+   * invoking.
+   */
+  reactToMessage?(thread: ThreadStub, platformMessageKey: string, emoji: string): Promise<void>;
   closeSession(reason?: string): Promise<void>;
 }
