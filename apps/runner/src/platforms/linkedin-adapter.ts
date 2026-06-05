@@ -19,6 +19,10 @@ import {
 } from "../services/linkedin-voice-store.js";
 import { stableHash } from "@inbox-os/core";
 import {
+  classifyLinkedInSendVerification,
+  type LinkedInSendBubble
+} from "./linkedin-send-verification.js";
+import {
   cleanMessageText,
   cleanText,
   AdapterFailure,
@@ -9732,7 +9736,7 @@ export class LinkedInAdapter implements PlatformAdapter {
   private async getLatestMessageSnapshot(
     page: Page,
     selectors: SelectorRegistry
-  ): Promise<{ direction: "IN" | "OUT"; timestamp: number; text: string } | null> {
+  ): Promise<LinkedInSendBubble | null> {
     // CRITICAL: Playwright's `{ timeout: 0 }` doesn't mean "fail fast" — it
     // disables the timeout entirely (wait forever). When LinkedIn's React
     // re-renders the message list mid-call (e.g. right after the auto-login
@@ -9760,6 +9764,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       (await timeNode.innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
       "";
     const parsed = Date.parse(timestampRaw);
+    const timestampSynthetic = Number.isNaN(parsed);
     const text =
       (await last.locator(selectors.message_text).first().innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
       (await last.innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
@@ -9767,8 +9772,10 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     return {
       direction: inbound ? "IN" : "OUT",
-      timestamp: Number.isNaN(parsed) ? Date.now() : parsed,
-      text
+      timestamp: timestampSynthetic ? Date.now() : parsed,
+      text,
+      timestampSynthetic,
+      count
     };
   }
 
@@ -9842,7 +9849,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         console.warn(`${tag} send_button clicked, entering verify loop`);
 
         const start = Date.now();
-        let verifiedBy: VerificationMethod = "best_effort";
+        let verifiedBy: VerificationMethod | null = null;
 
         while (Date.now() - start < 10_000) {
           const last = await this.getLatestMessageSnapshot(page, selectors);
@@ -9851,20 +9858,24 @@ export class LinkedInAdapter implements PlatformAdapter {
             continue;
           }
 
-          const timestampAdvanced = !preSend || last.timestamp > preSend.timestamp;
-          const textMatch = cleanText(last.text).includes(cleanText(text));
-
-          if (last.direction === "OUT" && timestampAdvanced && textMatch) {
-            verifiedBy = "bubble_detected";
-            break;
-          }
-
-          if (last.direction === "OUT" && timestampAdvanced) {
-            verifiedBy = "timestamp_advanced";
+          verifiedBy = classifyLinkedInSendVerification({ pre: preSend, last, sentText: text });
+          if (verifiedBy) {
             break;
           }
 
           await page.waitForTimeout(400);
+        }
+
+        if (!verifiedBy) {
+          // Do NOT report a silently-failed send as sent. No new outbound bubble
+          // (and no matching text) appeared within the window, so we cannot
+          // confirm delivery. Throwing makes send.ts record this as FAILED and
+          // surface a retry, instead of a false "Sent" — the previous code fell
+          // through to a best_effort/timestamp_advanced success on a re-reply
+          // whose send never actually landed.
+          throw new Error(
+            "Could not confirm the LinkedIn message was delivered — no new outbound bubble appeared within 10s"
+          );
         }
 
         console.warn(`${tag} send complete verifiedBy=${verifiedBy}`);
