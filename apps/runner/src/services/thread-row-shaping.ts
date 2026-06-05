@@ -3,6 +3,7 @@ import {
   isTemporaryLinkedInId,
   normalizeCanonicalLinkedInThreadId
 } from "../linkedin/linkedinIdentity.js";
+import { isMoreCanonical } from "./canonical-thread.js";
 
 export type IdentityWarning = "unresolved_id";
 
@@ -265,15 +266,18 @@ export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[]
 }
 
 function prefersCandidate(current: ShapedThreadGroupRow, next: ShapedThreadGroupRow): boolean {
-  // Pick the more-active sibling thread: highest message count, then
-  // most-recent activity. Ties break deterministically on id.
-  if (next.messageCount !== current.messageCount) {
-    return next.messageCount > current.messageCount;
-  }
-  const a = next.source.lastMessageAt?.getTime() ?? 0;
-  const b = current.source.lastMessageAt?.getTime() ?? 0;
-  if (a !== b) return a > b;
-  return next.source.id > current.source.id;
+  // Pick the CANONICAL sibling thread for an iMessage person: the one still
+  // receiving inbound (most recent lastInboundAt), tie-broken by message count
+  // then id. This is the same row the thread endpoint reads AI fields from and
+  // the reassess pipeline writes to, so Today/Inbox preview + whatTheyWant and
+  // the row's link target the LIVE conversation rather than a high-message-
+  // count but dormant handle (e.g. an old phone thread frozen days behind the
+  // email thread the contact now uses). Shares isMoreCanonical with
+  // canonical-thread.ts so the rule can't drift between selection sites.
+  return isMoreCanonical(
+    { id: next.source.id, lastInboundAt: next.source.lastInboundAt, messageCount: next.messageCount },
+    { id: current.source.id, lastInboundAt: current.source.lastInboundAt, messageCount: current.messageCount }
+  );
 }
 
 export interface RiskThresholds {
