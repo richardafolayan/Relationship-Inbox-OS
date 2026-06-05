@@ -33,6 +33,7 @@ import {
   isTransientPageError
 } from "./utils.js";
 import { humanClick, humanHover, humanType, humanWait, readingPause } from "./humanize.js";
+import { REACTION_SELECTORS, messageRowSelector, normalizeReactionEmoji } from "./linkedin-message-reactions.js";
 import { ChromeCookieBridge } from "./chrome-cookie-bridge.js";
 import type { AdapterFailureKind, AdapterStage } from "./utils.js";
 import type { SessionManager } from "../services/session-manager";
@@ -9926,6 +9927,90 @@ export class LinkedInAdapter implements PlatformAdapter {
         note: displayName ? `open_profile:${displayName}` : "open_profile"
       });
       await this.throwIfAuthRequired(page, "openProfileUrl:after_navigate");
+    });
+  }
+
+  // Add an emoji reaction to one message (issue #408, Phase 1). Mirrors the
+  // sendMessage flow: take the platform lease, open the thread, then drive the
+  // real hover -> reaction entry point -> quick-reaction list using the same
+  // humanised pointer the rest of the adapter uses (LinkedIn only renders the
+  // hover toolbar and only honours trusted pointer events). Phase 1 supports
+  // the quick popular-reaction list; an emoji absent from it raises a clear
+  // failure rather than silently picking the wrong glyph (full-keyboard search
+  // is a Phase 1.1 follow-up once validated live).
+  async reactToMessage(thread: ThreadStub, platformMessageKey: string, emoji: string): Promise<void> {
+    const glyph = normalizeReactionEmoji(emoji);
+    const rowSelector = messageRowSelector(platformMessageKey);
+    const tag = `[react:${thread.displayName}]`;
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.getPage();
+      try {
+        await this.openThreadAndWaitForActivation(page, selectors, thread);
+
+        const row = page.locator(rowSelector).first();
+        if ((await row.count()) === 0) {
+          throw new AdapterFailure(`Message not found in thread for reaction (key=${platformMessageKey})`, {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        await row.scrollIntoViewIfNeeded().catch(() => undefined);
+
+        // Hover the row to render its action container, then hover the
+        // reaction entry point to open the quick-reaction list.
+        await humanHover(page, row);
+        const entry = row.locator(REACTION_SELECTORS.reactionEntryPoint).first();
+        await humanHover(page, entry);
+
+        // Quick-reaction items carry the emoji as their text; match on the
+        // glyph so we are independent of LinkedIn's per-locale aria labels.
+        const reaction = page
+          .locator(REACTION_SELECTORS.popularReactionItem)
+          .filter({ hasText: glyph })
+          .first();
+        try {
+          await reaction.waitFor({ state: "visible", timeout: 6_000 });
+        } catch {
+          throw new AdapterFailure(
+            `Reaction ${glyph} is not available in LinkedIn's quick-reaction list`,
+            {
+              kind: "THREAD_FETCH_FAILED",
+              platform: this.platform,
+              stage: "parse",
+              details: { platformThreadId: thread.platformThreadId, emoji: glyph }
+            }
+          );
+        }
+        await humanClick(page, reaction, { timeout: 8_000, reading: null });
+
+        // Best-effort confirmation: the row should now carry a reaction
+        // summary. We don't hard-fail if it's not detected yet (the summary
+        // selector is finalised during live verification), but we log it.
+        const applied = await row
+          .locator('[class*="reaction"]')
+          .first()
+          .count()
+          .catch(() => 0);
+        console.warn(`${tag} reaction ${glyph} clicked (summaryDetected=${applied > 0})`);
+      } catch (error) {
+        if (error instanceof AdapterFailure) throw error;
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "persist",
+          message: `Failed to react to LinkedIn message for ${thread.displayName}`,
+          action: "react",
+          error,
+          kind: "THREAD_FETCH_FAILED",
+          page,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir,
+          platformThreadId: thread.platformThreadId,
+          details: { threadDisplayName: thread.displayName, emoji: glyph }
+        });
+      }
     });
   }
 

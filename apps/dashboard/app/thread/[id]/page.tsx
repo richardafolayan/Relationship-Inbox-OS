@@ -373,6 +373,22 @@ function ParticipantPopover({
   );
 }
 
+/**
+ * Shape of a message reaction as the runner stores and returns it. An
+ * operator-applied reaction (sent from this dashboard) carries
+ * direction "OUT"; reactions the contact left carry "IN". Shared by the
+ * native-reactions read, the optimistic local overlay, and the badge
+ * renderer so all three agree on one shape.
+ */
+type MessageReaction = { emoji: string; kind: string; direction: "IN" | "OUT" };
+
+/**
+ * #408. The quick-react picker offers a small, common set of emoji.
+ * LinkedIn's own message reactions map onto these glyphs, so the
+ * operator picks from a familiar row rather than a full keyboard.
+ */
+const QUICK_REACT_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "👏"] as const;
+
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -444,6 +460,18 @@ export default function ThreadPage() {
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // #408. Per-message reaction trigger state (LinkedIn only). The picker
+  // id tracks which bubble's emoji row is open; the reacting id is the
+  // single in-flight request so its control shows a pending state; the
+  // error map surfaces a calm inline failure on the bubble that failed;
+  // the optimistic overlay renders the just-applied "OUT" reaction
+  // immediately, before the next thread refresh confirms it server-side.
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
+  const [reactionErrorByMessageId, setReactionErrorByMessageId] = useState<Record<string, string>>({});
+  const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
+    Record<string, MessageReaction[]>
+  >({});
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
   // Defensive 30s ceiling on the suggestions spinner. See the
   // `repliesGenerating` derivation below for why this exists.
@@ -1551,6 +1579,66 @@ export default function ThreadPage() {
       setError(message);
     } finally {
       setTransforming(null);
+    }
+  };
+
+  // #408. Apply an operator reaction to a single LinkedIn message. Mirrors
+  // the transform / reassess handlers: a single in-flight id drives the
+  // pending state, the catch surfaces a calm per-message inline error, and
+  // the finally clears the in-flight flag. The reaction is rendered
+  // optimistically (OUT direction) the instant it is sent, then confirmed
+  // by refresh(); on failure the optimistic glyph is rolled back.
+  const reactToMessage = async (messageId: string, emoji: string) => {
+    if (!thread || reactingMessageId) return;
+    const optimistic: MessageReaction = { emoji, kind: "emoji", direction: "OUT" };
+    setReactionPickerMessageId(null);
+    setReactingMessageId(messageId);
+    setReactionErrorByMessageId((prev) => {
+      if (!(messageId in prev)) return prev;
+      const next = { ...prev };
+      delete next[messageId];
+      return next;
+    });
+    setOptimisticReactionsByMessageId((prev) => ({
+      ...prev,
+      [messageId]: [...(prev[messageId] ?? []), optimistic]
+    }));
+    try {
+      await apiPost<{ status: string; emoji: string }>(
+        `/runner/control/thread/${thread.id}/message/${messageId}/react`,
+        { emoji }
+      );
+      setError(null);
+      // The runner has persisted the reaction; the refresh below pulls the
+      // authoritative copy. Drop our optimistic overlay for this message so
+      // the badge isn't double-counted once the server copy lands.
+      setOptimisticReactionsByMessageId((prev) => {
+        if (!(messageId in prev)) return prev;
+        const next = { ...prev };
+        delete next[messageId];
+        return next;
+      });
+      await refresh();
+    } catch (reactError) {
+      const message = reactError instanceof Error ? reactError.message : "Reaction failed";
+      // Roll the optimistic glyph back so the bubble reflects reality, then
+      // surface the failure inline on this message only.
+      setOptimisticReactionsByMessageId((prev) => {
+        const current = prev[messageId];
+        if (!current) return prev;
+        const idx = current.lastIndexOf(optimistic);
+        const trimmed = idx >= 0 ? [...current.slice(0, idx), ...current.slice(idx + 1)] : current;
+        const next = { ...prev };
+        if (trimmed.length > 0) {
+          next[messageId] = trimmed;
+        } else {
+          delete next[messageId];
+        }
+        return next;
+      });
+      setReactionErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
+    } finally {
+      setReactingMessageId(null);
     }
   };
 
@@ -2940,14 +3028,28 @@ export default function ThreadPage() {
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
                       const nativeReactions =
-                        (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                        (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
                       const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
-                      const reactions: Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> = [
+                      // #408. Operator reactions just sent from this dashboard,
+                      // shown optimistically until the next refresh folds them
+                      // into the runner's native copy.
+                      const optimisticReactions = optimisticReactionsByMessageId[message.id] ?? [];
+                      const reactions: MessageReaction[] = [
                         ...nativeReactions,
-                        ...synthesizedReactions
+                        ...synthesizedReactions,
+                        ...optimisticReactions
                       ];
+                      // #408. The quick-react trigger is LinkedIn-only: iMessage
+                      // reactions are read-only here (applied from the Messages
+                      // app, surfaced via synthesised stickers), so we never show
+                      // the picker for them.
+                      const canReact = thread.platform === "LINKEDIN";
+                      const pickerOpen = reactionPickerMessageId === message.id;
+                      const isReacting = reactingMessageId === message.id;
+                      const reactionError = reactionErrorByMessageId[message.id];
                       return (
-                        <div className="relative">
+                        <>
+                        <div className="group relative">
                           <div
                             className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                               message.direction === "OUT"
@@ -3010,7 +3112,74 @@ export default function ThreadPage() {
                               ))}
                             </div>
                           ) : null}
+                          {canReact ? (
+                            <div
+                              className={`absolute top-1/2 -translate-y-1/2 ${
+                                message.direction === "OUT"
+                                  ? "right-[calc(100%+8px)]"
+                                  : "left-[calc(100%+8px)]"
+                              }`}
+                            >
+                              {/* React trigger: revealed on bubble hover, or
+                                  kept visible while its picker is open / a
+                                  request is in flight so the affordance does not
+                                  vanish mid-interaction. */}
+                              <button
+                                type="button"
+                                disabled={isReacting}
+                                onClick={() =>
+                                  setReactionPickerMessageId((prev) =>
+                                    prev === message.id ? null : message.id
+                                  )
+                                }
+                                aria-label="React to message"
+                                title="React"
+                                className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+                                  pickerOpen || isReacting
+                                    ? "opacity-100"
+                                    : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                }`}
+                              >
+                                {isReacting ? (
+                                  <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                                ) : (
+                                  <span className="text-[13px] leading-none">☺</span>
+                                )}
+                              </button>
+                              {pickerOpen ? (
+                                <div
+                                  className={`absolute bottom-[calc(100%+6px)] z-20 flex items-center gap-[2px] rounded-full border border-hairline bg-paper p-[4px] shadow-pop ${
+                                    message.direction === "OUT" ? "right-0" : "left-0"
+                                  }`}
+                                >
+                                  {QUICK_REACT_EMOJI.map((emoji) => (
+                                    <button
+                                      key={emoji}
+                                      type="button"
+                                      disabled={isReacting}
+                                      onClick={() => void reactToMessage(message.id, emoji)}
+                                      aria-label={`React with ${emoji}`}
+                                      title={emoji}
+                                      className="inline-flex h-[28px] w-[28px] items-center justify-center rounded-full text-[16px] leading-none transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {emoji}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
+                        {reactionError ? (
+                          <span
+                            className={`mt-[6px] font-mono text-[11px] text-risk-overdue ${
+                              message.direction === "OUT" ? "self-end" : "self-start"
+                            }`}
+                          >
+                            {reactionError}
+                          </span>
+                        ) : null}
+                        </>
                       );
                     })()}
                     <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
