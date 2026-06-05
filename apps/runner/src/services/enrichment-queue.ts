@@ -396,13 +396,23 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     // Acquire the enrich lock so a concurrent drain pass can't collide on
     // the same managed page. Defer if the lock is held — the caller will
     // fall back to enqueue and the worker drains it normally.
-    const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
-      visitProfile(personId)
-    );
-    if (!acquired.acquired) {
-      return { deferred: true };
+    let result: ProfileExtractionResult;
+    try {
+      const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
+        visitProfile(personId)
+      );
+      if (!acquired.acquired) {
+        return { deferred: true };
+      }
+      result = acquired.value;
+    } catch (error) {
+      // A thrown visit (e.g. getManagedPage threw, or a step escaped
+      // extractProfile) must not skip the rate-limit accounting and
+      // persistFailure below — mirror processJob and treat it as an
+      // unknown failure so the visit is still recorded.
+      const detail = error instanceof Error ? error.message : String(error);
+      result = { failed: true, reason: "unknown", detail };
     }
-    const result = acquired.value;
     lastVisitAt = Date.now();
     recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
