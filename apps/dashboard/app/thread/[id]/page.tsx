@@ -46,8 +46,11 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
+import { autocorrectAtCaret } from "@/lib/autocorrect";
+import { blobToWhisperWav } from "@/lib/dictation-audio";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
+import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 
 // Thread workspace - landscape layout.
@@ -87,6 +90,11 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 // near the bottom keeps the auto-scroll-on-new-message glue active.
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
+// #461 (pilot R-0060): once the operator has scrolled up this far from the
+// newest message, surface a floating "jump to latest" button. Larger than
+// SCROLL_BOTTOM_THRESHOLD so it appears only once you're genuinely reading
+// history, not on a small nudge away from the bottom.
+const JUMP_TO_LATEST_THRESHOLD = 600;
 
 // Picks the topmost visible message bubble below the sticky header to
 // anchor scroll preservation on. Selecting by data-message-id (set on
@@ -430,6 +438,10 @@ export default function ThreadPage() {
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  // Synchronous re-entrancy guard. The `sending` state lags a render, so a
+  // held Cmd+Enter autorepeat (or click + shortcut in one frame) can clear
+  // two distinct clientSendIds before it flips — sending the message twice.
+  const sendingRef = useRef(false);
   const [reassessing, setReassessing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
@@ -475,6 +487,16 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  // #466 (pilot R-0065): remembers the most recent autocorrection so an
+  // immediate Backspace can revert it (iOS-style). Cleared on any other edit.
+  const lastAutocorrectRef = useRef<{ original: string; corrected: string; value: string } | null>(null);
+  // #462 (pilot R-0061): voice-to-text dictation into the composer. Separate
+  // from the iMessage voice-note recorder above (that one sends an audio
+  // attachment; this one transcribes speech into editable text).
+  const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [dictationAvailable, setDictationAvailable] = useState(false);
+  const dictationRecorderRef = useRef<MediaRecorder | null>(null);
+  const dictationChunksRef = useRef<BlobPart[]>([]);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -620,6 +642,9 @@ export default function ThreadPage() {
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  // #461 (pilot R-0060): controls the floating "jump to latest" button.
+  // True when the operator has scrolled up away from the newest message.
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   // After a load-older fires, the layout effect needs to put the
   // operator's viewport back where it was. We anchor on a specific
   // visible message element rather than on `prevTop + (newHeight -
@@ -748,6 +773,30 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // Thread-local composer + AI state must NOT leak across threads. The page
+  // does not remount when navigating /thread/A -> /thread/B (same App Router
+  // dynamic segment), so without this reset a reply typed for A, staged
+  // attachments, in-flight optimistic sends, and A's AI snooze suggestions
+  // would carry into B — risking A's draft being sent to B. Keyed on the
+  // route param so it clears the instant navigation starts, before B loads.
+  useEffect(() => {
+    setComposer("");
+    setComposerSource("empty");
+    setComposeIntent("");
+    setComposeDraft("");
+    setComposeError(null);
+    setAskAnswer(null);
+    setSnoozeSuggestions(null);
+    setSnoozeMenuOpen(false);
+    setPendingSends([]);
+    setComposerAttachments((prev) => {
+      for (const a of prev) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+      return [];
+    });
+  }, [threadId]);
 
   // Load the operator voice profile once. Reloads on a profile-saved
   // event so an AI-help-level change in Settings lands without a reload.
@@ -906,8 +955,9 @@ export default function ThreadPage() {
   };
 
   const onSend = useCallback(async () => {
-    if (!thread || sending) return;
+    if (!thread || sending || sendingRef.current) return;
     if (!composer.trim() && composerAttachments.length === 0) return;
+    sendingRef.current = true;
     const clientSendId = uuid();
     const text = composer;
     const attachmentsToSend = composerAttachments;
@@ -946,6 +996,12 @@ export default function ThreadPage() {
           ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
+      // Send succeeded — the optimistic clear above already removed these
+      // from the composer, so release their image preview object URLs. (On
+      // failure we instead restore them below, keeping the URLs alive.)
+      for (const a of attachmentsToSend) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
     } catch (sendError) {
       const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
       setPendingSends((prev) =>
@@ -957,6 +1013,7 @@ export default function ThreadPage() {
       setComposer(text);
       setComposerAttachments(attachmentsToSend);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
@@ -982,6 +1039,21 @@ export default function ThreadPage() {
       return next;
     });
   }, []);
+
+  // Revoke any outstanding image preview object URLs when the thread view
+  // unmounts (e.g. navigating away mid-compose) so they don't leak.
+  const composerAttachmentsRef = useRef(composerAttachments);
+  useEffect(() => {
+    composerAttachmentsRef.current = composerAttachments;
+  }, [composerAttachments]);
+  useEffect(
+    () => () => {
+      for (const a of composerAttachmentsRef.current) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+    },
+    []
+  );
 
   const startRecording = useCallback(async () => {
     if (recording) return;
@@ -1018,6 +1090,103 @@ export default function ThreadPage() {
     recorderRef.current = null;
     setRecording(false);
   }, [recording]);
+
+  // #462: probe once whether the runner can transcribe, so the Dictate
+  // control renders enabled vs. disabled-with-explanation.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ dictationAvailable: boolean }>("/runner/data/transcription-capabilities")
+      .then((d) => {
+        if (!cancelled) setDictationAvailable(Boolean(d?.dictationAvailable));
+      })
+      .catch(() => {
+        /* leave disabled — the button explains why on hover */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // #462: record a short clip, post it to the runner for transcription, and
+  // append the returned text to the composer for the operator to review. No
+  // autosend; nothing is persisted server-side.
+  const startDictation = useCallback(async () => {
+    if (dictationStatus !== "idle") return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // webm/opus is the broadly-supported recording format (incl. Firefox);
+      // fall back to mp4/aac on Safari. The runner transcodes either way.
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      dictationChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) dictationChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
+        if (raw.size === 0) {
+          setDictationStatus("idle");
+          return;
+        }
+        setDictationStatus("transcribing");
+        try {
+          // Convert the recording to 16 kHz mono WAV in the browser. The
+          // runner's local-whisper provider normalises audio with macOS
+          // afconvert, which can't read the webm/opus MediaRecorder emits
+          // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
+          let wav: Blob;
+          try {
+            wav = await blobToWhisperWav(raw);
+          } catch {
+            setError("Could not prepare the recording for transcription.");
+            setDictationStatus("idle");
+            return;
+          }
+          const form = new FormData();
+          form.append("audio", wav, "dictation.wav");
+          const resp = await fetch("/runner/control/transcribe-dictation", {
+            method: "POST",
+            body: form
+          });
+          const data = (await resp.json().catch(() => ({}))) as {
+            ok?: boolean;
+            text?: string;
+            error?: string;
+          };
+          if (!resp.ok || !data.ok) {
+            setError(data?.error || "Could not transcribe the recording.");
+          } else if (typeof data.text === "string" && data.text.trim()) {
+            const spoken = data.text.trim();
+            setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+            setComposerSource("user");
+          } else {
+            setError("Didn't catch any speech. Try again.");
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Dictation failed.");
+        } finally {
+          setDictationStatus("idle");
+        }
+      };
+      recorder.start();
+      dictationRecorderRef.current = recorder;
+      setDictationStatus("recording");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Microphone access denied");
+      setDictationStatus("idle");
+    }
+  }, [dictationStatus]);
+
+  const stopDictation = useCallback(() => {
+    if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
+    dictationRecorderRef.current.stop();
+    dictationRecorderRef.current = null;
+  }, [dictationStatus]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -1545,8 +1714,14 @@ export default function ThreadPage() {
   // operator keeps typing or switches threads mid-flight.
   const draftCoverageThreadIdRef = useRef<string | null>(null);
   const draftCoverageDraftRef = useRef<string>("");
+  // Depend on the specific primitives this effect reads, not the whole
+  // `thread` object — `thread` is a fresh reference on every background
+  // poll/SSE refresh, which would otherwise re-arm the 1.4s debounce timer
+  // continuously and could starve the coverage check during event bursts.
+  const draftCoverageThreadId = thread?.id ?? null;
+  const draftCoverageOpenLoopCount = thread?.openLoops.length ?? 0;
   useEffect(() => {
-    if (!thread) return;
+    if (!draftCoverageThreadId) return;
     const aiLevel = profile?.aiHelpLevel ?? "writing_support";
     // Functional updater + ref-equal short-circuit so clearing on every
     // re-render doesn't itself become a dependency that re-fires the
@@ -1558,11 +1733,11 @@ export default function ThreadPage() {
       return;
     }
     const trimmed = composer.trim();
-    if (trimmed.length < 20 || thread.openLoops.length === 0) {
+    if (trimmed.length < 20 || draftCoverageOpenLoopCount === 0) {
       clearIfNotEmpty();
       return;
     }
-    const threadId = thread.id;
+    const threadId = draftCoverageThreadId;
     draftCoverageThreadIdRef.current = threadId;
     draftCoverageDraftRef.current = trimmed;
     const handle = window.setTimeout(() => {
@@ -1593,7 +1768,7 @@ export default function ThreadPage() {
         });
     }, 1400);
     return () => window.clearTimeout(handle);
-  }, [composer, thread, profile?.aiHelpLevel]);
+  }, [composer, draftCoverageThreadId, draftCoverageOpenLoopCount, profile?.aiHelpLevel]);
 
   // Reset AI coverage when the thread changes — local state from the
   // previous thread shouldn't bleed into a new one.
@@ -1799,23 +1974,28 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
-    // Bubbles + dividers collapse over 150ms (see bubble/DayDivider
-    // className). Re-centre on every layout change during that
-    // window so the focused parent slides into the centre rather
-    // than the layout shifting underneath a one-shot calculation.
-    const recenter = () => {
+    // #465 (pilot R-0064): position the focused message as HIGH as
+    // possible — its top sits just below the sticky header — rather than
+    // centring it, so the message and the replies beneath it read
+    // top-down. scrollTop clamps at the bottom, so a focused message near
+    // the end of the thread still lands as high as the remaining content
+    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
+    // className), so re-align on every layout change during that window
+    // rather than relying on a one-shot calculation.
+    const realignToTop = () => {
       const containerRect = container.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      const delta = (targetRect.top - containerRect.top)
-        - (containerRect.height / 2)
-        + (targetRect.height / 2);
+      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
+      // message clears the glassy sticky header.
+      const FOCUS_HEADER_OFFSET = 64;
+      const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
       container.scrollTop = container.scrollTop + delta;
     };
-    recenter();
+    realignToTop();
     if (anchorGuardStopRef.current) anchorGuardStopRef.current();
-    anchorGuardStopRef.current = startScrollSettlingGuard(container, recenter);
+    anchorGuardStopRef.current = startScrollSettlingGuard(container, realignToTop);
     // `focusTrigger` is included so clicking a chip whose parent is
-    // already the current focus re-centres rather than no-opping.
+    // already the current focus re-aligns rather than no-opping.
   }, [focusedThreadParentId, focusTrigger]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
@@ -1879,6 +2059,7 @@ export default function ThreadPage() {
   useEffect(() => {
     if (thread && prevThreadIdRef.current !== thread.id) {
       stickToBottomRef.current = true;
+      setShowJumpToLatest(false);
       prevThreadIdRef.current = thread.id;
     }
   }, [thread]);
@@ -1946,10 +2127,18 @@ export default function ThreadPage() {
     // stack is naturally bounded by the collapsed background, and
     // pulling in new history would shift the underlying timeline so
     // exit-focus lands the operator far from where they started.
-    if (focusedThreadParentId) return;
+    if (focusedThreadParentId) {
+      // The jump-to-latest affordance is meaningless inside the bounded
+      // focused stack — keep it hidden there.
+      if (showJumpToLatest) setShowJumpToLatest(false);
+      return;
+    }
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    // #461 (pilot R-0060): surface the floating jump-to-latest button once
+    // the operator has scrolled meaningfully up from the newest message.
+    setShowJumpToLatest(distanceFromBottom > JUMP_TO_LATEST_THRESHOLD);
     // Scroll near the top + server says more exists → request the next
     // older page. Capture an anchor element (the topmost visible message
     // bubble below the sticky header) and its viewport offset so the
@@ -1969,6 +2158,17 @@ export default function ThreadPage() {
       void loadOlderMessages();
     }
   };
+
+  // #461 (pilot R-0060): jump straight back to the newest message and
+  // re-arm bottom-stickiness so subsequent inbound messages keep the
+  // operator pinned at the foot of the thread.
+  const scrollToLatest = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
 
   if (!thread) {
     // `loading` flips false the moment the fetch settles. A failed fetch
@@ -2073,6 +2273,14 @@ export default function ThreadPage() {
   const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
+
+  // Reply Brief, computed once and shared between the always-visible brief
+  // band (pinned under the header, the default-visible reply-readiness
+  // summary) and the full Reply Brief in the AI rail.
+  const displayBrief = chooseDisplayBrief(thread);
+  const activeOpenLoops = thread.openLoops.filter(
+    (loop) => !thread.dismissedOpenLoops.includes(loop)
+  );
 
   const threadsRailWidth = threadsCollapsed ? "56px" : "240px";
   const gridTemplateColumns = aiOpen
@@ -2515,6 +2723,21 @@ export default function ThreadPage() {
                 ]}
               />
             </header>
+            {/* Always-visible reply-readiness band: what the reply needs to
+                do, why it matters, what's still open — so the operator
+                understands the thread without opening the AI rail or
+                rereading. Pinned with the header. Hidden at lg only when the
+                full rail is open (it supersedes the summary there); stays
+                visible on mobile, where the rail can't open. */}
+            {thread.needsReply !== false ? (
+              <div className={aiOpen ? "lg:hidden" : undefined}>
+                <ThreadBriefBand
+                  onYou={displayBrief.on_you}
+                  whereItStands={displayBrief.where_it_stands}
+                  openLoops={activeOpenLoops}
+                />
+              </div>
+            ) : null}
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
@@ -3123,13 +3346,30 @@ export default function ThreadPage() {
           </div>
         </div>
 
-        <div className="flex-shrink-0 border-t border-hairline bg-paper">
+        <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
+          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
+              above the composer's top edge so it sits in the middle just
+              above the input, with a glassy frosted-surface treatment that
+              matches the sticky header. Hidden in focused mode (the stack is
+              bounded there). */}
+          {showJumpToLatest && !focusedThreadParentId ? (
+            <button
+              type="button"
+              onClick={scrollToLatest}
+              aria-label="Jump to latest message"
+              title="Jump to latest"
+              className="absolute -top-12 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] text-ink-2 shadow-card backdrop-blur-md backdrop-saturate-150 transition-colors duration-calm hover:border-hairline-strong hover:bg-[color-mix(in_oklch,var(--paper)_88%,transparent)] hover:text-ink"
+            >
+              <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
+            </button>
+          ) : null}
           <div className="mx-auto w-full max-w-[820px] px-8 pb-2 pt-2">
             {error ? (
               <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
             ) : null}
             <div
               data-thread-composer="true"
+              data-demo-target="composer-input"
               // Predraft state earns a tinted accent border + soft ring
               // (#350): the textarea on its own looks like a passive
               // surface, so operators read the AI predraft as static
@@ -3193,13 +3433,53 @@ export default function ThreadPage() {
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
+                // #466 (pilot R-0065): native browser assists where supported
+                // (spellCheck underlines on desktop; autoCapitalize/autoCorrect
+                // on iOS/Safari). The JS layer below covers desktop Firefox.
+                spellCheck
+                autoCapitalize="sentences"
+                autoCorrect="on"
                 onChange={(event) => {
-                  setComposer(event.target.value);
+                  const nextValue = event.target.value;
+                  const caret = event.target.selectionStart ?? nextValue.length;
                   if (composerSource === "predraft" || composerSource === "empty") {
                     setComposerSource("user");
                   }
+                  // #466: autocorrect only on a single typed character that
+                  // appends at the very end of the text, so the caret stays
+                  // put and mid-text edits are never disturbed.
+                  if (nextValue.length === composer.length + 1 && caret === nextValue.length) {
+                    const fix = autocorrectAtCaret(nextValue, caret);
+                    if (fix) {
+                      lastAutocorrectRef.current = {
+                        original: fix.original,
+                        corrected: fix.corrected,
+                        value: fix.text
+                      };
+                      setComposer(fix.text);
+                      return;
+                    }
+                  }
+                  lastAutocorrectRef.current = null;
+                  setComposer(nextValue);
                 }}
                 onKeyDown={(event) => {
+                  // #466: an immediate Backspace reverts the last
+                  // autocorrection to exactly what the operator typed.
+                  if (
+                    event.key === "Backspace" &&
+                    lastAutocorrectRef.current &&
+                    composer === lastAutocorrectRef.current.value
+                  ) {
+                    event.preventDefault();
+                    const { original, corrected, value } = lastAutocorrectRef.current;
+                    const terminator = value.slice(-1);
+                    const reverted =
+                      value.slice(0, value.length - 1 - corrected.length) + original + terminator;
+                    lastAutocorrectRef.current = null;
+                    setComposer(reverted);
+                    return;
+                  }
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
                     // #65: stop the native window-level keydown listener
@@ -3362,6 +3642,45 @@ export default function ThreadPage() {
                       </button>
                     </>
                   ) : null}
+                  {/* #462 (pilot R-0061): Dictate — record speech and have
+                      the runner transcribe it into the composer for review.
+                      Distinct from the iMessage voice-note mic (that attaches
+                      audio to send). Available on every platform; disabled
+                      with an explanation when transcription isn't configured. */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      dictationStatus === "recording" ? stopDictation() : void startDictation()
+                    }
+                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    title={
+                      dictationAvailable
+                        ? dictationStatus === "recording"
+                          ? "Stop and transcribe"
+                          : "Dictate your reply"
+                        : "Voice dictation needs transcription enabled on the runner"
+                    }
+                    aria-label="Dictate"
+                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      dictationStatus === "recording"
+                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
+                  >
+                    {dictationStatus === "transcribing" ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Mic
+                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                        strokeWidth={1.8}
+                      />
+                    )}
+                    {dictationStatus === "recording"
+                      ? "Stop"
+                      : dictationStatus === "transcribing"
+                        ? "Transcribing…"
+                        : "Dictate"}
+                  </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
                       type="button"
@@ -3584,7 +3903,7 @@ export default function ThreadPage() {
               hasn't yet generated one for this row. */}
           <ReplyBriefPanel
             threadId={thread.id}
-            brief={chooseDisplayBrief(thread)}
+            brief={displayBrief}
             openLoops={thread.openLoops}
             dismissedOpenLoops={thread.dismissedOpenLoops}
             onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}

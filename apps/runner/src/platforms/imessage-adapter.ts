@@ -14,6 +14,7 @@ import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { groupStubFields } from "./imessage-group-name";
+import { imessageMessageBodyText } from "./imessage-message-text";
 import { sendIMessage } from "./imessage-send";
 import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
 
@@ -162,11 +163,12 @@ export class IMessageAdapter implements PlatformAdapter {
       // human-readable to label by.
       const resolvedSender =
         r.senderHandle ? this.contactResolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
+      const text = imessageMessageBodyText(r.text, r.attachments.length);
       return {
         platformMessageKey: r.guid,
         direction: r.direction,
         timestamp: r.timestamp ?? new Date().toISOString(),
-        text: r.text,
+        text,
         senderName: resolvedSender,
         raw: Object.keys(raw).length > 0 ? raw : undefined,
         attachments: r.attachments.map((a) => ({

@@ -1,7 +1,9 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
+import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
+import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import type {
@@ -13,13 +15,14 @@ import type {
   ThreadResponse
 } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
-import { isWithinHorizon } from "@/lib/horizon";
-import { isLikelyClosed } from "@/lib/closed-conversation";
+import { isInTodayQueue } from "@/lib/today";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
+import { FitText } from "@/components/common/fit-text";
 import { ThreadRow } from "@/components/common/thread-row";
+import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
@@ -41,6 +44,13 @@ import { isTourSeen, markTourSeen, startPilotTour } from "@/lib/pilot-tour";
 // cap, the stack listed every reply-needed thread - dozens of rows that
 // made Today feel like the entire inbox (issue #291).
 const TODAY_STACK_LIMIT = 7;
+
+// Metadata on the Today surface is space-separated — no glyph between items
+// (the redesign's saved default: not "·", not "|"). A double non-breaking
+// space keeps a legible gap inside the single text nodes (hero eyebrow,
+// hero meta, queue peek) where a flex gap isn't available; the list-row
+// tags rely on their flex gap instead.
+const META_SEP = "  ";
 
 interface RunnerEventDetail {
   type?: string;
@@ -81,6 +91,20 @@ function writeTonightProgress(value: TonightProgress): void {
   }
 }
 
+// Today-scoped oxblood palette — match the redesign prototype's colours
+// ("colours and all"). These CSS-var overrides live on the Today canvas
+// ONLY: the sidebar / app-shell render outside this subtree, and every
+// other page keeps the app's global coral tokens. Accent + overdue +
+// needs-reply go oxblood; waiting stays amber, fresh stays green.
+const OXBLOOD_TODAY_VARS = {
+  "--accent": "#7B1F1F",
+  "--accent-ink": "#7B1F1F",
+  "--accent-soft": "rgba(123,31,31,0.08)",
+  "--risk-overdue": "#7B1F1F",
+  "--risk-waiting": "#9a6a12",
+  "--risk-fresh": "#1f6b3a"
+} as CSSProperties;
+
 export default function TodayPage() {
   const router = useRouter();
   const [data, setData] = useState<InboxResponse | null>(null);
@@ -106,6 +130,10 @@ export default function TodayPage() {
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of the filtered Today queue (`rows`, computed below) so the
+  // MESSAGE_SENT handler credits a send as "done" only when the thread is
+  // actually in tonight's queue, not just anywhere in the inbox.
+  const todayRowsRef = useRef<InboxRow[]>([]);
   // Per-day "done" counter so the right-rail outline ticks up as the
   // operator clears overdue / waiting threads. Keyed by ISO date string
   // so it resets at local midnight.
@@ -179,8 +207,10 @@ export default function TodayPage() {
     const onRunnerEvent = (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string }>).detail;
       const type = detail?.type;
+      // MESSAGE_SENT is handled by the advanceHero effect below (which also
+      // refreshes), so it's intentionally not listed here — otherwise a
+      // single send triggers two refreshes.
       if (
-        type === "MESSAGE_SENT" ||
         type === "MESSAGE_SEND_FAILED" ||
         type === "THREAD_UPDATED" ||
         type === "SCAN_FINISHED"
@@ -220,19 +250,33 @@ export default function TodayPage() {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
       if (!detail || !detail.threadId) return;
       if (detail.type === "MESSAGE_SENT") {
-        const matching = data?.rows.find((row) => row.id === detail.threadId);
-        advanceHero(detail.threadId, "Sent, next up", matching?.riskLevel ?? "GREEN");
+        // Only advance (and bump the "Tonight's outline" done counter) when
+        // the sent thread is actually in Today's queue. Replying to an
+        // off-queue thread (or a scheduled send firing) must not inflate
+        // Today's counts. A non-Today send still refreshes via THREAD_UPDATED.
+        const matching = todayRowsRef.current.find((row) => row.id === detail.threadId);
+        if (matching) {
+          advanceHero(detail.threadId, "Sent, next up", matching.riskLevel);
+        }
       }
     };
     window.addEventListener("runner-event", handler);
     return () => window.removeEventListener("runner-event", handler);
-  }, [advanceHero, data?.rows]);
+  }, [advanceHero]);
 
   useEffect(() => () => {
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
   }, []);
 
-  const allRows = data?.rows ?? [];
+  const { sandboxActive } = useFullDemo();
+  // While a sandbox guided flow (pilot tour / presenter sandbox) is active,
+  // Today shows only the demo-seeded threads so the walkthrough resolves its
+  // targets instead of pointing at the operator's real hero. Outside a sandbox
+  // flow this is a no-op and the real inbox shows as normal.
+  const allRows = useMemo(
+    () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
+    [data, sandboxActive]
+  );
   // Today is the "tonight's work" view. Two filters narrow the runner's
   // raw needs-reply set into things that genuinely need the operator
   // tonight (issue #287):
@@ -245,20 +289,16 @@ export default function TodayPage() {
   // "show all" toggle still appears there, and a new inbound message
   // immediately pulls a thread back into Today.
   const rows = useMemo(
-    () =>
-      allRows.filter(
-        (row) =>
-          row.needsReply !== false &&
-          !row.scheduledSendAt &&
-          !removedIds.has(row.id) &&
-          isWithinHorizon(row.lastMessageAt) &&
-          !isLikelyClosed(row)
-      ),
+    () => allRows.filter((row) => isInTodayQueue(row, removedIds)),
     [allRows, removedIds]
   );
   const overdueCount = rows.filter((row) => row.riskLevel === "RED").length;
   const waitingCount = rows.filter((row) => row.riskLevel === "AMBER").length;
   const freshCount = rows.filter((row) => row.riskLevel === "GREEN").length;
+
+  useEffect(() => {
+    todayRowsRef.current = rows;
+  }, [rows]);
 
   const sortedRows = useMemo(() => {
     const rank = (level: string) => (level === "RED" ? 0 : level === "AMBER" ? 1 : 2);
@@ -391,22 +431,27 @@ export default function TodayPage() {
   const heroLabel = !hero
     ? ""
     : heroRisk === "overdue"
-      ? `${PLATFORM_LABEL[hero.platform]} · waiting ${formatRelative(hero.lastInboundAt)}`
+      ? `${PLATFORM_LABEL[hero.platform]}${META_SEP}waiting ${formatRelative(hero.lastInboundAt)}`
       : heroRisk === "waiting"
-        ? `${PLATFORM_LABEL[hero.platform]} · waiting ${formatRelative(hero.lastInboundAt)}`
-        : `${PLATFORM_LABEL[hero.platform]} · ${formatRelative(hero.lastInboundAt)}`;
+        ? `${PLATFORM_LABEL[hero.platform]}${META_SEP}waiting ${formatRelative(hero.lastInboundAt)}`
+        : `${PLATFORM_LABEL[hero.platform]}${META_SEP}${formatRelative(hero.lastInboundAt)}`;
 
   const heroHeadlineRaw =
     heroSummary && heroSummary.id === hero?.id && heroSummary.summary
       ? heroSummary.summary
       : normalizePreview(hero?.preview);
+  // The hero summary renders IN FULL via <FitText> (it shrinks the font to
+  // fit, never truncates), so the only cap here is a generous safety net for a
+  // pathological `summary` fallback. whatTheyWant is already ≤120 chars
+  // server-side, so the normal ask is never touched; this just stops a runaway
+  // multi-sentence fallback from forcing the font to the readability floor.
   const heroHeadline = (() => {
     if (!heroHeadlineRaw) return "";
     const trimmed = heroHeadlineRaw.trim();
-    if (trimmed.length <= 120) return trimmed;
-    const cut = trimmed.slice(0, 120);
+    if (trimmed.length <= 200) return trimmed;
+    const cut = trimmed.slice(0, 200);
     const lastSpace = cut.lastIndexOf(" ");
-    return (lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim();
+    return (lastSpace > 120 ? cut.slice(0, lastSpace) : cut).trim();
   })();
   const heroIsTransitioning = transitioning && hero && transitioning.id === hero.id;
 
@@ -423,11 +468,16 @@ export default function TodayPage() {
   const overduePct = totalRed === 0 ? 0 : (cleared.RED / totalRed) * 100;
   const waitingPct = totalAmber === 0 ? 0 : (cleared.AMBER / totalAmber) * 100;
   const freshPct = totalGreen === 0 ? 0 : (cleared.GREEN / totalGreen) * 100;
-  const allDone =
-    rows.length === 0 && (cleared.RED + cleared.AMBER + cleared.GREEN) > 0;
+  // "Cleared X of N" overall progress for the right-rail panel: N is every
+  // thread that needed the operator tonight (still-live + already-cleared),
+  // X is how many have been handled.
+  const clearedTotal = cleared.RED + cleared.AMBER + cleared.GREEN;
+  const totalAll = rows.length + clearedTotal;
+  const overallPct = totalAll === 0 ? 0 : (clearedTotal / totalAll) * 100;
+  const allDone = rows.length === 0 && clearedTotal > 0;
 
   return (
-    <Canvas className="max-w-[1240px] pb-10">
+    <Canvas className="max-w-[1240px] pb-10" style={OXBLOOD_TODAY_VARS}>
       <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
         <div className="min-w-0">
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
@@ -508,51 +558,49 @@ export default function TodayPage() {
               ref={heroRef}
               data-testid="today-hero"
               data-demo-target="today-hero"
-              className={`relative mb-4 flex min-h-[300px] cursor-pointer flex-col overflow-hidden rounded-card border border-hairline bg-paper px-10 pb-9 pt-10 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
+              {/* The hero is no longer a white card — per the redesign it
+                  dissolves into a soft warm wash bleeding from the top-right,
+                  so it reads as part of the page, not a box floating on it.
+                  No border, no fill, no shadow; the wash is the only chrome. */}
               <div
                 aria-hidden
                 className="pointer-events-none absolute inset-0"
                 style={{
                   background:
-                    "radial-gradient(ellipse at 100% 0%, color-mix(in oklch, var(--accent) 12%, transparent), transparent 55%)"
+                    "radial-gradient(135% 130% at 100% 0%, color-mix(in srgb, var(--accent) 12%, transparent) 0%, color-mix(in srgb, var(--accent) 4%, transparent) 36%, transparent 64%)"
                 }}
               />
               <div className="relative flex flex-col">
                 <p className="mb-[20px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
                   <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
-                  {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up · 1 of ${rows.length}`}
+                  {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up${META_SEP}1 of ${rows.length}`}
                 </p>
-                {/* #348: line-clamp-3 caps the hero at 3 lines. The
-                    36px display type inside a 22ch container can grow
-                    to 5+ tall lines when the bound source (whatTheyWant
-                    / preview) runs long, which dominates the card and
-                    pushes the message preview, action row and queue
-                    counter below the fold. The prompt cap (runner side)
-                    is the primary fix; this is the visual safety net so
-                    legacy long content stays readable. */}
-                <h2 className="m-0 mb-[14px] line-clamp-3 max-w-[22ch] text-balance font-display text-[36px] font-semibold leading-[1.15] tracking-[-0.025em]">
-                  {heroHeadline || "Catching up with someone"}
-                </h2>
+                {/* The hero summary must always show IN FULL — never an
+                    ellipsis (Richard: "the summary must fit so I see the whole
+                    thing"). <FitText> renders the complete text and shrinks the
+                    font (36 → 22px floor) until it fits the height budget below,
+                    using more of the row's width as needed. This both removes
+                    the old line-clamp-3 truncation AND keeps the original #348
+                    guarantee — a long ask can't grow unbounded and push the
+                    actions below the fold, because the block height is capped
+                    (the font shrinks instead of the card growing). */}
+                <div className="mb-[14px] max-w-[600px]">
+                  <FitText
+                    as="h2"
+                    maxPx={36}
+                    minPx={22}
+                    maxHeightPx={150}
+                    data-testid="today-hero-summary"
+                    className="m-0 text-balance font-display font-semibold leading-[1.15] tracking-[-0.025em]"
+                  >
+                    {heroHeadline || "Catching up with someone"}
+                  </FitText>
+                </div>
                 <div className="mb-[18px] flex items-center gap-3">
-                  {hero.personAvatarUrl ? (
-                    <span className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-paper-2">
-                      {/* eslint-disable-next-line @next/next/no-img-element */}
-                      <img
-                        src={hero.personAvatarUrl}
-                        alt=""
-                        width={28}
-                        height={28}
-                        referrerPolicy="no-referrer"
-                        className="h-full w-full object-cover"
-                      />
-                    </span>
-                  ) : (
-                    <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[11px] font-semibold text-white">
-                      {initials(hero.personName)}
-                    </span>
-                  )}
+                  <PersonAvatar name={hero.personName} avatarUrl={hero.personAvatarUrl} size={28} />
                   <span className="font-medium text-ink">{hero.personName}</span>
                   <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
                 </div>
@@ -572,8 +620,8 @@ export default function TodayPage() {
                     <KbHint label="↵" tone="primary" />
                   </Button>
                   <Button
-                    variant="ghost"
-                    className="gap-3"
+                    variant="quiet"
+                    className="gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink"
                     onClick={() => {
                       const id = hero.id;
                       const level = hero.riskLevel;
@@ -589,8 +637,8 @@ export default function TodayPage() {
                     <KbHint label="S" />
                   </Button>
                   <Button
-                    variant="ghost"
-                    className="gap-3"
+                    variant="quiet"
+                    className="gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink"
                     onClick={() => {
                       const id = hero.id;
                       const level = hero.riskLevel;
@@ -621,11 +669,11 @@ export default function TodayPage() {
                       ))}
                     </span>
                     <span className="truncate">
-                      {queuePeek.map((row) => row.personName.split(" ")[0]).join(" · ")}
+                      {queuePeek.map((row) => row.personName.split(" ")[0]).join(META_SEP)}
                     </span>
                     {queueRemaining > 0 ? (
                       <span className="ml-auto">
-                        {queueRemaining} more · ~{queueEtaMinutes} min
+                        {queueRemaining} more{META_SEP}~{queueEtaMinutes} min
                       </span>
                     ) : null}
                   </div>
@@ -676,57 +724,71 @@ export default function TodayPage() {
           ) : null}
         </div>
 
-        {/* Right rail: day outline */}
+        {/* Right rail: tonight's progress. Per the redesign the rail is no
+            longer a boxed card — it's an open titled section sitting on the
+            page, so the focus column and the rail read as one calm surface. */}
         <aside className="hidden lg:block">
-          <div className="sticky top-[110px] rounded-[16px] border border-hairline bg-paper p-[18px]">
-            <h5 className="m-0 mb-[14px] font-mono text-[10px] font-medium uppercase tracking-[0.08em] text-ink-3">
-              Tonight’s outline
-            </h5>
-            <ul className="m-0 flex list-none flex-col gap-[11px] p-0 text-[12.5px] text-ink-2">
-              <OutlineRow
-                label="Overdue"
-                done={cleared.RED}
-                total={totalRed}
-                pct={overduePct}
-                tone="overdue"
-                liveCount={overdueCount}
-                onJump={() => jumpToLevel("RED")}
-              />
-              <OutlineRow
-                label="Waiting on you"
-                done={cleared.AMBER}
-                total={totalAmber}
-                pct={waitingPct}
-                tone="waiting"
-                liveCount={waitingCount}
-                onJump={() => jumpToLevel("AMBER")}
-              />
-              <OutlineRow
-                label="Fresh, no rush"
-                done={cleared.GREEN}
-                total={totalGreen}
-                pct={freshPct}
-                tone="fresh"
-                liveCount={freshCount}
-                onJump={() => jumpToLevel("GREEN")}
-              />
-              <li className={`flex items-center gap-[10px] ${allDone ? "" : "opacity-50"}`}>
-                <span
-                  className={`inline-block h-[8px] w-[8px] rounded-full ${allDone ? "bg-risk-fresh" : "bg-hairline-strong"}`}
+          <div className="sticky top-[110px] flex flex-col gap-10">
+            <section>
+              <h5 className="m-0 mb-[18px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
+                Tonight’s progress
+              </h5>
+              {/* Overall "Cleared X of N" with an honest fill bar. */}
+              <div className="mb-5">
+                <div className="mb-[9px] flex items-baseline justify-between">
+                  <span className="text-[13.5px] font-semibold text-ink">Cleared</span>
+                  <span className="font-mono text-[12px] text-ink-2">
+                    <strong className="font-semibold text-ink">{clearedTotal}</strong> of {totalAll}
+                  </span>
+                </div>
+                <div className="h-[6px] overflow-hidden rounded-full bg-hairline">
+                  <span
+                    className="block h-full rounded-full bg-ink transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                    style={{ width: `${overallPct}%` }}
+                  />
+                </div>
+              </div>
+              {/* Per-category bars that visibly fill as each bucket clears. */}
+              <div className="flex flex-col gap-[15px]">
+                <CategoryBar
+                  label="Overdue"
+                  tone="overdue"
+                  done={cleared.RED}
+                  total={totalRed}
+                  pct={overduePct}
+                  liveCount={overdueCount}
+                  onJump={() => jumpToLevel("RED")}
                 />
-                <span className="relative block h-[3px] w-[28px] overflow-hidden rounded-[2px] bg-hairline">
-                  {allDone ? <span className="absolute inset-0 bg-risk-fresh" /> : null}
-                </span>
-                <span>Done · sleep</span>
-                <span className="ml-auto font-mono text-[10px] text-ink-4">{allDone ? "✓" : "-"}</span>
-              </li>
-            </ul>
-          </div>
-          {/* Upcoming birthdays sits below the day outline so the right
-              rail keeps its rhythm: today's work, then a soft reminder of
-              who has a birthday coming up. The component renders nothing
-              when the runner has no upcoming birthdays. */}
-          <div className="mt-[14px]">
+                <CategoryBar
+                  label="Needs a reply"
+                  tone="waiting"
+                  done={cleared.AMBER}
+                  total={totalAmber}
+                  pct={waitingPct}
+                  liveCount={waitingCount}
+                  onJump={() => jumpToLevel("AMBER")}
+                />
+                <CategoryBar
+                  label="Fresh, no rush"
+                  tone="fresh"
+                  done={cleared.GREEN}
+                  total={totalGreen}
+                  pct={freshPct}
+                  liveCount={freshCount}
+                  onJump={() => jumpToLevel("GREEN")}
+                />
+              </div>
+              {allDone ? (
+                <p className="mt-[18px] text-[13.5px] leading-[1.5] text-ink-2">
+                  <strong className="font-semibold text-risk-fresh">That’s everyone.</strong> Nothing
+                  left tonight. Close the laptop and get some sleep.
+                </p>
+              ) : null}
+            </section>
+
+            {/* Upcoming birthdays: a soft reminder below tonight's progress,
+                also an open section. Renders nothing when the runner has no
+                upcoming birthdays. */}
             <UpcomingBirthdays />
           </div>
         </aside>
@@ -735,52 +797,64 @@ export default function TodayPage() {
   );
 }
 
-function OutlineRow({
+// One risk category in the right-rail "Tonight's progress" panel: a label
+// row (dot + name + done/total) stacked over a thin fill bar, coloured by
+// risk tone via currentColor. While the level still has live threads the
+// whole block is a button that scrolls to the first such thread; once the
+// bucket is empty it renders inert.
+function CategoryBar({
   label,
+  tone,
   done,
   total,
   pct,
-  tone,
   liveCount,
   onJump
 }: {
   label: string;
+  tone: "overdue" | "waiting" | "fresh";
   done: number;
   total: number;
   pct: number;
-  tone: "overdue" | "waiting" | "fresh";
   liveCount: number;
   onJump: () => void;
 }) {
-  const fillClass =
-    tone === "overdue" ? "bg-risk-overdue" : tone === "waiting" ? "bg-risk-waiting" : "bg-risk-fresh";
+  const toneClass =
+    tone === "overdue"
+      ? "text-risk-overdue"
+      : tone === "waiting"
+        ? "text-risk-waiting"
+        : "text-risk-fresh";
   const inner = (
     <>
-      <span className={`inline-block h-[8px] w-[8px] rounded-full ${fillClass}`} />
-      <span className="relative block h-[3px] w-[28px] overflow-hidden rounded-[2px] bg-hairline">
-        <span className={`absolute inset-y-0 left-0 ${fillClass}`} style={{ width: `${pct}%` }} />
-      </span>
-      <span>{label}</span>
-      <span className="ml-auto font-mono text-[10px] text-ink-4">
-        {done}/{total}
-      </span>
+      <div className="mb-[7px] flex items-center gap-[9px]">
+        <span className="inline-block h-[7px] w-[7px] rounded-full bg-current" />
+        <span className="flex-1 text-[13px] text-ink-2">{label}</span>
+        <span className="font-mono text-[11.5px] text-ink-3">
+          {done}/{total}
+        </span>
+      </div>
+      <div className="h-[4px] overflow-hidden rounded-full bg-hairline">
+        <span
+          className="block h-full rounded-full bg-current transition-[width] duration-500 ease-out motion-reduce:transition-none"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
     </>
   );
   // No live threads of this level: nothing to jump to, so render it inert.
   if (liveCount === 0) {
-    return <li className="flex items-center gap-[10px]">{inner}</li>;
+    return <div className={toneClass}>{inner}</div>;
   }
   return (
-    <li className="-mx-[8px]">
-      <button
-        type="button"
-        onClick={onJump}
-        title={`Jump to ${label.toLowerCase()}`}
-        className="flex w-full items-center gap-[10px] rounded-[8px] px-[8px] py-[4px] text-left text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-      >
-        {inner}
-      </button>
-    </li>
+    <button
+      type="button"
+      onClick={onJump}
+      title={`Jump to ${label.toLowerCase()}`}
+      className={`${toneClass} -mx-2 rounded-[8px] px-2 py-1 text-left transition-colors duration-calm hover:bg-paper-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
+    >
+      {inner}
+    </button>
   );
 }
 
@@ -793,30 +867,12 @@ function PeekAvatar({
   avatarUrl?: string | null;
   offset: number;
 }) {
-  if (avatarUrl) {
-    return (
-      <span
-        className="grid h-[22px] w-[22px] place-items-center overflow-hidden rounded-full border-2 border-paper bg-paper-2"
-        style={{ marginLeft: offset === 0 ? 0 : -6 }}
-      >
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={avatarUrl}
-          alt=""
-          width={22}
-          height={22}
-          referrerPolicy="no-referrer"
-          className="h-full w-full object-cover"
-        />
-      </span>
-    );
-  }
+  // Reuse PersonAvatar so the peek tiles carry the same per-name hashed
+  // tone as the list rows (matching the prototype's coloured avatars); the
+  // wrapper just supplies the overlap offset + paper ring.
   return (
-    <span
-      className="grid h-[22px] w-[22px] place-items-center rounded-full border-2 border-paper bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[9.5px] font-semibold text-white"
-      style={{ marginLeft: offset === 0 ? 0 : -6 }}
-    >
-      {initials(name)}
+    <span className="inline-flex" style={{ marginLeft: offset === 0 ? 0 : -6 }}>
+      <PersonAvatar name={name} avatarUrl={avatarUrl} size={22} className="border-2 border-paper" />
     </span>
   );
 }

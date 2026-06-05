@@ -538,3 +538,82 @@ This audit tracks the reliability/session bugs reproduced from baseline and fixe
 - BUG-020: `apps/runner/src/platforms/linkedin-adapter.ts`, `tests/fixtures/linkedin/smoke-thread-shell.html`, `tests/runner-linkedin-smoke-parsing.test.mjs`
 - BUG-021: `apps/runner/src/linkedin/linkedinIdentity.ts`, `apps/runner/src/linkedin/linkedinTime.ts`, `apps/runner/src/linkedin/linkedinRowSignals.ts`, `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/services/thread-row-shaping.ts`, `apps/runner/src/scripts/repair-linkedin-threads.ts`, `apps/runner/src/index.ts`, `apps/dashboard/lib/time.ts`, `apps/dashboard/lib/types.ts`, `apps/dashboard/app/inbox/page.tsx`, `apps/dashboard/app/people/page.tsx`, `packages/core/src/types.ts`, `apps/runner/package.json`, `package.json`, `tests/fixtures/linkedin/unread-rerender-scroll.html`, `tests/runner-linkedin-collect-threads-no-name-error.test.mjs`, `tests/runner-linkedin-time-parser.test.mjs`, `tests/runner-inbox-row-shaping.test.mjs`, `tests/runner-repair-linkedin-threads.test.mjs`, `README.md`
 - BUG-022: `apps/runner/src/platforms/linkedin-adapter.ts`, `apps/runner/src/services/scan-queue.ts`, `apps/runner/src/services/thread-row-shaping.ts`, `apps/runner/src/services/admin-reset.ts`, `apps/runner/src/index.ts`, `apps/runner/src/scripts/reset-linkedin-inbox.ts`, `apps/runner/src/scripts/cleanup-artifacts.ts`, `apps/dashboard/app/settings/page.tsx`, `apps/dashboard/lib/api.ts`, `.gitignore`, `apps/runner/package.json`, `package.json`, `tests/fixtures/linkedin/streaming-virtualized.html`, `tests/runner-linkedin-streaming-scan.test.mjs`, `tests/runner-inbox-row-shaping.test.mjs`, `tests/runner-admin-reset.test.mjs`, `tests/runner-cleanup-artifacts.test.mjs`, `README.md`
+
+---
+
+# Audit Pass 2 — Pilot Hardening (2026-05-28)
+
+A full-codebase correctness audit of the `v1/strip-back-pr1` baseline (6 parallel
+agents across LinkedIn scraper, runner API/session, scan orchestration,
+AI/transcription, dashboard, and core/iMessage/beta). Findings are correctness
+bugs only (wrong behaviour / incorrect data flow), not style. Shipped as a stack
+of subsystem PRs so the high-risk LinkedIn scraper work is reviewable in
+isolation. Status legend: **Fixed** (landed) · **Confirmed** (real, scheduled in a
+later PR in the stack) · **Deferred** (low-confidence / out of correctness scope,
+documented here instead of changed).
+
+## PR1 — Safe pilot hardening (Fixed)
+
+- **RT-3** `apps/runner/src/config.ts` — `port: Number(env.RUNNER_PORT ?? 4001)` binds port `0`/`NaN` on an empty or garbage value (`Number("") === 0`). Now uses `parseIntOrDefault`. Same file: `IMESSAGE_ENABLED` (RT-7) only accepted the exact string `"true"`; now normalised (`.trim().toLowerCase()`).
+- **RT-4** `apps/runner/src/services/send.ts`, `apps/runner/src/index.ts` — scheduled replies dropped `replyToMessageId` (only immediate sends forwarded it), so a promoted scheduled reply went out un-threaded. `enqueueScheduledSend` now persists it.
+- **RT-6** `apps/runner/src/index.ts` — `GET /data/logs?limit=` (empty) returned 0 rows (`Number("") === 0`, not NaN) and a negative limit reversed order. Now validated to a positive bounded integer.
+- **AI-1** `apps/runner/src/services/ai.ts` — composeInVoice late-reply hint hardcoded "his register"; now "their register" (de-personalisation + no-gendered-pronoun rules).
+- **AI-2** `apps/runner/src/services/ai.ts` — snooze-suggestion prompt advertised `hours: 1-168` but the zod validator caps 72, so one out-of-range value threw out the whole batch. Template corrected to `1-72` and parsing made per-item resilient (clamp + keep valid).
+- **AI-3** `apps/runner/src/services/ai.ts` — composeInVoice fed the model the raw `[Voice note]` placeholder for the recipient's last message; now uses `renderMessageBody` so the transcript is injected.
+- **AI-4** `apps/runner/src/services/transcription/{transcription-service,selection}.ts` — refinement assumed the attempt list was "best/highest-tier last", but it was built from an unordered `findMany`; now sorted by `TIER_RANK`.
+- **AI-5** `apps/runner/src/services/ai.ts` — `updateThreadSummary` returned `summary`/`what_they_want`/`open_loops`/`tone_notes` without the dash/coaching-phrase scrub its reply_brief siblings get; now run through `stripBannedPhrases`.
+- **AI-6** `apps/runner/src/services/ai.ts` — composeInVoice gated the late hint with a lexicographic string timestamp compare while computing the gap numerically; now numeric on both.
+- **SC-2** `apps/runner/src/services/scan-queue.ts` — `consecutiveNoChange` (adaptive scheduled-scan backoff) was bumped for ANY 0-thread scan, so manual refreshes and failed/cooldown-blocked runs inflated the auto-scan interval up to 4x. Now only a clean SCHEDULED scan that found no changes increments it.
+- **SC-3** `apps/runner/src/services/scan-queue.ts` — during cooldown the 1s scheduler tick re-enqueued every second (the block never advances the scheduled clock), and each blocked enqueue overwrote the stored last-run summary. Scheduler now skips cooldown-blocked platforms; the blocked enqueue no longer clobbers `latestRunSummaryByPlatform`.
+- **UI-1** `apps/dashboard/app/today/page.tsx` — replying to ANY thread (even one not in Today's queue) incremented and persisted Today's "Tonight's outline" done counters. Now guarded to threads actually present in Today's rows.
+- **UI-2** `apps/dashboard/app/inbox/page.tsx` — the "Snoozed" tab actually filtered on `scheduledSendAt` (queued outbound sends), not `snoozedUntil`, and truly-snoozed threads are excluded from `/data/inbox` upstream. Renamed the tab to **Scheduled** to match the data. (See follow-up note below.)
+- **UI-3** `apps/dashboard/app/today/page.tsx` — a single `MESSAGE_SENT` triggered two refreshes (a direct one and the advanceHero one). Consolidated onto the advanceHero path.
+- **UI-4** `apps/dashboard/app/thread/[id]/page.tsx` — image-attachment `createObjectURL` previews leaked on every successful send and on unmount. Now revoked on success and via an unmount cleanup.
+- **UI-7** `apps/dashboard/app/thread/[id]/page.tsx` — the debounced draft-coverage effect depended on the whole `thread` object (a fresh reference each poll), re-arming its 1.4s timer continuously. Now depends on `thread.id` + open-loop count.
+- **CORE-3** `apps/runner/src/platforms/imessage-db.ts` — the automated-sender filter ran on group chats too and could drop groups with short `chatNNN` identifiers. Now skipped for group-style (43) chats.
+- **CORE-4** `apps/runner/src/platforms/imessage-db.ts` — in group chats, two people sending the same tapback kind collapsed into one reaction. Reactor `handle_id` now included in the aggregation key.
+- **CORE-5** `apps/runner/src/platforms/imessage-db.ts` — the four "last message" correlated subqueries could resolve to different rows on a `date` tie (preview text from one row, direction from another). Added a `ROWID` tie-break so all four pick the same row.
+- **CORE-6** `apps/runner/src/platforms/imessage-db.ts` — the unread-count subquery counted inbound tapbacks/reactions as unread messages. Now excludes the tapback ranges.
+- **CORE-7** `apps/runner/src/platforms/imessage-db.ts` — the inbox preview/last-author could be a tapback row ("[reaction or attachment]" with the reactor as author). The last-message subqueries now exclude tapbacks, mirroring the timeline filter.
+
+## PR2 — LinkedIn scraper hardening (Fixed)
+
+- **LI-1** [high] `linkedin-adapter.ts` `collectThreadMessagesWithBackfill` — deep-fetch stamped a message with today's date when its group `<li>` lacked a date heading (later groups in a date run inherit no heading), reintroducing the timestamp drift #431 addressed. Fixed: carry an inherited date heading like `collectVisibleThreadMessages` does.
+- **LI-2** [high] `linkedin-adapter.ts` `getActiveThreadDescriptor` — when no row carried the active CSS class it fell back to the FIRST inbox row, attributing the opened thread (and in the deep-fetch path, a canonical thread id) to the wrong person. Fixed: return an empty descriptor (caller degrades to `page.url()`); add aria-current/aria-selected signals.
+- **LI-3** [med] `linkedin-adapter.ts` — messages without a stable id got a positional fallback key that shifted across backfill scroll passes, duplicating timeline entries. Fixed: content-fingerprint fallback key.
+- **LI-4** [med] `linkedin/linkedinIdentity.ts` — a `urn:li:msg_thread:` id was lowercased when it arrived via query param but not via the path token, so one thread could split into two records. Fixed: route the path token through `extractStableLinkedInUrn` too. Regression test: `tests/runner-linkedin-identity.test.mjs`.
+- **LI-6** [low] `linkedin-adapter.ts` — a read row was counted unread=1 when an empty unread-count container was present; multi-digit counts truncated at the comma. Fixed: require non-empty badge text; strip thousands separators.
+
+## PR3 — Send / concurrency hardening (Fixed)
+
+- **RT-1** [high] `apps/runner/src/index.ts` `/retry-send` — re-queued text only, dropping the original send's attachments and `replyToMessageId`. Fixed: parse `attachmentsJson` and forward both (staged files persist after a FAILED send, so the paths are still valid).
+- **RT-2** [med] `send.ts` — a send during a scan drove the same managed Playwright page concurrently (the platform lease only counts active holders, it doesn't serialize). Fixed: `processSendRequest` now wraps `adapter.sendMessage` in `withPlatformLock`, the SAME per-platform mutex key (`<personKey>:<platform>`) the scan queue uses, so sends and scans serialize on the shared page.
+- **RT-5** [low] `send.ts` `enqueueSend` — an idempotent replay of a SCHEDULED/CANCELLED `clientSendId` was mis-reported as `PENDING`; the SCHEDULED case told the dashboard it was queued though the PENDING worker never drains it. Fixed: PENDING is handled explicitly; SCHEDULED/CANCELLED now throw a conflict error (mirroring `enqueueScheduledSend`).
+
+## PR4 — Beta / hidden correctness (Fixed)
+
+- **CORE-1** [high within beta] `beta-adapter.ts` — IG/TikTok direction was derived from English substrings in hashed classnames, so virtually every inbound message was labelled OUT (wrongly marking threads as "you replied last"). Fixed: check inbound and outbound keyword sets explicitly and default the ambiguous case to IN, the safe error for an unread inbox.
+- **CORE-2** [med] `beta-adapter.ts` — multi-line IG/TikTok messages were flattened by `cleanText`. Fixed: use `cleanMessageText` (preserves line breaks), matching the iMessage/LinkedIn paths.
+- **CORE-9** [low] `beta-adapter.ts` — the index-based `stableKey` fallback duplicated a thread across scrapes when name+preview+href were all missing. Fixed: key off the row's text instead of its scroll index.
+- **CORE-10** [low] `beta-adapter.ts` — TikTok auth detection (`/log in/ && !/messages/`) was inert (the messages surface contains "messages"). Fixed: removed the dead/false-positive-prone check; detection relies on the QR phrases + the `/login` URL match.
+- **SC-1** [high] `enrichment-queue.ts` — a job that deferred on a busy enrich-lock still burned a retry attempt (the increment preceded the lock acquire), so lock contention could permanently FAIL a job that never visited a profile. Fixed: attempts is incremented only on the failure path (a real visit), not at the RUNNING step; give-up progression for real failures is unchanged.
+
+## Deferred (documented, not changed this pass)
+
+Low-confidence, dev-only, or out of correctness scope. Reproduction notes kept here per PM guidance.
+
+- **RT-8** [low] `index.ts` — stale-summary self-heal in `/data/thread` is keyed by thread id and can run a resummarize twice if a second request arrives after the 120s timeout rejected but before the underlying work settles. Last-writer-wins; redundant AI spend only.
+- **AI-7** [low] `ai.ts` — GLM/Gemini requests still send `response_format` though other GPT-5 knobs are stripped for those providers. Works for the models in use; pin with a test before relying on it.
+- **UI-5** [low] `thread/[id]/page.tsx` — `setComposerSource` is called from inside a `setComposer` functional updater (impure under StrictMode). Currently idempotent.
+- **UI-6** [low] `thread/[id]/page.tsx` — `timelineRows`/`dateLabelFormatter` memos are computed every render but unused (the JSX uses `dayDividerLabel`). Dead work, not wrong output.
+- **UI-8** [low] `thread/[id]/page.tsx` — redundant mount-time write of `dashboard_threads_collapsed`. Resolves correctly given effect ordering; likely a non-issue.
+- **SC-4** [low] `scan-queue.ts` `enqueueScan` — a just-started job is reported `status: "queued"` instead of `"running"` because `processNext` flips `processing` synchronously before control returns. Cosmetic.
+- **SC-5** [low] `enrichment-queue.ts` — a job enqueued in the narrow window after a drain's final `pickNextJob()` but before `running` resets can wait for the next periodic tick. Re-kick on drain exit if a rerun was requested.
+- **SC-6** [med, dev-only] runner `dev-flags.isAutoScanDisabledInDev` defaults auto-scan OFF in dev (`LINKEDIN_DEV_DISABLE_AUTOSCAN` default true) while the front-end `resolveAutoScanDisabled` defaults ON — the two layers disagree. Left unchanged because the runner scheduler and the front-end topbar toggle may be intentionally separate; changing the default risks double-scanning. Needs a product decision on which layer owns auto-scan in dev.
+- **SC-7** [low] `scan-queue.ts` — a second message in the same displayed clock-minute with an unchanged unread count can be treated as "unchanged" and skipped (row time is minute-precision, db time second-precision). Edge case.
+- **LI-5** [low] `linkedin-adapter.ts` — send-verification can report a false `timestamp_advanced` when the latest bubble's `<time>` is unparseable and falls back to `Date.now()` on both snapshots. Rare.
+- **CORE-8** [low] iMessage `AttachmentPlaceholder.type` carries the media `kind` instead of a stable discriminator, diverging from the beta adapter's `type: "attachment"`. Cosmetic/consistency.
+
+## Follow-up notes
+
+- **UI-2 follow-up:** a true snoozed-thread view (`snoozedUntil`) is not currently surfaced. `/data/inbox` excludes snoozed threads upstream, so a dedicated "Snoozed" view would need a new data path. Out of scope for this hardening pass.

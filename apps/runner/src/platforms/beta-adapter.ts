@@ -7,7 +7,7 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
-import { AdapterFailure, cleanText, humanDelay, toStageFailure } from "./utils";
+import { AdapterFailure, cleanMessageText, humanDelay, toStageFailure } from "./utils";
 import { humanClick, humanType, readingPause } from "./humanize";
 import type { SessionManager } from "../services/session-manager";
 
@@ -85,9 +85,10 @@ export class BetaAdapter implements PlatformAdapter {
         ) {
           return { authRequired: true, reason: "tiktok_qr_login" };
         }
-        if (/log in/.test(bodyText) && !/messages/.test(bodyText)) {
-          return { authRequired: true, reason: "tiktok_login_gate" };
-        }
+        // The TikTok messages surface almost always contains the word
+        // "messages", so the old `/log in/ && !/messages/` gate was inert (and
+        // a rare false positive). Login detection now relies on the QR phrases
+        // above and the /login URL match below.
       }
 
       return { authRequired: false };
@@ -203,9 +204,16 @@ export class BetaAdapter implements PlatformAdapter {
           const unreadMatch = unreadText.match(/\d+/);
           const normalizedName = displayName.toLowerCase().slice(0, 120);
           const normalizedPreview = preview.toLowerCase().slice(0, 160);
+          // Identity must never depend on scroll position: the same thread at a
+          // different index would otherwise get a new id and duplicate across
+          // scrapes. When name and preview are both empty, fall back to the
+          // row's own text rather than its index.
+          const rowSignature = clean(row.textContent).toLowerCase().slice(0, 200);
           const stableKey = normalizedName
             ? `${platform.toLowerCase()}:name:${normalizedName}`
-            : `${platform.toLowerCase()}:preview:${normalizedPreview || index}`;
+            : normalizedPreview
+              ? `${platform.toLowerCase()}:preview:${normalizedPreview}`
+              : `${platform.toLowerCase()}:row:${rowSignature || "empty"}`;
 
           return {
             platformThreadId: link?.href || row.getAttribute("data-id") || row.getAttribute("id") || stableKey,
@@ -325,7 +333,15 @@ export class BetaAdapter implements PlatformAdapter {
           return nodes.map((node, index) => {
             const root = node as HTMLElement;
             const className = root.className || "";
-            const inbound = /other|left|incoming|receive/i.test(className);
+            // IG/TikTok ship hashed class names, so the inbound keyword test
+            // usually misses. Check both directions explicitly and default the
+            // ambiguous case to IN: this is an inbox of RECEIVED DMs, and
+            // mislabeling an inbound message as OUT wrongly marks the thread as
+            // "you replied last" and hides it from the needs-reply queue. The
+            // safer error for an unread inbox is to over-surface (IN).
+            const inboundClass = /other|left|incoming|received|partner/i.test(className);
+            const outboundClass = /\bself\b|\bmine\b|outgoing|message-out|message--out/i.test(className);
+            const direction = inboundClass ? "IN" : outboundClass ? "OUT" : "IN";
             const text = root.querySelector(selectors.message_text)?.textContent || root.textContent || "";
             const senderName =
               root.querySelector("[role='link']")?.textContent ||
@@ -334,7 +350,7 @@ export class BetaAdapter implements PlatformAdapter {
             const attachmentCount = root.querySelectorAll("img, video, svg, a[download]").length;
             return {
               platformMessageKey: root.getAttribute("data-id") || root.getAttribute("id") || `beta-${index}`,
-              direction: inbound ? "IN" : "OUT",
+              direction,
               // Beta IG/TikTok scrapers don't parse the per-message timestamp
               // out of the DOM yet (relative-time strings like "5m"/"2d" + a
               // hover-only datetime attribute that varies per layout). Omit
@@ -361,7 +377,7 @@ export class BetaAdapter implements PlatformAdapter {
       return messages.slice(-limit).map((msg) => ({
         ...msg,
         direction: msg.direction === "IN" ? "IN" : "OUT",
-        text: cleanText(msg.text),
+        text: cleanMessageText(msg.text),
         senderName: msg.senderName,
         raw: msg.raw
       }));

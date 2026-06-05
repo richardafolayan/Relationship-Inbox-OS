@@ -1,7 +1,7 @@
-import { createReadStream, existsSync, mkdirSync, openSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import multer from "multer";
@@ -9,7 +9,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
@@ -147,6 +147,25 @@ function maybeMultipart(req: express.Request, res: express.Response, next: expre
     next();
   }
 }
+
+// #462 (pilot R-0061): voice-to-text dictation. The composer records a short
+// audio clip and posts it here as a single `audio` field; we transcribe it
+// with the existing provider and return the text for the operator to review.
+// Clips land in their own temp dir and are removed once transcription
+// completes (success or failure) — nothing is persisted as a Message.
+const dictationUploadRoot = resolve(dataDir, "dictation-uploads");
+mkdirSync(dictationUploadRoot, { recursive: true });
+const uploadDictation = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => {
+      const dir = resolve(dictationUploadRoot, uuid());
+      mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (_req, file, cb) => cb(null, file.originalname || "dictation.webm")
+  }),
+  limits: { fileSize: 25 * 1024 * 1024 } // ~ several minutes of speech
+}).single("audio");
 
 function kindFromMime(mime: string | undefined, filename: string | undefined): "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" {
   const m = (mime ?? "").toLowerCase();
@@ -421,6 +440,20 @@ if (runnerConfig.audioTranscription.enabled) {
   }
 }
 
+// #462: the best provider available for one-shot dictation. Prefers the
+// single configured provider, else the balanced "standard" progressive tier
+// (then max, then fast). Null when transcription isn't configured at all, in
+// which case the dictation route and capability probe both report it off.
+function pickDictationProvider(): TranscriptionProvider | null {
+  return (
+    transcriptionProvider ??
+    tierProviders.standard ??
+    tierProviders.max ??
+    tierProviders.fast ??
+    null
+  );
+}
+
 // GPT-5-nano text refinement is text-only — never receives audio
 // bytes. Constructed only when the operator opts in AND the OpenAI
 // key is present. The refiner itself short-circuits on a null client,
@@ -534,7 +567,10 @@ const sendService = createSendService({
   adapters,
   eventBus,
   settingsStore,
-  auditLog: (input) => auditService.log(input)
+  auditLog: (input) => auditService.log(input),
+  // Same per-platform mutex key the scan queue uses, so a send and a scan
+  // never drive the shared managed page at the same time.
+  withPlatformLock: withPlatformControlLock
 });
 
 // Async send worker. The /control/thread/:id/send endpoint inserts a PENDING
@@ -983,13 +1019,15 @@ async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
   // "overdue" stays in lockstep with what Today calls overdue (#360
   // amendment 2). loadVisibleThreadRows already hides archived rows and
   // thread-level snoozes; the digest service does the rest of the filtering.
-  const [visibleRows, scheduledSends] = await Promise.all([
+  const [visibleRows, scheduledSends, riskSettings] = await Promise.all([
     loadVisibleThreadRows(),
     prisma.sendRequest.findMany({
       where: { status: "SCHEDULED" },
       select: { threadId: true, scheduledFor: true }
-    })
+    }),
+    settingsStore.getSettings()
   ]);
+  const riskThresholds = { amberHours: riskSettings.amberHours, redHours: riskSettings.redHours };
   const counts = personThreadCounts(visibleRows);
   const scheduledByThread = new Map<string, Date>();
   for (const row of scheduledSends) {
@@ -1001,7 +1039,7 @@ async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
   }
   return visibleRows.map((row) => {
     const count = counts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
-    const shaped = toInboxRow(row, count);
+    const shaped = toInboxRow(row, count, riskThresholds);
     const scheduledFor = scheduledByThread.get(shaped.id);
     return {
       threadId: shaped.id,
@@ -2589,7 +2627,8 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
         text: payload.text,
         clientSendId: payload.clientSendId,
         scheduledFor: new Date(payload.scheduledFor),
-        attachments: stagedAttachments
+        attachments: stagedAttachments,
+        replyToMessageId: payload.replyToMessageId
       });
       res.json({
         clientSendId: scheduleResult.clientSendId,
@@ -2745,12 +2784,31 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
     return;
   }
 
+  // Preserve the original send's attachments and reply-threading so a retry
+  // re-sends the same message, not a text-only stub. Staged attachment files
+  // persist after a FAILED send (the send service doesn't unlink them), so the
+  // original absolutePath references are still valid.
+  let retryAttachments:
+    | Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>
+    | undefined;
+  if (original.attachmentsJson) {
+    try {
+      const parsed = JSON.parse(original.attachmentsJson);
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        retryAttachments = parsed;
+      }
+    } catch {
+      retryAttachments = undefined;
+    }
+  }
   const newClientSendId = randomUUID();
   try {
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: original.requestText,
-      clientSendId: newClientSendId
+      clientSendId: newClientSendId,
+      attachments: retryAttachments,
+      replyToMessageId: original.replyToMessageId ?? undefined
     });
     res.json({ ...queueResult, clientSendId: newClientSendId });
   } catch (error) {
@@ -3174,6 +3232,78 @@ app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) =
   });
 }));
 
+// #462 (pilot R-0061): does the runner have a transcription provider wired
+// up? The composer reads this once to decide whether to enable the Dictate
+// control (vs. show it disabled with an explanation).
+app.get("/data/transcription-capabilities", asyncRoute(async (_req, res) => {
+  res.json({ dictationAvailable: pickDictationProvider() !== null });
+}));
+
+// #462 (pilot R-0061): transcribe a one-shot dictation clip into text. Posts
+// a single `audio` field (multipart); returns { ok, text }. Nothing is
+// persisted — the operator reviews/edits the text in the composer before any
+// send. The temp upload is always cleaned up.
+app.post(
+  "/control/transcribe-dictation",
+  (req, res, next) =>
+    uploadDictation(req, res, (err: unknown) => {
+      if (err) {
+        res
+          .status(400)
+          .json({ ok: false, error: err instanceof Error ? err.message : "Upload failed." });
+        return;
+      }
+      next();
+    }),
+  asyncRoute(async (req, res) => {
+    const file = req.file as Express.Multer.File | undefined;
+    const cleanup = () => {
+      if (file) {
+        try {
+          rmSync(dirname(file.path), { recursive: true, force: true });
+        } catch {
+          /* best-effort temp cleanup */
+        }
+      }
+    };
+    if (!file) {
+      res.status(400).json({ ok: false, error: "No audio uploaded." });
+      return;
+    }
+    const provider = pickDictationProvider();
+    if (!provider) {
+      cleanup();
+      res.status(503).json({
+        ok: false,
+        reason: "unavailable",
+        error:
+          "Voice transcription is not configured on the runner. Enable AUDIO_TRANSCRIPTION_ENABLED (local Whisper or OpenAI) to use dictation."
+      });
+      return;
+    }
+    try {
+      const outcome = await provider.transcribe({
+        filePath: file.path,
+        mimeType: file.mimetype || "audio/webm",
+        filename: file.originalname || "dictation.webm",
+        language: runnerConfig.audioTranscription.language,
+        // local-whisper ignores this (model is baked into the provider);
+        // the OpenAI provider uses it as the audio model id.
+        model: runnerConfig.audioTranscription.model
+      });
+      if (outcome.kind === "ok") {
+        res.json({ ok: true, text: outcome.result.text });
+      } else if (outcome.kind === "skipped") {
+        res.status(422).json({ ok: false, reason: "skipped", error: outcome.reason });
+      } else {
+        res.status(502).json({ ok: false, reason: "failed", error: outcome.errorMessage });
+      }
+    } finally {
+      cleanup();
+    }
+  })
+);
+
 // Issue #331. Reads the operator's in-flight draft against the thread's
 // active open loops and returns the subset the draft already addresses.
 // The dashboard debounces calls here while the operator types so the
@@ -3254,7 +3384,12 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
         // asc + take would feed composeInVoice the OLDEST 80 and miss
         // the live conversation on long threads.
         orderBy: { timestamp: "desc" },
-        take: 80
+        take: 80,
+        // Voice-note transcripts must reach composeInVoice. Without this,
+        // a contact whose last message is an audio note is rendered to the
+        // model as the bare "[Voice note]" placeholder and the draft answers
+        // nothing the contact actually said.
+        include: { audioTranscription: { select: { status: true, transcript: true } } }
       }
     }
   });
@@ -3307,11 +3442,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
-    threadMessages: orderedMessages.map((m) => ({
-      direction: m.direction as "IN" | "OUT",
-      text: m.text,
-      timestamp: m.timestamp.toISOString()
-    })),
+    threadMessages: orderedMessages.map(prismaMessageToPrompt),
     relationshipContext,
     operatorProfile: composeOperatorProfile,
     contact: composeContactSnapshot,
@@ -3463,10 +3594,12 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
     }
   }
 
+  const inboxRiskSettings = await settingsStore.getSettings();
+  const riskThresholds = { amberHours: inboxRiskSettings.amberHours, redHours: inboxRiskSettings.redHours };
   const visibleCounts = personThreadCounts(visibleRows);
   const dedupedRows = visibleRows.map((row) => {
     const count = visibleCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1;
-    const shaped = toInboxRow(row, count);
+    const shaped = toInboxRow(row, count, riskThresholds);
     const scheduledFor = scheduledSendByThread.get(shaped.id);
     return {
       ...shaped,
@@ -3885,6 +4018,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   })();
 
   const aiInputs = {
+    displayName: thread.person.displayName,
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
@@ -3953,7 +4087,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
   let suggested: SuggestedRepliesOutput | undefined;
   let suggestedRepliesStatus: "ready" | "generating" = "ready";
-  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+  // On a paginated (older-history) fetch, recentMessages is an older window,
+  // so the recomputed cacheKey can never match the live one. Serve the
+  // persisted replies as-is and never regenerate/persist — otherwise
+  // scrolling up regenerates suggestions from stale context and clobbers the
+  // live cache (wasted AI spend + flapping suggestions on the next fetch).
+  const servePersistedOnly = Boolean(beforeMessageId);
+  if ((servePersistedOnly || thread.suggestedRepliesCacheKey === cacheKey) && thread.suggestedRepliesJson) {
     try {
       suggested = JSON.parse(thread.suggestedRepliesJson);
     } catch {
@@ -3963,7 +4103,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   }
   if (!suggested) {
     const inFlightKey = `${thread.id}:${cacheKey}`;
-    if (!suggestedRepliesInFlight.has(inFlightKey)) {
+    if (!servePersistedOnly && !suggestedRepliesInFlight.has(inFlightKey)) {
       const inFlight = withInFlightTimeout(
         aiService.generateSuggestedReplies(aiInputs),
         `generateSuggestedReplies(${thread.id})`
@@ -4107,6 +4247,18 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       latestInboundText: lastInbound?.text ?? null
     });
 
+  // Recompute risk live from the thread's timestamps + current thresholds,
+  // mirroring the inbox shaper, so the thread page's risk pill never disagrees
+  // with the list (risk ages amber -> red with the clock; the persisted value
+  // is frozen at the last scan).
+  const threadRiskSettings = await settingsStore.getSettings();
+  const liveThreadRisk = calculateRisk({
+    lastInboundAt: thread.lastInboundAt,
+    lastOutboundAt: thread.lastOutboundAt,
+    amberHours: threadRiskSettings.amberHours,
+    redHours: threadRiskSettings.redHours
+  });
+
   res.json({
     id: thread.id,
     personId: thread.person.id,
@@ -4121,8 +4273,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     personBirthday: thread.person.birthday ?? null,
     personBirthYear: thread.person.birthYear ?? null,
     platform: thread.platform,
-    riskLevel: thread.riskLevel,
-    riskReason: thread.riskReason,
+    riskLevel: liveThreadRisk.level,
+    riskReason: liveThreadRisk.riskReason,
     snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
     // Issue #392. Operator-supplied "remind me to…" text. Surfaces as
     // a "Reminder: <text>" banner on the thread page so the operator
@@ -4316,10 +4468,11 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/data/logs", asyncRoute(async (req, res) => {
-  const limit = Number(req.query.limit ?? 200);
+  const requested = Number(req.query.limit);
+  const limit = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 1000) : 200;
   const logs = await prisma.auditLog.findMany({
     orderBy: { timestamp: "desc" },
-    take: Number.isNaN(limit) ? 200 : limit
+    take: limit
   });
 
   res.json(
@@ -4398,9 +4551,11 @@ app.post("/control/thread/:threadId/unarchive", asyncRoute(async (req, res) => {
 // Archived view counterpart to /data/inbox — same shape, only archived rows.
 app.get("/data/archived", asyncRoute(async (_req, res) => {
   const archivedRows = await loadVisibleThreadRows({ archived: true });
+  const archivedRiskSettings = await settingsStore.getSettings();
+  const archivedRiskThresholds = { amberHours: archivedRiskSettings.amberHours, redHours: archivedRiskSettings.redHours };
   const archivedCounts = personThreadCounts(archivedRows);
   const rows = archivedRows
-    .map((row) => toInboxRow(row, archivedCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1))
+    .map((row) => toInboxRow(row, archivedCounts.get(personThreadCountKey(row.source.platform, row.source.personId)) ?? 1, archivedRiskThresholds))
     .sort((a, b) => {
       const aTime = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
       const bTime = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
@@ -4524,11 +4679,13 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
     });
   }
 
+  const peopleRiskSettings = await settingsStore.getSettings();
+  const peopleRiskThresholds = { amberHours: peopleRiskSettings.amberHours, redHours: peopleRiskSettings.redHours };
   const peopleCounts = personThreadCounts(visibleThreadGroups);
   const groupedByPerson = new Map<string, ReturnType<typeof toInboxRow>[]>();
   for (const group of visibleThreadGroups) {
     const count = peopleCounts.get(personThreadCountKey(group.source.platform, group.source.personId)) ?? 1;
-    const shaped = toInboxRow(group, count);
+    const shaped = toInboxRow(group, count, peopleRiskThresholds);
     const bucket = groupedByPerson.get(shaped.personId) ?? [];
     bucket.push(shaped);
     groupedByPerson.set(shaped.personId, bucket);
@@ -5407,6 +5564,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   })();
 
   const aiInputs = {
+    displayName: thread.person.displayName,
     summary: thread.rollingSummary ?? "",
     whatTheyWant: thread.whatTheyWant ?? "",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
@@ -5523,8 +5681,14 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
       person: true,
       // Most RECENT 80, made chronological by the reverse below. An asc
       // + take would calibrate voice off the OLDEST 80 messages and miss
-      // how the operator currently writes to this contact.
-      messages: { orderBy: { timestamp: "desc" }, take: 80 }
+      // how the operator currently writes to this contact. Includes the
+      // audio transcript so a voice-note last message reaches composeInVoice
+      // as its transcribed text, not the bare "[Voice note]" placeholder.
+      messages: {
+        orderBy: { timestamp: "desc" },
+        take: 80,
+        include: { audioTranscription: { select: { status: true, transcript: true } } }
+      }
     }
   });
   if (!thread) {
@@ -5554,11 +5718,7 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
     voiceSamples,
-    threadMessages: orderedMessages.map((m) => ({
-      direction: m.direction as "IN" | "OUT",
-      text: m.text,
-      timestamp: m.timestamp.toISOString()
-    })),
+    threadMessages: orderedMessages.map(prismaMessageToPrompt),
     operatorProfile: rewriteOperatorProfile,
     contact: rewriteContactSnapshot,
     operatorStyle,

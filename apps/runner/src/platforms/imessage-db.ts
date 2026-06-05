@@ -363,6 +363,17 @@ export class IMessageDb {
    * (decoded from attributedBody when text is NULL).
    */
   listThreads(limit: number, opts: { unreadOnly: boolean }): IMessageThreadRow[] {
+    // Exclude tapback/reaction rows (associated_message_type 2000-2005 /
+    // 3000-3005, mirroring isTapbackType) from both the unread count and the
+    // last-message preview. Without this a tapback inflates the unread badge
+    // and a recent tapback can surface as the chat's "last message".
+    // COALESCE so normal rows (type 0 or NULL) are kept. The shared
+    // `ORDER BY m.date DESC, m.ROWID DESC` tie-break makes all four
+    // last-message subqueries resolve to the SAME row on a date tie, so the
+    // preview text, timestamp, and direction can't come from different rows.
+    const notTapback =
+      "NOT (COALESCE(m.associated_message_type, 0) BETWEEN 2000 AND 2005 " +
+      "OR COALESCE(m.associated_message_type, 0) BETWEEN 3000 AND 3005)";
     const rows = this.db
       .prepare(
         `SELECT
@@ -374,23 +385,23 @@ export class IMessageDb {
            c.style                           AS style,
            (SELECT COUNT(*) FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND m.is_read = 0 AND m.is_from_me = 0) AS unreadCount,
+              WHERE cmj.chat_id = c.ROWID AND m.is_read = 0 AND m.is_from_me = 0 AND ${notTapback}) AS unreadCount,
            (SELECT m.date FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastDate,
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastDate,
            (SELECT m.text FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastText,
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastText,
            (SELECT m.attributedBody FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastBody,
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastBody,
            (SELECT m.is_from_me FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastIsFromMe
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastIsFromMe
          FROM chat c
          ORDER BY lastDate DESC NULLS LAST
          LIMIT ?`
@@ -409,7 +420,10 @@ export class IMessageDb {
         lastIsFromMe: number | null;
       }>;
 
-    const nonAutomated = rows.filter((r) => !looksLikeAutomatedSender(r.chatIdentifier));
+    // Only apply the automated-sender heuristic to 1:1 chats. Group chats
+    // (style 43) have synthetic "chatNNN" identifiers that the heuristic can
+    // mistake for an alphanumeric service ID and wrongly drop.
+    const nonAutomated = rows.filter((r) => r.style === 43 || !looksLikeAutomatedSender(r.chatIdentifier));
     const filtered = opts.unreadOnly ? nonAutomated.filter((r) => r.unreadCount > 0) : nonAutomated;
 
     return filtered.map((r) => {
@@ -541,6 +555,7 @@ export class IMessageDb {
       associatedType: number;
       isFromMe: number;
       date: number | bigint | null;
+      handleId: number | null;
     }> = [];
     for (let i = 0; i < messageGuids.length; i += CHUNK) {
       const chunk = messageGuids.slice(i, i + CHUNK);
@@ -551,7 +566,8 @@ export class IMessageDb {
              m.associated_message_guid AS parentGuidRaw,
              m.associated_message_type AS associatedType,
              m.is_from_me              AS isFromMe,
-             m.date                    AS date
+             m.date                    AS date,
+             m.handle_id               AS handleId
            FROM message m
            WHERE m.associated_message_type BETWEEN 2000 AND 3005
              AND m.associated_message_guid IN (${placeholders},${placeholders})
@@ -567,6 +583,7 @@ export class IMessageDb {
           associatedType: number;
           isFromMe: number;
           date: number | bigint | null;
+          handleId: number | null;
         }>;
       rows.push(...chunkRows);
     }
@@ -580,7 +597,11 @@ export class IMessageDb {
       if (!info) continue;
       const parentGuid = r.parentGuidRaw.replace(/^(?:p:0\/|bp:)/, "");
       const dir: "IN" | "OUT" = r.isFromMe === 1 ? "OUT" : "IN";
-      const key = `${info.kind}|${dir}`;
+      // Include the reactor's handle so two people in a group adding the
+      // same tapback kind don't collapse into one. Outbound reactions have
+      // no handle (self), so they key consistently. The apply/remove
+      // lifecycle still resolves per-reactor (same handle, latest wins).
+      const key = `${info.kind}|${dir}|${r.handleId ?? 0}`;
       const dateNum = typeof r.date === "bigint" ? Number(r.date) : (r.date ?? 0);
       const agg = byParent.get(parentGuid) ?? new Map();
       const prior = agg.get(key);

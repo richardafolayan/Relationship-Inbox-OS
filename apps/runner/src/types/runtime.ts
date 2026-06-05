@@ -185,6 +185,10 @@ export interface AiService {
     race?: boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
+    /** Contact's name — injected as the prompt's authoritative `Recipient:`
+     *  line so the model names the contact instead of falling back to the
+     *  CONTACT_NAME_DISCIPLINE example name. */
+    displayName: string;
     summary: string;
     whatTheyWant: string;
     openLoops: string[];

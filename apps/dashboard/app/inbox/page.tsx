@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
+import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import { Archive, Search } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
@@ -16,8 +18,19 @@ import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
+import {
+  OXBLOOD_PAGE_VARS,
+  TOOL_CLASS,
+  XIcon,
+  FilterGlyph,
+  SelectGlyph,
+  useDismiss,
+  SortMenu,
+  PopSection,
+  PopOpt
+} from "@/components/common/list-controls";
 
-type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "snoozed";
+type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
 type SortMode = "oldest" | "recent" | "name";
@@ -27,7 +40,7 @@ const TABS: { key: RiskTab; label: string }[] = [
   { key: "overdue", label: "Overdue" },
   { key: "waiting", label: "Waiting" },
   { key: "fresh", label: "Fresh" },
-  { key: "snoozed", label: "Snoozed" }
+  { key: "scheduled", label: "Scheduled" }
 ];
 
 const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
@@ -59,7 +72,7 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
 
 function applyTab(row: InboxRow, tab: RiskTab): boolean {
   if (tab === "all") return !row.scheduledSendAt;
-  if (tab === "snoozed") return !!row.scheduledSendAt;
+  if (tab === "scheduled") return !!row.scheduledSendAt;
   if (row.scheduledSendAt) return false;
   if (tab === "overdue") return row.riskLevel === "RED";
   if (tab === "waiting") return row.riskLevel === "AMBER";
@@ -107,21 +120,24 @@ function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
   }
 }
 
+// Right-hand timestamp. Per the redesign only "overdue" carries colour
+// (oxblood "… overdue"); waiting and fresh times read as quiet grey so the
+// list stays calm and the overdue rows are the thing that pulls the eye.
 function rightLabelFor(row: InboxRow): { text: string; tone: string } {
   const risk = toDisplayRisk(row.riskLevel);
   const rel = formatRelative(row.lastInboundAt ?? row.lastMessageAt);
   if (risk === "overdue")
     return { text: `${rel} overdue`, tone: "text-risk-overdue font-medium" };
-  if (risk === "waiting")
-    return { text: rel, tone: "text-risk-waiting font-medium" };
-  return { text: rel, tone: "text-ink-2" };
+  return { text: rel, tone: "text-ink-3" };
 }
 
+// Status dot: overdue = oxblood, waiting = amber, fresh = muted grey
+// (the redesign mutes the fresh dot rather than colouring it green).
 function dotFor(row: InboxRow): string {
   const risk = toDisplayRisk(row.riskLevel);
   if (risk === "overdue") return "bg-risk-overdue";
   if (risk === "waiting") return "bg-risk-waiting";
-  return "bg-risk-fresh";
+  return "bg-ink-4";
 }
 
 // Human-readable label for the "N older or closed conversations set aside"
@@ -144,7 +160,7 @@ function hiddenLabel(breakdown: { older: number; closed: number }): string {
 // #433 R-0055: empty-state headline for a specific risk tab whose badge is
 // non-zero but whose feed is empty because every match sits behind the
 // recency horizon. The tab label already reads as a noun
-// ("Overdue"/"Waiting"/"Fresh"/"Snoozed"); lowercase it and agree the verb
+// ("Overdue"/"Waiting"/"Fresh"/"Scheduled"); lowercase it and agree the verb
 // with the count so the line reads "197 overdue are set aside."
 function setAsidePhrase(tab: RiskTab, count: number): string {
   const noun: Record<RiskTab, string> = {
@@ -152,7 +168,7 @@ function setAsidePhrase(tab: RiskTab, count: number): string {
     overdue: "overdue",
     waiting: "waiting",
     fresh: "fresh",
-    snoozed: "snoozed"
+    scheduled: "scheduled"
   };
   return `${count} ${noun[tab]} ${count === 1 ? "is" : "are"} set aside.`;
 }
@@ -166,7 +182,7 @@ interface SectionGroup {
 // Inbox - search box, a risk tab bar, then a thin secondary filter row
 // (platform / kind / sort). The "All" tab buckets the feed into Overdue /
 // Waiting / Fresh sections so a long list scans top-down by urgency; a
-// single-risk or Snoozed tab is already homogeneous and renders as one
+// single-risk or Scheduled tab is already homogeneous and renders as one
 // flat list. Older / likely-closed threads are hidden by default
 // (issue #287) and surfaced via the Show all affordance.
 export default function InboxPage() {
@@ -236,7 +252,15 @@ export default function InboxPage() {
     };
   }, [refresh]);
 
-  const allRows = data?.rows ?? [];
+  const { sandboxActive } = useFullDemo();
+  // In a sandbox guided flow (pilot tour / presenter sandbox), the Inbox shows
+  // only demo-seeded threads so the walkthrough stays inside sandbox data and
+  // its targets resolve on a busy real inbox. Outside a sandbox flow this is a
+  // no-op.
+  const allRows = useMemo(
+    () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
+    [data, sandboxActive]
+  );
 
   // Per-tab counts. Scoped to the active platform + category chips so the
   // badges reflect the current filter — e.g. filtering to LinkedIn shows
@@ -256,7 +280,7 @@ export default function InboxPage() {
       overdue: live.filter((r) => r.riskLevel === "RED").length,
       waiting: live.filter((r) => r.riskLevel === "AMBER").length,
       fresh: live.filter((r) => r.riskLevel === "GREEN").length,
-      snoozed: scoped.filter((r) => !!r.scheduledSendAt).length
+      scheduled: scoped.filter((r) => !!r.scheduledSendAt).length
     };
   }, [allRows, category, platformFilter]);
 
@@ -489,7 +513,7 @@ export default function InboxPage() {
   );
 
   return (
-    <Canvas>
+    <Canvas style={OXBLOOD_PAGE_VARS}>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
@@ -504,71 +528,110 @@ export default function InboxPage() {
         }
       />
 
-      <div className="mb-[14px] flex items-center gap-2 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-ink-3">
-        <Search className="h-[14px] w-[14px]" strokeWidth={1.6} />
+      {/* Ghost search — a subtle field, not a heavy box (the redesign's
+          calmer default). The border darkens on hover/focus; a clear
+          button appears once there's a query. */}
+      <label
+        className={cn(
+          "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+          query
+            ? "border-hairline-strong"
+            : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
+        )}
+      >
+        <Search className="h-[16px] w-[16px] shrink-0 text-ink-3" strokeWidth={1.6} />
         <input
           type="text"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Search people, keywords…"
+          autoComplete="off"
           className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
         />
-      </div>
-
-      <div className="flex flex-wrap items-center gap-[2px] border-b border-hairline">
-        {TABS.map((entry) => {
-          const active = tab === entry.key;
-          const count = counts[entry.key];
-          const tone =
-            entry.key === "overdue"
-              ? "text-risk-overdue"
-              : entry.key === "waiting"
-                ? "text-risk-waiting"
-                : "text-ink-4";
-          return (
-            <button
-              key={entry.key}
-              type="button"
-              onClick={() => setTab(entry.key)}
-              className={cn(
-                "relative -mb-px px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
-                active ? "font-medium text-ink" : "text-ink-3 hover:text-ink"
-              )}
-            >
-              {entry.label}
-              <span className={cn("ml-[5px] font-mono text-[10px]", active ? "text-ink-2" : tone)}>
-                {count}
-              </span>
-              {active ? (
-                <span
-                  aria-hidden
-                  className="absolute bottom-[-1px] left-[14px] right-[14px] h-[2px] bg-ink"
-                />
-              ) : null}
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="mb-1 mt-3 flex flex-wrap items-center gap-x-5 gap-y-2 font-mono text-[11px]">
-        <FilterSelect
-          label="platform"
-          value={platformFilter}
-          onChange={setPlatformFilter}
-          options={PLATFORM_FILTERS}
-        />
-        <FilterSelect label="kind" value={category} onChange={setCategory} options={CATEGORY_FILTERS} />
-        <FilterSelect label="sort" value={sortMode} onChange={setSortMode} options={SORT_MODES} />
-        {!selectMode && orderedRows.length > 0 ? (
+        {query ? (
           <button
             type="button"
-            onClick={() => setForceSelectMode(true)}
-            className="ml-auto uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
+            onClick={() => setQuery("")}
+            aria-label="Clear search"
+            className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
           >
-            Select
+            <XIcon />
           </button>
         ) : null}
+      </label>
+
+      {/* Status tabs (the lens you switch most) + a compact tools cluster.
+          Platform + Kind now live behind the Filters popover so this bar
+          stays one calm row instead of the old stack of dropdowns. */}
+      <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
+        <div className="flex flex-1 flex-wrap gap-[1px]">
+          {TABS.map((entry) => {
+            const active = tab === entry.key;
+            const count = counts[entry.key];
+            const zero = count === 0;
+            return (
+              <button
+                key={entry.key}
+                type="button"
+                onClick={() => setTab(entry.key)}
+                className={cn(
+                  "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                  active
+                    ? "border-accent font-medium text-ink"
+                    : zero
+                      ? "text-ink-4 hover:text-ink-2"
+                      : "text-ink-3 hover:text-ink"
+                )}
+              >
+                {entry.label}
+                <span
+                  className={cn(
+                    "ml-[5px] font-mono text-[11px]",
+                    active ? "text-accent-ink" : "text-ink-3"
+                  )}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-[4px] pb-[6px]">
+          <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
+          <FiltersPopover
+            platformFilter={platformFilter}
+            category={category}
+            onPlatform={setPlatformFilter}
+            onCategory={setCategory}
+            onClear={() => {
+              setPlatformFilter("all");
+              setCategory("any");
+            }}
+          />
+          {orderedRows.length > 0 || selectMode ? (
+            <button
+              type="button"
+              onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
+              className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
+              aria-pressed={selectMode}
+            >
+              <SelectGlyph />
+              <span>Select</span>
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      <ChipsRow
+        platformFilter={platformFilter}
+        category={category}
+        onClearPlatform={() => setPlatformFilter("all")}
+        onClearCategory={() => setCategory("any")}
+        onClearAll={() => {
+          setPlatformFilter("all");
+          setCategory("any");
+        }}
+      />
 
       {degraded ? (
         <DegradedBanner
@@ -646,48 +709,6 @@ export default function InboxPage() {
         />
       ) : (
         <>
-          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
-            <p className="mb-3 mt-3 flex flex-wrap items-baseline gap-x-3 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-              {showAll ? (
-                <span>
-                  Showing all conversations.{" "}
-                  <button
-                    type="button"
-                    onClick={() => setShowAll(false)}
-                    className="underline underline-offset-2 hover:text-ink"
-                  >
-                    Show recent only
-                  </button>
-                </span>
-              ) : (
-                <span>
-                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
-                  <button
-                    type="button"
-                    onClick={() => setShowAll(true)}
-                    className="underline underline-offset-2 hover:text-ink"
-                  >
-                    Show all
-                  </button>
-                </span>
-              )}
-              {/* #287 F1: trigger AI close-status classification for
-                  threads that have never been classified (or pre-date
-                  the v2 cache with reasons). Sits next to the existing
-                  Show all / Show recent toggle so the affordance is in
-                  the same place the operator already looks. */}
-              <button
-                type="button"
-                onClick={() => void handleRefreshClosedVerdicts()}
-                disabled={closedRefreshState.kind === "running"}
-                className={`underline underline-offset-2 transition-colors duration-calm hover:text-ink disabled:opacity-60 ${closedRefreshTone}`}
-                data-testid="inbox-refresh-closed-verdicts"
-                aria-live="polite"
-              >
-                {closedRefreshLabel}
-              </button>
-            </p>
-          ) : null}
           {grouped ? (
             sections.map((section, index) => (
               <section key={section.key}>
@@ -722,7 +743,49 @@ export default function InboxPage() {
       )}
 
       {loaded ? (
-        <div className="mt-14 flex justify-center border-t border-hairline pt-6">
+        <div className="mt-14 flex flex-col items-center gap-3 border-t border-hairline pt-6">
+          {/* Older / closed set-aside disclosure — an end-of-list affordance
+              (moved here from the header per the redesign), sitting next to
+              View archived threads where end-of-list disclosures belong. */}
+          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
+            <p className="m-0 flex flex-wrap items-baseline justify-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+              {showAll ? (
+                <span>
+                  Showing all conversations.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(false)}
+                    className="underline underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Show recent only
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="underline underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Show all
+                  </button>
+                </span>
+              )}
+              {/* #287 F1: trigger AI close-status classification for threads
+                  never classified (or pre-dating the v2 cache with reasons). */}
+              <button
+                type="button"
+                onClick={() => void handleRefreshClosedVerdicts()}
+                disabled={closedRefreshState.kind === "running"}
+                className={`underline underline-offset-2 transition-colors duration-calm hover:text-ink disabled:opacity-60 ${closedRefreshTone}`}
+                data-testid="inbox-refresh-closed-verdicts"
+                aria-live="polite"
+              >
+                {closedRefreshLabel}
+              </button>
+            </p>
+          ) : null}
           <Link
             href="/archived"
             className="inline-flex items-center gap-[7px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
@@ -791,29 +854,134 @@ export default function InboxPage() {
   );
 }
 
-interface FilterSelectProps<K extends string> {
-  label: string;
-  value: K;
-  onChange: (value: K) => void;
-  options: readonly { key: K; label: string }[];
+// Filters: Platform + Kind collapsed into one popover with an active-count
+// badge — replacing the old stack of inline <select>s (the "convoluted"
+// part Richard flagged).
+function FiltersPopover({
+  platformFilter,
+  category,
+  onPlatform,
+  onCategory,
+  onClear
+}: {
+  platformFilter: PlatformFilter;
+  category: CategoryFilter;
+  onPlatform: (value: PlatformFilter) => void;
+  onCategory: (value: CategoryFilter) => void;
+  onClear: () => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useDismiss(open, () => setOpen(false));
+  const activeCount = (platformFilter !== "all" ? 1 : 0) + (category !== "any" ? 1 : 0);
+  return (
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn(TOOL_CLASS, open ? "bg-paper-2 text-ink" : "", activeCount > 0 ? "text-accent-ink" : "")}
+        aria-expanded={open}
+      >
+        <FilterGlyph />
+        <span>Filters</span>
+        {activeCount > 0 ? (
+          <span className="grid h-[16px] min-w-[16px] place-items-center rounded-full bg-accent px-[4px] font-mono text-[10px] font-medium text-white">
+            {activeCount}
+          </span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-[248px] rounded-[12px] border border-hairline bg-paper p-4 shadow-pop">
+          <PopSection label="Platform">
+            {PLATFORM_FILTERS.map((o) => (
+              <PopOpt key={o.key} selected={platformFilter === o.key} onClick={() => onPlatform(o.key)}>
+                {o.label}
+              </PopOpt>
+            ))}
+          </PopSection>
+          <div className="mt-4">
+            <PopSection label="Kind">
+              {CATEGORY_FILTERS.map((o) => (
+                <PopOpt key={o.key} selected={category === o.key} onClick={() => onCategory(o.key)}>
+                  {o.label}
+                </PopOpt>
+              ))}
+            </PopSection>
+          </div>
+          <div className="mt-4 flex justify-end border-t border-hairline pt-3">
+            <button
+              type="button"
+              onClick={onClear}
+              className="font-mono text-[12px] text-ink-3 transition-colors duration-calm hover:text-accent-ink"
+            >
+              Clear filters
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
-function FilterSelect<K extends string>({ label, value, onChange, options }: FilterSelectProps<K>) {
+// Applied-filter chips — only rendered when a platform/kind filter is set,
+// so the resting bar stays calm.
+function ChipsRow({
+  platformFilter,
+  category,
+  onClearPlatform,
+  onClearCategory,
+  onClearAll
+}: {
+  platformFilter: PlatformFilter;
+  category: CategoryFilter;
+  onClearPlatform: () => void;
+  onClearCategory: () => void;
+  onClearAll: () => void;
+}) {
+  const chips: { key: string; label: string; value: string; onRemove: () => void }[] = [];
+  if (platformFilter !== "all") {
+    chips.push({
+      key: "platform",
+      label: "Platform",
+      value: PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label ?? platformFilter,
+      onRemove: onClearPlatform
+    });
+  }
+  if (category !== "any") {
+    chips.push({
+      key: "kind",
+      label: "Kind",
+      value: CATEGORY_FILTERS.find((c) => c.key === category)?.label ?? category,
+      onRemove: onClearCategory
+    });
+  }
+  if (chips.length === 0) return null;
   return (
-    <label className="flex items-center gap-[6px] text-ink-3">
-      <span>{label}</span>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value as K)}
-        className="cursor-pointer bg-transparent text-ink-2 outline-none transition-colors duration-calm hover:text-ink"
+    <div className="flex flex-wrap items-center gap-2 pt-[14px]">
+      {chips.map((c) => (
+        <span
+          key={c.key}
+          className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2"
+        >
+          <span className="opacity-60">{c.label}</span>
+          {c.value}
+          <button
+            type="button"
+            onClick={c.onRemove}
+            aria-label={`Remove ${c.label} filter`}
+            className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
+          >
+            <XIcon />
+          </button>
+        </span>
+      ))}
+      <button
+        type="button"
+        onClick={onClearAll}
+        className="font-mono text-[11.5px] text-ink-3 transition-colors duration-calm hover:text-accent-ink"
       >
-        {options.map((option) => (
-          <option key={option.key} value={option.key}>
-            {option.label}
-          </option>
-        ))}
-      </select>
-    </label>
+        Clear all
+      </button>
+    </div>
   );
 }
 

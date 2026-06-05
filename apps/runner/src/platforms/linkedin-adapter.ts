@@ -3811,8 +3811,15 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(unreadContainer)) ??
           ""
       );
-      const unreadMatch = unreadText.match(/\d+/);
-      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : unreadContainerExists ? 1 : 0;
+      // Strip thousands separators before matching so "1,234" doesn't parse as
+      // "1". Only treat a bare container (no number) as unread when it actually
+      // carries text — an empty badge element is not reliable unread evidence.
+      const unreadMatch = unreadText.replace(/,/g, "").match(/\d+/);
+      const unreadCount = unreadMatch
+        ? Number(unreadMatch[0])
+        : unreadContainerExists && unreadText.length > 0
+          ? 1
+          : 0;
 
       const urnToken =
         (await readAttr(scope, "data-conversation-urn")) ??
@@ -5888,8 +5895,14 @@ export class LinkedInAdapter implements PlatformAdapter {
   ): LinkedInVisibleRowSnapshot[] {
     const snapshots: LinkedInVisibleRowSnapshot[] = [];
     for (const row of rawRows) {
-      const unreadMatch = row.unreadText.match(/\d+/);
-      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : row.unreadContainerPresent ? 1 : 0;
+      // Strip thousands separators so "1,234" doesn't parse as "1"; only treat
+      // a bare container (no number) as unread when it actually carries text.
+      const unreadMatch = row.unreadText.replace(/,/g, "").match(/\d+/);
+      const unreadCount = unreadMatch
+        ? Number(unreadMatch[0])
+        : row.unreadContainerPresent && row.unreadText.trim().length > 0
+          ? 1
+          : 0;
       const threadUrl = resolveSmokeThreadUrl(row.href ?? "", pageUrl);
       const rowKey = resolveLinkedInRowKey({
         id: row.id,
@@ -7911,17 +7924,29 @@ export class LinkedInAdapter implements PlatformAdapter {
     const fallbackActive = page
       .locator(".msg-conversation-listitem .msg-conversation-listitem__link--active")
       .first();
-    const activeNode = ((await primaryActive.count().catch(() => 0)) > 0 ? primaryActive : fallbackActive).first();
+    // aria signals as a third path, mirroring isRowMarkedActive — LinkedIn
+    // sometimes marks the active row via aria-current/aria-selected without
+    // the --active class.
+    const ariaActive = page
+      .locator(".msg-conversation-listitem [aria-current='true'], .msg-conversation-listitem [aria-selected='true']")
+      .first();
+    const primaryCount = await primaryActive.count().catch(() => 0);
+    const fallbackCount = primaryCount > 0 ? 0 : await fallbackActive.count().catch(() => 0);
+    const ariaCount = primaryCount + fallbackCount > 0 ? 0 : await ariaActive.count().catch(() => 0);
+    if (primaryCount + fallbackCount + ariaCount === 0) {
+      // No row is marked active. Falling back to the FIRST row here (the old
+      // behaviour) attributes the opened thread to the wrong person and can
+      // compute a wrong canonical thread id. Return an empty descriptor so the
+      // caller degrades to page.url()/explicit-match logic instead.
+      return { threadUrl: undefined, activeKey: undefined, displayName: undefined };
+    }
+    const activeNode = primaryCount > 0 ? primaryActive : fallbackCount > 0 ? fallbackActive : ariaActive;
 
     const activeRowCandidate = activeNode
-      .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-conversation-listitem ')][1]")
+      .locator("xpath=ancestor-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-conversation-listitem ')][1]")
       .first();
-    const activeRow =
-      (await activeRowCandidate.count().catch(() => 0)) > 0
-        ? activeRowCandidate
-        : page.locator(".msg-conversation-listitem").first();
-    const activeRowExists = (await activeRow.count().catch(() => 0)) > 0;
-    const scope = activeRowExists ? activeRow : activeNode;
+    const scope =
+      (await activeRowCandidate.count().catch(() => 0)) > 0 ? activeRowCandidate : activeNode;
 
     const hrefRaw =
       (await readAttr(scope.locator("a[href*='/messaging/']").first(), "href")) ??
@@ -8317,6 +8342,13 @@ export class LinkedInAdapter implements PlatformAdapter {
       const beforeFirstKey = initialCount > 0 ? await readMessageKey(messageNodes.nth(0), 0) : "";
 
       const messages: LinkedInMessageSnapshot[] = [];
+      // Date headings only render on the FIRST group of a date run, so later
+      // groups in the same day carry an empty heading. Walk the bubbles in
+      // DOM order (chronological) and inherit the most-recent heading, matching
+      // collectVisibleThreadMessages. Without this, a heading-less older bubble
+      // falls back to "today" in parseLinkedInMessageTimestamp and corrupts
+      // lastMessageAt (the #431 drift).
+      let inheritedDateHeading = "";
       for (let index = 0; index < initialCount; index += 1) {
         const root = messageNodes.nth(index);
         const className = (await readAttr(root, "class")) ?? "";
@@ -8414,6 +8446,14 @@ export class LinkedInAdapter implements PlatformAdapter {
           })
           .catch(() => ({ timeText: "", timeDatetimeAttr: null as string | null, dateHeadingText: "" }));
 
+        // Inherit the most-recent date heading for bubbles whose own group LI
+        // lacked one (later groups in a date run), then update the running
+        // heading when this bubble does carry one.
+        const headingForBubble = bubbleTimeData.dateHeadingText || inheritedDateHeading;
+        if (bubbleTimeData.dateHeadingText) {
+          inheritedDateHeading = bubbleTimeData.dateHeadingText;
+        }
+
         // Prefer datetime attribute (rare, but fully qualified). Otherwise
         // combine date heading + time-of-day. Leave timestamp empty if we
         // resolved nothing — fetchThreadMessages's downstream fallback will
@@ -8428,7 +8468,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         if (!timestamp && bubbleTimeData.timeText) {
           const combined = parseLinkedInMessageTimestamp(
             bubbleTimeData.timeText,
-            bubbleTimeData.dateHeadingText,
+            headingForBubble,
             new Date()
           );
           if (combined) {
@@ -8439,6 +8479,15 @@ export class LinkedInAdapter implements PlatformAdapter {
             timestamp = bubbleTimeData.timeText;
           }
         }
+        // When the bubble had no stable DOM id, readMessageKey returned a
+        // positional `li-msg-<index>` key. That index shifts every backfill
+        // pass (older messages prepend and renumber), so the same bubble would
+        // merge under two keys and duplicate. Derive a content fingerprint
+        // instead so the key is stable across passes.
+        const stableBaseKey =
+          basePlatformMessageKey === `li-msg-${index}`
+            ? `li-msg-fp:${inbound ? "IN" : "OUT"}|${senderName}|${headingForBubble}|${bubbleTimeData.timeText}|${(textParts[0] ?? "").slice(0, 48)}`
+            : basePlatformMessageKey;
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
           const partTimestamp = Number.isNaN(parsedTimestampMs)
@@ -8463,7 +8512,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           }
           messages.push({
             platformMessageKey:
-              partIndex === 0 ? basePlatformMessageKey : `${basePlatformMessageKey}:body:${partIndex}`,
+              partIndex === 0 ? stableBaseKey : `${stableBaseKey}:body:${partIndex}`,
             direction: inbound ? "IN" : "OUT",
             timestamp: partTimestamp,
             text,
