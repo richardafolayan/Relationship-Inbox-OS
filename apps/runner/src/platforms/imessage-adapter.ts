@@ -220,6 +220,18 @@ export class IMessageAdapter implements PlatformAdapter {
     // is found.
     const initialHandle = chat.participants[0] ?? chat.chatIdentifier;
     const handle = this.pickBestSendHandle(initialHandle);
+    // The receipt lookups below key on a chat guid. When pickBestSendHandle
+    // routes to a sibling handle, Messages.app delivers the message into that
+    // handle's *own* chat (a different chat.ROWID/guid than thread
+    // .platformThreadId), so polling the original thread guid would miss the
+    // sent row entirely — no receipt guid (which lets a later scan re-insert
+    // the message as a duplicate), no delivery confirmation, no attachments.
+    // Re-resolve to the picked handle's chat; fall back to the thread guid
+    // when the handle is unchanged or has no distinct 1:1 chat.
+    const receiptChatGuid =
+      handle === initialHandle
+        ? thread.platformThreadId
+        : db.findChatGuidForHandle(handle) ?? thread.platformThreadId;
     const sendStartedAt = Date.now();
     // Service must follow the *handle* we picked, not chat.service_name.
     // The chat row records whatever service Messages.app last touched it
@@ -274,7 +286,7 @@ export class IMessageAdapter implements PlatformAdapter {
     let isDelivered = false;
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
-      const status = db.findOutboundDeliveryStatus(thread.platformThreadId, sendStartedAt - 1000);
+      const status = db.findOutboundDeliveryStatus(receiptChatGuid, sendStartedAt - 1000);
       if (status) {
         if (status.error && status.error !== 0) {
           const serviceLabel = status.service ?? "?";
@@ -306,14 +318,14 @@ export class IMessageAdapter implements PlatformAdapter {
       // Defensive fallback: the delivery-status row should always carry
       // a timestamp now, but keep the legacy lookup as a safety net for
       // unusual chat.db states (e.g. corrupted date column).
-      const fallback = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
+      const fallback = db.findOutboundSince(receiptChatGuid, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
     }
 
     // Capture attachments from chat.db for the new outbound message so
     // send.ts can persist them on the Message row (otherwise the dashboard
     // shows only the text bubble for voice notes / photos / videos).
-    const dbAttachments = db.findOutboundAttachments(thread.platformThreadId, sendStartedAt - 1000);
+    const dbAttachments = db.findOutboundAttachments(receiptChatGuid, sendStartedAt - 1000);
     const receiptAttachments: AttachmentPlaceholder[] = dbAttachments.map((a) => ({
       type: a.kind,
       manualReview: a.kind === "unknown",
