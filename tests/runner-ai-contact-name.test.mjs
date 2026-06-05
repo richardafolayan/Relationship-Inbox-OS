@@ -129,20 +129,24 @@ test("CONTACT_NAME_DISCIPLINE bans guessing gendered pronouns (#416)", () => {
   assert.match(CONTACT_NAME_DISCIPLINE, /Praise/);
 });
 
-test("CONTACT_NAME_DISCIPLINE explicitly bans operator/contact confusion (#400)", () => {
-  // Pilot R-0039: AI wrote the OPERATOR's name (Richard) when it
-  // should have written the CONTACT's name (Seyi). The operator's
-  // name leaks via the operator profile block and/or via the contact
-  // addressing the operator by name in inbound messages ("Hi Richard").
-  // The constant must explicitly name this failure mode so the model
-  // doesn't repeat it.
+test("CONTACT_NAME_DISCIPLINE bans operator/contact confusion WITHOUT a copyable example name (#400)", () => {
+  // Pilot R-0039: AI wrote the operator's name when it should have written
+  // the contact's. The rule must still ban that failure mode...
   assert.match(CONTACT_NAME_DISCIPLINE, /OPERATOR's own name as the contact's name/);
-  // The Seyi/Richard worked example must be present as the canonical
-  // regression fixture (parallels the Mayowa/Ayo example for #399).
-  assert.match(CONTACT_NAME_DISCIPLINE, /Seyi/);
-  assert.match(CONTACT_NAME_DISCIPLINE, /Richard/);
+  assert.match(CONTACT_NAME_DISCIPLINE, /reference the RECIPIENT's name, never the operator's/);
   // Must teach the model to re-read the displayName when uncertain.
   assert.match(CONTACT_NAME_DISCIPLINE, /re-read the recipient\/displayName/i);
+  // ...but the worked example must NOT use concrete, copyable names. The
+  // original example ("displayName is Seyi, operator is Richard") backfired:
+  // on a nameless thread with no real Recipient name, the model copied the
+  // example name "Seyi" straight into the summary. The bullet now uses
+  // symbolic <operator's name> placeholders, so there is no adoptable real
+  // name anywhere in the rule. Pin that the leaked names are gone. ("Richard"
+  // also doubles as a de-personalisation guard — no operator persona in prompts.)
+  assert.doesNotMatch(CONTACT_NAME_DISCIPLINE, /Seyi/);
+  assert.doesNotMatch(CONTACT_NAME_DISCIPLINE, /Richard/);
+  // The placeholder convention is explicitly flagged as non-output.
+  assert.match(CONTACT_NAME_DISCIPLINE, /NEVER output a bracketed placeholder/);
 });
 
 test("CONTACT_NAME_DISCIPLINE allows natural name shortening (Ayo Johnson → Ayo)", () => {
