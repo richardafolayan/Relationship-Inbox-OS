@@ -1,8 +1,8 @@
 import type { PlatformAdapter, PlatformName, SendReceipt, ThreadStub } from "@inbox-os/core";
 import { calculateRisk, stableHash } from "@inbox-os/core";
-import { Prisma } from "@prisma/client";
+import { Prisma, type PrismaClient } from "@prisma/client";
 import { v4 as uuid } from "uuid";
-import { prisma } from "../db";
+import { prisma as defaultPrisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
@@ -32,6 +32,8 @@ interface SendServiceDeps {
    * navigations/DOM reads on one page.
    */
   withPlatformLock: <T>(platform: PlatformName, work: () => Promise<T>) => Promise<T>;
+  /** Override the Prisma client. Defaults to the runner's singleton; tests inject a fake. */
+  prisma?: PrismaClient;
 }
 
 interface SendResult {
@@ -106,6 +108,10 @@ export interface ScheduleSendResult {
 }
 
 export function createSendService(deps: SendServiceDeps) {
+  // Default to the runner's singleton; tests inject a fake to exercise the
+  // scheduled-send race guards without a real database.
+  const prisma = deps.prisma ?? defaultPrisma;
+
   /**
    * Insert a SendRequest in PENDING state and return immediately. The actual
    * adapter call happens in the background, driven by the send-queue worker
@@ -592,10 +598,21 @@ export function createSendService(deps: SendServiceDeps) {
       return { cancelled: false, reason: `not_scheduled:${row.status}` };
     }
 
-    await prisma.sendRequest.update({
-      where: { clientSendId: input.clientSendId },
+    // Atomic, status-guarded cancel. The scheduled-send promoter runs on its
+    // own interval and can flip this row SCHEDULED -> PENDING in the window
+    // between the read above and this write; the worker then dispatches it.
+    // A plain `update` keyed only on clientSendId would stomp that PENDING/SENT
+    // row to CANCELLED — recording a delivered message as cancelled. By
+    // guarding on `status: "SCHEDULED"`, we only cancel a row that is *still*
+    // scheduled; count === 0 means we lost the race and must not report it
+    // cancelled.
+    const { count } = await prisma.sendRequest.updateMany({
+      where: { clientSendId: input.clientSendId, status: "SCHEDULED" },
       data: { status: "CANCELLED" }
     });
+    if (count === 0) {
+      return { cancelled: false, reason: "no_longer_scheduled" };
+    }
 
     const thread = await prisma.thread.findUnique({
       where: { id: input.threadId }
@@ -651,10 +668,17 @@ export function createSendService(deps: SendServiceDeps) {
       return { updated: false, reason: "scheduled_for_must_be_future" };
     }
 
-    await prisma.sendRequest.update({
-      where: { clientSendId: input.clientSendId },
+    // Atomic, status-guarded update — same race as cancel: the promoter can
+    // promote this row to PENDING between the read above and this write. Guard
+    // on `status: "SCHEDULED"` so we never rewrite the text/time of a send the
+    // worker has already picked up; count === 0 means it's no longer ours.
+    const { count } = await prisma.sendRequest.updateMany({
+      where: { clientSendId: input.clientSendId, status: "SCHEDULED" },
       data: { requestText: nextText, scheduledFor: nextScheduledFor }
     });
+    if (count === 0) {
+      return { updated: false, reason: "no_longer_scheduled" };
+    }
 
     const thread = await prisma.thread.findUnique({ where: { id: input.threadId } });
     if (thread) {
