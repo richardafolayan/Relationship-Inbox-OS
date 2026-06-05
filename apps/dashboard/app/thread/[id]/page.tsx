@@ -47,6 +47,7 @@ import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
+import { blobToWhisperWav } from "@/lib/dictation-audio";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
@@ -1098,16 +1099,27 @@ export default function ThreadPage() {
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
-        const blob = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
-        if (blob.size === 0) {
+        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
+        if (raw.size === 0) {
           setDictationStatus("idle");
           return;
         }
         setDictationStatus("transcribing");
         try {
-          const ext = recorder.mimeType.includes("mp4") ? "m4a" : "webm";
+          // Convert the recording to 16 kHz mono WAV in the browser. The
+          // runner's local-whisper provider normalises audio with macOS
+          // afconvert, which can't read the webm/opus MediaRecorder emits
+          // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
+          let wav: Blob;
+          try {
+            wav = await blobToWhisperWav(raw);
+          } catch {
+            setError("Could not prepare the recording for transcription.");
+            setDictationStatus("idle");
+            return;
+          }
           const form = new FormData();
-          form.append("audio", blob, `dictation.${ext}`);
+          form.append("audio", wav, "dictation.wav");
           const resp = await fetch("/runner/control/transcribe-dictation", {
             method: "POST",
             body: form
