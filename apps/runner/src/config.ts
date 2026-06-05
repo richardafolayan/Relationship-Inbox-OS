@@ -404,6 +404,49 @@ function parseIntOrDefault(value: string | undefined, fallback: number): number 
   return fallback;
 }
 
+/**
+ * Normalise the runner's DATABASE_URL to an absolute SQLite `file:` URL.
+ *
+ * Prisma resolves a *relative* `file:` path in DATABASE_URL against the
+ * schema directory (packages/core/prisma/), NOT the project root — so the
+ * `DATABASE_URL=file:./data/inbox-os.sqlite` shipped in .env.example points
+ * the runner at packages/core/prisma/data/inbox-os.sqlite, a different
+ * (empty) database from the one `npm run db:push` writes to: that script
+ * overrides DATABASE_URL with an absolute `file:$(pwd)/data/...` path. A
+ * student who copies .env.example verbatim then sees an empty inbox even
+ * though the scan wrote rows — the two halves were looking at two files.
+ *
+ * Collapse the ambiguity here, once, before the Prisma client is built:
+ *   - unset / blank  → the absolute dbFile (resolve(dataDir, ...)).
+ *   - relative file: → resolved against the project root.
+ *   - absolute file: → trusted as-is.
+ *   - any non-file:  → trusted as-is (e.g. a remote libsql/turso URL).
+ */
+export function resolveDatabaseUrl(
+  rawUrl: string | undefined,
+  rootDir: string,
+  absoluteDbFile: string
+): string {
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) {
+    return `file:${absoluteDbFile}`;
+  }
+  const filePrefix = "file:";
+  if (!trimmed.startsWith(filePrefix)) {
+    return trimmed;
+  }
+  const path = trimmed.slice(filePrefix.length);
+  // file:/abs, file:///abs — already absolute, trust it.
+  if (path.startsWith("/")) {
+    return trimmed;
+  }
+  // file:./data/... or file:data/... or file:../data/... — relative, and
+  // therefore schema-dir-relative under Prisma. Re-anchor on the project
+  // root so the runner and db:push always agree on a single database file.
+  const normalizedRelative = path.replace(/^\.\//, "");
+  return `file:${resolve(rootDir, normalizedRelative)}`;
+}
+
 export function resolveConnectTimeoutMs(profileMode: BrowserProfileMode, env: NodeJS.ProcessEnv = process.env): number {
   const isolatedTimeoutMs = parseTimeoutOrDefault(env.CONNECT_OPERATION_TIMEOUT_MS, 25_000);
   const personalTimeoutMs = parseTimeoutOrDefault(env.CONNECT_OPERATION_TIMEOUT_MS_PERSONAL, 90_000);
