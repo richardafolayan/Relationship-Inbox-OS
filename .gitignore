@@ -27,6 +27,10 @@ packages/core/generated
 # Local tooling state (not part of the project)
 /.claude/
 /.codex-disabled-*/
+# Impeccable design-skill machinery installed into the GitHub-Copilot harness
+# folder. Local tooling, like /.claude; the design *context* lives in the
+# committed PRODUCT.md / DESIGN.md instead.
+/.github/skills/
 migration-log.md
 # Worktree-only convenience symlinks to the main checkout's data/ dir and
 # one-shot operator scripts (filenames prefixed `_`) stay outside the

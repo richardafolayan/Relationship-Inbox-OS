@@ -248,7 +248,7 @@ function tickerLabel(state: TickerState): string {
       // are missing (older runner build).
       if (state.scope === "update" && typeof state.processedRows === "number") {
         const updated = typeof state.openedRows === "number" ? state.openedRows : 0;
-        return `Checking ${platformLabel} · ${state.processedRows} checked · ${updated} updated`;
+        return `Checking ${platformLabel}, ${state.processedRows} checked, ${updated} updated`;
       }
       if (
         typeof state.processedRows === "number" &&
@@ -256,7 +256,7 @@ function tickerLabel(state: TickerState): string {
         state.total > 0
       ) {
         const prefix = state.scope === "full" ? `Full ${platformLabel} scan` : `Scanning ${platformLabel}`;
-        return `${prefix} · ${state.processedRows}/${state.total}`;
+        return `${prefix} ${state.processedRows}/${state.total}`;
       }
       return state.scope === "full" ? `Full ${platformLabel} scan` : `Scanning ${platformLabel}`;
     }
@@ -264,7 +264,7 @@ function tickerLabel(state: TickerState): string {
       return `Enriching ${state.total} profile${state.total === 1 ? "" : "s"}`;
     case "sending":
       return state.blockedByScan
-        ? `Send queued · waiting on scan to reply to ${state.personName}`
+        ? `Send queued, waiting on scan to reply to ${state.personName}`
         : `Sending to ${state.personName}`;
     case "send_failed":
       return `Failed to send to ${state.personName}`;
@@ -527,7 +527,6 @@ export function TopStatus() {
 
       {tickerIsActive || ticker.kind === "send_failed" || ticker.kind === "send_succeeded" ? (
         <>
-          <span aria-hidden className="text-ink-3/60">·</span>
           <span className="inline-flex min-w-0 items-center gap-[8px]">
             {ticker.kind === "send_succeeded" ? (
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" aria-hidden />
@@ -553,7 +552,7 @@ export function TopStatus() {
                 )}
               </span>
             ) : null}
-            {tickerSub ? <span className="text-ink-3">· {tickerSub}</span> : null}
+            {tickerSub ? <span className="text-ink-3">{tickerSub}</span> : null}
             {canCancelScan ? (
               <button
                 type="button"
@@ -574,7 +573,6 @@ export function TopStatus() {
         {ready ? <span>{scanLabel}</span> : null}
         {ready && ticker.kind !== "scanning" ? (
           <>
-            <span aria-hidden className="text-ink-3/60">·</span>
             <button
               type="button"
               onClick={onScanNow}
@@ -629,7 +627,7 @@ export function TopStatus() {
                     <span className="text-[13px] text-ink-2">
                       {label}{" "}
                       <span className="font-mono text-[11px] text-risk-overdue">
-                        · {p.status.toLowerCase().replace(/_/g, " ")}
+                        {p.status.toLowerCase().replace(/_/g, " ")}
                       </span>
                     </span>
                     {isImessage ? (
