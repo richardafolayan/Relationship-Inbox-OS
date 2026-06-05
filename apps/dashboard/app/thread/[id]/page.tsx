@@ -48,6 +48,7 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
+import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 
 // Thread workspace - landscape layout.
@@ -2043,6 +2044,14 @@ export default function ThreadPage() {
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
+  // Reply Brief, computed once and shared between the always-visible brief
+  // band (pinned under the header, the default-visible reply-readiness
+  // summary) and the full Reply Brief in the AI rail.
+  const displayBrief = chooseDisplayBrief(thread);
+  const activeOpenLoops = thread.openLoops.filter(
+    (loop) => !thread.dismissedOpenLoops.includes(loop)
+  );
+
   const threadsRailWidth = threadsCollapsed ? "56px" : "240px";
   const gridTemplateColumns = aiOpen
     ? `${threadsRailWidth} minmax(0,1fr) 360px`
@@ -2484,6 +2493,21 @@ export default function ThreadPage() {
                 ]}
               />
             </header>
+            {/* Always-visible reply-readiness band: what the reply needs to
+                do, why it matters, what's still open — so the operator
+                understands the thread without opening the AI rail or
+                rereading. Pinned with the header. Hidden at lg only when the
+                full rail is open (it supersedes the summary there); stays
+                visible on mobile, where the rail can't open. */}
+            {thread.needsReply !== false ? (
+              <div className={aiOpen ? "lg:hidden" : undefined}>
+                <ThreadBriefBand
+                  onYou={displayBrief.on_you}
+                  whereItStands={displayBrief.where_it_stands}
+                  openLoops={activeOpenLoops}
+                />
+              </div>
+            ) : null}
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
@@ -3473,7 +3497,7 @@ export default function ThreadPage() {
               hasn't yet generated one for this row. */}
           <ReplyBriefPanel
             threadId={thread.id}
-            brief={chooseDisplayBrief(thread)}
+            brief={displayBrief}
             openLoops={thread.openLoops}
             dismissedOpenLoops={thread.dismissedOpenLoops}
             onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
