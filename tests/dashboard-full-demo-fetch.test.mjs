@@ -46,6 +46,7 @@ const MUTATION_SAMPLES = [
   ["POST", "/runner/control/thread/abc/snooze", "snooze the thread"],
   ["POST", "/runner/control/thread/abc/mark-done", "mark the thread handled"],
   ["POST", "/runner/control/thread/abc/draft", "save a draft"],
+  ["POST", "/runner/control/thread/abc/delete-draft", "delete a draft"],
   ["POST", "/runner/control/thread/abc/predraft", "request an AI predraft"],
   ["POST", "/runner/control/thread/abc/check-draft", "check draft coverage"],
   ["POST", "/runner/control/thread/abc/open-loop", "edit the reply checklist"],
