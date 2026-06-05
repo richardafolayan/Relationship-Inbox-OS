@@ -175,3 +175,13 @@ test("toInboxRow risk reflects the CURRENT thresholds, not the scan-time ones", 
   assert.equal(toInboxRow(rows[0], 1, { amberHours: 6, redHours: 18 }).riskLevel, "AMBER");
   assert.equal(toInboxRow(rows[0], 1, { amberHours: 8, redHours: 18 }).riskLevel, "GREEN");
 });
+
+test("toInboxRow maps a favourited contact's favouritedAt to personFavourite (R-0066)", () => {
+  const favourited = shapeThreadRows([
+    buildRow({ id: "fav", person: { favouritedAt: new Date("2026-06-05T12:00:00.000Z") } })
+  ]);
+  assert.equal(toInboxRow(favourited[0], 1, THRESHOLDS).personFavourite, true);
+
+  const notFavourited = shapeThreadRows([buildRow({ id: "plain", person: { favouritedAt: null } })]);
+  assert.equal(toInboxRow(notFavourited[0], 1, THRESHOLDS).personFavourite, false);
+});

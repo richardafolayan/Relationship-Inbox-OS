@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { Star } from "lucide-react";
 import type { InboxRow } from "@/lib/types";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
@@ -80,6 +81,16 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
       <span className="min-w-0">
         <span className="mb-1 flex items-baseline gap-[10px]">
           <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">{row.personName}</span>
+          {row.personFavourite ? (
+            // Favourite marker (R-0066 / #483). Subtle filled star so a pinned
+            // contact reads at a glance in the queue.
+            <Star
+              className="h-[13px] w-[13px] shrink-0 text-accent"
+              strokeWidth={1.6}
+              fill="currentColor"
+              aria-label="Favourite"
+            />
+          ) : null}
           <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-ink-2">
             {PLATFORM_LABEL[row.platform]}
           </span>

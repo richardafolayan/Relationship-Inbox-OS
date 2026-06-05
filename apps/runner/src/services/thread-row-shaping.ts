@@ -54,6 +54,11 @@ export interface ThreadRowSource {
     // optional four-digit year. Both null when no contact matched.
     birthday: string | null;
     birthYear: number | null;
+    // Operator-pinned favourite (R-0066 / #483). Non-null timestamp = the
+    // operator marked this contact a favourite, so their threads float to the
+    // top of the Inbox section / Today bucket they already sit in. Null when
+    // not favourited.
+    favouritedAt: Date | null;
   };
   _count?: {
     messages: number;
@@ -85,6 +90,13 @@ export interface ShapedThreadRow {
    */
   personBirthday: string | null;
   personBirthYear: number | null;
+  /**
+   * True when the operator has marked this contact a favourite (R-0066 /
+   * #483). The dashboard floats favourited rows to the top of the Inbox
+   * section and Today bucket they already belong to (without reordering
+   * across risk levels) and can filter the Inbox to favourites only.
+   */
+  personFavourite: boolean;
   platform: PlatformName;
   preview: string;
   /**
@@ -305,6 +317,7 @@ export function toInboxRow(
     personAvatarUrl: source.person.avatarUrl ?? null,
     personBirthday: source.person.birthday ?? null,
     personBirthYear: source.person.birthYear ?? null,
+    personFavourite: source.person.favouritedAt != null,
     platform: source.platform,
     preview: previewText,
     lastMessageDirection: source.lastMessageDirection ?? null,
