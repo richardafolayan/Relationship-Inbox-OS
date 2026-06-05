@@ -47,6 +47,7 @@ import { streamIMessageAttachment } from "./services/imessage-attachment-server"
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resummarizeThread } from "./services/resummarize-thread";
+import { pickCanonicalThread } from "./services/canonical-thread";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
@@ -3524,7 +3525,7 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   // race wiring is testable without booting Express (see
   // tests/runner-reassess-thread-race.test.mjs).
   const outcome = await runReassessForThread(
-    { prisma, aiService, resummarize: resummarizeThreadById },
+    { prisma, aiService, resummarize: resummarizeThreadById, siblingThreadIds },
     threadId
   );
   if (outcome.kind === "not_found") {
@@ -3806,10 +3807,57 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // to the same Person — chat.db creates separate chats for the phone
   // and email handle of one human, but the operator wants a single
   // conversation view. LinkedIn keeps thread-scoped messages.
-  const messageThreadFilter =
-    thread.platform === "IMESSAGE"
-      ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
-      : { threadId: thread.id };
+  //
+  // The AI analysis (reply brief, predraft, summary, what-they-want, open
+  // loops, remember, category) is persisted per-row, and the FRESH state
+  // lives on the sibling still receiving inbound — NOT necessarily the row
+  // the operator opened. A dormant high-message-count phone thread can be
+  // days behind the email thread the contact now uses, so reading AI fields
+  // off the requested row surfaces a stale brief and a predraft answering the
+  // old state. While messages merge across all siblings, the AI fields are
+  // sourced from the CANONICAL sibling (most-recent inbound, see
+  // pickCanonicalThread). Non-iMessage threads are their own canonical row.
+  type AiSourceThread = {
+    id: string;
+    rollingSummary: string | null;
+    whatTheyWant: string | null;
+    openLoopsJson: string | null;
+    toneNotesJson: string | null;
+    rememberJson: string | null;
+    replyBriefJson: string | null;
+    suggestedRepliesJson: string | null;
+    suggestedRepliesCacheKey: string | null;
+    category: string | null;
+  };
+  let aiThread: AiSourceThread = thread;
+  let siblingIds: string[] = [thread.id];
+  if (thread.platform === "IMESSAGE") {
+    const siblingRows = await prisma.thread.findMany({
+      where: { platform: thread.platform, personId: thread.personId },
+      select: {
+        id: true,
+        lastInboundAt: true,
+        rollingSummary: true,
+        whatTheyWant: true,
+        openLoopsJson: true,
+        toneNotesJson: true,
+        rememberJson: true,
+        replyBriefJson: true,
+        suggestedRepliesJson: true,
+        suggestedRepliesCacheKey: true,
+        category: true,
+        _count: { select: { messages: true } }
+      }
+    });
+    siblingIds = siblingRows.map((row) => row.id);
+    const canonical = pickCanonicalThread(
+      siblingRows.map((row) => ({ ...row, messageCount: row._count?.messages ?? 0 }))
+    );
+    if (canonical) {
+      aiThread = canonical;
+    }
+  }
+  const messageThreadFilter = { threadId: { in: siblingIds } };
   // Style sample (issue #299) — newest messages on the thread for the
   // writing-style analysis. A dedicated fixed-size window so it stays
   // stable regardless of the messagesLimit / beforeMessageId pagination
@@ -4061,9 +4109,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // expansion is fixing. Older rows have null replyBriefJson — the prompt
   // just omits the brief block in that case.
   const briefForReplies: ReturnType<typeof sanitizeReplyBrief> = (() => {
-    if (!thread.replyBriefJson) return null;
+    if (!aiThread.replyBriefJson) return null;
     try {
-      return sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+      return sanitizeReplyBrief(JSON.parse(aiThread.replyBriefJson));
     } catch {
       return null;
     }
@@ -4071,9 +4119,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
   const aiInputs = {
     displayName: thread.person.displayName,
-    summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
-    whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
-    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    summary: aiThread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
+    whatTheyWant: aiThread.whatTheyWant ?? "No clear ask yet.",
+    openLoops: aiThread.openLoopsJson ? (JSON.parse(aiThread.openLoopsJson) as string[]) : [],
     recentMessages,
     needsReply: aiNeedsReply,
     // Drives the voice tier (LinkedIn → formal; everything else → casual)
@@ -4081,7 +4129,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     // the generic SYSTEM_PROMPT.
     platform: thread.platform as PlatformName,
     // Drives the "Polite decline" reply variant when the thread is outreach.
-    category: (thread.category ?? null) as "outreach" | "genuine" | null,
+    category: (aiThread.category ?? null) as "outreach" | "genuine" | null,
     // Late-reply detection: when the last inbound is much older than the
     // most recent outbound (or there's no outbound yet) the prompt asks
     // the model to acknowledge the gap. Day-bucketed ISO is enough for
@@ -4145,9 +4193,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // scrolling up regenerates suggestions from stale context and clobbers the
   // live cache (wasted AI spend + flapping suggestions on the next fetch).
   const servePersistedOnly = Boolean(beforeMessageId);
-  if ((servePersistedOnly || thread.suggestedRepliesCacheKey === cacheKey) && thread.suggestedRepliesJson) {
+  if ((servePersistedOnly || aiThread.suggestedRepliesCacheKey === cacheKey) && aiThread.suggestedRepliesJson) {
     try {
-      suggested = JSON.parse(thread.suggestedRepliesJson);
+      suggested = JSON.parse(aiThread.suggestedRepliesJson);
     } catch {
       // Corrupt cache row — fall through and regenerate.
       suggested = undefined;
@@ -4161,8 +4209,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
         `generateSuggestedReplies(${thread.id})`
       )
         .then(async (generated) => {
+          // Persist to the CANONICAL sibling (aiThread) so the next read —
+          // from any sibling — finds these replies under the same cache key.
+          // The SSE event still carries the REQUESTED thread.id so the view
+          // the operator has open refetches.
           await prisma.thread.update({
-            where: { id: thread.id },
+            where: { id: aiThread.id },
             data: {
               suggestedRepliesJson: JSON.stringify(generated),
               suggestedRepliesCacheKey: cacheKey
@@ -4190,7 +4242,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
           // inbound message arrives or the thread is re-summarised.
           try {
             await prisma.thread.update({
-              where: { id: thread.id },
+              where: { id: aiThread.id },
               data: {
                 suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
                 suggestedRepliesCacheKey: cacheKey
@@ -4287,13 +4339,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // from the legacy fields so the dashboard rail always has something
   // grounded to render. The real brief regenerates on next scan /
   // Reassess / stale-summary self-heal.
-  const persistedOpenLoops: string[] = thread.openLoopsJson
-    ? (JSON.parse(thread.openLoopsJson) as string[])
+  const persistedOpenLoops: string[] = aiThread.openLoopsJson
+    ? (JSON.parse(aiThread.openLoopsJson) as string[])
     : [];
   let parsedReplyBrief: ReturnType<typeof sanitizeReplyBrief> = null;
-  if (thread.replyBriefJson) {
+  if (aiThread.replyBriefJson) {
     try {
-      parsedReplyBrief = sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+      parsedReplyBrief = sanitizeReplyBrief(JSON.parse(aiThread.replyBriefJson));
     } catch {
       parsedReplyBrief = null;
     }
@@ -4301,10 +4353,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   const replyBriefResponse =
     parsedReplyBrief ??
     synthesiseFallbackBrief({
-      rollingSummary: thread.rollingSummary ?? "",
-      whatTheyWant: thread.whatTheyWant ?? "",
+      rollingSummary: aiThread.rollingSummary ?? "",
+      whatTheyWant: aiThread.whatTheyWant ?? "",
       openLoops: persistedOpenLoops,
-      needsReply: thread.needsReply,
+      // Derived from the MERGED last inbound/outbound (aiNeedsReply), not the
+      // requested row's stored flag, so a split iMessage thread's fallback
+      // brief reflects the live conversation.
+      needsReply: aiNeedsReply,
       latestInboundText: lastInbound?.text ?? null
     });
 
@@ -4347,8 +4402,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     reminderText: thread.reminderText ?? null,
     unreadCount: thread.unreadCount,
     needsReply: thread.needsReply,
-    summary: thread.rollingSummary,
-    whatTheyWant: thread.whatTheyWant,
+    // AI-analysis fields come from the CANONICAL sibling (aiThread), so a
+    // split iMessage conversation shows the live brief/summary/what-they-want
+    // rather than a dormant sibling's stale state. dismissedOpenLoops stays on
+    // the requested row (it pairs with the per-row dismiss write path).
+    summary: aiThread.rollingSummary,
+    whatTheyWant: aiThread.whatTheyWant,
     openLoops: filterDismissedOpenLoops(
       persistedOpenLoops,
       thread.dismissedOpenLoopsJson
@@ -4356,8 +4415,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     dismissedOpenLoops: thread.dismissedOpenLoopsJson
       ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
       : [],
-    toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
-    remember: thread.rememberJson ? (JSON.parse(thread.rememberJson) as RememberItem[]) : [],
+    toneNotes: aiThread.toneNotesJson ? (JSON.parse(aiThread.toneNotesJson) as string[]) : [],
+    remember: aiThread.rememberJson ? (JSON.parse(aiThread.rememberJson) as RememberItem[]) : [],
     replyBrief: replyBriefResponse,
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
