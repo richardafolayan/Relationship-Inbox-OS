@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { InboxRow } from "@/lib/types";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
-import { normalizePreview } from "@/lib/preview";
+import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
 import { birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
@@ -32,7 +32,10 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
   // says *why* the conversation needs the operator, not just the last
   // words. Replied/handled threads keep the literal preview so the
   // "You: …" sent-marker stays visible.
-  const nudge = row.whatTheyWant?.trim();
+  // cleanAskSummary repairs legacy summaries that were stored hard-cut
+  // mid-word ("...current skills fo") before the server cut on word
+  // boundaries, so the row never shows a bisected word.
+  const nudge = cleanAskSummary(row.whatTheyWant);
   // True when the row body is the AI ask-summary (`nudge`) rather than the
   // literal last message. The summary is ≤120 chars (capped server-side), so
   // it's allowed to wrap to its full length; the literal preview can run long
