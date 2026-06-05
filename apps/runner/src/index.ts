@@ -32,6 +32,7 @@ import {
 import { briefSignatureForCache, sanitizeReplyBrief, synthesiseFallbackBrief } from "./services/reply-brief";
 import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
+import { decidePersonNameAction } from "./services/person-name-action";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
@@ -4786,6 +4787,8 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
 //   action: "confirm"  → set displayName = inferredName, clear inferredName
 //   action: "rename"   → set displayName = <name>, clear inferredName
 //   action: "dismiss"  → clear inferredName (keep displayName as-is)
+// "confirm" is idempotent: a duplicate/stale confirm (already resolved) is a
+// successful no-op, not an error. See decidePersonNameAction.
 app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { personId, action: "rename the contact", kind: "thread-mutation" })) return;
@@ -4800,38 +4803,11 @@ app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
     res.status(404).json({ error: "person not found" });
     return;
   }
-  if (payload.action === "confirm") {
-    if (!person.inferredName) {
-      res.status(409).json({ error: "no inferred name to confirm" });
-      return;
-    }
-    const updated = await prisma.person.update({
-      where: { id: personId },
-      // "manual" locks the name: auto-refresh (e.g. the iMessage group-name
-      // sync in scan-queue) must never overwrite an operator's choice.
-      data: { displayName: person.inferredName, displayNameSource: "manual", inferredName: null }
-    });
-    res.json({ status: "ok", displayName: updated.displayName });
-    return;
+  const decision = decidePersonNameAction(person, payload);
+  if (decision.write) {
+    await prisma.person.update({ where: { id: personId }, data: decision.write });
   }
-  if (payload.action === "rename") {
-    if (!payload.name) {
-      res.status(400).json({ error: "name is required for rename" });
-      return;
-    }
-    const updated = await prisma.person.update({
-      where: { id: personId },
-      data: { displayName: payload.name, displayNameSource: "manual", inferredName: null }
-    });
-    res.json({ status: "ok", displayName: updated.displayName });
-    return;
-  }
-  // dismiss
-  await prisma.person.update({
-    where: { id: personId },
-    data: { inferredName: null }
-  });
-  res.json({ status: "ok" });
+  res.status(decision.status).json(decision.body);
 }));
 
 app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {
