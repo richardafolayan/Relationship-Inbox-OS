@@ -65,11 +65,14 @@ export async function runReassessForThread(
   deps: ReassessThreadDeps,
   threadId: string
 ): Promise<ReassessThreadResult> {
-  const resummarised = await deps.resummarize(threadId, { race: true });
-  if (!resummarised.ok) {
-    return { kind: "not_found" };
-  }
-
+  // Fetch the thread + its recent messages ONCE, up front, so the classifier
+  // can run CONCURRENTLY with re-summarisation instead of waiting for it.
+  // These were two strictly-serial raced LLM round-trips (summary, then a
+  // separate 80-message fetch, then category) while the operator watched a
+  // spinner. The classifier keys off the inbound messages and the EXISTING
+  // summary/what-they-want, not the freshly-generated summary, so racing the
+  // two changes nothing about the category it returns — it just removes one
+  // full LLM round-trip from the wall-clock.
   const thread = await deps.prisma.thread.findUnique({
     where: { id: threadId },
     include: {
@@ -86,16 +89,26 @@ export async function runReassessForThread(
   }
 
   const orderedMessages = [...thread.messages].reverse();
-  const category = await deps.aiService
-    .classifyThreadCategory({
-      platform: thread.platform as PlatformName,
-      displayName: thread.person.displayName,
-      messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-      summary: thread.rollingSummary,
-      whatTheyWant: thread.whatTheyWant,
-      race: true
-    })
-    .catch(() => null);
+  const [resummarised, category] = await Promise.all([
+    deps.resummarize(threadId, { race: true }),
+    deps.aiService
+      .classifyThreadCategory({
+        platform: thread.platform as PlatformName,
+        displayName: thread.person.displayName,
+        messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
+        summary: thread.rollingSummary,
+        whatTheyWant: thread.whatTheyWant,
+        race: true
+      })
+      .catch(() => null)
+  ]);
+
+  // resummarise only reports not_found when the thread vanished mid-flight;
+  // treat it as not_found and skip the write (the parallel category result is
+  // simply discarded).
+  if (!resummarised.ok) {
+    return { kind: "not_found" };
+  }
 
   await deps.prisma.thread.update({
     where: { id: thread.id },

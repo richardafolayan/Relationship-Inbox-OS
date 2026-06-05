@@ -1385,7 +1385,11 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   // connection would hang a user-visible call ("Drafting…") indefinitely.
   // maxRetries:0 because tryProvider() + the fallback chain already own
   // retries/fallback — the SDK's default 2 retries would multiply that.
-  const AI_CLIENT_OPTIONS = { timeout: 30_000, maxRetries: 0 } as const;
+  // 15s (was 30s): a healthy nano/flash call returns in ~2-5s, so 15s still
+  // clears a slow-but-legit response while halving the worst-case stall a
+  // single wedged provider can add before the fallback chain moves on — the
+  // tail latency behind the "Reassess takes forever" complaint.
+  const AI_CLIENT_OPTIONS = { timeout: 15_000, maxRetries: 0 } as const;
   const openAiClient = runnerConfig.openAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.openAiApiKey, ...AI_CLIENT_OPTIONS })
     : null;

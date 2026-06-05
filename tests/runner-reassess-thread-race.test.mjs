@@ -112,15 +112,15 @@ test("runReassessForThread falls back to the existing category when classify ret
   assert.equal(outcome.category, "genuine");
 });
 
-test("runReassessForThread surfaces a missing thread as not_found (resummarise failure)", async () => {
+test("runReassessForThread surfaces a resummarise not_found and skips the write", async () => {
   const { deps, calls } = makeDeps({
     resummariseResult: { ok: false, reason: "not_found" }
   });
   const outcome = await runReassessForThread(deps, "thread-1");
   assert.equal(outcome.kind, "not_found");
-  // No further work happens after resummarise reports not_found.
-  assert.equal(calls.findUnique.length, 0);
-  assert.equal(calls.classifyThreadCategory.length, 0);
+  // The summary + classify now run concurrently, so the parallel category
+  // result is simply discarded; the load-bearing guarantee is that NO
+  // summary/category write happens when resummarise reports the thread gone.
   assert.equal(calls.update.length, 0);
 });
 
