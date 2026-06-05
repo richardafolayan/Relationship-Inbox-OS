@@ -107,6 +107,13 @@ export interface InboxRow {
    * "N threads" badge so repeat names don't read as duplicates.
    */
   personThreadCount?: number;
+  /**
+   * True when the operator has favourited this contact (R-0066 / #483).
+   * The Inbox floats favourited rows to the top of their section, can
+   * filter to favourites only, and marks them with a star; Today
+   * prioritises them within their risk bucket. Absent on legacy payloads.
+   */
+  personFavourite?: boolean;
 }
 
 export interface InboxResponse {
@@ -176,6 +183,8 @@ export interface PersonDetailResponse {
     avatarUrl: string | null;
     tags: string[];
     notes: string | null;
+    /** True when the operator has favourited this contact (R-0066 / #483). */
+    favourite: boolean;
   };
   enrichment: {
     headline: string | null;
@@ -391,6 +400,9 @@ export interface ThreadResponse {
   personId: string;
   personName: string;
   personAvatarUrl?: string | null;
+  /** True when the operator has favourited this contact (R-0066 / #483).
+   *  Drives the favourite star toggle in the thread header. */
+  personFavourite?: boolean;
   /**
    * Issue #412. Contact birthday as "MM-DD" (year-less). Optional —
    * threads on contacts without a captured birthday omit the field.
