@@ -3142,17 +3142,18 @@ export default function ThreadPage() {
         </div>
 
         <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
-          {/* #461 (pilot R-0060): floating jump-to-latest button. Anchored
-              to the composer's top edge so it always floats at the bottom
-              of the timeline, just above the input. Hidden in focused mode
-              (the stack is bounded there). */}
+          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
+              above the composer's top edge so it sits in the middle just
+              above the input, with a glassy frosted-surface treatment that
+              matches the sticky header. Hidden in focused mode (the stack is
+              bounded there). */}
           {showJumpToLatest && !focusedThreadParentId ? (
             <button
               type="button"
               onClick={scrollToLatest}
               aria-label="Jump to latest message"
               title="Jump to latest"
-              className="absolute -top-12 right-6 z-20 grid h-9 w-9 place-items-center rounded-full border border-hairline bg-paper text-ink-2 shadow-card transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+              className="absolute -top-12 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] text-ink-2 shadow-card backdrop-blur-md backdrop-saturate-150 transition-colors duration-calm hover:border-hairline-strong hover:bg-[color-mix(in_oklch,var(--paper)_88%,transparent)] hover:text-ink"
             >
               <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
             </button>
