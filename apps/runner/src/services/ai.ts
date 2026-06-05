@@ -31,6 +31,7 @@ import type {
   StyleProfile
 } from "../types/runtime";
 import { describeContactStyle, describeOperatorStyle } from "./style";
+import { looksLikeNamelessRecipient } from "./name-inference";
 import {
   buildReplyStyleAnalysisPrompt,
   emptyInferredStyle,
@@ -255,7 +256,7 @@ export const CONTACT_NAME_DISCIPLINE = [
   "The contact's name is ALWAYS the value passed as \"Recipient: <name>\" / \"displayName\" in this prompt. Use that name (or a natural shortening of it — e.g. \"Ayo\" when the displayName is \"Ayo Johnson\") whenever you reference the contact in user-facing text.",
   "NEVER write \"the contact\", \"the user\", \"the recipient\", or \"the other person\" generically when the displayName is available. If the recipient is \"Ayo Johnson\" the brief says \"Ayo\" (or \"Ayo Johnson\"), not \"the contact\".",
   "NEVER pick a name from the transcript content. Operators sometimes write nicknames, honorifics, friends' names, third-party names, or random fragments in their own outbound messages. Those names are NOT the contact's name. \"Mayowa\" appearing inside an operator: message in a thread whose displayName is \"Ayo Johnson\" means the contact is still Ayo, not Mayowa.",
-  "NEVER use the OPERATOR's own name as the contact's name. The operator's name appears in the \"WRITE AS THIS PERSON\" block when present, and it may also appear inside operator: lines if the contact addressed the operator by name (\"Hi Richard…\", \"Thanks Richard\"). That name belongs to the operator — never to the contact. If the recipient's displayName is \"Seyi\" and the operator is configured as \"Richard\", the brief and replies must reference \"Seyi\", never \"Richard\". Confusing the two is the worst-case naming failure — re-read the recipient/displayName field if you're about to write a name and you're not sure which person you're naming.",
+  "NEVER use the OPERATOR's own name as the contact's name. The operator's name appears in the \"WRITE AS THIS PERSON\" block when present, and it may also appear inside operator: lines if the contact addressed the operator by name (an inbound that opens \"Hi <operator's name>…\" or signs off \"Thanks <operator's name>\"). That name belongs to the operator — never to the contact. The contact's name is whatever the Recipient field says; when the Recipient name and the operator's configured name are different people, the brief and replies must reference the RECIPIENT's name, never the operator's. Confusing the two is the worst-case naming failure — re-read the recipient/displayName field if you're about to write a name and you're not sure which person you're naming. The bracketed placeholders in these rules (<operator's name>, <name>) are illustrative — NEVER output a bracketed placeholder, and NEVER output a name that appears only in these instructions; the only valid sources for a contact's name are the Recipient field and the transcript.",
   "If the displayName looks like a placeholder (\"+44…\", a phone number, an email, an empty string), it is acceptable to fall back to \"they/them\" or to omit a name. Do not invent one.",
   "GENDER / PRONOUNS (strict, #416). The system does NOT carry a pronoun signal on contacts. NEVER guess \"he\" or \"she\" from a name alone — gendered guesses on names you're unfamiliar with misfire often, and a wrong pronoun reads as careless. When unsure of pronouns: use the contact's name (\"Praise said she's free Friday\" → \"Praise is free Friday\") or fall back to \"they/them\". Acceptable signals for choosing he/she: the contact explicitly self-references in the transcript (\"my husband says…\", \"I'm pregnant\"), the operator has used a specific pronoun for them across multiple recent messages, or the displayName is a name you are HIGHLY confident maps to one gender across cultures (very rare — most names cross cultures). When in doubt, name-or-neutral always wins over a guess.",
   "TRANSCRIPT LABELS (strict, #463). In the transcript, the contact's own messages are prefixed with their name (the same value as Recipient/displayName) whenever it is known, and the operator's with \"operator:\". Those speaker labels are the ONLY authority on who the contact is. Any OTHER name that appears INSIDE a message body — whether the operator or the contact typed it — is a third party being discussed, NEVER the contact themselves. Worked example: in a thread whose contact is \"Lanre\", the name \"Anu\" mentioned inside the messages is a different person Lanre is talking about; the contact is still Lanre, and the summary must never call her Anu."
@@ -287,7 +288,16 @@ export const CONTACT_NAME_DISCIPLINE = [
  * Exported so tests can assert the rule and the name travel together.
  */
 export function contactNameContext(displayName: string): string {
-  return `${CONTACT_NAME_DISCIPLINE}\n\nRecipient: ${displayName}`;
+  // Placeholder displayNames (a bare phone number, an email, or a number-only
+  // group chat like "+447…, +447…") carry no usable personal name. Passing the
+  // raw handle as "Recipient: +447…" leaves the model with the naming RULE but
+  // no name to apply it to, so it reaches into the discipline block's worked
+  // example and mislabels the contact with the example name ("Seyi"). Give it
+  // an explicit unknown-recipient instruction instead, filling the vacuum.
+  const recipientLine = looksLikeNamelessRecipient(displayName)
+    ? `Recipient: unknown contact or group chat — no name on file. Do NOT use a personal name for them. Refer to them as "they"/"them" (or "the group" for a group chat) unless a name is explicitly grounded in the transcript. NEVER borrow a name from the examples above.`
+    : `Recipient: ${displayName}`;
+  return `${CONTACT_NAME_DISCIPLINE}\n\n${recipientLine}`;
 }
 
 export const BRIEF_FIDELITY_REMINDER = [

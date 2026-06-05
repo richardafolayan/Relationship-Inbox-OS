@@ -65,7 +65,7 @@ export function transcriptionMessageIdsToRefresh<
 export async function resummarizeThread(
   deps: ResummarizeThreadDeps,
   threadId: string,
-  options?: { race?: boolean }
+  options?: { race?: boolean; fromScratch?: boolean }
 ): Promise<ResummarizeThreadResult> {
   const { prisma } = deps;
   const thread = await prisma.thread.findUnique({
@@ -97,13 +97,20 @@ export async function resummarizeThread(
     thread.lastInboundAt &&
       (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
   );
+  // `fromScratch` drops the prior summary/loops/remember from the prompt so
+  // the model regenerates purely from the transcript. Needed to de-poison a
+  // summary that already carries a bad value: the prompt feeds the previous
+  // summary back and is told to keep it "durable/stable", so a wrong name
+  // (e.g. a leaked example name on a nameless thread, with no real recipient
+  // name to override it) perpetuates itself across normal re-summarisation.
+  const fromScratch = options?.fromScratch ?? false;
   const summary = await deps.aiService.updateThreadSummary({
     displayName: thread.person.displayName,
-    previousSummary: thread.rollingSummary ?? undefined,
-    previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-    previousRemember: thread.rememberJson
-      ? (JSON.parse(thread.rememberJson) as RememberItem[])
-      : [],
+    previousSummary: fromScratch ? undefined : (thread.rollingSummary ?? undefined),
+    previousOpenLoops:
+      fromScratch || !thread.openLoopsJson ? [] : (JSON.parse(thread.openLoopsJson) as string[]),
+    previousRemember:
+      fromScratch || !thread.rememberJson ? [] : (JSON.parse(thread.rememberJson) as RememberItem[]),
     messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
     needsReply: computedNeedsReply,
     race: options?.race
