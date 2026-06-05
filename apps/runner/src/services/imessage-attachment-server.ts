@@ -80,8 +80,35 @@ function pipeFile(path: string, contentType: string, res: Response, downloadName
   res.setHeader("Content-Type", contentType);
   res.setHeader("Content-Length", String(stat.size));
   res.setHeader("Cache-Control", "private, max-age=86400");
-  res.setHeader("Content-Disposition", `inline; filename="${downloadName.replace(/"/g, "")}"`);
-  createReadStream(path).pipe(res);
+  // Strip both quotes (would terminate the header value) and CR/LF (would
+  // allow header injection if `transferName` ever came from an untrusted
+  // source — chat.db is trusted today, but defence in depth).
+  const safeDownloadName = downloadName.replace(/["\r\n]/g, "");
+  res.setHeader("Content-Disposition", `inline; filename="${safeDownloadName}"`);
+  const stream = createReadStream(path);
+  // Without these handlers, if the file is unlinked mid-stream (Messages.app
+  // attachment cleanup, OS upgrade) the unhandled `error` event propagates as
+  // an uncaught exception and the process-level handler exits the runner.
+  // Best-effort cleanup: send a 500 if headers haven't gone out yet, otherwise
+  // destroy the stream/socket and let the client retry.
+  stream.on("error", (err) => {
+    console.warn(`[imessage-attachment] stream error for ${path}: ${err.message}`);
+    if (!res.headersSent) {
+      res.status(500).json({ error: "stream read failed" });
+    } else {
+      try {
+        res.destroy(err);
+      } catch {
+        // Already torn down — nothing to do.
+      }
+    }
+  });
+  // If the client disconnects (closed tab, dashboard navigation), destroy the
+  // read stream so we don't keep reading the file into a dead socket.
+  res.on("close", () => {
+    if (!stream.destroyed) stream.destroy();
+  });
+  stream.pipe(res);
 }
 
 /**
