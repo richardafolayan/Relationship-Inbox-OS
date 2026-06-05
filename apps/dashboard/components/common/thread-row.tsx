@@ -33,7 +33,12 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
   // words. Replied/handled threads keep the literal preview so the
   // "You: …" sent-marker stays visible.
   const nudge = row.whatTheyWant?.trim();
-  const bodyText = row.needsReply !== false && nudge ? nudge : previewBody;
+  // True when the row body is the AI ask-summary (`nudge`) rather than the
+  // literal last message. The summary is ≤120 chars (capped server-side), so
+  // it's allowed to wrap to its full length; the literal preview can run long
+  // and stays 2-line clamped below.
+  const showingNudge = row.needsReply !== false && Boolean(nudge);
+  const bodyText = showingNudge && nudge ? nudge : previewBody;
   const rightLabel =
     risk === "overdue"
       ? "Overdue"
@@ -120,7 +125,19 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
             </span>
           ) : null}
         </span>
-        <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{bodyText}</span>
+        {/* The ask-summary wraps in full (no truncation) so the operator sees
+            the whole thing; the literal last-message preview stays 2-line
+            clamped so already-replied rows don't balloon. */}
+        <span
+          data-testid="thread-row-summary"
+          className={
+            showingNudge
+              ? "block text-[14px] leading-[1.45] text-ink-2"
+              : "block max-w-[64ch] line-clamp-2 text-[14px] leading-[1.45] text-ink-2"
+          }
+        >
+          {bodyText}
+        </span>
       </span>
       <span className={`text-[12px] tracking-[-0.005em] ${riskTextClass[risk]}`}>
         {rightLabel}
