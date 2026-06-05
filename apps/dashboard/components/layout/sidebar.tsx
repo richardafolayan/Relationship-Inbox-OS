@@ -258,7 +258,7 @@ export function Sidebar({
       >
         <div
           className={cn(
-            "relative grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] text-white",
+            "relative grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#9a2727] to-[#6b1818] text-white",
             collapsed ? "h-7 w-7" : "h-8 w-8"
           )}
           aria-label="Operator avatar"
