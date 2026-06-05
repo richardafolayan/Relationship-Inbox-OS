@@ -1,5 +1,6 @@
 import type { AppSettings, PlatformName, SelectorOverrideStore, SelectorRegistry } from "@inbox-os/core";
 import { defaultSettings } from "@inbox-os/core";
+import { safeJsonParse } from "../utils/json";
 import { prisma } from "../db";
 import type { AiHelpLevel, DemoSeedManifest, OperatorProfile, ReplyStyle, SettingsStore } from "../types/runtime";
 
@@ -95,7 +96,9 @@ export function createSettingsStore(): SettingsStore {
 
       const loaded: AppSettings = {
         ...defaultSettings,
-        ...(JSON.parse(record.valueJson) as Partial<AppSettings>)
+        // A corrupt app_settings row must not throw out of getSettings — it's
+        // read at boot and on many control routes. Fall back to defaults.
+        ...safeJsonParse<Partial<AppSettings>>(record.valueJson, {})
       };
       settingsCache ??= cloneSettings(loaded);
       return cloneSettings(settingsCache);
@@ -136,7 +139,7 @@ export function createSettingsStore(): SettingsStore {
     selectorOverridesLoadPromise ??= (async () => {
       const record = await prisma.setting.findUnique({ where: { key: SELECTOR_OVERRIDES_KEY } });
       const loaded: SelectorOverrideStore = record
-        ? (JSON.parse(record.valueJson) as SelectorOverrideStore)
+        ? safeJsonParse<SelectorOverrideStore>(record.valueJson, {})
         : {};
       selectorOverridesCache ??= cloneSelectorOverrides(loaded);
       return cloneSelectorOverrides(selectorOverridesCache);
@@ -194,7 +197,7 @@ export function createSettingsStore(): SettingsStore {
     if (!record) {
       return null;
     }
-    return JSON.parse(record.valueJson) as DemoSeedManifest;
+    return safeJsonParse<DemoSeedManifest | null>(record.valueJson, null);
   }
 
   async function setDemoSeedManifest(manifest: DemoSeedManifest | null): Promise<void> {
