@@ -8,7 +8,12 @@ import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
-import { notificationsSupported, requestNotificationPermission } from "@/lib/notifications";
+import {
+  notificationsSupported,
+  readNotificationPermission,
+  requestNotificationPermission,
+  subscribeNotificationPermission
+} from "@/lib/notifications";
 import { localDateString } from "@/lib/overdue-digest";
 import type {
   OverdueDigestCadence,
@@ -496,12 +501,14 @@ function OverdueDigestRow() {
   }, []);
 
   useEffect(() => {
-    if (notificationsSupported()) {
-      setPermission(Notification.permission);
-    } else {
-      setPermission("unsupported");
-    }
+    // Seed from the live permission, then stay in sync: granting from the
+    // sibling NotificationsPermissionControl in the same session must enable
+    // the cadence control here without a reload (it used to read once on
+    // mount and go stale).
+    setPermission(readNotificationPermission());
+    const unsubscribe = subscribeNotificationPermission(setPermission);
     void refresh();
+    return unsubscribe;
   }, [refresh]);
 
   const writeCadence = async (cadence: OverdueDigestCadence) => {
