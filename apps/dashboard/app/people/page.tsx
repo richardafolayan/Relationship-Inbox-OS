@@ -7,6 +7,7 @@ import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { cleanContactSummary } from "@/lib/preview";
+import { shouldAdoptIncomingNotes } from "@/lib/notes-sync";
 import { createLatestRequestGate } from "@/lib/latest-request";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
@@ -35,6 +36,11 @@ export default function PeoplePage() {
   const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedNotesAtRef = useRef<number>(0);
+  // Which person the current notes draft belongs to, and the server value it
+  // was last synced from. Used to decide whether a background refresh may
+  // overwrite the textarea (only when the user isn't mid-edit).
+  const notesPersonRef = useRef<string | null>(null);
+  const syncedNotesRef = useRef<string>("");
   // Latest-wins gate: only the most recent detail fetch may write to state,
   // so fast person switching can't show an older response over a newer one.
   const detailReqGate = useRef(createLatestRequestGate());
@@ -96,13 +102,27 @@ export default function PeoplePage() {
   );
 
   useEffect(() => {
+    const incoming = selected?.notes ?? "";
+    const personChanged = notesPersonRef.current !== selectedId;
+    // The draft is dirty (has unsaved keystrokes) when it no longer matches the
+    // server value we last synced into it. Reading notesDraft via the previous
+    // render's value is fine here because we only ever overwrite on adopt.
+    const draftIsDirty = notesDraft !== syncedNotesRef.current;
+    if (!shouldAdoptIncomingNotes({ personChanged, draftIsDirty })) {
+      // Same person, mid-edit: keep the user's keystrokes; just remember the
+      // latest server value so a later clean state can re-sync to it.
+      syncedNotesRef.current = incoming;
+      return;
+    }
     if (notesSaveTimer.current) {
       clearTimeout(notesSaveTimer.current);
       notesSaveTimer.current = null;
     }
-    setNotesDraft(selected?.notes ?? "");
+    notesPersonRef.current = selectedId;
+    syncedNotesRef.current = incoming;
+    setNotesDraft(incoming);
     setNotesStatus("idle");
-  }, [selectedId, selected?.notes]);
+  }, [selectedId, selected?.notes, notesDraft]);
 
   useEffect(() => () => {
     if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
