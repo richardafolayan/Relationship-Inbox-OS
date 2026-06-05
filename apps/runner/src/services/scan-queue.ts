@@ -257,6 +257,27 @@ export type OutboundDedupAction =
   | { kind: "migrate_twin_key"; twinId: string }
   | { kind: "delete_twin"; twinId: string };
 
+/**
+ * The two outbound persistence paths normalize whitespace differently, so the
+ * same physical message lands with slightly different `text`:
+ *   - send.ts stores the operator's text verbatim. A dictation/compose
+ *     artifact commonly leaves a stray leading space on a wrapped line.
+ *   - the scan parser runs the same message (re-read from the platform, e.g.
+ *     iMessage chat.db) through cleanMessageText, which trims each line.
+ *
+ * One stray space then makes the two rows differ by a single character, an
+ * exact-equality twin check misses, and the duplicate survives — the user saw
+ * two identical bubbles on Lanre's iMessage thread, one tagged "sent via
+ * automation" (raw, 1019 chars) and one not (cleaned, 1018 chars). Collapse
+ * whitespace runs to a single space and trim so the comparison ignores these
+ * cosmetic differences. Two genuinely distinct outbound messages that are
+ * identical modulo whitespace inside the 5-minute window is not a real
+ * workflow, so this does not introduce false positives.
+ */
+export function normalizeOutboundTextForDedup(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 export function decideOutboundDedup(input: {
   newKey: string;
   newTimestamp: Date;
@@ -279,11 +300,12 @@ export function decideOutboundDedup(input: {
   windowMs?: number;
 }): OutboundDedupAction {
   const windowMs = input.windowMs ?? 5 * 60 * 1000;
+  const normalizedNewText = normalizeOutboundTextForDedup(input.newText);
   const twin = input.existingTwins.find((row) => {
     if (row.platformMessageKey === input.newKey) {
       return false;
     }
-    if (row.text !== input.newText) {
+    if (normalizeOutboundTextForDedup(row.text) !== normalizedNewText) {
       return false;
     }
     const dtMs = Math.abs(row.timestamp.getTime() - input.newTimestamp.getTime());
@@ -2861,6 +2883,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
       // See decideOutboundDedup for why this is needed (different keys for the
       // same physical message). Inbound messages don't have this problem —
       // they're only ever recorded by the scan parser.
+      //
+      // We fetch every OUT row in the ±5min window (NOT filtering on exact
+      // `text` in SQL) because the send-time row stores raw text while this
+      // scan row stores cleanMessageText output — a one-space difference would
+      // make an exact SQL match miss the twin entirely. decideOutboundDedup
+      // then compares with whitespace normalized so the divergent twin is
+      // still recognised. The window keeps the candidate set tiny.
       if (message.direction === "OUT") {
         await flushBatchedMessageWrites();
         const windowMs = 5 * 60 * 1000;
@@ -2890,7 +2919,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
             where: {
               threadId: { in: twinThreadIds },
               direction: "OUT",
-              text: messageText,
               timestamp: {
                 gte: new Date(safeTimestamp.getTime() - windowMs),
                 lte: new Date(safeTimestamp.getTime() + windowMs)
@@ -2922,8 +2950,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
           })
         ]);
 
-        const sameThreadTwins = twins.filter((t) => t.threadId === thread.id);
-        const crossSiblingTwins = twins.filter((t) => t.threadId !== thread.id);
+        // The twin query no longer filters on exact `text` in SQL (so it can
+        // catch a send-side row whose whitespace diverges from this scan row —
+        // see normalizeOutboundTextForDedup). That makes gating on content our
+        // job here: keep only rows whose normalized text matches before the
+        // cross-sibling block acts, otherwise unrelated sibling-thread messages
+        // that merely fall inside the 5-minute window would be wrongly
+        // collapsed. decideOutboundDedup re-checks the same way for the
+        // same-thread set.
+        const normalizedMessageText = normalizeOutboundTextForDedup(messageText);
+        const contentTwins = twins.filter(
+          (t) => normalizeOutboundTextForDedup(t.text) === normalizedMessageText
+        );
+        const sameThreadTwins = contentTwins.filter((t) => t.threadId === thread.id);
+        const crossSiblingTwins = contentTwins.filter((t) => t.threadId !== thread.id);
 
         // Cross-sibling dedup — chat.db says this message belongs to the
         // current thread, so any same-content row in a sibling thread is
