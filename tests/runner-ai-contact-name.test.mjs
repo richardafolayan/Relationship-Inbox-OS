@@ -48,6 +48,44 @@ test("contactNameContext binds the naming rule to the actual recipient name", ()
   assert.match(ctx, /Recipient: The Jess/);
 });
 
+test("contactNameContext: a real displayName is passed through as the recipient", () => {
+  const ctx = contactNameContext("Jess");
+  assert.match(ctx, /Recipient: Jess/);
+  // A real name must NOT trigger the unknown-recipient fallback.
+  assert.doesNotMatch(ctx, /unknown contact or group chat/);
+});
+
+test("contactNameContext: placeholder displayNames (phone/email/number-group) get an explicit unknown-recipient instruction, never the raw handle as a name", () => {
+  // The residual "Seyi" leak: a group chat whose displayName is two phone
+  // numbers. A raw "Recipient: +447…" left the naming vacuum that made the
+  // model copy the example name. These must route to the unknown-recipient
+  // instruction instead — and must NOT present the raw handle as the name.
+  const cases = [
+    "+447484670086, +447491133433", // number-only group chat (the real leak)
+    "+447860020301", // bare phone
+    "yafolayan@yahoo.com", // bare email
+    "", // blank
+    "   " // whitespace-only
+  ];
+  for (const dn of cases) {
+    const ctx = contactNameContext(dn);
+    assert.match(ctx, /unknown contact or group chat/, `expected unknown-recipient instruction for ${JSON.stringify(dn)}`);
+    assert.match(ctx, /they.*them|the group/i);
+    // The rule still travels with it.
+    assert.match(ctx, /CONTACT NAME/);
+    // The raw phone number must never be offered as the recipient's name.
+    assert.doesNotMatch(ctx, /Recipient: \+44/);
+  }
+});
+
+test("contactNameContext: a group chat carrying real names is NOT treated as nameless", () => {
+  // Over-triggering guard: a group whose displayName lists real names should
+  // keep passing those names through, not collapse to "the group".
+  const ctx = contactNameContext("Israel Anuwe, Teni, Keisha");
+  assert.match(ctx, /Recipient: Israel Anuwe, Teni, Keisha/);
+  assert.doesNotMatch(ctx, /unknown contact or group chat/);
+});
+
 test("contactNameContext is wired into all three contact-referencing prompts", () => {
   // updateThreadSummary (brief), generateSuggestedReplies (chips),
   // composeInVoice (operator-typed rewrite) — all three feed user-facing

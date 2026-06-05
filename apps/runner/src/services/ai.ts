@@ -31,6 +31,7 @@ import type {
   StyleProfile
 } from "../types/runtime";
 import { describeContactStyle, describeOperatorStyle } from "./style";
+import { looksLikeNamelessRecipient } from "./name-inference";
 import {
   buildReplyStyleAnalysisPrompt,
   emptyInferredStyle,
@@ -287,7 +288,16 @@ export const CONTACT_NAME_DISCIPLINE = [
  * Exported so tests can assert the rule and the name travel together.
  */
 export function contactNameContext(displayName: string): string {
-  return `${CONTACT_NAME_DISCIPLINE}\n\nRecipient: ${displayName}`;
+  // Placeholder displayNames (a bare phone number, an email, or a number-only
+  // group chat like "+447…, +447…") carry no usable personal name. Passing the
+  // raw handle as "Recipient: +447…" leaves the model with the naming RULE but
+  // no name to apply it to, so it reaches into the discipline block's worked
+  // example and mislabels the contact with the example name ("Seyi"). Give it
+  // an explicit unknown-recipient instruction instead, filling the vacuum.
+  const recipientLine = looksLikeNamelessRecipient(displayName)
+    ? `Recipient: unknown contact or group chat — no name on file. Do NOT use a personal name for them. Refer to them as "they"/"them" (or "the group" for a group chat) unless a name is explicitly grounded in the transcript. NEVER borrow a name from the examples above.`
+    : `Recipient: ${displayName}`;
+  return `${CONTACT_NAME_DISCIPLINE}\n\n${recipientLine}`;
 }
 
 export const BRIEF_FIDELITY_REMINDER = [
