@@ -48,6 +48,7 @@ import { resummarizeThread } from "./services/resummarize-thread";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
 import {
@@ -588,6 +589,29 @@ const sendQueue = createSendQueue({
 // (e.g. crashed mid-send, or restarted while a send was queued behind a
 // scan). The queue's `running` guard prevents duplicate processing.
 sendQueue.resume();
+
+// Immediate reassess when the operator sends a reply. The scan loop only
+// refreshes a thread's brief when its lastInboundHash changes, so a dashboard
+// send (which flips needsReply but adds no inbound) would otherwise leave the
+// right rail showing the points the operator JUST answered as still
+// outstanding until the next scan happens to run. Subscribe to MESSAGE_SENT,
+// recompute the brief right away, then emit THREAD_UPDATED so the dashboard
+// refetches /data/thread. Inbound stays scan-driven (the scan reassesses
+// inline on detection; there is no push channel for iMessage / LinkedIn).
+// Per-thread dedupe, a hard timeout, and non-blocking failure handling live
+// in the handler module so this stays a thin wiring line.
+const reassessOnSend = createReassessOnSendHandler({
+  resummarize: (threadId) => resummarizeThreadById(threadId),
+  onReassessed: (threadId) =>
+    eventBus.emit({ type: "THREAD_UPDATED", jobId: uuid(), threadId }),
+  onError: (threadId, error) =>
+    console.warn(
+      `[ai] reassess-on-send failed for threadId=${threadId}: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    )
+});
+eventBus.subscribe((event) => reassessOnSend.handle(event));
 
 // Promotes SCHEDULED SendRequests to PENDING when their scheduledFor
 // timestamp has elapsed, then kicks the send-queue worker. Runs every
