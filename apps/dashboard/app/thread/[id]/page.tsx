@@ -16,10 +16,12 @@ import {
   Paperclip,
   Send,
   Sparkles,
+  Star,
   X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
@@ -472,6 +474,15 @@ export default function ThreadPage() {
   const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
     Record<string, MessageReaction[]>
   >({});
+  // Optimistic favourite override (R-0066 / #483). null = follow the server
+  // value (thread.personFavourite); a boolean wins until the request settles,
+  // so the header star flips instantly and reverts if the toggle fails.
+  const [favOverride, setFavOverride] = useState<boolean | null>(null);
+  // Drop the override when navigating to a different thread so it can't leak
+  // onto the next contact (this component persists across /thread/:id changes).
+  useEffect(() => {
+    setFavOverride(null);
+  }, [threadId]);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
   // Defensive 30s ceiling on the suggestions spinner. See the
   // `repliesGenerating` derivation below for why this exists.
@@ -2227,6 +2238,18 @@ export default function ThreadPage() {
   const firstName = thread.personName.split(/\s+/)[0] ?? thread.personName;
   const risk = toDisplayRisk(thread.riskLevel);
 
+  // Favourite star in the header (R-0066 / #483). Optimistic: flip locally,
+  // persist, then refresh so the inbox/today views re-sort; revert on failure.
+  const favourite = favOverride ?? thread.personFavourite ?? false;
+  const toggleFavourite = () => {
+    const next = !favourite;
+    const personId = thread.personId;
+    setFavOverride(next);
+    void setFavourite(personId, next)
+      .then(() => refresh())
+      .catch(() => setFavOverride(!next));
+  };
+
   // Late-night LinkedIn send nudge (see lib/late-night-send.ts). Shown only
   // while a LinkedIn draft is open inside the 22:00 to 06:00 quiet window; one
   // click schedules the draft for the next 08:00 instead of pinging the
@@ -2560,6 +2583,22 @@ export default function ThreadPage() {
                     ) : null}
                   </p>
                 </div>
+              </button>
+              {/* Favourite star (R-0066 / #483). Pins this contact so their
+                  threads float to the top of the Inbox / Today. Optimistic. */}
+              <button
+                type="button"
+                onClick={toggleFavourite}
+                aria-label={favourite ? `Unfavourite ${thread.personName}` : `Favourite ${thread.personName}`}
+                aria-pressed={favourite}
+                data-testid="thread-favourite-toggle"
+                title={favourite ? "Remove favourite" : "Favourite this contact"}
+                className={cn(
+                  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-calm hover:bg-paper-2",
+                  favourite ? "text-accent" : "text-ink-3 hover:text-ink"
+                )}
+              >
+                <Star className="h-[16px] w-[16px]" strokeWidth={1.6} fill={favourite ? "currentColor" : "none"} />
               </button>
               <ActionButton
                 variant="ghost"

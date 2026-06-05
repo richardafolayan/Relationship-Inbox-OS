@@ -4,9 +4,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
-import { Archive, Search } from "lucide-react";
+import { Archive, Search, Star } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
+import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
@@ -97,6 +98,13 @@ function applyCategory(row: InboxRow, kind: CategoryFilter): boolean {
 
 function applyPlatform(row: InboxRow, platform: PlatformFilter): boolean {
   return platform === "all" ? true : row.platform === platform;
+}
+
+// Favourites lens (R-0066 / #483). When on, only favourited contacts show —
+// the star doubles as a one-tap filter. Off by default so the inbox stays the
+// full list.
+function applyFavourite(row: InboxRow, favouritesOnly: boolean): boolean {
+  return favouritesOnly ? row.personFavourite === true : true;
 }
 
 function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
@@ -196,7 +204,12 @@ export default function InboxPage() {
   const [tab, setTab] = useState<RiskTab>("all");
   const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
+  const [favouritesOnly, setFavouritesOnly] = useState(false);
   const [sortMode, setSortMode] = useState<SortMode>("oldest");
+  // Optimistic favourite state keyed by personId, so tapping a row's star
+  // re-sorts and re-marks instantly without waiting for the 10s poll. Merged
+  // over the server rows below; reverted if the toggle request fails.
+  const [favOverrides, setFavOverrides] = useState<Record<string, boolean>>({});
   // Issue #287: by default the inbox hides conversations whose last activity
   // is older than the recency horizon. Searching or flipping "show all"
   // lifts the horizon so dormant threads stay reachable.
@@ -258,9 +271,26 @@ export default function InboxPage() {
   // its targets resolve on a busy real inbox. Outside a sandbox flow this is a
   // no-op.
   const allRows = useMemo(
-    () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
-    [data, sandboxActive]
+    () =>
+      scopeRowsToSandbox(data?.rows ?? [], sandboxActive).map((row) => {
+        const pid = row.personId;
+        return pid && pid in favOverrides
+          ? { ...row, personFavourite: favOverrides[pid] }
+          : row;
+      }),
+    [data, sandboxActive, favOverrides]
   );
+
+  // Optimistically flip a contact's favourite, then persist. Reverts the
+  // local override if the request fails so the star never lies. Keyed by
+  // personId so every row of a multi-thread contact updates together.
+  const toggleFavourite = useCallback((personId: string | undefined, next: boolean) => {
+    if (!personId) return;
+    setFavOverrides((prev) => ({ ...prev, [personId]: next }));
+    void setFavourite(personId, next).catch(() => {
+      setFavOverrides((prev) => ({ ...prev, [personId]: !next }));
+    });
+  }, []);
 
   // Per-tab counts. Scoped to the active platform + category chips so the
   // badges reflect the current filter — e.g. filtering to LinkedIn shows
@@ -272,7 +302,10 @@ export default function InboxPage() {
   // than hiding them from the badge.
   const counts = useMemo(() => {
     const scoped = allRows.filter(
-      (row) => applyCategory(row, category) && applyPlatform(row, platformFilter)
+      (row) =>
+        applyCategory(row, category) &&
+        applyPlatform(row, platformFilter) &&
+        applyFavourite(row, favouritesOnly)
     );
     const live = scoped.filter((row) => !row.scheduledSendAt);
     return {
@@ -282,7 +315,7 @@ export default function InboxPage() {
       fresh: live.filter((r) => r.riskLevel === "GREEN").length,
       scheduled: scoped.filter((r) => !!r.scheduledSendAt).length
     };
-  }, [allRows, category, platformFilter]);
+  }, [allRows, category, platformFilter, favouritesOnly]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -298,6 +331,7 @@ export default function InboxPage() {
       if (!applyTab(row, tab)) return false;
       if (!applyCategory(row, category)) return false;
       if (!applyPlatform(row, platformFilter)) return false;
+      if (!applyFavourite(row, favouritesOnly)) return false;
       if (applyActiveOnly && !isWithinHorizon(row.lastMessageAt)) return false;
       if (applyActiveOnly && isLikelyClosed(row)) return false;
       if (!q) return true;
@@ -306,7 +340,7 @@ export default function InboxPage() {
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, tab, category, platformFilter, showAll]);
+  }, [allRows, query, tab, category, platformFilter, favouritesOnly, showAll]);
 
   // How many threads the active-only filter is currently hiding, broken
   // down by reason. Only counts threads that would otherwise be visible
@@ -320,6 +354,7 @@ export default function InboxPage() {
       if (!applyTab(row, tab)) continue;
       if (!applyCategory(row, category)) continue;
       if (!applyPlatform(row, platformFilter)) continue;
+      if (!applyFavourite(row, favouritesOnly)) continue;
       const dormant = !isWithinHorizon(row.lastMessageAt);
       const ended = isLikelyClosed(row);
       if (!dormant && !ended) continue;
@@ -330,7 +365,7 @@ export default function InboxPage() {
       else closed += 1;
     }
     return { total: older + closed, older, closed };
-  }, [allRows, showAll, query, tab, category, platformFilter]);
+  }, [allRows, showAll, query, tab, category, platformFilter, favouritesOnly]);
   const hiddenByHorizon = hiddenBreakdown.total;
 
   // #287 F1: "Refresh closed verdicts" button state. Same idle/running/
@@ -396,11 +431,16 @@ export default function InboxPage() {
 
   const sections = useMemo<SectionGroup[]>(() => {
     const live = visible.filter((row) => !removedIds.has(row.id));
+    // Favourited contacts float to the top of whichever section they land in,
+    // preserving the chosen sort order within the favourite / non-favourite
+    // split (R-0066 / #483). Applied per-section so a favourite never jumps
+    // its risk bucket.
+    const ordered = (rows: InboxRow[]) => favouritesFirst(applySort(rows, sortMode));
     if (!grouped) {
-      return [{ key: tab, label: null, items: applySort(live, sortMode) }];
+      return [{ key: tab, label: null, items: ordered(live) }];
     }
     const byLevel = (level: InboxRow["riskLevel"]) =>
-      applySort(live.filter((row) => row.riskLevel === level), sortMode);
+      ordered(live.filter((row) => row.riskLevel === level));
     return [
       { key: "overdue", label: "Overdue", items: byLevel("RED") },
       { key: "waiting", label: "Waiting", items: byLevel("AMBER") },
@@ -601,11 +641,14 @@ export default function InboxPage() {
           <FiltersPopover
             platformFilter={platformFilter}
             category={category}
+            favouritesOnly={favouritesOnly}
             onPlatform={setPlatformFilter}
             onCategory={setCategory}
+            onFavouritesOnly={setFavouritesOnly}
             onClear={() => {
               setPlatformFilter("all");
               setCategory("any");
+              setFavouritesOnly(false);
             }}
           />
           {orderedRows.length > 0 || selectMode ? (
@@ -625,11 +668,14 @@ export default function InboxPage() {
       <ChipsRow
         platformFilter={platformFilter}
         category={category}
+        favouritesOnly={favouritesOnly}
         onClearPlatform={() => setPlatformFilter("all")}
         onClearCategory={() => setCategory("any")}
+        onClearFavourites={() => setFavouritesOnly(false)}
         onClearAll={() => {
           setPlatformFilter("all");
           setCategory("any");
+          setFavouritesOnly(false);
         }}
       />
 
@@ -704,8 +750,8 @@ export default function InboxPage() {
         </div>
       ) : visible.length === 0 ? (
         <CaughtUp
-          title={query || tab !== "all" || category !== "any" ? "Nothing matches that filter." : "You’re caught up."}
-          body={query || tab !== "all" || category !== "any" ? "Clear the filter or try a different search." : "No conversations need you right now."}
+          title={query || tab !== "all" || category !== "any" || favouritesOnly ? "Nothing matches that filter." : "You’re caught up."}
+          body={query || tab !== "all" || category !== "any" || favouritesOnly ? "Clear the filter or try a different search." : "No conversations need you right now."}
         />
       ) : (
         <>
@@ -721,6 +767,7 @@ export default function InboxPage() {
                       selectMode={selectMode}
                       selected={selectedSet.has(row.id)}
                       onToggle={toggleId}
+                      onToggleFavourite={toggleFavourite}
                     />
                   ))}
                 </div>
@@ -735,6 +782,7 @@ export default function InboxPage() {
                   selectMode={selectMode}
                   selected={selectedSet.has(row.id)}
                   onToggle={toggleId}
+                  onToggleFavourite={toggleFavourite}
                 />
               ))}
             </div>
@@ -860,19 +908,24 @@ export default function InboxPage() {
 function FiltersPopover({
   platformFilter,
   category,
+  favouritesOnly,
   onPlatform,
   onCategory,
+  onFavouritesOnly,
   onClear
 }: {
   platformFilter: PlatformFilter;
   category: CategoryFilter;
+  favouritesOnly: boolean;
   onPlatform: (value: PlatformFilter) => void;
   onCategory: (value: CategoryFilter) => void;
+  onFavouritesOnly: (value: boolean) => void;
   onClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
-  const activeCount = (platformFilter !== "all" ? 1 : 0) + (category !== "any" ? 1 : 0);
+  const activeCount =
+    (platformFilter !== "all" ? 1 : 0) + (category !== "any" ? 1 : 0) + (favouritesOnly ? 1 : 0);
   return (
     <div ref={ref} className="relative">
       <button
@@ -907,6 +960,19 @@ function FiltersPopover({
               ))}
             </PopSection>
           </div>
+          <div className="mt-4">
+            <PopSection label="Show">
+              <PopOpt selected={!favouritesOnly} onClick={() => onFavouritesOnly(false)}>
+                Everyone
+              </PopOpt>
+              <PopOpt selected={favouritesOnly} onClick={() => onFavouritesOnly(true)}>
+                <span className="inline-flex items-center gap-[6px]">
+                  <Star className="h-[12px] w-[12px]" strokeWidth={1.6} fill="currentColor" />
+                  Favourites only
+                </span>
+              </PopOpt>
+            </PopSection>
+          </div>
           <div className="mt-4 flex justify-end border-t border-hairline pt-3">
             <button
               type="button"
@@ -927,14 +993,18 @@ function FiltersPopover({
 function ChipsRow({
   platformFilter,
   category,
+  favouritesOnly,
   onClearPlatform,
   onClearCategory,
+  onClearFavourites,
   onClearAll
 }: {
   platformFilter: PlatformFilter;
   category: CategoryFilter;
+  favouritesOnly: boolean;
   onClearPlatform: () => void;
   onClearCategory: () => void;
+  onClearFavourites: () => void;
   onClearAll: () => void;
 }) {
   const chips: { key: string; label: string; value: string; onRemove: () => void }[] = [];
@@ -952,6 +1022,14 @@ function ChipsRow({
       label: "Kind",
       value: CATEGORY_FILTERS.find((c) => c.key === category)?.label ?? category,
       onRemove: onClearCategory
+    });
+  }
+  if (favouritesOnly) {
+    chips.push({
+      key: "favourites",
+      label: "Show",
+      value: "Favourites",
+      onRemove: onClearFavourites
     });
   }
   if (chips.length === 0) return null;
@@ -990,11 +1068,13 @@ interface InboxRowItemProps {
   selectMode: boolean;
   selected: boolean;
   onToggle: (id: string, opts: { shiftKey: boolean }) => void;
+  onToggleFavourite: (personId: string | undefined, next: boolean) => void;
 }
 
-function InboxRowItem({ row, selectMode, selected, onToggle }: InboxRowItemProps) {
+function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }: InboxRowItemProps) {
   const right = rightLabelFor(row);
   const dot = dotFor(row);
+  const fav = row.personFavourite === true;
   const cleanPreview = normalizePreview(row.preview);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
@@ -1073,6 +1153,30 @@ function InboxRowItem({ row, selectMode, selected, onToggle }: InboxRowItemProps
         ) : null}
       </span>
       <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
+        {/* Favourite star (R-0066 / #483). Filled + always visible once
+            favourited (doubles as the at-a-glance marker); a quiet outline
+            that fades in on row hover otherwise. Stops propagation so a tap
+            toggles the favourite instead of opening the thread. */}
+        <button
+          type="button"
+          aria-label={fav ? `Unfavourite ${row.personName}` : `Favourite ${row.personName}`}
+          aria-pressed={fav}
+          data-testid="inbox-favourite-toggle"
+          title={fav ? "Remove favourite" : "Favourite this contact"}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleFavourite(row.personId, !fav);
+          }}
+          className={cn(
+            "-my-1 shrink-0 rounded p-[3px] transition-[color,opacity] duration-calm",
+            fav
+              ? "text-accent opacity-100"
+              : "text-ink-4 opacity-0 hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
+          )}
+        >
+          <Star className="h-[15px] w-[15px]" strokeWidth={1.6} fill={fav ? "currentColor" : "none"} />
+        </button>
         <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${dot}`} />
         <span className={right.tone}>{right.text}</span>
       </span>

@@ -21,3 +21,30 @@ export function isInTodayQueue(row: InboxRow, removedIds: ReadonlySet<string>): 
     !isLikelyClosed(row)
   );
 }
+
+function riskRank(level: InboxRow["riskLevel"]): number {
+  return level === "RED" ? 0 : level === "AMBER" ? 1 : 2;
+}
+
+// Order for "tonight's work": most-urgent risk bucket first (overdue →
+// waiting → fresh), oldest-waiting first within a bucket. Favourited contacts
+// (R-0066 / #483) are lifted to the front of their OWN risk bucket only —
+// never across buckets, so an overdue non-favourite still leads a fresh
+// favourite. The chronological oldest-inbound order is preserved within the
+// favourite / non-favourite split. The first row becomes the Today hero, so a
+// favourite's overdue thread naturally leads the screen.
+export function sortTodayQueue(rows: readonly InboxRow[]): InboxRow[] {
+  return [...rows].sort((a, b) => {
+    if (riskRank(a.riskLevel) !== riskRank(b.riskLevel)) {
+      return riskRank(a.riskLevel) - riskRank(b.riskLevel);
+    }
+    const aFav = a.personFavourite ? 0 : 1;
+    const bFav = b.personFavourite ? 0 : 1;
+    if (aFav !== bFav) {
+      return aFav - bFav;
+    }
+    const aIn = a.lastInboundAt ? Date.parse(a.lastInboundAt) : 0;
+    const bIn = b.lastInboundAt ? Date.parse(b.lastInboundAt) : 0;
+    return aIn - bIn;
+  });
+}

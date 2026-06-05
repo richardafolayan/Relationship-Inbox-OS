@@ -17,7 +17,8 @@ import type {
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { cleanAskSummary, normalizePreview } from "@/lib/preview";
-import { isInTodayQueue } from "@/lib/today";
+import { isInTodayQueue, sortTodayQueue } from "@/lib/today";
+import { Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { FitText } from "@/components/common/fit-text";
@@ -300,17 +301,10 @@ export default function TodayPage() {
     todayRowsRef.current = rows;
   }, [rows]);
 
-  const sortedRows = useMemo(() => {
-    const rank = (level: string) => (level === "RED" ? 0 : level === "AMBER" ? 1 : 2);
-    return [...rows].sort((a, b) => {
-      if (rank(a.riskLevel) !== rank(b.riskLevel)) {
-        return rank(a.riskLevel) - rank(b.riskLevel);
-      }
-      const aIn = a.lastInboundAt ? Date.parse(a.lastInboundAt) : 0;
-      const bIn = b.lastInboundAt ? Date.parse(b.lastInboundAt) : 0;
-      return aIn - bIn;
-    });
-  }, [rows]);
+  // Risk bucket first, then favourites lifted within their own bucket, then
+  // oldest-waiting (R-0066 / #483). A favourite's overdue thread leads the
+  // hero, but a non-favourite overdue still outranks a fresh favourite.
+  const sortedRows = useMemo(() => sortTodayQueue(rows), [rows]);
   const hero = sortedRows[0];
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
   // Cap the "Then these, in order" stack; the long tail routes to Inbox.
@@ -602,6 +596,14 @@ export default function TodayPage() {
                 <div className="mb-[18px] flex items-center gap-3">
                   <PersonAvatar name={hero.personName} avatarUrl={hero.personAvatarUrl} size={28} />
                   <span className="font-medium text-ink">{hero.personName}</span>
+                  {hero.personFavourite ? (
+                    <Star
+                      className="h-[14px] w-[14px] text-accent"
+                      strokeWidth={1.6}
+                      fill="currentColor"
+                      aria-label="Favourite"
+                    />
+                  ) : null}
                   <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
                 </div>
                 <p className="m-0 mb-7 max-w-[68ch] text-balance border-l-2 border-hairline-strong pl-5 text-[17px] leading-[1.55] text-ink-2">

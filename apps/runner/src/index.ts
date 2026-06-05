@@ -34,6 +34,7 @@ import { briefSignatureForCache, sanitizeReplyBrief, synthesiseFallbackBrief } f
 import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
+import { decidePersonFavouriteAction } from "./services/person-favourite-action";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
@@ -1136,7 +1137,8 @@ async function loadVisibleThreadRows(options?: {
           platform: true,
           avatarUrl: true,
           birthday: true,
-          birthYear: true
+          birthYear: true,
+          favouritedAt: true
         }
       },
       _count: {
@@ -4290,6 +4292,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     personId: thread.person.id,
     personName: thread.person.displayName,
     personAvatarUrl: thread.person.avatarUrl ?? null,
+    // R-0066 / #483. Whether the operator has favourited this contact, so the
+    // thread header can render (and toggle) the favourite star in the right
+    // state on open.
+    personFavourite: thread.person.favouritedAt != null,
     // Issue #412. Carry the contact's birthday into the thread page so
     // the rail can show a "🎂 birthday in N days" pill when it's
     // within the next month. The 14-day horizon constant is reused
@@ -4838,7 +4844,9 @@ app.get("/data/person/:personId", asyncRoute(async (req, res) => {
       enrichmentFailedReason: person.enrichmentFailedReason ?? null,
       avatarUrl: person.avatarUrl ?? null,
       tags: person.tagsJson ? JSON.parse(person.tagsJson) : [],
-      notes: person.notes
+      notes: person.notes,
+      // R-0066 / #483. Drives the favourite star in the profile drawer.
+      favourite: person.favouritedAt != null
     },
     enrichment: enrichment
       ? {
@@ -4891,6 +4899,31 @@ app.post("/control/person/:personId/rename", asyncRoute(async (req, res) => {
     return;
   }
   const decision = decidePersonNameAction(person, payload);
+  if (decision.write) {
+    await prisma.person.update({ where: { id: personId }, data: decision.write });
+  }
+  res.status(decision.status).json(decision.body);
+}));
+
+// Toggle / set a contact as a favourite (R-0066 / #483). Favourited contacts
+// float to the top of the Inbox section / Today bucket they already sit in and
+// can be filtered to on the Inbox. The dashboard sends an explicit
+// `{ favourite }` so an optimistic star stays in sync; a bare POST toggles.
+app.post("/control/person/:personId/favourite", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "favourite the contact", kind: "thread-mutation" })) return;
+  const payload = z
+    .object({
+      action: z.enum(["toggle", "set"]).optional(),
+      favourite: z.boolean().optional()
+    })
+    .parse(req.body ?? {});
+  const person = await prisma.person.findUnique({ where: { id: personId } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  const decision = decidePersonFavouriteAction(person, payload);
   if (decision.write) {
     await prisma.person.update({ where: { id: personId }, data: decision.write });
   }
