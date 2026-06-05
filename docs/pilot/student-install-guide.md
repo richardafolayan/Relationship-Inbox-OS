@@ -13,6 +13,8 @@ The app runs entirely on your own Mac. Nothing is uploaded to a server.
   macOS-only, and I want to keep the first round simple.
 - **Google Chrome**, and you signed into LinkedIn in it as normal. (Don't
   have Chrome? Get it free from [google.com/chrome](https://www.google.com/chrome/).)
+- **The Messages app on your Mac, signed in**, so your iMessages can be
+  included. If you have ever sent an iMessage from this Mac, you are set.
 - About 20 minutes, and me on a call with you.
 
 You do **not** need a GitHub account or any developer tools. I will send you
@@ -116,7 +118,27 @@ will give you both on the call:
 Leave everything else as it is. We will fill in the Chrome profile details
 together on the call. They depend on your Mac.
 
-## Step 6: Start the app
+## Step 6: Turn on iMessage (Mac)
+
+This is what makes your iMessage conversations show up next to LinkedIn. It is
+already switched on in your settings file; it just needs one macOS permission.
+
+1. **Be signed into Messages.** Open the **Messages** app on your Mac once and
+   check you can see your conversations. The app only ever reads your Mac's own
+   Messages, it never logs in anywhere.
+2. **Give Terminal Full Disk Access.** Open **System Settings → Privacy &
+   Security → Full Disk Access**, find **Terminal** in the list, and turn its
+   switch **on**. If Terminal is not in the list, click **+** and add it from
+   Applications → Utilities.
+3. macOS will say Terminal must quit to use the new permission. **Quit
+   Terminal** (⌘ + Q), reopen it, and go back into the project folder the same
+   way as Step 3 (type `cd `, drag the folder onto the window, press Enter).
+
+Your iMessages then appear after the first scan (Step 9). The first time you
+send an iMessage reply, macOS asks "Terminal wants to control Messages",
+click **Allow**.
+
+## Step 7: Start the app
 
 ```bash
 npm run dev
@@ -129,7 +151,7 @@ open **Chrome** and go to:
 http://localhost:3100
 ```
 
-## Step 7: Set up your reply style
+## Step 8: Set up your reply style
 
 The first time you open it, the **Today** page shows a short welcome card
 and a "Set up your reply style" card. Fill the reply-style card in: your
@@ -137,14 +159,15 @@ name and a sentence on how you usually message people. This is what makes
 the app support *your* words rather than sounding generic. It takes a minute
 and you can change it later in Settings.
 
-## Step 8: Pull in your messages
+## Step 9: Pull in your messages
 
 The app reads your messages in the background. To pull them in the first
 time, press **⌘K** to open the command bar, type `scan`, and choose
 **Run scan now**. Your conversations appear on **Today** and **Inbox**.
 
-On a Mac, iMessage is included automatically. macOS may pop up a permission
-request the first time, allow it, or ask me on the call.
+Both your LinkedIn and iMessage conversations show up here. If iMessage threads
+are missing, it is almost always Full Disk Access (Step 6) not being granted
+yet, see [troubleshooting.md](./troubleshooting.md).
 
 That is the whole setup. From here, see
 [student-pilot-instructions.md](./student-pilot-instructions.md) for what to

@@ -25,8 +25,26 @@ Terminal running `npm run dev` was closed or crashed.
 - Make sure you are **signed into LinkedIn in Chrome** (the normal Chrome
   window, not a private one).
 - Press **⌘K**, type `scan`, and run **Full LinkedIn rescan** once.
-- iMessage messages only appear on a Mac, and only after you have allowed
-  the macOS permission prompt.
+- iMessage threads need Full Disk Access for Terminal (see "My iMessage
+  conversations don't show up" below).
+
+## My iMessage conversations don't show up
+
+iMessage needs one macOS permission that LinkedIn does not. Check these, in
+order:
+
+1. **Full Disk Access.** The Terminal running `npm run dev` must have it.
+   Open **System Settings → Privacy & Security → Full Disk Access** and make
+   sure **Terminal** is switched on.
+2. **Restart the app after granting it.** The permission only takes effect on
+   a fresh start: click the Terminal, press `Ctrl + C` to stop the app, then
+   run `npm run dev` again.
+3. **Be signed into Messages.** Open the **Messages** app once and confirm you
+   can see your chats.
+4. **Run a scan.** Press **⌘K**, type `scan`, choose **Run scan now**.
+
+LinkedIn works without any of this, so if only iMessage is missing, it is
+almost always step 1.
 
 ## LinkedIn wants me to log in again
 
@@ -43,9 +61,17 @@ Mac and try again.
 
 ## macOS asked for permission
 
-The first time the app reads iMessage, macOS may ask to allow access to your
-Messages. Allowing it lets the app show your iMessage threads. If you would
-rather not, decline. LinkedIn still works fine on its own.
+Two different macOS permissions are involved with iMessage, and both are
+expected:
+
+- **Full Disk Access** lets the app *read* your iMessages. You grant this
+  yourself in System Settings (see "My iMessage conversations don't show up"
+  above).
+- **"Terminal wants to control Messages"** appears the first time you *send*
+  an iMessage reply. Click **Allow**. If you dismissed it by accident, sending
+  will fail, tell me and we will re-trigger it.
+
+You can decline both and LinkedIn still works fine on its own.
 
 ## A conversation won't open ("Can't open this thread")
 
