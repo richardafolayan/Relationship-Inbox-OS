@@ -1264,14 +1264,19 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   // the whole integration. The provider choice is resolved per-call from
   // SettingsStore so a dashboard toggle takes effect without restarting
   // the runner.
+  // Cap each request: the SDK defaults to NO timeout, so a wedged TCP
+  // connection would hang a user-visible call ("Drafting…") indefinitely.
+  // maxRetries:0 because tryProvider() + the fallback chain already own
+  // retries/fallback — the SDK's default 2 retries would multiply that.
+  const AI_CLIENT_OPTIONS = { timeout: 30_000, maxRetries: 0 } as const;
   const openAiClient = runnerConfig.openAiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.openAiApiKey })
+    ? new OpenAI({ apiKey: runnerConfig.openAiApiKey, ...AI_CLIENT_OPTIONS })
     : null;
   const glmClient = runnerConfig.zAiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl })
+    ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl, ...AI_CLIENT_OPTIONS })
     : null;
   const geminiClient = runnerConfig.geminiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.geminiApiKey, baseURL: runnerConfig.geminiBaseUrl })
+    ? new OpenAI({ apiKey: runnerConfig.geminiApiKey, baseURL: runnerConfig.geminiBaseUrl, ...AI_CLIENT_OPTIONS })
     : null;
 
   // Per-provider client + model resolution. The set of clients is built

@@ -14,6 +14,7 @@ import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside } from "./utils/fs";
+import { safeJsonParse } from "./utils/json";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
@@ -4257,8 +4258,11 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       // Apple-native `raw.replyToGuid` when both are present so threads
       // started from the dashboard's focused composer reconcile correctly.
       replyToMessageId: message.replyToMessageId ?? null,
-      raw: message.rawJson ? JSON.parse(message.rawJson) : null,
-      attachments: message.attachmentsJson ? JSON.parse(message.attachmentsJson) : [],
+      // safeJsonParse, not bare JSON.parse: this runs per-message inside the
+      // .map, so one corrupt rawJson/attachmentsJson row would otherwise throw
+      // and 500 the entire thread view (the most common read path).
+      raw: safeJsonParse<unknown>(message.rawJson, null),
+      attachments: safeJsonParse<unknown[]>(message.attachmentsJson, []),
       // Audio transcription status + text, when the runner ran one for
       // this message. Null when the message has no audio attachment or
       // transcription is disabled. The dashboard's IMessageMedia uses
