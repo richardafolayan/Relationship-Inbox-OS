@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import {
@@ -44,10 +45,19 @@ import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
 import { ActionButton } from "@/components/ui/action-button";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
-import { ProfileDrawer } from "@/components/common/profile-drawer";
+// Drawers are lazy-loaded: they're heavy (ProfileDrawer ~390 LOC + its own
+// data fetch) and only ever shown on demand, so they stay out of the most-
+// opened page's initial JS chunk. An "opened-once" latch below keeps them
+// mounted after first open, so their open/close behaviour is unchanged.
+const ReceiptsDrawer = dynamic(
+  () => import("@/components/common/receipts-drawer").then((m) => m.ReceiptsDrawer),
+  { ssr: false }
+);
+const ProfileDrawer = dynamic(
+  () => import("@/components/common/profile-drawer").then((m) => m.ProfileDrawer),
+  { ssr: false }
+);
 import { DegradedBanner } from "@/components/common/degraded-banner";
-import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import { blobToWhisperWav } from "@/lib/dictation-audio";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
@@ -461,6 +471,16 @@ export default function ThreadPage() {
   const [askAnswer, setAskAnswer] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
+  // Latch the first open of each drawer so the lazy chunk loads on demand and
+  // then stays mounted (preserving the existing open-prop open/close path).
+  const [receiptsEverOpened, setReceiptsEverOpened] = useState(false);
+  const [profileEverOpened, setProfileEverOpened] = useState(false);
+  useEffect(() => {
+    if (receiptsOpen) setReceiptsEverOpened(true);
+  }, [receiptsOpen]);
+  useEffect(() => {
+    if (profileDrawerOpen) setProfileEverOpened(true);
+  }, [profileDrawerOpen]);
   const [error, setError] = useState<string | null>(null);
   // #408. Per-message reaction trigger state (LinkedIn only). The picker
   // id tracks which bubble's emoji row is open; the reacting id is the
@@ -703,101 +723,130 @@ export default function ThreadPage() {
   const lastBottomedThreadIdRef = useRef<string | null>(null);
   const prevThreadIdRef = useRef<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    const [threadResult, inboxResult, platformsResult, logsResult] = await Promise.allSettled([
-      apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
-      apiGet<InboxResponse>("/runner/data/inbox"),
-      apiGet<PlatformCard[]>("/runner/data/platforms"),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
-    ]);
-    if (threadResult.status === "fulfilled") {
-      // Merge the fresh recent-messages window with any older messages
-      // the operator has already paginated in. Without this, every poll
-      // (every send, every SSE event, the 3s polling tick) would
-      // overwrite the loaded older history and the operator would get
-      // yanked back to the bottom — exactly the "I scroll up, more
-      // loads, then I get kicked back down" symptom.
-      const fresh = threadResult.value;
-      setThread((current) => {
-        if (!current || current.id !== fresh.id) return fresh;
-        const freshIds = new Set(fresh.messages.map((m) => m.id));
-        const olderKept = current.messages.filter((m) => !freshIds.has(m.id));
-        return {
-          ...fresh,
-          messages: [...olderKept, ...fresh.messages],
-          // Keep the operator's paginated cursor — fresh.messagePage
-          // describes only the recent window and would re-show the
-          // "load older messages" button as if no history were loaded.
-          messagePage: olderKept.length > 0 ? current.messagePage : fresh.messagePage
-        };
-      });
-      // Ghost-reconcile pendingSends against the freshly-fetched message
-      // list. The primary clear paths are the MESSAGE_SENT SSE event and
-      // the send-queue poll, both of which key off `clientSendId`. When
-      // either misses (SSE drop, race between the event and the page
-      // mount, sibling-thread routing on iMessage so the event's threadId
-      // doesn't match the user's view) the optimistic bubble used to
-      // linger forever, double-rendering on top of the real Message row.
-      // Any pending whose text matches a recent OUT message in the
-      // freshly-loaded window can be safely dropped — the real bubble is
-      // already on screen, the optimistic one is now noise.
-      const RECONCILE_WINDOW_MS = 5 * 60 * 1000;
-      const freshOutTexts = new Map<string, number>();
-      for (const m of fresh.messages) {
-        if (m.direction !== "OUT") continue;
-        const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
-        if (Number.isNaN(ts)) continue;
-        const prior = freshOutTexts.get(m.text);
-        if (prior === undefined || ts > prior) {
-          freshOutTexts.set(m.text, ts);
-        }
+  // Apply a freshly-fetched thread payload to local state. Extracted so the
+  // conversation can paint off /data/thread ALONE (first paint must not wait
+  // on the inbox/platforms/logs context fetches), and so a stale-while-
+  // revalidate cache hit can paint instantly and then re-apply the network
+  // value via this same path.
+  const applyThread = useCallback((fresh: ThreadResponse) => {
+    // Merge the fresh recent-messages window with any older messages
+    // the operator has already paginated in. Without this, every poll
+    // (every send, every SSE event, the 3s polling tick) would
+    // overwrite the loaded older history and the operator would get
+    // yanked back to the bottom — exactly the "I scroll up, more
+    // loads, then I get kicked back down" symptom.
+    setThread((current) => {
+      if (!current || current.id !== fresh.id) return fresh;
+      const freshIds = new Set(fresh.messages.map((m) => m.id));
+      const olderKept = current.messages.filter((m) => !freshIds.has(m.id));
+      return {
+        ...fresh,
+        messages: [...olderKept, ...fresh.messages],
+        // Keep the operator's paginated cursor — fresh.messagePage
+        // describes only the recent window and would re-show the
+        // "load older messages" button as if no history were loaded.
+        messagePage: olderKept.length > 0 ? current.messagePage : fresh.messagePage
+      };
+    });
+    // Ghost-reconcile pendingSends against the freshly-fetched message
+    // list. The primary clear paths are the MESSAGE_SENT SSE event and
+    // the send-queue poll, both of which key off `clientSendId`. When
+    // either misses (SSE drop, race between the event and the page
+    // mount, sibling-thread routing on iMessage so the event's threadId
+    // doesn't match the user's view) the optimistic bubble used to
+    // linger forever, double-rendering on top of the real Message row.
+    // Any pending whose text matches a recent OUT message in the
+    // freshly-loaded window can be safely dropped — the real bubble is
+    // already on screen, the optimistic one is now noise.
+    const RECONCILE_WINDOW_MS = 5 * 60 * 1000;
+    const freshOutTexts = new Map<string, number>();
+    for (const m of fresh.messages) {
+      if (m.direction !== "OUT") continue;
+      const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
+      if (Number.isNaN(ts)) continue;
+      const prior = freshOutTexts.get(m.text);
+      if (prior === undefined || ts > prior) {
+        freshOutTexts.set(m.text, ts);
       }
-      setPendingSends((prev) =>
-        prev.filter((pending) => {
-          if (pending.failed) return true; // keep failed bubbles so the operator can retry
-          const ts = freshOutTexts.get(pending.text);
-          if (ts === undefined) return true;
-          const pendingTs = Date.parse(pending.sentAt);
-          if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
-          return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
-        })
-      );
-      setComposer((prev) => {
-        if (prev) return prev; // operator already typed something
-        const explicitDraft = threadResult.value.draft;
-        if (explicitDraft) {
-          setComposerSource("draft");
-          return explicitDraft;
-        }
-        // No explicit draft - fall back to AI predraft (first suggested
-        // reply) so the operator opens an already-filled composer when
-        // /today has pre-warmed the cache. Only when the operator has
-        // opted into full AI drafts — at lower help levels the composer
-        // stays empty so they write it themselves.
-        const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
-        if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
-          setComposerSource("predraft");
-          return aiPredraft;
-        }
-        return "";
-      });
-      // Track DB-persisted draft presence independently of the composer
-      // text (the operator may have typed over it), so "Delete draft"
-      // reflects what's actually saved server-side.
-      setHasSavedDraft(Boolean((threadResult.value.draft ?? "").trim()));
-      setError(null);
-    } else {
-      const message =
-        threadResult.reason instanceof Error
-          ? threadResult.reason.message
-          : "Failed to load thread";
-      setError(message);
     }
+    setPendingSends((prev) =>
+      prev.filter((pending) => {
+        if (pending.failed) return true; // keep failed bubbles so the operator can retry
+        const ts = freshOutTexts.get(pending.text);
+        if (ts === undefined) return true;
+        const pendingTs = Date.parse(pending.sentAt);
+        if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
+        return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
+      })
+    );
+    setComposer((prev) => {
+      if (prev) return prev; // operator already typed something
+      const explicitDraft = fresh.draft;
+      if (explicitDraft) {
+        setComposerSource("draft");
+        return explicitDraft;
+      }
+      // No explicit draft - fall back to AI predraft (first suggested
+      // reply) so the operator opens an already-filled composer when
+      // /today has pre-warmed the cache. Only when the operator has
+      // opted into full AI drafts — at lower help levels the composer
+      // stays empty so they write it themselves.
+      const aiPredraft = fresh.suggestedReplies?.replies?.[0]?.text?.trim();
+      if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
+        setComposerSource("predraft");
+        return aiPredraft;
+      }
+      return "";
+    });
+    // Track DB-persisted draft presence independently of the composer
+    // text (the operator may have typed over it), so "Delete draft"
+    // reflects what's actually saved server-side.
+    setHasSavedDraft(Boolean((fresh.draft ?? "").trim()));
+    setError(null);
+  }, []);
+
+  // Paint the conversation off /data/thread alone. This is the ONLY fetch
+  // that gates first paint — time-to-first-message is now a single runner
+  // round-trip instead of max(thread, full-inbox, platforms, 150-row-logs).
+  // Uses the SWR cache so a hover-prefetched or previously-seen thread paints
+  // instantly and revalidates in the background.
+  const refreshThread = useCallback(async () => {
+    try {
+      const fresh = await apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`, {
+        swr: true,
+        onFresh: (data) => applyThread(data as ThreadResponse)
+      });
+      applyThread(fresh);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load thread";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [threadId, applyThread]);
+
+  // Secondary, non-blocking context: the siblings picker, platform cards and
+  // the degraded-banner log link. Never gates first paint and is cached, so
+  // it is cheap and does not re-fire on the chat-paint path.
+  const refreshSiblings = useCallback(async () => {
+    const [inboxResult, platformsResult, logsResult] = await Promise.allSettled([
+      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 5000 }),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150", { ttlMs: 5000 })
+    ]);
     if (inboxResult.status === "fulfilled") setSiblings(inboxResult.value.rows);
     if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
     if (logsResult.status === "fulfilled") setLogs(logsResult.value);
-    setLoading(false);
-  }, [threadId]);
+  }, []);
+
+  // Full refresh used by user actions (send / snooze / schedule / mark-done):
+  // paint the thread first, then refresh the surrounding context in the
+  // background. SSE-driven refreshes use refreshThread directly so a scan
+  // burst never re-pulls the inbox/platforms/logs.
+  const refresh = useCallback(async () => {
+    await refreshThread();
+    void refreshSiblings();
+  }, [refreshThread, refreshSiblings]);
 
   useEffect(() => {
     refresh().catch((err) => {
@@ -806,6 +855,25 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // Debounced thread-only refresh for SSE bursts. A multi-thread scan emits
+  // one THREAD_UPDATED per touched thread; without this, each event triggered
+  // a full refetch and the open thread page fired ~N requests and janked.
+  // Trailing debounce collapses a burst into a single /data/thread refetch.
+  const threadRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleThreadRefresh = useCallback(() => {
+    if (threadRefreshTimerRef.current) clearTimeout(threadRefreshTimerRef.current);
+    threadRefreshTimerRef.current = setTimeout(() => {
+      threadRefreshTimerRef.current = null;
+      void refreshThread();
+    }, 450);
+  }, [refreshThread]);
+  useEffect(
+    () => () => {
+      if (threadRefreshTimerRef.current) clearTimeout(threadRefreshTimerRef.current);
+    },
+    []
+  );
 
   // Thread-local composer + AI state must NOT leak across threads. The page
   // does not remount when navigating /thread/A -> /thread/B (same App Router
@@ -868,7 +936,7 @@ export default function ThreadPage() {
       }>).detail;
       if (!detail || !threadId || detail.threadId !== threadId) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
-        void refresh().finally(() => {
+        void refreshThread().finally(() => {
           setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
         });
       } else if (detail.type === "MESSAGE_SEND_FAILED" && detail.clientSendId) {
@@ -881,7 +949,9 @@ export default function ThreadPage() {
           )
         );
       } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
-        void refresh();
+        // Thread-only + debounced: a scan burst of THREAD_UPDATED events
+        // collapses into one /data/thread refetch instead of N full refreshes.
+        scheduleThreadRefresh();
       } else if (detail.type === "SCAN_THREAD_STARTED") {
         setRescanStage("Opening thread");
         if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
@@ -894,7 +964,7 @@ export default function ThreadPage() {
           clearTimeout(rescanTimeoutRef.current);
           rescanTimeoutRef.current = null;
         }
-        void refresh();
+        void refreshThread();
       }
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
@@ -902,7 +972,7 @@ export default function ThreadPage() {
       window.removeEventListener("runner-event", onRunnerEvent as EventListener);
       if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
     };
-  }, [threadId, refresh]);
+  }, [threadId, refreshThread, scheduleThreadRefresh]);
 
   // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
@@ -1725,19 +1795,10 @@ export default function ThreadPage() {
     );
   }, [logs, thread]);
 
-  // Voice match - built from this thread's outbound history. Memos
-  // live up here (before early returns) so the React hook order is
-  // stable across the loading/loaded transition.
-  const voiceCorpus = useMemo(() => {
-    if (!thread) return buildCorpusStats([]);
-    return buildCorpusStats(
-      thread.messages.filter((m) => m.direction === "OUT").map((m) => m.text)
-    );
-  }, [thread]);
-  const voiceScore = useMemo(
-    () => scoreDraftAgainstCorpus(composer, voiceCorpus),
-    [composer, voiceCorpus]
-  );
+  // (Removed dead voice-match computation: a per-keystroke
+  // scoreDraftAgainstCorpus(composer, …) plus a per-thread buildCorpusStats
+  // over the entire OUT history whose result was never rendered — wasted
+  // work on the composer's hot path.)
 
   // Issue #331. Debounced draft-coverage check: ~1.4s after the operator
   // stops typing, ask the runner which open loops the in-flight draft
@@ -1822,20 +1883,29 @@ export default function ThreadPage() {
   //   - bubbles with no displayable content at all (empty text + no
   //     playable attachments + no transcript) so the thread never
   //     paints a literally-blank bubble.
-  const visibleMessagesBeforeReactionFold: ThreadMessage[] = (thread?.messages ?? []).filter((m) => {
-    if (isNonContentIMessageSystemEvent(m.text)) return false;
-    const text = (m.text ?? "").trim();
-    const hasText = text.length > 0;
-    const hasPlayable = (m.attachments ?? []).some(
-      (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
-    );
-    const hasTranscript =
-      !!m.audioTranscription &&
-      m.audioTranscription.status === "transcribed" &&
-      !!m.audioTranscription.transcript &&
-      m.audioTranscription.transcript.trim().length > 0;
-    return hasText || hasPlayable || hasTranscript;
-  });
+  // Memoized on thread.messages so a keystroke in the composer (which
+  // re-renders this 4000-line component) or a 3s poll tick does NOT re-run
+  // this full filter pass and hand a fresh array reference to the reaction-
+  // fold and reply-graph memos below — they only recompute when messages
+  // actually change.
+  const visibleMessagesBeforeReactionFold: ThreadMessage[] = useMemo(
+    () =>
+      (thread?.messages ?? []).filter((m) => {
+        if (isNonContentIMessageSystemEvent(m.text)) return false;
+        const text = (m.text ?? "").trim();
+        const hasText = text.length > 0;
+        const hasPlayable = (m.attachments ?? []).some(
+          (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
+        );
+        const hasTranscript =
+          !!m.audioTranscription &&
+          m.audioTranscription.status === "transcribed" &&
+          !!m.audioTranscription.transcript &&
+          m.audioTranscription.transcript.trim().length > 0;
+        return hasText || hasPlayable || hasTranscript;
+      }),
+    [thread?.messages]
+  );
   // #422: iMessage stores arbitrary-emoji reactions as "Reacted X to
   // 'Y'" text bubbles when either party isn't on iOS 18. Collapse those
   // synthesised bubbles into reaction stickers on the parent so the
@@ -1852,8 +1922,9 @@ export default function ThreadPage() {
         ),
       [visibleMessagesBeforeReactionFold]
     );
-  const visibleMessages: ThreadMessage[] = visibleMessagesBeforeReactionFold.filter(
-    (m) => !synthesizedReactionHiddenIds.has(m.id)
+  const visibleMessages: ThreadMessage[] = useMemo(
+    () => visibleMessagesBeforeReactionFold.filter((m) => !synthesizedReactionHiddenIds.has(m.id)),
+    [visibleMessagesBeforeReactionFold, synthesizedReactionHiddenIds]
   );
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
@@ -4263,18 +4334,22 @@ export default function ThreadPage() {
         </div>
       </aside>
 
-      <ReceiptsDrawer
-        open={receiptsOpen}
-        onClose={() => setReceiptsOpen(false)}
-        rows={thread.receipts}
-        title="Thread receipts"
-      />
+      {receiptsEverOpened ? (
+        <ReceiptsDrawer
+          open={receiptsOpen}
+          onClose={() => setReceiptsOpen(false)}
+          rows={thread.receipts}
+          title="Thread receipts"
+        />
+      ) : null}
 
-      <ProfileDrawer
-        open={profileDrawerOpen}
-        personId={thread.personId ?? null}
-        onClose={() => setProfileDrawerOpen(false)}
-      />
+      {profileEverOpened ? (
+        <ProfileDrawer
+          open={profileDrawerOpen}
+          personId={thread.personId ?? null}
+          onClose={() => setProfileDrawerOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

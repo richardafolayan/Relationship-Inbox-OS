@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
 import type {
   HealthResponse,
   InboxResponse,
@@ -108,12 +108,19 @@ const OXBLOOD_TODAY_VARS = {
 
 export default function TodayPage() {
   const router = useRouter();
-  const [data, setData] = useState<InboxResponse | null>(null);
-  const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
+  // Seed from the shared client cache so revisiting Today (e.g. back from a
+  // thread) paints the last-known queue instantly instead of a blank skeleton,
+  // then revalidates in the background.
+  const [data, setData] = useState<InboxResponse | null>(
+    () => peekCache<InboxResponse>("/runner/data/inbox") ?? null
+  );
+  const [platforms, setPlatforms] = useState<PlatformCard[]>(
+    () => peekCache<PlatformCard[]>("/runner/data/platforms") ?? []
+  );
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
+  const [loaded, setLoaded] = useState(() => peekCache<InboxResponse>("/runner/data/inbox") !== undefined);
   // True when the /data/inbox fetch failed outright (runner down /
   // unreachable). Without this the empty "You're caught up" state renders
   // for an unreachable runner — indistinguishable from a genuinely empty
@@ -145,30 +152,57 @@ export default function TodayPage() {
     GREEN: 0
   }));
 
+  const applyInbox = useCallback((inbox: InboxResponse) => {
+    setInboxUnavailable(false);
+    setData(inbox);
+    const stillPending = new Set(
+      inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+    );
+    setRemovedIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     const [inbox, platformRows, healthData] = await Promise.all([
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => [] as PlatformCard[]),
-      apiGet<HealthResponse>("/runner/health").catch(() => null)
+      // SWR: paint the cached queue immediately, revalidate in the background.
+      apiGet<InboxResponse>("/runner/data/inbox", {
+        ttlMs: 4000,
+        swr: true,
+        onFresh: (d) => applyInbox(d as InboxResponse)
+      }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(
+        () => [] as PlatformCard[]
+      ),
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null)
     ]);
     setInboxUnavailable(inbox === null);
-    if (inbox) {
-      setData(inbox);
-      const stillPending = new Set(
-        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
-      );
-      setRemovedIds((prev) => {
-        const next = new Set<string>();
-        prev.forEach((id) => {
-          if (stillPending.has(id)) next.add(id);
-        });
-        return next;
-      });
-    }
+    if (inbox) applyInbox(inbox);
     setPlatforms(platformRows ?? []);
     if (healthData) setHealth(healthData);
     setLoaded(true);
-  }, []);
+  }, [applyInbox]);
+
+  // Debounce SSE-driven refreshes so a multi-thread scan (one THREAD_UPDATED
+  // per touched thread) collapses into a single inbox refetch instead of N.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, 450);
+  }, [refresh]);
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    },
+    []
+  );
 
   const loadProfile = useCallback(() => {
     void apiGet<OperatorProfile>("/runner/data/operator-profile")
@@ -204,7 +238,7 @@ export default function TodayPage() {
 
   useEffect(() => {
     void refresh();
-    const onResync = () => void refresh();
+    const onResync = () => scheduleRefresh();
     const onRunnerEvent = (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string }>).detail;
       const type = detail?.type;
@@ -216,7 +250,7 @@ export default function TodayPage() {
         type === "THREAD_UPDATED" ||
         type === "SCAN_FINISHED"
       ) {
-        void refresh();
+        scheduleRefresh();
       }
     };
     window.addEventListener("runner-resync", onResync);
@@ -225,7 +259,7 @@ export default function TodayPage() {
       window.removeEventListener("runner-resync", onResync);
       window.removeEventListener("runner-event", onRunnerEvent as EventListener);
     };
-  }, [refresh]);
+  }, [refresh, scheduleRefresh]);
 
   const advanceHero = useCallback((id: string, label: string, level: "RED" | "AMBER" | "GREEN") => {
     setTransitioning({ id, label });

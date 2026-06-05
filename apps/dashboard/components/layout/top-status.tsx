@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
@@ -332,30 +333,33 @@ export function TopStatus() {
   const [, setTick] = useState(0);
 
   const refresh = useCallback(async () => {
+    // Short TTLs so /health and /data/platforms de-dupe with the app-shell's
+    // own 8s poll via the shared client cache instead of issuing duplicate
+    // requests on overlapping cadences.
     const [healthData, queueData, platformData] = await Promise.all([
-      apiGet<HealthResponse>("/runner/health").catch(() => null),
-      apiGet<SendQueueResponse>("/runner/data/send-queue").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => null)
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null),
+      apiGet<SendQueueResponse>("/runner/data/send-queue", { ttlMs: 3000 }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => null)
     ]);
     if (healthData) setHealth(healthData);
     if (queueData) setQueue(queueData);
     if (platformData) setPlatforms(platformData);
     setReady(true);
   }, []);
+  // Stable handle for the action handlers below that trigger an out-of-band
+  // refresh (scan now, reset session, etc.) without depending on refresh's
+  // identity.
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refreshRef.current(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+  // Poll while visible; paused in background tabs. The hook fires an
+  // immediate tick on mount and a catch-up tick on return to foreground.
+  useVisiblePolling(() => void refresh(), POLL_INTERVAL_MS);
 
-  // Tick once a second so the "scan Xm ago" caption stays current.
-  useEffect(() => {
-    const timer = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  // Tick once a second so the "scan Xm ago" caption stays current — but only
+  // while the tab is visible, so a backgrounded tab isn't re-rendering the
+  // status bar every second for a caption nobody is reading.
+  useVisiblePolling(() => setTick((n) => n + 1), 1000);
 
   // Issue #369. Subscribe to per-thread Reassess in-flight signals so
   // the ticker surfaces "Reassessing thread" while a kebab → Reassess

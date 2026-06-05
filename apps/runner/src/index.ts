@@ -4,6 +4,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
+import compression from "compression";
 import multer from "multer";
 import OpenAI from "openai";
 import { z } from "zod";
@@ -113,6 +114,29 @@ import {
 import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
+// How far back the per-thread receipts lookup scans the audit log. A thread's
+// own scan/send receipts are recent, so 180 days is generous while keeping the
+// query off the full historical telemetry table.
+const RECEIPTS_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000;
+
+// Gzip JSON responses. The inbox (hundreds of rows of preview/summary text)
+// and thread (up to 120 messages + reply-brief/suggested-reply JSON) payloads
+// are 5-10x compressible, so this cuts transfer + client JSON.parse on every
+// navigation and poll. The SSE stream (/events, text/event-stream) is
+// excluded — compression buffers chunked responses and would break live
+// events — and callers can opt out with an `x-no-compression` header.
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (req.path === "/events") return false;
+      if (req.headers["x-no-compression"]) return false;
+      const type = res.getHeader("Content-Type");
+      if (typeof type === "string" && type.includes("text/event-stream")) return false;
+      return compression.filter(req, res);
+    }
+  })
+);
+
 // Most routes carry tiny JSON. /control/pilot-feedback can carry several
 // base64 screenshots, so it gets a larger limit; everything else stays tight.
 const jsonSmall = express.json({ limit: "1mb" });
@@ -4197,8 +4221,17 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     suggestedRepliesStatus = "generating";
   }
 
+  // Bound the receipts lookup to a recent window. Without it this runs a
+  // `detailsJson LIKE '%threadId%'` scan over the ENTIRE audit_logs table
+  // (hundreds of thousands of telemetry rows) on EVERY thread open — the
+  // dominant chunk of "click a chat and it takes forever". The timestamp
+  // floor lets SQLite use the leading-timestamp index (@@index([timestamp,
+  // platform, action, status])) to range-scan only recent rows; a thread's
+  // own receipts are recent, so nothing visible is lost.
+  const receiptsSince = new Date(Date.now() - RECEIPTS_LOOKBACK_MS);
   const receipts = await prisma.auditLog.findMany({
     where: {
+      timestamp: { gte: receiptsSince },
       OR: [
         { detailsJson: { contains: thread.id } },
         { action: { in: ["SELECTOR_TEST", "SELECTOR_FAIL"] }, platform: thread.platform }
