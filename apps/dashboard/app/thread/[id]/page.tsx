@@ -46,6 +46,8 @@ import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 import { ProfileDrawer } from "@/components/common/profile-drawer";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
+import { autocorrectAtCaret } from "@/lib/autocorrect";
+import { blobToWhisperWav } from "@/lib/dictation-audio";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
@@ -88,6 +90,11 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 // near the bottom keeps the auto-scroll-on-new-message glue active.
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
+// #461 (pilot R-0060): once the operator has scrolled up this far from the
+// newest message, surface a floating "jump to latest" button. Larger than
+// SCROLL_BOTTOM_THRESHOLD so it appears only once you're genuinely reading
+// history, not on a small nudge away from the bottom.
+const JUMP_TO_LATEST_THRESHOLD = 600;
 
 // Picks the topmost visible message bubble below the sticky header to
 // anchor scroll preservation on. Selecting by data-message-id (set on
@@ -452,6 +459,16 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  // #466 (pilot R-0065): remembers the most recent autocorrection so an
+  // immediate Backspace can revert it (iOS-style). Cleared on any other edit.
+  const lastAutocorrectRef = useRef<{ original: string; corrected: string; value: string } | null>(null);
+  // #462 (pilot R-0061): voice-to-text dictation into the composer. Separate
+  // from the iMessage voice-note recorder above (that one sends an audio
+  // attachment; this one transcribes speech into editable text).
+  const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [dictationAvailable, setDictationAvailable] = useState(false);
+  const dictationRecorderRef = useRef<MediaRecorder | null>(null);
+  const dictationChunksRef = useRef<BlobPart[]>([]);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -597,6 +614,9 @@ export default function ThreadPage() {
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
+  // #461 (pilot R-0060): controls the floating "jump to latest" button.
+  // True when the operator has scrolled up away from the newest message.
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
   // After a load-older fires, the layout effect needs to put the
   // operator's viewport back where it was. We anchor on a specific
   // visible message element rather than on `prevTop + (newHeight -
@@ -1042,6 +1062,103 @@ export default function ThreadPage() {
     recorderRef.current = null;
     setRecording(false);
   }, [recording]);
+
+  // #462: probe once whether the runner can transcribe, so the Dictate
+  // control renders enabled vs. disabled-with-explanation.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ dictationAvailable: boolean }>("/runner/data/transcription-capabilities")
+      .then((d) => {
+        if (!cancelled) setDictationAvailable(Boolean(d?.dictationAvailable));
+      })
+      .catch(() => {
+        /* leave disabled — the button explains why on hover */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // #462: record a short clip, post it to the runner for transcription, and
+  // append the returned text to the composer for the operator to review. No
+  // autosend; nothing is persisted server-side.
+  const startDictation = useCallback(async () => {
+    if (dictationStatus !== "idle") return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // webm/opus is the broadly-supported recording format (incl. Firefox);
+      // fall back to mp4/aac on Safari. The runner transcodes either way.
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      dictationChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) dictationChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
+        if (raw.size === 0) {
+          setDictationStatus("idle");
+          return;
+        }
+        setDictationStatus("transcribing");
+        try {
+          // Convert the recording to 16 kHz mono WAV in the browser. The
+          // runner's local-whisper provider normalises audio with macOS
+          // afconvert, which can't read the webm/opus MediaRecorder emits
+          // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
+          let wav: Blob;
+          try {
+            wav = await blobToWhisperWav(raw);
+          } catch {
+            setError("Could not prepare the recording for transcription.");
+            setDictationStatus("idle");
+            return;
+          }
+          const form = new FormData();
+          form.append("audio", wav, "dictation.wav");
+          const resp = await fetch("/runner/control/transcribe-dictation", {
+            method: "POST",
+            body: form
+          });
+          const data = (await resp.json().catch(() => ({}))) as {
+            ok?: boolean;
+            text?: string;
+            error?: string;
+          };
+          if (!resp.ok || !data.ok) {
+            setError(data?.error || "Could not transcribe the recording.");
+          } else if (typeof data.text === "string" && data.text.trim()) {
+            const spoken = data.text.trim();
+            setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+            setComposerSource("user");
+          } else {
+            setError("Didn't catch any speech. Try again.");
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Dictation failed.");
+        } finally {
+          setDictationStatus("idle");
+        }
+      };
+      recorder.start();
+      dictationRecorderRef.current = recorder;
+      setDictationStatus("recording");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Microphone access denied");
+      setDictationStatus("idle");
+    }
+  }, [dictationStatus]);
+
+  const stopDictation = useCallback(() => {
+    if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
+    dictationRecorderRef.current.stop();
+    dictationRecorderRef.current = null;
+  }, [dictationStatus]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -1769,23 +1886,28 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
-    // Bubbles + dividers collapse over 150ms (see bubble/DayDivider
-    // className). Re-centre on every layout change during that
-    // window so the focused parent slides into the centre rather
-    // than the layout shifting underneath a one-shot calculation.
-    const recenter = () => {
+    // #465 (pilot R-0064): position the focused message as HIGH as
+    // possible — its top sits just below the sticky header — rather than
+    // centring it, so the message and the replies beneath it read
+    // top-down. scrollTop clamps at the bottom, so a focused message near
+    // the end of the thread still lands as high as the remaining content
+    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
+    // className), so re-align on every layout change during that window
+    // rather than relying on a one-shot calculation.
+    const realignToTop = () => {
       const containerRect = container.getBoundingClientRect();
       const targetRect = target.getBoundingClientRect();
-      const delta = (targetRect.top - containerRect.top)
-        - (containerRect.height / 2)
-        + (targetRect.height / 2);
+      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
+      // message clears the glassy sticky header.
+      const FOCUS_HEADER_OFFSET = 64;
+      const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
       container.scrollTop = container.scrollTop + delta;
     };
-    recenter();
+    realignToTop();
     if (anchorGuardStopRef.current) anchorGuardStopRef.current();
-    anchorGuardStopRef.current = startScrollSettlingGuard(container, recenter);
+    anchorGuardStopRef.current = startScrollSettlingGuard(container, realignToTop);
     // `focusTrigger` is included so clicking a chip whose parent is
-    // already the current focus re-centres rather than no-opping.
+    // already the current focus re-aligns rather than no-opping.
   }, [focusedThreadParentId, focusTrigger]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
@@ -1849,6 +1971,7 @@ export default function ThreadPage() {
   useEffect(() => {
     if (thread && prevThreadIdRef.current !== thread.id) {
       stickToBottomRef.current = true;
+      setShowJumpToLatest(false);
       prevThreadIdRef.current = thread.id;
     }
   }, [thread]);
@@ -1916,10 +2039,18 @@ export default function ThreadPage() {
     // stack is naturally bounded by the collapsed background, and
     // pulling in new history would shift the underlying timeline so
     // exit-focus lands the operator far from where they started.
-    if (focusedThreadParentId) return;
+    if (focusedThreadParentId) {
+      // The jump-to-latest affordance is meaningless inside the bounded
+      // focused stack — keep it hidden there.
+      if (showJumpToLatest) setShowJumpToLatest(false);
+      return;
+    }
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    // #461 (pilot R-0060): surface the floating jump-to-latest button once
+    // the operator has scrolled meaningfully up from the newest message.
+    setShowJumpToLatest(distanceFromBottom > JUMP_TO_LATEST_THRESHOLD);
     // Scroll near the top + server says more exists → request the next
     // older page. Capture an anchor element (the topmost visible message
     // bubble below the sticky header) and its viewport offset so the
@@ -1939,6 +2070,17 @@ export default function ThreadPage() {
       void loadOlderMessages();
     }
   };
+
+  // #461 (pilot R-0060): jump straight back to the newest message and
+  // re-arm bottom-stickiness so subsequent inbound messages keep the
+  // operator pinned at the foot of the thread.
+  const scrollToLatest = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
 
   if (!thread) {
     // `loading` flips false the moment the fetch settles. A failed fetch
@@ -3035,7 +3177,23 @@ export default function ThreadPage() {
           </div>
         </div>
 
-        <div className="flex-shrink-0 border-t border-hairline bg-paper">
+        <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
+          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
+              above the composer's top edge so it sits in the middle just
+              above the input, with a glassy frosted-surface treatment that
+              matches the sticky header. Hidden in focused mode (the stack is
+              bounded there). */}
+          {showJumpToLatest && !focusedThreadParentId ? (
+            <button
+              type="button"
+              onClick={scrollToLatest}
+              aria-label="Jump to latest message"
+              title="Jump to latest"
+              className="absolute -top-12 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] text-ink-2 shadow-card backdrop-blur-md backdrop-saturate-150 transition-colors duration-calm hover:border-hairline-strong hover:bg-[color-mix(in_oklch,var(--paper)_88%,transparent)] hover:text-ink"
+            >
+              <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
+            </button>
+          ) : null}
           <div className="mx-auto w-full max-w-[820px] px-8 pb-2 pt-2">
             {error ? (
               <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
@@ -3106,13 +3264,53 @@ export default function ThreadPage() {
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
+                // #466 (pilot R-0065): native browser assists where supported
+                // (spellCheck underlines on desktop; autoCapitalize/autoCorrect
+                // on iOS/Safari). The JS layer below covers desktop Firefox.
+                spellCheck
+                autoCapitalize="sentences"
+                autoCorrect="on"
                 onChange={(event) => {
-                  setComposer(event.target.value);
+                  const nextValue = event.target.value;
+                  const caret = event.target.selectionStart ?? nextValue.length;
                   if (composerSource === "predraft" || composerSource === "empty") {
                     setComposerSource("user");
                   }
+                  // #466: autocorrect only on a single typed character that
+                  // appends at the very end of the text, so the caret stays
+                  // put and mid-text edits are never disturbed.
+                  if (nextValue.length === composer.length + 1 && caret === nextValue.length) {
+                    const fix = autocorrectAtCaret(nextValue, caret);
+                    if (fix) {
+                      lastAutocorrectRef.current = {
+                        original: fix.original,
+                        corrected: fix.corrected,
+                        value: fix.text
+                      };
+                      setComposer(fix.text);
+                      return;
+                    }
+                  }
+                  lastAutocorrectRef.current = null;
+                  setComposer(nextValue);
                 }}
                 onKeyDown={(event) => {
+                  // #466: an immediate Backspace reverts the last
+                  // autocorrection to exactly what the operator typed.
+                  if (
+                    event.key === "Backspace" &&
+                    lastAutocorrectRef.current &&
+                    composer === lastAutocorrectRef.current.value
+                  ) {
+                    event.preventDefault();
+                    const { original, corrected, value } = lastAutocorrectRef.current;
+                    const terminator = value.slice(-1);
+                    const reverted =
+                      value.slice(0, value.length - 1 - corrected.length) + original + terminator;
+                    lastAutocorrectRef.current = null;
+                    setComposer(reverted);
+                    return;
+                  }
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
                     // #65: stop the native window-level keydown listener
@@ -3275,6 +3473,45 @@ export default function ThreadPage() {
                       </button>
                     </>
                   ) : null}
+                  {/* #462 (pilot R-0061): Dictate — record speech and have
+                      the runner transcribe it into the composer for review.
+                      Distinct from the iMessage voice-note mic (that attaches
+                      audio to send). Available on every platform; disabled
+                      with an explanation when transcription isn't configured. */}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      dictationStatus === "recording" ? stopDictation() : void startDictation()
+                    }
+                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    title={
+                      dictationAvailable
+                        ? dictationStatus === "recording"
+                          ? "Stop and transcribe"
+                          : "Dictate your reply"
+                        : "Voice dictation needs transcription enabled on the runner"
+                    }
+                    aria-label="Dictate"
+                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      dictationStatus === "recording"
+                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
+                  >
+                    {dictationStatus === "transcribing" ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Mic
+                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                        strokeWidth={1.8}
+                      />
+                    )}
+                    {dictationStatus === "recording"
+                      ? "Stop"
+                      : dictationStatus === "transcribing"
+                        ? "Transcribing…"
+                        : "Dictate"}
+                  </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
                       type="button"
