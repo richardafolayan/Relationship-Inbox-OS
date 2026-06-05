@@ -363,6 +363,17 @@ export class IMessageDb {
    * (decoded from attributedBody when text is NULL).
    */
   listThreads(limit: number, opts: { unreadOnly: boolean }): IMessageThreadRow[] {
+    // Exclude tapback/reaction rows (associated_message_type 2000-2005 /
+    // 3000-3005, mirroring isTapbackType) from both the unread count and the
+    // last-message preview. Without this a tapback inflates the unread badge
+    // and a recent tapback can surface as the chat's "last message".
+    // COALESCE so normal rows (type 0 or NULL) are kept. The shared
+    // `ORDER BY m.date DESC, m.ROWID DESC` tie-break makes all four
+    // last-message subqueries resolve to the SAME row on a date tie, so the
+    // preview text, timestamp, and direction can't come from different rows.
+    const notTapback =
+      "NOT (COALESCE(m.associated_message_type, 0) BETWEEN 2000 AND 2005 " +
+      "OR COALESCE(m.associated_message_type, 0) BETWEEN 3000 AND 3005)";
     const rows = this.db
       .prepare(
         `SELECT
@@ -374,23 +385,23 @@ export class IMessageDb {
            c.style                           AS style,
            (SELECT COUNT(*) FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID AND m.is_read = 0 AND m.is_from_me = 0) AS unreadCount,
+              WHERE cmj.chat_id = c.ROWID AND m.is_read = 0 AND m.is_from_me = 0 AND ${notTapback}) AS unreadCount,
            (SELECT m.date FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastDate,
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastDate,
            (SELECT m.text FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastText,
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastText,
            (SELECT m.attributedBody FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastBody,
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastBody,
            (SELECT m.is_from_me FROM message m
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
-              WHERE cmj.chat_id = c.ROWID
-              ORDER BY m.date DESC LIMIT 1) AS lastIsFromMe
+              WHERE cmj.chat_id = c.ROWID AND ${notTapback}
+              ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastIsFromMe
          FROM chat c
          ORDER BY lastDate DESC NULLS LAST
          LIMIT ?`
@@ -409,7 +420,10 @@ export class IMessageDb {
         lastIsFromMe: number | null;
       }>;
 
-    const nonAutomated = rows.filter((r) => !looksLikeAutomatedSender(r.chatIdentifier));
+    // Only apply the automated-sender heuristic to 1:1 chats. Group chats
+    // (style 43) have synthetic "chatNNN" identifiers that the heuristic can
+    // mistake for an alphanumeric service ID and wrongly drop.
+    const nonAutomated = rows.filter((r) => r.style === 43 || !looksLikeAutomatedSender(r.chatIdentifier));
     const filtered = opts.unreadOnly ? nonAutomated.filter((r) => r.unreadCount > 0) : nonAutomated;
 
     return filtered.map((r) => {
@@ -449,6 +463,30 @@ export class IMessageDb {
       )
       .all(chatId) as Array<{ handleId: string }>;
     return rows.map((r) => r.handleId);
+  }
+
+  /**
+   * Map every chat's guid to its participant handle ids (phone numbers /
+   * emails). A 1:1 conversation has exactly one handle; group chats have
+   * several. Used by the birthday sync to bridge a Thread (keyed by chat
+   * guid) back to a contact handle for matching against macOS Contacts.
+   */
+  listChatHandleMap(): Map<string, string[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT c.guid AS guid, h.id AS handleId
+           FROM chat c
+           JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+           JOIN handle h ON h.ROWID = chj.handle_id`
+      )
+      .all() as Array<{ guid: string; handleId: string }>;
+    const map = new Map<string, string[]>();
+    for (const row of rows) {
+      const list = map.get(row.guid) ?? [];
+      list.push(row.handleId);
+      map.set(row.guid, list);
+    }
+    return map;
   }
 
   private fetchAttachmentsByMessageRowIds(rowIds: number[]): Map<number, IMessageAttachment[]> {
@@ -501,27 +539,54 @@ export class IMessageDb {
   private fetchReactionsByMessageGuids(messageGuids: string[]): Map<string, IMessageReaction[]> {
     const map = new Map<string, IMessageReaction[]>();
     if (messageGuids.length === 0) return map;
-    const placeholders = messageGuids.map(() => "?").join(",");
-    const rows = this.db
-      .prepare(
-        `SELECT
-           m.associated_message_guid AS parentGuidRaw,
-           m.associated_message_type AS associatedType,
-           m.is_from_me              AS isFromMe,
-           m.date                    AS date
-         FROM message m
-         WHERE m.associated_message_type BETWEEN 2000 AND 3005
-           AND m.associated_message_guid IN (${messageGuids.map(() => "?").join(",")}
-                                              ${placeholders ? "," : ""}
-                                              ${messageGuids.map(() => "?").join(",")})
-         ORDER BY m.date ASC`
-      )
-      .all(
-        // associated_message_guid is stored prefixed: "p:0/<guid>" or "bp:<guid>"
-        // — bind both forms so we don't miss either.
-        ...messageGuids.map((g) => `p:0/${g}`),
-        ...messageGuids.map((g) => `bp:${g}`)
-      ) as Array<{ parentGuidRaw: string; associatedType: number; isFromMe: number; date: number | bigint | null }>;
+
+    // Each guid is bound TWICE (the "p:0/<guid>" and "bp:<guid>" prefix
+    // forms), so a thread with N messages needs 2N bound parameters. A
+    // multi-year heavy thread blows SQLite's SQLITE_MAX_VARIABLE_NUMBER
+    // ("too many SQL variables") and the whole thread silently dropped on
+    // import. Chunk the guid list (400 -> 800 params/query, safe even on
+    // the oldest 999-limit SQLite) and accumulate raw rows; the
+    // aggregation below is order-independent (it keeps the latest row per
+    // reaction key via lastDate) so running it once over the combined
+    // rows is identical to the un-chunked result.
+    const CHUNK = 400;
+    const rows: Array<{
+      parentGuidRaw: string;
+      associatedType: number;
+      isFromMe: number;
+      date: number | bigint | null;
+      handleId: number | null;
+    }> = [];
+    for (let i = 0; i < messageGuids.length; i += CHUNK) {
+      const chunk = messageGuids.slice(i, i + CHUNK);
+      const placeholders = chunk.map(() => "?").join(",");
+      const chunkRows = this.db
+        .prepare(
+          `SELECT
+             m.associated_message_guid AS parentGuidRaw,
+             m.associated_message_type AS associatedType,
+             m.is_from_me              AS isFromMe,
+             m.date                    AS date,
+             m.handle_id               AS handleId
+           FROM message m
+           WHERE m.associated_message_type BETWEEN 2000 AND 3005
+             AND m.associated_message_guid IN (${placeholders},${placeholders})
+           ORDER BY m.date ASC`
+        )
+        .all(
+          // associated_message_guid is stored prefixed: "p:0/<guid>" or
+          // "bp:<guid>" — bind both forms so we don't miss either.
+          ...chunk.map((g) => `p:0/${g}`),
+          ...chunk.map((g) => `bp:${g}`)
+        ) as Array<{
+          parentGuidRaw: string;
+          associatedType: number;
+          isFromMe: number;
+          date: number | bigint | null;
+          handleId: number | null;
+        }>;
+      rows.push(...chunkRows);
+    }
 
     type ReactionKey = string; // `${kind}|${direction}`
     type Aggregator = Map<ReactionKey, { reaction: IMessageReaction; lastDate: number }>;
@@ -532,7 +597,11 @@ export class IMessageDb {
       if (!info) continue;
       const parentGuid = r.parentGuidRaw.replace(/^(?:p:0\/|bp:)/, "");
       const dir: "IN" | "OUT" = r.isFromMe === 1 ? "OUT" : "IN";
-      const key = `${info.kind}|${dir}`;
+      // Include the reactor's handle so two people in a group adding the
+      // same tapback kind don't collapse into one. Outbound reactions have
+      // no handle (self), so they key consistently. The apply/remove
+      // lifecycle still resolves per-reactor (same handle, latest wins).
+      const key = `${info.kind}|${dir}|${r.handleId ?? 0}`;
       const dateNum = typeof r.date === "bigint" ? Number(r.date) : (r.date ?? 0);
       const agg = byParent.get(parentGuid) ?? new Map();
       const prior = agg.get(key);
@@ -732,6 +801,37 @@ export class IMessageDb {
       error: row.error ?? 0,
       timestamp: new Date(unixMs).toISOString()
     };
+  }
+
+  /**
+   * Return guids of every outbound message in `chatGuid` whose chat.db
+   * `error` column is non-zero — i.e. Messages.app accepted the send,
+   * then later flipped it to "Not Delivered" (most common with
+   * SMS-fallback on a recipient whose iMessage activation lags). The
+   * scan loop uses this to hard-delete the matching Message rows from
+   * our DB so the thread reflects what the recipient actually saw.
+   * Unbounded by time on purpose: failures don't self-heal, and the
+   * delete-by-guid filter on the Prisma side is a no-op if we never
+   * persisted the row.
+   */
+  findFailedOutboundGuids(chatGuid: string): string[] {
+    const chat = this.db.prepare("SELECT ROWID AS chatId FROM chat WHERE guid = ?").get(chatGuid) as
+      | { chatId: number }
+      | undefined;
+    if (!chat) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT m.guid AS guid
+           FROM message m
+           JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+          WHERE cmj.chat_id = ?
+            AND m.is_from_me = 1
+            AND m.error IS NOT NULL
+            AND m.error != 0
+            AND m.guid IS NOT NULL`
+      )
+      .all(chat.chatId) as Array<{ guid: string | null }>;
+    return rows.map((r) => r.guid).filter((g): g is string => typeof g === "string" && g.length > 0);
   }
 
   /**

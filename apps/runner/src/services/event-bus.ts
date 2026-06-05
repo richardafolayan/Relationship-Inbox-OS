@@ -26,7 +26,19 @@ export function createEventBus(): EventBus {
     }
 
     for (const listener of subscribers) {
-      listener(event);
+      try {
+        listener(event);
+      } catch (error) {
+        // One bad subscriber must not abort delivery to the others, nor unwind
+        // into the emitter (e.g. send-queue tick()) where it would surface as a
+        // process-level unhandledRejection. The classic case is an SSE listener
+        // doing res.write() on a half-closed socket. Log and keep going.
+        console.warn(
+          `[event-bus] subscriber threw for ${event.type}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
     }
 
     return event;

@@ -32,6 +32,16 @@ export interface ThreadStub {
   needsReplyFromList?: boolean;
   isUnreadCandidate?: boolean;
   isRecentCandidate?: boolean;
+  /** True when the platform reports this thread as a group conversation. */
+  isGroup?: boolean;
+  /**
+   * The user-set group name as reported by the platform (e.g. the iMessage
+   * chat display name). Only populated for groups that have an explicit
+   * name. Downstream persists it onto the group thread's synthetic Person
+   * under `displayNameSource = "auto"`, so a manual rename is never
+   * overwritten.
+   */
+  groupName?: string;
 }
 
 export interface AttachmentPlaceholder {
@@ -200,13 +210,125 @@ export type RunnerEvent =
   | (RunnerEventBase & { type: "PERSONAL_PROFILE_FALLBACK"; platform: PlatformName; reason: string })
   | (RunnerEventBase & { type: "RESYNC_REQUIRED"; reason: string });
 
+/**
+ * A durable fact worth remembering about a contact — an exam, a trip, an
+ * interview, a life event. Extracted by the AI summary alongside open loops,
+ * but distinct from them: a loop is something to reply to now, a remember
+ * item is context to carry forward.
+ */
+export interface RememberItem {
+  /** Short third-person phrase, e.g. "Final exams", "Trip to Lagos". */
+  note: string;
+  /** ISO YYYY-MM-DD when a specific date is known, else null. */
+  date: string | null;
+}
+
 export interface SummaryOutput {
   summary: string;
   what_they_want: string;
   open_loops: string[];
+  /** Durable life facts worth remembering — events, milestones, deadlines. */
+  remember: RememberItem[];
   tone_notes: string[];
   needs_reply: boolean;
   urgency_hint?: string;
+  /**
+   * Compressed Reply Brief that drives the thread right rail. Generated in
+   * the same AI call as `summary`/`what_they_want`/`open_loops` so the
+   * catch-up, the obligation read, and the classification stay internally
+   * consistent. Optional so older AI runs / fallbacks still parse — when
+   * absent, the dashboard derives a safe brief from the legacy fields.
+   */
+  reply_brief?: ReplyBrief | null;
+}
+
+/**
+ * Classification of a point the AI extracted from the recent transcript.
+ *
+ * - required: the reply would feel incomplete if this point were ignored
+ *   (direct question, request, decision the contact asked the operator
+ *   to make, important news that deserves acknowledgement, multi-part
+ *   inbound where parts still need a response). Mirrored into the legacy
+ *   `open_loops` array so the existing checklist + draft-coverage flow
+ *   keeps working.
+ * - optional: a relationship-deepening or conversational move the AI
+ *   suggests but the contact did not actually ask for. Never gates
+ *   sending, never appears in the required list.
+ * - handled: a point that no longer needs action (the contact answered
+ *   themselves later, the operator already answered, the conversation
+ *   moved on, rhetorical, or covered by the operator's current draft).
+ */
+export type ReplyBriefPointStatus = "required" | "optional" | "handled";
+
+export interface ReplyBriefPoint {
+  /** Stable id within this brief — short slug, used as a UI key. */
+  id: string;
+  /** Plain-English phrasing the operator can read in under a beat. */
+  text: string;
+  status: ReplyBriefPointStatus;
+  /**
+   * For `handled` points only: a short reason it's been dropped from the
+   * required list (e.g. "you already answered this on Tuesday"). Optional;
+   * surfaced only in the expanded "More" disclosure.
+   */
+  reason?: string;
+}
+
+/**
+ * A single substance bullet pulled from the latest unanswered inbound. Used
+ * to surface the reply-relevant details (decisions, constraints, reasons,
+ * news, updates) in a scannable list so the operator can write a reply
+ * without rereading the message. Distinct from `ReplyBriefPoint` — these
+ * are NOT actions the operator should take, they're what the contact said.
+ */
+export interface ReplyBriefSubstancePoint {
+  /** Stable id within this brief — short slug, used as a UI key. */
+  id: string;
+  /** One short line capturing a single reply-relevant detail. */
+  text: string;
+}
+
+export interface ReplyBrief {
+  /**
+   * The compressed trace. Explains what the operator previously said
+   * (only when it explains why the contact replied the way they did),
+   * what the contact said back, and where the conversation has landed.
+   * NOT a generic relationship summary — that lives in `summary` /
+   * `fuller_context`. Plain British English, no abstract coaching.
+   */
+  where_it_stands: string;
+  /**
+   * The obligation read. States plainly whether the contact has asked
+   * the operator for anything and what would close the loop. If nothing
+   * is genuinely on the operator, says so directly (e.g. "He hasn't
+   * asked you anything. Acknowledge the offer, ask what he's looking at
+   * now, and you're done.").
+   */
+  on_you: string;
+  required_points: ReplyBriefPoint[];
+  optional_followups: ReplyBriefPoint[];
+  handled_points?: ReplyBriefPoint[];
+  /**
+   * Substance bullets from the latest unanswered inbound message — the
+   * reply-relevant details (decisions, constraints, reasons, news,
+   * updates) the contact actually shared. Surfaced by default below
+   * `where_it_stands` so the operator can write a thoughtful reply
+   * without rereading the raw message. Empty array in reconnect mode
+   * (no inbound is waiting on the operator).
+   */
+  they_said?: ReplyBriefSubstancePoint[] | null;
+  /** Longer context for the expanded "More" section, when useful. */
+  fuller_context?: string | null;
+  /** Durable relationship context (who they are, how the operator knows them). */
+  durable_context?: string | null;
+  /** One short line on how to approach the reply (tone, register). */
+  tone_steer?: string | null;
+  /**
+   * AI self-report: does the brief carry enough for the operator to write
+   * a reply without scrolling up into the message history? Surface signal
+   * only — the dashboard renders regardless.
+   */
+  enough_to_reply_without_scrolling: boolean;
 }
 
 export interface SuggestedReply {
@@ -260,6 +382,20 @@ export type AiErrorKind =
   | "empty_content"
   | "unknown";
 
+/**
+ * Presenter / demo mode for the full-presenter-demo flow.
+ *  - "off":     normal app, no demo seeding or guards.
+ *  - "sandbox": seeded showcase threads, mutations scoped to manifest,
+ *               all real platform adapters bypassed (sends route through
+ *               demoSendAdapter).
+ *  - "live":    real threads visible, every mutation intercepted + 403'd
+ *               server-side. Used together with presenterReadOnly=true.
+ *
+ * Optional so settings rows persisted before this field was added still
+ * parse — undefined is treated as "off".
+ */
+export type PresenterDemoMode = "off" | "sandbox" | "live";
+
 export interface AppSettings {
   scanIntervalSeconds: number;
   amberHours: number;
@@ -268,6 +404,19 @@ export interface AppSettings {
   maxMessagesPerThread: number;
   enabledPlatforms: PlatformName[];
   demoMode: boolean;
+  /**
+   * Full-presenter-demo mode. See PresenterDemoMode. Optional so old rows
+   * still parse; undefined == "off".
+   */
+  presenterDemoMode?: PresenterDemoMode;
+  /**
+   * Live-demo read-only flag. When true, the runner rejects every
+   * mutation listed in the presenter-guard table with a 403 so a stray
+   * client request cannot accidentally archive / send / snooze a real
+   * thread during a presentation. Always cleared via
+   * POST /control/presenter-demo/reset.
+   */
+  presenterReadOnly?: boolean;
   recentThreadSweepCount: number;
   // Optional so existing rows persisted before this field was added still
   // parse. When undefined, runner falls back to runnerConfig.aiProvider

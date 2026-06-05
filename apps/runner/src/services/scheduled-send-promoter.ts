@@ -14,7 +14,7 @@ export interface ScheduledSendPromoterPrisma {
       select: { id: true; clientSendId: true };
     }): Promise<Array<{ id: string; clientSendId: string }>>;
     updateMany(args: {
-      where: { id: { in: string[] } };
+      where: { id: { in: string[] }; status: "SCHEDULED"; scheduledFor: { lte: Date } };
       data: { status: "PENDING" };
     }): Promise<{ count: number }>;
     count(args: { where: { status: "PENDING" } }): Promise<number>;
@@ -59,21 +59,30 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
     if (running) return { promoted: 0 };
     running = true;
     try {
+      const now = new Date();
       const due = await prisma.sendRequest.findMany({
         where: {
           status: "SCHEDULED",
-          scheduledFor: { lte: new Date() }
+          scheduledFor: { lte: now }
         },
         orderBy: { scheduledFor: "asc" },
         select: { id: true, clientSendId: true }
       });
       if (due.length === 0) return { promoted: 0 };
 
+      // Status- AND time-guarded promotion. Between the findMany above and this
+      // write, the operator may have cancelled a row (SCHEDULED -> CANCELLED)
+      // or rescheduled it to the future. Re-checking `status` and `scheduledFor`
+      // in the WHERE means we never resurrect a cancelled row or fire a
+      // rescheduled one at its old time — without this guard, the id-only
+      // updateMany would flip a just-cancelled row back to PENDING. `count` is
+      // the number actually promoted, which can be fewer than `due.length`.
       const ids = due.map((r) => r.id);
-      await prisma.sendRequest.updateMany({
-        where: { id: { in: ids } },
+      const { count: promoted } = await prisma.sendRequest.updateMany({
+        where: { id: { in: ids }, status: "SCHEDULED", scheduledFor: { lte: now } },
         data: { status: "PENDING" }
       });
+      if (promoted === 0) return { promoted: 0 };
 
       // Tell the dashboard right away that the queue moved — the SystemStatusBar
       // shouldn't have to wait for its 3-second poll to notice the promotion.
@@ -97,7 +106,7 @@ export function createScheduledSendPromoter(deps: ScheduledSendPromoterDeps): Sc
         );
       }
 
-      return { promoted: due.length };
+      return { promoted };
     } finally {
       running = false;
     }

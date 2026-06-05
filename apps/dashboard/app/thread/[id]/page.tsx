@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import {
@@ -15,20 +16,55 @@ import {
   PanelLeftOpen,
   Paperclip,
   Send,
-  Sparkles
+  Sparkles,
+  Star,
+  X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
-import { IMessageMedia } from "@/components/thread/imessage-media";
+import { setFavourite } from "@/lib/favourites";
+import { runActionWithFeedback, showToast } from "@/lib/feedback";
+import { signalReassessStart } from "@/lib/reassess-status";
+import { readThreadSource } from "@/lib/thread-source";
+import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
+import { cn } from "@/lib/utils";
+import type {
+  AuditLogRow,
+  InboxResponse,
+  InboxRow,
+  OperatorProfile,
+  PlatformCard,
+  ThreadMessage,
+  ThreadResponse
+} from "@/lib/types";
+import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
+import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
+import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
-import { ProfileDrawer } from "@/components/common/profile-drawer";
+import { ActionButton } from "@/components/ui/action-button";
+// Drawers are lazy-loaded: they're heavy (ProfileDrawer ~390 LOC + its own
+// data fetch) and only ever shown on demand, so they stay out of the most-
+// opened page's initial JS chunk. An "opened-once" latch below keeps them
+// mounted after first open, so their open/close behaviour is unchanged.
+const ReceiptsDrawer = dynamic(
+  () => import("@/components/common/receipts-drawer").then((m) => m.ReceiptsDrawer),
+  { ssr: false }
+);
+const ProfileDrawer = dynamic(
+  () => import("@/components/common/profile-drawer").then((m) => m.ProfileDrawer),
+  { ssr: false }
+);
 import { DegradedBanner } from "@/components/common/degraded-banner";
-import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
+import { autocorrectAtCaret } from "@/lib/autocorrect";
+import { blobToWhisperWav } from "@/lib/dictation-audio";
+import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
+import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
+import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
+import { chooseDisplayBrief } from "@/lib/reply-brief";
+import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 
 // Thread workspace - landscape layout.
 //
@@ -67,6 +103,100 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 // near the bottom keeps the auto-scroll-on-new-message glue active.
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
+// #461 (pilot R-0060): once the operator has scrolled up this far from the
+// newest message, surface a floating "jump to latest" button. Larger than
+// SCROLL_BOTTOM_THRESHOLD so it appears only once you're genuinely reading
+// history, not on a small nudge away from the bottom.
+const JUMP_TO_LATEST_THRESHOLD = 600;
+
+// Picks the topmost visible message bubble below the sticky header to
+// anchor scroll preservation on. Selecting by data-message-id (set on
+// every bubble in the JSX) avoids accidentally anchoring on a wrapper
+// div whose position doesn't map cleanly to a message — the wrapper's
+// rect can stay constant while the messages inside it shift, leaving
+// scroll preservation off by tens of pixels. Each bubble is rendered
+// with key={message.id}, so React preserves the DOM node across the
+// re-render that prepends older messages.
+function pickScrollAnchor(scroller: HTMLElement, scrollerTop: number): HTMLElement | null {
+  const stickyBand = 80;
+  const probeTop = scrollerTop + stickyBand;
+  const probeBottom = scrollerTop + scroller.clientHeight;
+  let best: { el: HTMLElement; top: number } | null = null;
+  const candidates = scroller.querySelectorAll<HTMLElement>("[data-message-id]");
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom <= probeTop || rect.top >= probeBottom) continue;
+    if (!best || rect.top < best.top) best = { el, top: rect.top };
+  }
+  return best?.el ?? null;
+}
+
+// Synchronously adjusts the scroller so the anchor element returns to
+// its captured viewport offset. Returns true if a non-trivial
+// adjustment was applied.
+function repinAnchor(scroller: HTMLElement, anchorEl: HTMLElement, viewportOffset: number): boolean {
+  if (!scroller.contains(anchorEl)) return false;
+  const elTop = scroller.getBoundingClientRect().top;
+  const newAnchorTop = anchorEl.getBoundingClientRect().top;
+  const adjustment = (newAnchorTop - elTop) - viewportOffset;
+  if (Math.abs(adjustment) < 0.5) return false;
+  scroller.scrollTop += adjustment;
+  return true;
+}
+
+// Re-pins the anchor for a short window after a load-older completes,
+// so async content growth above the anchor (image/attachment loads,
+// suggested-replies expanding, etc.) doesn't shift the operator's
+// viewport. Stops as soon as the operator scrolls themselves or the
+// window expires.
+function startPostLoadAnchorGuard(
+  scroller: HTMLElement,
+  anchorEl: HTMLElement,
+  viewportOffset: number
+): () => void {
+  return startScrollSettlingGuard(scroller, () => {
+    repinAnchor(scroller, anchorEl, viewportOffset);
+  });
+}
+
+// Pins the scroller to its bottom for a short window after a fresh
+// thread landing, so async content (images, attachment thumbnails)
+// loading in DOESN'T leave the operator above the most recent
+// message. Same shape as the post-load anchor guard — just a
+// different re-pin target.
+function startInitialBottomGuard(scroller: HTMLElement): () => void {
+  return startScrollSettlingGuard(scroller, () => {
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+}
+
+function startScrollSettlingGuard(scroller: HTMLElement, repin: () => void): () => void {
+  const GUARD_MS = 1500;
+  let active = true;
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    ro.disconnect();
+    scroller.removeEventListener("wheel", stop);
+    scroller.removeEventListener("touchstart", stop);
+    document.removeEventListener("keydown", stop);
+    clearTimeout(timer);
+  };
+  const ro = new ResizeObserver(() => {
+    if (!active) return;
+    repin();
+  });
+  // Observe each non-sticky child of the scroller — that's where the
+  // message-list growth happens. (The sticky header doesn't count.)
+  for (const child of Array.from(scroller.children) as HTMLElement[]) {
+    if (getComputedStyle(child).position !== "sticky") ro.observe(child);
+  }
+  scroller.addEventListener("wheel", stop, { passive: true });
+  scroller.addEventListener("touchstart", stop, { passive: true });
+  document.addEventListener("keydown", stop);
+  const timer = setTimeout(stop, GUARD_MS);
+  return stop;
+}
 
 // Returns a friendly day label ("Today", "Yesterday", or "Tue 6 May") if
 // the given message starts a new day relative to the previous, otherwise
@@ -190,8 +320,12 @@ function formatScheduledFor(iso: string | null | undefined): string {
 }
 
 function DayDivider({ label, className }: { label: string; className?: string }) {
+  // Faster collapse on focus enter (150ms) than expand on exit
+  // (300ms) — matches the bubble timing so dividers and bubbles
+  // animate together.
+  const dimmed = className?.includes("opacity-0") ?? false;
   return (
-    <div className={`my-3 flex items-center gap-3 self-stretch transition-all duration-300 ${className ?? ""}`}>
+    <div className={`my-3 flex items-center gap-3 self-stretch transition-all ${dimmed ? "duration-150" : "duration-300"} ${className ?? ""}`}>
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
@@ -251,6 +385,22 @@ function ParticipantPopover({
   );
 }
 
+/**
+ * Shape of a message reaction as the runner stores and returns it. An
+ * operator-applied reaction (sent from this dashboard) carries
+ * direction "OUT"; reactions the contact left carry "IN". Shared by the
+ * native-reactions read, the optimistic local overlay, and the badge
+ * renderer so all three agree on one shape.
+ */
+type MessageReaction = { emoji: string; kind: string; direction: "IN" | "OUT" };
+
+/**
+ * #408. The quick-react picker offers a small, common set of emoji.
+ * LinkedIn's own message reactions map onto these glyphs, so the
+ * operator picks from a familiar row rather than a full keyboard.
+ */
+const QUICK_REACT_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "👏"] as const;
+
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -274,12 +424,25 @@ export default function ThreadPage() {
   // mode. Restored on exit so the operator lands back in the same
   // spot they were before they clicked the chip, regardless of how
   // they scrolled inside the focused stack.
-  const preFocusScrollTopRef = useRef<number | null>(null);
+  // The exact message the operator was looking at when they entered
+  // focus mode. Restored on exit so layout shifts during focus
+  // (collapsed bubbles re-expanding, late-loaded attachments) don't
+  // leave them at a numerically-equal-but-visually-different scroll
+  // position.
+  const preFocusAnchorRef = useRef<{ anchorEl: HTMLElement; viewportOffset: number } | null>(null);
   const focusOnParent = useCallback((parentId: string) => {
-    if (timelineRef.current && preFocusScrollTopRef.current === null) {
+    const el = timelineRef.current;
+    if (el && preFocusAnchorRef.current === null) {
       // Only capture once per focus session — repeated chip clicks
       // (focus swaps) keep the same "where we came from" anchor.
-      preFocusScrollTopRef.current = timelineRef.current.scrollTop;
+      const elTop = el.getBoundingClientRect().top;
+      const anchor = pickScrollAnchor(el, elTop);
+      if (anchor) {
+        preFocusAnchorRef.current = {
+          anchorEl: anchor,
+          viewportOffset: anchor.getBoundingClientRect().top - elTop
+        };
+      }
     }
     setFocusedThreadParentId(parentId);
     setFocusTrigger((n) => n + 1);
@@ -288,7 +451,12 @@ export default function ThreadPage() {
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  // Synchronous re-entrancy guard. The `sending` state lags a render, so a
+  // held Cmd+Enter autorepeat (or click + shortcut in one frame) can clear
+  // two distinct clientSendIds before it flips — sending the message twice.
+  const sendingRef = useRef(false);
   const [reassessing, setReassessing] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
   const [composeIntent, setComposeIntent] = useState("");
   const [composing, setComposing] = useState(false);
@@ -303,7 +471,38 @@ export default function ThreadPage() {
   const [askAnswer, setAskAnswer] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
+  // Latch the first open of each drawer so the lazy chunk loads on demand and
+  // then stays mounted (preserving the existing open-prop open/close path).
+  const [receiptsEverOpened, setReceiptsEverOpened] = useState(false);
+  const [profileEverOpened, setProfileEverOpened] = useState(false);
+  useEffect(() => {
+    if (receiptsOpen) setReceiptsEverOpened(true);
+  }, [receiptsOpen]);
+  useEffect(() => {
+    if (profileDrawerOpen) setProfileEverOpened(true);
+  }, [profileDrawerOpen]);
   const [error, setError] = useState<string | null>(null);
+  // #408. Per-message reaction trigger state (LinkedIn only). The picker
+  // id tracks which bubble's emoji row is open; the reacting id is the
+  // single in-flight request so its control shows a pending state; the
+  // error map surfaces a calm inline failure on the bubble that failed;
+  // the optimistic overlay renders the just-applied "OUT" reaction
+  // immediately, before the next thread refresh confirms it server-side.
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
+  const [reactionErrorByMessageId, setReactionErrorByMessageId] = useState<Record<string, string>>({});
+  const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
+    Record<string, MessageReaction[]>
+  >({});
+  // Optimistic favourite override (R-0066 / #483). null = follow the server
+  // value (thread.personFavourite); a boolean wins until the request settles,
+  // so the header star flips instantly and reverts if the toggle fails.
+  const [favOverride, setFavOverride] = useState<boolean | null>(null);
+  // Drop the override when navigating to a different thread so it can't leak
+  // onto the next contact (this component persists across /thread/:id changes).
+  useEffect(() => {
+    setFavOverride(null);
+  }, [threadId]);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
   // Defensive 30s ceiling on the suggestions spinner. See the
   // `repliesGenerating` derivation below for why this exists.
@@ -320,10 +519,32 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  // #466 (pilot R-0065): remembers the most recent autocorrection so an
+  // immediate Backspace can revert it (iOS-style). Cleared on any other edit.
+  const lastAutocorrectRef = useRef<{ original: string; corrected: string; value: string } | null>(null);
+  // #462 (pilot R-0061): voice-to-text dictation into the composer. Separate
+  // from the iMessage voice-note recorder above (that one sends an audio
+  // attachment; this one transcribes speech into editable text).
+  const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [dictationAvailable, setDictationAvailable] = useState(false);
+  const dictationRecorderRef = useRef<MediaRecorder | null>(null);
+  const dictationChunksRef = useRef<BlobPart[]>([]);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
   const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
+  // Whether a draft is persisted in the DB for this thread (issue #486 /
+  // pilot R-0067). Drives the "Delete draft" button — it only appears
+  // when there's actually a saved draft to remove, never for an AI
+  // predraft (no DB row) or unsaved typing. Set on load from the fetched
+  // draft, after a successful Save, and cleared after delete / on switch.
+  const [hasSavedDraft, setHasSavedDraft] = useState(false);
+  // Operator voice profile — its aiHelpLevel decides which AI affordances
+  // this page surfaces. The ref mirror lets `refresh` (a useCallback that
+  // must not depend on profile) read the latest value when deciding
+  // whether to auto-fill a predraft.
+  const [profile, setProfile] = useState<OperatorProfile | null>(null);
+  const profileRef = useRef<OperatorProfile | null>(null);
   // AI-suggested snooze chips, populated lazily when the operator opens
   // the snooze chip menu. Empty list = AI saw no time hint and refused
   // to fabricate one (correct, expected behaviour for most threads).
@@ -337,10 +558,23 @@ export default function ThreadPage() {
   // Voice-match: rebuilt only when the thread's outbound history
   // changes. Score is debounced against the composer text below.
   const [voiceRewritePending, setVoiceRewritePending] = useState(false);
+  // Issue #331. Per-loop coverage verdicts the AI returns for the
+  // current draft. "addressed" rows auto-tick at full_drafts (or
+  // highlight at writing_support); "partial" rows stay unticked but
+  // render a soft "partly covered" hint with a short reason, so the
+  // operator can see why the row didn't tick and what's still missing.
+  // Cleared when the thread changes or the composer empties; refreshed
+  // by a debounced effect that hits /control/thread/:id/check-draft.
+  const [aiCoverageItems, setAiCoverageItems] = useState<
+    Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>
+  >([]);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+  // How much AI writing help to surface is driven by the operator's
+  // configured aiHelpLevel (see the `profile` state below). Full sendable
+  // drafts, predraft, and compose-in-voice only appear at "full_drafts".
 
   // Sibling-threads rail collapse — operator can hide the 240px list to
   // give the chat column more room. State persists in localStorage and
@@ -351,6 +585,30 @@ export default function ThreadPage() {
     const stored = window.localStorage.getItem("dashboard_threads_collapsed");
     if (stored === "true") setThreadsCollapsed(true);
   }, []);
+
+  // Open the context rail once per thread when there's a brief to show — i.e.
+  // a Where it stands or On you string the operator can use to write the
+  // reply without scrolling. Previously the rail only auto-opened when the
+  // thread had open loops, which left the panel hidden on dormant or
+  // social-update threads where the brief is still useful (Brandon-style:
+  // "He hasn't asked you anything. Acknowledge the offer, ask what he's
+  // looking at now, and you're done.").
+  const railAutoOpenForThreadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!thread || railAutoOpenForThreadRef.current === thread.id) return;
+    railAutoOpenForThreadRef.current = thread.id;
+    const brief = thread.replyBrief;
+    const hasBriefContent = Boolean(
+      brief && (brief.where_it_stands?.trim() || brief.on_you?.trim())
+    );
+    if (
+      hasBriefContent ||
+      thread.openLoops.length > 0 ||
+      thread.dismissedOpenLoops.length > 0
+    ) {
+      setAiOpen(true);
+    }
+  }, [thread]);
 
   useEffect(() => {
     window.localStorage.setItem(
@@ -402,6 +660,17 @@ export default function ThreadPage() {
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
   const scheduleMenuRef = useRef<HTMLDivElement>(null);
 
+  // Coarse once-a-minute clock. The late-night LinkedIn schedule nudge below
+  // the composer keys off the local time, so this lets it appear/disappear
+  // live as the clock crosses the 22:00 / 06:00 quiet-window boundary without
+  // the operator needing to re-type. One render a minute is negligible next to
+  // the 3s send-queue poll already running on this page.
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setClockNow(new Date()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const [pendingSends, setPendingSends] = useState<
     Array<{
       clientSendId: string;
@@ -422,48 +691,162 @@ export default function ThreadPage() {
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const restoreScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  // #461 (pilot R-0060): controls the floating "jump to latest" button.
+  // True when the operator has scrolled up away from the newest message.
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  // After a load-older fires, the layout effect needs to put the
+  // operator's viewport back where it was. We anchor on a specific
+  // visible message element rather than on `prevTop + (newHeight -
+  // prevHeight)` because the bare height-delta math is wrong whenever
+  // the prepended content isn't the only thing that changes (e.g.,
+  // a day-divider is inserted at the prepend/existing boundary, the
+  // sticky header re-measures, the load button swaps to "loading…").
+  // anchorEl is a React-keyed message DOM node so its identity
+  // survives the re-render; viewportOffset is its top relative to
+  // the scroller's top at the moment of the snapshot.
+  const restoreScrollRef = useRef<{
+    anchorEl: HTMLElement;
+    viewportOffset: number;
+  } | null>(null);
+  // The post-load guard's stop fn — held so a new load (or unmount)
+  // can cancel the prior guard before installing a new one.
+  const anchorGuardStopRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => {
+    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+  }, []);
+  // Tracks the thread.id we last pinned to the bottom for. When this
+  // doesn't match the currently loaded thread, the layout effect
+  // treats it as a fresh landing (page refresh or thread switch) and
+  // unconditionally scrolls to the bottom — bypassing the sticky
+  // verification, which would otherwise reject the bottom-pin
+  // because the operator hasn't had a chance to scroll yet.
+  const lastBottomedThreadIdRef = useRef<string | null>(null);
   const prevThreadIdRef = useRef<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    const [threadResult, inboxResult, platformsResult, logsResult] = await Promise.allSettled([
-      apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
-      apiGet<InboxResponse>("/runner/data/inbox"),
-      apiGet<PlatformCard[]>("/runner/data/platforms"),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
-    ]);
-    if (threadResult.status === "fulfilled") {
-      setThread(threadResult.value);
-      setComposer((prev) => {
-        if (prev) return prev; // operator already typed something
-        const explicitDraft = threadResult.value.draft;
-        if (explicitDraft) {
-          setComposerSource("draft");
-          return explicitDraft;
-        }
-        // No explicit draft - fall back to AI predraft (first suggested
-        // reply) so the operator opens an already-filled composer when
-        // /today has pre-warmed the cache.
-        const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
-        if (aiPredraft) {
-          setComposerSource("predraft");
-          return aiPredraft;
-        }
-        return "";
-      });
-      setError(null);
-    } else {
-      const message =
-        threadResult.reason instanceof Error
-          ? threadResult.reason.message
-          : "Failed to load thread";
-      setError(message);
+  // Apply a freshly-fetched thread payload to local state. Extracted so the
+  // conversation can paint off /data/thread ALONE (first paint must not wait
+  // on the inbox/platforms/logs context fetches), and so a stale-while-
+  // revalidate cache hit can paint instantly and then re-apply the network
+  // value via this same path.
+  const applyThread = useCallback((fresh: ThreadResponse) => {
+    // Merge the fresh recent-messages window with any older messages
+    // the operator has already paginated in. Without this, every poll
+    // (every send, every SSE event, the 3s polling tick) would
+    // overwrite the loaded older history and the operator would get
+    // yanked back to the bottom — exactly the "I scroll up, more
+    // loads, then I get kicked back down" symptom.
+    setThread((current) => {
+      if (!current || current.id !== fresh.id) return fresh;
+      const freshIds = new Set(fresh.messages.map((m) => m.id));
+      const olderKept = current.messages.filter((m) => !freshIds.has(m.id));
+      return {
+        ...fresh,
+        messages: [...olderKept, ...fresh.messages],
+        // Keep the operator's paginated cursor — fresh.messagePage
+        // describes only the recent window and would re-show the
+        // "load older messages" button as if no history were loaded.
+        messagePage: olderKept.length > 0 ? current.messagePage : fresh.messagePage
+      };
+    });
+    // Ghost-reconcile pendingSends against the freshly-fetched message
+    // list. The primary clear paths are the MESSAGE_SENT SSE event and
+    // the send-queue poll, both of which key off `clientSendId`. When
+    // either misses (SSE drop, race between the event and the page
+    // mount, sibling-thread routing on iMessage so the event's threadId
+    // doesn't match the user's view) the optimistic bubble used to
+    // linger forever, double-rendering on top of the real Message row.
+    // Any pending whose text matches a recent OUT message in the
+    // freshly-loaded window can be safely dropped — the real bubble is
+    // already on screen, the optimistic one is now noise.
+    const RECONCILE_WINDOW_MS = 5 * 60 * 1000;
+    const freshOutTexts = new Map<string, number>();
+    for (const m of fresh.messages) {
+      if (m.direction !== "OUT") continue;
+      const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
+      if (Number.isNaN(ts)) continue;
+      const prior = freshOutTexts.get(m.text);
+      if (prior === undefined || ts > prior) {
+        freshOutTexts.set(m.text, ts);
+      }
     }
+    setPendingSends((prev) =>
+      prev.filter((pending) => {
+        if (pending.failed) return true; // keep failed bubbles so the operator can retry
+        const ts = freshOutTexts.get(pending.text);
+        if (ts === undefined) return true;
+        const pendingTs = Date.parse(pending.sentAt);
+        if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
+        return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
+      })
+    );
+    setComposer((prev) => {
+      if (prev) return prev; // operator already typed something
+      const explicitDraft = fresh.draft;
+      if (explicitDraft) {
+        setComposerSource("draft");
+        return explicitDraft;
+      }
+      // No explicit draft - fall back to AI predraft (first suggested
+      // reply) so the operator opens an already-filled composer when
+      // /today has pre-warmed the cache. Only when the operator has
+      // opted into full AI drafts — at lower help levels the composer
+      // stays empty so they write it themselves.
+      const aiPredraft = fresh.suggestedReplies?.replies?.[0]?.text?.trim();
+      if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
+        setComposerSource("predraft");
+        return aiPredraft;
+      }
+      return "";
+    });
+    // Track DB-persisted draft presence independently of the composer
+    // text (the operator may have typed over it), so "Delete draft"
+    // reflects what's actually saved server-side.
+    setHasSavedDraft(Boolean((fresh.draft ?? "").trim()));
+    setError(null);
+  }, []);
+
+  // Paint the conversation off /data/thread alone. This is the ONLY fetch
+  // that gates first paint — time-to-first-message is now a single runner
+  // round-trip instead of max(thread, full-inbox, platforms, 150-row-logs).
+  // Uses the SWR cache so a hover-prefetched or previously-seen thread paints
+  // instantly and revalidates in the background.
+  const refreshThread = useCallback(async () => {
+    try {
+      const fresh = await apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`, {
+        swr: true,
+        onFresh: (data) => applyThread(data as ThreadResponse)
+      });
+      applyThread(fresh);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load thread";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [threadId, applyThread]);
+
+  // Secondary, non-blocking context: the siblings picker, platform cards and
+  // the degraded-banner log link. Never gates first paint and is cached, so
+  // it is cheap and does not re-fire on the chat-paint path.
+  const refreshSiblings = useCallback(async () => {
+    const [inboxResult, platformsResult, logsResult] = await Promise.allSettled([
+      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 5000 }),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150", { ttlMs: 5000 })
+    ]);
     if (inboxResult.status === "fulfilled") setSiblings(inboxResult.value.rows);
     if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
     if (logsResult.status === "fulfilled") setLogs(logsResult.value);
-    setLoading(false);
-  }, [threadId]);
+  }, []);
+
+  // Full refresh used by user actions (send / snooze / schedule / mark-done):
+  // paint the thread first, then refresh the surrounding context in the
+  // background. SSE-driven refreshes use refreshThread directly so a scan
+  // burst never re-pulls the inbox/platforms/logs.
+  const refresh = useCallback(async () => {
+    await refreshThread();
+    void refreshSiblings();
+  }, [refreshThread, refreshSiblings]);
 
   useEffect(() => {
     refresh().catch((err) => {
@@ -472,6 +855,66 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // Debounced thread-only refresh for SSE bursts. A multi-thread scan emits
+  // one THREAD_UPDATED per touched thread; without this, each event triggered
+  // a full refetch and the open thread page fired ~N requests and janked.
+  // Trailing debounce collapses a burst into a single /data/thread refetch.
+  const threadRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleThreadRefresh = useCallback(() => {
+    if (threadRefreshTimerRef.current) clearTimeout(threadRefreshTimerRef.current);
+    threadRefreshTimerRef.current = setTimeout(() => {
+      threadRefreshTimerRef.current = null;
+      void refreshThread();
+    }, 450);
+  }, [refreshThread]);
+  useEffect(
+    () => () => {
+      if (threadRefreshTimerRef.current) clearTimeout(threadRefreshTimerRef.current);
+    },
+    []
+  );
+
+  // Thread-local composer + AI state must NOT leak across threads. The page
+  // does not remount when navigating /thread/A -> /thread/B (same App Router
+  // dynamic segment), so without this reset a reply typed for A, staged
+  // attachments, in-flight optimistic sends, and A's AI snooze suggestions
+  // would carry into B — risking A's draft being sent to B. Keyed on the
+  // route param so it clears the instant navigation starts, before B loads.
+  useEffect(() => {
+    setComposer("");
+    setComposerSource("empty");
+    setHasSavedDraft(false);
+    setComposeIntent("");
+    setComposeDraft("");
+    setComposeError(null);
+    setAskAnswer(null);
+    setSnoozeSuggestions(null);
+    setSnoozeMenuOpen(false);
+    setPendingSends([]);
+    setComposerAttachments((prev) => {
+      for (const a of prev) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+      return [];
+    });
+  }, [threadId]);
+
+  // Load the operator voice profile once. Reloads on a profile-saved
+  // event so an AI-help-level change in Settings lands without a reload.
+  useEffect(() => {
+    const loadProfile = () => {
+      void apiGet<OperatorProfile>("/runner/data/operator-profile")
+        .then((data) => {
+          profileRef.current = data ?? null;
+          setProfile(data ?? null);
+        })
+        .catch(() => undefined);
+    };
+    loadProfile();
+    window.addEventListener("operator-profile-saved", loadProfile);
+    return () => window.removeEventListener("operator-profile-saved", loadProfile);
+  }, []);
 
   // Per-thread rescan progress: shows the active stage inline next to
   // the Rescan button while the runner is opening + parsing the thread.
@@ -493,7 +936,7 @@ export default function ThreadPage() {
       }>).detail;
       if (!detail || !threadId || detail.threadId !== threadId) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
-        void refresh().finally(() => {
+        void refreshThread().finally(() => {
           setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
         });
       } else if (detail.type === "MESSAGE_SEND_FAILED" && detail.clientSendId) {
@@ -506,7 +949,9 @@ export default function ThreadPage() {
           )
         );
       } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
-        void refresh();
+        // Thread-only + debounced: a scan burst of THREAD_UPDATED events
+        // collapses into one /data/thread refetch instead of N full refreshes.
+        scheduleThreadRefresh();
       } else if (detail.type === "SCAN_THREAD_STARTED") {
         setRescanStage("Opening thread");
         if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
@@ -519,7 +964,7 @@ export default function ThreadPage() {
           clearTimeout(rescanTimeoutRef.current);
           rescanTimeoutRef.current = null;
         }
-        void refresh();
+        void refreshThread();
       }
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
@@ -527,7 +972,7 @@ export default function ThreadPage() {
       window.removeEventListener("runner-event", onRunnerEvent as EventListener);
       if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
     };
-  }, [threadId, refresh]);
+  }, [threadId, refreshThread, scheduleThreadRefresh]);
 
   // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
@@ -614,8 +1059,9 @@ export default function ThreadPage() {
   };
 
   const onSend = useCallback(async () => {
-    if (!thread || sending) return;
+    if (!thread || sending || sendingRef.current) return;
     if (!composer.trim() && composerAttachments.length === 0) return;
+    sendingRef.current = true;
     const clientSendId = uuid();
     const text = composer;
     const attachmentsToSend = composerAttachments;
@@ -654,6 +1100,12 @@ export default function ThreadPage() {
           ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
+      // Send succeeded — the optimistic clear above already removed these
+      // from the composer, so release their image preview object URLs. (On
+      // failure we instead restore them below, keeping the URLs alive.)
+      for (const a of attachmentsToSend) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
     } catch (sendError) {
       const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
       setPendingSends((prev) =>
@@ -665,6 +1117,7 @@ export default function ThreadPage() {
       setComposer(text);
       setComposerAttachments(attachmentsToSend);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
   }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
@@ -690,6 +1143,21 @@ export default function ThreadPage() {
       return next;
     });
   }, []);
+
+  // Revoke any outstanding image preview object URLs when the thread view
+  // unmounts (e.g. navigating away mid-compose) so they don't leak.
+  const composerAttachmentsRef = useRef(composerAttachments);
+  useEffect(() => {
+    composerAttachmentsRef.current = composerAttachments;
+  }, [composerAttachments]);
+  useEffect(
+    () => () => {
+      for (const a of composerAttachmentsRef.current) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+    },
+    []
+  );
 
   const startRecording = useCallback(async () => {
     if (recording) return;
@@ -726,6 +1194,103 @@ export default function ThreadPage() {
     recorderRef.current = null;
     setRecording(false);
   }, [recording]);
+
+  // #462: probe once whether the runner can transcribe, so the Dictate
+  // control renders enabled vs. disabled-with-explanation.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ dictationAvailable: boolean }>("/runner/data/transcription-capabilities")
+      .then((d) => {
+        if (!cancelled) setDictationAvailable(Boolean(d?.dictationAvailable));
+      })
+      .catch(() => {
+        /* leave disabled — the button explains why on hover */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // #462: record a short clip, post it to the runner for transcription, and
+  // append the returned text to the composer for the operator to review. No
+  // autosend; nothing is persisted server-side.
+  const startDictation = useCallback(async () => {
+    if (dictationStatus !== "idle") return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // webm/opus is the broadly-supported recording format (incl. Firefox);
+      // fall back to mp4/aac on Safari. The runner transcodes either way.
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      dictationChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) dictationChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
+        if (raw.size === 0) {
+          setDictationStatus("idle");
+          return;
+        }
+        setDictationStatus("transcribing");
+        try {
+          // Convert the recording to 16 kHz mono WAV in the browser. The
+          // runner's local-whisper provider normalises audio with macOS
+          // afconvert, which can't read the webm/opus MediaRecorder emits
+          // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
+          let wav: Blob;
+          try {
+            wav = await blobToWhisperWav(raw);
+          } catch {
+            setError("Could not prepare the recording for transcription.");
+            setDictationStatus("idle");
+            return;
+          }
+          const form = new FormData();
+          form.append("audio", wav, "dictation.wav");
+          const resp = await fetch("/runner/control/transcribe-dictation", {
+            method: "POST",
+            body: form
+          });
+          const data = (await resp.json().catch(() => ({}))) as {
+            ok?: boolean;
+            text?: string;
+            error?: string;
+          };
+          if (!resp.ok || !data.ok) {
+            setError(data?.error || "Could not transcribe the recording.");
+          } else if (typeof data.text === "string" && data.text.trim()) {
+            const spoken = data.text.trim();
+            setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+            setComposerSource("user");
+          } else {
+            setError("Didn't catch any speech. Try again.");
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Dictation failed.");
+        } finally {
+          setDictationStatus("idle");
+        }
+      };
+      recorder.start();
+      dictationRecorderRef.current = recorder;
+      setDictationStatus("recording");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Microphone access denied");
+      setDictationStatus("idle");
+    }
+  }, [dictationStatus]);
+
+  const stopDictation = useCallback(() => {
+    if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
+    dictationRecorderRef.current.stop();
+    dictationRecorderRef.current = null;
+  }, [dictationStatus]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -1058,19 +1623,37 @@ export default function ThreadPage() {
     }
   };
 
-  const reassessThread = async () => {
+  const reassessThread = () => {
     if (!thread || reassessing) return;
     setReassessing(true);
-    setError(null);
-    try {
-      await apiPost(`/runner/control/thread/${thread.id}/reassess`, {});
-      await refresh();
-    } catch (reassessError) {
-      const message = reassessError instanceof Error ? reassessError.message : "Reassess failed";
-      setError(message);
-    } finally {
-      setReassessing(false);
-    }
+    // Issue #369. Reassess is a 5-15s LLM call — ongoing work, not an
+    // event. Surface the in-flight state in TopStatus (via
+    // signalReassessStart) instead of a static pending toast. The
+    // discrete outcome (success / error) still uses the toast surface
+    // because those ARE events. This mirrors the surface rule
+    // established by #337 for the pilot feedback modal.
+    const threadId = thread.id;
+    const stopTickerSignal = signalReassessStart(threadId);
+    apiPost(`/runner/control/thread/${threadId}/reassess`, {})
+      .then(async () => {
+        showToast({ kind: "success", title: "Reply Brief refreshed" });
+        setError(null);
+        await refresh();
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        showToast({
+          kind: "error",
+          title: "Reassess failed",
+          description: message,
+          durationMs: 9000
+        });
+        setError(message);
+      })
+      .finally(() => {
+        stopTickerSignal();
+        setReassessing(false);
+      });
   };
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
@@ -1088,6 +1671,66 @@ export default function ThreadPage() {
       setError(message);
     } finally {
       setTransforming(null);
+    }
+  };
+
+  // #408. Apply an operator reaction to a single LinkedIn message. Mirrors
+  // the transform / reassess handlers: a single in-flight id drives the
+  // pending state, the catch surfaces a calm per-message inline error, and
+  // the finally clears the in-flight flag. The reaction is rendered
+  // optimistically (OUT direction) the instant it is sent, then confirmed
+  // by refresh(); on failure the optimistic glyph is rolled back.
+  const reactToMessage = async (messageId: string, emoji: string) => {
+    if (!thread || reactingMessageId) return;
+    const optimistic: MessageReaction = { emoji, kind: "emoji", direction: "OUT" };
+    setReactionPickerMessageId(null);
+    setReactingMessageId(messageId);
+    setReactionErrorByMessageId((prev) => {
+      if (!(messageId in prev)) return prev;
+      const next = { ...prev };
+      delete next[messageId];
+      return next;
+    });
+    setOptimisticReactionsByMessageId((prev) => ({
+      ...prev,
+      [messageId]: [...(prev[messageId] ?? []), optimistic]
+    }));
+    try {
+      await apiPost<{ status: string; emoji: string }>(
+        `/runner/control/thread/${thread.id}/message/${messageId}/react`,
+        { emoji }
+      );
+      setError(null);
+      // The runner has persisted the reaction; the refresh below pulls the
+      // authoritative copy. Drop our optimistic overlay for this message so
+      // the badge isn't double-counted once the server copy lands.
+      setOptimisticReactionsByMessageId((prev) => {
+        if (!(messageId in prev)) return prev;
+        const next = { ...prev };
+        delete next[messageId];
+        return next;
+      });
+      await refresh();
+    } catch (reactError) {
+      const message = reactError instanceof Error ? reactError.message : "Reaction failed";
+      // Roll the optimistic glyph back so the bubble reflects reality, then
+      // surface the failure inline on this message only.
+      setOptimisticReactionsByMessageId((prev) => {
+        const current = prev[messageId];
+        if (!current) return prev;
+        const idx = current.lastIndexOf(optimistic);
+        const trimmed = idx >= 0 ? [...current.slice(0, idx), ...current.slice(idx + 1)] : current;
+        const next = { ...prev };
+        if (trimmed.length > 0) {
+          next[messageId] = trimmed;
+        } else {
+          delete next[messageId];
+        }
+        return next;
+      });
+      setReactionErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
+    } finally {
+      setReactingMessageId(null);
     }
   };
 
@@ -1152,25 +1795,137 @@ export default function ThreadPage() {
     );
   }, [logs, thread]);
 
-  // Voice match - built from this thread's outbound history. Memos
-  // live up here (before early returns) so the React hook order is
-  // stable across the loading/loaded transition.
-  const voiceCorpus = useMemo(() => {
-    if (!thread) return buildCorpusStats([]);
-    return buildCorpusStats(
-      thread.messages.filter((m) => m.direction === "OUT").map((m) => m.text)
-    );
-  }, [thread]);
-  const voiceScore = useMemo(
-    () => scoreDraftAgainstCorpus(composer, voiceCorpus),
-    [composer, voiceCorpus]
-  );
+  // (Removed dead voice-match computation: a per-keystroke
+  // scoreDraftAgainstCorpus(composer, …) plus a per-thread buildCorpusStats
+  // over the entire OUT history whose result was never rendered — wasted
+  // work on the composer's hot path.)
+
+  // Issue #331. Debounced draft-coverage check: ~1.4s after the operator
+  // stops typing, ask the runner which open loops the in-flight draft
+  // addresses. Skipped at memory_only (the privacy-tightest tier opts
+  // out of all AI writing aids), when there are no open loops to score
+  // against, and for drafts under 20 chars (saves tokens on stubs like
+  // "ok" or "yeah"). The ref guard discards stale responses if the
+  // operator keeps typing or switches threads mid-flight.
+  const draftCoverageThreadIdRef = useRef<string | null>(null);
+  const draftCoverageDraftRef = useRef<string>("");
+  // Depend on the specific primitives this effect reads, not the whole
+  // `thread` object — `thread` is a fresh reference on every background
+  // poll/SSE refresh, which would otherwise re-arm the 1.4s debounce timer
+  // continuously and could starve the coverage check during event bursts.
+  const draftCoverageThreadId = thread?.id ?? null;
+  const draftCoverageOpenLoopCount = thread?.openLoops.length ?? 0;
+  useEffect(() => {
+    if (!draftCoverageThreadId) return;
+    const aiLevel = profile?.aiHelpLevel ?? "writing_support";
+    // Functional updater + ref-equal short-circuit so clearing on every
+    // re-render doesn't itself become a dependency that re-fires the
+    // effect.
+    const clearIfNotEmpty = () =>
+      setAiCoverageItems((prev) => (prev.length === 0 ? prev : []));
+    if (aiLevel === "memory_only") {
+      clearIfNotEmpty();
+      return;
+    }
+    const trimmed = composer.trim();
+    if (trimmed.length < 20 || draftCoverageOpenLoopCount === 0) {
+      clearIfNotEmpty();
+      return;
+    }
+    const threadId = draftCoverageThreadId;
+    draftCoverageThreadIdRef.current = threadId;
+    draftCoverageDraftRef.current = trimmed;
+    const handle = window.setTimeout(() => {
+      void apiPost<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>(
+        `/runner/control/thread/${threadId}/check-draft`,
+        { draft: trimmed }
+      )
+        .then((output) => {
+          // Latest-write-wins: ignore responses from a stale debounce
+          // (operator either kept typing past this fire or moved on
+          // to a different thread).
+          if (
+            draftCoverageThreadIdRef.current !== threadId ||
+            draftCoverageDraftRef.current !== trimmed
+          ) {
+            return;
+          }
+          setAiCoverageItems(output.items ?? []);
+        })
+        .catch((coverageError: unknown) => {
+          // Coverage is a polish — never escalate to the visible error
+          // badge. A console line is enough for debugging without
+          // distracting the operator mid-draft.
+          console.warn(
+            "[draft-coverage]",
+            coverageError instanceof Error ? coverageError.message : String(coverageError)
+          );
+        });
+    }, 1400);
+    return () => window.clearTimeout(handle);
+  }, [composer, draftCoverageThreadId, draftCoverageOpenLoopCount, profile?.aiHelpLevel]);
+
+  // Reset AI coverage when the thread changes — local state from the
+  // previous thread shouldn't bleed into a new one.
+  useEffect(() => {
+    setAiCoverageItems([]);
+    draftCoverageThreadIdRef.current = null;
+    draftCoverageDraftRef.current = "";
+  }, [thread?.id]);
 
   // Pagination is now driven by the runner: `thread.messages` is whatever
   // the latest fetch returned (initial slice or initial + lazily-pulled
   // older pages). `messagePage.hasOlder` tells us whether more history
   // exists on the server.
-  const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
+  // Render-time filter on top of the runner's API filter. Drops:
+  //   - iMessage "kept an audio message" system events (the runner
+  //     hides these too; this is belt-and-braces);
+  //   - bubbles with no displayable content at all (empty text + no
+  //     playable attachments + no transcript) so the thread never
+  //     paints a literally-blank bubble.
+  // Memoized on thread.messages so a keystroke in the composer (which
+  // re-renders this 4000-line component) or a 3s poll tick does NOT re-run
+  // this full filter pass and hand a fresh array reference to the reaction-
+  // fold and reply-graph memos below — they only recompute when messages
+  // actually change.
+  const visibleMessagesBeforeReactionFold: ThreadMessage[] = useMemo(
+    () =>
+      (thread?.messages ?? []).filter((m) => {
+        if (isNonContentIMessageSystemEvent(m.text)) return false;
+        const text = (m.text ?? "").trim();
+        const hasText = text.length > 0;
+        const hasPlayable = (m.attachments ?? []).some(
+          (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
+        );
+        const hasTranscript =
+          !!m.audioTranscription &&
+          m.audioTranscription.status === "transcribed" &&
+          !!m.audioTranscription.transcript &&
+          m.audioTranscription.transcript.trim().length > 0;
+        return hasText || hasPlayable || hasTranscript;
+      }),
+    [thread?.messages]
+  );
+  // #422: iMessage stores arbitrary-emoji reactions as "Reacted X to
+  // 'Y'" text bubbles when either party isn't on iOS 18. Collapse those
+  // synthesised bubbles into reaction stickers on the parent so the
+  // operator sees the same UI as native ❤️/👍 tapbacks.
+  const { synthesizedByParentId: synthesizedReactionsByParentId, hiddenMessageIds: synthesizedReactionHiddenIds } =
+    useMemo(
+      () =>
+        foldSynthesizedReactions(
+          visibleMessagesBeforeReactionFold.map((m) => ({
+            id: m.id,
+            direction: m.direction,
+            text: m.text ?? ""
+          }))
+        ),
+      [visibleMessagesBeforeReactionFold]
+    );
+  const visibleMessages: ThreadMessage[] = useMemo(
+    () => visibleMessagesBeforeReactionFold.filter((m) => !synthesizedReactionHiddenIds.has(m.id)),
+    [visibleMessagesBeforeReactionFold, synthesizedReactionHiddenIds]
+  );
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
   // Threaded-reply lookups — unifies two sources:
@@ -1301,14 +2056,21 @@ export default function ThreadPage() {
   useLayoutEffect(() => {
     const container = timelineRef.current;
     if (!focusedThreadParentId) {
-      stickToBottomRef.current = true;
-      // Exit: restore the operator's pre-focus scroll position. The
-      // non-focused bubbles have just expanded back to their natural
-      // heights, so the same scrollTop value puts the timeline exactly
-      // where it was before the chip click.
-      if (container && preFocusScrollTopRef.current !== null) {
-        container.scrollTop = preFocusScrollTopRef.current;
-        preFocusScrollTopRef.current = null;
+      // Exit: restore the operator's pre-focus visual position by
+      // re-pinning the message they were looking at. Numeric scrollTop
+      // restoration drifts when the layout has shifted during focus
+      // (collapsed bubbles re-expanding, late-loaded attachments,
+      // reply-context placeholders filling in), so we anchor on the
+      // specific message instead. The settling guard re-pins through
+      // the 300ms collapse-back transition.
+      if (container && preFocusAnchorRef.current) {
+        const { anchorEl, viewportOffset } = preFocusAnchorRef.current;
+        preFocusAnchorRef.current = null;
+        if (container.contains(anchorEl)) {
+          repinAnchor(container, anchorEl, viewportOffset);
+          if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+          anchorGuardStopRef.current = startPostLoadAnchorGuard(container, anchorEl, viewportOffset);
+        }
       }
       return;
     }
@@ -1317,20 +2079,28 @@ export default function ThreadPage() {
       `[data-message-id="${focusedThreadParentId}"]`
     ) as HTMLElement | null;
     if (!container || !target) return;
-    const containerRect = container.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
-    // With non-focused bubbles collapsed to height 0, the focused
-    // stack is the entire scrollable content. Centring the parent
-    // gives breathing room above when the stack is short, and lets
-    // the operator scroll the stack within the column when the stack
-    // is taller than the viewport. Direct scrollTop assignment (not
-    // smooth scroll) so we don't race React's commit phase.
-    const delta = (targetRect.top - containerRect.top)
-      - (containerRect.height / 2)
-      + (targetRect.height / 2);
-    container.scrollTop = container.scrollTop + delta;
+    // #465 (pilot R-0064): position the focused message as HIGH as
+    // possible — its top sits just below the sticky header — rather than
+    // centring it, so the message and the replies beneath it read
+    // top-down. scrollTop clamps at the bottom, so a focused message near
+    // the end of the thread still lands as high as the remaining content
+    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
+    // className), so re-align on every layout change during that window
+    // rather than relying on a one-shot calculation.
+    const realignToTop = () => {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
+      // message clears the glassy sticky header.
+      const FOCUS_HEADER_OFFSET = 64;
+      const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
+      container.scrollTop = container.scrollTop + delta;
+    };
+    realignToTop();
+    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+    anchorGuardStopRef.current = startScrollSettlingGuard(container, realignToTop);
     // `focusTrigger` is included so clicking a chip whose parent is
-    // already the current focus re-centres rather than no-opping.
+    // already the current focus re-aligns rather than no-opping.
   }, [focusedThreadParentId, focusTrigger]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
@@ -1394,27 +2164,67 @@ export default function ThreadPage() {
   useEffect(() => {
     if (thread && prevThreadIdRef.current !== thread.id) {
       stickToBottomRef.current = true;
+      setShowJumpToLatest(false);
       prevThreadIdRef.current = thread.id;
     }
   }, [thread]);
 
   // After every layout pass that affects the timeline, do one of:
-  //  (a) restore scroll position (we just prepended older messages)
+  //  (a) restore scroll position by re-pinning a captured anchor
+  //      element to its previous viewport offset (we just prepended
+  //      older messages and the operator should stay on the same
+  //      message they were looking at)
   //  (b) jump to bottom (fresh thread or stickToBottomRef is true)
   useLayoutEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
     if (restoreScrollRef.current) {
-      const { prevHeight, prevTop } = restoreScrollRef.current;
-      const delta = el.scrollHeight - prevHeight;
-      el.scrollTop = prevTop + delta;
+      const { anchorEl, viewportOffset } = restoreScrollRef.current;
       restoreScrollRef.current = null;
+      if (el.contains(anchorEl)) {
+        repinAnchor(el, anchorEl, viewportOffset);
+        if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+        anchorGuardStopRef.current = startPostLoadAnchorGuard(el, anchorEl, viewportOffset);
+      }
+      return;
+    }
+    // First layout pass for this thread.id — fresh landing (page
+    // refresh, thread switch). Always pin to the bottom regardless
+    // of the sticky ref's verification, since scrollTop is 0 here
+    // (the page just rendered) and the verification would otherwise
+    // reject the legitimate bottom-pin. Then keep re-pinning for a
+    // short window so attachment images and other async content that
+    // loads after the initial layout pass don't leave the operator
+    // shy of the actual most-recent message.
+    if (thread && lastBottomedThreadIdRef.current !== thread.id) {
+      lastBottomedThreadIdRef.current = thread.id;
+      el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
+      if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+      anchorGuardStopRef.current = startInitialBottomGuard(el);
       return;
     }
     if (stickToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
+      // Verify the ref against the operator's actual scroll position
+      // before yanking them down. The ref is set to true in places
+      // that pre-state assumptions (focus exit, send, scrolled near
+      // bottom) and is supposed to be flipped off by the onScroll
+      // handler when the operator scrolls up — but if React hasn't
+      // dispatched the scroll event yet (programmatic scroll races,
+      // fast scroll bursts), the ref can be stale. A refresh
+      // (THREAD_UPDATED, send completion, etc.) firing in that window
+      // would otherwise pin the operator to the bottom mid-read.
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // 4× the scroll-handler threshold gives the new-message-at-bottom
+      // case (most common reason this branch fires) plenty of headroom
+      // while still rejecting "operator is way up the thread" cases.
+      if (distanceFromBottom < SCROLL_BOTTOM_THRESHOLD * 4) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        stickToBottomRef.current = false;
+      }
     }
-  }, [visibleMessages, pendingSends.length, loading]);
+  }, [visibleMessages, pendingSends.length, loading, thread]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
     // In focused-thread mode, suppress both the bottom-stickiness
@@ -1422,29 +2232,107 @@ export default function ThreadPage() {
     // stack is naturally bounded by the collapsed background, and
     // pulling in new history would shift the underlying timeline so
     // exit-focus lands the operator far from where they started.
-    if (focusedThreadParentId) return;
+    if (focusedThreadParentId) {
+      // The jump-to-latest affordance is meaningless inside the bounded
+      // focused stack — keep it hidden there.
+      if (showJumpToLatest) setShowJumpToLatest(false);
+      return;
+    }
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    // #461 (pilot R-0060): surface the floating jump-to-latest button once
+    // the operator has scrolled meaningfully up from the newest message.
+    setShowJumpToLatest(distanceFromBottom > JUMP_TO_LATEST_THRESHOLD);
     // Scroll near the top + server says more exists → request the next
-    // older page. Capture scroll position so the layout effect above can
-    // restore it once the prepended messages render (no view jump).
+    // older page. Capture an anchor element (the topmost visible message
+    // bubble below the sticky header) and its viewport offset so the
+    // layout effect above can re-pin it once the prepended messages
+    // render. Element-anchored preservation handles structural shifts
+    // (extra day-dividers at the prepend boundary, etc.) that the
+    // earlier prevHeight/prevTop math couldn't.
     if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder && !loadingOlderMessages) {
-      restoreScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+      const elTop = el.getBoundingClientRect().top;
+      const anchorEl = pickScrollAnchor(el, elTop);
+      if (anchorEl) {
+        restoreScrollRef.current = {
+          anchorEl,
+          viewportOffset: anchorEl.getBoundingClientRect().top - elTop
+        };
+      }
       void loadOlderMessages();
     }
   };
 
-  if (loading || !thread) {
+  // #461 (pilot R-0060): jump straight back to the newest message and
+  // re-arm bottom-stickiness so subsequent inbound messages keep the
+  // operator pinned at the foot of the thread.
+  const scrollToLatest = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
+
+  if (!thread) {
+    // `loading` flips false the moment the fetch settles. A failed fetch
+    // (stale / removed thread id, runner unreachable) leaves `thread` null
+    // with an `error` set — render that instead of a "Loading…" that would
+    // otherwise hang forever with the error trapped in the unreached main
+    // render below.
     return (
       <div className="px-12 pt-14">
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        {loading ? (
+          <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        ) : (
+          <div className="max-w-[440px]">
+            <p className="m-0 mb-2 font-display text-[18px] font-semibold text-ink">
+              Can’t open this thread.
+            </p>
+            <p className="m-0 mb-4 text-[13px] leading-[1.55] text-ink-3">
+              {error ??
+                "This conversation could not be loaded. It may have been removed, or the runner is unavailable."}
+            </p>
+            <Link
+              href="/today"
+              className="inline-block rounded-[8px] bg-ink px-3 py-[6px] text-[12px] font-medium text-paper hover:opacity-90"
+            >
+              Back to Today
+            </Link>
+          </div>
+        )}
       </div>
     );
   }
 
   const firstName = thread.personName.split(/\s+/)[0] ?? thread.personName;
   const risk = toDisplayRisk(thread.riskLevel);
+
+  // Favourite star in the header (R-0066 / #483). Optimistic: flip locally,
+  // persist, then refresh so the inbox/today views re-sort; revert on failure.
+  const favourite = favOverride ?? thread.personFavourite ?? false;
+  const toggleFavourite = () => {
+    const next = !favourite;
+    const personId = thread.personId;
+    setFavOverride(next);
+    void setFavourite(personId, next)
+      .then(() => refresh())
+      .catch(() => setFavOverride(!next));
+  };
+
+  // Late-night LinkedIn send nudge (see lib/late-night-send.ts). Shown only
+  // while a LinkedIn draft is open inside the 22:00 to 06:00 quiet window; one
+  // click schedules the draft for the next 08:00 instead of pinging the
+  // recipient at an odd hour. Hidden while an immediate send is in flight.
+  const showLateNightNudge =
+    !sending &&
+    shouldOfferLateNightSchedule({
+      platform: thread.platform,
+      hasDraft: composer.trim().length > 0,
+      now: clockNow
+    });
+  const lateNightSlot = showLateNightNudge ? nextMorningSendSlot(clockNow) : null;
   let lastInboundAt: string | null = null;
   for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
     const message = thread.messages[i];
@@ -1493,25 +2381,36 @@ export default function ThreadPage() {
   // - reopen (operator already replied or thread dormant): rail surfaces a
   //   warm reconnect hook + transcript-grounded callbacks + conversation
   //   starters in the chips
-  // The fields themselves (whatTheyWant, openLoops, suggestedReplies) are
-  // generated mode-aware on the server. The dashboard only adjusts headers
-  // and helper copy. `trimmedSummary` (the durable rolling relationship
-  // summary) shows as a muted subline so the operator gets the relationship
-  // shorthand without it crowding the per-turn ask.
-  const trimmedSummary = thread.summary?.trim() ?? "";
-  const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
-  const summaryDuplicatesAsk =
-    trimmedAsk && trimmedSummary &&
-    (trimmedSummary.includes(trimmedAsk) || trimmedAsk.includes(trimmedSummary));
-  const showRelationshipContext = trimmedSummary && !summaryDuplicatesAsk;
+  // The Reply Brief itself is generated mode-aware on the server. This page
+  // only flips the compose helper + the AI predraft heading on reopen.
   const isReopenMode = thread.needsReply === false;
-  const askHeading = isReopenMode ? "Reconnect hook" : "What they want";
-  const loopsHeading = isReopenMode ? "Conversation hooks" : "Open loops";
   const composeHelper = isReopenMode
     ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
     : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
 
+  // AI help level gates which writing affordances this page surfaces.
+  // It NEVER hides the summary, "what they want", open loops, or memory —
+  // those are the core support and stay on at every level.
+  //   - full_drafts:     suggested replies + Compose-a-full-draft + rewrites
+  //   - writing_support: rewrites ("shorten" / "warmer") on the operator's
+  //                      own draft, but no complete AI-written drafts
+  //   - memory_only:     no AI writing help at all (Ask is still allowed —
+  //                      it answers from the thread, it doesn't draft)
+  const aiHelpLevel = profile?.aiHelpLevel ?? "writing_support";
+  const showFullDrafts = aiHelpLevel === "full_drafts";
+  const showWritingSupport = aiHelpLevel !== "memory_only";
+  // When full drafts are off, the compose drawer offers "Ask" only.
+  const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
+
   const platformLabel = PLATFORM_LABEL[thread.platform];
+
+  // Reply Brief, computed once and shared between the always-visible brief
+  // band (pinned under the header, the default-visible reply-readiness
+  // summary) and the full Reply Brief in the AI rail.
+  const displayBrief = chooseDisplayBrief(thread);
+  const activeOpenLoops = thread.openLoops.filter(
+    (loop) => !thread.dismissedOpenLoops.includes(loop)
+  );
 
   const threadsRailWidth = threadsCollapsed ? "56px" : "240px";
   const gridTemplateColumns = aiOpen
@@ -1674,12 +2573,35 @@ export default function ThreadPage() {
           ref={timelineRef}
           onScroll={onTimelineScroll}
           className="relative min-h-0 flex-1 overflow-y-auto"
+          // overflowAnchor: disable the browser's native scroll anchoring
+          // so it doesn't race with the load-older restoration in
+          // useLayoutEffect. When both fire on the same prepend, the
+          // browser anchors on its own heuristic-picked element (often a
+          // wrapper) and our code anchors on a specific message bubble —
+          // the difference shows up as a small visible jolt as the scroll
+          // position settles.
+          //
+          // scrollPaddingTop: the glassy sticky header below sits INSIDE
+          // this scroller, so any programmatic scroll (scrollIntoView,
+          // future snap-to-message features) would otherwise land target
+          // elements at scroll-container-top — i.e. behind the header.
+          // Reserving a top scroll-padding zone the size of the header
+          // makes those alignments respect the header. Value tuned to the
+          // header's resting height (single row, h-9 avatar + py-2.5 ≈
+          // 60-64px); if the header grows another row of chips this may
+          // need a ref-based measurement.
+          style={{ overflowAnchor: "none", scrollPaddingTop: "64px" }}
         >
           {/* Glassy sticky header. Sits inside the scroll container so the
               timeline scrolls visibly behind it - matches the iOS / Apple
               translucent-bar aesthetic the rest of the redesign nods at.
-              Single-row layout keeps vertical real estate for the chat. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
+              Single-row layout keeps vertical real estate for the chat.
+              Opacity is high (92%) on purpose: at lower values (~70%)
+              message bubbles passing behind the bar stayed legible enough
+              to read as a layout bug — the operator saw a clipped bubble
+              rather than a tinted bar. 92% + backdrop-blur reads as
+              frosted glass while making clipped content visually fade. */}
+          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
             <header className="flex items-center gap-2">
               <button
                 type="button"
@@ -1733,19 +2655,64 @@ export default function ThreadPage() {
                   </p>
                 </div>
               </button>
-              <Button
+              {/* Favourite star (R-0066 / #483). Pins this contact so their
+                  threads float to the top of the Inbox / Today. Optimistic. */}
+              <button
+                type="button"
+                onClick={toggleFavourite}
+                aria-label={favourite ? `Unfavourite ${thread.personName}` : `Favourite ${thread.personName}`}
+                aria-pressed={favourite}
+                data-testid="thread-favourite-toggle"
+                title={favourite ? "Remove favourite" : "Favourite this contact"}
+                className={cn(
+                  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-calm hover:bg-paper-2",
+                  favourite ? "text-accent" : "text-ink-3 hover:text-ink"
+                )}
+              >
+                <Star className="h-[16px] w-[16px]" strokeWidth={1.6} fill={favourite ? "currentColor" : "none"} />
+              </button>
+              <ActionButton
                 variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                    setError
-                  )
+                runningLabel="Saving…"
+                doneLabel="Saved"
+                onError={setError}
+                action={() =>
+                  apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
                 }
+                onSuccess={() => setHasSavedDraft(composer.trim().length > 0)}
                 className="px-3 py-1.5 text-[12px]"
               >
                 Save draft
-              </Button>
-              {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+              </ActionButton>
+              {/* Delete the persisted draft (issue #486 / pilot R-0067).
+                  Only shown when a draft is actually saved server-side —
+                  the AI predraft has its own local-only "Discard" below.
+                  Clearing the composer + hiding this button is the success
+                  signal; the inline "Deleting…" covers the in-flight state. */}
+              {hasSavedDraft ? (
+                <ActionButton
+                  variant="ghost"
+                  runningLabel="Deleting…"
+                  doneLabel="Deleted"
+                  onError={setError}
+                  action={() =>
+                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {})
+                  }
+                  onSuccess={() => {
+                    setComposer("");
+                    setComposerSource("empty");
+                    setHasSavedDraft(false);
+                  }}
+                  title="Delete the saved draft for this thread"
+                  className="px-3 py-1.5 text-[12px]"
+                >
+                  Delete draft
+                </ActionButton>
+              ) : null}
+              {/* Clear-thread cluster: wrapped so the guided tour can spotlight
+                  snooze + mark-done + archive together (data-demo-target). */}
+              <div data-demo-target="thread-actions" className="flex items-center gap-2">
+                {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
                 <Button
                   variant="ghost"
                   onClick={() =>
@@ -1783,19 +2750,43 @@ export default function ThreadPage() {
                   Snooze
                 </Button>
               )}
-              <Button
+              <ActionButton
                 variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                    setError,
-                    refresh
-                  )
-                }
+                runningLabel="Marking…"
+                doneLabel="Handled"
+                onError={setError}
+                onSuccess={refresh}
+                action={() => apiPost(`/runner/control/thread/${thread.id}/mark-done`, {})}
                 className="px-3 py-1.5 text-[12px]"
               >
                 Mark as handled
+              </ActionButton>
+              <Button
+                variant="ghost"
+                disabled={archiving}
+                onClick={() => {
+                  if (archiving) return;
+                  setArchiving(true);
+                  // Issue #336. Return to whichever list the operator
+                  // came from (Inbox, Reconnect, Archived, At risk…)
+                  // rather than always /today; falls back to /today
+                  // when no source was recorded (deep link, fresh tab).
+                  const returnTo = readThreadSource();
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
+                    (message) => {
+                      setError(message);
+                      if (message) setArchiving(false);
+                    },
+                    () => router.push(returnTo)
+                  );
+                }}
+                title="Move this thread out of the active inbox (you can find it in Archived)"
+                className="px-3 py-1.5 text-[12px]"
+              >
+                {archiving ? "Archiving…" : "Archive"}
               </Button>
+              </div>
               <Button
                 variant={aiOpen ? "primary" : "quiet"}
                 onClick={() => setAiOpen((v) => !v)}
@@ -1827,6 +2818,64 @@ export default function ThreadPage() {
                     }
                   },
                   {
+                    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
+                    // → AI parses → thread snoozes until then with the
+                    // reminder text saved on Thread.reminderText. When the
+                    // snooze expires the thread returns to inbox with a
+                    // "Reminder: <text>" banner. window.prompt for the
+                    // input is intentionally rough — see #392 for the
+                    // upcoming dedicated compose-mode polish.
+                    label: "Remind me…",
+                    onSelect: () => {
+                      if (!thread) return;
+                      const intent = window.prompt(
+                        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
+                      );
+                      if (!intent || !intent.trim()) return;
+                      apiPost<{
+                        ok: boolean;
+                        remindAt?: string;
+                        reminderText?: string;
+                        needsClarification?: boolean;
+                        reason?: string;
+                      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
+                        .then(async (res) => {
+                          if (res.ok && res.remindAt && res.reminderText) {
+                            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
+                              weekday: "short",
+                              month: "short",
+                              day: "numeric",
+                              hour: "numeric",
+                              minute: "2-digit"
+                            });
+                            showToast({
+                              kind: "success",
+                              title: `Reminder set for ${whenLabel}`,
+                              description: res.reminderText
+                            });
+                            await refresh();
+                          } else {
+                            showToast({
+                              kind: "error",
+                              title: "Couldn't set the reminder",
+                              description:
+                                res.reason ??
+                                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
+                              durationMs: 9000
+                            });
+                          }
+                        })
+                        .catch((err) => {
+                          showToast({
+                            kind: "error",
+                            title: "Reminder failed",
+                            description: err instanceof Error ? err.message : String(err),
+                            durationMs: 9000
+                          });
+                        });
+                    }
+                  },
+                  {
                     label: `Open in ${platformLabel}`,
                     onSelect: () =>
                       runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
@@ -1846,9 +2895,75 @@ export default function ThreadPage() {
                 ]}
               />
             </header>
+            {/* Always-visible reply-readiness band: what the reply needs to
+                do, why it matters, what's still open — so the operator
+                understands the thread without opening the AI rail or
+                rereading. Pinned with the header. Hidden at lg only when the
+                full rail is open (it supersedes the summary there); stays
+                visible on mobile, where the rail can't open. */}
+            {thread.needsReply !== false ? (
+              <div className={aiOpen ? "lg:hidden" : undefined}>
+                <ThreadBriefBand
+                  onYou={displayBrief.on_you}
+                  whereItStands={displayBrief.where_it_stands}
+                  openLoops={activeOpenLoops}
+                />
+              </div>
+            ) : null}
           </div>
 
           <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
+            {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
+                the contact's birthday is within the next 30 days
+                (pilot wanted "in the next month"). Wider than the
+                7-day inbox-row threshold because the operator opened
+                this specific thread — anything birthday-relevant in
+                the next month is worth flagging. Renders the age
+                ("turns 30") when birthYear is known. */}
+            {(() => {
+              if (!thread.personBirthday) return null;
+              const days = daysUntilBirthday(thread.personBirthday);
+              if (days === null || days > 30) return null;
+              const label = birthdayCountdownLabel(days);
+              const age = ageOnNextBirthday(thread.personBirthYear ?? null, thread.personBirthday);
+              return (
+                <div
+                  className={cn(
+                    "self-center flex items-center gap-2 rounded-pill border border-hairline px-3 py-[6px] text-[12.5px]",
+                    days === 0 ? "border-accent-ink text-accent-ink" : "text-ink-2"
+                  )}
+                >
+                  <span>🎂</span>
+                  <span>
+                    {thread.personName}'s birthday {label}
+                    {age ? ` · turns ${age}` : ""}
+                  </span>
+                </div>
+              );
+            })()}
+            {/* Issue #392. "Remind me to…" banner. Surfaces when the
+                operator set a reminder via the kebab menu — visible
+                whenever the thread is loaded, so the operator sees
+                WHY the thread is in front of them. Cleared on
+                unsnooze (server-side) and on the next reassess that
+                ships a fresh state. */}
+            {thread.reminderText ? (
+              <div className="self-center flex items-center gap-3 rounded-row border border-hairline bg-paper-2 px-3 py-[8px] text-[12.5px] text-ink-2">
+                <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Reminder</span>
+                <span>{thread.reminderText}</span>
+                {thread.snoozedUntil ? (
+                  <span className="font-mono text-[10.5px] text-ink-3">
+                    · resurfaces {new Date(thread.snoozedUntil).toLocaleString(undefined, {
+                      weekday: "short",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit"
+                    })}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
             {focusedThreadParentId ? (
               <div
                 data-focused-pill="true"
@@ -1875,7 +2990,20 @@ export default function ThreadPage() {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => void loadOlderMessages()}
+                    onClick={() => {
+                      const el = timelineRef.current;
+                      if (el) {
+                        const elTop = el.getBoundingClientRect().top;
+                        const anchorEl = pickScrollAnchor(el, elTop);
+                        if (anchorEl) {
+                          restoreScrollRef.current = {
+                            anchorEl,
+                            viewportOffset: anchorEl.getBoundingClientRect().top - elTop
+                          };
+                        }
+                      }
+                      void loadOlderMessages();
+                    }}
                     className="hover:text-ink"
                   >
                     load older messages
@@ -1913,6 +3041,15 @@ export default function ThreadPage() {
               const parentMessageId = parentIdOf.get(message.id);
               const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
               const replyCount = replyCountByParentId.get(message.id) ?? 0;
+              // A message can carry a reply pointer (replyToMessageId or
+              // raw.replyToGuid) before its parent is in the loaded
+              // window. We render the reply-context stub anyway so the
+              // bubble's height doesn't change when an older-messages
+              // load brings the parent in — the snippet text just fills
+              // in. Same pattern as iMessage / WhatsApp.
+              const hasReplyIntent =
+                !!message.replyToMessageId ||
+                !!(message.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
               // In focused mode, bubbles outside the parent+replies set
               // fade + blur so the focused thread "pops out" like
               // Messages.app's overlay. Pointer events off prevents
@@ -1940,7 +3077,17 @@ export default function ThreadPage() {
                   <div
                     data-message-id={message.id}
                     data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
-                    className={`flex max-w-[72%] flex-col transition-all duration-300 ease-out ${
+                    className={`flex max-w-[72%] flex-col ease-out transition-all ${
+                      // Focus enter is animated too — same easing as
+                      // exit, just faster (150ms vs 300ms) so the
+                      // focused stack snaps into view without
+                      // dragging out the dim. The post-load anchor
+                      // guard re-centres the focused parent on every
+                      // layout change during the collapse, so the
+                      // operator sees the focused stack slide into
+                      // place rather than the parent drifting.
+                      focusedThreadParentId ? "duration-150" : "duration-300"
+                    } ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
                       dimmedByFocus
@@ -1956,23 +3103,44 @@ export default function ThreadPage() {
                         : ""
                     }`}
                   >
-                    {parentMessageId ? (
-                      <button
-                        type="button"
-                        onClick={() => focusOnParent(parentMessageId)}
-                        className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 ${
-                          message.direction === "OUT" ? "self-end" : "self-start"
-                        }`}
-                        title={`Focus thread: ${parentMessage?.text ?? "earlier message"}`}
-                      >
-                        <span className="text-ink-4" aria-hidden="true">↳</span>
-                        <span className="line-clamp-2 italic text-left">
-                          {parentMessage
-                            ? parentMessage.text.slice(0, 120) || "(media)"
-                            : "Replying to an earlier message"}
-                        </span>
-                      </button>
-                    ) : null}
+                    {hasReplyIntent ? (() => {
+                      // Prefer the in-window parent (we already have it
+                      // loaded, so the focus action can navigate to it)
+                      // but fall back to the server-resolved replyTo
+                      // snippet for parents that live outside the
+                      // pagination window or in a sibling iMessage
+                      // thread. Last resort: the generic literal stub.
+                      const localSnippet = parentMessage
+                        ? parentMessage.text.slice(0, 120) || "(media)"
+                        : null;
+                      const serverSnippet = message.replyTo?.snippet ?? null;
+                      const snippet =
+                        localSnippet ??
+                        serverSnippet ??
+                        "Replying to an earlier message";
+                      // The focus button only navigates when the parent
+                      // is loaded in the current window. For server-only
+                      // snippets we still show the text but make the
+                      // button non-interactive (focus would jump
+                      // nowhere).
+                      const navigable = Boolean(parentMessageId);
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => navigable && parentMessageId && focusOnParent(parentMessageId)}
+                          disabled={!navigable}
+                          className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 disabled:cursor-default disabled:hover:bg-paper-2/60 disabled:hover:text-ink-3 disabled:hover:border-hairline ${
+                            message.direction === "OUT" ? "self-end" : "self-start"
+                          }`}
+                          title={`Focus thread: ${snippet}`}
+                        >
+                          <span className="text-ink-4" aria-hidden="true">↳</span>
+                          <span className="line-clamp-2 italic text-left min-h-[30px]">
+                            {snippet}
+                          </span>
+                        </button>
+                      );
+                    })() : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
                         <button
@@ -2006,9 +3174,29 @@ export default function ThreadPage() {
                       const hasInlineMedia = playableAttachments.length > 0;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
-                      const reactions = (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                      const nativeReactions =
+                        (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
+                      const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
+                      // #408. Operator reactions just sent from this dashboard,
+                      // shown optimistically until the next refresh folds them
+                      // into the runner's native copy.
+                      const optimisticReactions = optimisticReactionsByMessageId[message.id] ?? [];
+                      const reactions: MessageReaction[] = [
+                        ...nativeReactions,
+                        ...synthesizedReactions,
+                        ...optimisticReactions
+                      ];
+                      // #408. The quick-react trigger is LinkedIn-only: iMessage
+                      // reactions are read-only here (applied from the Messages
+                      // app, surfaced via synthesised stickers), so we never show
+                      // the picker for them.
+                      const canReact = thread.platform === "LINKEDIN";
+                      const pickerOpen = reactionPickerMessageId === message.id;
+                      const isReacting = reactingMessageId === message.id;
+                      const reactionError = reactionErrorByMessageId[message.id];
                       return (
-                        <div className="relative">
+                        <>
+                        <div className="group relative">
                           <div
                             className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                               message.direction === "OUT"
@@ -2021,6 +3209,29 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                 ))}
+                                {(() => {
+                                  // Pick the first transcribable attachment to
+                                  // drive the per-message transcript surface.
+                                  // Voice notes win over plain audio, which
+                                  // win over video, so a multi-attachment
+                                  // bubble (rare) labels itself sensibly.
+                                  const transcribableKind = playableAttachments
+                                    .map((a) => a.kind)
+                                    .find(
+                                      (k) =>
+                                        k === "voice_note" ||
+                                        k === "audio" ||
+                                        k === "video"
+                                    );
+                                  if (!transcribableKind) return null;
+                                  return (
+                                    <VoiceMessageTranscript
+                                      messageId={message.id}
+                                      transcription={message.audioTranscription ?? null}
+                                      attachmentKind={transcribableKind}
+                                    />
+                                  );
+                                })()}
                               </div>
                             ) : null}
                             {showText ? (
@@ -2048,7 +3259,74 @@ export default function ThreadPage() {
                               ))}
                             </div>
                           ) : null}
+                          {canReact ? (
+                            <div
+                              className={`absolute top-1/2 -translate-y-1/2 ${
+                                message.direction === "OUT"
+                                  ? "right-[calc(100%+8px)]"
+                                  : "left-[calc(100%+8px)]"
+                              }`}
+                            >
+                              {/* React trigger: revealed on bubble hover, or
+                                  kept visible while its picker is open / a
+                                  request is in flight so the affordance does not
+                                  vanish mid-interaction. */}
+                              <button
+                                type="button"
+                                disabled={isReacting}
+                                onClick={() =>
+                                  setReactionPickerMessageId((prev) =>
+                                    prev === message.id ? null : message.id
+                                  )
+                                }
+                                aria-label="React to message"
+                                title="React"
+                                className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+                                  pickerOpen || isReacting
+                                    ? "opacity-100"
+                                    : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                }`}
+                              >
+                                {isReacting ? (
+                                  <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                                ) : (
+                                  <span className="text-[13px] leading-none">☺</span>
+                                )}
+                              </button>
+                              {pickerOpen ? (
+                                <div
+                                  className={`absolute bottom-[calc(100%+6px)] z-20 flex items-center gap-[2px] rounded-full border border-hairline bg-paper p-[4px] shadow-pop ${
+                                    message.direction === "OUT" ? "right-0" : "left-0"
+                                  }`}
+                                >
+                                  {QUICK_REACT_EMOJI.map((emoji) => (
+                                    <button
+                                      key={emoji}
+                                      type="button"
+                                      disabled={isReacting}
+                                      onClick={() => void reactToMessage(message.id, emoji)}
+                                      aria-label={`React with ${emoji}`}
+                                      title={emoji}
+                                      className="inline-flex h-[28px] w-[28px] items-center justify-center rounded-full text-[16px] leading-none transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {emoji}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
+                          ) : null}
                         </div>
+                        {reactionError ? (
+                          <span
+                            className={`mt-[6px] font-mono text-[11px] text-risk-overdue ${
+                              message.direction === "OUT" ? "self-end" : "self-start"
+                            }`}
+                          >
+                            {reactionError}
+                          </span>
+                        ) : null}
+                        </>
                       );
                     })()}
                     <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
@@ -2240,14 +3518,43 @@ export default function ThreadPage() {
           </div>
         </div>
 
-        <div className="flex-shrink-0 border-t border-hairline bg-paper">
+        <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
+          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
+              above the composer's top edge so it sits in the middle just
+              above the input, with a glassy frosted-surface treatment that
+              matches the sticky header. Hidden in focused mode (the stack is
+              bounded there). */}
+          {showJumpToLatest && !focusedThreadParentId ? (
+            <button
+              type="button"
+              onClick={scrollToLatest}
+              aria-label="Jump to latest message"
+              title="Jump to latest"
+              className="absolute -top-12 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] text-ink-2 shadow-card backdrop-blur-md backdrop-saturate-150 transition-colors duration-calm hover:border-hairline-strong hover:bg-[color-mix(in_oklch,var(--paper)_88%,transparent)] hover:text-ink"
+            >
+              <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
+            </button>
+          ) : null}
           <div className="mx-auto w-full max-w-[820px] px-8 pb-2 pt-2">
             {error ? (
               <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
             ) : null}
             <div
               data-thread-composer="true"
-              className="rounded-card border border-hairline bg-paper px-3 pb-1.5 pt-1.5"
+              data-demo-target="composer-input"
+              // Predraft state earns a tinted accent border + soft ring
+              // (#350): the textarea on its own looks like a passive
+              // surface, so operators read the AI predraft as static
+              // text rather than something they're meant to edit. The
+              // accent frame signals "this is suggested content, click
+              // anywhere to refine, or discard and start fresh". As soon
+              // as composerSource flips to "user" (typing starts) the
+              // frame reverts to the neutral hairline.
+              className={`rounded-card border bg-paper px-3 pb-1.5 pt-1.5 transition-colors duration-calm ${
+                composerSource === "predraft"
+                  ? "border-accent-ink/40 ring-1 ring-accent-ink/10"
+                  : "border-hairline"
+              }`}
             >
               {focusedParentMessage ? (
                 <div className="mb-2 flex items-start gap-2 rounded-[10px] border border-hairline bg-paper-2/60 px-2 py-1.5 text-[12px] leading-snug text-ink-2">
@@ -2271,32 +3578,80 @@ export default function ThreadPage() {
               {composerSource === "predraft" ? (
                 <div
                   data-testid="ai-predraft-badge"
-                  className="mb-1 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
+                  className="mb-1.5 flex items-center justify-between gap-2"
                 >
-                  <Sparkles className="h-[11px] w-[11px]" />
-                  {isReopenMode ? "AI opener - review before sending" : "AI predraft - review before sending"}
+                  <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
+                    <Sparkles className="h-[12px] w-[12px]" />
+                    {isReopenMode ? "AI opener · review before sending" : "AI predraft · review before sending"}
+                  </span>
+                  {/* Bumped from a tiny "clear" link to a proper Discard
+                      button at body-text size with an icon (#350). Old
+                      treatment was easy to miss when the operator wanted
+                      to throw away the AI draft and write their own. */}
                   <button
                     type="button"
                     onClick={() => {
                       setComposer("");
                       setComposerSource("empty");
                     }}
-                    className="ml-1 text-ink-3 hover:text-ink"
+                    title="Discard the AI draft and start fresh"
+                    className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
                   >
-                    clear
+                    <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                    Discard
                   </button>
                 </div>
               ) : null}
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
+                // #466 (pilot R-0065): native browser assists where supported
+                // (spellCheck underlines on desktop; autoCapitalize/autoCorrect
+                // on iOS/Safari). The JS layer below covers desktop Firefox.
+                spellCheck
+                autoCapitalize="sentences"
+                autoCorrect="on"
                 onChange={(event) => {
-                  setComposer(event.target.value);
+                  const nextValue = event.target.value;
+                  const caret = event.target.selectionStart ?? nextValue.length;
                   if (composerSource === "predraft" || composerSource === "empty") {
                     setComposerSource("user");
                   }
+                  // #466: autocorrect only on a single typed character that
+                  // appends at the very end of the text, so the caret stays
+                  // put and mid-text edits are never disturbed.
+                  if (nextValue.length === composer.length + 1 && caret === nextValue.length) {
+                    const fix = autocorrectAtCaret(nextValue, caret);
+                    if (fix) {
+                      lastAutocorrectRef.current = {
+                        original: fix.original,
+                        corrected: fix.corrected,
+                        value: fix.text
+                      };
+                      setComposer(fix.text);
+                      return;
+                    }
+                  }
+                  lastAutocorrectRef.current = null;
+                  setComposer(nextValue);
                 }}
                 onKeyDown={(event) => {
+                  // #466: an immediate Backspace reverts the last
+                  // autocorrection to exactly what the operator typed.
+                  if (
+                    event.key === "Backspace" &&
+                    lastAutocorrectRef.current &&
+                    composer === lastAutocorrectRef.current.value
+                  ) {
+                    event.preventDefault();
+                    const { original, corrected, value } = lastAutocorrectRef.current;
+                    const terminator = value.slice(-1);
+                    const reverted =
+                      value.slice(0, value.length - 1 - corrected.length) + original + terminator;
+                    lastAutocorrectRef.current = null;
+                    setComposer(reverted);
+                    return;
+                  }
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
                     // #65: stop the native window-level keydown listener
@@ -2374,10 +3729,11 @@ export default function ThreadPage() {
                     ) : null}
                   </div>
                 ) : null}
-                {/* Suggested-replies dropdown. Replaces the row of chips that
-                    used to wrap onto multiple lines on narrower viewports;
-                    keeps the composer compact and previews each suggestion's
-                    text before the operator commits to it. */}
+                {/* Suggested-replies dropdown. Complete sendable drafts —
+                    shown only when the operator has opted into full AI
+                    drafts via the AI help level. Lower levels keep the
+                    composer centred on the operator's own writing. */}
+                {showFullDrafts ? (
                 <div className="relative" ref={chipsMenuRef}>
                   <button
                     type="button"
@@ -2434,22 +3790,68 @@ export default function ThreadPage() {
                     </div>
                   ) : null}
                 </div>
+                ) : null}
                 <div className="flex flex-1 items-center justify-end gap-2">
+                  {/* "shorten" / "warmer" rewrite the operator's OWN draft —
+                      writing support, shown unless AI help is memory-only. */}
+                  {showWritingSupport ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("SHORTEN")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("MAKE_WARMER")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
+                      </button>
+                    </>
+                  ) : null}
+                  {/* #462 (pilot R-0061): Dictate — record speech and have
+                      the runner transcribe it into the composer for review.
+                      Distinct from the iMessage voice-note mic (that attaches
+                      audio to send). Available on every platform; disabled
+                      with an explanation when transcription isn't configured. */}
                   <button
                     type="button"
-                    disabled={!composer.trim() || transforming !== null}
-                    onClick={() => void transform("SHORTEN")}
-                    className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                    onClick={() =>
+                      dictationStatus === "recording" ? stopDictation() : void startDictation()
+                    }
+                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    title={
+                      dictationAvailable
+                        ? dictationStatus === "recording"
+                          ? "Stop and transcribe"
+                          : "Dictate your reply"
+                        : "Voice dictation needs transcription enabled on the runner"
+                    }
+                    aria-label="Dictate"
+                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      dictationStatus === "recording"
+                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
                   >
-                    {transforming === "SHORTEN" ? "shortening…" : "shorten"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!composer.trim() || transforming !== null}
-                    onClick={() => void transform("MAKE_WARMER")}
-                    className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                  >
-                    {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
+                    {dictationStatus === "transcribing" ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Mic
+                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                        strokeWidth={1.8}
+                      />
+                    )}
+                    {dictationStatus === "recording"
+                      ? "Stop"
+                      : dictationStatus === "transcribing"
+                        ? "Transcribing…"
+                        : "Dictate"}
                   </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
@@ -2561,6 +3963,25 @@ export default function ThreadPage() {
                   </Button>
                 </div>
               </div>
+              {showLateNightNudge && lateNightSlot ? (
+                <button
+                  type="button"
+                  data-testid="late-night-schedule-nudge"
+                  onClick={() => void scheduleSend(lateNightSlot)}
+                  disabled={scheduling}
+                  title={`Send at ${lateNightSlot.toLocaleString(undefined, {
+                    weekday: "long",
+                    hour: "numeric",
+                    minute: "2-digit"
+                  })} instead of now`}
+                  className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-ink-3 transition-colors duration-calm hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Clock className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                  <span>
+                    {scheduling ? "Scheduling…" : "It’s late, schedule for 8 AM instead?"}
+                  </span>
+                </button>
+              ) : null}
               {composerAttachments.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-2 border-t border-hairline pt-2">
                   {composerAttachments.map((a) => (
@@ -2663,77 +4084,55 @@ export default function ThreadPage() {
       {/* ───── Context rail ───── */}
       <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
         <div className="flex flex-col gap-7 px-7 py-10">
-          {trimmedAsk || trimmedSummary ? (
-            <section>
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                {askHeading}
-              </p>
-              <p className="m-0 text-balance text-[14px] leading-[1.55] text-ink">
-                {trimmedAsk || trimmedSummary}
-              </p>
-              {showRelationshipContext && trimmedAsk ? (
-                <p className="mt-3 border-t border-hairline pt-3 text-[13px] leading-[1.55] text-ink-3">
-                  <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                    context ·{" "}
-                  </span>
-                  {trimmedSummary}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
+          {/* Reply Brief - the single adaptive panel that drives the rail.
+              Default visible card carries only Where it stands + On you so
+              the operator can read the thread in under 10 seconds; everything
+              else (optional follow-ups, fuller context, tone steer, the
+              gated reply checklist with its existing auto-tick / dismiss
+              behaviour) sits behind one collapsed disclosure. Falls back to
+              a safe brief derived from the legacy fields when the runner
+              hasn't yet generated one for this row. */}
+          <ReplyBriefPanel
+            threadId={thread.id}
+            brief={displayBrief}
+            openLoops={thread.openLoops}
+            dismissedOpenLoops={thread.dismissedOpenLoops}
+            onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+            aiCoverageItems={aiCoverageItems}
+            aiCoverageMode={
+              aiHelpLevel === "memory_only"
+                ? "off"
+                : aiHelpLevel === "full_drafts"
+                  ? "auto-tick"
+                  : "highlight"
+            }
+          />
 
-          {/* Loops - active rows render with an unchecked box; ticking
-              dismisses the loop (#62). Dismissed loops still render below
-              in a muted, struck-through form so the operator can restore
-              one by un-ticking. Heading flips to "Conversation hooks" in
-              reopen mode where the items are warm callbacks rather than
-              pending asks. */}
-          {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
-            <section>
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                {loopsHeading}
-              </p>
-              <ul className="m-0 list-none space-y-[6px] p-0">
-                {thread.openLoops.map((item) => (
-                  <li key={`open:${item}`} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
-                    <input
-                      type="checkbox"
-                      checked={false}
-                      onChange={() => void toggleOpenLoop(item, true)}
-                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink"
-                      aria-label={`Mark "${item}" as resolved`}
-                    />
-                    {item}
-                  </li>
-                ))}
-                {thread.dismissedOpenLoops.map((item) => (
-                  <li
-                    key={`dismissed:${item}`}
-                    className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-4 line-through"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={true}
-                      onChange={() => void toggleOpenLoop(item, false)}
-                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink-3"
-                      aria-label={`Restore "${item}" as an open loop`}
-                    />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+          {/* Things to remember - durable facts (exams, trips, life events)
+              the AI re-derives from the transcript each scan. Stays separate
+              from the Reply Brief on purpose: this is life context the
+              operator wants to carry forward, not reply-state. Read-only and
+              self-hiding when empty. */}
+          <ThingsToRemember remember={thread.remember ?? []} />
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-              {composeMode === "write" ? "Compose" : "Ask"}
+              {effectiveComposeMode === "write" ? "Compose" : "Ask"}
             </p>
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              {composeMode === "write"
+              {effectiveComposeMode === "write"
                 ? composeHelper
-                : "Ask a question about this thread or person. The AI answers from the transcript and what's on record — it won't make anything up."}
+                : "Ask a question about this thread or person. The AI answers from the transcript and what's on record. It won't make anything up."}
             </p>
+            {!showFullDrafts ? (
+              <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
+                Full AI reply drafts are off.{" "}
+                <Link href="/settings" className="text-ink-2 underline-offset-2 hover:underline">
+                  Change your AI help level in Settings
+                </Link>{" "}
+                to draft complete replies as well.
+              </p>
+            ) : null}
             <textarea
               value={composeIntent}
               onChange={(event) => {
@@ -2742,7 +4141,7 @@ export default function ThreadPage() {
                 if (composeDraft) setComposeDraft("");
               }}
               placeholder={
-                composeMode === "write"
+                effectiveComposeMode === "write"
                   ? isReopenMode
                     ? "e.g. ask how exams went"
                     : "e.g. ask if free for a quick coffee next week"
@@ -2753,8 +4152,9 @@ export default function ThreadPage() {
             />
             {/* Mismatch hint: if the input shape clashes with the selected
                 mode, surface a one-line nudge below the textarea so the
-                operator can flip modes without burying it in a menu. */}
-            {(() => {
+                operator can flip modes without burying it in a menu. Only
+                relevant when both modes are available (full AI drafts on). */}
+            {showFullDrafts ? (() => {
               const trimmed = composeIntent.trim();
               if (!trimmed) return null;
               const looksLikeQuestion =
@@ -2791,19 +4191,19 @@ export default function ThreadPage() {
                 );
               }
               return null;
-            })()}
+            })() : null}
             <div className="mt-2 flex items-center gap-2">
               {/* Split button: primary action + a chevron to flip the mode.
-                  Keeps the default action one click away while the mode is
-                  always visible on the label. */}
+                  The mode switcher only appears when full AI drafts are on;
+                  otherwise this is an Ask-only button. */}
               <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
                 <button
                   type="button"
                   disabled={composing || !composeIntent.trim()}
                   onClick={() =>
-                    composeMode === "write" ? void composeFromIntent() : void askAi()
+                    effectiveComposeMode === "write" ? void composeFromIntent() : void askAi()
                   }
-                  className="inline-flex items-center gap-2 rounded-l-pill bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50"
+                  className={`inline-flex items-center gap-2 bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50 ${showFullDrafts ? "rounded-l-pill" : "rounded-pill"}`}
                 >
                   {composing ? (
                     <Loader2 className="h-[14px] w-[14px] animate-spin" />
@@ -2811,13 +4211,15 @@ export default function ThreadPage() {
                     <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.8} />
                   )}
                   {composing
-                    ? composeMode === "write"
+                    ? effectiveComposeMode === "write"
                       ? "Composing…"
                       : "Thinking…"
-                    : composeMode === "write"
+                    : effectiveComposeMode === "write"
                       ? "Compose"
                       : "Ask"}
                 </button>
+                {showFullDrafts ? (
+                  <>
                 <span className="my-[6px] w-px bg-paper/20" aria-hidden />
                 <button
                   type="button"
@@ -2863,25 +4265,44 @@ export default function ThreadPage() {
                     </button>
                   </div>
                 ) : null}
+                  </>
+                ) : null}
               </div>
               {composeError ? (
                 <span className="font-mono text-[11px] text-risk-overdue">{composeError}</span>
               ) : null}
             </div>
             {composeDraft ? (
-              <div className="mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink">
+              // #436.4: "try again" re-runs composeFromIntent, which keeps the
+              // old draft mounted while the new one streams. Fade the stale
+              // text and swap the actions for a Regenerating… indicator so two
+              // suggestions never sit side by side.
+              <div
+                className={`mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
+                  composing ? "opacity-40" : "opacity-100"
+                }`}
+              >
                 <p className="m-0 whitespace-pre-wrap">{composeDraft}</p>
                 <div className="mt-3 flex items-center gap-3">
-                  <Button variant="quiet" onClick={useDraft}>
-                    Use this
-                  </Button>
-                  <button
-                    type="button"
-                    onClick={() => void composeFromIntent()}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-                  >
-                    try again
-                  </button>
+                  {composing ? (
+                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                      Regenerating…
+                    </span>
+                  ) : (
+                    <>
+                      <Button variant="quiet" onClick={useDraft}>
+                        Use this
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => void composeFromIntent()}
+                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                      >
+                        try again
+                      </button>
+                    </>
+                  )}
                 </div>
               </div>
             ) : null}
@@ -2913,18 +4334,22 @@ export default function ThreadPage() {
         </div>
       </aside>
 
-      <ReceiptsDrawer
-        open={receiptsOpen}
-        onClose={() => setReceiptsOpen(false)}
-        rows={thread.receipts}
-        title="Thread receipts"
-      />
+      {receiptsEverOpened ? (
+        <ReceiptsDrawer
+          open={receiptsOpen}
+          onClose={() => setReceiptsOpen(false)}
+          rows={thread.receipts}
+          title="Thread receipts"
+        />
+      ) : null}
 
-      <ProfileDrawer
-        open={profileDrawerOpen}
-        personId={thread.personId ?? null}
-        onClose={() => setProfileDrawerOpen(false)}
-      />
+      {profileEverOpened ? (
+        <ProfileDrawer
+          open={profileDrawerOpen}
+          personId={thread.personId ?? null}
+          onClose={() => setProfileDrawerOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }

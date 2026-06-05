@@ -10,8 +10,11 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
+import { groupStubFields } from "./imessage-group-name";
+import { imessageMessageBodyText } from "./imessage-message-text";
 import { sendIMessage } from "./imessage-send";
 import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
 
@@ -109,7 +112,8 @@ export class IMessageAdapter implements PlatformAdapter {
         : row.lastMessagePreview,
       lastMessageAt: row.lastMessageAt,
       isUnreadCandidate: isUnread,
-      isRecentCandidate: isRecent
+      isRecentCandidate: isRecent,
+      ...groupStubFields(row)
     };
   }
 
@@ -138,7 +142,12 @@ export class IMessageAdapter implements PlatformAdapter {
     // proper scroll-back without re-scanning.
     const effectiveLimit = Math.max(limit, 500);
     const rows = db.fetchMessages(thread.platformThreadId, effectiveLimit);
-    return rows.map((r) => {
+    // Drop iMessage "kept an audio message" system events at ingestion so
+    // they never become persisted rows. Existing stored rows are filtered
+    // again at the read paths (scan-queue aggregates, AI context, thread
+    // render, inbox preview) so the operator never sees them either way.
+    const filteredRows = rows.filter((r) => !isNonContentIMessageSystemEvent(r.text));
+    return filteredRows.map((r) => {
       // Persist reactions + reply parent on rawJson. Both fields are read
       // back by the dashboard's thread page; absent fields stay omitted so
       // we don't write empty {} for plain bubbles (keeps rawJson nullable
@@ -154,11 +163,12 @@ export class IMessageAdapter implements PlatformAdapter {
       // human-readable to label by.
       const resolvedSender =
         r.senderHandle ? this.contactResolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
+      const text = imessageMessageBodyText(r.text, r.attachments.length);
       return {
         platformMessageKey: r.guid,
         direction: r.direction,
         timestamp: r.timestamp ?? new Date().toISOString(),
-        text: r.text,
+        text,
         senderName: resolvedSender,
         raw: Object.keys(raw).length > 0 ? raw : undefined,
         attachments: r.attachments.map((a) => ({
@@ -171,6 +181,10 @@ export class IMessageAdapter implements PlatformAdapter {
         }))
       };
     });
+  }
+
+  async collectRetractedOutboundKeys(thread: ThreadStub): Promise<string[]> {
+    return this.getDb().findFailedOutboundGuids(thread.platformThreadId);
   }
 
   async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
@@ -207,10 +221,20 @@ export class IMessageAdapter implements PlatformAdapter {
     const initialHandle = chat.participants[0] ?? chat.chatIdentifier;
     const handle = this.pickBestSendHandle(initialHandle);
     const sendStartedAt = Date.now();
+    // Service must follow the *handle* we picked, not chat.service_name.
+    // The chat row records whatever service Messages.app last touched it
+    // with - so a thread whose previous reply happened to land on SMS will
+    // keep chat.service = "SMS" forever, and passing that to AppleScript
+    // forces every subsequent send (including ones routed to an
+    // iMessage-capable handle by pickBestSendHandle) down the SMS path.
+    // Reading the service off the handle itself lets a contact toggle
+    // back to blue bubbles as soon as we send to an iMessage-registered
+    // address.
+    const handleService = db.findHandleService(handle) ?? undefined;
     try {
       await sendIMessage({
         handle,
-        service: chat.service ?? undefined,
+        service: handleService,
         text,
         attachmentPaths: (attachments ?? []).map((a) => a.absolutePath)
       });

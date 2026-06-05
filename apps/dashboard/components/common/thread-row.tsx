@@ -1,17 +1,22 @@
 "use client";
 
 import Link from "next/link";
+import { Star } from "lucide-react";
 import type { InboxRow } from "@/lib/types";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
-import { normalizePreview } from "@/lib/preview";
+import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
+import { birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
+import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 
 interface ThreadRowProps {
   row: InboxRow;
   /** Optional - when provided, called after a name suggestion is confirmed/edited/dismissed so the parent can refresh the inbox. */
   onPersonChanged?: () => void;
+  /** Optional DOM id applied to the row, so a parent can scroll it into view. */
+  id?: string;
 }
 
 const riskTextClass: Record<DisplayRisk, string> = {
@@ -20,11 +25,25 @@ const riskTextClass: Record<DisplayRisk, string> = {
   fresh: "text-ink-2"
 };
 
-export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
+export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
   const risk = toDisplayRisk(row.riskLevel);
   const cleanPreview = normalizePreview(row.preview);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
+  // On threads still awaiting a reply, lead with the AI context line - it
+  // says *why* the conversation needs the operator, not just the last
+  // words. Replied/handled threads keep the literal preview so the
+  // "You: …" sent-marker stays visible.
+  // cleanAskSummary repairs legacy summaries that were stored hard-cut
+  // mid-word ("...current skills fo") before the server cut on word
+  // boundaries, so the row never shows a bisected word.
+  const nudge = cleanAskSummary(row.whatTheyWant);
+  // True when the row body is the AI ask-summary (`nudge`) rather than the
+  // literal last message. The summary is ≤120 chars (capped server-side), so
+  // it's allowed to wrap to its full length; the literal preview can run long
+  // and stays 2-line clamped below.
+  const showingNudge = row.needsReply !== false && Boolean(nudge);
+  const bodyText = showingNudge && nudge ? nudge : previewBody;
   const rightLabel =
     risk === "overdue"
       ? "Overdue"
@@ -40,10 +59,21 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
   // marker so the operator can spot it while scanning the list.
   const needsReplyMarker =
     row.lastMessageDirection === "IN" && row.unreadCount > 0 && !row.archivedAt;
+  // Quiet "birthday soon" marker, from the contact's macOS Contacts card.
+  // Capped at a week so the row stays a reply-triage surface, not a
+  // calendar; the Today page carries the fuller upcoming-birthdays list.
+  const birthdayDays = daysUntilBirthday(row.personBirthday);
+  const birthdayMarker =
+    birthdayDays !== null && birthdayDays <= 7 ? birthdayCountdownLabel(birthdayDays) : null;
 
   return (
     <Link
+      id={id}
       href={`/thread/${row.id}`}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={cancelThreadPrefetch}
+      onFocus={() => prefetchThreadData(row.id)}
+      data-demo-target={row.platformThreadId ? `thread-row-${row.platformThreadId}` : undefined}
       className="group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
     >
       <PersonAvatar
@@ -55,6 +85,16 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
       <span className="min-w-0">
         <span className="mb-1 flex items-baseline gap-[10px]">
           <span className="text-[15px] font-medium tracking-[-0.01em] text-ink">{row.personName}</span>
+          {row.personFavourite ? (
+            // Favourite marker (R-0066 / #483). Subtle filled star so a pinned
+            // contact reads at a glance in the queue.
+            <Star
+              className="h-[13px] w-[13px] shrink-0 text-accent"
+              strokeWidth={1.6}
+              fill="currentColor"
+              aria-label="Favourite"
+            />
+          ) : null}
           <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em] text-ink-2">
             {PLATFORM_LABEL[row.platform]}
           </span>
@@ -73,14 +113,25 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
               onChanged={() => onPersonChanged?.()}
             />
           ) : null}
+          {/* Metadata tags are space-separated (no glyph) — the row-top
+              flex gap provides the spacing. */}
           {categoryLabel ? (
             <span className="font-mono text-[11px] tracking-[0.02em] text-ink-3">
-              · {categoryLabel}
+              {categoryLabel}
             </span>
           ) : null}
           {needsReplyMarker ? (
             <span className="font-mono text-[11px] tracking-[0.02em] text-risk-overdue">
-              · needs reply
+              needs reply
+            </span>
+          ) : null}
+          {birthdayMarker ? (
+            <span
+              className={`font-mono text-[11px] tracking-[0.02em] ${
+                birthdayDays === 0 ? "text-accent-ink" : "text-ink-3"
+              }`}
+            >
+              birthday {birthdayMarker}
             </span>
           ) : null}
           {row.personThreadCount && row.personThreadCount > 1 ? (
@@ -88,11 +139,23 @@ export function ThreadRow({ row, onPersonChanged }: ThreadRowProps) {
               className="font-mono text-[11px] tracking-[0.02em] text-ink-3"
               title="Same contact has multiple separate conversations visible"
             >
-              · {row.personThreadCount} threads
+              {row.personThreadCount} threads
             </span>
           ) : null}
         </span>
-        <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>
+        {/* The ask-summary wraps in full (no truncation) so the operator sees
+            the whole thing; the literal last-message preview stays 2-line
+            clamped so already-replied rows don't balloon. */}
+        <span
+          data-testid="thread-row-summary"
+          className={
+            showingNudge
+              ? "block text-[14px] leading-[1.45] text-ink-2"
+              : "block max-w-[64ch] line-clamp-2 text-[14px] leading-[1.45] text-ink-2"
+          }
+        >
+          {bodyText}
+        </span>
       </span>
       <span className={`text-[12px] tracking-[-0.005em] ${riskTextClass[risk]}`}>
         {rightLabel}

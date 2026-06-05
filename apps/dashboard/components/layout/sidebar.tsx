@@ -5,27 +5,35 @@ import { usePathname } from "next/navigation";
 import {
   Sun,
   Inbox,
-  AlertTriangle,
-  Archive,
-  Users,
-  Cable,
-  ListChecks,
   Search,
   Settings as SettingsIcon,
   PanelLeftClose,
-  PanelLeftOpen
+  PanelLeftOpen,
+  Sparkles,
+  MessageSquareText,
+  User
 } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { openPilotFeedback } from "@/lib/pilot";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 
 interface SidebarProps {
-  health: HealthResponse | null;
+  // `undefined` = the first /health fetch is still in flight (cold mount);
+  // rendered as a calm "Connecting…" rather than "Runner offline" (#435).
+  // `null` = a fetch completed and failed → genuine offline.
+  health: HealthResponse | null | undefined;
   attentionCount: number;
-  userInitials: string;
   onOpenSearch: () => void;
   collapsed: boolean;
   onToggleCollapsed: () => void;
+  /**
+   * Operator's preferred display name, sourced from the operator_profile_v1
+   * setting. `undefined` = still loading (footer shows a skeleton); `null`
+   * / empty → falls back to the literal "Operator" so the footer never
+   * collapses on a fresh install.
+   */
+  operatorDisplayName?: string | null;
 }
 
 interface NavItem {
@@ -35,14 +43,15 @@ interface NavItem {
   attention?: boolean;
 }
 
+// v1 nav scope: only the inbox loop. /at-risk, /people, /platforms, /logs
+// still resolve if typed directly; PR2 will decide which routes get deleted.
+// Reconnect is the live nudge toward dormant ties. Archived is off the rail
+// (pilot feedback #303) — reachable from a quiet link at the foot of the
+// Inbox and via the ⌘K palette.
 const nav: NavItem[] = [
   { href: "/today", label: "Today", icon: Sun, attention: true },
   { href: "/inbox", label: "Inbox", icon: Inbox },
-  { href: "/at-risk", label: "At Risk", icon: AlertTriangle },
-  { href: "/archived", label: "Archived", icon: Archive },
-  { href: "/people", label: "People", icon: Users },
-  { href: "/platforms", label: "Platforms", icon: Cable },
-  { href: "/logs", label: "Activity", icon: ListChecks },
+  { href: "/reconnect", label: "Reconnect", icon: Sparkles },
   { href: "/settings", label: "Settings", icon: SettingsIcon }
 ];
 
@@ -54,22 +63,29 @@ const nav: NavItem[] = [
 export function Sidebar({
   health,
   attentionCount,
-  userInitials,
   onOpenSearch,
   collapsed,
-  onToggleCollapsed
+  onToggleCollapsed,
+  operatorDisplayName
 }: SidebarProps) {
+  const profileLoading = operatorDisplayName === undefined;
+  const operatorLabel = operatorDisplayName?.trim() || "Operator";
   const pathname = usePathname();
-  // Three runner states the sidebar can surface, in priority order:
-  //   - unreachable: dashboard couldn't fetch /runner/health (network or
-  //     the runner process is genuinely down) → red dot, "Runner offline".
-  //   - busy:       runner reachable but mid-task (scanning, sending, or
-  //                 draining the enrichment queue) → amber dot, "Runner busy".
-  //   - online:     reachable + idle → green dot, "Runner online".
+  // Four runner states the sidebar can surface, in priority order:
+  //   - unknown:     first /health fetch hasn't resolved yet (cold mount /
+  //                  reload) → grey dot, "Connecting…". Distinct from
+  //                  offline so a slow runner doesn't read as a dead one
+  //                  while the dashboard is still asking (#435 / R-0057).
+  //   - unreachable: a fetch completed and failed (network or the runner
+  //                  process is genuinely down) → red dot, "Runner offline".
+  //   - busy:        runner reachable but mid-task (scanning, sending, or
+  //                  draining the enrichment queue) → amber dot, "Runner busy".
+  //   - online:      reachable + idle → green dot, "Runner online".
   // The previous binary check (runnerStatus === "ONLINE") collapsed busy
   // into "Runner offline", which read as broken when the runner was
   // actually working as intended.
-  const runnerLabel: { kind: "online" | "busy" | "offline"; text: string } = (() => {
+  const runnerLabel: { kind: "online" | "busy" | "offline" | "unknown"; text: string } = (() => {
+    if (health === undefined) return { kind: "unknown", text: "Connecting…" };
     if (!health) return { kind: "offline", text: "Runner offline" };
     if (health.runnerStatus !== "ONLINE") return { kind: "busy", text: "Runner busy" };
     if ((health.enrichmentQueue?.total ?? 0) > 0) return { kind: "busy", text: "Runner busy" };
@@ -80,7 +96,9 @@ export function Sidebar({
       ? "bg-risk-fresh"
       : runnerLabel.kind === "busy"
         ? "bg-risk-waiting"
-        : "bg-risk-overdue";
+        : runnerLabel.kind === "unknown"
+          ? "bg-ink-3"
+          : "bg-risk-overdue";
 
   const ToggleIcon = collapsed ? PanelLeftOpen : PanelLeftClose;
   const toggleTitle = collapsed ? "Expand sidebar ([)" : "Collapse sidebar ([)";
@@ -159,6 +177,7 @@ export function Sidebar({
             <Link
               key={item.href}
               href={item.href}
+              data-demo-target={`nav-${item.href.replace(/^\//, "")}`}
               title={collapsed ? item.label : undefined}
               className={cn(
                 "relative flex items-center rounded-[10px] text-[13px] tracking-[-0.005em]",
@@ -181,11 +200,21 @@ export function Sidebar({
                     <span
                       className={cn(
                         "ml-auto inline-flex min-w-[18px] justify-center rounded-full px-[6px] py-[1px] font-mono text-[10px] font-medium",
-                        active ? "bg-paper text-ink" : "bg-accent/15 text-accent"
+                        // Muted styling on purpose (#352). The bright
+                        // accent on a 3-digit count read as "your life
+                        // is on fire" rather than "today's queue".
+                        // Today is the calm-pile, not an alert. Active
+                        // state still inverts so the count remains
+                        // visible against the dark Today background.
+                        active ? "bg-paper text-ink" : "bg-paper-2 text-ink-3"
                       )}
                       aria-label={`${attentionCount} need attention`}
                     >
-                      {attentionCount}
+                      {/* Cap the displayed number — the operator isn't
+                          actioning 220 items in a day, so past ~99 the
+                          exact figure stops being useful and starts
+                          being noise. */}
+                      {attentionCount > 99 ? "99+" : attentionCount}
                     </span>
                   ) : null}
                 </>
@@ -200,41 +229,62 @@ export function Sidebar({
         })}
       </nav>
 
-      <div
+      <button
+        type="button"
+        onClick={() => openPilotFeedback("feedback")}
+        aria-label="Send feedback"
+        title={collapsed ? "Send feedback" : undefined}
+        data-demo-target="feedback"
+        data-tour="feedback"
         className={cn(
-          "mt-auto flex items-center rounded-[10px] border border-hairline bg-paper-2/40",
+          "mt-auto flex items-center rounded-[10px] text-[13px] tracking-[-0.005em] text-ink-2",
+          "transition-[color,background-color] duration-calm hover:bg-paper-2 hover:text-ink",
           collapsed ? "h-9 w-9 justify-center self-center" : "gap-3 px-3 py-2"
         )}
-        title={collapsed ? `Operator · ${runnerLabel.text}` : undefined}
+      >
+        <MessageSquareText
+          className={cn("shrink-0", collapsed ? "h-[18px] w-[18px]" : "h-[16px] w-[16px]")}
+          strokeWidth={1.6}
+        />
+        {!collapsed ? <span className="flex-1 text-left">Feedback</span> : null}
+      </button>
+
+      <div
+        className={cn(
+          "mt-3 flex items-center border-t border-hairline pt-3",
+          collapsed ? "justify-center" : "gap-2 px-3"
+        )}
+        title={collapsed ? `${operatorLabel} · ${runnerLabel.text}` : undefined}
       >
         <div
           className={cn(
-            "relative grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display font-semibold text-white",
-            collapsed ? "h-7 w-7 text-[10px]" : "h-8 w-8 text-[12px]"
+            "relative grid shrink-0 place-items-center rounded-full bg-gradient-to-br from-[#9a2727] to-[#6b1818] text-white",
+            collapsed ? "h-7 w-7" : "h-8 w-8"
           )}
           aria-label="Operator avatar"
         >
-          {userInitials}
-          {collapsed ? (
-            <span
-              className={cn(
-                "absolute -bottom-[1px] -right-[1px] h-[8px] w-[8px] rounded-full border border-paper",
-                dotColor
-              )}
-              aria-hidden
-            />
-          ) : null}
+          <User
+            className={collapsed ? "h-[13px] w-[13px]" : "h-[15px] w-[15px]"}
+            strokeWidth={1.8}
+          />
+          <span
+            className={cn(
+              "absolute -bottom-[1px] -right-[1px] h-[8px] w-[8px] rounded-full border border-paper",
+              dotColor
+            )}
+            aria-hidden
+          />
         </div>
         {!collapsed ? (
           <>
             <div className="min-w-0 flex-1">
-              <p className="m-0 truncate text-[12px] font-medium text-ink">Operator</p>
-              <p className="m-0 flex items-center gap-[6px] text-[11px] text-ink-3">
-                <span
-                  className={cn("h-[6px] w-[6px] rounded-full", dotColor)}
-                  aria-hidden
-                />
-                <span>{runnerLabel.text}</span>
+              {profileLoading ? (
+                <span className="block h-[12px] w-20 rounded bg-paper-2" aria-hidden />
+              ) : (
+                <p className="m-0 truncate text-[12px] font-medium text-ink">{operatorLabel}</p>
+              )}
+              <p className="m-0 truncate whitespace-nowrap text-[11px] text-ink-3">
+                {runnerLabel.text}
               </p>
             </div>
             <ThemeToggle />

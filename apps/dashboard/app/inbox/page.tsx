@@ -1,24 +1,61 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "next/navigation";
-import { Search } from "lucide-react";
-import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import Link from "next/link";
+import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
+import { scopeRowsToSandbox } from "@/lib/demo-threads";
+import { Archive, Search, Star } from "lucide-react";
+import { apiGet, apiPost, peekCache, runAction, ApiRequestError } from "@/lib/api";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
+import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
-import { SelectableThreadRow } from "@/components/common/selectable-thread-row";
 import { DegradedBanner } from "@/components/common/degraded-banner";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import dynamic from "next/dynamic";
+import { PersonAvatar } from "@/components/common/person-avatar";
+import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
+import { normalizePreview } from "@/lib/preview";
+import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isWithinHorizon } from "@/lib/horizon";
+import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
+import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
+import {
+  OXBLOOD_PAGE_VARS,
+  TOOL_CLASS,
+  XIcon,
+  FilterGlyph,
+  SelectGlyph,
+  useDismiss,
+  SortMenu,
+  PopSection,
+  PopOpt
+} from "@/components/common/list-controls";
 
-type FilterMode = "all" | "unread" | "needs_reply" | "waiting_on_them" | "genuine" | "outreach";
+type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
+type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
-type SortMode = "recent" | "oldest" | "name";
+type SortMode = "oldest" | "recent" | "name";
 
-const FILTERS: { key: FilterMode; label: string }[] = [
+// Lazy-load the receipts drawer so its chunk stays out of the inbox's
+// initial bundle; an "opened-once" latch keeps the existing open-prop
+// behaviour once it has been shown.
+const ReceiptsDrawer = dynamic(
+  () => import("@/components/common/receipts-drawer").then((m) => m.ReceiptsDrawer),
+  { ssr: false }
+);
+
+const TABS: { key: RiskTab; label: string }[] = [
   { key: "all", label: "All" },
-  { key: "unread", label: "Unread" },
+  { key: "overdue", label: "Overdue" },
+  { key: "waiting", label: "Waiting" },
+  { key: "fresh", label: "Fresh" },
+  { key: "scheduled", label: "Scheduled" }
+];
+
+const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
+  { key: "any", label: "Any" },
   { key: "needs_reply", label: "Needs reply" },
   { key: "waiting_on_them", label: "Waiting on them" },
   { key: "genuine", label: "Genuine" },
@@ -26,27 +63,39 @@ const FILTERS: { key: FilterMode; label: string }[] = [
 ];
 
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
-  { key: "all", label: "All platforms" },
+  { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
   { key: "IMESSAGE", label: "iMessage" }
 ];
 
 const SORT_MODES: { key: SortMode; label: string }[] = [
-  { key: "recent", label: "Recent first" },
-  { key: "oldest", label: "Oldest first" },
-  { key: "name", label: "By name (A-Z)" }
+  { key: "oldest", label: "oldest wait" },
+  { key: "recent", label: "most recent" },
+  { key: "name", label: "name A-Z" }
 ];
 
-function applyFilter(row: InboxRow, mode: FilterMode): boolean {
-  switch (mode) {
-    case "unread":
-      return row.unreadCount > 0;
+const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
+  LINKEDIN: "in",
+  IMESSAGE: "iM",
+  INSTAGRAM: "ig",
+  TIKTOK: "tt"
+};
+
+function applyTab(row: InboxRow, tab: RiskTab): boolean {
+  if (tab === "all") return !row.scheduledSendAt;
+  if (tab === "scheduled") return !!row.scheduledSendAt;
+  if (row.scheduledSendAt) return false;
+  if (tab === "overdue") return row.riskLevel === "RED";
+  if (tab === "waiting") return row.riskLevel === "AMBER";
+  if (tab === "fresh") return row.riskLevel === "GREEN";
+  return true;
+}
+
+function applyCategory(row: InboxRow, kind: CategoryFilter): boolean {
+  switch (kind) {
     case "needs_reply":
       return row.needsReply;
     case "waiting_on_them":
-      // Operator sent the last message and the other party hasn't replied
-      // yet. Excludes archived rows so closed-out conversations don't pile
-      // into the "I'm waiting on them" surface.
       return row.lastMessageDirection === "OUT" && !row.archivedAt;
     case "genuine":
       return row.category === "genuine";
@@ -57,187 +106,386 @@ function applyFilter(row: InboxRow, mode: FilterMode): boolean {
   }
 }
 
-function applyPlatformFilter(row: InboxRow, platform: PlatformFilter): boolean {
-  if (platform === "all") return true;
-  return row.platform === platform;
+function applyPlatform(row: InboxRow, platform: PlatformFilter): boolean {
+  return platform === "all" ? true : row.platform === platform;
+}
+
+// Favourites lens (R-0066 / #483). When on, only favourited contacts show —
+// the star doubles as a one-tap filter. Off by default so the inbox stays the
+// full list.
+function applyFavourite(row: InboxRow, favouritesOnly: boolean): boolean {
+  return favouritesOnly ? row.personFavourite === true : true;
 }
 
 function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
-  // Defensive copy: caller's buckets are useMemo'd; mutating in place
-  // would trip the "did this change?" check on the next render.
   const copy = [...items];
   switch (sort) {
-    case "oldest":
-      return copy.sort((a, b) => {
-        const aTs = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
-        const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
-        return aTs - bTs;
-      });
     case "name":
       return copy.sort((a, b) => a.personName.localeCompare(b.personName));
     case "recent":
-    default:
       return copy.sort((a, b) => {
         const aTs = a.lastMessageAt ? Date.parse(a.lastMessageAt) : 0;
         const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
         return bTs - aTs;
       });
+    case "oldest":
+    default:
+      return copy.sort((a, b) => {
+        const aTs = a.lastInboundAt ?? a.lastMessageAt;
+        const bTs = b.lastInboundAt ?? b.lastMessageAt;
+        return (aTs ? Date.parse(aTs) : 0) - (bTs ? Date.parse(bTs) : 0);
+      });
   }
 }
 
-// All inbox - same chrome as Today, body bucketed by risk. The runner's
-// /data/inbox already returns the rows pre-sorted; we just split them
-// into three sections and skip empty buckets. Search + status filter +
-// platform filter narrow the visible set before bucketing.
-//
-// Multi-select: cmd/ctrl-click any row to enter select mode and toggle
-// selection (or use the explicit Select button). While ≥1 row is
-// selected, a sticky bottom action bar surfaces bulk Mark done / Snooze
-// / Rescan / Clear. Esc clears selection. Cmd/Ctrl+A selects all
-// currently-visible rows (post-filter).
-export default function InboxPage() {
-  // Next.js requires useSearchParams consumers to sit under a Suspense
-  // boundary so the static prerender doesn't error on /inbox.
-  return (
-    <Suspense fallback={null}>
-      <InboxPageContent />
-    </Suspense>
-  );
+// Right-hand timestamp. Per the redesign only "overdue" carries colour
+// (oxblood "… overdue"); waiting and fresh times read as quiet grey so the
+// list stays calm and the overdue rows are the thing that pulls the eye.
+function rightLabelFor(row: InboxRow): { text: string; tone: string } {
+  const risk = toDisplayRisk(row.riskLevel);
+  const rel = formatRelative(row.lastInboundAt ?? row.lastMessageAt);
+  if (risk === "overdue")
+    return { text: `${rel} overdue`, tone: "text-risk-overdue font-medium" };
+  return { text: rel, tone: "text-ink-3" };
 }
 
-function InboxPageContent() {
-  const searchParams = useSearchParams();
-  // Inbound deep-links from other pages:
-  //   /inbox?q=<text>      pre-fills the search box (used by the thread
-  //                        participant popover to look up other 1:1 threads).
-  //   /inbox?person=<id>   filters to threads belonging to a single person
-  //                        (used by the people list "open in inbox" link).
-  // Both URLs were silently no-ops before this page started reading the
-  // query string.
-  const initialQuery = searchParams?.get("q") ?? "";
-  const initialPersonId = searchParams?.get("person") ?? null;
+// Status dot: overdue = oxblood, waiting = amber, fresh = muted grey
+// (the redesign mutes the fresh dot rather than colouring it green).
+function dotFor(row: InboxRow): string {
+  const risk = toDisplayRisk(row.riskLevel);
+  if (risk === "overdue") return "bg-risk-overdue";
+  if (risk === "waiting") return "bg-risk-waiting";
+  return "bg-ink-4";
+}
 
-  const [data, setData] = useState<InboxResponse | null>(null);
-  const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
+// Human-readable label for the "N older or closed conversations set aside"
+// banner. Picks the right pluralisation and only mentions a bucket when
+// it is non-empty so the copy stays tight ("3 older conversations", "1
+// closed conversation", "5 older, 2 closed").
+function hiddenLabel(breakdown: { older: number; closed: number }): string {
+  const { older, closed } = breakdown;
+  if (older > 0 && closed > 0) {
+    return `${older} older, ${closed} closed conversation${
+      older + closed === 1 ? "" : "s"
+    }`;
+  }
+  if (older > 0) {
+    return `${older} older conversation${older === 1 ? "" : "s"}`;
+  }
+  return `${closed} closed conversation${closed === 1 ? "" : "s"}`;
+}
+
+// #433 R-0055: empty-state headline for a specific risk tab whose badge is
+// non-zero but whose feed is empty because every match sits behind the
+// recency horizon. The tab label already reads as a noun
+// ("Overdue"/"Waiting"/"Fresh"/"Scheduled"); lowercase it and agree the verb
+// with the count so the line reads "197 overdue are set aside."
+function setAsidePhrase(tab: RiskTab, count: number): string {
+  const noun: Record<RiskTab, string> = {
+    all: "",
+    overdue: "overdue",
+    waiting: "waiting",
+    fresh: "fresh",
+    scheduled: "scheduled"
+  };
+  return `${count} ${noun[tab]} ${count === 1 ? "is" : "are"} set aside.`;
+}
+
+interface SectionGroup {
+  key: string;
+  label: string | null;
+  items: InboxRow[];
+}
+
+// Inbox - search box, a risk tab bar, then a thin secondary filter row
+// (platform / kind / sort). The "All" tab buckets the feed into Overdue /
+// Waiting / Fresh sections so a long list scans top-down by urgency; a
+// single-risk or Scheduled tab is already homogeneous and renders as one
+// flat list. Older / likely-closed threads are hidden by default
+// (issue #287) and surfaced via the Show all affordance.
+export default function InboxPage() {
+  // Seed from the shared client cache so returning to the Inbox (e.g. back
+  // from a thread, or Today -> Inbox) paints the last-known list instantly
+  // and then revalidates, instead of flashing an empty skeleton.
+  const [data, setData] = useState<InboxResponse | null>(
+    () => peekCache<InboxResponse>("/runner/data/inbox") ?? null
+  );
+  const [platforms, setPlatforms] = useState<PlatformCard[]>(
+    () => peekCache<PlatformCard[]>("/runner/data/platforms") ?? []
+  );
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
-  const [loaded, setLoaded] = useState(false);
-  const [query, setQuery] = useState(initialQuery);
-  const [personFilter, setPersonFilter] = useState<string | null>(initialPersonId);
-  const [filter, setFilter] = useState<FilterMode>("all");
+  const [receiptsEverOpened, setReceiptsEverOpened] = useState(false);
+  useEffect(() => {
+    if (receiptsOpen) setReceiptsEverOpened(true);
+  }, [receiptsOpen]);
+  const [loaded, setLoaded] = useState(() => peekCache<InboxResponse>("/runner/data/inbox") !== undefined);
+  const [query, setQuery] = useState("");
+  const [tab, setTab] = useState<RiskTab>("all");
+  const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
-  const [sortMode, setSortMode] = useState<SortMode>("recent");
+  const [favouritesOnly, setFavouritesOnly] = useState(false);
+  const [sortMode, setSortMode] = useState<SortMode>("oldest");
+  // Optimistic favourite state keyed by personId, so tapping a row's star
+  // re-sorts and re-marks instantly without waiting for the 10s poll. Merged
+  // over the server rows below; reverted if the toggle request fails.
+  const [favOverrides, setFavOverrides] = useState<Record<string, boolean>>({});
+  // Issue #287: by default the inbox hides conversations whose last activity
+  // is older than the recency horizon. Searching or flipping "show all"
+  // lifts the horizon so dormant threads stay reachable.
+  const [showAll, setShowAll] = useState(false);
 
-  // Multi-select state. selectedIds preserves insertion order so
-  // shift-click range can find the anchor (last selected) deterministically.
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
-  // Toggle to put the row list into checkbox-and-toggle mode without
-  // requiring a modifier-click; useful when discovering the feature.
   const [forceSelectMode, setForceSelectMode] = useState(false);
   const lastToggledRef = useRef<string | null>(null);
-  // Removed-locally so bulk actions feel instant; reconciled against
-  // server data on the next refresh, mirroring /today.
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
   const [bulkPending, setBulkPending] = useState<string | null>(null);
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
+  const applyInbox = useCallback((inbox: InboxResponse) => {
+    setData(inbox);
+    const stillPending = new Set(
+      inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+    );
+    setRemovedIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     const [inbox, platformRows, logRows] = await Promise.all([
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => []),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100").catch(() => [])
+      // SWR: paint the cached list immediately, revalidate in the background.
+      apiGet<InboxResponse>("/runner/data/inbox", {
+        ttlMs: 4000,
+        swr: true,
+        onFresh: (d) => applyInbox(d as InboxResponse)
+      }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => []),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100", { ttlMs: 5000 }).catch(() => [])
     ]);
-    if (inbox) {
-      setData(inbox);
-      // Drop optimistic IDs the server has caught up on (same logic as /today).
-      const stillPending = new Set(
-        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
-      );
-      setRemovedIds((prev) => {
-        const next = new Set<string>();
-        prev.forEach((id) => {
-          if (stillPending.has(id)) next.add(id);
-        });
-        return next;
-      });
-    }
+    if (inbox) applyInbox(inbox);
     setPlatforms(platformRows ?? []);
     setLogs(logRows ?? []);
     setLoaded(true);
+  }, [applyInbox]);
+
+  // Seed search from a ?q= deep link (the thread participant popover's
+  // "Find 1:1 thread" → /inbox?q=<handle>). Runs once on mount; the inbox
+  // redesign dropped the original handling — see issue #211.
+  useEffect(() => {
+    const q = readInboxQueryParam(window.location.search);
+    if (q) setQuery(q);
   }, []);
 
   useEffect(() => {
-    void refresh();
     const onResync = () => void refresh();
     window.addEventListener("runner-resync", onResync);
-    const timer = setInterval(() => void refresh(), 10000);
     return () => {
       window.removeEventListener("runner-resync", onResync);
-      clearInterval(timer);
     };
   }, [refresh]);
+  // Poll every 10s while visible; paused in background tabs (the hook fires an
+  // immediate tick on mount and a catch-up tick on return to foreground).
+  useVisiblePolling(() => void refresh(), 10000);
 
-  const allRows = data?.rows ?? [];
-  const summary = data?.summary;
+  const { sandboxActive } = useFullDemo();
+  // In a sandbox guided flow (pilot tour / presenter sandbox), the Inbox shows
+  // only demo-seeded threads so the walkthrough stays inside sandbox data and
+  // its targets resolve on a busy real inbox. Outside a sandbox flow this is a
+  // no-op.
+  const allRows = useMemo(
+    () =>
+      scopeRowsToSandbox(data?.rows ?? [], sandboxActive).map((row) => {
+        const pid = row.personId;
+        return pid && pid in favOverrides
+          ? { ...row, personFavourite: favOverrides[pid] }
+          : row;
+      }),
+    [data, sandboxActive, favOverrides]
+  );
 
-  // Filter chain: query + status + platform produce `visible`; bulk
-  // optimistic-removal further narrows to `rows`. Buckets, flatVisibleIds,
-  // and select-all all derive from `rows` so selection respects both
-  // filters and in-flight bulk actions. Empty-state detection uses
-  // `visible` (not `rows`) so a mid-flight bulk removal doesn't briefly
-  // flip the page to "Nothing matches".
+  // Optimistically flip a contact's favourite, then persist. Reverts the
+  // local override if the request fails so the star never lies. Keyed by
+  // personId so every row of a multi-thread contact updates together.
+  const toggleFavourite = useCallback((personId: string | undefined, next: boolean) => {
+    if (!personId) return;
+    setFavOverrides((prev) => ({ ...prev, [personId]: next }));
+    void setFavourite(personId, next).catch(() => {
+      setFavOverrides((prev) => ({ ...prev, [personId]: !next }));
+    });
+  }, []);
+
+  // Per-tab counts. Scoped to the active platform + category chips so the
+  // badges reflect the current filter — e.g. filtering to LinkedIn shows
+  // how many LinkedIn threads sit in each risk bucket, not the global
+  // totals (#433 R-0055). Search and the recency horizon are deliberately
+  // left out: search is a transient find (the "N of M" header already
+  // tracks it), and the horizon's "set aside" threads still belong to
+  // their bucket — the empty-state copy below explains that split rather
+  // than hiding them from the badge.
+  const counts = useMemo(() => {
+    const scoped = allRows.filter(
+      (row) =>
+        applyCategory(row, category) &&
+        applyPlatform(row, platformFilter) &&
+        applyFavourite(row, favouritesOnly)
+    );
+    const live = scoped.filter((row) => !row.scheduledSendAt);
+    return {
+      all: live.length,
+      overdue: live.filter((r) => r.riskLevel === "RED").length,
+      waiting: live.filter((r) => r.riskLevel === "AMBER").length,
+      fresh: live.filter((r) => r.riskLevel === "GREEN").length,
+      scheduled: scoped.filter((r) => !!r.scheduledSendAt).length
+    };
+  }, [allRows, category, platformFilter, favouritesOnly]);
+
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
+    // Two "set aside" filters tighten the default inbox (issue #287):
+    //   - The recency horizon hides dormant threads (phase 1).
+    //   - The closed-conversation heuristic hides threads whose last
+    //     inbound message reads as an acknowledgement / farewell
+    //     (phase 2).
+    // Both are lifted by an explicit "show all" toggle and by any active
+    // search, so older or closed threads are still reachable.
+    const applyActiveOnly = !showAll && !q;
     return allRows.filter((row) => {
-      // Person-filter from /inbox?person=<id> takes precedence over other
-      // filters so a deep-link from the People list shows exactly that
-      // person's threads. The filter chip can be cleared in the UI to fall
-      // back to normal filtering.
-      if (personFilter && row.personId !== personFilter) return false;
-      if (!applyPlatformFilter(row, platformFilter)) return false;
-      if (!applyFilter(row, filter)) return false;
+      if (!applyTab(row, tab)) return false;
+      if (!applyCategory(row, category)) return false;
+      if (!applyPlatform(row, platformFilter)) return false;
+      if (!applyFavourite(row, favouritesOnly)) return false;
+      if (applyActiveOnly && !isWithinHorizon(row.lastMessageAt)) return false;
+      if (applyActiveOnly && isLikelyClosed(row)) return false;
       if (!q) return true;
       return (
         row.personName.toLowerCase().includes(q) ||
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, filter, platformFilter, personFilter]);
+  }, [allRows, query, tab, category, platformFilter, favouritesOnly, showAll]);
 
-  const personFilterName = useMemo(() => {
-    if (!personFilter) return null;
-    return allRows.find((row) => row.personId === personFilter)?.personName ?? null;
-  }, [allRows, personFilter]);
+  // How many threads the active-only filter is currently hiding, broken
+  // down by reason. Only counts threads that would otherwise be visible
+  // under the current tab / category / platform so the affordance does
+  // not over-promise.
+  const hiddenBreakdown = useMemo(() => {
+    if (showAll || query.trim()) return { total: 0, older: 0, closed: 0 };
+    let older = 0;
+    let closed = 0;
+    for (const row of allRows) {
+      if (!applyTab(row, tab)) continue;
+      if (!applyCategory(row, category)) continue;
+      if (!applyPlatform(row, platformFilter)) continue;
+      if (!applyFavourite(row, favouritesOnly)) continue;
+      const dormant = !isWithinHorizon(row.lastMessageAt);
+      const ended = isLikelyClosed(row);
+      if (!dormant && !ended) continue;
+      // Dormant takes precedence in the count so the two reasons add up
+      // to total without double-counting a thread that is both old and
+      // closed.
+      if (dormant) older += 1;
+      else closed += 1;
+    }
+    return { total: older + closed, older, closed };
+  }, [allRows, showAll, query, tab, category, platformFilter, favouritesOnly]);
+  const hiddenByHorizon = hiddenBreakdown.total;
 
-  const rows = useMemo(
-    () => visible.filter((row) => !removedIds.has(row.id)),
-    [visible, removedIds]
-  );
-  const overdue = useMemo(
-    () => applySort(rows.filter((r) => r.riskLevel === "RED"), sortMode),
-    [rows, sortMode]
-  );
-  const waiting = useMemo(
-    () => applySort(rows.filter((r) => r.riskLevel === "AMBER"), sortMode),
-    [rows, sortMode]
-  );
-  const fresh = useMemo(
-    () => applySort(rows.filter((r) => r.riskLevel === "GREEN"), sortMode),
-    [rows, sortMode]
+  // #287 F1: "Refresh closed verdicts" button state. Same idle/running/
+  // done/error transitions as the Reconnect page's refresh button so the
+  // operator's pattern carries across surfaces.
+  type RefreshState =
+    | { kind: "idle" }
+    | { kind: "running" }
+    | { kind: "done"; summary: string; tone: "ok" | "warn" }
+    | { kind: "error"; message: string };
+  const [closedRefreshState, setClosedRefreshState] = useState<RefreshState>({ kind: "idle" });
+  const handleRefreshClosedVerdicts = useCallback(async () => {
+    if (closedRefreshState.kind === "running") return;
+    setClosedRefreshState({ kind: "running" });
+    try {
+      const result = await apiPost<{
+        status: "ok" | "ai_unavailable" | "disabled_by_settings";
+        scored: number;
+        skipped: number;
+        failed: number;
+      }>("/runner/control/closed-status/refresh-stale", { limit: 30 });
+      await refresh();
+      const summary =
+        result.status === "disabled_by_settings"
+          ? "AI is off (Settings)"
+          : result.scored === 0 && result.skipped > 0
+            ? "Already up to date"
+            : result.status === "ai_unavailable"
+              ? `Classified ${result.scored}, then AI went quiet`
+              : `Classified ${result.scored}${result.skipped > 0 ? `, skipped ${result.skipped} already done` : ""}`;
+      const tone: "ok" | "warn" =
+        result.status === "ai_unavailable" || result.status === "disabled_by_settings"
+          ? "warn"
+          : "ok";
+      setClosedRefreshState({ kind: "done", summary, tone });
+      window.setTimeout(() => {
+        setClosedRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
+      }, 4500);
+    } catch (err) {
+      const message = err instanceof Error && err.message ? err.message : "Could not reach the runner.";
+      setClosedRefreshState({ kind: "error", message });
+      window.setTimeout(() => {
+        setClosedRefreshState((current) => (current.kind === "error" ? { kind: "idle" } : current));
+      }, 5000);
+    }
+  }, [closedRefreshState.kind, refresh]);
+  const closedRefreshLabel = (() => {
+    if (closedRefreshState.kind === "running") return "Classifying…";
+    if (closedRefreshState.kind === "done") return closedRefreshState.summary;
+    if (closedRefreshState.kind === "error") return closedRefreshState.message;
+    return "Refresh closed verdicts";
+  })();
+  const closedRefreshTone =
+    closedRefreshState.kind === "error"
+      ? "text-risk-overdue"
+      : closedRefreshState.kind === "done" && closedRefreshState.tone === "warn"
+        ? "text-risk-waiting"
+        : "text-ink-3";
+
+  // The "All" tab mixes risk levels, so it is bucketed into urgency
+  // sections; every other tab is a single bucket and renders flat.
+  const grouped = tab === "all";
+
+  const sections = useMemo<SectionGroup[]>(() => {
+    const live = visible.filter((row) => !removedIds.has(row.id));
+    // Favourited contacts float to the top of whichever section they land in,
+    // preserving the chosen sort order within the favourite / non-favourite
+    // split (R-0066 / #483). Applied per-section so a favourite never jumps
+    // its risk bucket.
+    const ordered = (rows: InboxRow[]) => favouritesFirst(applySort(rows, sortMode));
+    if (!grouped) {
+      return [{ key: tab, label: null, items: ordered(live) }];
+    }
+    const byLevel = (level: InboxRow["riskLevel"]) =>
+      ordered(live.filter((row) => row.riskLevel === level));
+    return [
+      { key: "overdue", label: "Overdue", items: byLevel("RED") },
+      { key: "waiting", label: "Waiting", items: byLevel("AMBER") },
+      { key: "fresh", label: "Fresh", items: byLevel("GREEN") }
+    ].filter((section) => section.items.length > 0);
+  }, [visible, removedIds, grouped, tab, sortMode]);
+
+  // Flat, in-visual-order id list so shift-click range select spans across
+  // section boundaries.
+  const orderedRows = useMemo(
+    () => sections.flatMap((section) => section.items),
+    [sections]
   );
 
-  const buckets = [
-    { key: "overdue", label: "Overdue - they’ve waited longest", items: overdue },
-    { key: "waiting", label: "Waiting on you", items: waiting },
-    { key: "fresh", label: "Fresh, no rush", items: fresh }
-  ];
   const degraded = platforms.find((p) => p.status === "DEGRADED");
-  const oldestPending = summary?.oldestPendingInboundAt
-    ? formatRelative(summary.oldestPendingInboundAt)
-    : "-";
 
-  const flatVisibleIds = useMemo(() => rows.map((r) => r.id), [rows]);
+  const flatVisibleIds = useMemo(() => orderedRows.map((r) => r.id), [orderedRows]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   const selectMode = forceSelectMode || selectedIds.length > 0;
 
@@ -246,7 +494,6 @@ function InboxPageContent() {
       setSelectedIds((prev) => {
         const set = new Set(prev);
         if (opts.shiftKey && lastToggledRef.current && lastToggledRef.current !== id) {
-          // Range select between anchor and target on the visible flat list.
           const anchor = lastToggledRef.current;
           const a = flatVisibleIds.indexOf(anchor);
           const b = flatVisibleIds.indexOf(id);
@@ -257,11 +504,8 @@ function InboxPageContent() {
             return Array.from(set);
           }
         }
-        if (set.has(id)) {
-          set.delete(id);
-        } else {
-          set.add(id);
-        }
+        if (set.has(id)) set.delete(id);
+        else set.add(id);
         lastToggledRef.current = id;
         return Array.from(set);
       });
@@ -275,7 +519,6 @@ function InboxPageContent() {
     lastToggledRef.current = null;
   }, []);
 
-  // ⌘A / ctrl-A selects all visible rows when in select mode; Esc clears.
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape" && selectMode) {
@@ -291,40 +534,6 @@ function InboxPageContent() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectMode, flatVisibleIds, clearSelection]);
 
-  const [archivingOutreach, setArchivingOutreach] = useState(false);
-
-  const archiveAllOutreach = useCallback(async () => {
-    const ids = rows.map((r) => r.id);
-    if (ids.length === 0) return;
-    const ok = window.confirm(
-      `Archive ${ids.length} outreach thread${ids.length === 1 ? "" : "s"}? You can unarchive any of them from the Archived view.`
-    );
-    if (!ok) return;
-    setArchivingOutreach(true);
-    setRemovedIds((prev) => {
-      const next = new Set(prev);
-      ids.forEach((id) => next.add(id));
-      return next;
-    });
-    const results = await Promise.allSettled(
-      ids.map((id) => apiPost(`/runner/control/thread/${id}/archive`, {}))
-    );
-    const failedIds = new Set<string>(
-      results.flatMap((r, idx) =>
-        r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
-      )
-    );
-    if (failedIds.size > 0) {
-      setRemovedIds((prev) => {
-        const next = new Set(prev);
-        failedIds.forEach((id) => next.delete(id));
-        return next;
-      });
-    }
-    setArchivingOutreach(false);
-    void refresh();
-  }, [rows, refresh]);
-
   const runBulk = useCallback(
     async (
       label: string,
@@ -335,7 +544,6 @@ function InboxPageContent() {
       if (ids.length === 0) return;
       setBulkPending(label);
       setBulkResult(null);
-      // Optimistically hide the affected rows.
       setRemovedIds((prev) => {
         const next = new Set(prev);
         ids.forEach((id) => next.add(id));
@@ -347,12 +555,6 @@ function InboxPageContent() {
       const failed = results.filter((r) => r.status === "rejected");
       const succeeded = ids.length - failed.length;
       if (failed.length > 0) {
-        // Restore the failed ids to the visible list.
-        // Map each rejected result back to its source id by sharing the
-        // index between `results` and `ids` (Promise.allSettled preserves
-        // input order). The original implementation used findIndex on
-        // `results`, which only ever found the first rejection and so
-        // mis-restored ids when ≥2 calls failed.
         const failedIds = new Set<string>(
           results.flatMap((r, idx) =>
             r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
@@ -379,100 +581,131 @@ function InboxPageContent() {
   );
 
   return (
-    <Canvas>
+    <Canvas style={OXBLOOD_PAGE_VARS}>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
-        subtitle="Every active thread, sectioned by urgency. Search and filter to find one fast."
         meta={
           selectMode ? (
             <span data-testid="inbox-select-count">{selectedIds.length} selected</span>
           ) : (
-            <span>{visible.length} of {allRows.length} threads</span>
+            <span>
+              <strong className="font-medium text-ink">{visible.length}</strong> of {counts.all} threads
+            </span>
           )
         }
       />
 
-      {summary ? (
-        <div className="mb-6 grid grid-cols-3 gap-3">
-          <KpiTile label="Unread" value={summary.unreadThreads} />
-          <KpiTile label="At risk" value={summary.atRiskThreads} tone={summary.atRiskThreads > 0 ? "warn" : "ok"} />
-          <KpiTile label="Oldest pending inbound" value={oldestPending} small />
-        </div>
-      ) : null}
-
-      {personFilter && personFilterName ? (
-        <div className="mb-2 flex items-center gap-2 text-[12px] text-ink-3">
-          <span>Filtered to threads with</span>
+      {/* Ghost search — a subtle field, not a heavy box (the redesign's
+          calmer default). The border darkens on hover/focus; a clear
+          button appears once there's a query. */}
+      <label
+        className={cn(
+          "mb-[16px] flex items-center gap-[10px] rounded-[12px] border bg-transparent px-[14px] py-[10px] transition-colors duration-calm",
+          query
+            ? "border-hairline-strong"
+            : "border-hairline hover:border-hairline-strong focus-within:border-ink-3 focus-within:bg-paper"
+        )}
+      >
+        <Search className="h-[16px] w-[16px] shrink-0 text-ink-3" strokeWidth={1.6} />
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Search people, keywords…"
+          autoComplete="off"
+          className="flex-1 border-0 bg-transparent text-[14px] text-ink outline-none placeholder:text-ink-3"
+        />
+        {query ? (
           <button
             type="button"
-            onClick={() => setPersonFilter(null)}
-            className="inline-flex items-center gap-1 rounded-[8px] border border-hairline bg-paper px-2 py-[2px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink"
-            aria-label={`Clear filter for ${personFilterName}`}
+            onClick={() => setQuery("")}
+            aria-label="Clear search"
+            className="shrink-0 p-[2px] text-ink-3 transition-colors duration-calm hover:text-ink"
           >
-            {personFilterName}
-            <span aria-hidden>×</span>
-          </button>
-        </div>
-      ) : null}
-
-      <div className="mb-2 flex flex-wrap items-center gap-2">
-        <label className="relative flex min-w-0 flex-1 items-center">
-          <Search className="absolute left-3 h-[14px] w-[14px] text-ink-3" strokeWidth={1.6} />
-          <input
-            type="text"
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search people, keywords…"
-            className="w-full rounded-[10px] border border-hairline bg-paper py-[8px] pl-9 pr-3 text-[13px] text-ink placeholder:text-ink-3 focus:border-ink-3 focus:outline-none"
-          />
-        </label>
-        <div className="flex shrink-0 rounded-[10px] border border-hairline bg-paper p-[2px]">
-          {FILTERS.map((f) => (
-            <button
-              key={f.key}
-              type="button"
-              onClick={() => setFilter(f.key)}
-              className={cn(
-                "rounded-[8px] px-3 py-[6px] text-[12px] tracking-[-0.005em] transition-colors duration-calm",
-                filter === f.key ? "bg-ink text-paper font-medium" : "text-ink-2 hover:text-ink"
-              )}
-            >
-              {f.label}
-            </button>
-          ))}
-        </div>
-        <select
-          value={platformFilter}
-          onChange={(e) => setPlatformFilter(e.target.value as PlatformFilter)}
-          className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
-          aria-label="Filter by platform"
-        >
-          {PLATFORM_FILTERS.map((p) => (
-            <option key={p.key} value={p.key}>{p.label}</option>
-          ))}
-        </select>
-        <select
-          value={sortMode}
-          onChange={(e) => setSortMode(e.target.value as SortMode)}
-          className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 focus:border-ink-3 focus:outline-none"
-          aria-label="Sort threads"
-        >
-          {SORT_MODES.map((s) => (
-            <option key={s.key} value={s.key}>{s.label}</option>
-          ))}
-        </select>
-        {filter === "outreach" && rows.length > 0 ? (
-          <button
-            type="button"
-            disabled={!!archivingOutreach}
-            onClick={() => void archiveAllOutreach()}
-            className="shrink-0 rounded-[10px] border border-hairline bg-paper px-3 py-[8px] text-[12px] text-ink-2 hover:bg-paper-2 disabled:opacity-50"
-          >
-            {archivingOutreach ? `Archiving ${rows.length}…` : `Archive all (${rows.length})`}
+            <XIcon />
           </button>
         ) : null}
+      </label>
+
+      {/* Status tabs (the lens you switch most) + a compact tools cluster.
+          Platform + Kind now live behind the Filters popover so this bar
+          stays one calm row instead of the old stack of dropdowns. */}
+      <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
+        <div className="flex flex-1 flex-wrap gap-[1px]">
+          {TABS.map((entry) => {
+            const active = tab === entry.key;
+            const count = counts[entry.key];
+            const zero = count === 0;
+            return (
+              <button
+                key={entry.key}
+                type="button"
+                onClick={() => setTab(entry.key)}
+                className={cn(
+                  "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                  active
+                    ? "border-accent font-medium text-ink"
+                    : zero
+                      ? "text-ink-4 hover:text-ink-2"
+                      : "text-ink-3 hover:text-ink"
+                )}
+              >
+                {entry.label}
+                <span
+                  className={cn(
+                    "ml-[5px] font-mono text-[11px]",
+                    active ? "text-accent-ink" : "text-ink-3"
+                  )}
+                >
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-[4px] pb-[6px]">
+          <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
+          <FiltersPopover
+            platformFilter={platformFilter}
+            category={category}
+            favouritesOnly={favouritesOnly}
+            onPlatform={setPlatformFilter}
+            onCategory={setCategory}
+            onFavouritesOnly={setFavouritesOnly}
+            onClear={() => {
+              setPlatformFilter("all");
+              setCategory("any");
+              setFavouritesOnly(false);
+            }}
+          />
+          {orderedRows.length > 0 || selectMode ? (
+            <button
+              type="button"
+              onClick={() => (selectMode ? clearSelection() : setForceSelectMode(true))}
+              className={cn(TOOL_CLASS, selectMode ? "bg-paper-2 text-ink" : "")}
+              aria-pressed={selectMode}
+            >
+              <SelectGlyph />
+              <span>Select</span>
+            </button>
+          ) : null}
+        </div>
       </div>
+
+      <ChipsRow
+        platformFilter={platformFilter}
+        category={category}
+        favouritesOnly={favouritesOnly}
+        onClearPlatform={() => setPlatformFilter("all")}
+        onClearCategory={() => setCategory("any")}
+        onClearFavourites={() => setFavouritesOnly(false)}
+        onClearAll={() => {
+          setPlatformFilter("all");
+          setCategory("any");
+          setFavouritesOnly(false);
+        }}
+      />
 
       {degraded ? (
         <DegradedBanner
@@ -507,52 +740,137 @@ function InboxPageContent() {
 
       {!loaded ? (
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+      ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
+        <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
+          {tab === "all" ? (
+            <>
+              <p className="m-0 text-[16px] font-medium text-ink">You’re caught up.</p>
+              <p className="m-0 text-[14px] text-ink-2">
+                {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+                <button
+                  type="button"
+                  onClick={() => setShowAll(true)}
+                  className="underline underline-offset-2 hover:text-ink"
+                >
+                  Show all
+                </button>
+              </p>
+            </>
+          ) : (
+            // #433 R-0055: the badge the user just clicked is non-zero, so
+            // "You’re caught up." reads as a contradiction. Lead with the
+            // actionable count and offer to lift the horizon in one click.
+            <>
+              <p className="m-0 text-[16px] font-medium text-ink">
+                {setAsidePhrase(tab, hiddenByHorizon)}
+              </p>
+              <p className="m-0 text-[14px] text-ink-2">
+                <button
+                  type="button"
+                  onClick={() => setShowAll(true)}
+                  className="underline underline-offset-2 hover:text-ink"
+                >
+                  Show all
+                </button>
+              </p>
+            </>
+          )}
+        </div>
       ) : visible.length === 0 ? (
         <CaughtUp
-          title={query || filter !== "all" ? "Nothing matches that filter." : "You’re caught up."}
-          body={query || filter !== "all" ? "Clear the filter or try a different search." : "No conversations need you right now."}
+          title={query || tab !== "all" || category !== "any" || favouritesOnly ? "Nothing matches that filter." : "You’re caught up."}
+          body={query || tab !== "all" || category !== "any" || favouritesOnly ? "Clear the filter or try a different search." : "No conversations need you right now."}
         />
       ) : (
         <>
-          {!selectMode ? (
-            <div className="mb-3 flex items-center justify-between">
-              <p className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                Tip:{" "}
-                <kbd className="rounded border border-hairline-strong bg-paper-2 px-[5px] py-[1px] font-mono text-[11px] normal-case tracking-normal text-ink-2">
-                  ⌘
-                </kbd>
-                -click a row to select multiple at once.
-              </p>
-              <button
-                type="button"
-                onClick={() => setForceSelectMode(true)}
-                className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
-              >
-                Select
-              </button>
-            </div>
-          ) : null}
-          {buckets.map((bucket) =>
-            bucket.items.length ? (
-              <section key={bucket.key}>
-                <SectionDivider label={bucket.label} />
+          {grouped ? (
+            sections.map((section, index) => (
+              <section key={section.key}>
+                <SectionDivider label={section.label ?? ""} tight={index === 0} />
                 <div className="flex flex-col">
-                  {bucket.items.map((row) => (
-                    <SelectableThreadRow
+                  {section.items.map((row) => (
+                    <InboxRowItem
                       key={row.id}
                       row={row}
                       selectMode={selectMode}
                       selected={selectedSet.has(row.id)}
                       onToggle={toggleId}
-                      onPersonChanged={() => void refresh()}
+                      onToggleFavourite={toggleFavourite}
                     />
                   ))}
                 </div>
               </section>
-            ) : null
+            ))
+          ) : (
+            <div className="mt-4 flex flex-col">
+              {orderedRows.map((row) => (
+                <InboxRowItem
+                  key={row.id}
+                  row={row}
+                  selectMode={selectMode}
+                  selected={selectedSet.has(row.id)}
+                  onToggle={toggleId}
+                  onToggleFavourite={toggleFavourite}
+                />
+              ))}
+            </div>
           )}
         </>
       )}
+
+      {loaded ? (
+        <div className="mt-14 flex flex-col items-center gap-3 border-t border-hairline pt-6">
+          {/* Older / closed set-aside disclosure — an end-of-list affordance
+              (moved here from the header per the redesign), sitting next to
+              View archived threads where end-of-list disclosures belong. */}
+          {!query.trim() && (showAll || hiddenByHorizon > 0) ? (
+            <p className="m-0 flex flex-wrap items-baseline justify-center gap-x-3 gap-y-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+              {showAll ? (
+                <span>
+                  Showing all conversations.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(false)}
+                    className="underline underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Show recent only
+                  </button>
+                </span>
+              ) : (
+                <span>
+                  {hiddenLabel(hiddenBreakdown)} set aside.{" "}
+                  <button
+                    type="button"
+                    onClick={() => setShowAll(true)}
+                    className="underline underline-offset-2 transition-colors duration-calm hover:text-ink"
+                  >
+                    Show all
+                  </button>
+                </span>
+              )}
+              {/* #287 F1: trigger AI close-status classification for threads
+                  never classified (or pre-dating the v2 cache with reasons). */}
+              <button
+                type="button"
+                onClick={() => void handleRefreshClosedVerdicts()}
+                disabled={closedRefreshState.kind === "running"}
+                className={`underline underline-offset-2 transition-colors duration-calm hover:text-ink disabled:opacity-60 ${closedRefreshTone}`}
+                data-testid="inbox-refresh-closed-verdicts"
+                aria-live="polite"
+              >
+                {closedRefreshLabel}
+              </button>
+            </p>
+          ) : null}
+          <Link
+            href="/archived"
+            className="inline-flex items-center gap-[7px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"
+          >
+            <Archive className="h-[13px] w-[13px]" strokeWidth={1.6} />
+            View archived threads
+          </Link>
+        </div>
+      ) : null}
 
       {selectMode ? (
         <div
@@ -602,39 +920,299 @@ function InboxPageContent() {
         </div>
       ) : null}
 
-      <ReceiptsDrawer
-        open={receiptsOpen}
-        onClose={() => setReceiptsOpen(false)}
-        rows={logs}
-        title="Inbox receipts"
-      />
+      {receiptsEverOpened ? (
+        <ReceiptsDrawer
+          open={receiptsOpen}
+          onClose={() => setReceiptsOpen(false)}
+          rows={logs}
+          title="Inbox receipts"
+        />
+      ) : null}
     </Canvas>
   );
 }
 
-function KpiTile({
-  label,
-  value,
-  small,
-  tone = "ok"
+// Filters: Platform + Kind collapsed into one popover with an active-count
+// badge — replacing the old stack of inline <select>s (the "convoluted"
+// part Richard flagged).
+function FiltersPopover({
+  platformFilter,
+  category,
+  favouritesOnly,
+  onPlatform,
+  onCategory,
+  onFavouritesOnly,
+  onClear
 }: {
-  label: string;
-  value: number | string;
-  small?: boolean;
-  tone?: "ok" | "warn";
+  platformFilter: PlatformFilter;
+  category: CategoryFilter;
+  favouritesOnly: boolean;
+  onPlatform: (value: PlatformFilter) => void;
+  onCategory: (value: CategoryFilter) => void;
+  onFavouritesOnly: (value: boolean) => void;
+  onClear: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const ref = useDismiss(open, () => setOpen(false));
+  const activeCount =
+    (platformFilter !== "all" ? 1 : 0) + (category !== "any" ? 1 : 0) + (favouritesOnly ? 1 : 0);
   return (
-    <div className="rounded-card border border-hairline bg-paper px-4 py-3">
-      <p className="m-0 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{label}</p>
-      <p
-        className={cn(
-          "m-0 mt-[2px] font-display font-semibold tracking-[-0.02em]",
-          small ? "text-[18px]" : "text-[26px]",
-          tone === "warn" ? "text-risk-overdue" : "text-ink"
-        )}
+    <div ref={ref} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className={cn(TOOL_CLASS, open ? "bg-paper-2 text-ink" : "", activeCount > 0 ? "text-accent-ink" : "")}
+        aria-expanded={open}
       >
-        {value}
-      </p>
+        <FilterGlyph />
+        <span>Filters</span>
+        {activeCount > 0 ? (
+          <span className="grid h-[16px] min-w-[16px] place-items-center rounded-full bg-accent px-[4px] font-mono text-[10px] font-medium text-white">
+            {activeCount}
+          </span>
+        ) : null}
+      </button>
+      {open ? (
+        <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-[248px] rounded-[12px] border border-hairline bg-paper p-4 shadow-pop">
+          <PopSection label="Platform">
+            {PLATFORM_FILTERS.map((o) => (
+              <PopOpt key={o.key} selected={platformFilter === o.key} onClick={() => onPlatform(o.key)}>
+                {o.label}
+              </PopOpt>
+            ))}
+          </PopSection>
+          <div className="mt-4">
+            <PopSection label="Kind">
+              {CATEGORY_FILTERS.map((o) => (
+                <PopOpt key={o.key} selected={category === o.key} onClick={() => onCategory(o.key)}>
+                  {o.label}
+                </PopOpt>
+              ))}
+            </PopSection>
+          </div>
+          <div className="mt-4">
+            <PopSection label="Show">
+              <PopOpt selected={!favouritesOnly} onClick={() => onFavouritesOnly(false)}>
+                Everyone
+              </PopOpt>
+              <PopOpt selected={favouritesOnly} onClick={() => onFavouritesOnly(true)}>
+                <span className="inline-flex items-center gap-[6px]">
+                  <Star className="h-[12px] w-[12px]" strokeWidth={1.6} fill="currentColor" />
+                  Favourites only
+                </span>
+              </PopOpt>
+            </PopSection>
+          </div>
+          <div className="mt-4 flex justify-end border-t border-hairline pt-3">
+            <button
+              type="button"
+              onClick={onClear}
+              className="font-mono text-[12px] text-ink-3 transition-colors duration-calm hover:text-accent-ink"
+            >
+              Clear filters
+            </button>
+          </div>
+        </div>
+      ) : null}
     </div>
+  );
+}
+
+// Applied-filter chips — only rendered when a platform/kind filter is set,
+// so the resting bar stays calm.
+function ChipsRow({
+  platformFilter,
+  category,
+  favouritesOnly,
+  onClearPlatform,
+  onClearCategory,
+  onClearFavourites,
+  onClearAll
+}: {
+  platformFilter: PlatformFilter;
+  category: CategoryFilter;
+  favouritesOnly: boolean;
+  onClearPlatform: () => void;
+  onClearCategory: () => void;
+  onClearFavourites: () => void;
+  onClearAll: () => void;
+}) {
+  const chips: { key: string; label: string; value: string; onRemove: () => void }[] = [];
+  if (platformFilter !== "all") {
+    chips.push({
+      key: "platform",
+      label: "Platform",
+      value: PLATFORM_FILTERS.find((p) => p.key === platformFilter)?.label ?? platformFilter,
+      onRemove: onClearPlatform
+    });
+  }
+  if (category !== "any") {
+    chips.push({
+      key: "kind",
+      label: "Kind",
+      value: CATEGORY_FILTERS.find((c) => c.key === category)?.label ?? category,
+      onRemove: onClearCategory
+    });
+  }
+  if (favouritesOnly) {
+    chips.push({
+      key: "favourites",
+      label: "Show",
+      value: "Favourites",
+      onRemove: onClearFavourites
+    });
+  }
+  if (chips.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-2 pt-[14px]">
+      {chips.map((c) => (
+        <span
+          key={c.key}
+          className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper px-[10px] py-[4px] font-mono text-[11.5px] text-ink-2"
+        >
+          <span className="opacity-60">{c.label}</span>
+          {c.value}
+          <button
+            type="button"
+            onClick={c.onRemove}
+            aria-label={`Remove ${c.label} filter`}
+            className="ml-[1px] rounded p-[1px] opacity-70 transition-opacity duration-calm hover:opacity-100"
+          >
+            <XIcon />
+          </button>
+        </span>
+      ))}
+      <button
+        type="button"
+        onClick={onClearAll}
+        className="font-mono text-[11.5px] text-ink-3 transition-colors duration-calm hover:text-accent-ink"
+      >
+        Clear all
+      </button>
+    </div>
+  );
+}
+
+interface InboxRowItemProps {
+  row: InboxRow;
+  selectMode: boolean;
+  selected: boolean;
+  onToggle: (id: string, opts: { shiftKey: boolean }) => void;
+  onToggleFavourite: (personId: string | undefined, next: boolean) => void;
+}
+
+function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }: InboxRowItemProps) {
+  const right = rightLabelFor(row);
+  const dot = dotFor(row);
+  const fav = row.personFavourite === true;
+  const cleanPreview = normalizePreview(row.preview);
+  const previewBody =
+    row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
+
+  const onClick = (event: React.MouseEvent) => {
+    if (event.metaKey || event.ctrlKey || selectMode) {
+      event.preventDefault();
+      onToggle(row.id, { shiftKey: event.shiftKey });
+    }
+  };
+
+  return (
+    <Link
+      href={`/thread/${row.id}`}
+      onClick={onClick}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={cancelThreadPrefetch}
+      onFocus={() => prefetchThreadData(row.id)}
+      className={cn(
+        "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
+        selected ? "bg-paper-2" : ""
+      )}
+    >
+      {/* Avatar doubles as the select target: a circle fades in over it on
+          row hover (and stays put in select mode) so multi-select is
+          discoverable without a ⌘-click. The button stops propagation so a
+          click selects rather than opening the thread. */}
+      <span className="relative h-7 w-7">
+        <PersonAvatar
+          name={row.personName}
+          avatarUrl={row.personAvatarUrl}
+          size={28}
+          className="text-[11px]"
+        />
+        <button
+          type="button"
+          aria-label={selected ? `Deselect ${row.personName}` : `Select ${row.personName}`}
+          aria-pressed={selected}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggle(row.id, { shiftKey: event.shiftKey });
+          }}
+          className={cn(
+            "absolute inset-0 grid place-items-center rounded-full border transition-opacity duration-calm",
+            selected
+              ? "border-accent bg-accent text-white"
+              : "border-hairline-strong bg-paper text-ink-3 hover:border-ink-3 hover:text-ink-2",
+            selectMode
+              ? "opacity-100"
+              : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          )}
+        >
+          {selected ? (
+            <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="2.25">
+              <path d="M3 8.5l3 3 7-7" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          ) : null}
+        </button>
+      </span>
+      <span className="rounded-[5px] border border-hairline px-1 py-[3px] text-center font-mono text-[9.5px] uppercase tracking-[0.02em] text-ink-3 self-start mt-[2px]">
+        {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
+      </span>
+      <span className="flex min-w-0 flex-col gap-[2px]">
+        <span className="flex min-w-0 items-baseline gap-[10px]">
+          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+            {row.personName}
+          </span>
+          <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>
+        </span>
+        {/* AI close-status reason caption (#287 F2). Only rendered when
+            the verdict is "closed" - on "open" rows there is nothing
+            useful to caption ("waiting on them" duplicates the right
+            column). The row itself only renders under Show all or a
+            search; the parent's filter decides whether the operator
+            sees it at all. */}
+        {row.closedStatus === "closed" && row.closedStatusReason ? (
+          <span className="block text-[12px] text-ink-3">{row.closedStatusReason}</span>
+        ) : null}
+      </span>
+      <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">
+        {/* Favourite star (R-0066 / #483). Filled + always visible once
+            favourited (doubles as the at-a-glance marker); a quiet outline
+            that fades in on row hover otherwise. Stops propagation so a tap
+            toggles the favourite instead of opening the thread. */}
+        <button
+          type="button"
+          aria-label={fav ? `Unfavourite ${row.personName}` : `Favourite ${row.personName}`}
+          aria-pressed={fav}
+          data-testid="inbox-favourite-toggle"
+          title={fav ? "Remove favourite" : "Favourite this contact"}
+          onClick={(event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            onToggleFavourite(row.personId, !fav);
+          }}
+          className={cn(
+            "-my-1 shrink-0 rounded p-[3px] transition-[color,opacity] duration-calm",
+            fav
+              ? "text-accent opacity-100"
+              : "text-ink-4 opacity-0 hover:text-accent group-hover:opacity-100 focus-visible:opacity-100"
+          )}
+        >
+          <Star className="h-[15px] w-[15px]" strokeWidth={1.6} fill={fav ? "currentColor" : "none"} />
+        </button>
+        <span aria-hidden className={`h-[6px] w-[6px] rounded-full ${dot}`} />
+        <span className={right.tone}>{right.text}</span>
+      </span>
+    </Link>
   );
 }

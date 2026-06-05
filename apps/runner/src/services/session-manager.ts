@@ -1,8 +1,15 @@
 import { mkdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { chromium } from "playwright";
+// Patchright is a drop-in Playwright fork that patches the most
+// reliable bot signals stock Playwright leaks: the CDP debugger
+// fingerprint (window.cdc_*, runtime.enable timing), various
+// navigator markers, and a handful of WebGL/Canvas oddities. Same
+// API as Playwright, so the types still come from "patchright"
+// (Patchright doesn't re-export types from the top-level entry,
+// but the shapes are byte-identical because it's a fork).
+import { chromium } from "patchright";
 import type { AppSettings, PlatformName } from "@inbox-os/core";
-import type { BrowserContext, Page } from "playwright";
+import type { BrowserContext, Page } from "patchright";
 import type { BrowserProfileConfig } from "../config.js";
 import {
   launchPersistentContextForPlatform,
@@ -21,6 +28,8 @@ interface SessionManagerDependencies {
     viewport: null;
     args?: string[];
     channel?: string;
+    chromiumSandbox?: boolean;
+    ignoreDefaultArgs?: string[];
   }) => Promise<BrowserContext>;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
@@ -398,7 +407,14 @@ export class SessionManager {
       // unit tests with minimal mock contexts don't have to implement them.
       const NAME_POLYFILL_SOURCE =
         "if (typeof globalThis.__name === 'undefined') { globalThis.__name = function (fn) { return fn; }; }";
-      const ctxAny = context as { addInitScript?: (input: { content: string }) => Promise<void>; pages?: () => Array<{ evaluate?: (script: string) => Promise<unknown> }> };
+      // Patchright's addInitScript returns Promise<Disposable> rather
+      // than Promise<void>, so the cast goes via `unknown` to satisfy
+      // TS's strict overlap check. Behaviour is the same — we
+      // discard the return value either way.
+      const ctxAny = context as unknown as {
+        addInitScript?: (input: { content: string }) => Promise<unknown>;
+        pages?: () => Array<{ evaluate?: (script: string) => Promise<unknown> }>;
+      };
       if (typeof ctxAny.addInitScript === "function") {
         await ctxAny.addInitScript({ content: NAME_POLYFILL_SOURCE }).catch(() => undefined);
       }

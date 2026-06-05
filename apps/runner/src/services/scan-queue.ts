@@ -1,13 +1,28 @@
-import type { NormalizedMessage, PlatformAdapter, PlatformName, ThreadStub } from "@inbox-os/core";
-import { calculateRisk, stableHash } from "@inbox-os/core";
+import type {
+  NormalizedMessage,
+  PlatformAdapter,
+  PlatformName,
+  RememberItem,
+  ThreadStub
+} from "@inbox-os/core";
+import {
+  calculateRisk,
+  DELETED_INBOUND_PLACEHOLDER_STRINGS,
+  isNonActionableInboundPlaceholder,
+  stableHash
+} from "@inbox-os/core";
 import { v4 as uuid } from "uuid";
 import { mkdir, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { dirname, join, resolve } from "node:path";
 import { prisma } from "../db";
+import { effectiveLastOutboundAt } from "./reaction-effects.js";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
+import { shouldRefreshGroupDisplayName } from "../platforms/imessage-group-name";
+import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
+import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
@@ -61,6 +76,15 @@ interface ScanQueueDeps {
    * scan even if it throws.
    */
   onNewPerson?: (input: { personId: string; trigger: "first_seen" }) => void;
+  /**
+   * Optional hook fired after a message with a voice / audio attachment
+   * is persisted during a scan. Used by the transcription service to
+   * spend an OpenAI call on the audio so summaries, reply briefs,
+   * predrafts, etc. can read voice content as ordinary text. Fire-and-
+   * forget; the service dedupes against any prior transcription row.
+   * Scans must not block on transcription.
+   */
+  onAudioMessage?: (input: { messageId: string }) => void;
 }
 
 /**
@@ -81,6 +105,8 @@ type ScanJob = {
   maxOpens?: number;
   forceFallback?: boolean;
   scope: ScanScope;
+  /** Drives per-platform adaptive backoff bookkeeping in runJob (#403). */
+  fromScheduler?: boolean;
 };
 
 interface TraceAwareAdapter {
@@ -181,6 +207,13 @@ type EnqueueScanOptions = {
   forceFallback?: boolean;
   /** Default "update". See ScanScope for what each value means. */
   scope?: ScanScope;
+  /**
+   * Internal-only flag set by the cadence scheduler so the runner can
+   * tell scheduled scans from manual API-triggered ones. Drives the
+   * per-platform adaptive backoff (#403) — only scheduler-driven runs
+   * count toward the backoff counter, manual scans always go through.
+   */
+  fromScheduler?: boolean;
 };
 
 type LinkedInFallbackDecision = {
@@ -297,6 +330,50 @@ export function shouldUseForceFallback(value: unknown, nodeEnv = process.env.NOD
   return value === true && nodeEnv !== "production";
 }
 
+/**
+ * #403 adaptive backoff multiplier — 1x for the first 3 no-change
+ * scans, then steps 2x → 3x → 4x. Cap at 4x so the longest stretch
+ * is, e.g., 4×60s = 4 minutes (or 4×300s = 20 minutes) — generous
+ * but never silently disables the platform.
+ */
+export function adaptiveBackoffMultiplier(consecutiveNoChange: number): number {
+  if (consecutiveNoChange <= 2) return 1;
+  if (consecutiveNoChange <= 4) return 2;
+  if (consecutiveNoChange <= 6) return 3;
+  return 4;
+}
+
+export interface AdaptiveBackoffState {
+  lastScheduledScanAt: number;
+  consecutiveNoChange: number;
+}
+
+/** Exported for testing. Pure function — see `recordPlatformScanOutcome`. */
+export function applyAdaptiveBackoffOutcome(
+  state: AdaptiveBackoffState | undefined,
+  updatedThreads: number,
+  options: { fromScheduler: boolean; now: number; success: boolean }
+): AdaptiveBackoffState {
+  const base = state ?? { lastScheduledScanAt: 0, consecutiveNoChange: 0 };
+  // consecutiveNoChange drives the scheduled-scan backoff. Only a clean
+  // SCHEDULED scan that genuinely found no changes should inflate it.
+  // Manual scans, failed scans, and cooldown-blocked runs all reach this
+  // path with updatedThreads === 0 but must NOT be treated as a quiet
+  // inbox — otherwise a few manual refreshes or transient failures stretch
+  // the automatic interval out to 4x. A scan (any source) that DID find
+  // changes still resets the counter to 0.
+  const consecutiveNoChange =
+    updatedThreads > 0
+      ? 0
+      : options.fromScheduler && options.success
+        ? base.consecutiveNoChange + 1
+        : base.consecutiveNoChange;
+  return {
+    lastScheduledScanAt: options.fromScheduler ? options.now : base.lastScheduledScanAt,
+    consecutiveNoChange
+  };
+}
+
 export function evaluateLinkedInFallbackDecision(input: {
   fallbackEnabled: boolean;
   forceFallback: boolean;
@@ -356,6 +433,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
   let currentScanProgress:
     | {
         platform: PlatformName;
+        scope: ScanScope;
         processedRows: number;
         openedRows: number;
         total: number;
@@ -367,6 +445,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
   let abortReason: string | null = null;
   const activeRunLoggerByPlatform = new Map<PlatformName, RunLogger>();
   const latestRunSummaryByPlatform = new Map<PlatformName, RunTraceSummary>();
+  // Issue #403. Per-platform adaptive backoff for the SCHEDULED scan
+  // path: after N consecutive scans that found no changes, the
+  // scheduler stretches that platform's effective interval out by
+  // 2x → 3x → 4x of the configured base. Manual scans are unaffected
+  // (the user explicitly asked for them). Any scan that finds
+  // changes resets the counter to 0.
+  //
+  // This addresses the "scan LinkedIn less aggressively when nothing
+  // is happening" half of R-0040 without going down a LinkedIn
+  // WebSocket reverse-engineering rabbit hole (PM-approved scope).
+  const adaptiveBackoffByPlatform = new Map<
+    PlatformName,
+    { lastScheduledScanAt: number; consecutiveNoChange: number }
+  >();
   const runTraceBaseDir = resolve(process.env.RUN_TRACE_DIR ?? "./logs/runs");
 
   const personKey = deps.personKey ?? "default";
@@ -398,6 +490,30 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
   function lockKey(platform: PlatformName): string {
     return `${personKey}:${platform}`;
+  }
+
+  function isPlatformDueForScheduledScan(
+    platform: PlatformName,
+    baseIntervalMs: number,
+    now: number
+  ): boolean {
+    const state = adaptiveBackoffByPlatform.get(platform);
+    if (!state) return true;
+    const adaptiveIntervalMs = baseIntervalMs * adaptiveBackoffMultiplier(state.consecutiveNoChange);
+    return now - state.lastScheduledScanAt >= adaptiveIntervalMs;
+  }
+
+  function recordPlatformScanOutcome(
+    platform: PlatformName,
+    updatedThreads: number,
+    options: { fromScheduler: boolean; success: boolean }
+  ): void {
+    const next = applyAdaptiveBackoffOutcome(
+      adaptiveBackoffByPlatform.get(platform),
+      updatedThreads,
+      { fromScheduler: options.fromScheduler, now: Date.now(), success: options.success }
+    );
+    adaptiveBackoffByPlatform.set(platform, next);
   }
 
   async function writeLatestLinkedInScanPointer(input: {
@@ -772,16 +888,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
           retryAfterSeconds: cooldown.retryAfterSeconds
         }
       });
-      const blockedSummary = blockedLogger.flush({
+      // Flush for the trace folder + decision log, but do NOT overwrite
+      // latestRunSummaryByPlatform — a cooldown block must not hide the
+      // genuine last-scan result that getLatestRunSummary surfaces.
+      blockedLogger.flush({
         success: false,
         stopReason: "cooldown_active",
         counters: {
           retryAfterSeconds: cooldown.retryAfterSeconds
         }
       });
-      if (platform) {
-        latestRunSummaryByPlatform.set(platform, blockedSummary);
-      }
       return {
         ok: false,
         blocked: true,
@@ -798,7 +914,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
       maxThreads: normalizePositiveScanCap(options?.maxThreads),
       maxOpens: normalizePositiveScanCap(options?.maxOpens),
       forceFallback: shouldUseForceFallback(options?.forceFallback),
-      scope: options?.scope ?? "update"
+      scope: options?.scope ?? "update",
+      fromScheduler: options?.fromScheduler === true
     };
 
     queue.push(job);
@@ -826,8 +943,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
       clearInterval(scheduler);
     }
 
-    let lastRunAt = 0;
-
     scheduler = setInterval(() => {
       void (async () => {
         const settings = await deps.settingsStore.getSettings();
@@ -837,12 +952,34 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
         const now = Date.now();
         const intervalMs = settings.scanIntervalSeconds * 1000;
-        if (processing || now - lastRunAt < intervalMs) {
+        if (processing) {
           return;
         }
 
-        lastRunAt = now;
-        enqueueScan(undefined, { respectCooldown: true });
+        // Per-platform adaptive backoff: queue separate scan jobs only
+        // for platforms whose adaptive interval has elapsed. Platforms
+        // with active backoff (#403) are skipped this tick and picked
+        // up on a later one. The queue serialises jobs so this never
+        // produces parallel scans of different platforms.
+        const enabledPlatforms = settings.enabledPlatforms.filter((platform) =>
+          allPlatforms.includes(platform)
+        );
+        for (const platform of enabledPlatforms) {
+          if (!isPlatformDueForScheduledScan(platform, intervalMs, now)) {
+            continue;
+          }
+          // Skip platforms currently in retry cooldown. A cooldown block
+          // never advances the scheduled clock, so without this guard the
+          // 1s tick re-enqueues every second for the whole cooldown window,
+          // spinning enqueueScan and churning trace folders.
+          if (retryController.getCooldown(platform).blocked) {
+            continue;
+          }
+          enqueueScan(platform, {
+            respectCooldown: true,
+            fromScheduler: true
+          });
+        }
       })().catch((error) => {
         void deps.auditLog({
           stage: "Scan",
@@ -1350,6 +1487,42 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 existingThreadOpenStateById.set(platformThreadId, lookup);
                 return lookup;
               };
+              // LinkedIn dropped the thread id from conversation-list rows
+              // (no href / data-urn — JS-driven navigation), so the id-keyed
+              // lookup above can't run pre-open. Fall back to matching the
+              // row to a DB thread by the participant display name. Only a
+              // UNIQUE display-name match is usable: if 0 or >1 LinkedIn
+              // threads share the name we can't safely attribute the row, so
+              // we return null and the caller opens the row (safe — at worst
+              // a redundant open). `take: 2` is enough to detect ambiguity.
+              const existingThreadOpenStateByName = new Map<string, Promise<ExistingThreadOpenState>>();
+              const loadExistingThreadByDisplayName = (
+                displayName: string
+              ): Promise<ExistingThreadOpenState> => {
+                const key = displayName.trim();
+                if (!key) {
+                  return Promise.resolve(null);
+                }
+                const cached = existingThreadOpenStateByName.get(key);
+                if (cached) {
+                  return cached;
+                }
+                const lookup = prisma.thread
+                  .findMany({
+                    where: { platform, person: { displayName: key } },
+                    select: {
+                      id: true,
+                      lastMessageAt: true,
+                      unreadCount: true,
+                      firstFullBackfillAt: true
+                    },
+                    take: 2
+                  })
+                  .then((rows) => (rows.length === 1 ? rows[0] ?? null : null))
+                  .catch(() => null);
+                existingThreadOpenStateByName.set(key, lookup);
+                return lookup;
+              };
               // LinkedIn lists threads most-recent-first. Once we've seen
               // N consecutive rows where the DB content is already up-to-
               // date, we've crossed into already-scanned territory and
@@ -1384,6 +1557,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
               });
               currentScanProgress = {
                 platform: "LINKEDIN",
+                // #338/#362: surface scope so the dashboard's TopStatus can
+                // distinguish "checking for new" (update) from "rescanning
+                // every thread" (full). Without this the bar reads
+                // "Scanning LinkedIn · 5/167" for both, and an incremental
+                // scan visually impersonates a full inbox sweep.
+                scope: job.scope,
                 processedRows: 0,
                 openedRows: 0,
                 total: baselineThreadTotal,
@@ -1422,120 +1601,146 @@ export function createScanQueue(deps: ScanQueueDeps) {
                   // canonical thread ID. Without one, fall back to "open in
                   // delta mode" — the post-open canonicalisation step will
                   // still dedupe on platformThreadId.
-                  if (!signals.candidatePlatformThreadId) {
+                  // Evaluate a row against the DB thread we matched it to.
+                  // Shared by the id path and the display-name fallback so
+                  // the unchanged check (timestamp <= stored AND unread
+                  // matches) and the streak/stop-scan accounting can never
+                  // diverge between the two. `canonicalIdForBackfill` is the
+                  // URL-derived id when we have one (id path) so the
+                  // first-encounter branch can pre-record the backfill; the
+                  // name path passes null (post-open canonicalisation still
+                  // stamps firstFullBackfillAt).
+                  const evaluateAgainstExisting = (
+                    existing: ExistingThreadOpenState,
+                    canonicalIdForBackfill: string | null,
+                    matchedBy: "id" | "display_name"
+                  ): LinkedInStreamPreOpenDecision => {
+                    // First encounter / pending full backfill — open full so
+                    // we walk the whole history. Breaks any unchanged streak.
+                    if (!existing || !existing.firstFullBackfillAt) {
+                      if (canonicalIdForBackfill) {
+                        fullBackfillThreadIds.add(canonicalIdForBackfill);
+                      }
+                      unchangedStreakCount = 0;
+                      return { open: true, mode: "full", reason: existing ? "first_full_backfill" : "new_thread" };
+                    }
+
+                    // Skip-if-unchanged: open ONLY when the row's list-side
+                    // signals indicate something actually moved. Both clauses
+                    // must hold:
+                    //   • the row's last-message timestamp is no newer than
+                    //     what we already have (so no new message arrived);
+                    //   • the unread count matches DB state (so no
+                    //     read/unread state flip we should record).
+                    //
+                    // Comparison precision depends on the row text. When
+                    // LinkedIn shows a TIME ("8:01 AM" / "19:16"), it's
+                    // today's message — minute precision, exact compare. When
+                    // it shows a date ("May 2"), weekday ("Wed") or
+                    // "Yesterday", we only have day precision; the parser
+                    // fills in noon, which would otherwise be > the precise
+                    // db.lastMessageAt of the same day's message and falsely
+                    // mark the thread "newer". Use a calendar-day compare.
+                    const rowAt = signals.listTimestampIso ? Date.parse(signals.listTimestampIso) : NaN;
+                    const dbAt = existing.lastMessageAt ? existing.lastMessageAt.getTime() : 0;
+                    const rowTextIsTime = /\d{1,2}:\d{2}/.test(signals.listTimestamp ?? "");
+                    let timestampUnchanged = false;
+                    if (!Number.isNaN(rowAt)) {
+                      if (rowTextIsTime) {
+                        timestampUnchanged = rowAt <= dbAt;
+                      } else {
+                        const startOfDay = (ms: number): number => {
+                          const d = new Date(ms);
+                          d.setHours(0, 0, 0, 0);
+                          return d.getTime();
+                        };
+                        timestampUnchanged = startOfDay(rowAt) <= startOfDay(dbAt);
+                      }
+                    }
+                    const unreadUnchanged = existing.unreadCount === signals.unreadCount;
                     runLogger.logDecision({
                       stage: "open_thread",
-                      decision: "shouldOpenCandidate: delta (no candidate id)",
+                      decision: "shouldOpenCandidate evaluated",
                       details: {
                         rowKey: signals.rowKey,
                         displayName: signals.displayName,
                         listTimestamp: signals.listTimestamp,
-                        threadUrl: signals.threadUrl
+                        listTimestampIso: signals.listTimestampIso,
+                        candidatePlatformThreadId: signals.candidatePlatformThreadId ?? null,
+                        matchedBy,
+                        dbLastMessageAt: existing.lastMessageAt?.toISOString() ?? null,
+                        dbUnreadCount: existing.unreadCount,
+                        rowUnreadCount: signals.unreadCount,
+                        rowTextIsTime,
+                        timestampUnchanged,
+                        unreadUnchanged,
+                        decision: timestampUnchanged && unreadUnchanged ? "skip" : "delta"
                       }
                     });
-                    // Reset streak — this row will be opened (we don't know
-                    // if it's unchanged), so it doesn't count toward the
-                    // "everything is up-to-date" signal.
+                    if (timestampUnchanged && unreadUnchanged) {
+                      unchangedStreakCount += 1;
+                      const stopScan = unchangedStreakCount >= unchangedStreakLimit;
+                      if (stopScan) {
+                        runLogger.logDecision({
+                          stage: "open_thread",
+                          decision:
+                            "Pre-open streak hit unchangedStreakLimit - requesting cooperative scan exit",
+                          details: {
+                            unchangedStreakCount,
+                            unchangedStreakLimit,
+                            rowKey: signals.rowKey
+                          }
+                        });
+                      }
+                      return {
+                        open: false,
+                        mode: "delta",
+                        reason: stopScan ? "unchanged_streak" : "unchanged",
+                        stopScan
+                      };
+                    }
+                    // Row had a real change (timestamp / unread count) — reset
+                    // the streak so the next contiguous unchanged-rows window
+                    // counts from this point.
                     unchangedStreakCount = 0;
                     return { open: true, mode: "delta" };
-                  }
-                  const existing = await loadExistingThreadOpenState(signals.candidatePlatformThreadId);
+                  };
 
-                  // First encounter — request a full backfill so we walk the
-                  // message list to the top and persist the entire history.
-                  // Also pre-record the candidate ID so the persistence step
-                  // can stamp firstFullBackfillAt; the post-open canonical ID
-                  // should match this URL-derived one (LinkedIn doesn't
-                  // rewrite thread URLs across click navigation).
-                  if (!existing || !existing.firstFullBackfillAt) {
-                    if (signals.candidatePlatformThreadId) {
-                      fullBackfillThreadIds.add(signals.candidatePlatformThreadId);
-                    }
-                    // First-encounter / pending full backfill — we'll open
-                    // this row, so it breaks any unchanged streak.
-                    unchangedStreakCount = 0;
-                    return { open: true, mode: "full", reason: existing ? "first_full_backfill" : "new_thread" };
-                  }
-
-                  // Skip-if-unchanged: open ONLY when the row's list-side
-                  // signals indicate something actually moved. Both clauses
-                  // must hold:
-                  //   • the row's last-message timestamp is no newer than
-                  //     what we already have (so no new message arrived);
-                  //   • the unread count matches DB state (so no
-                  //     read/unread state flip we should record).
-                  //
-                  // Comparison precision depends on the row text. When
-                  // LinkedIn shows a TIME ("8:01 AM" / "19:16"), it's today's
-                  // message — we have minute precision and can do an exact
-                  // compare. When it shows a date ("May 2"), weekday ("Wed"),
-                  // or "Yesterday", we only have day precision; the parser
-                  // fills in noon, which would otherwise be > the precise
-                  // db.lastMessageAt of the same day's message and falsely
-                  // mark the thread as "newer than db". Use a calendar-day
-                  // comparison in that case.
-                  const rowAt = signals.listTimestampIso ? Date.parse(signals.listTimestampIso) : NaN;
-                  const dbAt = existing.lastMessageAt ? existing.lastMessageAt.getTime() : 0;
-                  const rowTextIsTime = /\d{1,2}:\d{2}/.test(signals.listTimestamp ?? "");
-                  let timestampUnchanged = false;
-                  if (!Number.isNaN(rowAt)) {
-                    if (rowTextIsTime) {
-                      timestampUnchanged = rowAt <= dbAt;
-                    } else {
-                      const startOfDay = (ms: number): number => {
-                        const d = new Date(ms);
-                        d.setHours(0, 0, 0, 0);
-                        return d.getTime();
-                      };
-                      timestampUnchanged = startOfDay(rowAt) <= startOfDay(dbAt);
-                    }
-                  }
-                  const unreadUnchanged = existing.unreadCount === signals.unreadCount;
-                  runLogger.logDecision({
-                    stage: "open_thread",
-                    decision: "shouldOpenCandidate evaluated",
-                    details: {
-                      rowKey: signals.rowKey,
-                      displayName: signals.displayName,
-                      listTimestamp: signals.listTimestamp,
-                      listTimestampIso: signals.listTimestampIso,
-                      candidatePlatformThreadId: signals.candidatePlatformThreadId,
-                      dbLastMessageAt: existing.lastMessageAt?.toISOString() ?? null,
-                      dbUnreadCount: existing.unreadCount,
-                      rowUnreadCount: signals.unreadCount,
-                      rowTextIsTime,
-                      timestampUnchanged,
-                      unreadUnchanged,
-                      decision: timestampUnchanged && unreadUnchanged ? "skip" : "delta"
-                    }
-                  });
-                  if (timestampUnchanged && unreadUnchanged) {
-                    unchangedStreakCount += 1;
-                    const stopScan = unchangedStreakCount >= unchangedStreakLimit;
-                    if (stopScan) {
+                  if (!signals.candidatePlatformThreadId) {
+                    // LinkedIn no longer exposes a thread id on conversation
+                    // list rows, so the id path can't run. Match the row to a
+                    // DB thread by display name instead. Only a UNIQUE
+                    // LinkedIn name match is usable (ambiguous -> open, safe).
+                    // The unchanged check itself is unchanged, so a genuinely
+                    // new message — which always bumps the row's list
+                    // timestamp to the top — is still detected; the only
+                    // relaxation vs the id path is the match key.
+                    const byName = await loadExistingThreadByDisplayName(signals.displayName);
+                    if (!byName) {
                       runLogger.logDecision({
                         stage: "open_thread",
-                        decision:
-                          "Pre-open streak hit unchangedStreakLimit - requesting cooperative scan exit",
+                        decision: "shouldOpenCandidate: delta (no candidate id, name unmatched/ambiguous)",
                         details: {
-                          unchangedStreakCount,
-                          unchangedStreakLimit,
-                          rowKey: signals.rowKey
+                          rowKey: signals.rowKey,
+                          displayName: signals.displayName,
+                          listTimestamp: signals.listTimestamp,
+                          threadUrl: signals.threadUrl
                         }
                       });
+                      // Can't attribute the row — open it. Reset the streak
+                      // (we don't know if it's unchanged).
+                      unchangedStreakCount = 0;
+                      return { open: true, mode: "delta" };
                     }
-                    return {
-                      open: false,
-                      mode: "delta",
-                      reason: stopScan ? "unchanged_streak" : "unchanged",
-                      stopScan
-                    };
+                    return evaluateAgainstExisting(byName, null, "display_name");
                   }
-                  // Row had a real change (timestamp / unread count) — reset
-                  // the streak so the next contiguous unchanged-rows window
-                  // counts from this point.
-                  unchangedStreakCount = 0;
-                  return { open: true, mode: "delta" };
+
+                  const existing = await loadExistingThreadOpenState(signals.candidatePlatformThreadId);
+                  return evaluateAgainstExisting(
+                    existing,
+                    signals.candidatePlatformThreadId,
+                    "id"
+                  );
                 },
                 onThreadCandidate: async (input) => {
                   streamedCandidates.push({
@@ -2246,6 +2451,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
             error: runError
           });
           latestRunSummaryByPlatform.set(platform, summary);
+          // #403: feed per-platform outcomes into the adaptive-backoff
+          // bookkeeping. `fromScheduler:false` callers don't bump
+          // lastScheduledScanAt — manual scans don't reset the clock,
+          // but they DO reset consecutiveNoChange if they found changes.
+          recordPlatformScanOutcome(platform, platformUpdatedThreads, {
+            fromScheduler: job.fromScheduler === true,
+            success: runSuccess
+          });
         }
       });
 
@@ -2361,7 +2574,14 @@ export function createScanQueue(deps: ScanQueueDeps) {
     jobId: string,
     runLogger?: RunLogger,
     preParsedMessages?: NormalizedMessage[],
-    markedFullBackfill = false
+    markedFullBackfill = false,
+    // Bulk historical backfill passes true: persist messages/people/threads
+    // only, skip the per-thread AI summary + category classification.
+    // Enrichment is gated by design and the recurring scanner already does
+    // AI for ACTIVE threads — running it synchronously across hundreds of
+    // dormant backfill threads just rate-limits the AI provider and is not
+    // what the backfill is for.
+    skipAi = false
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
@@ -2480,6 +2700,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       (await prisma.person.create({
         data: {
           displayName: candidate.displayName,
+          displayNameSource: "auto",
           platform,
           avatarUrl: candidateAvatarUrl,
           profileUrl: candidateProfileUrl,
@@ -2544,6 +2765,35 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     });
 
+    // Group rename refresh. v1 models a group as a Thread pointing at a
+    // synthetic Person whose displayName IS the group name, so the whole
+    // dashboard reads the group name off person.displayName. When a group
+    // is renamed the platform-authoritative name (candidate.groupName)
+    // changes, but the person-identity lookup above keys on displayName and
+    // therefore misses the existing synthetic row — leaving the established
+    // thread link pointing at the stale name. Re-stamp the existing thread's
+    // linked person directly, under the same no-clobber rule as profileUrl:
+    // an operator rename ("manual") is never overwritten.
+    if (existing && candidate.isGroup && candidate.groupName) {
+      const linkedPerson = await prisma.person.findUnique({
+        where: { id: existing.personId }
+      });
+      if (
+        linkedPerson &&
+        shouldRefreshGroupDisplayName({
+          isGroup: candidate.isGroup,
+          groupName: candidate.groupName,
+          currentDisplayName: linkedPerson.displayName,
+          currentSource: linkedPerson.displayNameSource
+        })
+      ) {
+        await prisma.person.update({
+          where: { id: existing.personId },
+          data: { displayName: candidate.groupName, displayNameSource: "auto" }
+        });
+      }
+    }
+
     const thread =
       existing ??
       (await prisma.thread.create({
@@ -2555,7 +2805,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           unreadCount: candidate.unreadCount ?? 0,
           lastMessagePreview: cleanText(candidate.lastMessagePreview ?? ""),
           lastMessageAt: candidateListTimestamp ?? undefined,
-          needsReply: Boolean(candidate.needsReplyFromList)
+          needsReply: Boolean(candidate.needsReplyFromList),
+          isGroup: Boolean(candidate.isGroup),
+          groupName: candidate.groupName ?? null
         }
       }));
 
@@ -2592,6 +2844,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
       const batch = batchedMessageWrites.splice(0, batchedMessageWrites.length);
       await prisma.$transaction(batch);
     };
+    // Platform message keys for inbound messages carrying voice / audio
+    // attachments. After persistence we resolve these to Message ids and
+    // hand them to the transcription service (fire-and-forget); the
+    // service's fingerprint dedup keeps re-scans free.
+    const audioBearingMessageKeys: string[] = [];
 
     for (const message of messages) {
       const safeTimestamp = normalizeMessageTimestamp(message.timestamp, timestampFallback);
@@ -2750,28 +3007,145 @@ export function createScanQueue(deps: ScanQueueDeps) {
           await flushBatchedMessageWrites();
         }
       }
+      if (
+        message.attachments.some(
+          (a) => a.kind === "voice_note" || a.kind === "audio" || a.kind === "video"
+        )
+      ) {
+        // Both directions, audio + video. The operator's own voice notes
+        // and screen / phone-camera videos carry context the AI otherwise
+        // can't see (intent, tone, what they actually said), so
+        // transcribing them too means a future "what did I tell them
+        // about X" question can reach into the audio track of either.
+        audioBearingMessageKeys.push(key);
+      }
     }
     await flushBatchedMessageWrites();
+
+    // Sweep retroactively-failed outbound sends. Messages.app accepts a
+    // send (our 5s post-send poll passes), then later flips the bubble
+    // to "Not Delivered" via chat.db.error — most common with
+    // SMS-fallback on a recipient whose iMessage activation lags. Hard-
+    // delete the Message rows so the thread reflects what the recipient
+    // saw (i.e. nothing). Best-effort: a chat.db read error here must
+    // not abort the rest of the scan.
+    if (adapter.collectRetractedOutboundKeys) {
+      try {
+        const retractedKeys = await adapter.collectRetractedOutboundKeys(candidate);
+        if (retractedKeys.length > 0) {
+          const removed = await prisma.message.deleteMany({
+            where: {
+              threadId: thread.id,
+              direction: "OUT",
+              platformMessageKey: { in: retractedKeys }
+            }
+          });
+          if (removed.count > 0) {
+            console.log(
+              `[scan] removed ${removed.count} failed outbound message(s) from thread ${thread.id}`
+            );
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[scan] retracted-key sweep failed for thread ${thread.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
+
+    // Transcription enqueue. We resolve the persisted Message ids in a
+    // single query rather than per-message lookups, then hand each one to
+    // the optional hook. Fire-and-forget: scans never block on OpenAI
+    // latency, and the transcription service's audioFingerprint dedup
+    // means re-scans of the same audio are free.
+    if (audioBearingMessageKeys.length > 0 && deps.onAudioMessage) {
+      try {
+        const persistedAudioRows = await prisma.message.findMany({
+          where: {
+            threadId: thread.id,
+            platformMessageKey: { in: audioBearingMessageKeys }
+          },
+          select: { id: true }
+        });
+        for (const row of persistedAudioRows) {
+          try {
+            deps.onAudioMessage({ messageId: row.id });
+          } catch (error) {
+            console.warn(
+              `[scan-queue] onAudioMessage hook threw for message ${row.id}: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
+        }
+      } catch (error) {
+        console.warn(
+          `[scan-queue] failed to resolve audio message ids for thread ${thread.id}: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      }
+    }
 
     // System-event placeholders (e.g. LinkedIn "X turned on read receipts")
     // shouldn't drive needs-reply state or surface as the latest preview —
     // they aren't real messages from the other party. Exclude them from
     // inbound/outbound aggregates and from lastMessage selection.
+    //
+    // Deleted/retracted inbound placeholders ("This message has been
+    // deleted.") are non-actionable too: the other party unsent the
+    // message, so it must not flip a thread back into needs-reply state
+    // and must not become the "closing beat" the closed-status
+    // classifier sees. They are excluded from the *inbound* side only —
+    // the operator deleting their own messages is a separate concern,
+    // and the preview side (latestRealMessage) keeps the placeholder so
+    // the inbox row still surfaces "this message has been deleted" so
+    // the operator can see what happened.
     const SYSTEM_EVENT_PLACEHOLDER = "[system event]";
-    const notSystemEvent = { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } } as const;
+    // iMessage "kept an audio message" system events. Substring filter
+    // is narrow enough — the exact phrase rarely appears in normal
+    // user text. Read-side defence in depth: the iMessage adapter
+    // drops these at ingestion going forward; this filter catches
+    // historical rows already in the DB.
+    const KEPT_AUDIO_CONTAINS = "kept an audio message";
+    const notSystemEvent = {
+      AND: [
+        { NOT: { text: SYSTEM_EVENT_PLACEHOLDER } },
+        { NOT: { text: { contains: KEPT_AUDIO_CONTAINS } } }
+      ]
+    };
+    const NON_REAL_INBOUND_TEXTS = [
+      SYSTEM_EVENT_PLACEHOLDER,
+      ...DELETED_INBOUND_PLACEHOLDER_STRINGS
+    ];
+    const notNonRealInbound = {
+      AND: [
+        { text: { notIn: NON_REAL_INBOUND_TEXTS } },
+        { NOT: { text: { contains: KEPT_AUDIO_CONTAINS } } }
+      ]
+    };
 
     const [latestMessagesDesc, aggregateAny, aggregateInbound, aggregateOutbound, lastInboundMessage, latestRealMessage] = await Promise.all([
       prisma.message.findMany({
         where: { threadId: thread.id },
         orderBy: { timestamp: "desc" },
-        take: maxMessages
+        take: maxMessages,
+        // Pull the audio transcription row alongside each message so the
+        // AI context builders (summary, reply brief, classifier, suggested
+        // replies) can fold the transcript text into prompts. Most
+        // messages have no transcription row; Prisma returns null cleanly
+        // and renderMessageBody in services/ai.ts falls back to the
+        // message text as before.
+        include: { audioTranscription: true }
       }),
       prisma.message.aggregate({
         where: { threadId: thread.id },
         _max: { timestamp: true }
       }),
       prisma.message.aggregate({
-        where: { threadId: thread.id, direction: "IN", ...notSystemEvent },
+        where: { threadId: thread.id, direction: "IN", ...notNonRealInbound },
         _max: { timestamp: true }
       }),
       prisma.message.aggregate({
@@ -2779,7 +3153,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         _max: { timestamp: true }
       }),
       prisma.message.findFirst({
-        where: { threadId: thread.id, direction: "IN", ...notSystemEvent },
+        where: { threadId: thread.id, direction: "IN", ...notNonRealInbound },
         orderBy: { timestamp: "desc" }
       }),
       prisma.message.findFirst({
@@ -2791,7 +3165,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const latestMessages = [...latestMessagesDesc].reverse();
     const resolvedLastMessageAt = aggregateAny._max.timestamp ?? candidateListTimestamp;
     const resolvedLastInboundAt = aggregateInbound._max.timestamp ?? null;
-    const resolvedLastOutboundAt = aggregateOutbound._max.timestamp ?? null;
+    // Operator OUT reactions (iMessage tapbacks) are stored on the parent
+    // message's rawJson, not as standalone Message rows, so the aggregate
+    // OUT-message query misses them. Fold them into the effective
+    // lastOutboundAt so a thread where the operator reacted ❤️ instead
+    // of typing a reply no longer hangs as needsReply forever (#393 —
+    // pilot R-0033). See services/reaction-effects.ts for the helper.
+    const resolvedLastOutboundAt = effectiveLastOutboundAt(
+      aggregateOutbound._max.timestamp ?? null,
+      latestMessagesDesc
+    );
     const hasPersistedMessages = Boolean(aggregateAny._max.timestamp);
     const messageDerivedNeedsReply = Boolean(
       resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
@@ -2825,7 +3208,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // transcript produces different summaries in active-reply vs reopen
     // mode — the cache has to invalidate when the operator's reply flips
     // a thread from active to dormant (or vice versa).
-    const SUMMARY_VERSION = "v3-mode-aware";
+    // v5 switches to second-person ("you") in all output text. Earlier
+    // v4 substituted the configured displayName, but the name + greeting
+    // already personalise the shell — summaries read more naturally in
+    // second person ("Ashley let you know") than third ("Ashley let
+    // Richard know"). Existing v4 summaries regenerate on next scan.
+    // v6 adds the Reply Brief sub-object alongside the legacy fields and
+    // bans abstract coaching phrases ("deepen the connection", "grounded
+    // question", "helpful nudge") from the default-visible strings.
+    // Existing v5 summaries regenerate on next scan so the rail surfaces
+    // the new brief shape and clean prose rather than the stripped
+    // fallback derived from the older summary.
+    const SUMMARY_VERSION = "v6-reply-brief";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
@@ -2833,23 +3227,25 @@ export function createScanQueue(deps: ScanQueueDeps) {
         )
       : null;
 
-    const shouldRefreshSummary = !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
+    const shouldRefreshSummary =
+      !skipAi && !!lastInboundHash && lastInboundHash !== thread.lastInboundHash;
 
     let summary = thread.rollingSummary;
     let whatTheyWant = thread.whatTheyWant;
     let openLoopsJson = thread.openLoopsJson;
     let toneNotesJson = thread.toneNotesJson;
+    let rememberJson = thread.rememberJson;
+    let replyBriefJson = thread.replyBriefJson;
 
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
         displayName: person.displayName,
         previousSummary: thread.rollingSummary ?? undefined,
         previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
-        messages: latestMessages.map((message) => ({
-          direction: message.direction,
-          text: message.text,
-          timestamp: message.timestamp.toISOString()
-        })),
+        previousRemember: thread.rememberJson
+          ? (JSON.parse(thread.rememberJson) as RememberItem[])
+          : [],
+        messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
         needsReply: resolvedNeedsReply
       });
 
@@ -2860,6 +3256,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
       whatTheyWant = stripUnpairedSurrogates(aiSummary.what_they_want);
       openLoopsJson = JSON.stringify(aiSummary.open_loops.map((s) => stripUnpairedSurrogates(s)));
       toneNotesJson = JSON.stringify(aiSummary.tone_notes.map((s) => stripUnpairedSurrogates(s)));
+      // remember notes are already surrogate-stripped inside updateThreadSummary.
+      rememberJson = JSON.stringify(aiSummary.remember);
+      // Reply Brief is already sanitised + sub-fields surrogate-stripped
+      // inside updateThreadSummary. Persisted as a single JSON blob; the
+      // dashboard parses on read.
+      replyBriefJson = aiSummary.reply_brief ? JSON.stringify(aiSummary.reply_brief) : null;
     }
 
     // Phase 3: classify on first encounter only. Once a thread has a
@@ -2867,22 +3269,71 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // can be triggered via /control/classify-uncategorized after a wrong
     // verdict is corrected manually.
     let categoryUpdate: string | null | undefined = undefined;
-    if (!thread.category && hasPersistedMessages) {
+    if (!skipAi && !thread.category && hasPersistedMessages) {
       const classified = await deps.aiService
         .classifyThreadCategory({
           platform: thread.platform as PlatformName,
           displayName: person.displayName,
-          messages: latestMessages.map((message) => ({
-            direction: message.direction,
-            text: message.text,
-            timestamp: message.timestamp.toISOString()
-          })),
+          messages: latestMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
           summary: summary ?? null,
           whatTheyWant: whatTheyWant ?? null
         })
         .catch(() => null);
       if (classified) {
         categoryUpdate = classified;
+      }
+    }
+
+    // Phase 2.5 (#287): conversation-end classifier. Re-runs whenever the
+    // last inbound text or timestamp changes (a fresh inbound flips the
+    // hash), so a thread that was closed but reopens with a new message
+    // gets re-evaluated automatically. The dedicated cache key is
+    // deliberately narrow (only the inbound itself) so it does not churn
+    // when unrelated fields like needsReply flip.
+    //
+    // The version tag is bumped to v2 when the classifier started
+    // returning a reason alongside the verdict — bumping it forces
+    // existing verdicts (which lack a reason) to re-classify on the
+    // next scan that processes their thread, so the dashboard can
+    // surface a "why" caption on rows already in the DB.
+    let closedStatusUpdate: string | null | undefined = undefined;
+    let closedStatusReasonUpdate: string | null | undefined = undefined;
+    let closedStatusCacheKeyUpdate: string | null | undefined = undefined;
+    // Gate the AI classifier behind the operator's chosen help level
+    // (#287 phase 2.5 follow-up). "memory_only" turns off the
+    // organisational AI features — scoring + close detection — so the
+    // operator can pick a quieter tier without losing summaries.
+    const operatorProfile = await deps.settingsStore.getOperatorProfile();
+    const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
+    if (!skipAi && lastInboundMessage && allowClassification) {
+      const closedKey = stableHash(
+        `closed-v2|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+      );
+      if (closedKey !== thread.closedStatusCacheKey) {
+        // Hide deleted-inbound placeholders from the classifier so the
+        // prompt sees the prior real turn as the "closing beat". A
+        // retracted message must not be treated as a fresh inbound that
+        // forces the verdict to OPEN. Operator OUT messages pass through
+        // untouched (we only filter the inbound side).
+        const classifierMessages = latestMessages
+          .filter(
+            (m) =>
+              m.direction !== "IN" || !isNonActionableInboundPlaceholder(m.text)
+          )
+          .map(prismaMessageToPrompt)
+          .filter(isAiVisibleMessage);
+        const verdict = await deps.aiService
+          .classifyThreadClosed({
+            displayName: person.displayName,
+            messages: classifierMessages,
+            summary: summary ?? null
+          })
+          .catch(() => null);
+        if (verdict) {
+          closedStatusUpdate = verdict.status;
+          closedStatusReasonUpdate = verdict.reason;
+          closedStatusCacheKeyUpdate = closedKey;
+        }
       }
     }
 
@@ -2902,17 +3353,33 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // first resolution still applies on first creation.
         threadUrl: candidate.threadUrl ?? thread.threadUrl,
         unreadCount: candidate.unreadCount ?? thread.unreadCount,
+        // Keep the thread's group flags current, but never wipe a known
+        // name: a group renamed on another device reports isGroup with no
+        // groupName, and we'd rather keep the last name we saw than blank it.
+        isGroup: candidate.isGroup ?? thread.isGroup,
+        groupName: candidate.groupName ?? thread.groupName,
         lastMessagePreview: resolvedLastMessagePreview || null,
         // Phase 2: track who sent the most recent message + its text, so the
         // inbox-row preview reflects the latest of either party. Without
         // these, lastMessagePreview only tracked the latest INBOUND and went
-        // stale the moment Richard replied.
+        // stale the moment the operator replied.
         lastMessageDirection: lastMessage?.direction ?? thread.lastMessageDirection,
         lastMessageText: lastMessage?.text ?? thread.lastMessageText,
         // Phase 3: only write when AI returned a confident classification.
         // undefined leaves the existing column value unchanged (Prisma
         // omits the field from the UPDATE statement).
         ...(categoryUpdate ? { category: categoryUpdate } : {}),
+        // Phase 2.5 (#287): same rule — only persist when the AI gave a
+        // verdict for the current inbound hash. A null verdict leaves
+        // the previous decision in place so a transient provider
+        // outage does not silently clear classifications.
+        ...(closedStatusUpdate !== undefined ? { closedStatus: closedStatusUpdate } : {}),
+        ...(closedStatusReasonUpdate !== undefined
+          ? { closedStatusReason: closedStatusReasonUpdate }
+          : {}),
+        ...(closedStatusCacheKeyUpdate !== undefined
+          ? { closedStatusCacheKey: closedStatusCacheKeyUpdate }
+          : {}),
         lastMessageAt: resolvedLastMessageAt,
         lastInboundAt: resolvedLastInboundAt,
         lastOutboundAt: resolvedLastOutboundAt,
@@ -2938,6 +3405,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         whatTheyWant,
         openLoopsJson,
         toneNotesJson,
+        rememberJson,
+        replyBriefJson,
         // Stamp the first-full-backfill marker on the FIRST successful
         // persistence of any thread that has at least one message. We don't
         // gate on the pre-click `markedFullBackfill` flag because the URL
@@ -3041,6 +3510,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
       currentScanProgress
         ? {
             platform: currentScanProgress.platform,
+            scope: currentScanProgress.scope,
             processedRows: currentScanProgress.processedRows,
             openedRows: currentScanProgress.openedRows,
             total: currentScanProgress.total,
@@ -3062,6 +3532,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         requestId: string;
         runLogger?: RunLogger;
         messages?: NormalizedMessage[];
+        skipAi?: boolean;
       }
     ) =>
       syncThread(
@@ -3070,7 +3541,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
         input.maxMessages,
         input.requestId,
         input.runLogger,
-        input.messages
+        input.messages,
+        false,
+        input.skipAi ?? false
       ),
     clearAbort
   };
