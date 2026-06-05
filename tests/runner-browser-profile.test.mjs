@@ -29,7 +29,7 @@ function basePersonalConfig(overrides = {}) {
     personalProfileMirrorRoot: "/tmp/mirror-root",
     personalChromeUserDataDir: "/Users/richard/Library/Application Support/Google/Chrome",
     personalChromeProfileDirectory: "Person 1",
-    personalChromeProfileName: "Richard Afolayan",
+    personalChromeProfileName: "Test Profile",
     personalChromeProfileResolutionStrategy: "directory_exact",
     ...overrides
   };
@@ -50,7 +50,8 @@ test("resolveBrowserProfileConfig defaults to isolated mode and Person 1 profile
   assert.equal(config.personalProfileMirrorRoot, resolve(dataDir, "profiles"));
   assert.equal(config.personalChromeUserDataDir, "/tmp/chrome-user-data-default");
   assert.equal(config.personalChromeProfileDirectory, "Person 1");
-  assert.equal(config.personalChromeProfileName, "Richard Afolayan");
+  // Defaults to empty — the app no longer ships a specific person's name.
+  assert.equal(config.personalChromeProfileName, "");
   assert.equal(config.personalChromeProfileResolutionStrategy, "local_state_missing");
 });
 
@@ -173,7 +174,7 @@ test("launchPersistentContextForPlatform keeps isolated launch behaviour unchang
       personalProfileMirrorRoot: "/tmp/mirror-root",
       personalChromeUserDataDir: "/tmp/personal",
       personalChromeProfileDirectory: "Person 1",
-      personalChromeProfileName: "Richard Afolayan",
+      personalChromeProfileName: "Test Profile",
       personalChromeProfileResolutionStrategy: "directory_exact"
     },
     args: ["--disable-blink-features=AutomationControlled"]
@@ -273,7 +274,7 @@ test("launchPersistentContextForPlatform falls back to isolated profile when per
   assert.equal(fallbackDetails?.platform, "INSTAGRAM");
   assert.equal(fallbackDetails?.personalChromeLaunchUserDataDir, "/tmp/isolated/instagram");
   assert.equal(fallbackDetails?.personalChromeProfileDirectory, "Person 1");
-  assert.equal(fallbackDetails?.personalChromeProfileName, "Richard Afolayan");
+  assert.equal(fallbackDetails?.personalChromeProfileName, "Test Profile");
   assert.equal(fallbackDetails?.personalChromeProfileResolutionStrategy, "directory_exact");
   assert.equal(fallbackDetails?.fallbackProfileDir, "/tmp/isolated/instagram");
   assert.match(fallbackDetails?.reason ?? "", /Profile lock in use/);
@@ -306,7 +307,11 @@ test("launchPersistentContextForPlatform throws instead of falling back when str
           durationMs: 1
         })
       }),
-    /Unable to use personal Chrome profile/
+    // The strict-mode error names the profile and explains why the runner
+    // refused to fall back. Match on the leading "Couldn't launch your X
+    // Chrome profile" phrase so this assertion does not break the next
+    // time the trailing reason text is reworded.
+    /Couldn't launch your .* Chrome profile/
   );
 
   assert.equal(calls.length, 1);

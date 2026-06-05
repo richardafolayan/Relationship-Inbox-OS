@@ -1,5 +1,5 @@
 import type { PlatformName } from "@inbox-os/core";
-import type { BrowserContext } from "playwright";
+import type { BrowserContext } from "patchright";
 import type { BrowserProfileConfig } from "../config";
 import {
   preparePersonalProfileMirror as preparePersonalProfileMirrorDefault,
@@ -12,6 +12,19 @@ interface LaunchPersistentContextOptions {
   viewport: null;
   args?: string[];
   channel?: string;
+  // Playwright/Patchright default this to false, which injects
+  // --no-sandbox and shows Chrome's "unsupported command-line flag"
+  // infobar — both are loud automation tells. Real Chrome runs
+  // sandboxed; we force it on. (No Docker/CI sandbox constraint here
+  // — this runs on the operator's macOS machine.)
+  chromiumSandbox?: boolean;
+  // Playwright/Patchright still inject some detectable args by
+  // default even though Patchright strips the big --enable-automation
+  // one. Strip the leftovers explicitly: --disable-blink-features=
+  // AutomationControlled (trips Chrome's bad-flags banner; redundant
+  // since Patchright patches navigator.webdriver natively) and
+  // --disable-infobars (an automation tell real Chrome never sets).
+  ignoreDefaultArgs?: string[];
 }
 
 interface LaunchPersistentContext {
@@ -66,7 +79,15 @@ export async function launchPersistentContextForPlatform(input: {
   const baseOptions: LaunchPersistentContextOptions = {
     headless: input.headless,
     viewport: null,
-    args: baseArgs
+    args: baseArgs,
+    // Run the real Chrome sandbox so we don't ship --no-sandbox (and
+    // its visible infobar). Applies to both isolated and personal
+    // launches via the personalOptions spread below.
+    chromiumSandbox: true,
+    ignoreDefaultArgs: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-infobars"
+    ]
   };
 
   if (input.browserProfile.mode !== "personal") {
@@ -174,8 +195,10 @@ export async function launchPersistentContextForPlatform(input: {
 
     if (input.browserProfile.fallbackBehavior === "error") {
       throw new Error(
-        `Unable to prepare personal Chrome profile "${input.browserProfile.personalChromeProfileDirectory}". ` +
-          `${reason}`
+        `Couldn't mirror your "${input.browserProfile.personalChromeProfileName}" Chrome profile (directory ${input.browserProfile.personalChromeProfileDirectory}). ` +
+          `Connect cancelled to avoid switching to a Chrome for Testing fingerprint. ` +
+          `Reason: ${reason}. ` +
+          `Common causes: PERSONAL_CHROME_USER_DATA_DIR points at the wrong path, the profile directory has been renamed in Chrome, or the disk is full.`
       );
     }
 
@@ -291,9 +314,10 @@ export async function launchPersistentContextForPlatform(input: {
 
     if (input.browserProfile.fallbackBehavior === "error") {
       throw new Error(
-        `Unable to use personal Chrome profile "${input.browserProfile.personalChromeProfileDirectory}". ` +
-          `Launch failed with: ${reason}. ` +
-          `Close Chrome fully and retry, or set PERSONAL_PROFILE_FALLBACK=allow_isolated to permit fallback.`
+        `Couldn't launch your "${input.browserProfile.personalChromeProfileName}" Chrome profile (directory ${input.browserProfile.personalChromeProfileDirectory}). ` +
+          `Connect cancelled to avoid switching to a Chrome for Testing fingerprint. ` +
+          `Reason: ${reason}. ` +
+          `Most often this means Chrome is currently open with that profile. Quit Chrome (or just that profile's window) and reconnect.`
       );
     }
 

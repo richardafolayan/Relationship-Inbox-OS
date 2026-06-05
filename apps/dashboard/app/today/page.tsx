@@ -1,97 +1,256 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
-import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { HealthResponse, InboxResponse, PlatformCard, ThreadResponse } from "@/lib/types";
+import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
+import { scopeRowsToSandbox } from "@/lib/demo-threads";
+import Link from "next/link";
+import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import type {
+  HealthResponse,
+  InboxResponse,
+  InboxRow,
+  OperatorProfile,
+  PlatformCard,
+  ThreadResponse
+} from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
-import { normalizePreview } from "@/lib/preview";
+import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { cleanAskSummary, normalizePreview } from "@/lib/preview";
+import { isInTodayQueue, sortTodayQueue } from "@/lib/today";
+import { Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
+import { Canvas, CaughtUp } from "@/components/common/canvas";
+import { FitText } from "@/components/common/fit-text";
 import { ThreadRow } from "@/components/common/thread-row";
+import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
+import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
+import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { NotificationCta } from "@/components/common/notification-cta";
+import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
+import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
+import { isTourSeen, markTourSeen, startPilotTour } from "@/lib/pilot-tour";
 
-// "Today" - the new home. One hero card naming the most-overdue
-// conversation in plain English, then a quiet ranked stack of the rest.
-// No KPIs. No filter chips above the fold. The runner already sorts the
-// inbox; we just take row[0] as "first up".
-//
-// The hero's headline prefers the AI summary of the top thread (fetched
-// via /runner/data/thread/:id when the inbox row arrives). If that fails
-// or hasn't loaded yet, we fall back to the actual preview text - never
-// the technical riskReason ("Inbound waiting Xh"), which is operator-
-// facing telemetry, not the human ask.
+// "Today" - the home. Hero card (most-overdue first) with keyboard hints
+// on each action, a "queue peek" of the next few people below it, and a
+// right-rail day outline tracking overdue → waiting → fresh → done.
+// Greeting drops from 56px to ~32px so the screen leads with the hero,
+// not the salutation. Section 05 of the redesign doc.
+
+// Today is a focused triage queue, not the whole backlog. The "Then
+// these, in order" stack renders at most this many rows; the rest stay a
+// click away on /inbox (built for "every active thread"). Before the
+// cap, the stack listed every reply-needed thread - dozens of rows that
+// made Today feel like the entire inbox (issue #291).
+const TODAY_STACK_LIMIT = 7;
+
+// Metadata on the Today surface is space-separated — no glyph between items
+// (the redesign's saved default: not "·", not "|"). A double non-breaking
+// space keeps a legible gap inside the single text nodes (hero eyebrow,
+// hero meta, queue peek) where a flex gap isn't available; the list-row
+// tags rely on their flex gap instead.
+const META_SEP = "  ";
 
 interface RunnerEventDetail {
   type?: string;
   threadId?: string;
 }
 
+// Per-day "tonight's outline" progress, persisted to localStorage so the
+// cleared-thread counts survive a reload instead of dropping back to zero.
+// The date field still forces a fresh start at local midnight.
+const TONIGHT_PROGRESS_KEY = "today_tonight_progress";
+
+type TonightProgress = { date: string; RED: number; AMBER: number; GREEN: number };
+
+function readTonightProgress(): TonightProgress | null {
+  try {
+    const raw = window.localStorage.getItem(TONIGHT_PROGRESS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<TonightProgress>;
+    if (
+      typeof parsed?.date === "string" &&
+      typeof parsed.RED === "number" &&
+      typeof parsed.AMBER === "number" &&
+      typeof parsed.GREEN === "number"
+    ) {
+      return { date: parsed.date, RED: parsed.RED, AMBER: parsed.AMBER, GREEN: parsed.GREEN };
+    }
+  } catch {
+    // Corrupt JSON or storage disabled: fall back to a fresh count.
+  }
+  return null;
+}
+
+function writeTonightProgress(value: TonightProgress): void {
+  try {
+    window.localStorage.setItem(TONIGHT_PROGRESS_KEY, JSON.stringify(value));
+  } catch {
+    // Storage disabled or over quota: progress just won't survive a reload.
+  }
+}
+
+// Today-scoped oxblood palette — match the redesign prototype's colours
+// ("colours and all"). These CSS-var overrides live on the Today canvas
+// ONLY: the sidebar / app-shell render outside this subtree, and every
+// other page keeps the app's global coral tokens. Accent + overdue +
+// needs-reply go oxblood; waiting stays amber, fresh stays green.
+const OXBLOOD_TODAY_VARS = {
+  "--accent": "#7B1F1F",
+  "--accent-ink": "#7B1F1F",
+  "--accent-soft": "rgba(123,31,31,0.08)",
+  "--risk-overdue": "#7B1F1F",
+  "--risk-waiting": "#9a6a12",
+  "--risk-fresh": "#1f6b3a"
+} as CSSProperties;
+
 export default function TodayPage() {
   const router = useRouter();
-  const [data, setData] = useState<InboxResponse | null>(null);
-  const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
+  // Seed from the shared client cache so revisiting Today (e.g. back from a
+  // thread) paints the last-known queue instantly instead of a blank skeleton,
+  // then revalidates in the background.
+  const [data, setData] = useState<InboxResponse | null>(
+    () => peekCache<InboxResponse>("/runner/data/inbox") ?? null
+  );
+  const [platforms, setPlatforms] = useState<PlatformCard[]>(
+    () => peekCache<PlatformCard[]>("/runner/data/platforms") ?? []
+  );
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
-  // IDs we've optimistically removed from the local view because the
-  // operator just acted on them (sent / handled / snoozed) - server
-  // hasn't necessarily caught up yet. Cleared on every refetch.
+  const [loaded, setLoaded] = useState(() => peekCache<InboxResponse>("/runner/data/inbox") !== undefined);
+  // True when the /data/inbox fetch failed outright (runner down /
+  // unreachable). Without this the empty "You're caught up" state renders
+  // for an unreachable runner — indistinguishable from a genuinely empty
+  // inbox and quietly misleading.
+  const [inboxUnavailable, setInboxUnavailable] = useState(false);
+  // Operator voice profile — drives the greeting name, the first-run setup
+  // card, and whether full AI drafts are predrafted. null until loaded.
+  const [profile, setProfile] = useState<OperatorProfile | null>(null);
+  // First-run pilot welcome card. `undefined` until localStorage is read,
+  // so the card never flashes for testers who already dismissed it.
+  const [welcomeDismissed, setWelcomeDismissed] = useState<boolean | undefined>(undefined);
+  // First-run pilot tour invite. `undefined` until localStorage is read so
+  // the card never flashes for testers who already saw or skipped it.
+  const [tourSeen, setTourSeen] = useState<boolean | undefined>(undefined);
   const [removedIds, setRemovedIds] = useState<Set<string>>(new Set());
-  // Brief "Sent - next up" overlay for the outgoing hero.
   const [transitioning, setTransitioning] = useState<{ id: string; label: string } | null>(null);
   const transitionTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Mirror of the filtered Today queue (`rows`, computed below) so the
+  // MESSAGE_SENT handler credits a send as "done" only when the thread is
+  // actually in tonight's queue, not just anywhere in the inbox.
+  const todayRowsRef = useRef<InboxRow[]>([]);
+  // Per-day "done" counter so the right-rail outline ticks up as the
+  // operator clears overdue / waiting threads. Keyed by ISO date string
+  // so it resets at local midnight.
+  const [doneTodayByLevel, setDoneTodayByLevel] = useState<TonightProgress>(() => ({
+    date: new Date().toDateString(),
+    RED: 0,
+    AMBER: 0,
+    GREEN: 0
+  }));
+
+  const applyInbox = useCallback((inbox: InboxResponse) => {
+    setInboxUnavailable(false);
+    setData(inbox);
+    const stillPending = new Set(
+      inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+    );
+    setRemovedIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, []);
 
   const refresh = useCallback(async () => {
     const [inbox, platformRows, healthData] = await Promise.all([
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => [] as PlatformCard[]),
-      apiGet<HealthResponse>("/runner/health").catch(() => null)
+      // SWR: paint the cached queue immediately, revalidate in the background.
+      apiGet<InboxResponse>("/runner/data/inbox", {
+        ttlMs: 4000,
+        swr: true,
+        onFresh: (d) => applyInbox(d as InboxResponse)
+      }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(
+        () => [] as PlatformCard[]
+      ),
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null)
     ]);
-    if (inbox) {
-      setData(inbox);
-      // Drop only the optimistic IDs the server has caught up on. A row
-      // counts as "still pending" when it's both present AND still needs
-      // a reply - so a mark-done / snooze that flips needsReply=false
-      // counts as confirmed even though the row itself lingers in the
-      // inbox view (the existing /data/inbox sort returns marked-done
-      // rows for archive context).
-      const stillPending = new Set(
-        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
-      );
-      setRemovedIds((prev) => {
-        const next = new Set<string>();
-        prev.forEach((id) => {
-          if (stillPending.has(id)) next.add(id);
-        });
-        return next;
-      });
-    }
+    setInboxUnavailable(inbox === null);
+    if (inbox) applyInbox(inbox);
     setPlatforms(platformRows ?? []);
     if (healthData) setHealth(healthData);
     setLoaded(true);
+  }, [applyInbox]);
+
+  // Debounce SSE-driven refreshes so a multi-thread scan (one THREAD_UPDATED
+  // per touched thread) collapses into a single inbox refetch instead of N.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, 450);
+  }, [refresh]);
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    },
+    []
+  );
+
+  const loadProfile = useCallback(() => {
+    void apiGet<OperatorProfile>("/runner/data/operator-profile")
+      .then((data) => setProfile(data ?? null))
+      .catch(() => undefined);
   }, []);
 
   useEffect(() => {
+    loadProfile();
+  }, [loadProfile]);
+
+  useEffect(() => {
+    setWelcomeDismissed(window.localStorage.getItem(PILOT_WELCOME_DISMISSED_KEY) === "1");
+    setTourSeen(isTourSeen(window.localStorage));
+  }, []);
+
+  // Restore tonight's cleared-thread counts so the right-rail outline keeps
+  // its progress across a reload. A stale (pre-midnight) entry is ignored.
+  useEffect(() => {
+    const stored = readTonightProgress();
+    if (stored && stored.date === new Date().toDateString()) {
+      setDoneTodayByLevel(stored);
+    }
+  }, []);
+
+  // Persist whenever there's progress to save. Skipping the all-zero state
+  // also stops the empty default from clobbering a restored value on mount.
+  useEffect(() => {
+    if (doneTodayByLevel.RED + doneTodayByLevel.AMBER + doneTodayByLevel.GREEN > 0) {
+      writeTonightProgress(doneTodayByLevel);
+    }
+  }, [doneTodayByLevel]);
+
+  useEffect(() => {
     void refresh();
-    const onResync = () => void refresh();
+    const onResync = () => scheduleRefresh();
     const onRunnerEvent = (event: Event) => {
-      // Today's "first up" hero must drop a thread the moment the operator
-      // replies to it. Without this, MESSAGE_SENT only updates the thread
-      // page; Today keeps pinning the just-replied conversation at the top
-      // until the next 8s status-bar tick coincidentally triggers a refresh
-      // through some other path.
       const detail = (event as CustomEvent<{ type?: string }>).detail;
       const type = detail?.type;
+      // MESSAGE_SENT is handled by the advanceHero effect below (which also
+      // refreshes), so it's intentionally not listed here — otherwise a
+      // single send triggers two refreshes.
       if (
-        type === "MESSAGE_SENT" ||
         type === "MESSAGE_SEND_FAILED" ||
         type === "THREAD_UPDATED" ||
         type === "SCAN_FINISHED"
       ) {
-        void refresh();
+        scheduleRefresh();
       }
     };
     window.addEventListener("runner-resync", onResync);
@@ -100,10 +259,15 @@ export default function TodayPage() {
       window.removeEventListener("runner-resync", onResync);
       window.removeEventListener("runner-event", onRunnerEvent as EventListener);
     };
-  }, [refresh]);
+  }, [refresh, scheduleRefresh]);
 
-  const advanceHero = useCallback((id: string, label: string) => {
+  const advanceHero = useCallback((id: string, label: string, level: "RED" | "AMBER" | "GREEN") => {
     setTransitioning({ id, label });
+    setDoneTodayByLevel((prev) => {
+      const todayKey = new Date().toDateString();
+      const base = prev.date === todayKey ? prev : { date: todayKey, RED: 0, AMBER: 0, GREEN: 0 };
+      return { ...base, [level]: base[level] + 1 };
+    });
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
     transitionTimer.current = setTimeout(() => {
       setRemovedIds((prev) => {
@@ -112,23 +276,23 @@ export default function TodayPage() {
         return next;
       });
       setTransitioning(null);
-      // Refetch in the background so server truth catches up. If the
-      // runner hasn't yet confirmed (e.g. mark-done in flight), the
-      // refetch may briefly bring the row back - that's correct
-      // behaviour and matches receipts-first design.
       void refresh();
     }, 700);
   }, [refresh]);
 
-  // Listen for runner-side confirmations. MESSAGE_SENT means the platform
-  // accepted the reply; that thread is no longer "first up". THREAD_UPDATED
-  // covers snooze/mark-done that other clients trigger.
   useEffect(() => {
     const handler = (event: Event) => {
       const detail = (event as CustomEvent<RunnerEventDetail>).detail;
       if (!detail || !detail.threadId) return;
       if (detail.type === "MESSAGE_SENT") {
-        advanceHero(detail.threadId, "Sent - next up");
+        // Only advance (and bump the "Tonight's outline" done counter) when
+        // the sent thread is actually in Today's queue. Replying to an
+        // off-queue thread (or a scheduled send firing) must not inflate
+        // Today's counts. A non-Today send still refreshes via THREAD_UPDATED.
+        const matching = todayRowsRef.current.find((row) => row.id === detail.threadId);
+        if (matching) {
+          advanceHero(detail.threadId, "Sent, next up", matching.riskLevel);
+        }
       }
     };
     window.addEventListener("runner-event", handler);
@@ -139,47 +303,56 @@ export default function TodayPage() {
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
   }, []);
 
-  const allRows = data?.rows ?? [];
-  // /today is the "first up" page; rows that no longer need a reply
-  // (mark-done, send-confirmed, or runner-confirmed truthy=false) shouldn't
-  // be the hero even if the runner keeps them in /data/inbox for archive
-  // context. The strict `!== false` form includes legacy rows where the
-  // field is undefined; the optimistic-removal Set covers in-flight actions.
-  // scheduledSendAt presence means the operator already queued a reply -
-  // suppress until the schedule fires (row vanishes naturally) or is
-  // cancelled (scheduledSendAt clears, row returns).
+  const { sandboxActive } = useFullDemo();
+  // While a sandbox guided flow (pilot tour / presenter sandbox) is active,
+  // Today shows only the demo-seeded threads so the walkthrough resolves its
+  // targets instead of pointing at the operator's real hero. Outside a sandbox
+  // flow this is a no-op and the real inbox shows as normal.
+  const allRows = useMemo(
+    () => scopeRowsToSandbox(data?.rows ?? [], sandboxActive),
+    [data, sandboxActive]
+  );
+  // Today is the "tonight's work" view. Two filters narrow the runner's
+  // raw needs-reply set into things that genuinely need the operator
+  // tonight (issue #287):
+  //   - Recency horizon (phase 1): dormant threads drop out so a year of
+  //     history does not flood the hero queue.
+  //   - Closed-conversation heuristic (phase 2): threads that already
+  //     wrapped on a "thanks" / "talk soon" are set aside so the operator
+  //     is not nudged to reply to closing messages.
+  // Both filters are conservative: anything reachable from the Inbox
+  // "show all" toggle still appears there, and a new inbound message
+  // immediately pulls a thread back into Today.
   const rows = useMemo(
-    () =>
-      allRows.filter(
-        (row) => row.needsReply !== false && !row.scheduledSendAt && !removedIds.has(row.id)
-      ),
+    () => allRows.filter((row) => isInTodayQueue(row, removedIds)),
     [allRows, removedIds]
   );
   const overdueCount = rows.filter((row) => row.riskLevel === "RED").length;
   const waitingCount = rows.filter((row) => row.riskLevel === "AMBER").length;
+  const freshCount = rows.filter((row) => row.riskLevel === "GREEN").length;
 
-  // Within the needs-reply set, surface the most-overdue conversation
-  // first. The runner sorts the inbox by lastMessageAt-desc which would
-  // otherwise put a reply that just came in (fresh, GREEN) ahead of a
-  // months-old overdue thread.
-  const sortedRows = useMemo(() => {
-    const rank = (level: string) => (level === "RED" ? 0 : level === "AMBER" ? 1 : 2);
-    return [...rows].sort((a, b) => {
-      if (rank(a.riskLevel) !== rank(b.riskLevel)) {
-        return rank(a.riskLevel) - rank(b.riskLevel);
-      }
-      const aIn = a.lastInboundAt ? Date.parse(a.lastInboundAt) : 0;
-      const bIn = b.lastInboundAt ? Date.parse(b.lastInboundAt) : 0;
-      return aIn - bIn;
-    });
+  useEffect(() => {
+    todayRowsRef.current = rows;
   }, [rows]);
+
+  // Risk bucket first, then favourites lifted within their own bucket, then
+  // oldest-waiting (R-0066 / #483). A favourite's overdue thread leads the
+  // hero, but a non-favourite overdue still outranks a fresh favourite.
+  const sortedRows = useMemo(() => sortTodayQueue(rows), [rows]);
   const hero = sortedRows[0];
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
+  // Cap the "Then these, in order" stack; the long tail routes to Inbox.
+  // overflowCount drives the "see all" link's label. (issue #291)
+  const visibleRemaining = useMemo(
+    () => remaining.slice(0, TODAY_STACK_LIMIT),
+    [remaining]
+  );
+  const overflowCount = remaining.length - visibleRemaining.length;
+  const queuePeek = useMemo(() => remaining.slice(0, 3), [remaining]);
+  const queueRemaining = Math.max(0, remaining.length - queuePeek.length);
+  const queueEtaMinutes = remaining.length > 0 ? Math.max(1, remaining.length * 2) : 0;
   const degraded = platforms.find((p) => p.status === "DEGRADED");
 
-  // Prefetch the hero thread to grab its AI summary for the headline.
-  // This is the one place the spec calls for "AI-summarized one-line
-  // ask" rather than the raw preview.
   useEffect(() => {
     if (!hero) {
       setHeroSummary(null);
@@ -187,27 +360,85 @@ export default function TodayPage() {
     }
     if (heroSummary?.id === hero.id) return;
     void apiGet<ThreadResponse>(`/runner/data/thread/${hero.id}`)
-      .then((t) => setHeroSummary({ id: hero.id, summary: t.whatTheyWant?.trim() || t.summary?.trim() || null }))
+      .then((t) => setHeroSummary({ id: hero.id, summary: cleanAskSummary(t.whatTheyWant) || t.summary?.trim() || null }))
       .catch(() => setHeroSummary({ id: hero.id, summary: null }));
   }, [hero, heroSummary?.id]);
 
-  // Pre-warm AI suggested replies for the top 3 rows so opening any of
-  // them shows AI suggestions instantly. The runner endpoint is
-  // idempotent: re-fires for an unchanged thread are cheap (cache hit
-  // returns immediately, no AI call). Bounded to 3 to keep token spend
-  // proportional to what an operator can plausibly act on in one
-  // session.
+  // Background-predraft the top 3 threads — but only when the user has
+  // opted into full AI drafts. At lower help levels the dashboard never
+  // surfaces a complete draft, so generating one would be wasted work.
   const top3Ids = useMemo(() => rows.slice(0, 3).map((row) => row.id).join("|"), [rows]);
+  const fullDrafts = profile?.aiHelpLevel === "full_drafts";
   useEffect(() => {
-    if (!top3Ids) return;
+    if (!top3Ids || !fullDrafts) return;
     const ids = top3Ids.split("|").filter(Boolean);
     for (const id of ids) {
-      void apiPost<{ status: string }>(`/runner/control/thread/${id}/predraft`, {}).catch(() => {
-        // Best-effort warmup. A failure just means the operator pays
-        // the AI latency on first open; the existing flow handles that.
-      });
+      void apiPost<{ status: string }>(`/runner/control/thread/${id}/predraft`, {}).catch(() => undefined);
     }
-  }, [top3Ids]);
+  }, [top3Ids, fullDrafts]);
+
+  // R / S / E keyboard hints on the hero. Active when the hero is
+  // visible and no input is focused. Esc behaviour stays owned by
+  // app-shell (close palette / leave thread).
+  const heroRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!hero) return;
+    const isTextTarget = (target: EventTarget | null): boolean => {
+      if (!(target instanceof HTMLElement)) return false;
+      const tag = target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return true;
+      return target.isContentEditable;
+    };
+    const onKey = (event: KeyboardEvent) => {
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+      if (isTextTarget(event.target)) return;
+      const key = event.key.toLowerCase();
+      if (key === "r" || key === "enter") {
+        event.preventDefault();
+        router.push(`/thread/${hero.id}`);
+      } else if (key === "s") {
+        event.preventDefault();
+        const id = hero.id;
+        const level = hero.riskLevel;
+        runAction(apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }), setError, refresh);
+        advanceHero(id, "Snoozed, next up", level);
+      } else if (key === "e") {
+        event.preventDefault();
+        const id = hero.id;
+        const level = hero.riskLevel;
+        runAction(apiPost(`/runner/control/thread/${id}/mark-done`, {}), setError, refresh);
+        advanceHero(id, "Handled, next up", level);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [hero, router, advanceHero, refresh]);
+
+  // Right-rail outline rows jump to the first live thread of their risk
+  // level: the hero when it matches, otherwise its row in the queue below.
+  const jumpToLevel = useCallback(
+    (level: "RED" | "AMBER" | "GREEN") => {
+      if (hero?.riskLevel === level) {
+        // The page scrolls inside app-shell's <main>, not the window, so
+        // jump to the hero by returning that container to the top.
+        heroRef.current?.closest("main")?.scrollTo({ top: 0, behavior: "smooth" });
+        return;
+      }
+      const target = visibleRemaining.find((row) => row.riskLevel === level);
+      if (target) {
+        document
+          .getElementById(`today-row-${target.id}`)
+          ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        return;
+      }
+      // All live threads of this level are beyond the visible cap, so
+      // send the operator to the "see all" link to find them in Inbox.
+      document
+        .querySelector('[data-testid="today-overflow-link"]')
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    },
+    [hero, visibleRemaining]
+  );
 
   const today = new Date();
   const dayLabel = today.toLocaleDateString("en-GB", {
@@ -218,56 +449,111 @@ export default function TodayPage() {
   const hour = today.getHours();
   const greeting =
     hour < 5 ? "Late evening" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  // Greet by the configured name when set; a bare greeting otherwise — the
+  // app no longer assumes who the user is.
+  const operatorName = profile?.displayName?.trim() ?? "";
+  const greetingLine = operatorName ? `${greeting}, ${operatorName}.` : `${greeting}.`;
+  const needsSetup = profile !== null && !profile.setupCompletedAt;
 
   const heroRisk = hero ? toDisplayRisk(hero.riskLevel) : null;
   const heroLabel = !hero
     ? ""
     : heroRisk === "overdue"
-      ? `overdue · ${formatRelative(hero.lastInboundAt)}`
+      ? `${PLATFORM_LABEL[hero.platform]}${META_SEP}waiting ${formatRelative(hero.lastInboundAt)}`
       : heroRisk === "waiting"
-        ? `waiting · ${formatRelative(hero.lastInboundAt)}`
-        : `fresh · ${formatRelative(hero.lastInboundAt)}`;
+        ? `${PLATFORM_LABEL[hero.platform]}${META_SEP}waiting ${formatRelative(hero.lastInboundAt)}`
+        : `${PLATFORM_LABEL[hero.platform]}${META_SEP}${formatRelative(hero.lastInboundAt)}`;
 
-  // Hero headline: a 1-2 sentence recap of the recent conversation that
-  // reminds the operator what's hanging in the air and what the contact
-  // is waiting on them to address. Prefer the AI summary; if it hasn't
-  // landed yet, fall back to the raw preview as a stand-in. The h2
-  // (max-w-22ch, 36px display, ~31 chars/line) gives a 4-line budget of
-  // ~124 chars; the AI side targets ≤ 120 so its full text renders
-  // without truncation. The preview fallback can be arbitrarily long,
-  // so it gets a word-boundary trim near 120 chars — still no ellipsis,
-  // since the operator can read the rest one tap away on the thread
-  // page (issue #193).
   const heroHeadlineRaw =
     heroSummary && heroSummary.id === hero?.id && heroSummary.summary
       ? heroSummary.summary
       : normalizePreview(hero?.preview);
+  // The hero summary renders IN FULL via <FitText> (it shrinks the font to
+  // fit, never truncates), so the only cap here is a generous safety net for a
+  // pathological `summary` fallback. whatTheyWant is already ≤120 chars
+  // server-side, so the normal ask is never touched; this just stops a runaway
+  // multi-sentence fallback from forcing the font to the readability floor.
   const heroHeadline = (() => {
     if (!heroHeadlineRaw) return "";
     const trimmed = heroHeadlineRaw.trim();
-    if (trimmed.length <= 120) return trimmed;
-    const cut = trimmed.slice(0, 120);
+    if (trimmed.length <= 200) return trimmed;
+    const cut = trimmed.slice(0, 200);
     const lastSpace = cut.lastIndexOf(" ");
-    return (lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim();
+    return (lastSpace > 120 ? cut.slice(0, lastSpace) : cut).trim();
   })();
-
   const heroIsTransitioning = transitioning && hero && transitioning.id === hero.id;
 
+  // Right-rail day outline: progress against today's three live buckets
+  // plus a fourth Done/sleep step that lights once everything is handled.
+  const todayKey = new Date().toDateString();
+  const cleared =
+    doneTodayByLevel.date === todayKey
+      ? doneTodayByLevel
+      : { date: todayKey, RED: 0, AMBER: 0, GREEN: 0 };
+  const totalRed = overdueCount + cleared.RED;
+  const totalAmber = waitingCount + cleared.AMBER;
+  const totalGreen = freshCount + cleared.GREEN;
+  const overduePct = totalRed === 0 ? 0 : (cleared.RED / totalRed) * 100;
+  const waitingPct = totalAmber === 0 ? 0 : (cleared.AMBER / totalAmber) * 100;
+  const freshPct = totalGreen === 0 ? 0 : (cleared.GREEN / totalGreen) * 100;
+  // "Cleared X of N" overall progress for the right-rail panel: N is every
+  // thread that needed the operator tonight (still-live + already-cleared),
+  // X is how many have been handled.
+  const clearedTotal = cleared.RED + cleared.AMBER + cleared.GREEN;
+  const totalAll = rows.length + clearedTotal;
+  const overallPct = totalAll === 0 ? 0 : (clearedTotal / totalAll) * 100;
+  const allDone = rows.length === 0 && clearedTotal > 0;
+
   return (
-    <Canvas>
-      <PageHead
-        eyebrow={dayLabel}
-        title={`${greeting}, Richard`}
-        subtitle="One thing at a time. Reply, snooze, or handle - and Today moves on to the next."
-        meta={
-          <>
-            <span className="text-ink">{overdueCount}</span> overdue ·{" "}
-            <span className="text-ink">{waitingCount}</span> waiting
-            <br />
-            last scan {health ? formatRelative(health.lastScanAt) : "-"}
-          </>
-        }
-      />
+    <Canvas className="max-w-[1240px] pb-10" style={OXBLOOD_TODAY_VARS}>
+      <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+        <div className="min-w-0">
+          <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+            {dayLabel}
+          </p>
+          <h1 className="m-0 font-display text-[32px] font-semibold leading-[1.1] tracking-[-0.025em]">
+            {greetingLine}
+          </h1>
+        </div>
+        <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">
+          <span>
+            <strong className="font-medium text-ink">{rows.length}</strong> need you tonight
+          </span>
+          <br />
+          last scan {health ? formatRelative(health.lastScanAt) : "never"}
+        </div>
+      </header>
+
+      <NotificationCta />
+
+      {welcomeDismissed === false ? (
+        <PilotWelcomeCard
+          onDismiss={() => {
+            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+            setWelcomeDismissed(true);
+          }}
+        />
+      ) : null}
+
+      {welcomeDismissed === true && tourSeen === false ? (
+        <PilotTourInviteCard
+          onStart={() => {
+            // The PilotTour component (mounted in AppShell) listens for
+            // this event and drives the sandbox + walkthrough.
+            startPilotTour();
+          }}
+          onSkip={() => {
+            markTourSeen(window.localStorage);
+            setTourSeen(true);
+          }}
+        />
+      ) : null}
+
+      {needsSetup ? (
+        <div data-testid="voice-setup-card" className="mb-8">
+          <UserVoiceProfile variant="onboarding" onCompleted={loadProfile} />
+        </div>
+      ) : null}
 
       {degraded ? (
         <DegradedBanner
@@ -292,115 +578,361 @@ export default function TodayPage() {
         <p className="mb-6 font-mono text-[11px] text-risk-overdue">{error}</p>
       ) : null}
 
-      {hero ? (
-        <article
-          data-testid="today-hero"
-          className={`relative mb-12 cursor-pointer overflow-hidden rounded-card border border-hairline bg-paper px-9 pb-7 pt-9 shadow-card transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
-          onClick={() => router.push(`/thread/${hero.id}`)}
-        >
-          <div
-            aria-hidden
-            className="pointer-events-none absolute inset-0"
-            style={{
-              background:
-                "radial-gradient(ellipse at 100% 0%, color-mix(in oklch, var(--accent) 12%, transparent), transparent 55%)"
-            }}
-          />
-          <div className="relative">
-            <p className="mb-[22px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
-              <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
-              {heroIsTransitioning ? transitioning?.label ?? "First up" : "First up"}
-            </p>
-            <h2 className="m-0 mb-[14px] max-w-[22ch] text-balance font-display text-[36px] font-semibold leading-[1.15] tracking-[-0.025em]">
-              {heroHeadline || "Catching up with someone"}
-            </h2>
-            <div className="mb-[18px] flex items-center gap-3">
-              {hero.personAvatarUrl ? (
-                <span className="grid h-7 w-7 place-items-center overflow-hidden rounded-full bg-paper-2">
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={hero.personAvatarUrl}
-                    alt=""
-                    width={28}
-                    height={28}
-                    referrerPolicy="no-referrer"
-                    className="h-full w-full object-cover"
-                  />
-                </span>
-              ) : (
-                <span className="grid h-7 w-7 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[11px] font-semibold text-white">
-                  {initials(hero.personName)}
-                </span>
-              )}
-              <span className="font-medium text-ink">{hero.personName}</span>
-              <span className="font-mono text-[12px] text-ink-3">
-                {PLATFORM_LABEL[hero.platform]} · {heroLabel}
-              </span>
-            </div>
-            <p className="m-0 mb-7 max-w-[58ch] text-balance border-l-2 border-hairline-strong pl-4 text-[17px] leading-[1.55] text-ink-2">
-              {normalizePreview(hero.preview)}
-            </p>
-            <div
-              className="relative flex items-center gap-[10px]"
-              onClick={(event) => event.stopPropagation()}
+      <div className="grid min-h-[calc(100vh-140px)] grid-cols-1 gap-8 lg:grid-cols-[1fr_260px]">
+        {/* Hero column */}
+        <div className="flex flex-col">
+          {hero ? (
+            <article
+              ref={heroRef}
+              data-testid="today-hero"
+              data-demo-target="today-hero"
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              onClick={() => router.push(`/thread/${hero.id}`)}
             >
-              <Button variant="primary" onClick={() => router.push(`/thread/${hero.id}`)}>
-                Open & reply
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  const id = hero.id;
-                  runAction(
-                    apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }),
-                    setError,
-                    refresh
-                  );
-                  advanceHero(id, "Snoozed - next up");
+              {/* The hero is no longer a white card — per the redesign it
+                  dissolves into a soft warm wash bleeding from the top-right,
+                  so it reads as part of the page, not a box floating on it.
+                  No border, no fill, no shadow; the wash is the only chrome. */}
+              <div
+                aria-hidden
+                className="pointer-events-none absolute inset-0"
+                style={{
+                  background:
+                    "radial-gradient(135% 130% at 100% 0%, color-mix(in srgb, var(--accent) 12%, transparent) 0%, color-mix(in srgb, var(--accent) 4%, transparent) 36%, transparent 64%)"
                 }}
-              >
-                Snooze ’til tomorrow
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  const id = hero.id;
-                  runAction(
-                    apiPost(`/runner/control/thread/${id}/mark-done`, {}),
-                    setError,
-                    refresh
-                  );
-                  advanceHero(id, "Handled - next up");
-                }}
-              >
-                Mark as handled
-              </Button>
-            </div>
-          </div>
-        </article>
-      ) : loaded ? (
-        <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
-      ) : (
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
-      )}
+              />
+              <div className="relative flex flex-col">
+                <p className="mb-[20px] flex items-center gap-[10px] font-mono text-[11px] uppercase tracking-[0.08em] text-accent-ink">
+                  <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
+                  {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up${META_SEP}1 of ${rows.length}`}
+                </p>
+                {/* The hero summary must always show IN FULL — never an
+                    ellipsis (Richard: "the summary must fit so I see the whole
+                    thing"). <FitText> renders the complete text and shrinks the
+                    font (36 → 22px floor) until it fits the height budget below,
+                    using more of the row's width as needed. This both removes
+                    the old line-clamp-3 truncation AND keeps the original #348
+                    guarantee — a long ask can't grow unbounded and push the
+                    actions below the fold, because the block height is capped
+                    (the font shrinks instead of the card growing). */}
+                <div className="mb-[14px] max-w-[600px]">
+                  <FitText
+                    as="h2"
+                    maxPx={36}
+                    minPx={22}
+                    maxHeightPx={150}
+                    data-testid="today-hero-summary"
+                    className="m-0 text-balance font-display font-semibold leading-[1.15] tracking-[-0.025em]"
+                  >
+                    {heroHeadline || "Catching up with someone"}
+                  </FitText>
+                </div>
+                <div className="mb-[18px] flex items-center gap-3">
+                  <PersonAvatar name={hero.personName} avatarUrl={hero.personAvatarUrl} size={28} />
+                  <span className="font-medium text-ink">{hero.personName}</span>
+                  {hero.personFavourite ? (
+                    <Star
+                      className="h-[14px] w-[14px] text-accent"
+                      strokeWidth={1.6}
+                      fill="currentColor"
+                      aria-label="Favourite"
+                    />
+                  ) : null}
+                  <span className="font-mono text-[12px] text-ink-3">{heroLabel}</span>
+                </div>
+                <p className="m-0 mb-7 max-w-[68ch] text-balance border-l-2 border-hairline-strong pl-5 text-[17px] leading-[1.55] text-ink-2">
+                  {normalizePreview(hero.preview)}
+                </p>
+                <div
+                  className="relative flex flex-wrap items-center gap-[10px]"
+                  onClick={(event) => event.stopPropagation()}
+                >
+                  <Button
+                    variant="primary"
+                    onClick={() => router.push(`/thread/${hero.id}`)}
+                    className="gap-3"
+                  >
+                    Open &amp; reply
+                    <KbHint label="↵" tone="primary" />
+                  </Button>
+                  <Button
+                    variant="quiet"
+                    className="gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink"
+                    onClick={() => {
+                      const id = hero.id;
+                      const level = hero.riskLevel;
+                      runAction(
+                        apiPost(`/runner/control/thread/${id}/snooze`, { hours: 16 }),
+                        setError,
+                        refresh
+                      );
+                      advanceHero(id, "Snoozed, next up", level);
+                    }}
+                  >
+                    Snooze ’til tomorrow
+                    <KbHint label="S" />
+                  </Button>
+                  <Button
+                    variant="quiet"
+                    className="gap-3 hover:border-[color-mix(in_oklch,var(--accent)_45%,transparent)] hover:bg-accent-soft hover:text-accent-ink"
+                    onClick={() => {
+                      const id = hero.id;
+                      const level = hero.riskLevel;
+                      runAction(
+                        apiPost(`/runner/control/thread/${id}/mark-done`, {}),
+                        setError,
+                        refresh
+                      );
+                      advanceHero(id, "Handled, next up", level);
+                    }}
+                  >
+                    Mark handled
+                    <KbHint label="E" />
+                  </Button>
+                </div>
 
-      {remaining.length > 0 ? (
-        <>
-          <div className="mb-[14px] mt-0 flex items-baseline justify-between px-1">
-            <h3 className="m-0 font-display text-[19px] font-semibold tracking-[-0.018em]">
-              Then these, in order
-            </h3>
-            <span className="font-mono text-[12px] text-ink-3">{remaining.length} left</span>
+                {queuePeek.length > 0 ? (
+                  <div className="mt-[22px] flex items-center gap-[14px] border-t border-hairline pt-[18px] font-mono text-[11px] text-ink-3">
+                    <span>after this</span>
+                    <span className="flex">
+                      {queuePeek.map((row, i) => (
+                        <PeekAvatar
+                          key={row.id}
+                          name={row.personName}
+                          avatarUrl={row.personAvatarUrl}
+                          offset={i}
+                        />
+                      ))}
+                    </span>
+                    <span className="truncate">
+                      {queuePeek.map((row) => row.personName.split(" ")[0]).join(META_SEP)}
+                    </span>
+                    {queueRemaining > 0 ? (
+                      <span className="ml-auto">
+                        {queueRemaining} more{META_SEP}~{queueEtaMinutes} min
+                      </span>
+                    ) : null}
+                  </div>
+                ) : null}
+              </div>
+            </article>
+          ) : loaded && inboxUnavailable && !data ? (
+            <CaughtUp
+              title="Can’t reach the runner."
+              body="The runner isn’t responding. Once it’s back, this page fills in on the next scan."
+            />
+          ) : loaded ? (
+            <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
+          ) : (
+            <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+          )}
+
+          {remaining.length > 0 ? (
+            <>
+              <div className="mb-[14px] mt-10 flex items-baseline justify-between px-1">
+                <h3 className="m-0 font-display text-[19px] font-semibold tracking-[-0.018em]">
+                  Then these, in order
+                </h3>
+                <span className="font-mono text-[12px] text-ink-3">{remaining.length} waiting</span>
+              </div>
+              <div className="flex flex-col">
+                {visibleRemaining.map((row) => (
+                  <ThreadRow
+                    key={row.id}
+                    row={row}
+                    id={`today-row-${row.id}`}
+                    onPersonChanged={refresh}
+                  />
+                ))}
+                {overflowCount > 0 ? (
+                  <Link
+                    href="/inbox"
+                    data-testid="today-overflow-link"
+                    className="group flex items-center justify-between border-b border-t border-hairline px-1 py-[18px] transition-colors duration-calm hover:bg-paper-2"
+                  >
+                    <span className="text-[14px] text-ink-2 transition-colors duration-calm group-hover:text-ink">
+                      + {overflowCount} more waiting
+                    </span>
+                    <span className="font-mono text-[12px] tracking-[-0.005em] text-ink-3 transition-colors duration-calm group-hover:text-ink">
+                      See all in Inbox →
+                    </span>
+                  </Link>
+                ) : null}
+              </div>
+            </>
+          ) : hero && loaded ? (
+            <CaughtUp title="That’s the only one." body="Reply to it and you’re done." />
+          ) : null}
+        </div>
+
+        {/* Right rail: tonight's progress. Per the redesign the rail is no
+            longer a boxed card — it's an open titled section sitting on the
+            page, so the focus column and the rail read as one calm surface. */}
+        <aside className="hidden lg:block">
+          <div className="sticky top-[110px] flex flex-col gap-10">
+            <section>
+              <h5 className="m-0 mb-[18px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
+                Tonight’s progress
+              </h5>
+              {/* Overall "Cleared X of N" with an honest fill bar. */}
+              <div className="mb-5">
+                <div className="mb-[9px] flex items-baseline justify-between">
+                  <span className="text-[13.5px] font-semibold text-ink">Cleared</span>
+                  <span className="font-mono text-[12px] text-ink-2">
+                    <strong className="font-semibold text-ink">{clearedTotal}</strong> of {totalAll}
+                  </span>
+                </div>
+                <div className="h-[6px] overflow-hidden rounded-full bg-hairline">
+                  <span
+                    className="block h-full rounded-full bg-ink transition-[width] duration-500 ease-out motion-reduce:transition-none"
+                    style={{ width: `${overallPct}%` }}
+                  />
+                </div>
+              </div>
+              {/* Per-category bars that visibly fill as each bucket clears. */}
+              <div className="flex flex-col gap-[15px]">
+                <CategoryBar
+                  label="Overdue"
+                  tone="overdue"
+                  done={cleared.RED}
+                  total={totalRed}
+                  pct={overduePct}
+                  liveCount={overdueCount}
+                  onJump={() => jumpToLevel("RED")}
+                />
+                <CategoryBar
+                  label="Needs a reply"
+                  tone="waiting"
+                  done={cleared.AMBER}
+                  total={totalAmber}
+                  pct={waitingPct}
+                  liveCount={waitingCount}
+                  onJump={() => jumpToLevel("AMBER")}
+                />
+                <CategoryBar
+                  label="Fresh, no rush"
+                  tone="fresh"
+                  done={cleared.GREEN}
+                  total={totalGreen}
+                  pct={freshPct}
+                  liveCount={freshCount}
+                  onJump={() => jumpToLevel("GREEN")}
+                />
+              </div>
+              {allDone ? (
+                <p className="mt-[18px] text-[13.5px] leading-[1.5] text-ink-2">
+                  <strong className="font-semibold text-risk-fresh">That’s everyone.</strong> Nothing
+                  left tonight. Close the laptop and get some sleep.
+                </p>
+              ) : null}
+            </section>
+
+            {/* Upcoming birthdays: a soft reminder below tonight's progress,
+                also an open section. Renders nothing when the runner has no
+                upcoming birthdays. */}
+            <UpcomingBirthdays />
           </div>
-          <div className="flex flex-col">
-            {remaining.map((row) => (
-              <ThreadRow key={row.id} row={row} />
-            ))}
-          </div>
-        </>
-      ) : hero && loaded ? (
-        <CaughtUp title="That’s the only one." body="Reply to it and you’re done." />
-      ) : null}
+        </aside>
+      </div>
     </Canvas>
+  );
+}
+
+// One risk category in the right-rail "Tonight's progress" panel: a label
+// row (dot + name + done/total) stacked over a thin fill bar, coloured by
+// risk tone via currentColor. While the level still has live threads the
+// whole block is a button that scrolls to the first such thread; once the
+// bucket is empty it renders inert.
+function CategoryBar({
+  label,
+  tone,
+  done,
+  total,
+  pct,
+  liveCount,
+  onJump
+}: {
+  label: string;
+  tone: "overdue" | "waiting" | "fresh";
+  done: number;
+  total: number;
+  pct: number;
+  liveCount: number;
+  onJump: () => void;
+}) {
+  const toneClass =
+    tone === "overdue"
+      ? "text-risk-overdue"
+      : tone === "waiting"
+        ? "text-risk-waiting"
+        : "text-risk-fresh";
+  const inner = (
+    <>
+      <div className="mb-[7px] flex items-center gap-[9px]">
+        <span className="inline-block h-[7px] w-[7px] rounded-full bg-current" />
+        <span className="flex-1 text-[13px] text-ink-2">{label}</span>
+        <span className="font-mono text-[11.5px] text-ink-3">
+          {done}/{total}
+        </span>
+      </div>
+      <div className="h-[4px] overflow-hidden rounded-full bg-hairline">
+        <span
+          className="block h-full rounded-full bg-current transition-[width] duration-500 ease-out motion-reduce:transition-none"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+    </>
+  );
+  // No live threads of this level: nothing to jump to, so render it inert.
+  if (liveCount === 0) {
+    return <div className={toneClass}>{inner}</div>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={onJump}
+      title={`Jump to ${label.toLowerCase()}`}
+      className={`${toneClass} -mx-2 rounded-[8px] px-2 py-1 text-left transition-colors duration-calm hover:bg-paper-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent`}
+    >
+      {inner}
+    </button>
+  );
+}
+
+function PeekAvatar({
+  name,
+  avatarUrl,
+  offset
+}: {
+  name: string;
+  avatarUrl?: string | null;
+  offset: number;
+}) {
+  // Reuse PersonAvatar so the peek tiles carry the same per-name hashed
+  // tone as the list rows (matching the prototype's coloured avatars); the
+  // wrapper just supplies the overlap offset + paper ring.
+  return (
+    <span className="inline-flex" style={{ marginLeft: offset === 0 ? 0 : -6 }}>
+      <PersonAvatar name={name} avatarUrl={avatarUrl} size={22} className="border-2 border-paper" />
+    </span>
+  );
+}
+
+function KbHint({ label, tone = "ghost" }: { label: string; tone?: "primary" | "ghost" }) {
+  return (
+    <span
+      aria-hidden
+      className={`inline-flex items-center font-mono text-[10px] ${
+        tone === "primary" ? "text-paper/70" : "text-ink-3"
+      }`}
+    >
+      <span
+        className={`rounded-[4px] border px-[5px] py-[1px] ${
+          tone === "primary" ? "border-paper/30 text-paper" : "border-hairline text-ink-3"
+        }`}
+      >
+        {label}
+      </span>
+    </span>
   );
 }

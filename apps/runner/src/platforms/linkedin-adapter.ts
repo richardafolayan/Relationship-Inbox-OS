@@ -1,7 +1,9 @@
-import type { ElementHandle, Locator, Page } from "playwright";
+import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
 import { writeFile } from "node:fs/promises";
+import { statSync } from "node:fs";
 import { join } from "node:path";
 import type {
+  AttachmentPlaceholder,
   NormalizedMessage,
   PlatformAdapter,
   SelectorRegistry,
@@ -9,7 +11,17 @@ import type {
   ThreadStub,
   VerificationMethod
 } from "@inbox-os/core";
+import {
+  LINKEDIN_VOICE_MIME,
+  hasLinkedInVoice,
+  linkedInVoicePath,
+  writeLinkedInVoice
+} from "../services/linkedin-voice-store.js";
 import { stableHash } from "@inbox-os/core";
+import {
+  classifyLinkedInSendVerification,
+  type LinkedInSendBubble
+} from "./linkedin-send-verification.js";
 import {
   cleanMessageText,
   cleanText,
@@ -20,6 +32,9 @@ import {
   retryWithBackoff,
   isTransientPageError
 } from "./utils.js";
+import { humanClick, humanHover, humanType, humanWait, readingPause } from "./humanize.js";
+import { REACTION_SELECTORS, messageRowSelector, normalizeReactionEmoji } from "./linkedin-message-reactions.js";
+import { ChromeCookieBridge } from "./chrome-cookie-bridge.js";
 import type { AdapterFailureKind, AdapterStage } from "./utils.js";
 import type { SessionManager } from "../services/session-manager";
 import {
@@ -57,6 +72,19 @@ interface LinkedInAdapterDependencies {
   linkedInCredentials?: {
     username: string;
     password: string;
+  };
+  /**
+   * When the runner uses the personal Chrome profile, this points at the
+   * real source profile so the cookie bridge can decrypt the live LinkedIn
+   * auth cookies and inject them into the launched (mirrored) context.
+   * A Playwright-launched Chrome with a custom user-data-dir cannot
+   * transparently decrypt the macOS Keychain-encrypted profile cookies, so
+   * without this bridge LinkedIn drops to the login page every launch.
+   * Undefined in isolated mode (nothing to bridge).
+   */
+  personalProfile?: {
+    sourceUserDataDir: string;
+    profileDirectory: string;
   };
 }
 
@@ -1822,10 +1850,11 @@ async function activateLinkedInUnreadFilterWithHooks(
 
     const clicked = hooks?.clickUnreadPill
       ? await hooks.clickUnreadPill()
-      : await page
-          .locator(linkedInUnreadPillSelector)
-          .first()
-          .click({ timeout: 5000 })
+      : await humanClick(
+          page,
+          page.locator(linkedInUnreadPillSelector).first(),
+          { timeout: 5000 }
+        )
           .then(() => true)
           .catch(() => false);
     if (!clicked) {
@@ -2127,6 +2156,13 @@ export class LinkedInAdapter implements PlatformAdapter {
 
   private static readonly inboxNavigationTimeoutMs = 10_000;
   private static readonly inboxReadyTimeoutMs = 10_000;
+  /**
+   * Minimum gap between cookie-bridge syncs. The LinkedIn li_at token is
+   * long-lived (≈1y), so re-decrypting on every getPage() call would just
+   * re-hit the Keychain and re-copy the Cookies DB for no benefit. 10min
+   * still picks up a same-run rotation while staying cheap.
+   */
+  private static readonly cookieSyncThrottleMs = 10 * 60 * 1000;
   private runLogger: RunLogger | null = null;
   private activeStage: string | null = null;
   private readonly pageTraceIds = new WeakMap<Page, string>();
@@ -2138,6 +2174,28 @@ export class LinkedInAdapter implements PlatformAdapter {
    * `null` until the first attempt.
    */
   private lastAutoLoginAttemptAt: number | null = null;
+
+  /**
+   * Lazily-built bridge that decrypts the real profile's LinkedIn cookies
+   * and injects them into the launched context. Null until first use, and
+   * stays null entirely in isolated mode (no personalProfile dep).
+   */
+  private cookieBridge: ChromeCookieBridge | null = null;
+
+  /**
+   * Contexts that already have the __name runtime shim init-script
+   * registered, so we don't stack duplicate init scripts on a reused
+   * persistent context.
+   */
+  private readonly shimmedContexts = new WeakSet<BrowserContext>();
+
+  /**
+   * Epoch-ms of the last successful cookie-bridge sync. Re-syncing on every
+   * getPage() call would re-hit the Keychain + copy the Cookies DB many
+   * times per scan; the session token is long-lived so a short throttle is
+   * plenty while still picking up rotations within a run.
+   */
+  private lastCookieSyncAt: number | null = null;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
 
@@ -2257,7 +2315,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       note: input?.note,
       attempt: input?.attempt,
       run: async () => {
-        await page.locator(selector).first().click({
+        await humanClick(page, page.locator(selector).first(), {
           timeout: input?.timeoutMs
         });
       }
@@ -2332,7 +2390,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       },
       run: async () => {
         const target = page.locator(containerSelector).first();
-        await target.hover({ force: true }).catch(() => undefined);
+        await humanHover(page, target).catch(() => undefined);
         await page.mouse.wheel(0, delta);
       }
     });
@@ -2668,17 +2726,186 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   private async getPage(): Promise<Page> {
-    return this.deps.sessionManager.getManagedPage({
+    const page = await this.deps.sessionManager.getManagedPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default",
-      args: ["--disable-blink-features=AutomationControlled"],
+      // Minimal arg set on purpose. Patchright patches the
+      // automation signals (navigator.webdriver, the
+      // AutomationControlled blink feature, CDP runtime.enable
+      // leakage) natively — passing --disable-blink-features=
+      // AutomationControlled on top is redundant AND trips Chrome's
+      // "unsupported command-line flag" banner, which is itself a
+      // visible automation tell. Site-isolation disabling
+      // (--disable-features=IsolateOrigins,site-per-process) is also
+      // dropped: real Chrome runs WITH site isolation, so disabling
+      // it is a fingerprint, not a defence.
+      //
+      // Deliberately NOT passing --password-store=basic /
+      // --use-mock-keychain. On macOS Chrome encrypts cookie values
+      // (including LinkedIn's li_at auth cookie) with a key held in
+      // the login Keychain as "Chrome Safe Storage"; forcing a
+      // mock/basic keychain guarantees the launched browser cannot
+      // decrypt anything. But even WITHOUT those flags a
+      // Playwright-launched Chrome on a custom user-data-dir often
+      // can't transparently reach that Keychain item, so we don't
+      // rely on profile-cookie decryption at all — the cookie bridge
+      // (ensureSessionCookies, below) decrypts the live LinkedIn
+      // cookies out-of-band and injects them into the context. That
+      // is the deterministic mechanism that keeps the session alive.
+      //
+      // Headful, not headless. Headless is a top-tier bot signal
+      // (GPU/SwiftShader render path, font metrics, AudioContext,
+      // absent window-chrome dimensions) that Patchright can't patch,
+      // so we run the REAL headful Chrome. --window-size keeps a
+      // realistic viewport (a 0x0 / tiny window is itself a tell).
+      //
+      // Getting the window out of the user's way WITHOUT the headless
+      // fingerprint and WITHOUT the visibilityState=hidden lazy-load
+      // bug:
+      //   - --window-position is useless: macOS clamps off-desktop
+      //     coords back on-screen (verified: -9999,-9999 -> 0,35).
+      //   - minimize sets document.visibilityState='hidden', which
+      //     LinkedIn's virtualised conversation list reads to decide
+      //     whether to render rows -> intermittent short scans.
+      //   - Mission Control / AppleScript Space-moving is brittle
+      //     across macOS versions.
+      //   - --start-fullscreen: macOS gives a native-fullscreen window
+      //     its OWN Space automatically. The user stays on their Space
+      //     (no visual disruption), but the page is genuinely visible
+      //     (visibilityState='visible', compositor + layout running) so
+      //     virtualised lazy-load works normally. Pure Chrome flag, no
+      //     OS scripting -> nothing to break across macOS updates; if a
+      //     future build ignored it you'd just get a normal visible
+      //     window (safe degradation, never a silent scan failure).
+      // --window-size is the fallback size if fullscreen is refused.
+      // The --disable-*-backgrounding flags are kept as cheap insurance
+      // (a faint, below-LinkedIn's-radar signal) in case the fullscreen
+      // Space is ever occluded. settings.headless=true (CI/debug)
+      // bypasses all of this.
+      args: [
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--disable-default-apps",
+        "--start-fullscreen",
+        "--window-size=1280,800",
+        "--disable-renderer-backgrounding",
+        "--disable-background-timer-throttling",
+        "--disable-backgrounding-occluded-windows"
+      ],
       runLogger: this.runLogger ?? undefined
     });
+    await this.ensureSessionCookies(page);
+    await this.ensurePageRuntimeShims(page);
+    return page;
+  }
+
+  /**
+   * tsx/esbuild can inject `__name(...)` helper calls into functions we
+   * hand to page.evaluate (the `keepNames` transform that preserves
+   * Function.name). The browser has no `__name`, so any such evaluate
+   * throws `ReferenceError: __name is not defined` — which silently broke
+   * the streaming-row snapshot once the auth wall was lifted. Define a
+   * harmless identity shim in the page so leaked references resolve.
+   *
+   * The shim is passed as a STRING (not a function) on purpose: a function
+   * literal would itself be run through esbuild and could re-introduce the
+   * very `__name` reference we're trying to define. Registered as an
+   * init-script (covers every future navigation/frame, once per context)
+   * and also injected as a <script> tag into the already-loaded document
+   * via addScriptTag — NOT page.evaluate(string), which the scan's
+   * no-string-evaluate guard forbids (string payloads can break under CSP).
+   * addScriptTag runs the shim string without going through evaluate and
+   * without esbuild reprocessing. Best-effort: a failure here is no worse
+   * than the prior state.
+   */
+  private async ensurePageRuntimeShims(page: Page): Promise<void> {
+    const shimSource =
+      "(()=>{var g=globalThis;" +
+      "if(typeof g.__name==='undefined'){" +
+      "g.__defProp=Object.defineProperty;" +
+      "g.__name=function(t){return t;};}})()";
+    try {
+      const context = page.context();
+      if (!this.shimmedContexts.has(context)) {
+        await context.addInitScript(shimSource);
+        this.shimmedContexts.add(context);
+      }
+      await page.addScriptTag({ content: shimSource });
+    } catch {
+      // Non-fatal: worst case the original __name error resurfaces, which
+      // is no worse than before this shim existed.
+    }
+  }
+
+  /**
+   * Inject the real Chrome profile's live LinkedIn auth cookies into the
+   * launched context. Best-effort and throttled: never throws (a sync
+   * hiccup must not block a scan/send), and re-syncs at most once per
+   * throttle window since the li_at token is long-lived. No-op in isolated
+   * mode (no personalProfile dependency).
+   */
+  private async ensureSessionCookies(page: Page): Promise<void> {
+    const personal = this.deps.personalProfile;
+    if (!personal) {
+      return;
+    }
+
+    const now = Date.now();
+    if (
+      this.lastCookieSyncAt !== null &&
+      now - this.lastCookieSyncAt < LinkedInAdapter.cookieSyncThrottleMs
+    ) {
+      return;
+    }
+
+    if (!this.cookieBridge) {
+      this.cookieBridge = new ChromeCookieBridge({
+        sourceUserDataDir: personal.sourceUserDataDir,
+        profileDirectory: personal.profileDirectory
+      });
+    }
+
+    try {
+      const context = page.context();
+      const result = await this.cookieBridge.syncIntoContext(context);
+      if (result.reason === "ok") {
+        this.lastCookieSyncAt = now;
+        const hasAuth = result.names?.includes("li_at") ? " (li_at present)" : "";
+        console.log(
+          `[linkedin-cookie-bridge] injected ${result.injected} cookies${hasAuth}`
+        );
+      } else {
+        // Surface a clear, actionable line. The most common failure is the
+        // first-run Keychain prompt not being approved.
+        const detail = result.detail ? ` — ${result.detail}` : "";
+        console.warn(
+          `[linkedin-cookie-bridge] no cookies injected (${result.reason})${detail}`
+        );
+      }
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      console.warn(`[linkedin-cookie-bridge] sync threw (non-fatal): ${reason}`);
+    }
   }
 
   private async navigateInbox(selectors: SelectorRegistry): Promise<Page> {
     const navigate = async (target: Page): Promise<void> => {
-      await target.bringToFront();
+      // Issue #420 / pilot R-0046 (and the desktop-switch half of
+      // #403). Background scans must not steal focus. navigateInbox
+      // is only called from background paths (scanInboxThreadsStream,
+      // scanInboxThreadsDirectFallback, ensureConnected,
+      // scanUnreadThreads, fetchRecentThreads, fetchThreadMessages) —
+      // each one a scheduled or status-driven scan, never an operator
+      // click. Operator-initiated openThread() and openProfileUrl()
+      // call bringToFront separately, so deliberate "open this thing"
+      // actions still raise the window.
+      //
+      // The bringToFront() that used to live here was likely
+      // defensive against Chromium background-throttling, but
+      // Patchright already disables the timer-throttling flags and
+      // goto + waitForLoadState exercise the page enough to keep it
+      // hydrated. If scan reliability regresses, revert this and
+      // investigate a non-focus-stealing alternative.
       await this.tracedGoto(target, selectors.inbox_url, {
         stage: "navigate",
         note: "navigate_inbox",
@@ -2756,14 +2983,25 @@ export class LinkedInAdapter implements PlatformAdapter {
     return inferAdapterFailureKindFromMessage(reason) ?? fallback;
   }
 
-  private normalizeTimestamp(rawValue: string | undefined, fallbackIso: string): string {
+  /**
+   * Parse a per-message timestamp string into ISO. Returns `undefined`
+   * when the input is missing or unparseable so callers can leave the
+   * adapter's `NormalizedMessage.timestamp` empty. The scan-queue then
+   * uses `candidateListTimestamp` for new rows and PRESERVES the
+   * existing timestamp on re-scrape (see `buildMessageUpsertPayload`
+   * `adapterReportedTimestamp:false`). This is what stops the #407
+   * drift: previously a synthesised `Date.now() - index * 1_000`
+   * fallback was reported as real, so every scrape pushed historical
+   * rows forward to "today minus a few seconds".
+   */
+  private normalizeTimestamp(rawValue: string | undefined): string | undefined {
     if (!rawValue) {
-      return fallbackIso;
+      return undefined;
     }
 
     const trimmed = rawValue.trim();
     if (!trimmed) {
-      return fallbackIso;
+      return undefined;
     }
 
     if (/^-?\d+(\.\d+)?$/.test(trimmed)) {
@@ -2787,7 +3025,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       return parsedListTimestamp.toISOString();
     }
 
-    return fallbackIso;
+    return undefined;
   }
 
   private normalizeIdentity(value: string | undefined): string {
@@ -3131,8 +3369,16 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     const targetUrl = page.url();
     try {
-      await usernameField.fill(creds.username, { timeout: 5_000 });
-      await passwordField.fill(creds.password, { timeout: 5_000 });
+      // Type credentials with human cadence rather than instant fill —
+      // password forms are one of the most-fingerprinted entry points
+      // and a 0ms-fill triple-tap is an obvious tell.
+      await humanType(page, usernameField, creds.username, {
+        reading: { min: 400, max: 1100 }
+      });
+      await humanType(page, passwordField, creds.password, {
+        reading: { min: 250, max: 700 },
+        noThink: true
+      });
     } catch (error) {
       return {
         ok: false,
@@ -3160,7 +3406,7 @@ export class LinkedInAdapter implements PlatformAdapter {
     try {
       await Promise.all([
         page.waitForLoadState("domcontentloaded", { timeout: 20_000 }).catch(() => undefined),
-        submitButton.click({ timeout: 5_000 })
+        humanClick(page, submitButton, { timeout: 5_000, reading: { min: 250, max: 700 } })
       ]);
     } catch (error) {
       return {
@@ -3401,9 +3647,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       selector: linkedInAllPillSelector,
       note: "activate_all_pill",
       run: async () => {
-        await allPill.click({
-          timeout: 5_000
-        });
+        await humanClick(page, allPill, { timeout: 5_000 });
       }
     });
     await this.runTracedPageAction({
@@ -3571,8 +3815,15 @@ export class LinkedInAdapter implements PlatformAdapter {
           (await readText(unreadContainer)) ??
           ""
       );
-      const unreadMatch = unreadText.match(/\d+/);
-      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : unreadContainerExists ? 1 : 0;
+      // Strip thousands separators before matching so "1,234" doesn't parse as
+      // "1". Only treat a bare container (no number) as unread when it actually
+      // carries text — an empty badge element is not reliable unread evidence.
+      const unreadMatch = unreadText.replace(/,/g, "").match(/\d+/);
+      const unreadCount = unreadMatch
+        ? Number(unreadMatch[0])
+        : unreadContainerExists && unreadText.length > 0
+          ? 1
+          : 0;
 
       const urnToken =
         (await readAttr(scope, "data-conversation-urn")) ??
@@ -4654,10 +4905,52 @@ export class LinkedInAdapter implements PlatformAdapter {
         };
       }
       if (hasRows) {
-        return {
-          status: "rows_ready",
-          rowSignalCounts
+        // A bare row signal is NOT enough. On a cold Chrome start LinkedIn
+        // briefly mounts list-item nodes during SPA boot, then tears them
+        // down and re-renders a virtualized list — if we return rows_ready
+        // on that flash, the downstream shell/list-root resolver runs
+        // against a still-booting DOM (document.title === "", every
+        // conversation-list selector count 0) and the whole scan fails
+        // with list_root_not_found. Require the resolver-aligned structure
+        // (a real conversation-list root that actually contains rows) to
+        // be present AND stable across two consecutive polls, with the
+        // messaging app genuinely hydrated (LinkedIn only sets a
+        // "...Messaging | LinkedIn" title post-hydration). This gate is a
+        // strict superset of what a successful run already satisfies, so
+        // it cannot regress the happy path — it only refuses to hand a
+        // half-booted DOM to the resolver.
+        const listRootHasRows = async (): Promise<boolean> => {
+          // Honour the CONFIGURED list-root / row selectors (#441). In
+          // production these resolve to the standard
+          // ul.msg-conversations-container__conversations-list /
+          // li.msg-conversation-listitem, so behaviour is unchanged — but a
+          // div-based root or an overridden selector (what the resolver
+          // already supports) is no longer rejected here. The /messag/i
+          // title check and the two-poll stability re-check above remain the
+          // anti-flash-boot gate; this only stops it ignoring the configured
+          // selectors.
+          const rootCount = await page.locator(selectors.thread_list).count().catch(() => 0);
+          if (rootCount === 0) {
+            return false;
+          }
+          return (await page.locator(selectors.thread_item).count().catch(() => 0)) > 0;
         };
+        const titleHydrated = await page
+          .title()
+          .then((title) => /messag/i.test(title ?? ""))
+          .catch(() => false);
+        if (titleHydrated && (await listRootHasRows())) {
+          await page.waitForTimeout(300).catch(() => undefined);
+          if (await listRootHasRows()) {
+            return {
+              status: "rows_ready",
+              rowSignalCounts
+            };
+          }
+        }
+        // Not stably hydrated yet — fall through and keep polling until the
+        // deadline (then list_hydration_timeout, which is a clearer signal
+        // than list_root_not_found and drives the same retry/cooldown).
       }
 
       const emptyStateCount = await page.locator(linkedInStreamingEmptyStateSelector).count().catch(() => 0);
@@ -5487,6 +5780,21 @@ export class LinkedInAdapter implements PlatformAdapter {
       rowRootSelector: string;
       rowClickSelector: string;
     };
+    // esbuild (tsx `keepNames`) rewrites the named inner arrows below into
+    // `__name(fn, "fn")` and references a module-level `__name` helper that
+    // does NOT travel with the serialized callback — so the evaluate throws
+    // `ReferenceError: __name is not defined` in the page. Define an
+    // identity `globalThis.__name` in the SAME frame world immediately
+    // before the real evaluate. Passed as a STRING so esbuild can't rewrite
+    // the shim itself; the unqualified `__name` refs then resolve to the
+    // global. Same elementHandle == same frame, no navigation between, so
+    // this is deterministic regardless of Patchright's init-script handling.
+    await listRoot
+      .evaluate(
+        "globalThis.__name=globalThis.__name||function(n){return n;};" +
+          "globalThis.__defProp=globalThis.__defProp||Object.defineProperty;"
+      )
+      .catch(() => undefined);
     return listRoot.evaluate((root: Element, input: StreamingSnapshotEvalInput) => {
       const { rowRootSelector, rowClickSelector } = input;
       const clean = (value: string | null | undefined): string =>
@@ -5591,8 +5899,14 @@ export class LinkedInAdapter implements PlatformAdapter {
   ): LinkedInVisibleRowSnapshot[] {
     const snapshots: LinkedInVisibleRowSnapshot[] = [];
     for (const row of rawRows) {
-      const unreadMatch = row.unreadText.match(/\d+/);
-      const unreadCount = unreadMatch ? Number(unreadMatch[0]) : row.unreadContainerPresent ? 1 : 0;
+      // Strip thousands separators so "1,234" doesn't parse as "1"; only treat
+      // a bare container (no number) as unread when it actually carries text.
+      const unreadMatch = row.unreadText.replace(/,/g, "").match(/\d+/);
+      const unreadCount = unreadMatch
+        ? Number(unreadMatch[0])
+        : row.unreadContainerPresent && row.unreadText.trim().length > 0
+          ? 1
+          : 0;
       const threadUrl = resolveSmokeThreadUrl(row.href ?? "", pageUrl);
       const rowKey = resolveLinkedInRowKey({
         id: row.id,
@@ -6190,6 +6504,14 @@ export class LinkedInAdapter implements PlatformAdapter {
             // braces filter out anything nested inside a profile picture.
             const attachmentScope =
               bubbleEl.querySelector(".msg-s-event-listitem__message-bubble") ?? bubbleEl;
+            // LinkedIn voice messages (`.msg-s-event-listitem__audio-
+            // container`) are handled in `collectThreadMessagesWithBackfill`,
+            // not here: capturing them requires clicking the play button
+            // to trigger the audio fetch, which only works from the
+            // Locator-based path with `waitForResponse`. The streaming
+            // scan stays read-only and leaves the voice message off the
+            // attachment count — the deep fetch fills it in when the
+            // operator opens the thread.
             const attachmentMatches = attachmentScope.querySelectorAll(
               ".msg-s-event-listitem__attachment, .msg-s-event-listitem__inline-image, video, a[download], a[href*='attachment']"
             );
@@ -6599,7 +6921,10 @@ export class LinkedInAdapter implements PlatformAdapter {
           });
         }
 
-        const hydration = await this.waitForThreadListHydratedOrEmptyOrBlocked(page, selectors, 10_000);
+        // 20s (was 10s): a cold Chrome launch + cookie injection + LinkedIn
+        // SPA boot can legitimately take >10s to truly hydrate the list,
+        // and the gate now waits for stable hydration rather than a flash.
+        const hydration = await this.waitForThreadListHydratedOrEmptyOrBlocked(page, selectors, 20_000);
         if (hydration.status === "blocked_by_modal") {
           const artifacts = await this.writeStreamingResolverFailureArtifacts({
             page,
@@ -6738,6 +7063,15 @@ export class LinkedInAdapter implements PlatformAdapter {
             }
           });
         }
+
+        // The messaging document is now hydrated and stable, and the rest
+        // of the scan (shell/list-root resolution, row snapshots, per-thread
+        // reads) happens via SPA route changes on THIS document — no full
+        // reload — so a single __name shim defined here persists for every
+        // downstream evaluate. This is the central fix for the esbuild
+        // `keepNames` -> `ReferenceError: __name is not defined` leak that
+        // otherwise breaks resolver/parser evaluates one callsite at a time.
+        await this.ensurePageRuntimeShims(page);
 
         shellResolution = await this.resolveMessagingShell(page);
         if (shellResolution) {
@@ -7226,11 +7560,10 @@ export class LinkedInAdapter implements PlatformAdapter {
               selectors,
               openMode === "full" ? 1000 : 120
             );
-            const baseTimestamp = Date.now() - parsedMessages.length * 1_000;
-            const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message, index) => ({
+            const normalizedMessages: NormalizedMessage[] = parsedMessages.map((message) => ({
               ...message,
               direction: message.direction === "IN" ? "IN" : "OUT",
-              timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+              timestamp: this.normalizeTimestamp(message.timestamp),
               text: cleanMessageText(message.text),
               senderName: message.senderName,
               raw: message.raw
@@ -7595,17 +7928,29 @@ export class LinkedInAdapter implements PlatformAdapter {
     const fallbackActive = page
       .locator(".msg-conversation-listitem .msg-conversation-listitem__link--active")
       .first();
-    const activeNode = ((await primaryActive.count().catch(() => 0)) > 0 ? primaryActive : fallbackActive).first();
+    // aria signals as a third path, mirroring isRowMarkedActive — LinkedIn
+    // sometimes marks the active row via aria-current/aria-selected without
+    // the --active class.
+    const ariaActive = page
+      .locator(".msg-conversation-listitem [aria-current='true'], .msg-conversation-listitem [aria-selected='true']")
+      .first();
+    const primaryCount = await primaryActive.count().catch(() => 0);
+    const fallbackCount = primaryCount > 0 ? 0 : await fallbackActive.count().catch(() => 0);
+    const ariaCount = primaryCount + fallbackCount > 0 ? 0 : await ariaActive.count().catch(() => 0);
+    if (primaryCount + fallbackCount + ariaCount === 0) {
+      // No row is marked active. Falling back to the FIRST row here (the old
+      // behaviour) attributes the opened thread to the wrong person and can
+      // compute a wrong canonical thread id. Return an empty descriptor so the
+      // caller degrades to page.url()/explicit-match logic instead.
+      return { threadUrl: undefined, activeKey: undefined, displayName: undefined };
+    }
+    const activeNode = primaryCount > 0 ? primaryActive : fallbackCount > 0 ? fallbackActive : ariaActive;
 
     const activeRowCandidate = activeNode
-      .locator("xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-conversation-listitem ')][1]")
+      .locator("xpath=ancestor-or-self::*[contains(concat(' ', normalize-space(@class), ' '), ' msg-conversation-listitem ')][1]")
       .first();
-    const activeRow =
-      (await activeRowCandidate.count().catch(() => 0)) > 0
-        ? activeRowCandidate
-        : page.locator(".msg-conversation-listitem").first();
-    const activeRowExists = (await activeRow.count().catch(() => 0)) > 0;
-    const scope = activeRowExists ? activeRow : activeNode;
+    const scope =
+      (await activeRowCandidate.count().catch(() => 0)) > 0 ? activeRowCandidate : activeNode;
 
     const hrefRaw =
       (await readAttr(scope.locator("a[href*='/messaging/']").first(), "href")) ??
@@ -7739,7 +8084,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           targetDisplayName: thread.displayName
         },
         run: async () => {
-          await clickTarget.click({ timeout: 10_000 });
+          await humanClick(page, clickTarget, { timeout: 10_000 });
         }
       });
     }
@@ -7812,6 +8157,135 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
+  /**
+   * Capture a voice-message audio file to disk so the transcription
+   * service's `AttachmentResolver` can read it back. Two strategies in
+   * order of preference:
+   *
+   *   1. **Direct URL.** LinkedIn's "Lite"/Tailwind messaging UI renders
+   *      voice notes as a file widget with an `<a class="download-
+   *      attachment" href="...messaging-audio-analyzed...">` exposing
+   *      the signed CDN URL inline. When that link is present anywhere
+   *      on the page and matches this message's URN, we fetch it
+   *      directly via `page.context().request` (re-uses the session's
+   *      auth cookies). No click, no timeout, no playback.
+   *   2. **Click-trigger fallback.** The Ember messaging UI keeps the
+   *      audio URL out of the DOM — it lazy-loads on play. We arm a
+   *      `page.waitForResponse` against the `messaging-audio-analyzed`
+   *      pattern, then click the play button via Playwright (a real
+   *      user gesture; synthetic `dispatchEvent('click')` is rejected
+   *      by browsers for media playback). The page is muted first so a
+   *      headed-mode debug run stays quiet.
+   *
+   * Returns the on-disk path + byte count on success, or null when
+   * neither strategy works. Idempotent: if a voice for this URN is
+   * already on disk, both branches short-circuit and return the cached
+   * path.
+   */
+  private async captureLinkedInVoiceMessage(
+    page: Page,
+    audioButton: Locator,
+    urn: string
+  ): Promise<{ path: string; byteSize: number } | null> {
+    if (hasLinkedInVoice(urn)) {
+      const cached = linkedInVoicePath(urn);
+      try {
+        return { path: cached, byteSize: statSync(cached).size };
+      } catch {
+        // Cached file vanished between hasLinkedInVoice and statSync;
+        // fall through and re-capture.
+      }
+    }
+
+    // Strategy 1: Lite UI direct fetch.
+    const direct = await this.tryDirectLinkedInVoiceFetch(page, urn).catch(() => null);
+    if (direct) {
+      return direct;
+    }
+
+    // Strategy 2: click-trigger + network intercept on the Ember UI.
+    await page
+      .evaluate(() => {
+        for (const el of Array.from(document.querySelectorAll("audio,video"))) {
+          const media = el as HTMLMediaElement;
+          media.muted = true;
+          media.volume = 0;
+        }
+      })
+      .catch(() => undefined);
+
+    const responsePromise = page
+      .waitForResponse(
+        (response) => /messaging-audio-analyzed/.test(response.url()),
+        { timeout: 8000 }
+      )
+      .catch(() => null);
+
+    await audioButton.click({ timeout: 4000 }).catch(() => undefined);
+
+    const response = await responsePromise;
+    if (!response || !response.ok()) {
+      return null;
+    }
+
+    const bytes = await response.body().catch(() => null);
+    if (!bytes || bytes.length === 0) {
+      return null;
+    }
+
+    const path = writeLinkedInVoice(urn, bytes);
+    return { path, byteSize: bytes.length };
+  }
+
+  /**
+   * Look for an `<a class="download-attachment">` whose href points at
+   * the `messaging-audio-analyzed` CDN AND belongs to this URN's LI,
+   * then fetch it through the page's auth context. Returns null if no
+   * matching link exists (the Ember messaging UI never renders one) or
+   * if the fetch fails — caller falls back to the click strategy.
+   *
+   * URN matching: the Lite UI uses `data-message-urn=
+   * "urn:li:messagingMessage:2-<innerId>"`, while the Ember UI's
+   * `data-event-urn` is `"urn:li:msg_message:(...,2-<innerId>)"`. We
+   * match on the canonical inner id (`2-<innerId>`), which appears in
+   * both URN forms, so a hybrid render or future variant rename
+   * doesn't break the lookup.
+   */
+  private async tryDirectLinkedInVoiceFetch(
+    page: Page,
+    urn: string
+  ): Promise<{ path: string; byteSize: number } | null> {
+    const innerIdMatch = urn.match(/2-[A-Za-z0-9_=-]+/);
+    if (!innerIdMatch) return null;
+    const innerId = innerIdMatch[0];
+
+    const url = await page
+      .evaluate(
+        ({ innerId: needle }) => {
+          const liSelector = `li[data-message-urn*="${needle}"]`;
+          const li = document.querySelector(liSelector);
+          if (!li) return null;
+          const anchor = li.querySelector<HTMLAnchorElement>(
+            'a.download-attachment[href*="messaging-audio"]'
+          );
+          return anchor?.href ?? null;
+        },
+        { innerId }
+      )
+      .catch(() => null);
+
+    if (!url) return null;
+
+    const response = await page.context().request.get(url).catch(() => null);
+    if (!response || !response.ok()) return null;
+
+    const bytes = await response.body().catch(() => null);
+    if (!bytes || bytes.length === 0) return null;
+
+    const path = writeLinkedInVoice(urn, Buffer.from(bytes));
+    return { path, byteSize: bytes.length };
+  }
+
   private async collectThreadMessagesWithBackfill(
     page: Page,
     selectors: SelectorRegistry,
@@ -7872,16 +8346,80 @@ export class LinkedInAdapter implements PlatformAdapter {
       const beforeFirstKey = initialCount > 0 ? await readMessageKey(messageNodes.nth(0), 0) : "";
 
       const messages: LinkedInMessageSnapshot[] = [];
+      // Date headings only render on the FIRST group of a date run, so later
+      // groups in the same day carry an empty heading. Walk the bubbles in
+      // DOM order (chronological) and inherit the most-recent heading, matching
+      // collectVisibleThreadMessages. Without this, a heading-less older bubble
+      // falls back to "today" in parseLinkedInMessageTimestamp and corrupts
+      // lastMessageAt (the #431 drift).
+      let inheritedDateHeading = "";
       for (let index = 0; index < initialCount; index += 1) {
         const root = messageNodes.nth(index);
         const className = (await readAttr(root, "class")) ?? "";
         const inbound = className.includes("msg-s-event-listitem--other") || /other|received|incoming/i.test(className);
-        const attachmentCount = await root
-          .locator("img, video, svg, a[download], a[href*='attachment']")
+        const basePlatformMessageKey = await readMessageKey(root, index);
+        // Voice-message detection. LinkedIn renders voice notes as an
+        // inline player widget keyed off `.msg-s-event-listitem__audio-
+        // container`; the audio URL itself only loads on play, so we
+        // trigger a real click via Playwright and intercept the
+        // resulting `messaging-audio-analyzed` response. Bytes land on
+        // disk under a URN-hashed filename that LinkedInAttachmentResolver
+        // looks back up by the same URN we set as `guid` below. Each
+        // capture is gated on `hasLinkedInVoice(urn)` so repeated
+        // backfill passes don't re-click messages we've already grabbed.
+        const voiceContainerCount = await root
+          .locator(".msg-s-event-listitem__audio-container")
           .count()
           .catch(() => 0);
+        let voiceAttachment: AttachmentPlaceholder | null = null;
+        if (voiceContainerCount > 0) {
+          const audioButton = root.locator(".msg-s-event-listitem__audio").first();
+          const captured = await this.captureLinkedInVoiceMessage(
+            page,
+            audioButton,
+            basePlatformMessageKey
+          ).catch(() => null);
+          voiceAttachment = {
+            type: LINKEDIN_VOICE_MIME,
+            manualReview: false,
+            rawLabel: "Voice message",
+            kind: "voice_note",
+            guid: basePlatformMessageKey,
+            ...(captured ? { byteSize: captured.byteSize } : {})
+          };
+        }
+        // Match path 1's (`collectVisibleThreadMessages`) filtering: the
+        // raw img/video/svg sweep otherwise picks up profile-pictures,
+        // the play-button SVG inside the voice container, and UI icons,
+        // tagging every voice-only or text-only message with a spurious
+        // "Attachment" placeholder alongside the real voice_note one.
+        const nonVoiceAttachmentCount = await root
+          .evaluate((el) => {
+            const matches = (el as Element).querySelectorAll(
+              "img, video, svg, a[download], a[href*='attachment']"
+            );
+            let count = 0;
+            matches.forEach((m) => {
+              if (
+                m.closest(
+                  ".msg-s-event-listitem__audio-container, .msg-s-event-listitem__profile-picture, .presence-entity__image, .msg-s-message-group__profile-link"
+                )
+              ) {
+                return;
+              }
+              count += 1;
+            });
+            return count;
+          })
+          .catch(() => 0);
+        const attachmentCount = nonVoiceAttachmentCount + voiceContainerCount;
+        const fallbackBodyText = voiceAttachment
+          ? "[voice message]"
+          : attachmentCount > 0
+            ? "[non-text message]"
+            : "[system event]";
         const rawBodyParts = await readAllTextParts(root.locator(selectors.message_text));
-        const textParts = rawBodyParts.length > 0 ? rawBodyParts : [attachmentCount > 0 ? "[non-text message]" : "[system event]"];
+        const textParts = rawBodyParts.length > 0 ? rawBodyParts : [fallbackBodyText];
         const senderName = clean(
           (await readText(root.locator(".msg-s-message-group__profile-link").first())) ??
             (await readText(root.locator(".msg-s-message-group__name").first())) ??
@@ -7912,6 +8450,14 @@ export class LinkedInAdapter implements PlatformAdapter {
           })
           .catch(() => ({ timeText: "", timeDatetimeAttr: null as string | null, dateHeadingText: "" }));
 
+        // Inherit the most-recent date heading for bubbles whose own group LI
+        // lacked one (later groups in a date run), then update the running
+        // heading when this bubble does carry one.
+        const headingForBubble = bubbleTimeData.dateHeadingText || inheritedDateHeading;
+        if (bubbleTimeData.dateHeadingText) {
+          inheritedDateHeading = bubbleTimeData.dateHeadingText;
+        }
+
         // Prefer datetime attribute (rare, but fully qualified). Otherwise
         // combine date heading + time-of-day. Leave timestamp empty if we
         // resolved nothing — fetchThreadMessages's downstream fallback will
@@ -7926,7 +8472,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         if (!timestamp && bubbleTimeData.timeText) {
           const combined = parseLinkedInMessageTimestamp(
             bubbleTimeData.timeText,
-            bubbleTimeData.dateHeadingText,
+            headingForBubble,
             new Date()
           );
           if (combined) {
@@ -7937,15 +8483,40 @@ export class LinkedInAdapter implements PlatformAdapter {
             timestamp = bubbleTimeData.timeText;
           }
         }
-        const basePlatformMessageKey = await readMessageKey(root, index);
+        // When the bubble had no stable DOM id, readMessageKey returned a
+        // positional `li-msg-<index>` key. That index shifts every backfill
+        // pass (older messages prepend and renumber), so the same bubble would
+        // merge under two keys and duplicate. Derive a content fingerprint
+        // instead so the key is stable across passes.
+        const stableBaseKey =
+          basePlatformMessageKey === `li-msg-${index}`
+            ? `li-msg-fp:${inbound ? "IN" : "OUT"}|${senderName}|${headingForBubble}|${bubbleTimeData.timeText}|${(textParts[0] ?? "").slice(0, 48)}`
+            : basePlatformMessageKey;
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
           const partTimestamp = Number.isNaN(parsedTimestampMs)
             ? timestamp
             : new Date(parsedTimestampMs + partIndex).toISOString();
+          // Only the first text part of a multi-paragraph bubble carries
+          // attachments; the voice-note placeholder replaces the generic
+          // "N attachment(s)" stub when present so the transcription
+          // pipeline (which keys off `kind === "voice_note"`) sees it.
+          const partAttachments: AttachmentPlaceholder[] = [];
+          if (partIndex === 0) {
+            if (voiceAttachment) {
+              partAttachments.push(voiceAttachment);
+            }
+            if (nonVoiceAttachmentCount > 0) {
+              partAttachments.push({
+                type: "attachment",
+                manualReview: true,
+                rawLabel: `${nonVoiceAttachmentCount} attachment(s)`
+              });
+            }
+          }
           messages.push({
             platformMessageKey:
-              partIndex === 0 ? basePlatformMessageKey : `${basePlatformMessageKey}:body:${partIndex}`,
+              partIndex === 0 ? stableBaseKey : `${stableBaseKey}:body:${partIndex}`,
             direction: inbound ? "IN" : "OUT",
             timestamp: partTimestamp,
             text,
@@ -7957,10 +8528,7 @@ export class LinkedInAdapter implements PlatformAdapter {
               bodyPartIndex: partIndex,
               bodyPartCount: textParts.length
             },
-            attachments:
-              partIndex === 0 && attachmentCount
-                ? [{ type: "attachment", manualReview: true, rawLabel: `${attachmentCount} attachment(s)` }]
-                : []
+            attachments: partAttachments
           });
         });
       }
@@ -7977,7 +8545,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         },
         run: async () => {
           const container = page.locator(selectors.message_container).first();
-          await container.hover({ force: true }).catch(() => undefined);
+          await humanHover(page, container).catch(() => undefined);
           await page.mouse.wheel(0, -840);
         }
       });
@@ -8309,7 +8877,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         let clicked = false;
         if (!activeBefore) {
           await unreadPill.scrollIntoViewIfNeeded().catch(() => undefined);
-          await unreadPill.click({ timeout: 5_000 }).catch((error: unknown) => {
+          await humanClick(page, unreadPill, { timeout: 5_000 }).catch((error: unknown) => {
             fail("collect_threads", "unread_pill_click_failed", "Failed to click LinkedIn Unread filter.", {
               error: error instanceof Error ? error.message : String(error)
             });
@@ -8472,7 +9040,7 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         await logStep(5, "open_thread", "opening first detected thread");
         await firstRow.clickTarget.scrollIntoViewIfNeeded().catch(() => undefined);
-        await firstRow.clickTarget.click({ timeout: 8_000 }).catch((error: unknown) => {
+        await humanClick(page, firstRow.clickTarget, { timeout: 8_000 }).catch((error: unknown) => {
           fail("open_thread", "thread_open_click_failed", "Failed to open first LinkedIn thread row.", {
             error: error instanceof Error ? error.message : String(error)
           });
@@ -8515,11 +9083,10 @@ export class LinkedInAdapter implements PlatformAdapter {
         if (rawMessages.length <= 0) {
           fail("parse", "no_messages_parsed", "Smoke ingest could not parse visible message text.");
         }
-        const baseTimestamp = Date.now() - rawMessages.length * 1_000;
-        const messages: NormalizedMessage[] = rawMessages.map((message, index) => ({
+        const messages: NormalizedMessage[] = rawMessages.map((message) => ({
           platformMessageKey: message.platformMessageKey,
           direction: message.direction,
-          timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+          timestamp: this.normalizeTimestamp(message.timestamp),
           text: cleanMessageText(message.text),
           senderName: message.senderName,
           attachments: [],
@@ -9108,11 +9675,13 @@ export class LinkedInAdapter implements PlatformAdapter {
         });
         // Propagate resolved timestamps forward across "continuation" bubbles.
         // LinkedIn renders consecutive messages from the same sender under one
-        // visible time; only the first bubble has a <time> element. Without
-        // this, those bubbles fall back to scan-time in normalizeTimestamp
-        // below and creep forward on every rescan. Walk the messages in DOM
-        // order, and when a bubble has no parseable timestamp, inherit the
-        // previous bubble's time + 1ms (preserves conversational order).
+        // visible time; only the first bubble has a <time> element. Walk the
+        // messages in DOM order, and when a bubble has no parseable timestamp,
+        // inherit the previous bubble's time + 1ms (preserves conversational
+        // order). First-message-with-no-time stays empty — normalizeTimestamp
+        // returns undefined and the scan-queue preserves any existing row
+        // timestamp on re-scrape (see #407: synthesising a fallback caused
+        // months-old messages to drift to "today minus a few seconds").
         let lastResolvedMs: number | null = null;
         for (const m of messages) {
           const parsed = m.timestamp ? Date.parse(m.timestamp) : NaN;
@@ -9122,15 +9691,11 @@ export class LinkedInAdapter implements PlatformAdapter {
             lastResolvedMs += 1;
             m.timestamp = new Date(lastResolvedMs).toISOString();
           }
-          // First-message-with-no-time: leave empty; normalizeTimestamp will
-          // fall back to scan-time as before. Better than fabricating a wrong
-          // anchor and propagating it.
         }
-        const baseTimestamp = Date.now() - messages.length * 1_000;
-        return messages.map((message, index) => ({
+        return messages.map((message) => ({
           ...message,
           direction: message.direction === "IN" ? "IN" : "OUT",
-          timestamp: this.normalizeTimestamp(message.timestamp, new Date(baseTimestamp + index * 1_000).toISOString()),
+          timestamp: this.normalizeTimestamp(message.timestamp),
           text: cleanMessageText(message.text),
           senderName: message.senderName,
           raw: message.raw
@@ -9172,7 +9737,7 @@ export class LinkedInAdapter implements PlatformAdapter {
   private async getLatestMessageSnapshot(
     page: Page,
     selectors: SelectorRegistry
-  ): Promise<{ direction: "IN" | "OUT"; timestamp: number; text: string } | null> {
+  ): Promise<LinkedInSendBubble | null> {
     // CRITICAL: Playwright's `{ timeout: 0 }` doesn't mean "fail fast" — it
     // disables the timeout entirely (wait forever). When LinkedIn's React
     // re-renders the message list mid-call (e.g. right after the auto-login
@@ -9200,6 +9765,7 @@ export class LinkedInAdapter implements PlatformAdapter {
       (await timeNode.innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
       "";
     const parsed = Date.parse(timestampRaw);
+    const timestampSynthetic = Number.isNaN(parsed);
     const text =
       (await last.locator(selectors.message_text).first().innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
       (await last.innerText({ timeout: ELEMENT_TIMEOUT_MS }).catch(() => null)) ??
@@ -9207,8 +9773,10 @@ export class LinkedInAdapter implements PlatformAdapter {
 
     return {
       direction: inbound ? "IN" : "OUT",
-      timestamp: Number.isNaN(parsed) ? Date.now() : parsed,
-      text
+      timestamp: timestampSynthetic ? Date.now() : parsed,
+      text,
+      timestampSynthetic,
+      count
     };
   }
 
@@ -9263,24 +9831,26 @@ export class LinkedInAdapter implements PlatformAdapter {
 
         console.warn(`${tag} click composer (selector=${selectors.composer_input})`);
         const composer = page.locator(selectors.composer_input).first();
-        await composer.click({ timeout: 10_000 });
-        console.warn(`${tag} composer clicked, filling text`);
+        await humanClick(page, composer, { timeout: 10_000 });
+        console.warn(`${tag} composer clicked, typing text`);
         try {
-          await composer.fill(text);
+          await humanType(page, composer, text, { alreadyFocused: true, reading: null });
         } catch {
-          console.warn(`${tag} composer.fill failed, falling back to keyboard.type`);
+          console.warn(`${tag} humanType failed, falling back to fill`);
           await page.keyboard.press("Meta+A").catch(() => undefined);
-          await page.keyboard.type(text, { delay: 12 });
+          await composer.fill(text);
         }
-        console.warn(`${tag} text filled`);
+        console.warn(`${tag} text typed`);
 
-        await humanDelay(100, 300);
+        // Operator re-reads their draft before pulling the trigger.
+        await readingPause(700, 1800);
         console.warn(`${tag} click send_button (selector=${selectors.send_button})`);
-        await page.locator(selectors.send_button).first().click({ timeout: 10_000 });
+        const sendBtn = page.locator(selectors.send_button).first();
+        await humanClick(page, sendBtn, { timeout: 10_000, reading: null });
         console.warn(`${tag} send_button clicked, entering verify loop`);
 
         const start = Date.now();
-        let verifiedBy: VerificationMethod = "best_effort";
+        let verifiedBy: VerificationMethod | null = null;
 
         while (Date.now() - start < 10_000) {
           const last = await this.getLatestMessageSnapshot(page, selectors);
@@ -9289,20 +9859,24 @@ export class LinkedInAdapter implements PlatformAdapter {
             continue;
           }
 
-          const timestampAdvanced = !preSend || last.timestamp > preSend.timestamp;
-          const textMatch = cleanText(last.text).includes(cleanText(text));
-
-          if (last.direction === "OUT" && timestampAdvanced && textMatch) {
-            verifiedBy = "bubble_detected";
-            break;
-          }
-
-          if (last.direction === "OUT" && timestampAdvanced) {
-            verifiedBy = "timestamp_advanced";
+          verifiedBy = classifyLinkedInSendVerification({ pre: preSend, last, sentText: text });
+          if (verifiedBy) {
             break;
           }
 
           await page.waitForTimeout(400);
+        }
+
+        if (!verifiedBy) {
+          // Do NOT report a silently-failed send as sent. No new outbound bubble
+          // (and no matching text) appeared within the window, so we cannot
+          // confirm delivery. Throwing makes send.ts record this as FAILED and
+          // surface a retry, instead of a false "Sent" — the previous code fell
+          // through to a best_effort/timestamp_advanced success on a re-reply
+          // whose send never actually landed.
+          throw new Error(
+            "Could not confirm the LinkedIn message was delivered — no new outbound bubble appeared within 10s"
+          );
         }
 
         console.warn(`${tag} send complete verifiedBy=${verifiedBy}`);
@@ -9353,6 +9927,90 @@ export class LinkedInAdapter implements PlatformAdapter {
         note: displayName ? `open_profile:${displayName}` : "open_profile"
       });
       await this.throwIfAuthRequired(page, "openProfileUrl:after_navigate");
+    });
+  }
+
+  // Add an emoji reaction to one message (issue #408, Phase 1). Mirrors the
+  // sendMessage flow: take the platform lease, open the thread, then drive the
+  // real hover -> reaction entry point -> quick-reaction list using the same
+  // humanised pointer the rest of the adapter uses (LinkedIn only renders the
+  // hover toolbar and only honours trusted pointer events). Phase 1 supports
+  // the quick popular-reaction list; an emoji absent from it raises a clear
+  // failure rather than silently picking the wrong glyph (full-keyboard search
+  // is a Phase 1.1 follow-up once validated live).
+  async reactToMessage(thread: ThreadStub, platformMessageKey: string, emoji: string): Promise<void> {
+    const glyph = normalizeReactionEmoji(emoji);
+    const rowSelector = messageRowSelector(platformMessageKey);
+    const tag = `[react:${thread.displayName}]`;
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.getPage();
+      try {
+        await this.openThreadAndWaitForActivation(page, selectors, thread);
+
+        const row = page.locator(rowSelector).first();
+        if ((await row.count()) === 0) {
+          throw new AdapterFailure(`Message not found in thread for reaction (key=${platformMessageKey})`, {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        await row.scrollIntoViewIfNeeded().catch(() => undefined);
+
+        // Hover the row to render its action container, then hover the
+        // reaction entry point to open the quick-reaction list.
+        await humanHover(page, row);
+        const entry = row.locator(REACTION_SELECTORS.reactionEntryPoint).first();
+        await humanHover(page, entry);
+
+        // Quick-reaction items carry the emoji as their text; match on the
+        // glyph so we are independent of LinkedIn's per-locale aria labels.
+        const reaction = page
+          .locator(REACTION_SELECTORS.popularReactionItem)
+          .filter({ hasText: glyph })
+          .first();
+        try {
+          await reaction.waitFor({ state: "visible", timeout: 6_000 });
+        } catch {
+          throw new AdapterFailure(
+            `Reaction ${glyph} is not available in LinkedIn's quick-reaction list`,
+            {
+              kind: "THREAD_FETCH_FAILED",
+              platform: this.platform,
+              stage: "parse",
+              details: { platformThreadId: thread.platformThreadId, emoji: glyph }
+            }
+          );
+        }
+        await humanClick(page, reaction, { timeout: 8_000, reading: null });
+
+        // Best-effort confirmation: the row should now carry a reaction
+        // summary. We don't hard-fail if it's not detected yet (the summary
+        // selector is finalised during live verification), but we log it.
+        const applied = await row
+          .locator('[class*="reaction"]')
+          .first()
+          .count()
+          .catch(() => 0);
+        console.warn(`${tag} reaction ${glyph} clicked (summaryDetected=${applied > 0})`);
+      } catch (error) {
+        if (error instanceof AdapterFailure) throw error;
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "persist",
+          message: `Failed to react to LinkedIn message for ${thread.displayName}`,
+          action: "react",
+          error,
+          kind: "THREAD_FETCH_FAILED",
+          page,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir,
+          platformThreadId: thread.platformThreadId,
+          details: { threadDisplayName: thread.displayName, emoji: glyph }
+        });
+      }
     });
   }
 

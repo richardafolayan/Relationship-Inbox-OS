@@ -73,6 +73,148 @@ export interface RunnerConfig {
      */
     contactsVcfPath: string | undefined;
   };
+  contacts: {
+    /**
+     * Sync contact birthdays from the macOS AddressBook into Person rows.
+     * Mac-only (the AddressBook databases exist only on macOS); the reader
+     * degrades to a no-op when Contacts data is absent or unreadable. On by
+     * default on macOS; set CONTACTS_BIRTHDAY_SYNC=false to disable.
+     */
+    birthdaySyncEnabled: boolean;
+  };
+  audioTranscription: {
+    /**
+     * Master switch. Default false so the runner never starts an audio
+     * transcription run (local or remote) without an explicit opt-in.
+     * When false the scan-side enqueue path short-circuits before any
+     * provider is consulted, mirroring how AI features are gated
+     * elsewhere.
+     */
+    enabled: boolean;
+    /**
+     * Selects which transcription provider the runner uses.
+     *   - "local-whisper": runs `whisper.cpp` locally via the
+     *     `LOCAL_WHISPER_COMMAND` CLI. No OpenAI request is made. This
+     *     is the near-zero-cost path for ongoing use.
+     *   - "openai": uses the existing /v1/audio/transcriptions endpoint.
+     *     Kept as an explicit fallback / quality-comparison option,
+     *     never auto-used when local-whisper is selected.
+     * Default is "local-whisper" so ongoing transcription is cost-
+     * safe — the runner never spends OpenAI tokens unless the operator
+     * explicitly sets AUDIO_TRANSCRIPTION_PROVIDER=openai. Unknown or
+     * mis-spelled values also fall through to local-whisper.
+     */
+    provider: "openai" | "local-whisper";
+    /**
+     * OpenAI provider model. Default `gpt-4o-mini-transcribe`. Override
+     * to `gpt-4o-transcribe` for higher accuracy at higher cost. Other
+     * audio model ids accepted by /v1/audio/transcriptions also pass
+     * through unchanged but are unsupported.
+     */
+    model: string;
+    /**
+     * Soft cap. Audio files larger than this are recorded as `skipped`
+     * so the runner never streams a multi-hour file at OpenAI. Default
+     * 25 MiB, matching the documented OpenAI request-size ceiling. Also
+     * applies to local-whisper to keep a single, predictable cap.
+     */
+    maxBytes: number;
+    /**
+     * Duration cap in seconds. Applied only when the source attachment
+     * exposes a duration (iMessage's chat.db does not, so this acts as
+     * a second line of defence behind maxBytes). Default 600 (10 min).
+     */
+    maxSeconds: number;
+    /**
+     * BCP-47 language hint. Forwarded to OpenAI's endpoint or to
+     * `whisper.cpp` (`-l`). Default `en`.
+     */
+    language: string;
+    localWhisper: {
+      /**
+       * Path / name of the whisper.cpp CLI binary. Default `whisper-cli`
+       * (the binary `make` produces in a vanilla whisper.cpp build);
+       * point at an absolute path on systems where it isn't on PATH.
+       */
+      command: string;
+      /**
+       * Absolute path to the local whisper.cpp `ggml-*.bin` model file.
+       * Empty when not configured; the runner short-circuits the
+       * provider in that case so we never invoke whisper-cli with a
+       * missing model. Used only when progressive mode is OFF — when
+       * progressive is ON the per-tier `progressive.fast/standard/max`
+       * model paths take over and this single path is ignored.
+       */
+      modelPath: string;
+      /**
+       * Per-call timeout. Default 120 seconds covers most iMessage
+       * voice notes (typically under a minute of audio) without
+       * letting the CLI hang the runner indefinitely.
+       */
+      timeoutMs: number;
+      /**
+       * Thread count passed to whisper.cpp's `-t`. Default 4.
+       */
+      threads: number;
+      /**
+       * Extra CLI arguments appended verbatim. Operators can use this
+       * to flip non-default whisper.cpp options without code changes.
+       * Parsed with whitespace as a separator; no shell interpretation.
+       */
+      extraArgs: string[];
+    };
+    /**
+     * Progressive (multi-tier) local-whisper mode. When `enabled` is
+     * true the runner runs three local Whisper models in sequence per
+     * voice note — fast, then standard, then max — so a transcript
+     * appears quickly and improves silently in the background. Each
+     * tier writes its own attempt row in
+     * `MessageAudioTranscriptionAttempt` so we can always inspect the
+     * raw output of every model; the selected text on the parent
+     * `MessageAudioTranscription.transcript` always reflects the best
+     * valid attempt under the never-downgrade rule.
+     *
+     * Default `enabled=true` only when at least one tier path is
+     * configured AND the master `enabled` switch is on; missing tier
+     * paths are skipped without failing the run. When all three paths
+     * are blank the runner falls back to the single-model
+     * `localWhisper.modelPath` shape so existing installs keep
+     * working unchanged.
+     */
+    progressive: {
+      enabled: boolean;
+      /** small.en model path — first transcript shown to the user. */
+      fastModelPath: string;
+      /** large-v3-turbo-q5_0 model path — the standard "good" pass. */
+      standardModelPath: string;
+      /** large-v3 model path — best local quality, slowest. */
+      maxModelPath: string;
+    };
+    /**
+     * Optional GPT-5-nano text refinement. Receives the local model
+     * attempts (text only — never the audio bytes) plus nearby thread
+     * messages and asks the chat model to correct likely ASR errors.
+     * Cost-safe: off by default, only invoked after at least the
+     * `standard` tier has succeeded, and never on threads where no
+     * local transcript exists. Output is post-parse sanitised so a
+     * runaway refinement can't overwrite a good local transcript with
+     * gibberish.
+     */
+    refinement: {
+      enabled: boolean;
+      /** Chat model id. Default `gpt-5-nano`. */
+      model: string;
+      /**
+       * Max number of nearby thread messages (each direction) shipped
+       * to the refiner as conversation context. Default 8 either side.
+       * Capped low because GPT-5-nano is cheap-but-not-free and most
+       * useful context lives in the immediately adjacent turns.
+       */
+      maxContextMessages: number;
+      /** Per-call wall-clock budget. Default 30 seconds. */
+      timeoutMs: number;
+    };
+  };
   screenshotDir: string;
   domDumpDir: string;
   selectorDir: string;
@@ -128,6 +270,31 @@ export interface RunnerConfig {
   enrichLongIdleMaxMs: number;
   /** Days before an enriched profile is considered stale. Default 30. */
   enrichRefreshDays: number;
+  /**
+   * Pilot feedback intake. When `webhookUrl` is unset the
+   * /control/pilot-feedback route reports "not configured" and the
+   * dashboard falls back to copy / the external form. Never exposed to
+   * the browser — the dashboard posts to the runner, the runner forwards.
+   */
+  pilotFeedback: {
+    webhookUrl?: string;
+    secret?: string;
+    statusUrl?: string;
+  };
+  /**
+   * GitHub integration for the pilot-feedback flow. When `token` and
+   * `repo` are set, the runner auto-attaches each screenshot to the
+   * GitHub issue the Apps Script creates (uploads to repo/pilot-
+   * feedback-attachments/ then posts an issue comment with inline
+   * image refs). Without these, the Drive-linked Sheet row remains
+   * the only screenshot surface. Best-effort; webhook succeeds
+   * regardless.
+   */
+  github: {
+    token?: string;
+    repo: string;
+    attachmentsBranch: string;
+  };
 }
 
 interface ChromeLocalStateProfileInfo {
@@ -272,14 +439,14 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
     personalProfileMirrorRoot,
     personalChromeUserDataDir,
     personalChromeProfileDirectory: profileDirectoryResolution.profileDirectory,
-    personalChromeProfileName: env.PERSONAL_CHROME_PROFILE_NAME ?? "Richard Afolayan",
+    personalChromeProfileName: env.PERSONAL_CHROME_PROFILE_NAME ?? "",
     personalChromeProfileResolutionStrategy: profileDirectoryResolution.resolutionStrategy
   };
 }
 
 export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): RunnerConfig {
   return {
-    port: Number(env.RUNNER_PORT ?? 4001),
+    port: parseIntOrDefault(env.RUNNER_PORT, 4001),
     openAiApiKey: env.OPENAI_API_KEY,
     // Default to gpt-5-nano: cheapest GPT-5 family member, sufficient for the
     // dashboard's short generations (summary, 3 reply drafts, classifier,
@@ -334,17 +501,114 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // Mac-only adapter. Default off so Linux/CI runners don't try to open
       // a non-existent chat.db. Set IMESSAGE_ENABLED=true on a Mac with
       // Full Disk Access granted to the runner's parent process.
-      enabled: env.IMESSAGE_ENABLED === "true" && process.platform === "darwin",
+      enabled: (env.IMESSAGE_ENABLED ?? "").trim().toLowerCase() === "true" && process.platform === "darwin",
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
       watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
+    },
+    contacts: {
+      // Mac-only. Enabled by default on macOS; the AddressBook reader is a
+      // no-op when Contacts data is missing or unreadable, so leaving it on
+      // is safe. Disable explicitly with CONTACTS_BIRTHDAY_SYNC=false.
+      birthdaySyncEnabled:
+        process.platform === "darwin" &&
+        !["false", "0", "no", "off"].includes(
+          (env.CONTACTS_BIRTHDAY_SYNC ?? "").trim().toLowerCase()
+        )
+    },
+    audioTranscription: {
+      // Off by default. The runner never starts a transcription run
+      // (local or remote) unless this is flipped on; the service also
+      // skips safely when the active provider is mis-configured, so a
+      // wrong env doesn't crash ingestion.
+      enabled:
+        (env.AUDIO_TRANSCRIPTION_ENABLED ?? "").trim().toLowerCase() === "true",
+      // Default `local-whisper` so ongoing transcription is cost-safe
+      // by default — the runner never spends OpenAI tokens unless the
+      // operator explicitly opts in by setting
+      // `AUDIO_TRANSCRIPTION_PROVIDER=openai`. Unknown / mis-spelled
+      // values also fall through to local-whisper rather than
+      // silently picking the paid path.
+      provider:
+        env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase() === "openai"
+          ? "openai"
+          : "local-whisper",
+      // Default to gpt-4o-mini-transcribe: the cheaper, sufficiently
+      // accurate OpenAI transcription model. Operators wanting higher
+      // quality can set AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe.
+      // Realtime / streaming models (gpt-realtime-whisper) are not used
+      // for stored voice notes; see the audio transcription section of
+      // docs/reference.md.
+      model: env.AUDIO_TRANSCRIPTION_MODEL?.trim() || "gpt-4o-mini-transcribe",
+      maxBytes: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_MAX_BYTES, 25 * 1024 * 1024),
+      maxSeconds: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_MAX_SECONDS, 600),
+      language: env.AUDIO_TRANSCRIPTION_LANGUAGE?.trim() || "en",
+      localWhisper: {
+        command: env.LOCAL_WHISPER_COMMAND?.trim() || "whisper-cli",
+        modelPath: env.LOCAL_WHISPER_MODEL_PATH?.trim() || "",
+        timeoutMs: parseIntOrDefault(env.LOCAL_WHISPER_TIMEOUT_MS, 120_000),
+        threads: parseIntOrDefault(env.LOCAL_WHISPER_THREADS, 4),
+        // Whitespace-separated extra args. No shell interpretation —
+        // the local provider spawns whisper.cpp directly, so each
+        // token is a literal argv entry.
+        extraArgs: (env.LOCAL_WHISPER_EXTRA_ARGS ?? "")
+          .trim()
+          .split(/\s+/)
+          .filter((arg) => arg.length > 0)
+      },
+      progressive: (() => {
+        // Auto-enable progressive mode when the operator has set at
+        // least one tier path AND not explicitly disabled it. Empty
+        // tier paths fall through safely — the orchestrator only
+        // schedules tiers whose model path is configured.
+        const explicit = (env.AUDIO_TRANSCRIPTION_PROGRESSIVE_MODE ?? "")
+          .trim()
+          .toLowerCase();
+        const fastModelPath = env.AUDIO_TRANSCRIPTION_FAST_MODEL_PATH?.trim() || "";
+        const standardModelPath =
+          env.AUDIO_TRANSCRIPTION_STANDARD_MODEL_PATH?.trim() || "";
+        const maxModelPath = env.AUDIO_TRANSCRIPTION_MAX_MODEL_PATH?.trim() || "";
+        const anyConfigured =
+          fastModelPath !== "" || standardModelPath !== "" || maxModelPath !== "";
+        const enabled =
+          explicit === "true"
+            ? true
+            : explicit === "false"
+              ? false
+              : anyConfigured;
+        return {
+          enabled,
+          fastModelPath,
+          standardModelPath,
+          maxModelPath
+        };
+      })(),
+      refinement: {
+        // Default off in code so the runner never spends OpenAI text
+        // tokens unless the operator opts in. When on, the refiner
+        // only fires after at least the standard local tier has
+        // succeeded — see transcription-service progressive logic.
+        enabled:
+          (env.AUDIO_TRANSCRIPTION_REFINEMENT_ENABLED ?? "").trim().toLowerCase() === "true",
+        model: env.AUDIO_TRANSCRIPTION_REFINEMENT_MODEL?.trim() || "gpt-5-nano",
+        maxContextMessages: parseIntOrDefault(
+          env.AUDIO_TRANSCRIPTION_REFINEMENT_MAX_CONTEXT_MESSAGES,
+          8
+        ),
+        timeoutMs: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_REFINEMENT_TIMEOUT_MS, 30_000)
+      }
     },
     screenshotDir: resolve(dataDir, "screenshots"),
     domDumpDir: resolve(dataDir, "dom_dumps"),
     selectorDir: resolve(projectRoot, "packages", "core", "selectors"),
     browserProfile: resolveBrowserProfileConfig(env),
     linkedInScan: {
-      maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 200),
+      // Lowered from 200 → 50: 200 unread threads opened in one go is
+      // a recruiter-tool volume signature. 50 is no longer in the
+      // danger zone, but it's still on the high end of what a person
+      // casually clicks through in one sitting — if your realistic
+      // daily ceiling is 10-20, tune this down further.
+      maxThreads: parseIntOrDefault(env.LINKEDIN_SCAN_MAX_THREADS, 50),
       stableIterations: parseIntOrDefault(env.LINKEDIN_SCAN_STABLE_ITERATIONS, 3),
       scrollWaitMs: parseIntOrDefault(env.LINKEDIN_SCAN_SCROLL_WAIT_MS, 1000),
       messageBackfillAttempts: parseIntOrDefault(env.LINKEDIN_SCAN_MESSAGE_BACKFILL_ATTEMPTS, 8)
@@ -352,11 +616,38 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     enrichPaceMinMs: parseIntOrDefault(env.ENRICH_PACE_MIN_MS, 60_000),
     enrichPaceMaxMs: parseIntOrDefault(env.ENRICH_PACE_MAX_MS, 180_000),
     enrichBatchMax: parseIntOrDefault(env.ENRICH_BATCH_MAX, 6),
-    enrichDailyCap: parseIntOrDefault(env.ENRICH_DAILY_CAP, 40),
+    // Lowered from 40 → 10: profile enrichment is the closest thing
+    // we do to "scraping" — visiting strangers' profiles to lift their
+    // posts/reactions. 40/day is a recruiter-tool footprint and the
+    // most fingerprint-able activity in the app. 10/day is closer to
+    // a real person clicking through to a few profiles a day.
+    enrichDailyCap: parseIntOrDefault(env.ENRICH_DAILY_CAP, 10),
     enrichLongIdleEvery: parseIntOrDefault(env.ENRICH_LONG_IDLE_EVERY, 10),
     enrichLongIdleMinMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MIN_MS, 300_000),
     enrichLongIdleMaxMs: parseIntOrDefault(env.ENRICH_LONG_IDLE_MAX_MS, 900_000),
-    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30)
+    enrichRefreshDays: parseIntOrDefault(env.ENRICH_REFRESH_DAYS, 30),
+    pilotFeedback: {
+      webhookUrl: env.PILOT_FEEDBACK_WEBHOOK_URL?.trim() || undefined,
+      secret: env.PILOT_FEEDBACK_SECRET?.trim() || undefined,
+      statusUrl: env.PILOT_FEEDBACK_STATUS_URL?.trim() || undefined
+    },
+    // GitHub integration for the pilot-feedback flow. When both are
+    // set, the runner auto-attaches screenshots to the GitHub issue
+    // the Apps Script creates (uploads to repo /pilot-feedback-
+    // attachments/, then posts an issue comment with inline image
+    // refs). Without these, the Apps Script's Sheet row + Drive link
+    // is the only screenshot surface. See services/github-attachments.ts.
+    github: {
+      // PAT with `repo` scope. Falls back to GH_TOKEN to match the
+      // gh CLI's env convention so operators can reuse the same token.
+      token: env.GITHUB_TOKEN?.trim() || env.GH_TOKEN?.trim() || undefined,
+      // "owner/name" — defaults to the project's main repo if unset.
+      repo: env.GITHUB_REPO?.trim() || "richardafolayan/Relationship-Inbox-OS",
+      // Where to commit the screenshot file. Defaults to the v1
+      // integration branch; operators can pin a different branch
+      // (e.g. "main" once v1 lands) without touching code.
+      attachmentsBranch: env.GITHUB_ATTACHMENTS_BRANCH?.trim() || "v1/strip-back-pr1"
+    }
   };
 }
 

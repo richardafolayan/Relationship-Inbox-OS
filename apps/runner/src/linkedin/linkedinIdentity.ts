@@ -50,6 +50,15 @@ export function extractLinkedInThreadIdFromUrl(url: string): string | null {
 
   const threadMatch = parsed.pathname.match(/\/messaging\/thread\/([^/?#]+)/i);
   if (threadMatch?.[1]) {
+    // A urn:li:msg_thread:/fs_conversation: id can appear either in the path
+    // or as a conversationId/Urn query param. Route both through
+    // extractStableLinkedInUrn first so URN forms normalise (lowercase)
+    // identically regardless of position — otherwise one thread can split
+    // into two records when the same URN is seen in both places.
+    const fromUrn = extractStableLinkedInUrn(threadMatch[1]);
+    if (fromUrn) {
+      return fromUrn;
+    }
     return normalizeLinkedInThreadIdToken(threadMatch[1]);
   }
 

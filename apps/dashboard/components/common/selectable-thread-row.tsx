@@ -4,9 +4,10 @@ import Link from "next/link";
 import type { InboxRow } from "@/lib/types";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
-import { normalizePreview } from "@/lib/preview";
+import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
+import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 
 interface SelectableThreadRowProps {
   row: InboxRow;
@@ -40,6 +41,11 @@ export function SelectableThreadRow({
   const cleanPreview = normalizePreview(row.preview);
   const previewBody =
     row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
+  // Threads awaiting a reply lead with the AI context line ("what they
+  // want"); replied/handled threads keep the literal "You: …" preview.
+  // cleanAskSummary repairs legacy summaries stored hard-cut mid-word.
+  const nudge = cleanAskSummary(row.whatTheyWant);
+  const bodyText = row.needsReply !== false && nudge ? nudge : previewBody;
   const rightLabel =
     risk === "overdue"
       ? "Overdue"
@@ -121,7 +127,7 @@ export function SelectableThreadRow({
             </span>
           ) : null}
         </span>
-        <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{previewBody}</span>
+        <span className="block max-w-[52ch] truncate text-[14px] text-ink-2">{bodyText}</span>
       </span>
       <span className={`text-[12px] tracking-[-0.005em] ${riskTextClass[risk]}`}>
         {rightLabel}
@@ -160,6 +166,9 @@ export function SelectableThreadRow({
     <Link
       href={`/thread/${row.id}`}
       className={className}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={cancelThreadPrefetch}
+      onFocus={() => prefetchThreadData(row.id)}
       onClick={(event) => {
         // Cmd/Ctrl-click enters select mode without losing the inbox.
         // (Shift-click is reserved by the browser for "open in new

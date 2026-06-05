@@ -1,0 +1,60 @@
+<!--
+  Real-world DOM shape for an inbound LinkedIn voice message in the
+  "full" Ember-rendered messaging UI. Captured live against
+  linkedin.com/messaging on 2026-05-26 and reproduced here with the
+  message URN slot REDACTED so the fixture is safe to commit.
+
+  The two stable affordances the LinkedIn adapter keys off:
+    - `.msg-s-event-listitem__audio-container`  — voice-message marker
+    - `button.msg-s-event-listitem__audio`      — click target for play
+  Plus `data-event-urn` on the `.msg-s-event-listitem` ancestor: this
+  is used as the attachment guid so LinkedInAttachmentResolver can find
+  the captured bytes back on disk.
+
+  `<progress max>` carries the duration in seconds (here 30.72); not
+  currently consumed by the adapter but useful if we ever surface
+  duration in the dashboard without waiting for transcription.
+-->
+<ol class="list-style-none msg-s-message-list-content">
+  <li class="msg-s-message-list__event clearfix">
+    <div
+      class="msg-s-event-listitem msg-s-event-listitem--other msg-s-event-listitem--last-in-group"
+      data-event-urn="urn:li:msg_message:(urn:li:fsd_profile:REDACTED,2-REDACTED)"
+      data-view-name="message-list-item"
+    >
+      <div class="msg-s-message-group__profile-picture-container">
+        <a class="msg-s-message-group__profile-link" href="/in/redacted">
+          <img class="msg-s-event-listitem__profile-picture" src="https://media.licdn.com/dms/image/REDACTED" alt="" />
+        </a>
+      </div>
+      <div class="msg-s-event-listitem__message-bubble msg-s-event-listitem__message-bubble--msg-actions-enabled" tabindex="0">
+        <div class="msg-s-event-listitem__audio-container">
+          <div class="msg-s-event-with-indicator display-flex">
+            <div class="msg-s-event__content">
+              <button class="msg-s-event-listitem__audio" type="button" style="width: calc(75px + 0.512 * (100% - 75px));">
+                <progress class="msg-s-event-listitem__audio-progress-bar" value="0" max="30.72"></progress>
+                <div class="msg-s-event-listitem__audio-icon-container relative">
+                  <svg
+                    role="img"
+                    aria-hidden="false"
+                    aria-label="Play"
+                    class="mh2"
+                    xmlns="http://www.w3.org/2000/svg"
+                    width="16"
+                    height="16"
+                    viewBox="0 0 16 16"
+                    data-supported-dps="16x16"
+                    data-test-icon="play-small"
+                  >
+                    <use href="#play-small" width="16" height="16"></use>
+                  </svg>
+                </div>
+                <span class="msg-s-event-listitem__audio-time t-12 t-white t-normal">0:31</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </li>
+</ol>

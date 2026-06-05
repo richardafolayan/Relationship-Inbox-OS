@@ -13,6 +13,10 @@
     "./autoscan": {
       "types": "./dist/autoscan.d.ts",
       "import": "./dist/autoscan.js"
+    },
+    "./birthday": {
+      "types": "./dist/birthday.d.ts",
+      "import": "./dist/birthday.js"
     }
   },
   "scripts": {

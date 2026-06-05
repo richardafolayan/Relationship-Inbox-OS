@@ -2,12 +2,14 @@ import type {
   AppSettings,
   PlatformName,
   PlatformStatus,
+  ReplyBrief,
   RunnerEvent,
   SelectorOverrideStore,
   SelectorRegistry,
   SelectorTestReport,
   SummaryOutput,
   SuggestedRepliesOutput,
+  RememberItem,
   ThreadStub
 } from "@inbox-os/core";
 
@@ -34,6 +36,39 @@ export interface DemoSeedManifest {
   domDumpFiles: string[];
 }
 
+/**
+ * Shape every AI context builder accepts for the message log. The
+ * legacy fields are unchanged so callers compile without touching the
+ * type; `audioTranscription` is additive and optional and lets the
+ * runner weave a voice-note transcript into prompts via the
+ * renderMessageBody helper in services/ai.ts.
+ */
+export interface MessageForPrompt {
+  direction: "IN" | "OUT";
+  text: string;
+  timestamp: string;
+  audioTranscription?: {
+    status: string;
+    transcript: string | null;
+  } | null;
+  /**
+   * iMessage tapbacks / reactions on this message, surfaced to the AI so
+   * it knows when the operator reacted with ❤️ (etc.) instead of typing
+   * a reply, or when the contact reacted to one of the operator's
+   * messages. Optional — non-iMessage adapters and historical rows have
+   * no reactions. The AI prompt builder (formatMessageForPrompt /
+   * renderMessageBody in services/ai.ts) appends a "[operator reacted
+   * ❤️]" annotation when present. See services/reaction-effects.ts for
+   * the parser and helpers.
+   */
+  reactions?: Array<{
+    direction: "IN" | "OUT";
+    emoji: string;
+    kind: "love" | "like" | "dislike" | "laugh" | "emphasis" | "question";
+    timestamp?: string;
+  }>;
+}
+
 export interface EventBus {
   nextEventId(): number;
   emit(event: RunnerEventInput): RunnerEvent;
@@ -55,35 +90,112 @@ export interface SettingsStore {
   updateOperatorProfile(partial: Partial<OperatorProfile>): Promise<OperatorProfile>;
 }
 
+/** Reply tone the operator picks during voice setup. "" = not chosen yet. */
+export type ReplyStyle = "warm" | "direct" | "casual" | "thoughtful" | "concise";
+
 /**
- * Free-text operator self-description that the AI prompts consume so
- * suggested replies and voice rewrites sound like the operator and stay
- * within their domain. Distinct from the LinkedIn-derived self snapshot
- * (which lives behind `SelfProfileService`) — this one is what the
- * operator types into Settings ("how I write", "things I care about").
+ * How much writing help the operator wants. Drives what the dashboard
+ * surfaces — never disables summaries / open loops / action items.
+ *   - memory_only:     context, summaries, things to address only
+ *   - writing_support: + rewrite ("shorten" / "warmer") on the operator's draft
+ *   - full_drafts:     + complete AI-suggested replies and compose-from-intent
+ */
+export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
+
+/**
+ * The operator's voice + identity profile. The AI prompts consume it so
+ * suggested replies and voice rewrites sound like the current user (not a
+ * hardcoded persona) and stay within their domain. Stored as a JSON
+ * `Setting` row, so new fields need no schema migration. Distinct from the
+ * LinkedIn-derived self snapshot (which lives behind `SelfProfileService`).
+ *
+ * All string fields default to "" meaning "not set" — an empty profile
+ * makes the AI fall back to a plain, neutral voice rather than any persona.
  */
 export interface OperatorProfile {
+  /** What the operator is called — used for the Today greeting and AI voice. */
+  displayName: string;
+  /** Free-text description of how the operator usually messages people. */
   about: string;
+  /** Things the operator cares about — keeps replies in-domain. */
   interests: string;
+  /** Words / phrases the operator uses often (free text, newline-separated). */
+  commonPhrases: string;
+  /** Words / phrases the operator never uses (free text, newline-separated). */
+  avoidedPhrases: string;
+  /** Preferred reply tone. "" until the operator picks one. */
+  preferredStyle: ReplyStyle | "";
+  /** How much AI writing help to surface. Defaults conservative. */
+  aiHelpLevel: AiHelpLevel;
+  /** ISO timestamp the operator finished first-run setup. "" = not done. */
+  setupCompletedAt: string;
+}
+
+/**
+ * The subset of OperatorProfile that reply-style analysis (issue #438) can
+ * infer from the operator's own sent messages. Identity (displayName) and
+ * the aiHelpLevel preference are deliberately excluded — analysis never
+ * touches them.
+ */
+export type InferredReplyStyle = Pick<
+  OperatorProfile,
+  "about" | "preferredStyle" | "commonPhrases" | "avoidedPhrases" | "interests"
+>;
+
+/**
+ * Observed writing style measured from a set of real messages (one
+ * speaker's). Computed at runtime by `analyzeStyle` in services/style —
+ * never hardcoded — and rendered into the draft prompts so suggestions
+ * adapt to how the operator and each contact actually write (issue
+ * #299). Distinct from `OperatorProfile`, which is operator-typed text.
+ */
+export interface StyleProfile {
+  /** Non-empty messages the profile was measured from. */
+  sampleCount: number;
+  /** Mean words per message. */
+  avgWords: number;
+  /** Bucketed `avgWords` for prompt phrasing. */
+  lengthLabel: "very short" | "short" | "medium" | "longer";
+  /** Mean whole-emoji count per message. */
+  emojiPerMessage: number;
+  /** Most-used emoji, most frequent first, capped at 5. */
+  topEmojis: string[];
+  /** 0..1 share of messages that close a sentence with a full stop. */
+  fullStopRate: number;
+  /** 0..1 share of letter-leading messages whose first letter is lowercase. */
+  lowercaseRate: number;
 }
 
 export interface AiService {
   updateThreadSummary(input: {
+    /** Contact's name (used in fallback summary text). */
     displayName: string;
     previousSummary?: string;
     previousOpenLoops: string[];
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    /** Last persisted remember items — kept as the fallback if the AI call fails. */
+    previousRemember: RememberItem[];
+    messages: MessageForPrompt[];
     /** Drives mode-aware framing: when false, what_they_want and open_loops are reframed as reconnect hooks. */
     needsReply: boolean;
+    /**
+     * Race two providers and keep the first valid result (issue #382 —
+     * pilot R-0029). Operator-initiated paths only — doubles provider
+     * spend per raced call.
+     */
+    race?: boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
+    /** Contact's name — injected as the prompt's authoritative `Recipient:`
+     *  line so the model names the contact instead of falling back to the
+     *  CONTACT_NAME_DISCIPLINE example name. */
+    displayName: string;
     summary: string;
     whatTheyWant: string;
     openLoops: string[];
     /** Last ~6 turns oldest-first. Lets the model see the operator's own recent
      *  replies and respond to the actual conversational turn. Also calibrates
      *  voice register against the operator's recent OUT entries here. */
-    recentMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    recentMessages: MessageForPrompt[];
     /** False = no pending reply; the prompt switches to "reopen mode" and
      *  generates conversation starters grounded in transcript details. */
     needsReply: boolean;
@@ -116,6 +228,29 @@ export interface AiService {
      * something specific the contact has shared.
      */
     contact?: ContactProfileSnapshot | null;
+    /**
+     * Writing style measured from the operator's own recent messages on
+     * THIS thread. Calibrates length, punctuation, capitalisation, and
+     * emoji to how the operator actually writes to this contact. Null
+     * when there isn't enough history (issue #299).
+     */
+    operatorStyle?: StyleProfile | null;
+    /**
+     * Writing style measured from the contact's own recent messages on
+     * THIS thread. Reinforces the reciprocity rule with concrete numbers
+     * to mirror. Null when there isn't enough history.
+     */
+    contactStyle?: StyleProfile | null;
+    /**
+     * The compressed reply brief from the most recent thread analysis.
+     * When present, the prompt feeds the substance bullets (they_said)
+     * and the obligation read (on_you) into the model so the generated
+     * replies engage with every reply-relevant beat — not just the first
+     * surface point. Null on cold paths (cache hit before brief
+     * generation, or AI summary failed and synthesised fallback has no
+     * substance to carry).
+     */
+    replyBrief?: ReplyBrief | null;
   }): Promise<SuggestedRepliesOutput>;
   transformReply(input: {
     mode: "SHORTEN" | "MAKE_WARMER";
@@ -134,12 +269,45 @@ export interface AiService {
      * patterns. Output enum stays the same across both tiers. */
     platform: PlatformName;
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     /** Pass the thread's rollingSummary so classifier can spot a pivot pattern. */
     summary?: string | null;
     /** Pass the thread's whatTheyWant for additional intent signal. */
     whatTheyWant?: string | null;
+    /**
+     * Race two providers and keep the first valid classification (issue
+     * #382 — pilot R-0029). Operator-initiated paths only.
+     */
+    race?: boolean;
   }): Promise<"outreach" | "genuine" | null>;
+  /**
+   * Conversation-end verdict (#287 phase 2.5). "closed" = last inbound
+   * reads as a natural endpoint with no implicit ask, "open" = operator
+   * still owes a reply. Null when the AI service is unavailable so the
+   * dashboard heuristic stays in charge. Cheap to call (last 3 turns +
+   * summary, ~150 tokens in); cache the verdict by last-inbound hash.
+   */
+  classifyThreadClosed(input: {
+    displayName: string;
+    messages: MessageForPrompt[];
+    summary?: string | null;
+  }): Promise<{ status: "closed" | "open"; reason: string } | null>;
+  /**
+   * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
+   * plus a one-sentence reason for how worth it would feel to send the
+   * LinkedIn dormant a deliberate "hey, been a while" message today.
+   * Null when the AI provider was unavailable; the dashboard ranks
+   * dormants by deterministic signals alone in that case.
+   */
+  scoreReconnectCandidate(input: {
+    displayName: string;
+    contactBlurb?: string | null;
+    daysDormant: number;
+    operatorOutboundCount: number;
+    totalMessageCount: number;
+    messages: MessageForPrompt[];
+    summary?: string | null;
+  }): Promise<{ score: number; reason: string } | null>;
   /**
    * Short paragraph (2-3 sentences) that introduces a contact based on
    * their LinkedIn profile data and any obvious commonality with the
@@ -184,7 +352,7 @@ export interface AiService {
     voiceSamples: string[];
     /** The full thread for context. Recent inbound message in particular
      *  drives whether the rewrite should reference / acknowledge anything. */
-    threadMessages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    threadMessages: MessageForPrompt[];
     /**
      * Cross-thread context for the same Person. Drives "don't repeat
      * questions answered elsewhere" and "match the warmth you've used
@@ -212,6 +380,13 @@ export interface AiService {
      *  recipient's headline, recent posts, etc. when the operator's intent
      *  is light on detail. */
     contact?: ContactProfileSnapshot | null;
+    /** Writing style measured from the operator's own recent messages on
+     *  this thread — calibrates length, punctuation, capitalisation, and
+     *  emoji to how the operator writes to this contact (issue #299). */
+    operatorStyle?: StyleProfile | null;
+    /** Writing style measured from the contact's own recent messages —
+     *  concrete numbers for the reciprocity match. */
+    contactStyle?: StyleProfile | null;
   }): Promise<string>;
   /**
    * Suggest up to 3 snooze targets grounded in the conversation. Picks
@@ -228,6 +403,24 @@ export interface AiService {
     whatTheyWant?: string | null;
   }): Promise<SnoozeSuggestionsOutput>;
   /**
+   * Issue #392. Parse a free-text "remind me to…" intent typed by the
+   * operator into { remindAtIso, reminderText, confidence } so the
+   * thread can be snoozed until the parsed time with the reminder note
+   * attached. Returns { confidence: "low" } when the time hint is
+   * ambiguous or missing — caller surfaces the parse back to the
+   * operator rather than guessing.
+   */
+  parseReminderRequest(input: {
+    intent: string;
+    referenceTimeIso: string;
+    displayName: string;
+  }): Promise<{
+    remindAtIso: string | null;
+    reminderText: string;
+    confidence: "high" | "low";
+    reason?: string;
+  }>;
+  /**
    * Per-person friendship summary - four sections covering how the
    * operator knows the contact, recent topics, inside jokes / running
    * threads, and the vibe of the relationship. Operates on the union of
@@ -235,8 +428,9 @@ export interface AiService {
    * Used by the iMessage profile drawer.
    */
   summarisePersonForFriendship(input: {
+    /** Contact's name (the person being characterised). */
     displayName: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
   }): Promise<FriendshipSummaryOutput>;
   /**
    * Free-form Q&A about a person. Grounded in messages, enrichment, and
@@ -245,13 +439,65 @@ export interface AiService {
    * question returns empty answer.
    */
   askAboutPerson(input: {
+    /** Contact's name (the person being asked about). */
     displayName: string;
     question: string;
-    messages: Array<{ direction: "IN" | "OUT"; text: string; timestamp: string }>;
+    messages: MessageForPrompt[];
     contact?: ContactProfileSnapshot | null;
     notes?: string | null;
     tags?: string[];
   }): Promise<{ answer: string }>;
+  /**
+   * Optional triage of a pilot bug / feedback report. Turns the tester's
+   * own words plus safe metadata into a short developer summary, a likely
+   * app area, a severity, and repro steps. Operates ONLY on the typed
+   * report and metadata — never on screenshots or message content.
+   * Returns null when the AI service is unavailable; the raw report is
+   * always kept regardless.
+   */
+  summarisePilotReport(input: {
+    type: string;
+    title: string;
+    description: string;
+    expected: string;
+    meta: Record<string, unknown>;
+  }): Promise<PilotReportTriage | null>;
+  /**
+   * Issue #331. Reads the operator's in-flight draft against the active
+   * open loops and returns per-loop verdicts. "addressed" loops are the
+   * ones the draft genuinely answers; "partial" loops are mentioned but
+   * not actually answered, and carry a short `reason` naming what's
+   * still missing. Loops the draft doesn't touch at all are omitted.
+   * Returns an empty items array when the AI service is unavailable so
+   * the UI never blocks on a failure.
+   */
+  checkDraftCoverage(input: {
+    displayName: string;
+    draft: string;
+    openLoops: string[];
+    recentMessages: MessageForPrompt[];
+  }): Promise<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>;
+  /**
+   * Issue #438 (pilot R-0059). Infer the operator's reply-style fields from a
+   * sample of their OWN sent messages so Settings can prefill the form.
+   * `sampleTexts` are pre-filtered operator sends (see
+   * services/reply-style-analysis). `aiRan` is false when no provider was
+   * reachable, letting the caller tell "AI down" apart from "nothing to
+   * suggest". Never saves — the dashboard reviews and saves.
+   */
+  inferReplyStyle(input: {
+    sampleTexts: string[];
+  }): Promise<{ suggestion: InferredReplyStyle; aiRan: boolean }>;
+}
+
+export interface PilotReportTriage {
+  /** 1-2 sentence developer-facing summary. */
+  summary: string;
+  /** Likely area of the app, e.g. "Thread page" or "LinkedIn scan". */
+  area: string;
+  severity: "low" | "medium" | "high";
+  /** Short ordered repro steps. Empty when the report is not a bug. */
+  repro: string[];
 }
 
 export interface FriendshipSummaryOutput {

@@ -1,0 +1,13 @@
+{
+  "voiceNoteId": "lanre-food-shops",
+  "mustFix": [
+    ["this place is getting long", "this voice note is getting long"]
+  ],
+  "mustPreserve": [
+    "a serious food shop like i used to do",
+    "i cleaned my room a bit"
+  ],
+  "mustNotIntroduce": [
+    "looking at different videos online and just like kind of looking at different videos online"
+  ]
+}

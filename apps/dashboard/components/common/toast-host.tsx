@@ -1,9 +1,16 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { ChevronRight, Loader2 } from "lucide-react";
 import { onToast, type Toast } from "@/lib/feedback";
 
 const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: string }> = {
+  pending: {
+    ring: "ring-1 ring-hairline",
+    dot: "text-ink-2",
+    label: "text-ink-1"
+  },
   info: {
     ring: "ring-1 ring-hairline",
     dot: "bg-ink-3",
@@ -21,73 +28,67 @@ const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: stri
   }
 };
 
-interface RunnerEventDetail {
-  type?: string;
-  threadId?: string;
-  reason?: string;
-  attempt?: number;
-}
+// How far (px) a pointer-drag must travel before the toast is dismissed on
+// release. Below the threshold it springs back.
+const SWIPE_DISMISS_PX = 80;
+
+// A release within this travel counts as a click rather than a swipe, so a
+// clickable toast (one with an href) navigates instead of springing back.
+const CLICK_SLOP_PX = 6;
 
 export function ToastHost() {
   const [toasts, setToasts] = useState<Toast[]>([]);
+  // Pending auto-dismiss timers, keyed by toast id, so a manual dismiss
+  // (X / swipe) can cancel the timer and we never double-remove or leak.
+  const timersRef = useRef<Map<string, number>>(new Map());
 
-  // Subscribe to in-app toast events.
-  useEffect(() => {
-    const off = onToast((toast) => {
+  const dismiss = useCallback((id: string) => {
+    const timers = timersRef.current;
+    const handle = timers.get(id);
+    if (handle !== undefined) {
+      window.clearTimeout(handle);
+      timers.delete(id);
+    }
+    setToasts((prev) => prev.filter((t) => t.id !== id));
+  }, []);
+
+  // Single funnel for every toast source so they all get the same cap and
+  // the same auto-dismiss behaviour.
+  const pushToast = useCallback(
+    (toast: Toast) => {
       setToasts((prev) => {
         const filtered = prev.filter((t) => t.id !== toast.id);
         return [...filtered, toast].slice(-5);
       });
-      window.setTimeout(() => {
-        setToasts((prev) => prev.filter((t) => t.id !== toast.id));
-      }, toast.durationMs);
-    });
-    return off;
-  }, []);
-
-  // Mirror selected runner SSE events as toasts so background work surfaces
-  // even when no UI action triggered it. Kept narrow on purpose - the SSE
-  // stream is noisy and we don't want every receipt becoming a toast.
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<RunnerEventDetail>).detail;
-      if (!detail || typeof detail.type !== "string") return;
-      // Event-type names must match what the runner emits in
-      // packages/core/src/types.ts and apps/runner/src/services/send.ts.
-      // The old "SEND_FAILED" / "SEND_CONFIRMED" labels never fired
-      // because send.ts emits MESSAGE_SEND_FAILED / MESSAGE_SENT.
-      switch (detail.type) {
-        case "MESSAGE_SEND_FAILED":
-          setToasts((prev) => [
-            ...prev,
-            {
-              id: `sse-${Date.now()}`,
-              kind: "error",
-              title: "Send failed",
-              description: detail.reason ?? "Runner reported a failed send",
-              durationMs: 9000,
-              createdAt: Date.now()
-            }
-          ]);
-          break;
-        case "MESSAGE_SENT":
-          setToasts((prev) => [
-            ...prev,
-            {
-              id: `sse-${Date.now()}`,
-              kind: "success",
-              title: "Reply confirmed by platform",
-              durationMs: 3000,
-              createdAt: Date.now()
-            }
-          ]);
-          break;
-        default:
-          break;
+      const timers = timersRef.current;
+      const existing = timers.get(toast.id);
+      if (existing !== undefined) {
+        window.clearTimeout(existing);
       }
+      const handle = window.setTimeout(() => {
+        timersRef.current.delete(toast.id);
+        setToasts((prev) => prev.filter((t) => t.id !== toast.id));
+      }, Math.max(2000, toast.durationMs));
+      timers.set(toast.id, handle);
+    },
+    []
+  );
+
+  // Subscribe to in-app toast events.
+  useEffect(() => {
+    const off = onToast((toast) => pushToast(toast));
+    return off;
+  }, [pushToast]);
+
+  // Clear every pending timer on unmount.
+  useEffect(() => {
+    const timers = timersRef.current;
+    return () => {
+      for (const handle of timers.values()) {
+        window.clearTimeout(handle);
+      }
+      timers.clear();
     };
-    window.addEventListener("runner-event", handler);
-    return () => window.removeEventListener("runner-event", handler);
   }, []);
 
   if (toasts.length === 0) return null;
@@ -97,30 +98,153 @@ export function ToastHost() {
       data-testid="toast-host"
       className="pointer-events-none fixed right-4 top-4 z-50 flex w-[320px] flex-col gap-2"
     >
-      {toasts.map((toast) => {
-        const style = kindStyles[toast.kind];
-        return (
-          <div
-            key={toast.id}
-            className={`pointer-events-auto rounded-xl bg-paper p-3 shadow-sm ${style.ring}`}
-            role={toast.kind === "error" ? "alert" : "status"}
-          >
-            <div className="flex items-start gap-2">
-              <span className={`mt-[6px] inline-block h-[6px] w-[6px] flex-none rounded-full ${style.dot}`} />
-              <div className="min-w-0 flex-1">
-                <div className={`text-[13px] font-medium leading-tight ${style.label}`}>
-                  {toast.title}
-                </div>
-                {toast.description ? (
-                  <div className="mt-1 break-words text-[12px] leading-snug text-ink-3">
-                    {toast.description}
-                  </div>
-                ) : null}
-              </div>
-            </div>
+      {toasts.map((toast) => (
+        <ToastCard key={toast.id} toast={toast} onDismiss={dismiss} />
+      ))}
+    </div>
+  );
+}
+
+function ToastCard({
+  toast,
+  onDismiss
+}: {
+  toast: Toast;
+  onDismiss: (id: string) => void;
+}) {
+  const router = useRouter();
+  const style = kindStyles[toast.kind];
+  const [dragX, setDragX] = useState(0);
+  const startXRef = useRef<number | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const interactive = Boolean(toast.href);
+
+  // Navigate to the toast's route and clear it. Used by both a pointer
+  // click (release within CLICK_SLOP_PX) and the keyboard handler.
+  const activate = useCallback(() => {
+    if (!toast.href) return;
+    onDismiss(toast.id);
+    router.push(toast.href);
+  }, [router, onDismiss, toast.href, toast.id]);
+
+  const onPointerDown = (e: React.PointerEvent) => {
+    // Don't start a swipe from the dismiss button.
+    if ((e.target as HTMLElement).closest("[data-toast-close]")) return;
+    startXRef.current = e.clientX;
+    setDragging(true);
+    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+  };
+
+  const onPointerMove = (e: React.PointerEvent) => {
+    if (startXRef.current === null) return;
+    setDragX(e.clientX - startXRef.current);
+  };
+
+  const endDrag = (e: React.PointerEvent) => {
+    if (startXRef.current === null) return;
+    const travelled = e.clientX - startXRef.current;
+    startXRef.current = null;
+    setDragging(false);
+    try {
+      (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
+    } catch {
+      /* pointer already released */
+    }
+    if (Math.abs(travelled) > SWIPE_DISMISS_PX) {
+      onDismiss(toast.id);
+    } else if (interactive && Math.abs(travelled) <= CLICK_SLOP_PX) {
+      // A near-stationary release on a clickable toast is a click, not a
+      // swipe: open the linked thread / view.
+      activate();
+    } else {
+      setDragX(0);
+    }
+  };
+
+  // Fade out as the card is dragged so the swipe feels physical.
+  const opacity = Math.max(0.15, 1 - Math.min(Math.abs(dragX) / 220, 0.85));
+
+  return (
+    <div
+      data-toast-href={toast.href ?? undefined}
+      className={`pointer-events-auto select-none rounded-xl bg-paper p-3 shadow-sm transition-shadow ${style.ring} ${
+        interactive ? "cursor-pointer hover:ring-hairline-strong focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent" : ""
+      }`}
+      role={interactive ? "button" : toast.kind === "error" ? "alert" : "status"}
+      tabIndex={interactive ? 0 : undefined}
+      aria-label={
+        interactive
+          ? `${toast.title}${toast.description ? `. ${toast.description}` : ""}. Open.`
+          : undefined
+      }
+      style={{
+        transform: `translateX(${dragX}px)`,
+        opacity,
+        transition: dragging ? "none" : "transform 150ms ease, opacity 150ms ease",
+        touchAction: "pan-y"
+      }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={endDrag}
+      onPointerCancel={endDrag}
+      onKeyDown={
+        interactive
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                activate();
+              }
+            }
+          : undefined
+      }
+    >
+      <div className="flex items-start gap-2">
+        {toast.kind === "pending" ? (
+          <Loader2
+            aria-hidden
+            className={`mt-[2px] h-[12px] w-[12px] flex-none animate-spin ${style.dot}`}
+          />
+        ) : (
+          <span
+            aria-hidden
+            className={`mt-[6px] inline-block h-[6px] w-[6px] flex-none rounded-full ${style.dot}`}
+          />
+        )}
+        <div className="min-w-0 flex-1">
+          <div className={`text-[13px] font-medium leading-tight ${style.label}`}>
+            {toast.title}
           </div>
-        );
-      })}
+          {toast.description ? (
+            <div className="mt-1 break-words text-[12px] leading-snug text-ink-3">
+              {toast.description}
+            </div>
+          ) : null}
+        </div>
+        {interactive ? (
+          <ChevronRight
+            aria-hidden
+            className="mt-[1px] h-[14px] w-[14px] flex-none text-ink-3"
+            strokeWidth={1.7}
+          />
+        ) : null}
+        <button
+          type="button"
+          data-toast-close
+          aria-label="Dismiss notification"
+          onClick={() => onDismiss(toast.id)}
+          className="-mr-1 -mt-1 flex-none rounded-md p-1 text-ink-3 transition-colors hover:bg-hairline/60 hover:text-ink-1"
+        >
+          <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+            <path
+              d="M3 3l6 6M9 3l-6 6"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+            />
+          </svg>
+        </button>
+      </div>
     </div>
   );
 }
