@@ -31,6 +31,7 @@ export const LIVE_INTERCEPTED_PATHS: Array<[RegExp, string]> = [
   [/\/control\/thread\/[^/]+\/update-send$/, "update a scheduled send"],
   [/\/control\/thread\/[^/]+\/retry-send$/, "retry a send"],
   [/\/control\/thread\/[^/]+\/draft$/, "save a draft"],
+  [/\/control\/thread\/[^/]+\/delete-draft$/, "delete a draft"],
   [/\/control\/thread\/[^/]+\/predraft$/, "request an AI predraft"],
   [/\/control\/thread\/[^/]+\/check-draft$/, "check draft coverage"],
   [/\/control\/thread\/[^/]+\/voice-rewrite$/, "voice-rewrite a draft"],
