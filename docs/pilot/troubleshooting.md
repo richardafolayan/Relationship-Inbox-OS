@@ -1,9 +1,14 @@
 # Student Pilot: Troubleshooting
 
-Quick fixes for the common snags. None of this is your fault. It is an
-early build, and a thing not working *is* useful pilot feedback. If a fix
-here does not sort it, open a bug from the **Feedback** button in the
-sidebar (it walks you through it) or message me.
+Quick fixes for the common snags while **using** the app. For **install-time**
+problems (Node version, ports, "inbox empty after install", uninstall), see
+[student-install-troubleshooting.md](./student-install-troubleshooting.md), or
+just run `node scripts/doctor.mjs` from the app folder for a plain-English
+health check.
+
+None of this is your fault. It is an early build, and a thing not working *is*
+useful pilot feedback. If a fix here does not sort it, open a bug from the
+**Feedback** button in the sidebar (it walks you through it) or message me.
 
 ## The app keeps the Terminal window busy
 
