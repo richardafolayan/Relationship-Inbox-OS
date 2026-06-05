@@ -7,6 +7,7 @@ import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { cleanContactSummary } from "@/lib/preview";
+import { createLatestRequestGate } from "@/lib/latest-request";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -34,6 +35,9 @@ export default function PeoplePage() {
   const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedNotesAtRef = useRef<number>(0);
+  // Latest-wins gate: only the most recent detail fetch may write to state,
+  // so fast person switching can't show an older response over a newer one.
+  const detailReqGate = useRef(createLatestRequestGate());
 
   const loadList = useCallback(async (): Promise<PeopleRow[]> => {
     try {
@@ -50,9 +54,13 @@ export default function PeoplePage() {
 
   const loadDetail = useCallback(
     async (personId: string, includeStarters = false) => {
+      const token = detailReqGate.current.next();
       const data = await apiGet<PersonDetailResponse>(
         `/runner/data/person/${personId}${includeStarters ? "?includeStarters=1" : ""}`
       ).catch(() => null);
+      // A newer request started while this one was in flight - drop the stale
+      // response so it can't overwrite the current selection's detail.
+      if (!detailReqGate.current.isLatest(token)) return;
       setDetail(data);
     },
     []
@@ -70,10 +78,10 @@ export default function PeoplePage() {
   }, [loadList]);
 
   useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
-    }
+    // Clear immediately on every selection change (not just deselection) so a
+    // stale prior detail can't show during the new fetch's in-flight window.
+    setDetail(null);
+    if (!selectedId) return;
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
