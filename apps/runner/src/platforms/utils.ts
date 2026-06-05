@@ -286,6 +286,67 @@ export function truncateAtWord(text: string, maxCodePoints: number): string {
 }
 
 /**
+ * Maximum length we store for an AI ask-summary (`whatTheyWant`). The Today
+ * hero renders it through <FitText> (shrinks the font to fit, never clips) and
+ * the needs-reply row wraps it in full, so the cap exists only to stop a
+ * pathological multi-sentence model response from forcing the hero font down to
+ * its readability floor. 200 matches the hero headline's own 200-char safety
+ * net and fits comfortably inside FitText's height budget.
+ *
+ * This is deliberately far higher than the old 120-char cap, which amputated
+ * complete second-person asks mid-thought — storing "...acknowledge the update
+ * and gently" instead of "...and gently encourage her to come along." A
+ * complete ask is almost always well under this; the budget only bites a
+ * runaway.
+ */
+export const ASK_SUMMARY_MAX_CODE_POINTS = 200;
+
+// Closed-class words that read as a dangling tail if the hard cap happens to
+// land right after one. We only ever drop one of these when it is the FINAL
+// token of an ALREADY-CAPPED string, so a complete sentence is never touched
+// (none of these end a sentence, and sub-cap summaries skip this path entirely).
+const DANGLING_TAIL_WORDS = new Set([
+  "and", "or", "but", "so", "to", "of", "for", "with", "in", "on", "at",
+  "the", "a", "an", "that", "as", "if", "by", "from", "into", "about", "your",
+  "her", "his", "their", "you"
+]);
+
+/**
+ * Cap an AI ask-summary (`whatTheyWant`) for storage. Backs the text up to a
+ * whole-word boundary at `ASK_SUMMARY_MAX_CODE_POINTS` (never mid-word via
+ * `truncateAtWord`), then — only when the cap actually fired — drops a trailing
+ * dangling connective so a rare over-long response never stores
+ * "...acknowledge the update and". Summaries already within budget (the
+ * overwhelming majority) pass through verbatim, so a complete thought the model
+ * wrote is never trimmed.
+ */
+export function capAskSummary(text: string | null | undefined): string {
+  if (typeof text !== "string") return "";
+  const trimmed = text.trim();
+  if (Array.from(trimmed).length <= ASK_SUMMARY_MAX_CODE_POINTS) {
+    return trimmed;
+  }
+  let capped = truncateAtWord(trimmed, ASK_SUMMARY_MAX_CODE_POINTS);
+  // The cap fired. Drop a trailing run of closed-class connectives it exposed
+  // so the stored ask never ends on "...and" or "...waiting on you". Bounded by
+  // an iteration cap AND a substance floor so we never gut the summary chasing
+  // function words — once dropping the next word would leave too little, stop
+  // and keep it. Only ever runs on an already-truncated (over-budget) string.
+  const SUBSTANCE_FLOOR = 60;
+  for (let pass = 0; pass < 4; pass += 1) {
+    const lastWord = capped.match(/(\p{L}+)\s*$/u)?.[1]?.toLowerCase();
+    if (!lastWord || !DANGLING_TAIL_WORDS.has(lastWord)) break;
+    const next = capped
+      .replace(/\s*\p{L}+\s*$/u, "")
+      .replace(/[\s,;:–—-]+$/u, "")
+      .trim();
+    if (Array.from(next).length < SUBSTANCE_FLOOR) break;
+    capped = next;
+  }
+  return capped;
+}
+
+/**
  * Drop any unpaired UTF-16 surrogates that sneak through from page
  * scraping or AI output. The defensive last line for every string we write
  * to Prisma — see `safeTruncate` for the full motivation.
