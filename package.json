@@ -10,6 +10,10 @@
   "scripts": {
     "dev": "npm run db:generate && npm run db:push && npm run build --workspace @inbox-os/core && turbo run dev --parallel",
     "dev:fast": "turbo run dev --parallel",
+    "install:student": "bash scripts/install-student-macos.sh",
+    "uninstall:student": "bash scripts/uninstall-student-macos.sh",
+    "start:student": "node scripts/start-student.mjs",
+    "doctor": "node scripts/doctor.mjs",
     "build": "turbo run build",
     "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
     "test": "npm run test:all",
