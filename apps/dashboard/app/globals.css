@@ -125,6 +125,30 @@ button:active { transform: scale(0.98); }
 }
 .animate-pulse-dot { animation: pulseDot 1200ms ease-in-out infinite; }
 
+/* Dictation transcribe-flow morph (#476). The composer body morphs through
+ * recording (live waveform) and transcribing/composing (shimmer) states.
+ * Bars + shimmer use the app's accent/paper tokens, not the prototype's
+ * oxblood. Reduced-motion is handled by the global block below. */
+@keyframes dictateWave {
+  from { height: 16%; opacity: 0.4; }
+  to   { height: var(--wave-h, 70%); opacity: 0.85; }
+}
+.dictate-wave-bar {
+  flex: 1 1 0; min-width: 2px; max-width: 4px; border-radius: 3px;
+  background: var(--accent-ink); opacity: 0.5; height: 18%;
+  animation: dictateWave 900ms ease-in-out infinite alternate;
+}
+@keyframes dictateShimmer {
+  from { background-position: 200% 0; }
+  to   { background-position: -200% 0; }
+}
+.dictate-shimmer {
+  height: 11px; border-radius: 6px;
+  background: linear-gradient(90deg, var(--paper-2) 25%, var(--paper) 50%, var(--paper-2) 75%);
+  background-size: 200% 100%;
+  animation: dictateShimmer 1300ms ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
