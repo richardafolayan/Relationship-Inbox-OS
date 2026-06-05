@@ -5,6 +5,7 @@ import { Loader2, Sparkles } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AiHelpLevel, OperatorProfile, ReplyStyle } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { buildPendingSavePartial, type PendingProfileSave } from "@/lib/voice-profile-save";
 
 // The reply-style fields that "Analyse my sent messages" (#438) can fill.
 // displayName (identity) and aiHelpLevel (a preference) are never inferred.
@@ -90,6 +91,9 @@ export function UserVoiceProfile({
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [finishing, setFinishing] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latest text save still waiting on the debounce, so we can flush it on
+  // unmount instead of dropping it (e.g. a name typed then "Done" clicked).
+  const pendingSave = useRef<PendingProfileSave | null>(null);
   // Reply-style analysis (#438). `review` holds an editable suggestion that
   // is NOT persisted until the operator clicks Save, so analysis never writes
   // behind their back.
@@ -107,13 +111,6 @@ export function UserVoiceProfile({
       .finally(() => setLoaded(true));
   }, []);
 
-  useEffect(
-    () => () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    },
-    []
-  );
-
   // Persist a partial profile to the runner. The runner store is what the
   // AI prompts read, so this is not a UI-only preference.
   const persist = useCallback(async (partial: Partial<OperatorProfile>) => {
@@ -129,13 +126,28 @@ export function UserVoiceProfile({
     }
   }, []);
 
+  useEffect(
+    () => () => {
+      // Flush a still-pending debounced save before tearing down, so the
+      // last-typed value (e.g. the onboarding name) isn't lost on unmount.
+      const partial = buildPendingSavePartial(pendingSave.current);
+      if (partial) void persist(partial);
+      pendingSave.current = null;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    },
+    [persist]
+  );
+
+
   // Text fields: update local state now, debounce the save.
   const onTextChange = useCallback(
     (field: keyof OperatorProfile, value: string) => {
       setProfile((prev) => ({ ...prev, [field]: value }));
       setStatus("saving");
+      pendingSave.current = { field, value };
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
+        pendingSave.current = null;
         void persist({ [field]: value });
       }, 600);
     },
