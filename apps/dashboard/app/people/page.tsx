@@ -7,6 +7,7 @@ import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { cleanContactSummary } from "@/lib/preview";
+import { personHeadlineLine } from "@/lib/people-headline";
 import { shouldAdoptIncomingNotes } from "@/lib/notes-sync";
 import { createLatestRequestGate } from "@/lib/latest-request";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
@@ -274,10 +275,7 @@ export default function PeoplePage() {
           {people.map((person) => {
             const risk = toDisplayRisk(person.risk);
             const active = person.id === selectedId;
-            const headlineLine =
-              person.headline ??
-              [person.currentRole, person.currentCompany].filter(Boolean).join(" at ") ??
-              "no profile yet";
+            const headlineLine = personHeadlineLine(person);
             const detailId = `person-detail-${person.id}`;
             return (
               <div

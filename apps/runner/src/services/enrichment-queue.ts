@@ -82,6 +82,18 @@ export interface EnrichmentQueueService {
   kick(): void;
 }
 
+/**
+ * Retry backoff tiers: 1h, 6h, 24h. `attempts` is the attempt count
+ * BEFORE the failed run, so the first failure passes `attempts=0` and
+ * waits 1h. Exported (and module-level) so the tier mapping is unit-
+ * testable without standing up the queue.
+ */
+export function exponentialDelayMs(attempts: number): number {
+  if (attempts <= 0) return 60 * 60 * 1000;
+  if (attempts === 1) return 6 * 60 * 60 * 1000;
+  return 24 * 60 * 60 * 1000;
+}
+
 export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueueService {
   const personKey = deps.personKey ?? "default";
   let running = false;
@@ -222,14 +234,6 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     });
   }
 
-  function exponentialDelayMs(attempts: number): number {
-    // 1h, 6h, 24h. attempts is the attempt count BEFORE the failed run,
-    // so the first failure passes attempts=0 and waits 1h.
-    if (attempts <= 0) return 60 * 60 * 1000;
-    if (attempts === 1) return 6 * 60 * 60 * 1000;
-    return 24 * 60 * 60 * 1000;
-  }
-
   // Reasons that won't resolve by retrying: the person row is missing /
   // has no profileUrl, LinkedIn returned a not-found page, or the profile
   // is private. Without this, jobs against profile-less people sit in
@@ -342,7 +346,12 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
           // number that only counts attempts where a visit actually ran.
           attempts,
           lastError: `${result.reason}${result.detail ? `: ${result.detail}` : ""}`,
-          nextAttemptAt: giveUp ? null : new Date(Date.now() + exponentialDelayMs(attempts))
+          // Pass the PRE-increment count (job.attempts) — exponentialDelayMs
+          // is contracted on "attempts before the failed run", so the first
+          // failure (job.attempts=0) hits the 1h tier instead of jumping to
+          // 6h. The persisted `attempts` above (post-increment) still drives
+          // the give-up check.
+          nextAttemptAt: giveUp ? null : new Date(Date.now() + exponentialDelayMs(job.attempts))
         }
       });
       console.warn(
