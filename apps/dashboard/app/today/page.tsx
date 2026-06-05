@@ -701,7 +701,12 @@ export default function TodayPage() {
               </div>
               <div className="flex flex-col">
                 {visibleRemaining.map((row) => (
-                  <ThreadRow key={row.id} row={row} id={`today-row-${row.id}`} />
+                  <ThreadRow
+                    key={row.id}
+                    row={row}
+                    id={`today-row-${row.id}`}
+                    onPersonChanged={refresh}
+                  />
                 ))}
                 {overflowCount > 0 ? (
                   <Link
