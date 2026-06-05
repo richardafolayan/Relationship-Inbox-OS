@@ -257,7 +257,8 @@ export const CONTACT_NAME_DISCIPLINE = [
   "NEVER pick a name from the transcript content. Operators sometimes write nicknames, honorifics, friends' names, third-party names, or random fragments in their own outbound messages. Those names are NOT the contact's name. \"Mayowa\" appearing inside an operator: message in a thread whose displayName is \"Ayo Johnson\" means the contact is still Ayo, not Mayowa.",
   "NEVER use the OPERATOR's own name as the contact's name. The operator's name appears in the \"WRITE AS THIS PERSON\" block when present, and it may also appear inside operator: lines if the contact addressed the operator by name (\"Hi Richard…\", \"Thanks Richard\"). That name belongs to the operator — never to the contact. If the recipient's displayName is \"Seyi\" and the operator is configured as \"Richard\", the brief and replies must reference \"Seyi\", never \"Richard\". Confusing the two is the worst-case naming failure — re-read the recipient/displayName field if you're about to write a name and you're not sure which person you're naming.",
   "If the displayName looks like a placeholder (\"+44…\", a phone number, an email, an empty string), it is acceptable to fall back to \"they/them\" or to omit a name. Do not invent one.",
-  "GENDER / PRONOUNS (strict, #416). The system does NOT carry a pronoun signal on contacts. NEVER guess \"he\" or \"she\" from a name alone — gendered guesses on names you're unfamiliar with misfire often, and a wrong pronoun reads as careless. When unsure of pronouns: use the contact's name (\"Praise said she's free Friday\" → \"Praise is free Friday\") or fall back to \"they/them\". Acceptable signals for choosing he/she: the contact explicitly self-references in the transcript (\"my husband says…\", \"I'm pregnant\"), the operator has used a specific pronoun for them across multiple recent messages, or the displayName is a name you are HIGHLY confident maps to one gender across cultures (very rare — most names cross cultures). When in doubt, name-or-neutral always wins over a guess."
+  "GENDER / PRONOUNS (strict, #416). The system does NOT carry a pronoun signal on contacts. NEVER guess \"he\" or \"she\" from a name alone — gendered guesses on names you're unfamiliar with misfire often, and a wrong pronoun reads as careless. When unsure of pronouns: use the contact's name (\"Praise said she's free Friday\" → \"Praise is free Friday\") or fall back to \"they/them\". Acceptable signals for choosing he/she: the contact explicitly self-references in the transcript (\"my husband says…\", \"I'm pregnant\"), the operator has used a specific pronoun for them across multiple recent messages, or the displayName is a name you are HIGHLY confident maps to one gender across cultures (very rare — most names cross cultures). When in doubt, name-or-neutral always wins over a guess.",
+  "TRANSCRIPT LABELS (strict, #463). In the transcript, the contact's own messages are prefixed with their name (the same value as Recipient/displayName) whenever it is known, and the operator's with \"operator:\". Those speaker labels are the ONLY authority on who the contact is. Any OTHER name that appears INSIDE a message body — whether the operator or the contact typed it — is a third party being discussed, NEVER the contact themselves. Worked example: in a thread whose contact is \"Lanre\", the name \"Anu\" mentioned inside the messages is a different person Lanre is talking about; the contact is still Lanre, and the summary must never call her Anu."
 ].join(" ");
 
 export const BRIEF_FIDELITY_REMINDER = [
@@ -265,7 +266,8 @@ export const BRIEF_FIDELITY_REMINDER = [
   "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation the contact did not express.",
   "If they paused a decision for a stated reason, name the reason — don't characterise it as a \"big thing\", \"big move\", \"hard call\", \"huge step\", \"weighty\", \"the main thing\", or anything else they didn't say.",
   "Worked example. Bad on_you: \"He's paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging\" (you invented \"big thing\"). Good on_you: \"He's paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough.\"",
-  "Self-check: every substantive phrase in the brief should be traceable to something the contact actually said in the transcript."
+  "Self-check: every substantive phrase in the brief should be traceable to something the contact actually said in the transcript.",
+  "NO INVENTED CADENCE (strict, #464). This applies to EVERY field including summary and what_they_want, not just the brief. Do NOT characterise the FORMAT, FREQUENCY, or TIMING of the messages themselves. Claims like \"single-word replies\", \"one-word messages\", \"you keep saying X\", \"rapid back-and-forth\", or \"for the last few minutes\" must be plainly and literally true of the recent transcript or be left out. Describe what was said, not how tersely, how often, or how recently it was said. A word that recurs in the messages (a topic, a name, a game like chess) is NOT evidence that the messages are one-word or repetitive."
 ].join(" ");
 
 // Voice profile tier — picks between the formal (professional) prompt and
@@ -331,9 +333,45 @@ export function renderMessageBody(
  * draft-coverage) call `renderMessageBody` directly to keep their own
  * prefix shape while still benefiting from transcript injection.
  */
-export function formatMessageForPrompt(message: MessageForPrompt): string {
-  const speaker = message.direction === "OUT" ? "operator" : "contact";
+export function formatMessageForPrompt(
+  message: MessageForPrompt,
+  contactLabel = "contact"
+): string {
+  const speaker = message.direction === "OUT" ? "operator" : contactLabel;
   return `${speaker} (${message.timestamp}): ${renderMessageBody(message)}`;
+}
+
+/**
+ * Issue #463 / #464 (pilot R-0062 / R-0063). The transcript used to label
+ * every inbound turn generically as `contact:`. On a long, busy thread the
+ * model would then latch onto a *name in the message content* and use it as
+ * the contact's name — pilot saw a thread with "Lanre" summarised as if the
+ * contact were "Anu" (a third party who recurs in the messages), and saw a
+ * recurring word ("Chess") fabricated into "single-word messages saying
+ * Chess". A header line ("Recipient: Lanre") plus CONTACT_NAME_DISCIPLINE
+ * was not enough to beat dozens of in-content name mentions.
+ *
+ * The structural fix: bind the contact's real name to *their own turns* in
+ * the transcript, so every inbound line reads "Lanre (ts): …". The model now
+ * sees the authoritative name on every contact message, which dominates any
+ * name buried in the content.
+ *
+ * Returns the contact's displayName when it reads as a real, single-person
+ * name, else "contact" (preserving the previous behaviour) for:
+ *   - empty / placeholder names,
+ *   - comma-joined group participant lists ("Israel, Tim, Ayo") — a group
+ *     turn can't be attributed to one name from this signal alone,
+ *   - email handles and phone-number-shaped handles.
+ * Group sender attribution (per-message senderName) is intentionally out of
+ * scope here; unnamed/group threads keep the generic `contact:` label.
+ */
+export function contactTranscriptLabel(displayName: string | null | undefined): string {
+  const name = (displayName ?? "").trim();
+  if (!name) return "contact";
+  if (name.includes(",")) return "contact"; // group / participant list
+  if (name.includes("@")) return "contact"; // email handle
+  if (/^\+?[\d\s().-]{6,}$/.test(name)) return "contact"; // phone-number-shaped handle
+  return name;
 }
 
 /**
@@ -1538,8 +1576,9 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // can never confuse who-said-what. `direction: "OUT"` = operator,
     // `direction: "IN"` = contact (the recipient). Reinforced in the
     // system prompt's ATTRIBUTION DISCIPLINE section.
+    const contactLabel = contactTranscriptLabel(input.displayName);
     const transcript = input.messages
-      .map((m) => formatMessageForPrompt(m))
+      .map((m) => formatMessageForPrompt(m, contactLabel))
       .join("\n");
 
     // Summaries refer to the operator in second person ("you") regardless
@@ -1626,7 +1665,7 @@ open_loops guidance (RECONNECT):
 
 Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve relative dates and to judge whether a remembered event has already passed.
 
-Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
+Reminder: lines starting with \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 
 OPERATOR OUTPUT VOICE: Write user-facing strings (summary, what_they_want, open_loops, remember notes, tone_notes, urgency_hint) in SECOND PERSON. Refer to the operator as "you" (e.g. "Ashley is waiting on you to reply"). NEVER write the literal phrases "the operator" or "operator" in output text — those words exist only as the transcript attribution label.
 
@@ -1644,7 +1683,7 @@ where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - If the operator has not asked anything specific in the recent exchange, describe what the contact has now opened with — one sentence, neutral. Example: "Brandon has sent through a long update on where he's landed since you last spoke."
 - DO NOT cram the contact's reply substance into where_it_stands. The substance goes in they_said. This field is just the setup.
 - No abstract coaching ("deepen the connection", "grounded question", "helpful nudge"). No marketing register.
-- DO NOT attribute operator words to the contact, or vice versa. The transcript labels (operator: / contact:) are authoritative.
+- DO NOT attribute operator words to the contact, or vice versa. The transcript speaker labels (\`operator:\` and the contact's own name) are authoritative — a name appearing INSIDE a message body is a third party being discussed, not the speaker, and never the contact's own name.
 
 they_said (SUBSTANCE — the most important field):
 - A bulleted list of every reply-relevant detail from the LATEST UNANSWERED INBOUND from the contact.
@@ -2836,7 +2875,7 @@ Return strict JSON:
     }
 
     const transcript = input.messages
-      .map((m) => formatMessageForPrompt(m))
+      .map((m) => formatMessageForPrompt(m, contactTranscriptLabel(input.displayName)))
       .join("\n");
 
     const prompt = `Return strict JSON matching this exact shape:
@@ -2847,7 +2886,7 @@ Return strict JSON:
   "vibe": "string — 1-2 sentences on the tone and feel of the relationship as it shows up in this transcript. Honest, not flattering."
 }
 
-Reminder: lines starting with \`operator:\` are the operator's own words; lines starting with \`contact:\` are the other person. Never paraphrase one as if it were the other.
+Reminder: lines starting with \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 
 OPERATOR OUTPUT VOICE: Write user-facing strings (how_you_know_each_other, recent_topics, inside_jokes, vibe) in SECOND PERSON — refer to the operator as "you" (e.g. "You met Ashley at university."). NEVER write "the operator" or "operator" in output text.
 
@@ -2899,7 +2938,7 @@ ${transcript}`;
     const transcript =
       input.messages.length > 0
         ? input.messages
-            .map((m) => formatMessageForPrompt(m))
+            .map((m) => formatMessageForPrompt(m, contactTranscriptLabel(input.displayName)))
             .join("\n")
         : "(no messages on record)";
 
@@ -2924,7 +2963,7 @@ You are answering a question the operator is asking about this contact. Answer b
 HARD RULES (strict):
 - Only answer using the provided context (transcript + enrichment + notes). If the context doesn't contain the answer, say so plainly: "We haven't discussed this" or "Not on record" - do not guess or extrapolate.
 - When relevant, cite specific dates from the message timestamps in your answer, e.g. "On 4 March 2025 they said they were moving to Lagos." Pull dates from the timestamp prefix on each transcript line. Verbatim short quotes are fine.
-- Lines prefixed \`operator:\` are the operator's own words; \`contact:\` are the other person. Never paraphrase one as if it were the other.
+- Lines prefixed \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 - Write the answer in SECOND PERSON — refer to the operator as "you". NEVER write "the operator" or "operator" in the answer text; that label only exists for transcript attribution.
 - Do not fabricate names, dates, jobs, locations, or any facts not in the context.
 
