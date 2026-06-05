@@ -52,6 +52,7 @@ import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
+import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 
 // Thread workspace - landscape layout.
 //
@@ -593,6 +594,17 @@ export default function ThreadPage() {
   const [originalScheduledTime, setOriginalScheduledTime] = useState("");
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
   const scheduleMenuRef = useRef<HTMLDivElement>(null);
+
+  // Coarse once-a-minute clock. The late-night LinkedIn schedule nudge below
+  // the composer keys off the local time, so this lets it appear/disappear
+  // live as the clock crosses the 22:00 / 06:00 quiet-window boundary without
+  // the operator needing to re-type. One render a minute is negligible next to
+  // the 3s send-queue poll already running on this page.
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setClockNow(new Date()), 60_000);
+    return () => clearInterval(id);
+  }, []);
 
   const [pendingSends, setPendingSends] = useState<
     Array<{
@@ -2115,6 +2127,19 @@ export default function ThreadPage() {
 
   const firstName = thread.personName.split(/\s+/)[0] ?? thread.personName;
   const risk = toDisplayRisk(thread.riskLevel);
+
+  // Late-night LinkedIn send nudge (see lib/late-night-send.ts). Shown only
+  // while a LinkedIn draft is open inside the 22:00 to 06:00 quiet window; one
+  // click schedules the draft for the next 08:00 instead of pinging the
+  // recipient at an odd hour. Hidden while an immediate send is in flight.
+  const showLateNightNudge =
+    !sending &&
+    shouldOfferLateNightSchedule({
+      platform: thread.platform,
+      hasDraft: composer.trim().length > 0,
+      now: clockNow
+    });
+  const lateNightSlot = showLateNightNudge ? nextMorningSendSlot(clockNow) : null;
   let lastInboundAt: string | null = null;
   for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
     const message = thread.messages[i];
@@ -3622,6 +3647,25 @@ export default function ThreadPage() {
                   </Button>
                 </div>
               </div>
+              {showLateNightNudge && lateNightSlot ? (
+                <button
+                  type="button"
+                  data-testid="late-night-schedule-nudge"
+                  onClick={() => void scheduleSend(lateNightSlot)}
+                  disabled={scheduling}
+                  title={`Send at ${lateNightSlot.toLocaleString(undefined, {
+                    weekday: "long",
+                    hour: "numeric",
+                    minute: "2-digit"
+                  })} instead of now`}
+                  className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-ink-3 transition-colors duration-calm hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Clock className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                  <span>
+                    {scheduling ? "Scheduling…" : "It’s late, schedule for 8 AM instead?"}
+                  </span>
+                </button>
+              ) : null}
               {composerAttachments.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-2 border-t border-hairline pt-2">
                   {composerAttachments.map((a) => (
