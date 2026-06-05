@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { CONTACT_NAME_DISCIPLINE } from "../apps/runner/dist/services/ai.js";
+import { CONTACT_NAME_DISCIPLINE, contactNameContext } from "../apps/runner/dist/services/ai.js";
 
 // Issues #396 / #399. Pilot saw the AI write "the contact" generically
 // instead of the person's actual name, and saw it pick a name out of
@@ -32,22 +32,49 @@ test("CONTACT_NAME_DISCIPLINE is exported and names the displayName authority ru
   assert.match(CONTACT_NAME_DISCIPLINE, /they\/them/);
 });
 
-test("CONTACT_NAME_DISCIPLINE is wired into all three contact-referencing prompts", () => {
+test("contactNameContext binds the naming rule to the actual recipient name", () => {
+  // The "Seyi" mislabel: the prompts injected CONTACT_NAME_DISCIPLINE
+  // (which says "the contact's name is the value passed as Recipient:
+  // <name>" and carries a worked example using "Seyi") but never passed a
+  // Recipient line — so the model named the contact "Seyi". contactNameContext
+  // makes the rule and the name inseparable: the returned fragment carries
+  // BOTH the discipline text AND the real Recipient header.
+  const ctx = contactNameContext("The Jess");
+  assert.equal(typeof ctx, "string");
+  // The rule travels with the fragment...
+  assert.match(ctx, /CONTACT NAME/);
+  assert.ok(ctx.includes(CONTACT_NAME_DISCIPLINE));
+  // ...and so does the authoritative name the rule points at.
+  assert.match(ctx, /Recipient: The Jess/);
+});
+
+test("contactNameContext is wired into all three contact-referencing prompts", () => {
   // updateThreadSummary (brief), generateSuggestedReplies (chips),
   // composeInVoice (operator-typed rewrite) — all three feed user-facing
-  // text that might reference the contact. The constant must appear in
-  // each one's assembled prompt.
+  // text that might reference the contact, so all three must inject the
+  // rule+name fragment, NOT CONTACT_NAME_DISCIPLINE on its own (which was
+  // the bug: rule without name → contact mislabelled "Seyi").
   const aiJsPath = fileURLToPath(
     new URL("../apps/runner/dist/services/ai.js", import.meta.url)
   );
   const source = readFileSync(aiJsPath, "utf8");
-  const occurrences = source.split("CONTACT_NAME_DISCIPLINE").length - 1;
-  // Expect at least 4: the export declaration + one reference in each
-  // of the three prompts (updateThreadSummary, generateSuggestedReplies,
-  // composeInVoice).
+  const wired = source.split("contactNameContext(input.displayName)").length - 1;
   assert.ok(
-    occurrences >= 4,
-    `expected at least 4 references to CONTACT_NAME_DISCIPLINE in compiled ai.js (export + 3 prompts), found ${occurrences}`
+    wired >= 3,
+    `expected contactNameContext(input.displayName) in all 3 contact-referencing prompts, found ${wired}`
+  );
+  // Guard the regression directly: the discipline block must never be
+  // template-injected into a prompt bare again. The `${CONTACT_NAME_DISCIPLINE}`
+  // injection form must appear EXACTLY once — inside contactNameContext,
+  // bound to the Recipient line. A prompt that interpolated it directly
+  // (the original bug) would push this above one and strand the rule from
+  // its name. (Counts the `${…}` form specifically so prose mentions of
+  // the constant in comments don't inflate the count.)
+  const bareInjections = source.split("${CONTACT_NAME_DISCIPLINE}").length - 1;
+  assert.equal(
+    bareInjections,
+    1,
+    `\${CONTACT_NAME_DISCIPLINE} must be injected only inside contactNameContext (exactly 1), found ${bareInjections} — a prompt is injecting the naming rule without the Recipient name`
   );
 });
 

@@ -261,6 +261,35 @@ export const CONTACT_NAME_DISCIPLINE = [
   "TRANSCRIPT LABELS (strict, #463). In the transcript, the contact's own messages are prefixed with their name (the same value as Recipient/displayName) whenever it is known, and the operator's with \"operator:\". Those speaker labels are the ONLY authority on who the contact is. Any OTHER name that appears INSIDE a message body — whether the operator or the contact typed it — is a third party being discussed, NEVER the contact themselves. Worked example: in a thread whose contact is \"Lanre\", the name \"Anu\" mentioned inside the messages is a different person Lanre is talking about; the contact is still Lanre, and the summary must never call her Anu."
 ].join(" ");
 
+/**
+ * CONTACT_NAME_DISCIPLINE tells the model the contact's name is "the value
+ * passed as `Recipient: <name>` / `displayName` in this prompt", and its
+ * worked example uses the name "Seyi" ("if the recipient's displayName is
+ * Seyi…"). That rule only works if the prompt actually CONTAINS a
+ * `Recipient: <name>` line.
+ *
+ * The "Seyi" mislabel bug: two of the three prompts that injected the
+ * discipline block — updateThreadSummary and generateSuggestedReplies —
+ * never passed a Recipient line. The model got the naming RULE and the
+ * example name but no real name to apply the rule to, so it labelled the
+ * contact "Seyi" (the only proper noun in scope) across unrelated
+ * low-signal threads ("Seyi mentioned that Boma can come" on a thread
+ * whose contact is "The Jess"). composeInVoice passed the Recipient line
+ * and was unaffected.
+ *
+ * Binding the rule and the name into ONE fragment makes it structurally
+ * impossible to ship the discipline block without the name it points at.
+ * Every prompt that needs contact-name discipline injects THIS — never
+ * CONTACT_NAME_DISCIPLINE on its own. Placeholder displayNames (phone
+ * numbers, emails, blank) are passed through verbatim; the discipline
+ * text already routes those to a "they/them" fallback.
+ *
+ * Exported so tests can assert the rule and the name travel together.
+ */
+export function contactNameContext(displayName: string): string {
+  return `${CONTACT_NAME_DISCIPLINE}\n\nRecipient: ${displayName}`;
+}
+
 export const BRIEF_FIDELITY_REMINDER = [
   "FIDELITY (applies to every visible brief field — where_it_stands, they_said, on_you).",
   "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation the contact did not express.",
@@ -1675,7 +1704,7 @@ REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail.
 
 ${BRIEF_FIDELITY_REMINDER}
 
-${CONTACT_NAME_DISCIPLINE}
+${contactNameContext(input.displayName)}
 
 where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - 1-2 short sentences. Plain British English. ≤ 280 chars total.
@@ -1850,6 +1879,13 @@ ${transcript}`;
   }
 
   async function generateSuggestedReplies(input: {
+    /**
+     * Contact's name. Injected into the prompt as the `Recipient: <name>`
+     * line that CONTACT_NAME_DISCIPLINE treats as the authoritative contact
+     * name — without it the model falls back to the discipline block's
+     * example name ("Seyi") and mislabels the contact.
+     */
+    displayName: string;
     summary: string;
     whatTheyWant: string;
     openLoops: string[];
@@ -2106,7 +2142,7 @@ it's formal.
 
 ${PREDRAFT_FIDELITY_REMINDER}
 
-${CONTACT_NAME_DISCIPLINE}
+${contactNameContext(input.displayName)}
 
 ${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
@@ -2586,11 +2622,9 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
 
 ${PREDRAFT_FIDELITY_REMINDER}
 
-${CONTACT_NAME_DISCIPLINE}
+${contactNameContext(input.displayName)}
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
-
-Recipient: ${input.displayName}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
