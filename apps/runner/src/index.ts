@@ -3959,6 +3959,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   })();
 
   const aiInputs = {
+    displayName: thread.person.displayName,
     summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
@@ -5504,6 +5505,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   })();
 
   const aiInputs = {
+    displayName: thread.person.displayName,
     summary: thread.rollingSummary ?? "",
     whatTheyWant: thread.whatTheyWant ?? "",
     openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
