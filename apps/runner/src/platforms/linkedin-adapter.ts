@@ -50,6 +50,7 @@ import {
   isSponsoredPillText,
   needsReplyFromPreview
 } from "../linkedin/linkedinRowSignals.js";
+import { stableMessageKey } from "../linkedin/linkedinMessageKey.js";
 
 interface LinkedInAdapterDependencies {
   screenshotDir: string;
@@ -6607,6 +6608,21 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       const textParts = raw.textParts.length > 0 ? raw.textParts : ["[system event]"];
+      // When the bubble had no stable DOM id the in-page walk fell back to a
+      // positional `li-msg-<index>` key. That index shifts between delta scans
+      // (the rendered window moves), so the same older inbound bubble would be
+      // re-keyed and persisted again — inbound has no content dedup. Mirror the
+      // backfill path and derive a content fingerprint that is stable across
+      // passes. `headingForBubble` is the inherited date heading, matching the
+      // deep-fetch path exactly.
+      const stableBaseKey = stableMessageKey({
+        existingKey: raw.platformMessageKey,
+        direction: raw.direction,
+        senderName: raw.senderName,
+        dateHeading: headingForBubble,
+        timeText: raw.timeText,
+        firstTextPart: textParts[0] ?? ""
+      });
       textParts.forEach((text, partIndex) => {
         const parsedTimestampMs = Date.parse(isoTimestamp);
         const partTimestamp = Number.isNaN(parsedTimestampMs)
@@ -6614,7 +6630,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           : new Date(parsedTimestampMs + partIndex).toISOString();
         parsed.push({
           platformMessageKey:
-            partIndex === 0 ? raw.platformMessageKey : `${raw.platformMessageKey}:body:${partIndex}`,
+            partIndex === 0 ? stableBaseKey : `${stableBaseKey}:body:${partIndex}`,
           direction: raw.direction,
           timestamp: partTimestamp,
           text,
@@ -8488,10 +8504,14 @@ export class LinkedInAdapter implements PlatformAdapter {
         // pass (older messages prepend and renumber), so the same bubble would
         // merge under two keys and duplicate. Derive a content fingerprint
         // instead so the key is stable across passes.
-        const stableBaseKey =
-          basePlatformMessageKey === `li-msg-${index}`
-            ? `li-msg-fp:${inbound ? "IN" : "OUT"}|${senderName}|${headingForBubble}|${bubbleTimeData.timeText}|${(textParts[0] ?? "").slice(0, 48)}`
-            : basePlatformMessageKey;
+        const stableBaseKey = stableMessageKey({
+          existingKey: basePlatformMessageKey,
+          direction: inbound ? "IN" : "OUT",
+          senderName,
+          dateHeading: headingForBubble,
+          timeText: bubbleTimeData.timeText,
+          firstTextPart: textParts[0] ?? ""
+        });
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
           const partTimestamp = Number.isNaN(parsedTimestampMs)
