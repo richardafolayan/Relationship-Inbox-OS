@@ -14,8 +14,10 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
+  RotateCcw,
   Send,
   Sparkles,
+  Square,
   Star,
   X
 } from "lucide-react";
@@ -505,10 +507,20 @@ export default function ThreadPage() {
   // #462 (pilot R-0061): voice-to-text dictation into the composer. Separate
   // from the iMessage voice-note recorder above (that one sends an audio
   // attachment; this one transcribes speech into editable text).
-  const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
+  // #476: the composer morphs through the transcribe flow in ONE box —
+  // idle -> recording -> transcribing -> transcript -> composing -> composed —
+  // instead of stacking a separate review card above it. dictationDraft holds
+  // the raw transcript; recSecs drives the recording timer; the abort ref lets
+  // Cancel bail out of an in-flight recording/transcription cleanly.
+  const [dictationMode, setDictationMode] = useState<
+    "idle" | "recording" | "transcribing" | "transcript" | "composing" | "composed"
+  >("idle");
   const [dictationAvailable, setDictationAvailable] = useState(false);
+  const [dictationDraft, setDictationDraft] = useState("");
+  const [recSecs, setRecSecs] = useState(0);
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<BlobPart[]>([]);
+  const dictationAbortRef = useRef(false);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -821,6 +833,10 @@ export default function ThreadPage() {
     setComposeDraft("");
     setComposeError(null);
     setAskAnswer(null);
+    dictationAbortRef.current = true;
+    setDictationMode("idle");
+    setDictationDraft("");
+    setRecSecs(0);
     setSnoozeSuggestions(null);
     setSnoozeMenuOpen(false);
     setPendingSends([]);
@@ -999,6 +1015,9 @@ export default function ThreadPage() {
     setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
     setComposer("");
     setComposerAttachments([]);
+    // Clear any "Draft · in your voice" morph label once the reply is sent.
+    setDictationMode("idle");
+    setDictationDraft("");
     setSending(true);
     setError(null);
     stickToBottomRef.current = true;
@@ -1145,7 +1164,8 @@ export default function ThreadPage() {
   // append the returned text to the composer for the operator to review. No
   // autosend; nothing is persisted server-side.
   const startDictation = useCallback(async () => {
-    if (dictationStatus !== "idle") return;
+    if (dictationRecorderRef.current) return; // already recording
+    dictationAbortRef.current = false;
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // webm/opus is the broadly-supported recording format (incl. Firefox);
@@ -1162,12 +1182,17 @@ export default function ThreadPage() {
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
-        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
-        if (raw.size === 0) {
-          setDictationStatus("idle");
+        // Cancel pressed mid-recording — drop the clip, don't transcribe.
+        if (dictationAbortRef.current) {
+          dictationAbortRef.current = false;
           return;
         }
-        setDictationStatus("transcribing");
+        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
+        if (raw.size === 0) {
+          setDictationMode("idle");
+          return;
+        }
+        setDictationMode("transcribing");
         try {
           // Convert the recording to 16 kHz mono WAV in the browser. The
           // runner's local-whisper provider normalises audio with macOS
@@ -1178,7 +1203,7 @@ export default function ThreadPage() {
             wav = await blobToWhisperWav(raw);
           } catch {
             setError("Could not prepare the recording for transcription.");
-            setDictationStatus("idle");
+            setDictationMode("idle");
             return;
           }
           const form = new FormData();
@@ -1187,6 +1212,11 @@ export default function ThreadPage() {
             method: "POST",
             body: form
           });
+          // Cancel pressed while the transcription was in flight.
+          if (dictationAbortRef.current) {
+            dictationAbortRef.current = false;
+            return;
+          }
           const data = (await resp.json().catch(() => ({}))) as {
             ok?: boolean;
             text?: string;
@@ -1194,33 +1224,53 @@ export default function ThreadPage() {
           };
           if (!resp.ok || !data.ok) {
             setError(data?.error || "Could not transcribe the recording.");
+            setDictationMode("idle");
           } else if (typeof data.text === "string" && data.text.trim()) {
             const spoken = data.text.trim();
-            setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
-            setComposerSource("user");
+            // Full-drafts tier: the transcript lands inside the composer as a
+            // reviewable "Transcript" step that can be rewritten in the
+            // operator's voice. Lower tiers (no AI compose) keep the original
+            // behaviour: raw transcript appended to the composer. Read
+            // profileRef, not showFullDrafts — this onstop closure is stale.
+            if (profileRef.current?.aiHelpLevel === "full_drafts") {
+              setDictationDraft(spoken);
+              setDictationMode("transcript");
+            } else {
+              setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+              setComposerSource("user");
+              setDictationMode("idle");
+            }
           } else {
             setError("Didn't catch any speech. Try again.");
+            setDictationMode("idle");
           }
         } catch (err) {
           setError(err instanceof Error ? err.message : "Dictation failed.");
-        } finally {
-          setDictationStatus("idle");
+          setDictationMode("idle");
         }
       };
       recorder.start();
       dictationRecorderRef.current = recorder;
-      setDictationStatus("recording");
+      setDictationMode("recording");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Microphone access denied");
-      setDictationStatus("idle");
+      setDictationMode("idle");
     }
-  }, [dictationStatus]);
+  }, []);
 
   const stopDictation = useCallback(() => {
-    if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
+    if (!dictationRecorderRef.current) return;
     dictationRecorderRef.current.stop();
     dictationRecorderRef.current = null;
-  }, [dictationStatus]);
+  }, []);
+
+  // Recording timer for the morph's "0:NN" readout.
+  useEffect(() => {
+    if (dictationMode !== "recording") return undefined;
+    setRecSecs(0);
+    const id = setInterval(() => setRecSecs((s) => s + 1), 1000);
+    return () => clearInterval(id);
+  }, [dictationMode]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -1664,10 +1714,12 @@ export default function ThreadPage() {
     }
   };
 
-  const composeFromIntent = async () => {
-    if (!thread) return;
-    const intent = composeIntent.trim();
-    if (!intent || composing) return;
+  const composeFromIntent = async (intentOverride?: string): Promise<boolean> => {
+    if (!thread) return false;
+    // intentOverride lets the dictation handoff pass the reviewed transcript
+    // directly, avoiding a stale read of composeIntent right after setState.
+    const intent = (intentOverride ?? composeIntent).trim();
+    if (!intent || composing) return false;
     setComposing(true);
     setComposeError(null);
     setAskAnswer(null);
@@ -1676,9 +1728,11 @@ export default function ThreadPage() {
         intent
       });
       setComposeDraft(output.text);
+      return true;
     } catch (composeErr) {
       const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
       setComposeError(message);
+      return false;
     } finally {
       setComposing(false);
     }
@@ -1710,6 +1764,65 @@ export default function ThreadPage() {
     setComposer(composeDraft);
     setComposeDraft("");
     setComposeIntent("");
+  };
+
+  // #476: compose the reviewed transcript into an in-voice draft IN THE
+  // COMPOSER (one box) by reusing /compose. On success the draft replaces the
+  // composer text and the box relabels to "Draft · in your voice". On error we
+  // fall back to the transcript so the words are never lost.
+  const composeDictation = async () => {
+    if (!thread) return;
+    const intent = dictationDraft.trim();
+    if (!intent || dictationMode === "composing") return;
+    setComposeError(null);
+    setDictationMode("composing");
+    try {
+      const output = await apiPost<{ text: string }>(
+        `/runner/control/thread/${thread.id}/compose`,
+        { intent }
+      );
+      setComposer(output.text);
+      setComposerSource("user");
+      setDictationMode("composed");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Compose failed");
+      setDictationMode("transcript");
+    }
+  };
+
+  // "Use as-is" — drop the edited raw transcript into the composer for a final
+  // edit/send, no AI rewrite.
+  const useRawDictation = () => {
+    const spoken = dictationDraft.trim();
+    if (spoken) {
+      setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+      setComposerSource("user");
+    }
+    setDictationDraft("");
+    setDictationMode("idle");
+  };
+
+  // Step a composed draft back to its raw transcript to re-compose.
+  const redoDictation = () => setDictationMode("transcript");
+
+  // Cancel / discard the flow from any morph state. Aborts an in-flight
+  // recording or transcription; clears a composed draft from the composer.
+  const discardDictation = () => {
+    dictationAbortRef.current = true;
+    if (dictationRecorderRef.current) {
+      try {
+        dictationRecorderRef.current.stop();
+      } catch {
+        /* recorder already stopped */
+      }
+      dictationRecorderRef.current = null;
+    }
+    if (dictationMode === "composed") {
+      setComposer("");
+      setComposerSource("empty");
+    }
+    setDictationDraft("");
+    setDictationMode("idle");
   };
 
   const degraded = useMemo(() => {
@@ -2330,6 +2443,15 @@ export default function ThreadPage() {
   const showWritingSupport = aiHelpLevel !== "memory_only";
   // When full drafts are off, the compose drawer offers "Ask" only.
   const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
+  // #476: the four transient transcribe states replace the composer's normal
+  // body/toolbar with the morph (recording / transcribing / transcript /
+  // composing). idle + composed keep the normal composer.
+  const isTranscribeMorph =
+    dictationMode === "recording" ||
+    dictationMode === "transcribing" ||
+    dictationMode === "transcript" ||
+    dictationMode === "composing";
+  const fmtRecSecs = (n: number) => `${Math.floor(n / 60)}:${String(n % 60).padStart(2, "0")}`;
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
@@ -3468,6 +3590,172 @@ export default function ThreadPage() {
             {error ? (
               <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
             ) : null}
+            {/* #476: one-box transcribe flow. The composer itself morphs
+                through recording -> transcribing -> transcript -> composing,
+                replacing the old stacked review card. idle + composed use the
+                normal composer below. App tokens, not the prototype oxblood. */}
+            {isTranscribeMorph ? (
+              <div
+                role="status"
+                data-testid="dictation-morph"
+                className={`rounded-card border bg-paper px-3 pb-2 pt-2.5 transition-colors duration-calm ${
+                  dictationMode === "recording"
+                    ? "border-accent-ink/40 ring-1 ring-accent-ink/10"
+                    : "border-hairline"
+                }`}
+              >
+                <div className="mb-1 flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    {dictationMode === "recording" ? (
+                      <span className="h-2 w-2 flex-shrink-0 animate-pulse rounded-full bg-accent-ink" aria-hidden />
+                    ) : dictationMode === "transcript" ? (
+                      <Mic className="h-3 w-3 flex-shrink-0 text-ink-3" strokeWidth={1.8} />
+                    ) : (
+                      <Sparkles className="h-3 w-3 flex-shrink-0 text-ink-3" strokeWidth={1.8} />
+                    )}
+                    <span className="flex-shrink-0 font-mono text-[10.5px] font-semibold uppercase tracking-[0.1em] text-ink-2">
+                      {dictationMode === "recording"
+                        ? "Recording"
+                        : dictationMode === "transcribing"
+                          ? "Transcribing"
+                          : dictationMode === "transcript"
+                            ? "Transcript"
+                            : "Composing"}
+                    </span>
+                    {dictationMode === "recording" ? (
+                      <span className="flex-shrink-0 font-mono text-[11px] tabular-nums text-accent-ink">
+                        {fmtRecSecs(recSecs)}
+                      </span>
+                    ) : null}
+                    <span className="truncate text-[12px] text-ink-3">
+                      {dictationMode === "recording"
+                        ? "tap stop when you're done"
+                        : dictationMode === "transcribing"
+                          ? "turning your voice into text"
+                          : dictationMode === "transcript"
+                            ? "raw, your words unedited"
+                            : "rewriting in your voice"}
+                    </span>
+                  </div>
+                  {dictationMode === "transcript" ? (
+                    <button
+                      type="button"
+                      onClick={discardDictation}
+                      aria-label="Discard"
+                      title="Discard"
+                      className="grid h-6 w-6 flex-shrink-0 place-items-center rounded-[7px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                    >
+                      <X className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                    </button>
+                  ) : null}
+                </div>
+
+                {dictationMode === "recording" ? (
+                  <div className="flex h-[34px] items-center gap-[3px] py-1" aria-hidden>
+                    {Array.from({ length: 38 }).map((_, i) => (
+                      <span
+                        key={i}
+                        className="dictate-wave-bar"
+                        style={
+                          {
+                            animationDelay: `${(i * 47) % 900}ms`,
+                            "--wave-h": `${28 + ((i * 37) % 64)}%`
+                          } as React.CSSProperties
+                        }
+                      />
+                    ))}
+                  </div>
+                ) : dictationMode === "transcribing" || dictationMode === "composing" ? (
+                  <div className="flex flex-col gap-[9px] py-2">
+                    <span className="dictate-shimmer" style={{ width: "92%" }} />
+                    <span className="dictate-shimmer" style={{ width: "76%" }} />
+                    {dictationMode === "transcribing" ? (
+                      <span className="dictate-shimmer" style={{ width: "61%" }} />
+                    ) : null}
+                  </div>
+                ) : (
+                  <textarea
+                    value={dictationDraft}
+                    onChange={(e) => setDictationDraft(e.target.value)}
+                    autoFocus
+                    rows={3}
+                    placeholder="Your dictated words…"
+                    className="block w-full resize-none rounded-[10px] bg-paper-2 px-3 py-2.5 text-[14px] leading-[1.55] text-ink-2 shadow-[inset_0_0_0_1px_var(--hairline)] outline-none transition-shadow duration-calm placeholder:text-ink-4 focus:text-ink focus:shadow-[inset_0_0_0_1px_var(--hairline-strong)]"
+                    style={{ minHeight: 56, maxHeight: 200 }}
+                  />
+                )}
+
+                <div className="mt-2 flex items-center justify-between gap-2 border-t border-hairline pt-2">
+                  {dictationMode === "recording" ? (
+                    <>
+                      <span className="text-[12.5px] text-ink-3">Listening… speak naturally</span>
+                      <div className="flex items-center gap-2">
+                        <button
+                          type="button"
+                          onClick={discardDictation}
+                          className="rounded-pill border border-hairline px-3 py-1.5 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                        >
+                          Cancel
+                        </button>
+                        <Button variant="primary" onClick={stopDictation} className="px-3.5 py-1.5 text-[12px]">
+                          <Square className="h-[11px] w-[11px]" fill="currentColor" strokeWidth={0} />
+                          Stop &amp; transcribe
+                        </Button>
+                      </div>
+                    </>
+                  ) : dictationMode === "transcribing" || dictationMode === "composing" ? (
+                    <>
+                      <span className="flex items-center gap-2 text-[12.5px] text-ink-3">
+                        <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                        {dictationMode === "composing" ? "Composing in your voice…" : "Working…"}
+                      </span>
+                      <button
+                        type="button"
+                        onClick={discardDictation}
+                        className="rounded-pill border border-hairline px-3 py-1.5 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <div className="flex items-center gap-2">
+                        <Button
+                          variant="primary"
+                          onClick={() => void composeDictation()}
+                          disabled={!dictationDraft.trim()}
+                          className="px-3.5 py-1.5 text-[12px]"
+                        >
+                          <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                          Compose in my voice
+                        </Button>
+                        <button
+                          type="button"
+                          onClick={useRawDictation}
+                          className="rounded-pill border border-hairline px-3 py-1.5 text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                        >
+                          Use as-is
+                        </button>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => void startDictation()}
+                        aria-label="Re-record"
+                        title="Re-record"
+                        className="grid h-[30px] w-[30px] flex-shrink-0 place-items-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                      >
+                        <Mic className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                      </button>
+                    </>
+                  )}
+                </div>
+                {composeError && dictationMode === "transcript" ? (
+                  <p className="mt-1.5 font-mono text-[11px] text-risk-overdue">
+                    Couldn&apos;t compose: {composeError}
+                  </p>
+                ) : null}
+              </div>
+            ) : (
             <div
               data-thread-composer="true"
               data-demo-target="composer-input"
@@ -3529,6 +3817,40 @@ export default function ThreadPage() {
                     <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
                     Discard
                   </button>
+                </div>
+              ) : null}
+              {/* #476: composed transcribe draft sits in the one box under a
+                  "Draft · in your voice" label, with Redo back to the
+                  transcript and Discard. */}
+              {dictationMode === "composed" ? (
+                <div
+                  data-testid="dictation-composed-badge"
+                  className="mb-1.5 flex items-center justify-between gap-2"
+                >
+                  <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
+                    <Sparkles className="h-[12px] w-[12px]" />
+                    Draft · in your voice
+                  </span>
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={redoDictation}
+                      title="Back to the transcript to re-compose"
+                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                    >
+                      <RotateCcw className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      Redo
+                    </button>
+                    <button
+                      type="button"
+                      onClick={discardDictation}
+                      title="Discard the draft"
+                      className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                    >
+                      <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      Discard
+                    </button>
+                  </div>
                 </div>
               ) : null}
               <textarea
@@ -3750,37 +4072,18 @@ export default function ThreadPage() {
                       with an explanation when transcription isn't configured. */}
                   <button
                     type="button"
-                    onClick={() =>
-                      dictationStatus === "recording" ? stopDictation() : void startDictation()
-                    }
-                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    onClick={() => void startDictation()}
+                    disabled={!dictationAvailable}
                     title={
                       dictationAvailable
-                        ? dictationStatus === "recording"
-                          ? "Stop and transcribe"
-                          : "Dictate your reply"
+                        ? "Dictate your reply"
                         : "Voice dictation needs transcription enabled on the runner"
                     }
                     aria-label="Dictate"
-                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
-                      dictationStatus === "recording"
-                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
-                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-                    }`}
+                    className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                   >
-                    {dictationStatus === "transcribing" ? (
-                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
-                    ) : (
-                      <Mic
-                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
-                        strokeWidth={1.8}
-                      />
-                    )}
-                    {dictationStatus === "recording"
-                      ? "Stop"
-                      : dictationStatus === "transcribing"
-                        ? "Transcribing…"
-                        : "Dictate"}
+                    <Mic className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    Dictate
                   </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
@@ -3939,6 +4242,7 @@ export default function ThreadPage() {
                 </div>
               ) : null}
             </div>
+            )}
 
             {snoozeMenuOpen ? (
               <div
