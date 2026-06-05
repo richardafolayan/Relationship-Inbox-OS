@@ -11,6 +11,48 @@ import { AdapterFailure, cleanMessageText, humanDelay, toStageFailure } from "./
 import { humanClick, humanType, readingPause } from "./humanize";
 import type { SessionManager } from "../services/session-manager";
 
+/**
+ * Decide which inbox-row locator (if any) matched the target thread. Returns
+ * `"title"` for a `span[title=...]` hit, `"text"` for a `hasText` hit, and
+ * `null` when NEITHER matched. `null` means "do not open anything" — there is
+ * deliberately NO first-row fallback: clicking whichever thread happens to be
+ * first would open the wrong conversation, and the caller would then message or
+ * scrape the wrong contact (bug H4).
+ */
+export function resolveBetaThreadMatch(input: {
+  hasTitleMatch: boolean;
+  hasTextMatch: boolean;
+}): "title" | "text" | null {
+  if (input.hasTitleMatch) {
+    return "title";
+  }
+  if (input.hasTextMatch) {
+    return "text";
+  }
+  return null;
+}
+
+/**
+ * Whitespace/case-insensitive, bidirectional containment test between an opened
+ * conversation's header text and the intended recipient's display name. Mirrors
+ * the LinkedIn adapter's `normalizeIdentity` + `includes` identity match. Empty
+ * inputs return `false` (cannot confirm a match), so the caller must decide
+ * whether an empty/unscrapeable header is fatal.
+ */
+export function betaIdentityMatch(
+  headerText: string | null | undefined,
+  displayName: string | null | undefined
+): boolean {
+  const normalize = (value: string | null | undefined): string =>
+    (value ?? "").replace(/\s+/g, " ").trim().toLowerCase();
+  const header = normalize(headerText);
+  const target = normalize(displayName);
+  if (!header || !target) {
+    return false;
+  }
+  return header.includes(target) || target.includes(header);
+}
+
 interface BetaAdapterDependencies {
   platform: PlatformName;
   screenshotDir: string;
@@ -123,7 +165,7 @@ export class BetaAdapter implements PlatformAdapter {
     });
   }
 
-  private async openThreadFromInbox(page: Page, selectors: SelectorRegistry, thread: ThreadStub): Promise<void> {
+  private async openThreadFromInbox(page: Page, selectors: SelectorRegistry, thread: ThreadStub): Promise<string> {
     await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
     await this.waitForInboxReady(page, selectors, 12000);
 
@@ -131,21 +173,85 @@ export class BetaAdapter implements PlatformAdapter {
     const byTitle = page
       .locator(`${selectors.thread_item} span[title="${escapedName}"]`)
       .first();
-
-    if ((await byTitle.count()) > 0) {
-      await humanClick(page, byTitle, { timeout: 10000 });
-      return;
-    }
-
     const byText = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
-    if ((await byText.count()) > 0) {
-      await humanClick(page, byText, { timeout: 10000 });
-      return;
+
+    const match = resolveBetaThreadMatch({
+      hasTitleMatch: (await byTitle.count()) > 0,
+      hasTextMatch: (await byText.count()) > 0
+    });
+
+    // No first-row fallback. Clicking whichever thread happens to be first would
+    // open the WRONG conversation, and the caller (sendMessage / fetchThreadMessages)
+    // would then message or scrape that contact. A name-miss is a hard failure so
+    // the scan/send is routed as THREAD_NOT_FOUND instead of silently hitting
+    // someone else (bug H4).
+    if (!match) {
+      throw new AdapterFailure(`${this.platform} thread not found in inbox`, {
+        kind: "THREAD_NOT_FOUND",
+        platform: this.platform,
+        stage: "open_thread",
+        platformThreadId: thread.platformThreadId,
+        details: {
+          targetDisplayName: thread.displayName,
+          platformThreadId: thread.platformThreadId
+        }
+      });
     }
 
-    const byFallback = page.locator(selectors.thread_item).first();
-    if ((await byFallback.count()) > 0) {
-      await humanClick(page, byFallback, { timeout: 10000 });
+    await humanClick(page, match === "title" ? byTitle : byText, { timeout: 10000 });
+    return thread.displayName;
+  }
+
+  private async readConversationHeaderText(page: Page, selectors: SelectorRegistry): Promise<string> {
+    return page
+      .evaluate(
+        ({ messageContainer }) => {
+          const clean = (value: string | null | undefined): string => (value ?? "").replace(/\s+/g, " ").trim();
+          const header =
+            (document.querySelector("header") as HTMLElement | null) ??
+            (document.querySelector(`${messageContainer} header`) as HTMLElement | null);
+          if (!header) {
+            return "";
+          }
+          return (
+            clean(header.querySelector("span[title]")?.getAttribute("title")) ||
+            clean(header.querySelector("h1, h2, h3")?.textContent) ||
+            clean(header.innerText)
+          );
+        },
+        { messageContainer: selectors.message_container }
+      )
+      .catch(() => "");
+  }
+
+  private async verifyOpenedConversationMatches(
+    page: Page,
+    selectors: SelectorRegistry,
+    thread: ThreadStub,
+    expectedName: string
+  ): Promise<void> {
+    const target = expectedName || thread.displayName;
+    if (!target) {
+      return;
+    }
+    const headerText = await this.readConversationHeaderText(page, selectors);
+    // Only fail on a POSITIVE mismatch: the header was scrapeable AND its name is
+    // disjoint from the target. An empty/unscrapeable header is NOT treated as a
+    // mismatch — IG/TikTok ship hashed, frequently-changing header markup, so a
+    // strict requirement would block legitimate sends. The hard wrong-recipient
+    // guarantee comes from the no-first-row-fallback throw above.
+    if (headerText && !betaIdentityMatch(headerText, target)) {
+      throw new AdapterFailure(`${this.platform} opened the wrong conversation`, {
+        kind: "THREAD_NOT_FOUND",
+        platform: this.platform,
+        stage: "open_thread",
+        platformThreadId: thread.platformThreadId,
+        details: {
+          targetDisplayName: target,
+          actualHeaderText: headerText,
+          platformThreadId: thread.platformThreadId
+        }
+      });
     }
   }
 
@@ -408,14 +514,18 @@ export class BetaAdapter implements PlatformAdapter {
     const page = await this.getPage();
 
     try {
+      let expectedName = thread.displayName;
       if (thread.threadUrl) {
         await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
       } else {
-        await this.openThreadFromInbox(page, selectors, thread);
+        expectedName = await this.openThreadFromInbox(page, selectors, thread);
       }
 
       await this.waitForConversationReady(page, selectors);
       await this.throwIfAuthRequired(page, "sendMessage");
+      // Guard against typing into the wrong thread: confirm the opened
+      // conversation header matches the intended recipient before composing.
+      await this.verifyOpenedConversationMatches(page, selectors, thread, expectedName);
       const composer = page.locator(selectors.composer_input).first();
       await humanClick(page, composer);
       await humanType(page, composer, text, { alreadyFocused: true, reading: null }).catch(async () => {
