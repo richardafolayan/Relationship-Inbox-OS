@@ -5669,6 +5669,21 @@ app.post("/control/thread/:threadId/draft", asyncRoute(async (req, res) => {
   res.json({ status: "ok" });
 }));
 
+// Delete the persisted reply draft for a thread (issue #486 / pilot
+// R-0067). The save route above is an upsert with no inverse, so once
+// an operator saved a draft it reloaded into the composer on every
+// visit with no way to remove it. deleteMany is idempotent — a thread
+// with no draft is a harmless no-op rather than a 404 — and clears any
+// stray duplicate rows (the save path uses findFirst, not a unique key).
+app.post("/control/thread/:threadId/delete-draft", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "delete a draft", kind: "thread-mutation" })) return;
+
+  await prisma.draft.deleteMany({ where: { threadId } });
+
+  res.json({ status: "ok" });
+}));
+
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "mark the thread handled", kind: "thread-mutation" })) return;

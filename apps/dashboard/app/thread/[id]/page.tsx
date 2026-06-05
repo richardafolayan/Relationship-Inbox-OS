@@ -474,6 +474,12 @@ export default function ThreadPage() {
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
   const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
+  // Whether a draft is persisted in the DB for this thread (issue #486 /
+  // pilot R-0067). Drives the "Delete draft" button — it only appears
+  // when there's actually a saved draft to remove, never for an AI
+  // predraft (no DB row) or unsaved typing. Set on load from the fetched
+  // draft, after a successful Save, and cleared after delete / on switch.
+  const [hasSavedDraft, setHasSavedDraft] = useState(false);
   // Operator voice profile — its aiHelpLevel decides which AI affordances
   // this page surfaces. The ref mirror lets `refresh` (a useCallback that
   // must not depend on profile) read the latest value when deciding
@@ -736,6 +742,10 @@ export default function ThreadPage() {
         }
         return "";
       });
+      // Track DB-persisted draft presence independently of the composer
+      // text (the operator may have typed over it), so "Delete draft"
+      // reflects what's actually saved server-side.
+      setHasSavedDraft(Boolean((threadResult.value.draft ?? "").trim()));
       setError(null);
     } else {
       const message =
@@ -767,6 +777,7 @@ export default function ThreadPage() {
   useEffect(() => {
     setComposer("");
     setComposerSource("empty");
+    setHasSavedDraft(false);
     setComposeIntent("");
     setComposeDraft("");
     setComposeError(null);
@@ -2470,10 +2481,36 @@ export default function ThreadPage() {
                 action={() =>
                   apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
                 }
+                onSuccess={() => setHasSavedDraft(composer.trim().length > 0)}
                 className="px-3 py-1.5 text-[12px]"
               >
                 Save draft
               </ActionButton>
+              {/* Delete the persisted draft (issue #486 / pilot R-0067).
+                  Only shown when a draft is actually saved server-side —
+                  the AI predraft has its own local-only "Discard" below.
+                  Clearing the composer + hiding this button is the success
+                  signal; the inline "Deleting…" covers the in-flight state. */}
+              {hasSavedDraft ? (
+                <ActionButton
+                  variant="ghost"
+                  runningLabel="Deleting…"
+                  doneLabel="Deleted"
+                  onError={setError}
+                  action={() =>
+                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {})
+                  }
+                  onSuccess={() => {
+                    setComposer("");
+                    setComposerSource("empty");
+                    setHasSavedDraft(false);
+                  }}
+                  title="Delete the saved draft for this thread"
+                  className="px-3 py-1.5 text-[12px]"
+                >
+                  Delete draft
+                </ActionButton>
+              ) : null}
               {/* Clear-thread cluster: wrapped so the guided tour can spotlight
                   snooze + mark-done + archive together (data-demo-target). */}
               <div data-demo-target="thread-actions" className="flex items-center gap-2">
