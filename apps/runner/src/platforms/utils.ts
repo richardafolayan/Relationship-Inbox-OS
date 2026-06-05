@@ -7,6 +7,7 @@ export type AdapterFailureKind =
   | "AUTH_REQUIRED"
   | "SELECTOR_MISMATCH"
   | "THREAD_FETCH_FAILED"
+  | "THREAD_NOT_FOUND"
   | "NAVIGATION_FAILED";
 
 export type AdapterStage = "connect" | "navigate" | "collect_threads" | "open_thread" | "parse" | "persist";
