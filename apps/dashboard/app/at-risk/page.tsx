@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import type { InboxResponse, InboxRow } from "@/lib/types";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
+import { nextFocusIndexAfterMarkHandled } from "@/lib/at-risk-focus";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -230,7 +231,11 @@ export default function AtRiskPage() {
       setFocusError,
       refresh
     );
-    advance();
+    // Do NOT advance(): archiving triggers refresh(), which drops the handled
+    // thread from sortedAtRisk and slides the next thread into the current
+    // focusIndex. Advancing as well would skip that next thread.
+    setFocusError(null);
+    setFocusIndex((i) => nextFocusIndexAfterMarkHandled(i));
   };
 
   const runBatch = async (
