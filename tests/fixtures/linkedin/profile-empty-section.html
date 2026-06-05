@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Synthetic LinkedIn profile (heading present, no parseable entries) | LinkedIn</title>
+    <style>
+      body {
+        margin: 16px;
+        font-family: Arial, sans-serif;
+      }
+      section {
+        border: 1px solid #d1d5db;
+        padding: 8px;
+        margin-bottom: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <!-- The Experience heading is present but the per-entry markup has
+           shifted such that no <li> row carries an aria-hidden line. The
+           parser must report presence.experience = true with an empty
+           experience array (fail-loud), never fabricate entries. -->
+      <section>
+        <h2><span aria-hidden="true">Experience</span></h2>
+        <div class="opaque-shell">
+          <div class="row">Senior Software Engineer</div>
+          <div class="row">Acme Corporation</div>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

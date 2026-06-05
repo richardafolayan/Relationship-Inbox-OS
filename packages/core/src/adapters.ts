@@ -27,5 +27,24 @@ export interface PlatformAdapter {
    * leave this unset; callers must check before invoking.
    */
   openProfileUrl?(url: string, displayName?: string): Promise<void>;
+  /**
+   * Optional. Returns persisted `platformMessageKey`s for outbound
+   * messages the platform retroactively considers undelivered — e.g.
+   * iMessage rows whose `chat.db.error` column flipped non-zero minutes
+   * after the post-send poll passed. The scan loop hard-deletes the
+   * matching Message rows so the thread reflects what the recipient
+   * actually saw (i.e. nothing). Adapters without an async-failure
+   * signal leave this unset.
+   */
+  collectRetractedOutboundKeys?(thread: ThreadStub): Promise<string[]>;
+  /**
+   * Optional. Adds an emoji reaction to a single message identified by its
+   * `platformMessageKey`. Used by the dashboard's message-bubble reaction
+   * affordance (issue #408). Resolves once the reaction is confirmed applied,
+   * throws an AdapterFailure otherwise. Platforms without a reaction surface
+   * (or not yet implemented) leave this unset; callers must check before
+   * invoking.
+   */
+  reactToMessage?(thread: ThreadStub, platformMessageKey: string, emoji: string): Promise<void>;
   closeSession(reason?: string): Promise<void>;
 }

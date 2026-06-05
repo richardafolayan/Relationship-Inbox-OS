@@ -58,7 +58,6 @@ enum EnrichmentJobStatus {
   RUNNING
   DONE
   FAILED
-  DEFERRED
 }
 
 model Platform {
@@ -76,6 +75,12 @@ model Platform {
 model Person {
   id          String   @id @default(cuid())
   displayName String
+  // Provenance for displayName: "auto" when the row scanner set it from a
+  // platform-authoritative source (e.g. an iMessage group's chat name),
+  // "manual" when the operator confirmed/edited it via the dashboard, null
+  // for legacy rows. Auto-refresh never overwrites a manual value — mirrors
+  // profileUrlSource below.
+  displayNameSource String?
   // For platforms that don't expose a real name (iMessage stores phone
   // numbers / emails), we run a heuristic over outbound greetings ("Hi
   // Marianne") to guess one. Surfaced in the dashboard as a "Maybe …"
@@ -104,6 +109,24 @@ model Person {
   // "not_found", "timeout", "auth_required"). Cleared on the next successful
   // run. Surfaced in the dashboard footer when present.
   enrichmentFailedReason  String?
+  // Birthday sourced from the operator's macOS Contacts (AddressBook), kept
+  // current by the birthday-sync service. Stored as zero-padded "MM-DD" so the
+  // upcoming-birthdays lookup is a pure month/day comparison independent of
+  // year. `birthYear` holds the four-digit year when the contact card carries
+  // one (most do); null for year-less cards. Both stay null until a sync run
+  // matches this Person to a contact by phone or email. The macOS Contacts
+  // card is the source of truth; these are never edited from the dashboard.
+  birthday                String?
+  birthYear               Int?
+  // Operator-pinned "favourite" contact (pilot feedback R-0066 / #483). When
+  // set, this person's conversations float to the top of the Inbox section
+  // and the Today queue they already belong to — favourites are prioritised
+  // WITHIN the existing chronological / risk order, never on top of it, and
+  // the Inbox can filter to favourites only. Stored as a nullable timestamp
+  // (set = favourited, null = not) mirroring archivedAt / snoozedUntil, so a
+  // future "recently favourited" sort is free. Toggled from the dashboard via
+  // POST /control/person/:id/favourite; never written by scans.
+  favouritedAt            DateTime?
   createdAt   DateTime @default(now())
   updatedAt   DateTime @updatedAt
 
@@ -142,7 +165,7 @@ model PersonEnrichment {
   // expose it (Recruiter/limited profiles, or when the badge fails to parse).
   followersCount    Int?
   // Cached AI output, regenerated when the cache key (a hash over the
-  // enrichment payload + Richard's self-profile hash) no longer matches.
+  // enrichment payload + the operator's self-profile hash) no longer matches.
   // Including the self-profile hash means a one-off self-refresh
   // automatically invalidates every dependent summary and starter set.
   summary           String?
@@ -201,12 +224,27 @@ model Thread {
   rollingSummary    String?
   whatTheyWant      String?
   openLoopsJson     String?
+  // Compressed Reply Brief that drives the thread right rail. JSON blob
+  // shaped like `ReplyBrief` (packages/core/src/types.ts): a where-it-stands
+  // trace, an on-you obligation read, required / optional / handled point
+  // classifications, and optional fuller-context / tone-steer fields.
+  // Generated in the same AI call as the rolling summary so it stays
+  // internally consistent. Nullable for older rows that pre-date the field
+  // — the dashboard self-heals by deriving a safe fallback brief from
+  // `rollingSummary` / `whatTheyWant` / `openLoopsJson` until the next
+  // scan or Reassess regenerates the real brief.
+  replyBriefJson    String?
   // List of open-loop strings the operator has dismissed via the thread-pane
   // checkbox. Filtered out of the visible openLoops surface in the dashboard
   // so re-summarisation can still recompute openLoopsJson without re-showing
   // loops the operator has already handled.
   dismissedOpenLoopsJson String?
   toneNotesJson     String?
+  // AI-extracted durable facts worth remembering about the contact — exams,
+  // trips, interviews, life events. JSON array of { note, date } where date
+  // is an ISO YYYY-MM-DD string or null when no specific date is known.
+  // Re-derived from the transcript on every summary refresh, like openLoops.
+  rememberJson      String?
   // Set the first time we walk the thread's message list to the top and
   // persist every historical message. Subsequent scans only fetch the delta
   // (messages newer than `lastMessageAt`). Null means full-history backfill
@@ -235,7 +273,7 @@ model Thread {
 
   // Direction + text of the most-recent message in the thread, irrespective
   // of who sent it. lastMessagePreview historically only tracked the latest
-  // INBOUND, so once Richard replied the inbox row preview was stale. These
+  // INBOUND, so once the operator replied the inbox row preview was stale. These
   // are written by send.ts (on outbound) and scan-queue.ts (on persist of
   // any new message). The dashboard prefixes outbound previews with "You: "
   // matching LinkedIn's convention.
@@ -247,11 +285,58 @@ model Thread {
   // in the Archived view. Unarchive flips this back to null.
   archivedAt DateTime?
 
+  // Set when the operator snoozes a thread. Threads with snoozedUntil in the
+  // future are hidden from active views (Today / Inbox / At Risk) and
+  // resurface automatically once the timestamp passes. Cleared on unsnooze.
+  snoozedUntil DateTime?
+
+  // Issue #392. Operator-supplied "remind me to…" text attached to a
+  // snooze, parsed from natural language ("remind me to follow up next
+  // Tuesday"). When set, the thread surfaces it as a "Reminder: <text>"
+  // banner so the operator remembers WHY the thread was snoozed when it
+  // returns. Cleared on manual unsnooze, on send, or when the operator
+  // dismisses the banner. Never sent to the contact.
+  reminderText String?
+
   // Coarse classification: "outreach" (cold pitches, sales, recruitment,
   // marketing, InMails) vs "genuine" (peer chats, ongoing relationships).
   // Set by the AI service on first scan-time persist of a thread; null until
   // classified. Used by the Inbox filter dropdown to hide outreach noise.
   category String?
+
+  // Conversation-ending verdict (#287 phase 2.5). "closed" means the AI
+  // judges the last inbound to be a natural endpoint (thanks / ok / talk
+  // soon / acknowledgement) with no implicit ask. "open" means the AI
+  // expects the operator to reply. Null while unclassified or when the
+  // AI provider was unavailable. The dashboard's lightweight heuristic
+  // still runs alongside this field as a fast first pass; the AI verdict
+  // is only consulted for the ambiguous middle the heuristic does not
+  // catch.
+  //
+  // The cache key is sha256 of (last-inbound text + last-inbound
+  // timestamp); when the inbound changes the verdict is recomputed.
+  closedStatus         String?
+  // One-line "why" caption (#287 phase 2.5 follow-up). The dashboard
+  // renders it alongside the row when an operator unhides set-aside
+  // threads via "Show all", so the verdict is not a black box.
+  closedStatusReason   String?
+  closedStatusCacheKey String?
+
+  // Reconnect ranking (#287 phase 3.5). When a LinkedIn thread ages out
+  // of the active inbox it surfaces on /reconnect. The dashboard ranks
+  // candidates using deterministic relationship signals (outbound count,
+  // total turns, days dormant) for free, then layers this optional AI
+  // score on top: a 0-100 integer for how worth-reaching-out the
+  // particular relationship feels given the conversation arc, plus a
+  // short reason rendered as a quiet "why" alongside the row. Null
+  // until classified or when the AI provider was unavailable.
+  //
+  // Cache key is sha256 of (lastMessageAt + outboundCount + lastInboundText)
+  // so the score re-evaluates only when the relationship state shifts.
+  reconnectScore          Int?
+  reconnectScoreReason    String?
+  reconnectScoreCacheKey  String?
+
   createdAt         DateTime     @default(now())
   updatedAt         DateTime     @updatedAt
 
@@ -275,19 +360,161 @@ model Message {
   senderName         String?
   rawJson            String?
   attachmentsJson    String?
+  audioTranscription MessageAudioTranscription?
   // Provenance for OUT messages. "automation" when send.ts (this runner)
   // wrote it. Null on inbound messages and on OUT messages that were only
   // observed via scan — those could have been sent from the LinkedIn web
   // UI directly, from another device, or from a previous version of this
   // system, so we cannot honestly claim "Sent via automation" for them.
   sentVia            String?
+  /**
+   * App-level threading: when the operator hits "Reply" in the dashboard
+   * focused-thread view, we set this to the parent Message.id (cuid). The
+   * message itself sends as a normal text bubble via the existing
+   * AppleScript verb — no native iMessage thread linkage on the wire — so
+   * the recipient on Messages.app sees a plain bubble. Dashboard users
+   * see the threading because we render off this column (alongside the
+   * Apple-native chat.db `thread_originator_guid` we stash on rawJson).
+   *
+   * Nullable: standalone messages and Apple-native replies (where the
+   * parent is captured via rawJson.replyToGuid → platformMessageKey)
+   * leave this null.
+   */
+  replyToMessageId   String?
   createdAt          DateTime  @default(now())
 
   thread Thread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
   @@unique([threadId, platformMessageKey])
   @@index([threadId, timestamp])
+  @@index([replyToMessageId])
+  // Serves the inbox KPI queries that scan by time across all threads: the
+  // 7-day reply-latency findMany (timestamp range + chronological sort) and
+  // the "sent today" OUT count. Without a timestamp-leading index both
+  // full-scan the 150k-row messages table on every inbox poll.
+  @@index([timestamp, direction])
   @@map("messages")
+}
+
+// Opt-in transcription of voice / audio attachments on inbound messages.
+// One row per Message; created by the runner's transcription service after
+// a voice-note attachment is detected during scan persist. Status moves
+// through pending -> transcribed | failed | skipped and never retries
+// automatically: a stable audioFingerprint (platform message key plus the
+// attachment guid or url hash) dedupes re-scans against the same audio.
+//
+// Transcripts flow into every AI context builder (summary, reply brief,
+// suggested replies, closed/open classifier) via a single helper in
+// services/ai.ts so the AI reasons about voice content the same way it
+// reads text. The thread UI surfaces the transcript quietly under the
+// existing audio control.
+//
+// Gated entirely behind AUDIO_TRANSCRIPTION_ENABLED — when off, no rows
+// are written and the AI / UI behave exactly as before. See the audio
+// transcription section in docs/reference.md.
+model MessageAudioTranscription {
+  id               String   @id @default(cuid())
+  messageId        String   @unique
+  message          Message  @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  // The attachment guid (iMessage) or per-message attachment index that
+  // produced this transcript. Stored so the dashboard can match a
+  // transcript back to its specific attachment when a message carries
+  // more than one. Nullable when the source attachment lacks a stable id.
+  attachmentId     String?
+  // Stable dedup key. Today: `${platformMessageKey}|${attachmentId ?? "idx-N"}`.
+  // Lets re-scans short-circuit before they spend an OpenAI call on
+  // already-known audio. Globally unique so a single retry path covers
+  // both same-message rescans and cross-thread reuse.
+  audioFingerprint String   @unique
+  // pending | transcribed | failed | skipped
+  status           String
+  // The selected transcript: the best one we've produced so far across
+  // all tiers + refinement. The rest of the app reads this column, so
+  // a fresh tier upgrade or a successful refinement simply rewrites it
+  // and the AI / UI consumers see the new text transparently.
+  transcript       String?
+  provider         String?
+  model            String?
+  language         String?
+  durationSeconds  Int?
+  // Short, safe human-readable error message; never the raw OpenAI body.
+  errorMessage     String?
+
+  // Progressive transcription bookkeeping (PR #382). Each tier
+  // (fast | standard | max | refinement) is a separate row in
+  // MessageAudioTranscriptionAttempt; these fields capture which one
+  // currently owns `transcript` so the selector and UI never have to
+  // re-derive it.
+  selectedTier         String?  // "fast" | "standard" | "max" | "refinement" | null when nothing selected
+  selectedModel        String?  // basename of the model that produced the selected transcript
+  selectedProvider     String?  // "local-whisper" | "openai-text-refiner"
+
+  // GPT-5 nano text-refinement output (env-gated, off by default).
+  // Stored alongside `transcript` so we can always inspect what the
+  // refiner did vs the raw local model attempts in
+  // MessageAudioTranscriptionAttempt.
+  refinedTranscript    String?
+  refinementModel      String?
+  refinementConfidence String?  // "low" | "medium" | "high" | null
+  // The full sanitised JSON payload from the refiner (changesMade,
+  // uncertainPhrases, etc.) so the dashboard can render diagnostics on
+  // demand. Kept as a string so SQLite + migrations stay simple.
+  refinementJson       String?
+
+  // Set true when a higher-tier transcript replaces an earlier one
+  // after a thread has already been summarised. The Reassess action
+  // clears this; we never auto-bill AI calls from here.
+  needsAiRefresh       Boolean  @default(false)
+
+  attempts         MessageAudioTranscriptionAttempt[]
+
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([status])
+  @@index([needsAiRefresh])
+  @@map("message_audio_transcriptions")
+}
+
+// One row per (transcription, tier, model) attempt. Lets us preserve
+// the raw output of every local Whisper model AND the refiner without
+// destroying earlier passes when a better one lands. The dashboard
+// "Refined from local transcript" tooltip and the future debug surface
+// both read from here.
+//
+// Crucially: a failed/empty higher tier writes a row here but does NOT
+// modify the selected transcript on MessageAudioTranscription. See
+// transcription-service.ts selectBestTranscript.
+model MessageAudioTranscriptionAttempt {
+  id              String   @id @default(cuid())
+  transcriptionId String
+  transcription   MessageAudioTranscription @relation(fields: [transcriptionId], references: [id], onDelete: Cascade)
+  // "fast" | "standard" | "max" | "refinement". Strings (not enum) so a
+  // future tier can be added without a migration.
+  tier            String
+  // "local-whisper" | "openai-text-refiner".
+  provider        String
+  model           String
+  // "transcribed" | "failed" | "skipped" | "pending". Empty-output rows
+  // are stored as "skipped" with errorMessage="empty_output" so the
+  // selector treats them the same as unrun.
+  status          String
+  transcript      String?
+  durationMs      Int?
+  // Short, safe error code (e.g. "local_whisper_empty_output"); never
+  // a raw API body.
+  errorMessage    String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  // One attempt per (transcription, tier, model) — re-running the same
+  // model is a no-op unless the operator manually clears the row first.
+  // This is what stops a scan loop from spending money on identical
+  // refinement calls.
+  @@unique([transcriptionId, tier, model])
+  @@index([transcriptionId])
+  @@index([status])
+  @@map("message_audio_transcription_attempts")
 }
 
 model Draft {
@@ -346,6 +573,14 @@ model SendRequest {
   // (iMessage today; LinkedIn cap at text-only). Cleaned up by the send
   // worker after the row reaches SENT or FAILED.
   attachmentsJson String?
+  /**
+   * App-level threading: when the operator hits "Reply" in the dashboard
+   * focused-thread view, the SendRequest carries the parent Message.id
+   * (cuid). The send worker copies it onto the resulting Message row so
+   * the dashboard renders the new bubble inline under its parent on the
+   * next refresh. Null on regular standalone sends.
+   */
+  replyToMessageId String?
   createdAt    DateTime          @default(now())
   updatedAt    DateTime          @updatedAt
 

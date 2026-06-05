@@ -1,10 +1,12 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Loader2, RefreshCw, X } from "lucide-react";
+import { Loader2, RefreshCw, Star, X } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import { setFavourite } from "@/lib/favourites";
 import type { PersonDetailResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
+import { cn } from "@/lib/utils";
 import { ProfileSections } from "./profile-sections";
 
 interface FriendshipSummary {
@@ -32,15 +34,38 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   const [askQuestion, setAskQuestion] = useState("");
   const [askAnswer, setAskAnswer] = useState<string | null>(null);
   const [asking, setAsking] = useState(false);
+  // Optimistic favourite override (R-0066 / #483). null = follow the loaded
+  // detail; a boolean wins until the toggle settles, reverting on failure.
+  const [favOverride, setFavOverride] = useState<boolean | null>(null);
+  const [favSaving, setFavSaving] = useState(false);
 
   useEffect(() => {
     if (!open || !personId) return;
+    // Drop the response if the drawer is closed (or switched to a
+    // different person) before the fetch resolves — otherwise a slow
+    // load can briefly flash stale data when the operator reopens the
+    // drawer for a different contact.
+    let cancelled = false;
     setLoading(true);
     setError(null);
+    // Clear any stale optimistic favourite from a previous contact.
+    setFavOverride(null);
     apiGet<PersonDetailResponse>(`/runner/data/person/${personId}`)
-      .then((data) => setDetail(data))
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load profile"))
-      .finally(() => setLoading(false));
+      .then((data) => {
+        if (cancelled) return;
+        setDetail(data);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(err instanceof Error ? err.message : "Failed to load profile");
+      })
+      .finally(() => {
+        if (cancelled) return;
+        setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [open, personId]);
 
   // Reset transient state when the drawer closes so the next open starts clean.
@@ -52,8 +77,26 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       setFriendshipSummary(null);
       setAskQuestion("");
       setAskAnswer(null);
+      setFavOverride(null);
     }
   }, [open]);
+
+  const favourite = favOverride ?? detail?.person.favourite ?? false;
+  const toggleFavourite = async () => {
+    if (!personId) return;
+    const next = !favourite;
+    setFavOverride(next);
+    setFavSaving(true);
+    setError(null);
+    try {
+      await setFavourite(personId, next);
+    } catch (err) {
+      setFavOverride(!next);
+      setError(err instanceof Error ? err.message : "Failed to update favourite");
+    } finally {
+      setFavSaving(false);
+    }
+  };
 
   const askAboutPerson = async () => {
     if (!personId) return;
@@ -143,6 +186,22 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
         <div className="mb-4 flex items-center justify-between">
           <p className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">Profile</p>
           <div className="flex items-center gap-2">
+            {/* Favourite toggle (R-0066 / #483). Pins the contact so their
+                threads float to the top of the Inbox / Today. */}
+            <Button
+              variant="quiet"
+              disabled={!detail || favSaving}
+              onClick={() => void toggleFavourite()}
+              aria-pressed={favourite}
+              className={cn(favourite ? "text-accent" : "")}
+            >
+              <Star
+                className="h-[14px] w-[14px]"
+                strokeWidth={1.6}
+                fill={favourite ? "currentColor" : "none"}
+              />
+              {favourite ? "Favourited" : "Favourite"}
+            </Button>
             <Button variant="quiet" disabled={refreshing || !detail?.person.profileUrl} onClick={rescan}>
               {refreshing ? (
                 <Loader2 className="h-[14px] w-[14px] animate-spin" />

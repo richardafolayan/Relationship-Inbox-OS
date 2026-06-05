@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { decideOutboundDedup } from "../apps/runner/dist/services/scan-queue.js";
+import {
+  decideOutboundDedup,
+  normalizeOutboundTextForDedup
+} from "../apps/runner/dist/services/scan-queue.js";
 
 // `decideOutboundDedup` reconciles the two paths that persist outbound
 // messages — send.ts at send time (keyed by stableHash(sentAt|text)) and
@@ -164,4 +167,85 @@ test("multiple twins: takes the first match (find semantics)", () => {
   // valid actions to take. The persist loop will run again on the next
   // message (or on a follow-up scan) and clean up the second one.
   assert.equal(decision.twinId, "msg-send-time");
+});
+
+// --- Lanre iMessage case: whitespace-divergent twin ----------------------
+// send.ts persists the operator's raw text (a dictation artifact left a
+// leading space on a wrapped line); the scan parser re-reads the same message
+// from chat.db and stores cleanMessageText output, which trims each line. The
+// two rows then differ by exactly one space, which an exact-equality twin
+// check misses — the user saw two identical 17:15 bubbles, one tagged "sent
+// via automation". These pin the whitespace-insensitive dedup.
+
+const rawSendTimeText =
+  "Okay, so I was just thinking of this idea, right? It could feel like they're not being heard.\n So that if I put a time block, they get a nudge.";
+const cleanedScanText =
+  "Okay, so I was just thinking of this idea, right? It could feel like they're not being heard.\nSo that if I put a time block, they get a nudge.";
+
+test("Lanre case: raw send-time twin still matches the cleaned scan text (migrate)", () => {
+  // Sanity: the two texts really do differ (so this isn't a trivial pass).
+  assert.notEqual(rawSendTimeText, cleanedScanText);
+  const decision = decideOutboundDedup({
+    newKey: "imessage-guid-canonical",
+    newTimestamp: new Date("2026-06-05T16:15:20Z"),
+    newText: cleanedScanText,
+    existingTwins: [
+      {
+        id: "msg-send-time-automation",
+        platformMessageKey: "stable-hash-send-time",
+        text: rawSendTimeText,
+        timestamp: new Date("2026-06-05T16:15:20Z")
+      }
+    ],
+    existingCanonical: null
+  });
+  assert.deepEqual(decision, {
+    kind: "migrate_twin_key",
+    twinId: "msg-send-time-automation"
+  });
+});
+
+test("Lanre case: with the guid canonical already present, drop the whitespace-divergent twin", () => {
+  const decision = decideOutboundDedup({
+    newKey: "imessage-guid-canonical",
+    newTimestamp: new Date("2026-06-05T16:15:20Z"),
+    newText: cleanedScanText,
+    existingTwins: [
+      {
+        id: "msg-send-time-automation",
+        platformMessageKey: "stable-hash-send-time",
+        text: rawSendTimeText,
+        timestamp: new Date("2026-06-05T16:15:20Z")
+      }
+    ],
+    existingCanonical: {
+      id: "msg-guid-canonical",
+      platformMessageKey: "imessage-guid-canonical",
+      text: cleanedScanText,
+      timestamp: new Date("2026-06-05T16:15:20Z")
+    }
+  });
+  assert.deepEqual(decision, { kind: "delete_twin", twinId: "msg-send-time-automation" });
+});
+
+test("genuinely different text is still NOT collapsed by whitespace normalization", () => {
+  // Guard against over-eager dedup: collapsing whitespace must not make two
+  // distinct messages look identical.
+  const decision = decideOutboundDedup({
+    ...baseInput,
+    existingTwins: [{ ...sendTimeRow, text: "A completely different reply" }]
+  });
+  assert.equal(decision.kind, "no_op");
+});
+
+test("normalizeOutboundTextForDedup collapses whitespace runs and trims", () => {
+  assert.equal(normalizeOutboundTextForDedup("heard.\n So that"), "heard. So that");
+  assert.equal(normalizeOutboundTextForDedup("heard.\nSo that"), "heard. So that");
+  assert.equal(normalizeOutboundTextForDedup("  hi   there \t\n"), "hi there");
+  assert.equal(normalizeOutboundTextForDedup("same"), "same");
+  // The two real Lanre payloads normalize to the same string.
+  assert.equal(
+    normalizeOutboundTextForDedup(rawSendTimeText),
+    normalizeOutboundTextForDedup(cleanedScanText)
+  );
 });

@@ -1,0 +1,10 @@
+{
+  "_comment": "Copy this file to operator-profile.seed.json (gitignored) and fill in your own voice. Run: npm run seed:operator-profile. It only writes when the stored profile is still empty or a placeholder; pass --force to overwrite a real one. preferredStyle is one of warm|direct|casual|thoughtful|concise (or \"\"); aiHelpLevel is memory_only|writing_support|full_drafts.",
+  "displayName": "",
+  "about": "",
+  "interests": "",
+  "commonPhrases": "",
+  "avoidedPhrases": "",
+  "preferredStyle": "",
+  "aiHelpLevel": "writing_support"
+}

@@ -1,9 +1,11 @@
-// Smoke test for the composeInVoice few-shot calibration.
+// Smoke test for composeInVoice.
 //
-// Hits the four acceptance scenarios from the spec and prints the AI's
-// output. Run locally with the same env the runner uses (OPENAI_API_KEY
-// or Z.AI key configured). Output is pasted into the PR description so
-// Richard can sanity-check the voice match before merging.
+// Hits four common compose scenarios and prints the AI's output. Run
+// locally with the same env the runner uses (OPENAI_API_KEY or Z.AI key
+// configured). Output can be pasted into the PR description so a reviewer
+// can sanity-check the voice match before merging. Note: these scenarios
+// pass no operator voice profile, so the AI uses its neutral fallback
+// voice — set one via the stub if you want to exercise a configured voice.
 //
 //   pnpm --filter runner exec tsx src/scripts/compose-voice-smoke.ts
 
@@ -74,7 +76,7 @@ const scenarios: Scenario[] = [
       { direction: "OUT", text: "Hey Reiss, saw you moved into sales recently, how's it going?", timestamp: daysAgo(40) },
       {
         direction: "IN",
-        text: "Hey Richard! It's been good actually, steep learning curve but I'm enjoying it. Mostly outbound stuff for a B2B SaaS, lots of cold calls. How have you been?",
+        text: "Hey! It's been good actually, steep learning curve but I'm enjoying it. Mostly outbound stuff for a B2B SaaS, lots of cold calls. How have you been?",
         timestamp: daysAgo(35)
       }
     ]
@@ -87,13 +89,13 @@ const scenarios: Scenario[] = [
     threadMessages: [
       {
         direction: "IN",
-        text: "Hey Richard, just wanted to say I really enjoyed your latest post about delegation. Resonated a lot.",
+        text: "Hey, just wanted to say I really enjoyed your latest post about delegation. Resonated a lot.",
         timestamp: daysAgo(1)
       }
     ]
   },
   {
-    label: "3. 60+ day gap (late-reply bucket should fire in his voice, not templated)",
+    label: "3. 60+ day gap (late-reply bucket should fire in the operator's voice, not templated)",
     intent: "Apologise for the delay, say things have been good, ask how he's been.",
     displayName: "James",
     voiceSamples: ["Hey man, yhh sounds good, lets do it", "Appreciate you, will catch you soon"],
@@ -101,7 +103,7 @@ const scenarios: Scenario[] = [
       { direction: "OUT", text: "Yeah let's grab a coffee soon man", timestamp: daysAgo(80) },
       {
         direction: "IN",
-        text: "Hey Richard, hope you're well! Was thinking about you the other day, how's everything been? Still working on Creality Studio?",
+        text: "Hey, hope you're well! Was thinking about you the other day, how's everything been? Still working on that project?",
         timestamp: daysAgo(70)
       }
     ]
@@ -114,7 +116,7 @@ const scenarios: Scenario[] = [
     threadMessages: [
       {
         direction: "IN",
-        text: "Hey Richard, I help agencies like yours hit page 1 of Google with proven SEO systems. Got 5 mins for a quick call this week?",
+        text: "Hey, I help agencies like yours hit page 1 of Google with proven SEO systems. Got 5 mins for a quick call this week?",
         timestamp: daysAgo(2)
       }
     ]

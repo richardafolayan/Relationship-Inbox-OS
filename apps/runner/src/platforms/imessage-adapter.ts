@@ -10,8 +10,11 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
+import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
+import { groupStubFields } from "./imessage-group-name";
+import { imessageMessageBodyText } from "./imessage-message-text";
 import { sendIMessage } from "./imessage-send";
 import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
 
@@ -109,7 +112,8 @@ export class IMessageAdapter implements PlatformAdapter {
         : row.lastMessagePreview,
       lastMessageAt: row.lastMessageAt,
       isUnreadCandidate: isUnread,
-      isRecentCandidate: isRecent
+      isRecentCandidate: isRecent,
+      ...groupStubFields(row)
     };
   }
 
@@ -138,22 +142,49 @@ export class IMessageAdapter implements PlatformAdapter {
     // proper scroll-back without re-scanning.
     const effectiveLimit = Math.max(limit, 500);
     const rows = db.fetchMessages(thread.platformThreadId, effectiveLimit);
-    return rows.map((r) => ({
-      platformMessageKey: r.guid,
-      direction: r.direction,
-      timestamp: r.timestamp ?? new Date().toISOString(),
-      text: r.text,
-      senderName: r.senderHandle,
-      raw: r.reactions.length > 0 ? { reactions: r.reactions } : undefined,
-      attachments: r.attachments.map((a) => ({
-        type: a.kind,
-        manualReview: a.kind === "unknown",
-        rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
-        guid: a.guid || undefined,
-        kind: a.kind,
-        byteSize: a.totalBytes ?? undefined
-      }))
-    }));
+    // Drop iMessage "kept an audio message" system events at ingestion so
+    // they never become persisted rows. Existing stored rows are filtered
+    // again at the read paths (scan-queue aggregates, AI context, thread
+    // render, inbox preview) so the operator never sees them either way.
+    const filteredRows = rows.filter((r) => !isNonContentIMessageSystemEvent(r.text));
+    return filteredRows.map((r) => {
+      // Persist reactions + reply parent on rawJson. Both fields are read
+      // back by the dashboard's thread page; absent fields stay omitted so
+      // we don't write empty {} for plain bubbles (keeps rawJson nullable
+      // for the existing "no metadata" code path).
+      const raw: Record<string, unknown> = {};
+      if (r.reactions.length > 0) raw.reactions = r.reactions;
+      if (r.replyToGuid) raw.replyToGuid = r.replyToGuid;
+      // Resolve raw chat.db handles (phone numbers / emails) to real
+      // contact names via the operator's vCard. Without this, group-chat
+      // bubbles surface "+15551234567" as the sender label even when the
+      // contact is in the address book (issue #144). Falls back to the
+      // raw handle when no match — unknown senders still get *something*
+      // human-readable to label by.
+      const resolvedSender =
+        r.senderHandle ? this.contactResolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
+      const text = imessageMessageBodyText(r.text, r.attachments.length);
+      return {
+        platformMessageKey: r.guid,
+        direction: r.direction,
+        timestamp: r.timestamp ?? new Date().toISOString(),
+        text,
+        senderName: resolvedSender,
+        raw: Object.keys(raw).length > 0 ? raw : undefined,
+        attachments: r.attachments.map((a) => ({
+          type: a.kind,
+          manualReview: a.kind === "unknown",
+          rawLabel: a.transferName ?? a.filename ?? a.mimeType ?? "iMessage attachment",
+          guid: a.guid || undefined,
+          kind: a.kind,
+          byteSize: a.totalBytes ?? undefined
+        }))
+      };
+    });
+  }
+
+  async collectRetractedOutboundKeys(thread: ThreadStub): Promise<string[]> {
+    return this.getDb().findFailedOutboundGuids(thread.platformThreadId);
   }
 
   async sendMessage(thread: ThreadStub, text: string, attachments?: OutboundAttachment[]): Promise<SendReceipt> {
@@ -190,10 +221,20 @@ export class IMessageAdapter implements PlatformAdapter {
     const initialHandle = chat.participants[0] ?? chat.chatIdentifier;
     const handle = this.pickBestSendHandle(initialHandle);
     const sendStartedAt = Date.now();
+    // Service must follow the *handle* we picked, not chat.service_name.
+    // The chat row records whatever service Messages.app last touched it
+    // with - so a thread whose previous reply happened to land on SMS will
+    // keep chat.service = "SMS" forever, and passing that to AppleScript
+    // forces every subsequent send (including ones routed to an
+    // iMessage-capable handle by pickBestSendHandle) down the SMS path.
+    // Reading the service off the handle itself lets a contact toggle
+    // back to blue bubbles as soon as we send to an iMessage-registered
+    // address.
+    const handleService = db.findHandleService(handle) ?? undefined;
     try {
       await sendIMessage({
         handle,
-        service: chat.service ?? undefined,
+        service: handleService,
         text,
         attachmentPaths: (attachments ?? []).map((a) => a.absolutePath)
       });
@@ -253,6 +294,7 @@ export class IMessageAdapter implements PlatformAdapter {
           );
         }
         receiptGuid = status.guid;
+        receiptTs = status.timestamp;
         if (status.isDelivered) {
           isDelivered = true;
           break;
@@ -261,8 +303,9 @@ export class IMessageAdapter implements PlatformAdapter {
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
     if (!receiptTs && receiptGuid) {
-      // We have a guid but the delivery poll didn't grab the timestamp;
-      // fall back to the legacy lookup for the row's date.
+      // Defensive fallback: the delivery-status row should always carry
+      // a timestamp now, but keep the legacy lookup as a safety net for
+      // unusual chat.db states (e.g. corrupted date column).
       const fallback = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
     }
@@ -282,6 +325,13 @@ export class IMessageAdapter implements PlatformAdapter {
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
+      // chat.db's row guid for the message we just sent. send.ts uses
+      // this as the persisted Message.platformMessageKey so a later
+      // scan, which also keys by guid, dedups against this row instead
+      // of inserting a duplicate. Without it, the same iMessage ends
+      // up as two Message rows: one from the send-side stableHash and
+      // one from the scan-side guid.
+      platformMessageKey: receiptGuid,
       // "bubble_detected" if Messages.app confirmed delivery; else
       // "best_effort" — the bubble exists but the recipient hasn't
       // acked yet (offline, slow, etc.).

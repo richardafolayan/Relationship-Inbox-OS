@@ -1,4 +1,4 @@
-import { formatSlaCountdown, type PlatformName } from "@inbox-os/core";
+import { calculateRisk, formatSlaCountdown, type PlatformName } from "@inbox-os/core";
 import {
   isTemporaryLinkedInId,
   normalizeCanonicalLinkedInThreadId
@@ -27,10 +27,22 @@ export interface ThreadRowSource {
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason: string | null;
   slaDueAt: Date | null;
+  snoozedUntil: Date | null;
   whatTheyWant: string | null;
   rollingSummary: string | null;
   archivedAt: Date | null;
   category: string | null;
+  /** "closed" | "open" | null - see Thread.closedStatus. The dashboard
+   *  treats "closed" as a strong "set aside" signal even when the
+   *  lightweight heuristic does not flag it. */
+  closedStatus: string | null;
+  /** One-line caption explaining the closed/open verdict. */
+  closedStatusReason: string | null;
+  /** AI reconnect-worthy score, 0-100. See Thread.reconnectScore. */
+  reconnectScore: number | null;
+  /** Short reason string the dashboard renders as a quiet "why" caption
+   *  alongside top-ranked reconnect candidates. */
+  reconnectScoreReason: string | null;
   updatedAt: Date;
   person: {
     id: string;
@@ -38,6 +50,15 @@ export interface ThreadRowSource {
     inferredName: string | null;
     platform: PlatformName;
     avatarUrl: string | null;
+    // Birthday synced from the operator's macOS Contacts: "MM-DD" plus an
+    // optional four-digit year. Both null when no contact matched.
+    birthday: string | null;
+    birthYear: number | null;
+    // Operator-pinned favourite (R-0066 / #483). Non-null timestamp = the
+    // operator marked this contact a favourite, so their threads float to the
+    // top of the Inbox section / Today bucket they already sit in. Null when
+    // not favourited.
+    favouritedAt: Date | null;
   };
   _count?: {
     messages: number;
@@ -46,6 +67,12 @@ export interface ThreadRowSource {
 
 export interface ShapedThreadRow {
   id: string;
+  /**
+   * Platform-side stable id of the thread (e.g. iMessage chat guid).
+   * Surfaced so the dashboard can target showcase demo threads by
+   * their deterministic platformThreadId from data-demo-target attrs.
+   */
+  platformThreadId: string;
   personId: string;
   personName: string;
   /**
@@ -56,6 +83,20 @@ export interface ShapedThreadRow {
    */
   personInferredName: string | null;
   personAvatarUrl: string | null;
+  /**
+   * Birthday for this row's contact, synced from macOS Contacts: a "MM-DD"
+   * string plus an optional four-digit year. Both null when no contact
+   * matched. The dashboard derives the "birthday soon" badge from these.
+   */
+  personBirthday: string | null;
+  personBirthYear: number | null;
+  /**
+   * True when the operator has marked this contact a favourite (R-0066 /
+   * #483). The dashboard floats favourited rows to the top of the Inbox
+   * section and Today bucket they already belong to (without reordering
+   * across risk levels) and can filter the Inbox to favourites only.
+   */
+  personFavourite: boolean;
   platform: PlatformName;
   preview: string;
   /**
@@ -75,7 +116,49 @@ export interface ShapedThreadRow {
   identityWarning?: IdentityWarning | null;
   messageCount: number;
   category: string | null;
+  /**
+   * AI-extracted one-line context, what would make a great reply or
+   * what the contact is waiting on. Surfaced on Today + inbox rows as a
+   * proactive nudge and used as the body of new-message notifications.
+   * Null until the thread has been summarised.
+   */
+  whatTheyWant: string | null;
+  /**
+   * AI verdict on whether the conversation has wrapped up (#287 phase
+   * 2.5). "closed" = last inbound is a natural endpoint and no reply
+   * is owed; "open" = operator still owes a reply; null = unclassified
+   * (provider unavailable on the relevant scan, or no inbound yet).
+   * The dashboard treats "closed" as a strong "set aside" signal.
+   */
+  closedStatus: "closed" | "open" | null;
+  /**
+   * One-line caption explaining the closed / open verdict. Rendered as
+   * a quiet "why" caption on the inbox row when the operator unhides
+   * set-aside threads via Show all. Null when the row was classified
+   * before reasons were introduced (will refill on next scan).
+   */
+  closedStatusReason: string | null;
+  /**
+   * Reconnect-worthy score (#287 phase 3.5). 0-100 integer indicating
+   * how much it makes sense to send a deliberate "hey, been a while"
+   * message to this LinkedIn dormant. Null when not yet scored or the
+   * AI provider was unavailable; the dashboard falls back to its
+   * deterministic relationship-signal ranking in that case.
+   */
+  reconnectScore: number | null;
+  /** Short reason for the AI score; rendered as a quiet "why" caption. */
+  reconnectScoreReason: string | null;
   archivedAt: string | null;
+  snoozedUntil: string | null;
+  /**
+   * How many surviving inbox rows belong to the same person+platform.
+   * 1 for the normal case; >1 when a contact has multiple distinct
+   * conversations visible (typically LinkedIn recruiters pitching
+   * different candidates in separate 1:1 threads). The dashboard
+   * surfaces a "N threads" badge so the operator doesn't read repeat
+   * names as accidental duplicates (issue #201).
+   */
+  personThreadCount: number;
 }
 
 export interface ShapedThreadGroupRow {
@@ -193,8 +276,29 @@ function prefersCandidate(current: ShapedThreadGroupRow, next: ShapedThreadGroup
   return next.source.id > current.source.id;
 }
 
-export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
+export interface RiskThresholds {
+  amberHours: number;
+  redHours: number;
+}
+
+export function toInboxRow(
+  row: ShapedThreadGroupRow,
+  personThreadCount: number,
+  thresholds: RiskThresholds
+): ShapedThreadRow {
   const source = row.source;
+  // Risk is purely time-dependent (it ages amber -> red as the clock advances),
+  // so recompute it at request time from the timestamps + current thresholds
+  // rather than trusting the level frozen at the last scan/send. Otherwise a
+  // thread keeps showing a stale risk level until a rescan rewrites it, which
+  // is unbounded when scans are paused (cooldown, idle/disabled platform,
+  // demo mode) — the Today/inbox views would then misstate urgency.
+  const risk = calculateRisk({
+    lastInboundAt: source.lastInboundAt,
+    lastOutboundAt: source.lastOutboundAt,
+    amberHours: thresholds.amberHours,
+    redHours: thresholds.redHours
+  });
   // Prefer the latest-message text (which respects direction) over the
   // legacy lastMessagePreview field (which only tracks inbound). Falls
   // through to AI-summary fields when neither is set, then a constant.
@@ -206,24 +310,58 @@ export function toInboxRow(row: ShapedThreadGroupRow): ShapedThreadRow {
     "No summary yet";
   return {
     id: source.id,
+    platformThreadId: source.platformThreadId,
     personId: source.personId,
     personName: source.person.displayName,
     personInferredName: source.person.inferredName ?? null,
     personAvatarUrl: source.person.avatarUrl ?? null,
+    personBirthday: source.person.birthday ?? null,
+    personBirthYear: source.person.birthYear ?? null,
+    personFavourite: source.person.favouritedAt != null,
     platform: source.platform,
     preview: previewText,
     lastMessageDirection: source.lastMessageDirection ?? null,
     unreadCount: source.unreadCount,
-    riskLevel: source.riskLevel,
+    riskLevel: risk.level,
     needsReply: row.needsReply,
     lastMessageAt: source.lastMessageAt?.toISOString() ?? null,
     lastInboundAt: source.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: source.lastOutboundAt?.toISOString() ?? null,
-    riskReason: source.riskReason,
-    slaCountdown: formatSlaCountdown(source.slaDueAt),
+    riskReason: risk.riskReason,
+    // slaDueAt is recomputed above from lastInboundAt + the current amber
+    // threshold, so the countdown is live. Still suppress it when nothing is
+    // owed (the operator has replied) so a no-longer-pending row doesn't read
+    // "Overdue Xh" (issue #200).
+    slaCountdown: row.needsReply ? formatSlaCountdown(risk.slaDueAt) : "",
     identityWarning: row.identityWarning,
     messageCount: row.messageCount,
     category: source.category ?? null,
-    archivedAt: source.archivedAt?.toISOString() ?? null
+    whatTheyWant: source.whatTheyWant ?? null,
+    closedStatus: (source.closedStatus as "closed" | "open" | null) ?? null,
+    closedStatusReason: source.closedStatusReason ?? null,
+    reconnectScore: source.reconnectScore ?? null,
+    reconnectScoreReason: source.reconnectScoreReason ?? null,
+    archivedAt: source.archivedAt?.toISOString() ?? null,
+    snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
+    personThreadCount
   };
+}
+
+// Count surviving rows per person+platform so the dashboard can flag
+// rows where the same contact has multiple distinct conversations (issue
+// #201). LinkedIn recruiters frequently start a separate 1:1 thread per
+// candidate they pitch — these look like duplicate name rows but
+// actually carry distinct content. Collapsing them would hide pitches
+// the operator still needs to act on.
+export function personThreadCounts(rows: ShapedThreadGroupRow[]): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const row of rows) {
+    const key = `${row.source.platform}:${row.source.personId}`;
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+export function personThreadCountKey(platform: PlatformName, personId: string): string {
+  return `${platform}:${personId}`;
 }

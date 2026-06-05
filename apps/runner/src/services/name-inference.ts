@@ -24,8 +24,8 @@ const STOPWORDS = new Set([
   "january", "february", "march", "april", "may", "june", "july", "august",
   "september", "october", "november", "december",
   "amen", "amennn", "yh", "yhh", "yhhh", "rn", "tbh", "imo", "btw", "idk", "tn", "tmr", "atm",
-  "ye", "yee", "good", "great", "fine", "alright", "cool", "nice", "wait", "wut", "what",
-  "soon", "later", "today", "tomorrow", "back", "home", "ok", "okay", "kk"
+  "yee", "good", "great", "fine", "alright", "cool", "nice", "wait", "wut", "what",
+  "soon", "later", "today", "tomorrow", "back", "home", "kk"
 ]);
 
 /**
@@ -113,4 +113,25 @@ export function looksLikeUnresolvedHandle(displayName: string): boolean {
   // Email-shaped.
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed)) return true;
   return false;
+}
+
+/**
+ * "No usable personal name on file" check, used to gate the prompt's
+ * Recipient line (see ai.ts contactNameContext). True when the displayName
+ * is blank, a bare phone/email handle, OR a comma-joined list where EVERY
+ * segment is a bare handle — iMessage group chats with no saved contacts key
+ * by handle ("+447…, +447…"), which looksLikeUnresolvedHandle misses because
+ * the comma/second-plus break its single-handle regex.
+ *
+ * Deliberately separate from looksLikeUnresolvedHandle (which gates 1:1 name
+ * inference and must NOT fire on multi-handle group strings it can't resolve
+ * to one person). A group that carries real names ("Israel, Teni, Keisha")
+ * is NOT nameless — `every` is false there, so the model may use those names.
+ */
+export function looksLikeNamelessRecipient(displayName: string | null | undefined): boolean {
+  const trimmed = (displayName ?? "").trim();
+  if (!trimmed) return true;
+  const segments = trimmed.split(",").map((s) => s.trim()).filter(Boolean);
+  if (segments.length === 0) return true;
+  return segments.every((segment) => looksLikeUnresolvedHandle(segment));
 }

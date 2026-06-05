@@ -2,21 +2,69 @@
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
-import { ChevronDown, ChevronLeft, Clock, Loader2, Mic, MoreHorizontal, Paperclip, Send, Sparkles } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronLeft,
+  Clock,
+  Loader2,
+  Mic,
+  MoreHorizontal,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Paperclip,
+  Send,
+  Sparkles,
+  Star,
+  X
+} from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, runAction } from "@/lib/api";
-import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard, ThreadMessage, ThreadResponse } from "@/lib/types";
-import { IMessageMedia } from "@/components/thread/imessage-media";
+import { setFavourite } from "@/lib/favourites";
+import { runActionWithFeedback, showToast } from "@/lib/feedback";
+import { signalReassessStart } from "@/lib/reassess-status";
+import { readThreadSource } from "@/lib/thread-source";
+import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
+import { cn } from "@/lib/utils";
+import type {
+  AuditLogRow,
+  InboxResponse,
+  InboxRow,
+  OperatorProfile,
+  PlatformCard,
+  ThreadMessage,
+  ThreadResponse
+} from "@/lib/types";
+import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
+import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
+import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
 import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
-import { ProfileDrawer } from "@/components/common/profile-drawer";
+import { ActionButton } from "@/components/ui/action-button";
+// Drawers are lazy-loaded: they're heavy (ProfileDrawer ~390 LOC + its own
+// data fetch) and only ever shown on demand, so they stay out of the most-
+// opened page's initial JS chunk. An "opened-once" latch below keeps them
+// mounted after first open, so their open/close behaviour is unchanged.
+const ReceiptsDrawer = dynamic(
+  () => import("@/components/common/receipts-drawer").then((m) => m.ReceiptsDrawer),
+  { ssr: false }
+);
+const ProfileDrawer = dynamic(
+  () => import("@/components/common/profile-drawer").then((m) => m.ProfileDrawer),
+  { ssr: false }
+);
 import { DegradedBanner } from "@/components/common/degraded-banner";
-import { buildCorpusStats, scoreDraftAgainstCorpus } from "@/lib/voice-score";
+import { autocorrectAtCaret } from "@/lib/autocorrect";
+import { blobToWhisperWav } from "@/lib/dictation-audio";
+import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
+import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
+import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
+import { chooseDisplayBrief } from "@/lib/reply-brief";
+import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 
 // Thread workspace - landscape layout.
 //
@@ -55,6 +103,100 @@ const FALLBACK_SUGGESTIONS: Array<{ intent: string; glyph: string; build: (first
 // near the bottom keeps the auto-scroll-on-new-message glue active.
 const SCROLL_TOP_THRESHOLD = 120;
 const SCROLL_BOTTOM_THRESHOLD = 200;
+// #461 (pilot R-0060): once the operator has scrolled up this far from the
+// newest message, surface a floating "jump to latest" button. Larger than
+// SCROLL_BOTTOM_THRESHOLD so it appears only once you're genuinely reading
+// history, not on a small nudge away from the bottom.
+const JUMP_TO_LATEST_THRESHOLD = 600;
+
+// Picks the topmost visible message bubble below the sticky header to
+// anchor scroll preservation on. Selecting by data-message-id (set on
+// every bubble in the JSX) avoids accidentally anchoring on a wrapper
+// div whose position doesn't map cleanly to a message — the wrapper's
+// rect can stay constant while the messages inside it shift, leaving
+// scroll preservation off by tens of pixels. Each bubble is rendered
+// with key={message.id}, so React preserves the DOM node across the
+// re-render that prepends older messages.
+function pickScrollAnchor(scroller: HTMLElement, scrollerTop: number): HTMLElement | null {
+  const stickyBand = 80;
+  const probeTop = scrollerTop + stickyBand;
+  const probeBottom = scrollerTop + scroller.clientHeight;
+  let best: { el: HTMLElement; top: number } | null = null;
+  const candidates = scroller.querySelectorAll<HTMLElement>("[data-message-id]");
+  for (const el of candidates) {
+    const rect = el.getBoundingClientRect();
+    if (rect.bottom <= probeTop || rect.top >= probeBottom) continue;
+    if (!best || rect.top < best.top) best = { el, top: rect.top };
+  }
+  return best?.el ?? null;
+}
+
+// Synchronously adjusts the scroller so the anchor element returns to
+// its captured viewport offset. Returns true if a non-trivial
+// adjustment was applied.
+function repinAnchor(scroller: HTMLElement, anchorEl: HTMLElement, viewportOffset: number): boolean {
+  if (!scroller.contains(anchorEl)) return false;
+  const elTop = scroller.getBoundingClientRect().top;
+  const newAnchorTop = anchorEl.getBoundingClientRect().top;
+  const adjustment = (newAnchorTop - elTop) - viewportOffset;
+  if (Math.abs(adjustment) < 0.5) return false;
+  scroller.scrollTop += adjustment;
+  return true;
+}
+
+// Re-pins the anchor for a short window after a load-older completes,
+// so async content growth above the anchor (image/attachment loads,
+// suggested-replies expanding, etc.) doesn't shift the operator's
+// viewport. Stops as soon as the operator scrolls themselves or the
+// window expires.
+function startPostLoadAnchorGuard(
+  scroller: HTMLElement,
+  anchorEl: HTMLElement,
+  viewportOffset: number
+): () => void {
+  return startScrollSettlingGuard(scroller, () => {
+    repinAnchor(scroller, anchorEl, viewportOffset);
+  });
+}
+
+// Pins the scroller to its bottom for a short window after a fresh
+// thread landing, so async content (images, attachment thumbnails)
+// loading in DOESN'T leave the operator above the most recent
+// message. Same shape as the post-load anchor guard — just a
+// different re-pin target.
+function startInitialBottomGuard(scroller: HTMLElement): () => void {
+  return startScrollSettlingGuard(scroller, () => {
+    scroller.scrollTop = scroller.scrollHeight;
+  });
+}
+
+function startScrollSettlingGuard(scroller: HTMLElement, repin: () => void): () => void {
+  const GUARD_MS = 1500;
+  let active = true;
+  const stop = () => {
+    if (!active) return;
+    active = false;
+    ro.disconnect();
+    scroller.removeEventListener("wheel", stop);
+    scroller.removeEventListener("touchstart", stop);
+    document.removeEventListener("keydown", stop);
+    clearTimeout(timer);
+  };
+  const ro = new ResizeObserver(() => {
+    if (!active) return;
+    repin();
+  });
+  // Observe each non-sticky child of the scroller — that's where the
+  // message-list growth happens. (The sticky header doesn't count.)
+  for (const child of Array.from(scroller.children) as HTMLElement[]) {
+    if (getComputedStyle(child).position !== "sticky") ro.observe(child);
+  }
+  scroller.addEventListener("wheel", stop, { passive: true });
+  scroller.addEventListener("touchstart", stop, { passive: true });
+  document.addEventListener("keydown", stop);
+  const timer = setTimeout(stop, GUARD_MS);
+  return stop;
+}
 
 // Returns a friendly day label ("Today", "Yesterday", or "Tue 6 May") if
 // the given message starts a new day relative to the previous, otherwise
@@ -83,7 +225,17 @@ function formatDayLabel(date: Date): string {
     a.getDate() === b.getDate();
   if (sameDay(date, today)) return "Today";
   if (sameDay(date, yesterday)) return "Yesterday";
-  return date.toLocaleDateString(undefined, { weekday: "short", day: "numeric", month: "short" });
+  // Append the year only when the message isn't from the current year.
+  // Keeps recent dividers clean ("Mon, May 12") while making it obvious
+  // that an older thread reaches into a prior year ("Mon, May 12, 2025"),
+  // so the operator never has to guess which May 12 they're looking at.
+  const includeYear = date.getFullYear() !== today.getFullYear();
+  return date.toLocaleDateString(undefined, {
+    weekday: "short",
+    day: "numeric",
+    month: "short",
+    ...(includeYear ? { year: "numeric" } : {})
+  });
 }
 
 // Build the standard list of schedule-send presets relative to `now`.
@@ -167,9 +319,13 @@ function formatScheduledFor(iso: string | null | undefined): string {
   });
 }
 
-function DayDivider({ label }: { label: string }) {
+function DayDivider({ label, className }: { label: string; className?: string }) {
+  // Faster collapse on focus enter (150ms) than expand on exit
+  // (300ms) — matches the bubble timing so dividers and bubbles
+  // animate together.
+  const dimmed = className?.includes("opacity-0") ?? false;
   return (
-    <div className="my-3 flex items-center gap-3 self-stretch">
+    <div className={`my-3 flex items-center gap-3 self-stretch transition-all ${dimmed ? "duration-150" : "duration-300"} ${className ?? ""}`}>
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
@@ -229,6 +385,22 @@ function ParticipantPopover({
   );
 }
 
+/**
+ * Shape of a message reaction as the runner stores and returns it. An
+ * operator-applied reaction (sent from this dashboard) carries
+ * direction "OUT"; reactions the contact left carry "IN". Shared by the
+ * native-reactions read, the optimistic local overlay, and the badge
+ * renderer so all three agree on one shape.
+ */
+type MessageReaction = { emoji: string; kind: string; direction: "IN" | "OUT" };
+
+/**
+ * #408. The quick-react picker offers a small, common set of emoji.
+ * LinkedIn's own message reactions map onto these glyphs, so the
+ * operator picks from a familiar row rather than a full keyboard.
+ */
+const QUICK_REACT_EMOJI = ["👍", "❤️", "😂", "😮", "😢", "👏"] as const;
+
 export default function ThreadPage() {
   const params = useParams<{ id: string }>();
   const router = useRouter();
@@ -239,19 +411,98 @@ export default function ThreadPage() {
   const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
+  // Focused thread: cuid of the parent message whose thread we're zoomed
+  // into. Declared up here because the send callback closes over it.
+  // Cleared on Esc, the chip ×, or when navigating threads (effect below).
+  const [focusedThreadParentId, setFocusedThreadParentId] = useState<string | null>(null);
+  // Bumped on every chip / N-Replies click so the focus useLayoutEffect
+  // re-fires its scroll-into-view even when the operator clicks a chip
+  // whose parent is already the current focus (re-centring after the
+  // user scrolled around).
+  const [focusTrigger, setFocusTrigger] = useState(0);
+  // Snapshot of the timeline's scrollTop just before entering focus
+  // mode. Restored on exit so the operator lands back in the same
+  // spot they were before they clicked the chip, regardless of how
+  // they scrolled inside the focused stack.
+  // The exact message the operator was looking at when they entered
+  // focus mode. Restored on exit so layout shifts during focus
+  // (collapsed bubbles re-expanding, late-loaded attachments) don't
+  // leave them at a numerically-equal-but-visually-different scroll
+  // position.
+  const preFocusAnchorRef = useRef<{ anchorEl: HTMLElement; viewportOffset: number } | null>(null);
+  const focusOnParent = useCallback((parentId: string) => {
+    const el = timelineRef.current;
+    if (el && preFocusAnchorRef.current === null) {
+      // Only capture once per focus session — repeated chip clicks
+      // (focus swaps) keep the same "where we came from" anchor.
+      const elTop = el.getBoundingClientRect().top;
+      const anchor = pickScrollAnchor(el, elTop);
+      if (anchor) {
+        preFocusAnchorRef.current = {
+          anchorEl: anchor,
+          viewportOffset: anchor.getBoundingClientRect().top - elTop
+        };
+      }
+    }
+    setFocusedThreadParentId(parentId);
+    setFocusTrigger((n) => n + 1);
+  }, []);
   const [composer, setComposer] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
+  // Synchronous re-entrancy guard. The `sending` state lags a render, so a
+  // held Cmd+Enter autorepeat (or click + shortcut in one frame) can clear
+  // two distinct clientSendIds before it flips — sending the message twice.
+  const sendingRef = useRef(false);
   const [reassessing, setReassessing] = useState(false);
+  const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
   const [composeIntent, setComposeIntent] = useState("");
   const [composing, setComposing] = useState(false);
   const [composeDraft, setComposeDraft] = useState("");
   const [composeError, setComposeError] = useState<string | null>(null);
+  // AI drawer mode: "write" composes a sendable draft in operator voice;
+  // "ask" answers a question about this thread without producing a draft.
+  // The send-style chevron beside the action button switches between them
+  // and a heuristic suggests the other mode when the input shape mismatches.
+  const [composeMode, setComposeMode] = useState<"write" | "ask">("write");
+  const [composeModeMenuOpen, setComposeModeMenuOpen] = useState(false);
+  const [askAnswer, setAskAnswer] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
   const [profileDrawerOpen, setProfileDrawerOpen] = useState(false);
+  // Latch the first open of each drawer so the lazy chunk loads on demand and
+  // then stays mounted (preserving the existing open-prop open/close path).
+  const [receiptsEverOpened, setReceiptsEverOpened] = useState(false);
+  const [profileEverOpened, setProfileEverOpened] = useState(false);
+  useEffect(() => {
+    if (receiptsOpen) setReceiptsEverOpened(true);
+  }, [receiptsOpen]);
+  useEffect(() => {
+    if (profileDrawerOpen) setProfileEverOpened(true);
+  }, [profileDrawerOpen]);
   const [error, setError] = useState<string | null>(null);
+  // #408. Per-message reaction trigger state (LinkedIn only). The picker
+  // id tracks which bubble's emoji row is open; the reacting id is the
+  // single in-flight request so its control shows a pending state; the
+  // error map surfaces a calm inline failure on the bubble that failed;
+  // the optimistic overlay renders the just-applied "OUT" reaction
+  // immediately, before the next thread refresh confirms it server-side.
+  const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
+  const [reactionErrorByMessageId, setReactionErrorByMessageId] = useState<Record<string, string>>({});
+  const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
+    Record<string, MessageReaction[]>
+  >({});
+  // Optimistic favourite override (R-0066 / #483). null = follow the server
+  // value (thread.personFavourite); a boolean wins until the request settles,
+  // so the header star flips instantly and reverts if the toggle fails.
+  const [favOverride, setFavOverride] = useState<boolean | null>(null);
+  // Drop the override when navigating to a different thread so it can't leak
+  // onto the next contact (this component persists across /thread/:id changes).
+  useEffect(() => {
+    setFavOverride(null);
+  }, [threadId]);
   const [chipsMenuOpen, setChipsMenuOpen] = useState(false);
   // Defensive 30s ceiling on the suggestions spinner. See the
   // `repliesGenerating` derivation below for why this exists.
@@ -268,10 +519,32 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  // #466 (pilot R-0065): remembers the most recent autocorrection so an
+  // immediate Backspace can revert it (iOS-style). Cleared on any other edit.
+  const lastAutocorrectRef = useRef<{ original: string; corrected: string; value: string } | null>(null);
+  // #462 (pilot R-0061): voice-to-text dictation into the composer. Separate
+  // from the iMessage voice-note recorder above (that one sends an audio
+  // attachment; this one transcribes speech into editable text).
+  const [dictationStatus, setDictationStatus] = useState<"idle" | "recording" | "transcribing">("idle");
+  const [dictationAvailable, setDictationAvailable] = useState(false);
+  const dictationRecorderRef = useRef<MediaRecorder | null>(null);
+  const dictationChunksRef = useRef<BlobPart[]>([]);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
   const [composerSource, setComposerSource] = useState<"empty" | "draft" | "predraft" | "user">("empty");
+  // Whether a draft is persisted in the DB for this thread (issue #486 /
+  // pilot R-0067). Drives the "Delete draft" button — it only appears
+  // when there's actually a saved draft to remove, never for an AI
+  // predraft (no DB row) or unsaved typing. Set on load from the fetched
+  // draft, after a successful Save, and cleared after delete / on switch.
+  const [hasSavedDraft, setHasSavedDraft] = useState(false);
+  // Operator voice profile — its aiHelpLevel decides which AI affordances
+  // this page surfaces. The ref mirror lets `refresh` (a useCallback that
+  // must not depend on profile) read the latest value when deciding
+  // whether to auto-fill a predraft.
+  const [profile, setProfile] = useState<OperatorProfile | null>(null);
+  const profileRef = useRef<OperatorProfile | null>(null);
   // AI-suggested snooze chips, populated lazily when the operator opens
   // the snooze chip menu. Empty list = AI saw no time hint and refused
   // to fabricate one (correct, expected behaviour for most threads).
@@ -285,10 +558,84 @@ export default function ThreadPage() {
   // Voice-match: rebuilt only when the thread's outbound history
   // changes. Score is debounced against the composer text below.
   const [voiceRewritePending, setVoiceRewritePending] = useState(false);
+  // Issue #331. Per-loop coverage verdicts the AI returns for the
+  // current draft. "addressed" rows auto-tick at full_drafts (or
+  // highlight at writing_support); "partial" rows stay unticked but
+  // render a soft "partly covered" hint with a short reason, so the
+  // operator can see why the row didn't tick and what's still missing.
+  // Cleared when the thread changes or the composer empties; refreshed
+  // by a debounced effect that hits /control/thread/:id/check-draft.
+  const [aiCoverageItems, setAiCoverageItems] = useState<
+    Array<{ loop: string; status: "addressed" | "partial"; reason?: string }>
+  >([]);
   const chipsMenuRef = useRef<HTMLDivElement>(null);
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+  // How much AI writing help to surface is driven by the operator's
+  // configured aiHelpLevel (see the `profile` state below). Full sendable
+  // drafts, predraft, and compose-in-voice only appear at "full_drafts".
+
+  // Sibling-threads rail collapse — operator can hide the 240px list to
+  // give the chat column more room. State persists in localStorage and
+  // toggles with the `]` keyboard shortcut.
+  const [threadsCollapsed, setThreadsCollapsed] = useState(false);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem("dashboard_threads_collapsed");
+    if (stored === "true") setThreadsCollapsed(true);
+  }, []);
+
+  // Open the context rail once per thread when there's a brief to show — i.e.
+  // a Where it stands or On you string the operator can use to write the
+  // reply without scrolling. Previously the rail only auto-opened when the
+  // thread had open loops, which left the panel hidden on dormant or
+  // social-update threads where the brief is still useful (Brandon-style:
+  // "He hasn't asked you anything. Acknowledge the offer, ask what he's
+  // looking at now, and you're done.").
+  const railAutoOpenForThreadRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!thread || railAutoOpenForThreadRef.current === thread.id) return;
+    railAutoOpenForThreadRef.current = thread.id;
+    const brief = thread.replyBrief;
+    const hasBriefContent = Boolean(
+      brief && (brief.where_it_stands?.trim() || brief.on_you?.trim())
+    );
+    if (
+      hasBriefContent ||
+      thread.openLoops.length > 0 ||
+      thread.dismissedOpenLoops.length > 0
+    ) {
+      setAiOpen(true);
+    }
+  }, [thread]);
+
+  useEffect(() => {
+    window.localStorage.setItem(
+      "dashboard_threads_collapsed",
+      threadsCollapsed ? "true" : "false"
+    );
+  }, [threadsCollapsed]);
+
+  useEffect(() => {
+    const onKeydown = (event: KeyboardEvent) => {
+      if (event.key !== "]") return;
+      const target = event.target as HTMLElement | null;
+      const tag = target?.tagName;
+      if (
+        tag === "INPUT" ||
+        tag === "TEXTAREA" ||
+        tag === "SELECT" ||
+        target?.isContentEditable
+      ) {
+        return;
+      }
+      event.preventDefault();
+      setThreadsCollapsed((prev) => !prev);
+    };
+    window.addEventListener("keydown", onKeydown);
+    return () => window.removeEventListener("keydown", onKeydown);
+  }, []);
 
   // Scheduled-send picker state. The picker hangs off a chevron next to the
   // Send button; opens a popover with quick presets ("In 1 hour", "Tomorrow
@@ -313,6 +660,17 @@ export default function ThreadPage() {
   const [savingScheduledId, setSavingScheduledId] = useState<string | null>(null);
   const scheduleMenuRef = useRef<HTMLDivElement>(null);
 
+  // Coarse once-a-minute clock. The late-night LinkedIn schedule nudge below
+  // the composer keys off the local time, so this lets it appear/disappear
+  // live as the clock crosses the 22:00 / 06:00 quiet-window boundary without
+  // the operator needing to re-type. One render a minute is negligible next to
+  // the 3s send-queue poll already running on this page.
+  const [clockNow, setClockNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = setInterval(() => setClockNow(new Date()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   const [pendingSends, setPendingSends] = useState<
     Array<{
       clientSendId: string;
@@ -333,48 +691,162 @@ export default function ThreadPage() {
 
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
-  const restoreScrollRef = useRef<{ prevHeight: number; prevTop: number } | null>(null);
+  // #461 (pilot R-0060): controls the floating "jump to latest" button.
+  // True when the operator has scrolled up away from the newest message.
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false);
+  // After a load-older fires, the layout effect needs to put the
+  // operator's viewport back where it was. We anchor on a specific
+  // visible message element rather than on `prevTop + (newHeight -
+  // prevHeight)` because the bare height-delta math is wrong whenever
+  // the prepended content isn't the only thing that changes (e.g.,
+  // a day-divider is inserted at the prepend/existing boundary, the
+  // sticky header re-measures, the load button swaps to "loading…").
+  // anchorEl is a React-keyed message DOM node so its identity
+  // survives the re-render; viewportOffset is its top relative to
+  // the scroller's top at the moment of the snapshot.
+  const restoreScrollRef = useRef<{
+    anchorEl: HTMLElement;
+    viewportOffset: number;
+  } | null>(null);
+  // The post-load guard's stop fn — held so a new load (or unmount)
+  // can cancel the prior guard before installing a new one.
+  const anchorGuardStopRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => {
+    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+  }, []);
+  // Tracks the thread.id we last pinned to the bottom for. When this
+  // doesn't match the currently loaded thread, the layout effect
+  // treats it as a fresh landing (page refresh or thread switch) and
+  // unconditionally scrolls to the bottom — bypassing the sticky
+  // verification, which would otherwise reject the bottom-pin
+  // because the operator hasn't had a chance to scroll yet.
+  const lastBottomedThreadIdRef = useRef<string | null>(null);
   const prevThreadIdRef = useRef<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    const [threadResult, inboxResult, platformsResult, logsResult] = await Promise.allSettled([
-      apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`),
-      apiGet<InboxResponse>("/runner/data/inbox"),
-      apiGet<PlatformCard[]>("/runner/data/platforms"),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150")
-    ]);
-    if (threadResult.status === "fulfilled") {
-      setThread(threadResult.value);
-      setComposer((prev) => {
-        if (prev) return prev; // operator already typed something
-        const explicitDraft = threadResult.value.draft;
-        if (explicitDraft) {
-          setComposerSource("draft");
-          return explicitDraft;
-        }
-        // No explicit draft - fall back to AI predraft (first suggested
-        // reply) so the operator opens an already-filled composer when
-        // /today has pre-warmed the cache.
-        const aiPredraft = threadResult.value.suggestedReplies?.replies?.[0]?.text?.trim();
-        if (aiPredraft) {
-          setComposerSource("predraft");
-          return aiPredraft;
-        }
-        return "";
-      });
-      setError(null);
-    } else {
-      const message =
-        threadResult.reason instanceof Error
-          ? threadResult.reason.message
-          : "Failed to load thread";
-      setError(message);
+  // Apply a freshly-fetched thread payload to local state. Extracted so the
+  // conversation can paint off /data/thread ALONE (first paint must not wait
+  // on the inbox/platforms/logs context fetches), and so a stale-while-
+  // revalidate cache hit can paint instantly and then re-apply the network
+  // value via this same path.
+  const applyThread = useCallback((fresh: ThreadResponse) => {
+    // Merge the fresh recent-messages window with any older messages
+    // the operator has already paginated in. Without this, every poll
+    // (every send, every SSE event, the 3s polling tick) would
+    // overwrite the loaded older history and the operator would get
+    // yanked back to the bottom — exactly the "I scroll up, more
+    // loads, then I get kicked back down" symptom.
+    setThread((current) => {
+      if (!current || current.id !== fresh.id) return fresh;
+      const freshIds = new Set(fresh.messages.map((m) => m.id));
+      const olderKept = current.messages.filter((m) => !freshIds.has(m.id));
+      return {
+        ...fresh,
+        messages: [...olderKept, ...fresh.messages],
+        // Keep the operator's paginated cursor — fresh.messagePage
+        // describes only the recent window and would re-show the
+        // "load older messages" button as if no history were loaded.
+        messagePage: olderKept.length > 0 ? current.messagePage : fresh.messagePage
+      };
+    });
+    // Ghost-reconcile pendingSends against the freshly-fetched message
+    // list. The primary clear paths are the MESSAGE_SENT SSE event and
+    // the send-queue poll, both of which key off `clientSendId`. When
+    // either misses (SSE drop, race between the event and the page
+    // mount, sibling-thread routing on iMessage so the event's threadId
+    // doesn't match the user's view) the optimistic bubble used to
+    // linger forever, double-rendering on top of the real Message row.
+    // Any pending whose text matches a recent OUT message in the
+    // freshly-loaded window can be safely dropped — the real bubble is
+    // already on screen, the optimistic one is now noise.
+    const RECONCILE_WINDOW_MS = 5 * 60 * 1000;
+    const freshOutTexts = new Map<string, number>();
+    for (const m of fresh.messages) {
+      if (m.direction !== "OUT") continue;
+      const ts = m.timestamp ? Date.parse(m.timestamp) : NaN;
+      if (Number.isNaN(ts)) continue;
+      const prior = freshOutTexts.get(m.text);
+      if (prior === undefined || ts > prior) {
+        freshOutTexts.set(m.text, ts);
+      }
     }
+    setPendingSends((prev) =>
+      prev.filter((pending) => {
+        if (pending.failed) return true; // keep failed bubbles so the operator can retry
+        const ts = freshOutTexts.get(pending.text);
+        if (ts === undefined) return true;
+        const pendingTs = Date.parse(pending.sentAt);
+        if (Number.isNaN(pendingTs)) return false; // can't compare timestamps; trust the text+thread match
+        return Math.abs(ts - pendingTs) > RECONCILE_WINDOW_MS;
+      })
+    );
+    setComposer((prev) => {
+      if (prev) return prev; // operator already typed something
+      const explicitDraft = fresh.draft;
+      if (explicitDraft) {
+        setComposerSource("draft");
+        return explicitDraft;
+      }
+      // No explicit draft - fall back to AI predraft (first suggested
+      // reply) so the operator opens an already-filled composer when
+      // /today has pre-warmed the cache. Only when the operator has
+      // opted into full AI drafts — at lower help levels the composer
+      // stays empty so they write it themselves.
+      const aiPredraft = fresh.suggestedReplies?.replies?.[0]?.text?.trim();
+      if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
+        setComposerSource("predraft");
+        return aiPredraft;
+      }
+      return "";
+    });
+    // Track DB-persisted draft presence independently of the composer
+    // text (the operator may have typed over it), so "Delete draft"
+    // reflects what's actually saved server-side.
+    setHasSavedDraft(Boolean((fresh.draft ?? "").trim()));
+    setError(null);
+  }, []);
+
+  // Paint the conversation off /data/thread alone. This is the ONLY fetch
+  // that gates first paint — time-to-first-message is now a single runner
+  // round-trip instead of max(thread, full-inbox, platforms, 150-row-logs).
+  // Uses the SWR cache so a hover-prefetched or previously-seen thread paints
+  // instantly and revalidates in the background.
+  const refreshThread = useCallback(async () => {
+    try {
+      const fresh = await apiGet<ThreadResponse>(`/runner/data/thread/${threadId}`, {
+        swr: true,
+        onFresh: (data) => applyThread(data as ThreadResponse)
+      });
+      applyThread(fresh);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to load thread";
+      setError(message);
+    } finally {
+      setLoading(false);
+    }
+  }, [threadId, applyThread]);
+
+  // Secondary, non-blocking context: the siblings picker, platform cards and
+  // the degraded-banner log link. Never gates first paint and is cached, so
+  // it is cheap and does not re-fire on the chat-paint path.
+  const refreshSiblings = useCallback(async () => {
+    const [inboxResult, platformsResult, logsResult] = await Promise.allSettled([
+      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 5000 }),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=150", { ttlMs: 5000 })
+    ]);
     if (inboxResult.status === "fulfilled") setSiblings(inboxResult.value.rows);
     if (platformsResult.status === "fulfilled") setPlatforms(platformsResult.value);
     if (logsResult.status === "fulfilled") setLogs(logsResult.value);
-    setLoading(false);
-  }, [threadId]);
+  }, []);
+
+  // Full refresh used by user actions (send / snooze / schedule / mark-done):
+  // paint the thread first, then refresh the surrounding context in the
+  // background. SSE-driven refreshes use refreshThread directly so a scan
+  // burst never re-pulls the inbox/platforms/logs.
+  const refresh = useCallback(async () => {
+    await refreshThread();
+    void refreshSiblings();
+  }, [refreshThread, refreshSiblings]);
 
   useEffect(() => {
     refresh().catch((err) => {
@@ -383,6 +855,66 @@ export default function ThreadPage() {
       setLoading(false);
     });
   }, [refresh]);
+
+  // Debounced thread-only refresh for SSE bursts. A multi-thread scan emits
+  // one THREAD_UPDATED per touched thread; without this, each event triggered
+  // a full refetch and the open thread page fired ~N requests and janked.
+  // Trailing debounce collapses a burst into a single /data/thread refetch.
+  const threadRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleThreadRefresh = useCallback(() => {
+    if (threadRefreshTimerRef.current) clearTimeout(threadRefreshTimerRef.current);
+    threadRefreshTimerRef.current = setTimeout(() => {
+      threadRefreshTimerRef.current = null;
+      void refreshThread();
+    }, 450);
+  }, [refreshThread]);
+  useEffect(
+    () => () => {
+      if (threadRefreshTimerRef.current) clearTimeout(threadRefreshTimerRef.current);
+    },
+    []
+  );
+
+  // Thread-local composer + AI state must NOT leak across threads. The page
+  // does not remount when navigating /thread/A -> /thread/B (same App Router
+  // dynamic segment), so without this reset a reply typed for A, staged
+  // attachments, in-flight optimistic sends, and A's AI snooze suggestions
+  // would carry into B — risking A's draft being sent to B. Keyed on the
+  // route param so it clears the instant navigation starts, before B loads.
+  useEffect(() => {
+    setComposer("");
+    setComposerSource("empty");
+    setHasSavedDraft(false);
+    setComposeIntent("");
+    setComposeDraft("");
+    setComposeError(null);
+    setAskAnswer(null);
+    setSnoozeSuggestions(null);
+    setSnoozeMenuOpen(false);
+    setPendingSends([]);
+    setComposerAttachments((prev) => {
+      for (const a of prev) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+      return [];
+    });
+  }, [threadId]);
+
+  // Load the operator voice profile once. Reloads on a profile-saved
+  // event so an AI-help-level change in Settings lands without a reload.
+  useEffect(() => {
+    const loadProfile = () => {
+      void apiGet<OperatorProfile>("/runner/data/operator-profile")
+        .then((data) => {
+          profileRef.current = data ?? null;
+          setProfile(data ?? null);
+        })
+        .catch(() => undefined);
+    };
+    loadProfile();
+    window.addEventListener("operator-profile-saved", loadProfile);
+    return () => window.removeEventListener("operator-profile-saved", loadProfile);
+  }, []);
 
   // Per-thread rescan progress: shows the active stage inline next to
   // the Rescan button while the runner is opening + parsing the thread.
@@ -404,7 +936,7 @@ export default function ThreadPage() {
       }>).detail;
       if (!detail || !threadId || detail.threadId !== threadId) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
-        void refresh().finally(() => {
+        void refreshThread().finally(() => {
           setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
         });
       } else if (detail.type === "MESSAGE_SEND_FAILED" && detail.clientSendId) {
@@ -417,7 +949,9 @@ export default function ThreadPage() {
           )
         );
       } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
-        void refresh();
+        // Thread-only + debounced: a scan burst of THREAD_UPDATED events
+        // collapses into one /data/thread refetch instead of N full refreshes.
+        scheduleThreadRefresh();
       } else if (detail.type === "SCAN_THREAD_STARTED") {
         setRescanStage("Opening thread");
         if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
@@ -430,7 +964,7 @@ export default function ThreadPage() {
           clearTimeout(rescanTimeoutRef.current);
           rescanTimeoutRef.current = null;
         }
-        void refresh();
+        void refreshThread();
       }
     };
     window.addEventListener("runner-event", onRunnerEvent as EventListener);
@@ -438,7 +972,7 @@ export default function ThreadPage() {
       window.removeEventListener("runner-event", onRunnerEvent as EventListener);
       if (rescanTimeoutRef.current) clearTimeout(rescanTimeoutRef.current);
     };
-  }, [threadId, refresh]);
+  }, [threadId, refreshThread, scheduleThreadRefresh]);
 
   // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
@@ -525,8 +1059,9 @@ export default function ThreadPage() {
   };
 
   const onSend = useCallback(async () => {
-    if (!thread || sending) return;
+    if (!thread || sending || sendingRef.current) return;
     if (!composer.trim() && composerAttachments.length === 0) return;
+    sendingRef.current = true;
     const clientSendId = uuid();
     const text = composer;
     const attachmentsToSend = composerAttachments;
@@ -538,11 +1073,15 @@ export default function ThreadPage() {
     setError(null);
     stickToBottomRef.current = true;
     try {
+      // Snapshot the focused-thread parent at send time so the post-send
+      // exit-focus doesn't race the network call and drop the linkage.
+      const replyToMessageId = focusedThreadParentId ?? undefined;
       if (attachmentsToSend.length > 0) {
         // Multipart upload - needed for binary file payloads.
         const form = new FormData();
         form.append("text", text);
         form.append("clientSendId", clientSendId);
+        if (replyToMessageId) form.append("replyToMessageId", replyToMessageId);
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
         }
@@ -557,8 +1096,15 @@ export default function ThreadPage() {
       } else {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
-          clientSendId
+          clientSendId,
+          ...(replyToMessageId ? { replyToMessageId } : {})
         });
+      }
+      // Send succeeded — the optimistic clear above already removed these
+      // from the composer, so release their image preview object URLs. (On
+      // failure we instead restore them below, keeping the URLs alive.)
+      for (const a of attachmentsToSend) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
     } catch (sendError) {
       const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
@@ -571,9 +1117,10 @@ export default function ThreadPage() {
       setComposer(text);
       setComposerAttachments(attachmentsToSend);
     } finally {
+      sendingRef.current = false;
       setSending(false);
     }
-  }, [composer, composerAttachments, sending, thread]);
+  }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files);
@@ -596,6 +1143,21 @@ export default function ThreadPage() {
       return next;
     });
   }, []);
+
+  // Revoke any outstanding image preview object URLs when the thread view
+  // unmounts (e.g. navigating away mid-compose) so they don't leak.
+  const composerAttachmentsRef = useRef(composerAttachments);
+  useEffect(() => {
+    composerAttachmentsRef.current = composerAttachments;
+  }, [composerAttachments]);
+  useEffect(
+    () => () => {
+      for (const a of composerAttachmentsRef.current) {
+        if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
+      }
+    },
+    []
+  );
 
   const startRecording = useCallback(async () => {
     if (recording) return;
@@ -632,6 +1194,103 @@ export default function ThreadPage() {
     recorderRef.current = null;
     setRecording(false);
   }, [recording]);
+
+  // #462: probe once whether the runner can transcribe, so the Dictate
+  // control renders enabled vs. disabled-with-explanation.
+  useEffect(() => {
+    let cancelled = false;
+    apiGet<{ dictationAvailable: boolean }>("/runner/data/transcription-capabilities")
+      .then((d) => {
+        if (!cancelled) setDictationAvailable(Boolean(d?.dictationAvailable));
+      })
+      .catch(() => {
+        /* leave disabled — the button explains why on hover */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // #462: record a short clip, post it to the runner for transcription, and
+  // append the returned text to the composer for the operator to review. No
+  // autosend; nothing is persisted server-side.
+  const startDictation = useCallback(async () => {
+    if (dictationStatus !== "idle") return;
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // webm/opus is the broadly-supported recording format (incl. Firefox);
+      // fall back to mp4/aac on Safari. The runner transcodes either way.
+      const mimeType = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : MediaRecorder.isTypeSupported("audio/mp4")
+          ? "audio/mp4"
+          : "";
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      dictationChunksRef.current = [];
+      recorder.ondataavailable = (e) => {
+        if (e.data.size > 0) dictationChunksRef.current.push(e.data);
+      };
+      recorder.onstop = async () => {
+        stream.getTracks().forEach((t) => t.stop());
+        const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
+        if (raw.size === 0) {
+          setDictationStatus("idle");
+          return;
+        }
+        setDictationStatus("transcribing");
+        try {
+          // Convert the recording to 16 kHz mono WAV in the browser. The
+          // runner's local-whisper provider normalises audio with macOS
+          // afconvert, which can't read the webm/opus MediaRecorder emits
+          // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
+          let wav: Blob;
+          try {
+            wav = await blobToWhisperWav(raw);
+          } catch {
+            setError("Could not prepare the recording for transcription.");
+            setDictationStatus("idle");
+            return;
+          }
+          const form = new FormData();
+          form.append("audio", wav, "dictation.wav");
+          const resp = await fetch("/runner/control/transcribe-dictation", {
+            method: "POST",
+            body: form
+          });
+          const data = (await resp.json().catch(() => ({}))) as {
+            ok?: boolean;
+            text?: string;
+            error?: string;
+          };
+          if (!resp.ok || !data.ok) {
+            setError(data?.error || "Could not transcribe the recording.");
+          } else if (typeof data.text === "string" && data.text.trim()) {
+            const spoken = data.text.trim();
+            setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+            setComposerSource("user");
+          } else {
+            setError("Didn't catch any speech. Try again.");
+          }
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "Dictation failed.");
+        } finally {
+          setDictationStatus("idle");
+        }
+      };
+      recorder.start();
+      dictationRecorderRef.current = recorder;
+      setDictationStatus("recording");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Microphone access denied");
+      setDictationStatus("idle");
+    }
+  }, [dictationStatus]);
+
+  const stopDictation = useCallback(() => {
+    if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
+    dictationRecorderRef.current.stop();
+    dictationRecorderRef.current = null;
+  }, [dictationStatus]);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -964,19 +1623,37 @@ export default function ThreadPage() {
     }
   };
 
-  const reassessThread = async () => {
+  const reassessThread = () => {
     if (!thread || reassessing) return;
     setReassessing(true);
-    setError(null);
-    try {
-      await apiPost(`/runner/control/thread/${thread.id}/reassess`, {});
-      await refresh();
-    } catch (reassessError) {
-      const message = reassessError instanceof Error ? reassessError.message : "Reassess failed";
-      setError(message);
-    } finally {
-      setReassessing(false);
-    }
+    // Issue #369. Reassess is a 5-15s LLM call — ongoing work, not an
+    // event. Surface the in-flight state in TopStatus (via
+    // signalReassessStart) instead of a static pending toast. The
+    // discrete outcome (success / error) still uses the toast surface
+    // because those ARE events. This mirrors the surface rule
+    // established by #337 for the pilot feedback modal.
+    const threadId = thread.id;
+    const stopTickerSignal = signalReassessStart(threadId);
+    apiPost(`/runner/control/thread/${threadId}/reassess`, {})
+      .then(async () => {
+        showToast({ kind: "success", title: "Reply Brief refreshed" });
+        setError(null);
+        await refresh();
+      })
+      .catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        showToast({
+          kind: "error",
+          title: "Reassess failed",
+          description: message,
+          durationMs: 9000
+        });
+        setError(message);
+      })
+      .finally(() => {
+        stopTickerSignal();
+        setReassessing(false);
+      });
   };
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
@@ -997,12 +1674,73 @@ export default function ThreadPage() {
     }
   };
 
+  // #408. Apply an operator reaction to a single LinkedIn message. Mirrors
+  // the transform / reassess handlers: a single in-flight id drives the
+  // pending state, the catch surfaces a calm per-message inline error, and
+  // the finally clears the in-flight flag. The reaction is rendered
+  // optimistically (OUT direction) the instant it is sent, then confirmed
+  // by refresh(); on failure the optimistic glyph is rolled back.
+  const reactToMessage = async (messageId: string, emoji: string) => {
+    if (!thread || reactingMessageId) return;
+    const optimistic: MessageReaction = { emoji, kind: "emoji", direction: "OUT" };
+    setReactionPickerMessageId(null);
+    setReactingMessageId(messageId);
+    setReactionErrorByMessageId((prev) => {
+      if (!(messageId in prev)) return prev;
+      const next = { ...prev };
+      delete next[messageId];
+      return next;
+    });
+    setOptimisticReactionsByMessageId((prev) => ({
+      ...prev,
+      [messageId]: [...(prev[messageId] ?? []), optimistic]
+    }));
+    try {
+      await apiPost<{ status: string; emoji: string }>(
+        `/runner/control/thread/${thread.id}/message/${messageId}/react`,
+        { emoji }
+      );
+      setError(null);
+      // The runner has persisted the reaction; the refresh below pulls the
+      // authoritative copy. Drop our optimistic overlay for this message so
+      // the badge isn't double-counted once the server copy lands.
+      setOptimisticReactionsByMessageId((prev) => {
+        if (!(messageId in prev)) return prev;
+        const next = { ...prev };
+        delete next[messageId];
+        return next;
+      });
+      await refresh();
+    } catch (reactError) {
+      const message = reactError instanceof Error ? reactError.message : "Reaction failed";
+      // Roll the optimistic glyph back so the bubble reflects reality, then
+      // surface the failure inline on this message only.
+      setOptimisticReactionsByMessageId((prev) => {
+        const current = prev[messageId];
+        if (!current) return prev;
+        const idx = current.lastIndexOf(optimistic);
+        const trimmed = idx >= 0 ? [...current.slice(0, idx), ...current.slice(idx + 1)] : current;
+        const next = { ...prev };
+        if (trimmed.length > 0) {
+          next[messageId] = trimmed;
+        } else {
+          delete next[messageId];
+        }
+        return next;
+      });
+      setReactionErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
+    } finally {
+      setReactingMessageId(null);
+    }
+  };
+
   const composeFromIntent = async () => {
     if (!thread) return;
     const intent = composeIntent.trim();
     if (!intent || composing) return;
     setComposing(true);
     setComposeError(null);
+    setAskAnswer(null);
     try {
       const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/compose`, {
         intent
@@ -1010,6 +1748,27 @@ export default function ThreadPage() {
       setComposeDraft(output.text);
     } catch (composeErr) {
       const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
+      setComposeError(message);
+    } finally {
+      setComposing(false);
+    }
+  };
+
+  const askAi = async () => {
+    if (!thread) return;
+    const question = composeIntent.trim();
+    if (!question || composing) return;
+    setComposing(true);
+    setComposeError(null);
+    setComposeDraft("");
+    try {
+      const output = await apiPost<{ answer: string }>(
+        `/runner/control/person/${thread.personId}/ask`,
+        { question }
+      );
+      setAskAnswer(output.answer ?? "");
+    } catch (askErr) {
+      const message = askErr instanceof Error ? askErr.message : "Ask failed";
       setComposeError(message);
     } finally {
       setComposing(false);
@@ -1036,26 +1795,313 @@ export default function ThreadPage() {
     );
   }, [logs, thread]);
 
-  // Voice match - built from this thread's outbound history. Memos
-  // live up here (before early returns) so the React hook order is
-  // stable across the loading/loaded transition.
-  const voiceCorpus = useMemo(() => {
-    if (!thread) return buildCorpusStats([]);
-    return buildCorpusStats(
-      thread.messages.filter((m) => m.direction === "OUT").map((m) => m.text)
-    );
-  }, [thread]);
-  const voiceScore = useMemo(
-    () => scoreDraftAgainstCorpus(composer, voiceCorpus),
-    [composer, voiceCorpus]
-  );
+  // (Removed dead voice-match computation: a per-keystroke
+  // scoreDraftAgainstCorpus(composer, …) plus a per-thread buildCorpusStats
+  // over the entire OUT history whose result was never rendered — wasted
+  // work on the composer's hot path.)
+
+  // Issue #331. Debounced draft-coverage check: ~1.4s after the operator
+  // stops typing, ask the runner which open loops the in-flight draft
+  // addresses. Skipped at memory_only (the privacy-tightest tier opts
+  // out of all AI writing aids), when there are no open loops to score
+  // against, and for drafts under 20 chars (saves tokens on stubs like
+  // "ok" or "yeah"). The ref guard discards stale responses if the
+  // operator keeps typing or switches threads mid-flight.
+  const draftCoverageThreadIdRef = useRef<string | null>(null);
+  const draftCoverageDraftRef = useRef<string>("");
+  // Depend on the specific primitives this effect reads, not the whole
+  // `thread` object — `thread` is a fresh reference on every background
+  // poll/SSE refresh, which would otherwise re-arm the 1.4s debounce timer
+  // continuously and could starve the coverage check during event bursts.
+  const draftCoverageThreadId = thread?.id ?? null;
+  const draftCoverageOpenLoopCount = thread?.openLoops.length ?? 0;
+  useEffect(() => {
+    if (!draftCoverageThreadId) return;
+    const aiLevel = profile?.aiHelpLevel ?? "writing_support";
+    // Functional updater + ref-equal short-circuit so clearing on every
+    // re-render doesn't itself become a dependency that re-fires the
+    // effect.
+    const clearIfNotEmpty = () =>
+      setAiCoverageItems((prev) => (prev.length === 0 ? prev : []));
+    if (aiLevel === "memory_only") {
+      clearIfNotEmpty();
+      return;
+    }
+    const trimmed = composer.trim();
+    if (trimmed.length < 20 || draftCoverageOpenLoopCount === 0) {
+      clearIfNotEmpty();
+      return;
+    }
+    const threadId = draftCoverageThreadId;
+    draftCoverageThreadIdRef.current = threadId;
+    draftCoverageDraftRef.current = trimmed;
+    const handle = window.setTimeout(() => {
+      void apiPost<{ items: Array<{ loop: string; status: "addressed" | "partial"; reason?: string }> }>(
+        `/runner/control/thread/${threadId}/check-draft`,
+        { draft: trimmed }
+      )
+        .then((output) => {
+          // Latest-write-wins: ignore responses from a stale debounce
+          // (operator either kept typing past this fire or moved on
+          // to a different thread).
+          if (
+            draftCoverageThreadIdRef.current !== threadId ||
+            draftCoverageDraftRef.current !== trimmed
+          ) {
+            return;
+          }
+          setAiCoverageItems(output.items ?? []);
+        })
+        .catch((coverageError: unknown) => {
+          // Coverage is a polish — never escalate to the visible error
+          // badge. A console line is enough for debugging without
+          // distracting the operator mid-draft.
+          console.warn(
+            "[draft-coverage]",
+            coverageError instanceof Error ? coverageError.message : String(coverageError)
+          );
+        });
+    }, 1400);
+    return () => window.clearTimeout(handle);
+  }, [composer, draftCoverageThreadId, draftCoverageOpenLoopCount, profile?.aiHelpLevel]);
+
+  // Reset AI coverage when the thread changes — local state from the
+  // previous thread shouldn't bleed into a new one.
+  useEffect(() => {
+    setAiCoverageItems([]);
+    draftCoverageThreadIdRef.current = null;
+    draftCoverageDraftRef.current = "";
+  }, [thread?.id]);
 
   // Pagination is now driven by the runner: `thread.messages` is whatever
   // the latest fetch returned (initial slice or initial + lazily-pulled
   // older pages). `messagePage.hasOlder` tells us whether more history
   // exists on the server.
-  const visibleMessages: ThreadMessage[] = thread?.messages ?? [];
+  // Render-time filter on top of the runner's API filter. Drops:
+  //   - iMessage "kept an audio message" system events (the runner
+  //     hides these too; this is belt-and-braces);
+  //   - bubbles with no displayable content at all (empty text + no
+  //     playable attachments + no transcript) so the thread never
+  //     paints a literally-blank bubble.
+  // Memoized on thread.messages so a keystroke in the composer (which
+  // re-renders this 4000-line component) or a 3s poll tick does NOT re-run
+  // this full filter pass and hand a fresh array reference to the reaction-
+  // fold and reply-graph memos below — they only recompute when messages
+  // actually change.
+  const visibleMessagesBeforeReactionFold: ThreadMessage[] = useMemo(
+    () =>
+      (thread?.messages ?? []).filter((m) => {
+        if (isNonContentIMessageSystemEvent(m.text)) return false;
+        const text = (m.text ?? "").trim();
+        const hasText = text.length > 0;
+        const hasPlayable = (m.attachments ?? []).some(
+          (a) => Boolean(a.guid) && a.kind !== undefined && a.kind !== "unknown"
+        );
+        const hasTranscript =
+          !!m.audioTranscription &&
+          m.audioTranscription.status === "transcribed" &&
+          !!m.audioTranscription.transcript &&
+          m.audioTranscription.transcript.trim().length > 0;
+        return hasText || hasPlayable || hasTranscript;
+      }),
+    [thread?.messages]
+  );
+  // #422: iMessage stores arbitrary-emoji reactions as "Reacted X to
+  // 'Y'" text bubbles when either party isn't on iOS 18. Collapse those
+  // synthesised bubbles into reaction stickers on the parent so the
+  // operator sees the same UI as native ❤️/👍 tapbacks.
+  const { synthesizedByParentId: synthesizedReactionsByParentId, hiddenMessageIds: synthesizedReactionHiddenIds } =
+    useMemo(
+      () =>
+        foldSynthesizedReactions(
+          visibleMessagesBeforeReactionFold.map((m) => ({
+            id: m.id,
+            direction: m.direction,
+            text: m.text ?? ""
+          }))
+        ),
+      [visibleMessagesBeforeReactionFold]
+    );
+  const visibleMessages: ThreadMessage[] = useMemo(
+    () => visibleMessagesBeforeReactionFold.filter((m) => !synthesizedReactionHiddenIds.has(m.id)),
+    [visibleMessagesBeforeReactionFold, synthesizedReactionHiddenIds]
+  );
   const hasOlder = thread?.messagePage.hasOlder ?? false;
+
+  // Threaded-reply lookups — unifies two sources:
+  //   (1) Apple-native: child carries `raw.replyToGuid` from chat.db's
+  //       `thread_originator_guid`, resolved against another row's
+  //       `platformMessageKey`.
+  //   (2) App-level: child carries `replyToMessageId` (a Message.id cuid)
+  //       set by the dashboard's focused-thread composer.
+  // Either way we end up with a parent cuid → child cuids map plus a
+  // per-child parent pointer the render code consumes uniformly.
+  const { messageById, replyCountByParentId, replyChildIdsByParentId, parentIdOf } = useMemo(() => {
+    const byKey = new Map<string, ThreadMessage>();
+    const byId = new Map<string, ThreadMessage>();
+    for (const m of visibleMessages) {
+      byId.set(m.id, m);
+      if (m.platformMessageKey) byKey.set(m.platformMessageKey, m);
+    }
+    const parentOf = new Map<string, string>();
+    const counts = new Map<string, number>();
+    const children = new Map<string, string[]>();
+    for (const m of visibleMessages) {
+      let parentId: string | undefined;
+      if (m.replyToMessageId && byId.has(m.replyToMessageId)) {
+        parentId = m.replyToMessageId;
+      } else {
+        const parentGuid = (m.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
+        if (parentGuid) {
+          const parent = byKey.get(parentGuid);
+          if (parent) parentId = parent.id;
+        }
+      }
+      if (parentId) {
+        parentOf.set(m.id, parentId);
+        counts.set(parentId, (counts.get(parentId) ?? 0) + 1);
+        const list = children.get(parentId) ?? [];
+        list.push(m.id);
+        children.set(parentId, list);
+      }
+    }
+    return {
+      messageById: byId,
+      replyCountByParentId: counts,
+      replyChildIdsByParentId: children,
+      parentIdOf: parentOf
+    };
+  }, [visibleMessages]);
+
+  // Focused thread: see state declaration up top (lifted there so the
+  // send callback closes over it). The derived state below depends on
+  // `messageById` which is only available after `visibleMessages` is
+  // computed, so it stays here.
+  const focusedParentMessage = focusedThreadParentId
+    ? (messageById.get(focusedThreadParentId) ?? null)
+    : null;
+  // The set of message ids that are "in focus" — the parent + every
+  // reply linked to it. Used by the render to bright-light those bubbles
+  // and dim/blur everything else, matching Messages.app's focused-thread
+  // overlay. When no focus, the set is null and every bubble renders at
+  // full opacity.
+  const focusedIdSet = useMemo<Set<string> | null>(() => {
+    if (!focusedThreadParentId) return null;
+    const childIds = replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
+    return new Set<string>([focusedThreadParentId, ...childIds]);
+  }, [focusedThreadParentId, replyChildIdsByParentId]);
+  useEffect(() => {
+    // Clear focused thread when navigating to a different thread so the
+    // user doesn't carry stale focus across conversations.
+    setFocusedThreadParentId(null);
+  }, [thread?.id]);
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setFocusedThreadParentId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [focusedThreadParentId]);
+  // Click-outside-to-exit. Anything that isn't a focused bubble, the
+  // composer, the sticky "FOCUSED THREAD" pill, or another "Focus
+  // thread" chip (which should swap focus, not dismiss) exits focused
+  // mode — Messages.app's tap-outside model.
+  // We use `click` (not `mousedown`) so the focusOnParent handler that
+  // activates focus has already updated state by the time we arrive,
+  // and we use `setTimeout(..., 0)` to push the listener attachment
+  // past the current click's bubbling phase — otherwise the same
+  // click that activated focus would also dismiss it.
+  useEffect(() => {
+    if (!focusedThreadParentId) return;
+    let cancelled = false;
+    const onClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target) return;
+      const focusedBubble = target.closest('[data-focused-bubble="true"]');
+      const composer = target.closest('[data-thread-composer="true"]');
+      const pill = target.closest('[data-focused-pill="true"]');
+      const focusSwap = target.closest('button[title^="Focus"]');
+      if (focusedBubble || composer || pill || focusSwap) return;
+      setFocusedThreadParentId(null);
+    };
+    // Delay listener arming so the focusing click itself doesn't
+    // immediately dismiss. 200ms covers test-runner / extension
+    // emulated event sequences that fire a trailing synthetic event
+    // after the React click handler runs.
+    const handle = setTimeout(() => {
+      if (cancelled) return;
+      document.addEventListener("click", onClick);
+    }, 200);
+    return () => {
+      cancelled = true;
+      clearTimeout(handle);
+      document.removeEventListener("click", onClick);
+    };
+  }, [focusedThreadParentId]);
+  // Bring the focused parent into view when the focus changes. Two
+  // pieces of timing care:
+  //   1. Flip `stickToBottomRef` off so the global timeline
+  //      useLayoutEffect doesn't immediately snap scrollTop back to
+  //      scrollHeight after our scroll (it fires on every
+  //      visibleMessages re-creation).
+  //   2. Scroll the timeline container EXPLICITLY rather than relying
+  //      on element.scrollIntoView's "nearest scrollable ancestor"
+  //      heuristic, which picks the wrong context on multi-monitor /
+  //      Retina setups and silently no-ops.
+  // We use a useLayoutEffect so the scroll happens synchronously after
+  // DOM update, before the browser paints — same frame as the dim/blur
+  // class applies, so users see them animate together rather than the
+  // dim happen, pause, then the scroll yank.
+  useLayoutEffect(() => {
+    const container = timelineRef.current;
+    if (!focusedThreadParentId) {
+      // Exit: restore the operator's pre-focus visual position by
+      // re-pinning the message they were looking at. Numeric scrollTop
+      // restoration drifts when the layout has shifted during focus
+      // (collapsed bubbles re-expanding, late-loaded attachments,
+      // reply-context placeholders filling in), so we anchor on the
+      // specific message instead. The settling guard re-pins through
+      // the 300ms collapse-back transition.
+      if (container && preFocusAnchorRef.current) {
+        const { anchorEl, viewportOffset } = preFocusAnchorRef.current;
+        preFocusAnchorRef.current = null;
+        if (container.contains(anchorEl)) {
+          repinAnchor(container, anchorEl, viewportOffset);
+          if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+          anchorGuardStopRef.current = startPostLoadAnchorGuard(container, anchorEl, viewportOffset);
+        }
+      }
+      return;
+    }
+    stickToBottomRef.current = false;
+    const target = container?.querySelector(
+      `[data-message-id="${focusedThreadParentId}"]`
+    ) as HTMLElement | null;
+    if (!container || !target) return;
+    // #465 (pilot R-0064): position the focused message as HIGH as
+    // possible — its top sits just below the sticky header — rather than
+    // centring it, so the message and the replies beneath it read
+    // top-down. scrollTop clamps at the bottom, so a focused message near
+    // the end of the thread still lands as high as the remaining content
+    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
+    // className), so re-align on every layout change during that window
+    // rather than relying on a one-shot calculation.
+    const realignToTop = () => {
+      const containerRect = container.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
+      // message clears the glassy sticky header.
+      const FOCUS_HEADER_OFFSET = 64;
+      const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
+      container.scrollTop = container.scrollTop + delta;
+    };
+    realignToTop();
+    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+    anchorGuardStopRef.current = startScrollSettlingGuard(container, realignToTop);
+    // `focusTrigger` is included so clicking a chip whose parent is
+    // already the current focus re-aligns rather than no-opping.
+  }, [focusedThreadParentId, focusTrigger]);
 
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
@@ -1118,51 +2164,175 @@ export default function ThreadPage() {
   useEffect(() => {
     if (thread && prevThreadIdRef.current !== thread.id) {
       stickToBottomRef.current = true;
+      setShowJumpToLatest(false);
       prevThreadIdRef.current = thread.id;
     }
   }, [thread]);
 
   // After every layout pass that affects the timeline, do one of:
-  //  (a) restore scroll position (we just prepended older messages)
+  //  (a) restore scroll position by re-pinning a captured anchor
+  //      element to its previous viewport offset (we just prepended
+  //      older messages and the operator should stay on the same
+  //      message they were looking at)
   //  (b) jump to bottom (fresh thread or stickToBottomRef is true)
   useLayoutEffect(() => {
     const el = timelineRef.current;
     if (!el) return;
     if (restoreScrollRef.current) {
-      const { prevHeight, prevTop } = restoreScrollRef.current;
-      const delta = el.scrollHeight - prevHeight;
-      el.scrollTop = prevTop + delta;
+      const { anchorEl, viewportOffset } = restoreScrollRef.current;
       restoreScrollRef.current = null;
+      if (el.contains(anchorEl)) {
+        repinAnchor(el, anchorEl, viewportOffset);
+        if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+        anchorGuardStopRef.current = startPostLoadAnchorGuard(el, anchorEl, viewportOffset);
+      }
+      return;
+    }
+    // First layout pass for this thread.id — fresh landing (page
+    // refresh, thread switch). Always pin to the bottom regardless
+    // of the sticky ref's verification, since scrollTop is 0 here
+    // (the page just rendered) and the verification would otherwise
+    // reject the legitimate bottom-pin. Then keep re-pinning for a
+    // short window so attachment images and other async content that
+    // loads after the initial layout pass don't leave the operator
+    // shy of the actual most-recent message.
+    if (thread && lastBottomedThreadIdRef.current !== thread.id) {
+      lastBottomedThreadIdRef.current = thread.id;
+      el.scrollTop = el.scrollHeight;
+      stickToBottomRef.current = true;
+      if (anchorGuardStopRef.current) anchorGuardStopRef.current();
+      anchorGuardStopRef.current = startInitialBottomGuard(el);
       return;
     }
     if (stickToBottomRef.current) {
-      el.scrollTop = el.scrollHeight;
+      // Verify the ref against the operator's actual scroll position
+      // before yanking them down. The ref is set to true in places
+      // that pre-state assumptions (focus exit, send, scrolled near
+      // bottom) and is supposed to be flipped off by the onScroll
+      // handler when the operator scrolls up — but if React hasn't
+      // dispatched the scroll event yet (programmatic scroll races,
+      // fast scroll bursts), the ref can be stale. A refresh
+      // (THREAD_UPDATED, send completion, etc.) firing in that window
+      // would otherwise pin the operator to the bottom mid-read.
+      const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+      // 4× the scroll-handler threshold gives the new-message-at-bottom
+      // case (most common reason this branch fires) plenty of headroom
+      // while still rejecting "operator is way up the thread" cases.
+      if (distanceFromBottom < SCROLL_BOTTOM_THRESHOLD * 4) {
+        el.scrollTop = el.scrollHeight;
+      } else {
+        stickToBottomRef.current = false;
+      }
     }
-  }, [visibleMessages, pendingSends.length, loading]);
+  }, [visibleMessages, pendingSends.length, loading, thread]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
+    // In focused-thread mode, suppress both the bottom-stickiness
+    // tracking and the load-older trigger. Scroll inside the focused
+    // stack is naturally bounded by the collapsed background, and
+    // pulling in new history would shift the underlying timeline so
+    // exit-focus lands the operator far from where they started.
+    if (focusedThreadParentId) {
+      // The jump-to-latest affordance is meaningless inside the bounded
+      // focused stack — keep it hidden there.
+      if (showJumpToLatest) setShowJumpToLatest(false);
+      return;
+    }
     const el = event.currentTarget;
     const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distanceFromBottom < SCROLL_BOTTOM_THRESHOLD;
+    // #461 (pilot R-0060): surface the floating jump-to-latest button once
+    // the operator has scrolled meaningfully up from the newest message.
+    setShowJumpToLatest(distanceFromBottom > JUMP_TO_LATEST_THRESHOLD);
     // Scroll near the top + server says more exists → request the next
-    // older page. Capture scroll position so the layout effect above can
-    // restore it once the prepended messages render (no view jump).
+    // older page. Capture an anchor element (the topmost visible message
+    // bubble below the sticky header) and its viewport offset so the
+    // layout effect above can re-pin it once the prepended messages
+    // render. Element-anchored preservation handles structural shifts
+    // (extra day-dividers at the prepend boundary, etc.) that the
+    // earlier prevHeight/prevTop math couldn't.
     if (el.scrollTop < SCROLL_TOP_THRESHOLD && hasOlder && !loadingOlderMessages) {
-      restoreScrollRef.current = { prevHeight: el.scrollHeight, prevTop: el.scrollTop };
+      const elTop = el.getBoundingClientRect().top;
+      const anchorEl = pickScrollAnchor(el, elTop);
+      if (anchorEl) {
+        restoreScrollRef.current = {
+          anchorEl,
+          viewportOffset: anchorEl.getBoundingClientRect().top - elTop
+        };
+      }
       void loadOlderMessages();
     }
   };
 
-  if (loading || !thread) {
+  // #461 (pilot R-0060): jump straight back to the newest message and
+  // re-arm bottom-stickiness so subsequent inbound messages keep the
+  // operator pinned at the foot of the thread.
+  const scrollToLatest = useCallback(() => {
+    const el = timelineRef.current;
+    if (!el) return;
+    el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
+    stickToBottomRef.current = true;
+    setShowJumpToLatest(false);
+  }, []);
+
+  if (!thread) {
+    // `loading` flips false the moment the fetch settles. A failed fetch
+    // (stale / removed thread id, runner unreachable) leaves `thread` null
+    // with an `error` set — render that instead of a "Loading…" that would
+    // otherwise hang forever with the error trapped in the unreached main
+    // render below.
     return (
       <div className="px-12 pt-14">
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        {loading ? (
+          <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        ) : (
+          <div className="max-w-[440px]">
+            <p className="m-0 mb-2 font-display text-[18px] font-semibold text-ink">
+              Can’t open this thread.
+            </p>
+            <p className="m-0 mb-4 text-[13px] leading-[1.55] text-ink-3">
+              {error ??
+                "This conversation could not be loaded. It may have been removed, or the runner is unavailable."}
+            </p>
+            <Link
+              href="/today"
+              className="inline-block rounded-[8px] bg-ink px-3 py-[6px] text-[12px] font-medium text-paper hover:opacity-90"
+            >
+              Back to Today
+            </Link>
+          </div>
+        )}
       </div>
     );
   }
 
   const firstName = thread.personName.split(/\s+/)[0] ?? thread.personName;
   const risk = toDisplayRisk(thread.riskLevel);
+
+  // Favourite star in the header (R-0066 / #483). Optimistic: flip locally,
+  // persist, then refresh so the inbox/today views re-sort; revert on failure.
+  const favourite = favOverride ?? thread.personFavourite ?? false;
+  const toggleFavourite = () => {
+    const next = !favourite;
+    const personId = thread.personId;
+    setFavOverride(next);
+    void setFavourite(personId, next)
+      .then(() => refresh())
+      .catch(() => setFavOverride(!next));
+  };
+
+  // Late-night LinkedIn send nudge (see lib/late-night-send.ts). Shown only
+  // while a LinkedIn draft is open inside the 22:00 to 06:00 quiet window; one
+  // click schedules the draft for the next 08:00 instead of pinging the
+  // recipient at an odd hour. Hidden while an immediate send is in flight.
+  const showLateNightNudge =
+    !sending &&
+    shouldOfferLateNightSchedule({
+      platform: thread.platform,
+      hasDraft: composer.trim().length > 0,
+      now: clockNow
+    });
+  const lateNightSlot = showLateNightNudge ? nextMorningSendSlot(clockNow) : null;
   let lastInboundAt: string | null = null;
   for (let i = thread.messages.length - 1; i >= 0; i -= 1) {
     const message = thread.messages[i];
@@ -1205,43 +2375,104 @@ export default function ThreadPage() {
     ? thread.suggestedReplies.source
     : null;
 
-  const trimmedSummary = thread.summary?.trim() ?? "";
-  const trimmedAsk = thread.whatTheyWant?.trim() ?? "";
-  const askDuplicatesSummary =
-    trimmedAsk && trimmedSummary &&
-    (trimmedSummary.includes(trimmedAsk) || trimmedAsk.includes(trimmedSummary));
-  const showAsk = trimmedAsk && !askDuplicatesSummary;
+  // Right-rail framing splits on `needsReply`:
+  // - active reply (contact's message is newest): rail surfaces what they're
+  //   waiting on + topical open loops + reply chips
+  // - reopen (operator already replied or thread dormant): rail surfaces a
+  //   warm reconnect hook + transcript-grounded callbacks + conversation
+  //   starters in the chips
+  // The Reply Brief itself is generated mode-aware on the server. This page
+  // only flips the compose helper + the AI predraft heading on reopen.
+  const isReopenMode = thread.needsReply === false;
+  const composeHelper = isReopenMode
+    ? "Type shorthand for a fresh opener. The AI writes the message in your voice grounded in things from the transcript."
+    : "Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the “rewrite in my voice” action above the composer instead.";
+
+  // AI help level gates which writing affordances this page surfaces.
+  // It NEVER hides the summary, "what they want", open loops, or memory —
+  // those are the core support and stay on at every level.
+  //   - full_drafts:     suggested replies + Compose-a-full-draft + rewrites
+  //   - writing_support: rewrites ("shorten" / "warmer") on the operator's
+  //                      own draft, but no complete AI-written drafts
+  //   - memory_only:     no AI writing help at all (Ask is still allowed —
+  //                      it answers from the thread, it doesn't draft)
+  const aiHelpLevel = profile?.aiHelpLevel ?? "writing_support";
+  const showFullDrafts = aiHelpLevel === "full_drafts";
+  const showWritingSupport = aiHelpLevel !== "memory_only";
+  // When full drafts are off, the compose drawer offers "Ask" only.
+  const effectiveComposeMode = showFullDrafts ? composeMode : "ask";
 
   const platformLabel = PLATFORM_LABEL[thread.platform];
 
+  // Reply Brief, computed once and shared between the always-visible brief
+  // band (pinned under the header, the default-visible reply-readiness
+  // summary) and the full Reply Brief in the AI rail.
+  const displayBrief = chooseDisplayBrief(thread);
+  const activeOpenLoops = thread.openLoops.filter(
+    (loop) => !thread.dismissedOpenLoops.includes(loop)
+  );
+
+  const threadsRailWidth = threadsCollapsed ? "56px" : "240px";
+  const gridTemplateColumns = aiOpen
+    ? `${threadsRailWidth} minmax(0,1fr) 360px`
+    : `${threadsRailWidth} minmax(0,1fr)`;
+
   return (
     <div
-      className={`grid h-full min-h-0 grid-cols-1 ${
-        aiOpen
-          ? "lg:grid-cols-[240px_minmax(0,1fr)_360px]"
-          : "lg:grid-cols-[240px_minmax(0,1fr)]"
-      }`}
+      className="grid h-full min-h-0 grid-cols-1 lg:[--threads-grid:var(--threads-grid-cols)]"
+      style={{ gridTemplateColumns }}
     >
       {/* ───── Sibling-thread list ───── */}
-      <aside className="hidden h-full min-h-0 flex-col overflow-y-auto border-r border-hairline bg-paper-2/30 lg:flex">
-        <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-4 py-4">
-          <div className="flex items-center justify-between gap-2">
-            <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-              Threads
-            </p>
-            <select
-              value={siblingPlatform}
-              onChange={(e) => setSiblingPlatform(e.target.value as "all" | "LINKEDIN" | "IMESSAGE")}
-              className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
-              aria-label="Filter sibling threads by platform"
+      <aside
+        className={`hidden h-full min-h-0 flex-col overflow-y-auto border-r border-hairline bg-paper-2/30 lg:flex ${
+          threadsCollapsed ? "overflow-x-hidden" : ""
+        }`}
+      >
+        <div
+          className={`sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 ${
+            threadsCollapsed ? "px-1 py-3" : "px-4 py-4"
+          }`}
+        >
+          {threadsCollapsed ? (
+            <button
+              type="button"
+              onClick={() => setThreadsCollapsed(false)}
+              aria-label="Expand threads (])"
+              title="Expand threads (])"
+              className="mx-auto grid h-8 w-8 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
             >
-              <option value="all">All</option>
-              <option value="LINKEDIN">LinkedIn</option>
-              <option value="IMESSAGE">iMessage</option>
-            </select>
-          </div>
+              <PanelLeftOpen className="h-[16px] w-[16px]" strokeWidth={1.6} />
+            </button>
+          ) : (
+            <div className="flex items-center justify-between gap-2">
+              <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                Threads
+              </p>
+              <div className="flex items-center gap-1">
+                <select
+                  value={siblingPlatform}
+                  onChange={(e) => setSiblingPlatform(e.target.value as "all" | "LINKEDIN" | "IMESSAGE")}
+                  className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
+                  aria-label="Filter sibling threads by platform"
+                >
+                  <option value="all">All</option>
+                  <option value="LINKEDIN">LinkedIn</option>
+                  <option value="IMESSAGE">iMessage</option>
+                </select>
+                <button
+                  type="button"
+                  onClick={() => setThreadsCollapsed(true)}
+                  aria-label="Collapse threads (])"
+                  title="Collapse threads (])"
+                  className="grid h-6 w-6 place-items-center rounded-[6px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+                >
+                  <PanelLeftClose className="h-[14px] w-[14px]" strokeWidth={1.6} />
+                </button>
+              </div>
+            </div>
+          )}
         </div>
-        <ul className="m-0 list-none space-y-[2px] p-2">
+        <ul className={`m-0 list-none ${threadsCollapsed ? "space-y-[4px] p-1" : "space-y-[2px] p-2"}`}>
           {siblingRows.map((row) => {
             const active = row.id === thread.id;
             const dotClass =
@@ -1250,6 +2481,30 @@ export default function ThreadPage() {
                 : row.riskLevel === "AMBER"
                   ? "bg-risk-waiting"
                   : "bg-risk-fresh";
+            if (threadsCollapsed) {
+              return (
+                <li key={row.id}>
+                  <Link
+                    href={`/thread/${row.id}`}
+                    title={`${row.personName} · ${PLATFORM_LABEL[row.platform]}`}
+                    className={`relative flex items-center justify-center rounded-row p-1 transition-colors duration-calm ${
+                      active ? "bg-paper-2" : "hover:bg-paper-2/60"
+                    }`}
+                  >
+                    <PersonAvatar
+                      name={row.personName}
+                      avatarUrl={row.personAvatarUrl}
+                      size={32}
+                      className={`font-mono text-[10px] ${active ? "ring-2 ring-ink/40" : ""}`}
+                    />
+                    <span
+                      className={`absolute -right-[1px] -top-[1px] h-[8px] w-[8px] rounded-full border border-paper ${dotClass}`}
+                      aria-hidden
+                    />
+                  </Link>
+                </li>
+              );
+            }
             return (
               <li key={row.id}>
                 <Link
@@ -1284,7 +2539,7 @@ export default function ThreadPage() {
               </li>
             );
           })}
-          {siblingRows.length === 0 ? (
+          {siblingRows.length === 0 && !threadsCollapsed ? (
             <li className="px-3 py-3 font-mono text-[11px] text-ink-3">no other threads</li>
           ) : null}
         </ul>
@@ -1318,114 +2573,228 @@ export default function ThreadPage() {
           ref={timelineRef}
           onScroll={onTimelineScroll}
           className="relative min-h-0 flex-1 overflow-y-auto"
+          // overflowAnchor: disable the browser's native scroll anchoring
+          // so it doesn't race with the load-older restoration in
+          // useLayoutEffect. When both fire on the same prepend, the
+          // browser anchors on its own heuristic-picked element (often a
+          // wrapper) and our code anchors on a specific message bubble —
+          // the difference shows up as a small visible jolt as the scroll
+          // position settles.
+          //
+          // scrollPaddingTop: the glassy sticky header below sits INSIDE
+          // this scroller, so any programmatic scroll (scrollIntoView,
+          // future snap-to-message features) would otherwise land target
+          // elements at scroll-container-top — i.e. behind the header.
+          // Reserving a top scroll-padding zone the size of the header
+          // makes those alignments respect the header. Value tuned to the
+          // header's resting height (single row, h-9 avatar + py-2.5 ≈
+          // 60-64px); if the header grows another row of chips this may
+          // need a ref-based measurement.
+          style={{ overflowAnchor: "none", scrollPaddingTop: "64px" }}
         >
           {/* Glassy sticky header. Sits inside the scroll container so the
               timeline scrolls visibly behind it - matches the iOS / Apple
-              translucent-bar aesthetic the rest of the redesign nods at. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] backdrop-blur-md backdrop-saturate-150 px-12 pb-4 pt-9">
-            <button
-              type="button"
-              onClick={() => router.push("/today")}
-              className="mb-4 inline-flex items-center gap-2 font-mono text-[12px] text-ink-3 hover:text-ink"
-            >
-              <ChevronLeft className="h-[14px] w-[14px]" strokeWidth={1.6} />
-              Back to today
-            </button>
-            <header className="flex items-center gap-4">
+              translucent-bar aesthetic the rest of the redesign nods at.
+              Single-row layout keeps vertical real estate for the chat.
+              Opacity is high (92%) on purpose: at lower values (~70%)
+              message bubbles passing behind the bar stayed legible enough
+              to read as a layout bug — the operator saw a clipped bubble
+              rather than a tinted bar. 92% + backdrop-blur reads as
+              frosted glass while making clipped content visually fade. */}
+          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
+            <header className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => router.push("/today")}
+                aria-label="Back to today"
+                title="Back to today (Esc)"
+                className="grid h-8 w-8 shrink-0 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+              >
+                <ChevronLeft className="h-[16px] w-[16px]" strokeWidth={1.6} />
+              </button>
               <button
                 type="button"
                 onClick={() => setProfileDrawerOpen(true)}
-                className="flex min-w-0 flex-1 items-center gap-4 rounded-row text-left transition-colors duration-calm hover:bg-paper-2"
+                className="flex min-w-0 flex-1 items-center gap-3 rounded-row px-2 py-1 text-left transition-colors duration-calm hover:bg-paper-2"
                 title="Open profile"
               >
                 {thread.personAvatarUrl ? (
-                  <span className="grid h-12 w-12 place-items-center overflow-hidden rounded-full bg-paper-2">
+                  <span className="grid h-9 w-9 place-items-center overflow-hidden rounded-full bg-paper-2">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
                       src={thread.personAvatarUrl}
                       alt=""
-                      width={48}
-                      height={48}
+                      width={36}
+                      height={36}
                       referrerPolicy="no-referrer"
                       className="h-full w-full object-cover"
                     />
                   </span>
                 ) : (
-                  <span className="grid h-12 w-12 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[16px] font-semibold text-white">
+                  <span className="grid h-9 w-9 place-items-center rounded-full bg-gradient-to-br from-[oklch(72%_0.10_35)] to-[oklch(60%_0.13_22)] font-display text-[12px] font-semibold text-white">
                     {initials(thread.personName)}
                   </span>
                 )}
-                <div className="min-w-0 flex-1">
-                  <h2 className="m-0 font-display text-[22px] font-semibold tracking-[-0.02em]">
+                <div className="flex min-w-0 flex-1 flex-col leading-tight">
+                  <h2 className="m-0 truncate font-display text-[16px] font-semibold tracking-[-0.02em]">
                     {thread.personName}
                   </h2>
-                  <p className="mt-1 text-[12px] text-ink-2">
-                    <span className="rounded bg-paper-2 px-[6px] py-[1px] text-[10px] font-medium uppercase tracking-[0.04em]">
+                  <p className="m-0 flex flex-wrap items-center gap-x-1 text-[11px] text-ink-2">
+                    <span className="rounded bg-paper-2 px-[5px] py-[1px] text-[9px] font-medium uppercase tracking-[0.04em]">
                       {platformLabel}
-                    </span>{" "}
+                    </span>
                     <span className="text-ink-3">· {riskLabel}</span>
+                    {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                      <span
+                        className="ml-1 rounded-full bg-[oklch(94%_0.03_85)] px-2 py-[1px] text-[9px] font-medium uppercase tracking-[0.04em] text-[oklch(45%_0.10_60)]"
+                        title={`Hidden from active inbox until ${new Date(thread.snoozedUntil).toLocaleString()}`}
+                      >
+                        Snoozed · wakes {formatScheduledFor(thread.snoozedUntil)}
+                      </span>
+                    ) : null}
                   </p>
                 </div>
               </button>
-              <Button
-                variant="quiet"
-                disabled={reassessing}
-                onClick={() => void reassessThread()}
-                title="Re-summarise, reclassify, and regenerate suggested replies"
+              {/* Favourite star (R-0066 / #483). Pins this contact so their
+                  threads float to the top of the Inbox / Today. Optimistic. */}
+              <button
+                type="button"
+                onClick={toggleFavourite}
+                aria-label={favourite ? `Unfavourite ${thread.personName}` : `Favourite ${thread.personName}`}
+                aria-pressed={favourite}
+                data-testid="thread-favourite-toggle"
+                title={favourite ? "Remove favourite" : "Favourite this contact"}
+                className={cn(
+                  "grid h-8 w-8 shrink-0 place-items-center rounded-[8px] transition-colors duration-calm hover:bg-paper-2",
+                  favourite ? "text-accent" : "text-ink-3 hover:text-ink"
+                )}
               >
-                {reassessing ? "Reassessing…" : "Reassess"}
+                <Star className="h-[16px] w-[16px]" strokeWidth={1.6} fill={favourite ? "currentColor" : "none"} />
+              </button>
+              <ActionButton
+                variant="ghost"
+                runningLabel="Saving…"
+                doneLabel="Saved"
+                onError={setError}
+                action={() =>
+                  apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
+                }
+                onSuccess={() => setHasSavedDraft(composer.trim().length > 0)}
+                className="px-3 py-1.5 text-[12px]"
+              >
+                Save draft
+              </ActionButton>
+              {/* Delete the persisted draft (issue #486 / pilot R-0067).
+                  Only shown when a draft is actually saved server-side —
+                  the AI predraft has its own local-only "Discard" below.
+                  Clearing the composer + hiding this button is the success
+                  signal; the inline "Deleting…" covers the in-flight state. */}
+              {hasSavedDraft ? (
+                <ActionButton
+                  variant="ghost"
+                  runningLabel="Deleting…"
+                  doneLabel="Deleted"
+                  onError={setError}
+                  action={() =>
+                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {})
+                  }
+                  onSuccess={() => {
+                    setComposer("");
+                    setComposerSource("empty");
+                    setHasSavedDraft(false);
+                  }}
+                  title="Delete the saved draft for this thread"
+                  className="px-3 py-1.5 text-[12px]"
+                >
+                  Delete draft
+                </ActionButton>
+              ) : null}
+              {/* Clear-thread cluster: wrapped so the guided tour can spotlight
+                  snooze + mark-done + archive together (data-demo-target). */}
+              <div data-demo-target="thread-actions" className="flex items-center gap-2">
+                {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
+                <Button
+                  variant="ghost"
+                  onClick={() =>
+                    runAction(
+                      apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+                      setError,
+                      refresh
+                    )
+                  }
+                  title="Bring this thread back into the active inbox now"
+                  className="px-3 py-1.5 text-[12px]"
+                >
+                  Wake up
+                </Button>
+              ) : (
+                <Button
+                  variant="ghost"
+                  onClick={() => {
+                    // Toggle the AI snooze menu, lazily fetching once. The
+                    // popover renders above this row when `snoozeMenuOpen`.
+                    if (!snoozeMenuOpen && !snoozeSuggestions) {
+                      setSnoozeSuggestions({ loading: true, items: [] });
+                      void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
+                        `/runner/control/thread/${thread.id}/suggest-snooze`
+                      )
+                        .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
+                        .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                    }
+                    setSnoozeMenuOpen((prev) => !prev);
+                  }}
+                  aria-expanded={snoozeMenuOpen}
+                  title="Hide from active inbox until later"
+                  className="px-3 py-1.5 text-[12px]"
+                >
+                  Snooze
+                </Button>
+              )}
+              <ActionButton
+                variant="ghost"
+                runningLabel="Marking…"
+                doneLabel="Handled"
+                onError={setError}
+                onSuccess={refresh}
+                action={() => apiPost(`/runner/control/thread/${thread.id}/mark-done`, {})}
+                className="px-3 py-1.5 text-[12px]"
+              >
+                Mark as handled
+              </ActionButton>
+              <Button
+                variant="ghost"
+                disabled={archiving}
+                onClick={() => {
+                  if (archiving) return;
+                  setArchiving(true);
+                  // Issue #336. Return to whichever list the operator
+                  // came from (Inbox, Reconnect, Archived, At risk…)
+                  // rather than always /today; falls back to /today
+                  // when no source was recorded (deep link, fresh tab).
+                  const returnTo = readThreadSource();
+                  runAction(
+                    apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
+                    (message) => {
+                      setError(message);
+                      if (message) setArchiving(false);
+                    },
+                    () => router.push(returnTo)
+                  );
+                }}
+                title="Move this thread out of the active inbox (you can find it in Archived)"
+                className="px-3 py-1.5 text-[12px]"
+              >
+                {archiving ? "Archiving…" : "Archive"}
               </Button>
+              </div>
               <Button
                 variant={aiOpen ? "primary" : "quiet"}
                 onClick={() => setAiOpen((v) => !v)}
                 title="Toggle the AI assist sidebar"
+                className="px-3 py-1.5 text-[12px]"
               >
-                <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.6} />
-                AI assist
-              </Button>
-            </header>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
-                    setError
-                  )
-                }
-              >
-                Save draft
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  // Toggle the AI snooze menu, lazily fetching once. The
-                  // popover renders above this row when `snoozeMenuOpen`.
-                  if (!snoozeMenuOpen && !snoozeSuggestions) {
-                    setSnoozeSuggestions({ loading: true, items: [] });
-                    void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
-                      `/runner/control/thread/${thread.id}/suggest-snooze`
-                    )
-                      .then((r) => setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] }))
-                      .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
-                  }
-                  setSnoozeMenuOpen((prev) => !prev);
-                }}
-                aria-expanded={snoozeMenuOpen}
-              >
-                Snooze
-              </Button>
-              <Button
-                variant="ghost"
-                onClick={() =>
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/mark-done`, {}),
-                    setError,
-                    refresh
-                  )
-                }
-              >
-                Mark as handled
+                <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                AI
               </Button>
               <Menu
                 align="end"
@@ -1434,12 +2803,78 @@ export default function ThreadPage() {
                     variant="ghost"
                     aria-label="More actions"
                     title={rescanStage ? `Rescan: ${rescanStage}…` : "More actions"}
+                    className="px-2 py-1.5 text-[12px]"
                   >
                     <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
                     {rescanStage ? <span className="ml-2">{rescanStage}…</span> : null}
                   </Button>
                 }
                 items={[
+                  {
+                    label: reassessing ? "Reassessing…" : "Reassess",
+                    onSelect: () => {
+                      if (reassessing) return;
+                      void reassessThread();
+                    }
+                  },
+                  {
+                    // Issue #392 / R-0032. "Remind me to follow up in 3 days"
+                    // → AI parses → thread snoozes until then with the
+                    // reminder text saved on Thread.reminderText. When the
+                    // snooze expires the thread returns to inbox with a
+                    // "Reminder: <text>" banner. window.prompt for the
+                    // input is intentionally rough — see #392 for the
+                    // upcoming dedicated compose-mode polish.
+                    label: "Remind me…",
+                    onSelect: () => {
+                      if (!thread) return;
+                      const intent = window.prompt(
+                        "Remind me to…\n\nExample: \"follow up with him next Tuesday\" or \"ask about the offer in 3 days\"."
+                      );
+                      if (!intent || !intent.trim()) return;
+                      apiPost<{
+                        ok: boolean;
+                        remindAt?: string;
+                        reminderText?: string;
+                        needsClarification?: boolean;
+                        reason?: string;
+                      }>(`/runner/control/thread/${thread.id}/remind`, { intent: intent.trim() })
+                        .then(async (res) => {
+                          if (res.ok && res.remindAt && res.reminderText) {
+                            const whenLabel = new Date(res.remindAt).toLocaleString(undefined, {
+                              weekday: "short",
+                              month: "short",
+                              day: "numeric",
+                              hour: "numeric",
+                              minute: "2-digit"
+                            });
+                            showToast({
+                              kind: "success",
+                              title: `Reminder set for ${whenLabel}`,
+                              description: res.reminderText
+                            });
+                            await refresh();
+                          } else {
+                            showToast({
+                              kind: "error",
+                              title: "Couldn't set the reminder",
+                              description:
+                                res.reason ??
+                                "Try rewriting with a clearer time, like 'in 3 days' or 'next Tuesday'.",
+                              durationMs: 9000
+                            });
+                          }
+                        })
+                        .catch((err) => {
+                          showToast({
+                            kind: "error",
+                            title: "Reminder failed",
+                            description: err instanceof Error ? err.message : String(err),
+                            durationMs: 9000
+                          });
+                        });
+                    }
+                  },
                   {
                     label: `Open in ${platformLabel}`,
                     onSelect: () =>
@@ -1459,11 +2894,93 @@ export default function ThreadPage() {
                   { label: "Receipts", onSelect: () => setReceiptsOpen(true) }
                 ]}
               />
-            </div>
+            </header>
+            {/* Always-visible reply-readiness band: what the reply needs to
+                do, why it matters, what's still open — so the operator
+                understands the thread without opening the AI rail or
+                rereading. Pinned with the header. Hidden at lg only when the
+                full rail is open (it supersedes the summary there); stays
+                visible on mobile, where the rail can't open. */}
+            {thread.needsReply !== false ? (
+              <div className={aiOpen ? "lg:hidden" : undefined}>
+                <ThreadBriefBand
+                  onYou={displayBrief.on_you}
+                  whereItStands={displayBrief.where_it_stands}
+                  openLoops={activeOpenLoops}
+                />
+              </div>
+            ) : null}
           </div>
 
-          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-7">
-            {hasOlder ? (
+          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
+            {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
+                the contact's birthday is within the next 30 days
+                (pilot wanted "in the next month"). Wider than the
+                7-day inbox-row threshold because the operator opened
+                this specific thread — anything birthday-relevant in
+                the next month is worth flagging. Renders the age
+                ("turns 30") when birthYear is known. */}
+            {(() => {
+              if (!thread.personBirthday) return null;
+              const days = daysUntilBirthday(thread.personBirthday);
+              if (days === null || days > 30) return null;
+              const label = birthdayCountdownLabel(days);
+              const age = ageOnNextBirthday(thread.personBirthYear ?? null, thread.personBirthday);
+              return (
+                <div
+                  className={cn(
+                    "self-center flex items-center gap-2 rounded-pill border border-hairline px-3 py-[6px] text-[12.5px]",
+                    days === 0 ? "border-accent-ink text-accent-ink" : "text-ink-2"
+                  )}
+                >
+                  <span>🎂</span>
+                  <span>
+                    {thread.personName}'s birthday {label}
+                    {age ? ` · turns ${age}` : ""}
+                  </span>
+                </div>
+              );
+            })()}
+            {/* Issue #392. "Remind me to…" banner. Surfaces when the
+                operator set a reminder via the kebab menu — visible
+                whenever the thread is loaded, so the operator sees
+                WHY the thread is in front of them. Cleared on
+                unsnooze (server-side) and on the next reassess that
+                ships a fresh state. */}
+            {thread.reminderText ? (
+              <div className="self-center flex items-center gap-3 rounded-row border border-hairline bg-paper-2 px-3 py-[8px] text-[12.5px] text-ink-2">
+                <span className="font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Reminder</span>
+                <span>{thread.reminderText}</span>
+                {thread.snoozedUntil ? (
+                  <span className="font-mono text-[10.5px] text-ink-3">
+                    · resurfaces {new Date(thread.snoozedUntil).toLocaleString(undefined, {
+                      weekday: "short",
+                      month: "short",
+                      day: "numeric",
+                      hour: "numeric",
+                      minute: "2-digit"
+                    })}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            {focusedThreadParentId ? (
+              <div
+                data-focused-pill="true"
+                className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur"
+              >
+                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
+                <button
+                  type="button"
+                  onClick={() => setFocusedThreadParentId(null)}
+                  className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                  title="Esc"
+                >
+                  exit
+                </button>
+              </div>
+            ) : null}
+            {hasOlder && !focusedThreadParentId ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
@@ -1473,7 +2990,20 @@ export default function ThreadPage() {
                 ) : (
                   <button
                     type="button"
-                    onClick={() => void loadOlderMessages()}
+                    onClick={() => {
+                      const el = timelineRef.current;
+                      if (el) {
+                        const elTop = el.getBoundingClientRect().top;
+                        const anchorEl = pickScrollAnchor(el, elTop);
+                        if (anchorEl) {
+                          restoreScrollRef.current = {
+                            anchorEl,
+                            viewportOffset: anchorEl.getBoundingClientRect().top - elTop
+                          };
+                        }
+                      }
+                      void loadOlderMessages();
+                    }}
                     className="hover:text-ink"
                   >
                     load older messages
@@ -1481,7 +3011,7 @@ export default function ThreadPage() {
                 )}
               </div>
             ) : (
-              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
+              <div className={`self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4 transition-opacity duration-300 ${focusedThreadParentId ? "opacity-30" : ""}`}>
                 start of conversation
               </div>
             )}
@@ -1508,14 +3038,109 @@ export default function ThreadPage() {
                 message.direction === "OUT"
                   ? "You"
                   : (message.senderName ?? firstName);
+              const parentMessageId = parentIdOf.get(message.id);
+              const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
+              const replyCount = replyCountByParentId.get(message.id) ?? 0;
+              // A message can carry a reply pointer (replyToMessageId or
+              // raw.replyToGuid) before its parent is in the loaded
+              // window. We render the reply-context stub anyway so the
+              // bubble's height doesn't change when an older-messages
+              // load brings the parent in — the snippet text just fills
+              // in. Same pattern as iMessage / WhatsApp.
+              const hasReplyIntent =
+                !!message.replyToMessageId ||
+                !!(message.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
+              // In focused mode, bubbles outside the parent+replies set
+              // fade + blur so the focused thread "pops out" like
+              // Messages.app's overlay. Pointer events off prevents
+              // accidental clicks on the dimmed background.
+              const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
+              // A day divider between two focused messages stays; a divider
+              // between collapsed bubbles needs to collapse too (otherwise
+              // the focused stack gets random "Yesterday" headers from
+              // dates that no focused message even touches).
+              const dividerInFocusedRange =
+                !dimmedByFocus &&
+                (idx === 0 || (prev && focusedIdSet ? focusedIdSet.has(prev.id) : true));
               return (
                 <div key={message.id} className="contents">
-                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {dayLabel ? (
+                    <DayDivider
+                      label={dayLabel}
+                      className={
+                        focusedIdSet && !dividerInFocusedRange
+                          ? "opacity-0 max-h-0 overflow-hidden my-0 -mt-[18px] pointer-events-none"
+                          : ""
+                      }
+                    />
+                  ) : null}
                   <div
-                    className={`flex max-w-[72%] flex-col ${
+                    data-message-id={message.id}
+                    data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
+                    className={`flex max-w-[72%] flex-col ease-out transition-all ${
+                      // Focus enter is animated too — same easing as
+                      // exit, just faster (150ms vs 300ms) so the
+                      // focused stack snaps into view without
+                      // dragging out the dim. The post-load anchor
+                      // guard re-centres the focused parent on every
+                      // layout change during the collapse, so the
+                      // operator sees the focused stack slide into
+                      // place rather than the parent drifting.
+                      focusedThreadParentId ? "duration-150" : "duration-300"
+                    } ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
+                    } ${
+                      dimmedByFocus
+                        // Collapse non-focused bubbles to zero height so the
+                        // focused thread members visually come together —
+                        // matches Messages.app's overlay where the focused
+                        // bubbles stack tight. Negative margin cancels the
+                        // parent's gap-[18px] so the collapse is total.
+                        // Kept in the DOM (no display:none) so the
+                        // layout-effect-driven scroll-into-view can still
+                        // find adjacent anchors.
+                        ? "max-h-0 opacity-0 overflow-hidden -mt-[18px] pointer-events-none"
+                        : ""
                     }`}
                   >
+                    {hasReplyIntent ? (() => {
+                      // Prefer the in-window parent (we already have it
+                      // loaded, so the focus action can navigate to it)
+                      // but fall back to the server-resolved replyTo
+                      // snippet for parents that live outside the
+                      // pagination window or in a sibling iMessage
+                      // thread. Last resort: the generic literal stub.
+                      const localSnippet = parentMessage
+                        ? parentMessage.text.slice(0, 120) || "(media)"
+                        : null;
+                      const serverSnippet = message.replyTo?.snippet ?? null;
+                      const snippet =
+                        localSnippet ??
+                        serverSnippet ??
+                        "Replying to an earlier message";
+                      // The focus button only navigates when the parent
+                      // is loaded in the current window. For server-only
+                      // snippets we still show the text but make the
+                      // button non-interactive (focus would jump
+                      // nowhere).
+                      const navigable = Boolean(parentMessageId);
+                      return (
+                        <button
+                          type="button"
+                          onClick={() => navigable && parentMessageId && focusOnParent(parentMessageId)}
+                          disabled={!navigable}
+                          className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 disabled:cursor-default disabled:hover:bg-paper-2/60 disabled:hover:text-ink-3 disabled:hover:border-hairline ${
+                            message.direction === "OUT" ? "self-end" : "self-start"
+                          }`}
+                          title={`Focus thread: ${snippet}`}
+                        >
+                          <span className="text-ink-4" aria-hidden="true">↳</span>
+                          <span className="line-clamp-2 italic text-left min-h-[30px]">
+                            {snippet}
+                          </span>
+                        </button>
+                      );
+                    })() : null}
                     {isGroupChat && message.direction === "IN" && message.senderName ? (
                       <div className="relative mb-[4px]">
                         <button
@@ -1549,9 +3174,29 @@ export default function ThreadPage() {
                       const hasInlineMedia = playableAttachments.length > 0;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
-                      const reactions = (message.raw?.reactions as Array<{ emoji: string; kind: string; direction: "IN" | "OUT" }> | undefined) ?? [];
+                      const nativeReactions =
+                        (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
+                      const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
+                      // #408. Operator reactions just sent from this dashboard,
+                      // shown optimistically until the next refresh folds them
+                      // into the runner's native copy.
+                      const optimisticReactions = optimisticReactionsByMessageId[message.id] ?? [];
+                      const reactions: MessageReaction[] = [
+                        ...nativeReactions,
+                        ...synthesizedReactions,
+                        ...optimisticReactions
+                      ];
+                      // #408. The quick-react trigger is LinkedIn-only: iMessage
+                      // reactions are read-only here (applied from the Messages
+                      // app, surfaced via synthesised stickers), so we never show
+                      // the picker for them.
+                      const canReact = thread.platform === "LINKEDIN";
+                      const pickerOpen = reactionPickerMessageId === message.id;
+                      const isReacting = reactingMessageId === message.id;
+                      const reactionError = reactionErrorByMessageId[message.id];
                       return (
-                        <div className="relative">
+                        <>
+                        <div className="group relative">
                           <div
                             className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                               message.direction === "OUT"
@@ -1564,6 +3209,29 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                 ))}
+                                {(() => {
+                                  // Pick the first transcribable attachment to
+                                  // drive the per-message transcript surface.
+                                  // Voice notes win over plain audio, which
+                                  // win over video, so a multi-attachment
+                                  // bubble (rare) labels itself sensibly.
+                                  const transcribableKind = playableAttachments
+                                    .map((a) => a.kind)
+                                    .find(
+                                      (k) =>
+                                        k === "voice_note" ||
+                                        k === "audio" ||
+                                        k === "video"
+                                    );
+                                  if (!transcribableKind) return null;
+                                  return (
+                                    <VoiceMessageTranscript
+                                      messageId={message.id}
+                                      transcription={message.audioTranscription ?? null}
+                                      attachmentKind={transcribableKind}
+                                    />
+                                  );
+                                })()}
                               </div>
                             ) : null}
                             {showText ? (
@@ -1571,19 +3239,94 @@ export default function ThreadPage() {
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
-                            <span
-                              className={`absolute -top-3 ${
-                                message.direction === "OUT" ? "-left-2" : "-right-2"
-                              } flex items-center gap-[2px] rounded-full border border-hairline bg-paper px-[6px] py-[2px] text-[11px] shadow-sm`}
+                            <div
+                              className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
+                                message.direction === "OUT" ? "-left-[10px]" : "-right-[10px]"
+                              }`}
                             >
                               {reactions.map((r, i) => (
-                                <span key={`${r.kind}-${r.direction}-${i}`} title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}>
+                                <span
+                                  key={`${r.kind}-${r.direction}-${i}`}
+                                  title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}
+                                  className={`flex h-[24px] w-[24px] items-center justify-center rounded-full border-2 border-paper text-[13px] leading-none shadow-sm ${
+                                    r.direction === "OUT"
+                                      ? "bg-ink text-paper"
+                                      : "bg-paper-2 text-ink"
+                                  }`}
+                                >
                                   {r.emoji}
                                 </span>
                               ))}
-                            </span>
+                            </div>
+                          ) : null}
+                          {canReact ? (
+                            <div
+                              className={`absolute top-1/2 -translate-y-1/2 ${
+                                message.direction === "OUT"
+                                  ? "right-[calc(100%+8px)]"
+                                  : "left-[calc(100%+8px)]"
+                              }`}
+                            >
+                              {/* React trigger: revealed on bubble hover, or
+                                  kept visible while its picker is open / a
+                                  request is in flight so the affordance does not
+                                  vanish mid-interaction. */}
+                              <button
+                                type="button"
+                                disabled={isReacting}
+                                onClick={() =>
+                                  setReactionPickerMessageId((prev) =>
+                                    prev === message.id ? null : message.id
+                                  )
+                                }
+                                aria-label="React to message"
+                                title="React"
+                                className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+                                  pickerOpen || isReacting
+                                    ? "opacity-100"
+                                    : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                }`}
+                              >
+                                {isReacting ? (
+                                  <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                                ) : (
+                                  <span className="text-[13px] leading-none">☺</span>
+                                )}
+                              </button>
+                              {pickerOpen ? (
+                                <div
+                                  className={`absolute bottom-[calc(100%+6px)] z-20 flex items-center gap-[2px] rounded-full border border-hairline bg-paper p-[4px] shadow-pop ${
+                                    message.direction === "OUT" ? "right-0" : "left-0"
+                                  }`}
+                                >
+                                  {QUICK_REACT_EMOJI.map((emoji) => (
+                                    <button
+                                      key={emoji}
+                                      type="button"
+                                      disabled={isReacting}
+                                      onClick={() => void reactToMessage(message.id, emoji)}
+                                      aria-label={`React with ${emoji}`}
+                                      title={emoji}
+                                      className="inline-flex h-[28px] w-[28px] items-center justify-center rounded-full text-[16px] leading-none transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      {emoji}
+                                    </button>
+                                  ))}
+                                </div>
+                              ) : null}
+                            </div>
                           ) : null}
                         </div>
+                        {reactionError ? (
+                          <span
+                            className={`mt-[6px] font-mono text-[11px] text-risk-overdue ${
+                              message.direction === "OUT" ? "self-end" : "self-start"
+                            }`}
+                          >
+                            {reactionError}
+                          </span>
+                        ) : null}
+                        </>
                       );
                     })()}
                     <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
@@ -1594,6 +3337,16 @@ export default function ThreadPage() {
                           indicator from #61 was dishonest. */}
                       {message.direction === "OUT" && message.sentVia === "automation" ? (
                         <span className="text-ink-4">· sent via automation ✓</span>
+                      ) : null}
+                      {replyCount > 0 ? (
+                        <button
+                          type="button"
+                          onClick={() => focusOnParent(message.id)}
+                          className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
+                          title="Focus this thread"
+                        >
+                          · {replyCount} {replyCount === 1 ? "Reply" : "Replies"}
+                        </button>
                       ) : null}
                     </span>
                   </div>
@@ -1765,94 +3518,140 @@ export default function ThreadPage() {
           </div>
         </div>
 
-        <div className="flex-shrink-0 border-t border-hairline bg-paper">
-          <div className="mx-auto w-full max-w-[820px] px-12 pb-5 pt-4">
+        <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
+          {/* #461 (pilot R-0060): floating jump-to-latest button. Centred
+              above the composer's top edge so it sits in the middle just
+              above the input, with a glassy frosted-surface treatment that
+              matches the sticky header. Hidden in focused mode (the stack is
+              bounded there). */}
+          {showJumpToLatest && !focusedThreadParentId ? (
+            <button
+              type="button"
+              onClick={scrollToLatest}
+              aria-label="Jump to latest message"
+              title="Jump to latest"
+              className="absolute -top-12 left-1/2 z-20 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-hairline bg-[color-mix(in_oklch,var(--paper)_72%,transparent)] text-ink-2 shadow-card backdrop-blur-md backdrop-saturate-150 transition-colors duration-calm hover:border-hairline-strong hover:bg-[color-mix(in_oklch,var(--paper)_88%,transparent)] hover:text-ink"
+            >
+              <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
+            </button>
+          ) : null}
+          <div className="mx-auto w-full max-w-[820px] px-8 pb-2 pt-2">
             {error ? (
-              <p className="mb-2 font-mono text-[11px] text-risk-overdue">{error}</p>
+              <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
             ) : null}
-            {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
-              <div data-testid="memory-chip" className="relative mb-2">
-                <button
-                  type="button"
-                  onClick={() => setMemoryOpen((prev) => !prev)}
-                  className="inline-flex items-center gap-2 rounded-full border border-hairline bg-paper-2 px-3 py-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 hover:bg-paper"
-                  aria-expanded={memoryOpen}
-                >
-                  <Sparkles className="h-[11px] w-[11px]" />
-                  Memory · {thread.relationshipMemory.otherThreadCount} prior conversation
-                  {thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}
-                  {thread.relationshipMemory.tags.length > 0
-                    ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}`
-                    : ""}
-                </button>
-                {memoryOpen ? (
-                  <div className="absolute bottom-full left-0 mb-2 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
-                    <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
-                      What the AI can lean on
-                    </div>
-                    {thread.relationshipMemory.tags.length > 0 ? (
-                      <div className="mb-2 flex flex-wrap gap-1">
-                        {thread.relationshipMemory.tags.map((tag) => (
-                          <span
-                            key={tag}
-                            className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
-                          >
-                            {tag}
-                          </span>
-                        ))}
-                      </div>
-                    ) : null}
-                    {thread.relationshipMemory.notes ? (
-                      <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
-                    ) : null}
-                    <ul className="space-y-1">
-                      {thread.relationshipMemory.recentExchanges.map((ex) => (
-                        <li key={ex.threadId} className="text-ink-2">
-                          <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
-                            {ex.platform.toLowerCase()}
-                            {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
-                          </span>
-                          <br />
-                          <span className="text-ink-2">
-                            {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
-              </div>
-            ) : null}
-            <div className="rounded-card border border-hairline bg-paper px-[18px] pb-[14px] pt-[16px] shadow-card">
+            <div
+              data-thread-composer="true"
+              data-demo-target="composer-input"
+              // Predraft state earns a tinted accent border + soft ring
+              // (#350): the textarea on its own looks like a passive
+              // surface, so operators read the AI predraft as static
+              // text rather than something they're meant to edit. The
+              // accent frame signals "this is suggested content, click
+              // anywhere to refine, or discard and start fresh". As soon
+              // as composerSource flips to "user" (typing starts) the
+              // frame reverts to the neutral hairline.
+              className={`rounded-card border bg-paper px-3 pb-1.5 pt-1.5 transition-colors duration-calm ${
+                composerSource === "predraft"
+                  ? "border-accent-ink/40 ring-1 ring-accent-ink/10"
+                  : "border-hairline"
+              }`}
+            >
+              {focusedParentMessage ? (
+                <div className="mb-2 flex items-start gap-2 rounded-[10px] border border-hairline bg-paper-2/60 px-2 py-1.5 text-[12px] leading-snug text-ink-2">
+                  <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                    Replying to
+                  </span>
+                  <span className="flex-1 italic line-clamp-2">
+                    {focusedParentMessage.text.slice(0, 160) || "(media)"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setFocusedThreadParentId(null)}
+                    className="text-ink-3 hover:text-ink"
+                    aria-label="Exit thread"
+                    title="Exit thread (Esc)"
+                  >
+                    ×
+                  </button>
+                </div>
+              ) : null}
               {composerSource === "predraft" ? (
                 <div
                   data-testid="ai-predraft-badge"
-                  className="mb-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink"
+                  className="mb-1.5 flex items-center justify-between gap-2"
                 >
-                  <Sparkles className="h-[12px] w-[12px]" />
-                  AI predraft - review before sending
+                  <span className="flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
+                    <Sparkles className="h-[12px] w-[12px]" />
+                    {isReopenMode ? "AI opener · review before sending" : "AI predraft · review before sending"}
+                  </span>
+                  {/* Bumped from a tiny "clear" link to a proper Discard
+                      button at body-text size with an icon (#350). Old
+                      treatment was easy to miss when the operator wanted
+                      to throw away the AI draft and write their own. */}
                   <button
                     type="button"
                     onClick={() => {
                       setComposer("");
                       setComposerSource("empty");
                     }}
-                    className="ml-1 text-ink-3 hover:text-ink"
+                    title="Discard the AI draft and start fresh"
+                    className="flex items-center gap-1 rounded-[6px] px-2 py-1 text-[12px] text-ink-2 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
                   >
-                    clear
+                    <X className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                    Discard
                   </button>
                 </div>
               ) : null}
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
+                // #466 (pilot R-0065): native browser assists where supported
+                // (spellCheck underlines on desktop; autoCapitalize/autoCorrect
+                // on iOS/Safari). The JS layer below covers desktop Firefox.
+                spellCheck
+                autoCapitalize="sentences"
+                autoCorrect="on"
                 onChange={(event) => {
-                  setComposer(event.target.value);
+                  const nextValue = event.target.value;
+                  const caret = event.target.selectionStart ?? nextValue.length;
                   if (composerSource === "predraft" || composerSource === "empty") {
                     setComposerSource("user");
                   }
+                  // #466: autocorrect only on a single typed character that
+                  // appends at the very end of the text, so the caret stays
+                  // put and mid-text edits are never disturbed.
+                  if (nextValue.length === composer.length + 1 && caret === nextValue.length) {
+                    const fix = autocorrectAtCaret(nextValue, caret);
+                    if (fix) {
+                      lastAutocorrectRef.current = {
+                        original: fix.original,
+                        corrected: fix.corrected,
+                        value: fix.text
+                      };
+                      setComposer(fix.text);
+                      return;
+                    }
+                  }
+                  lastAutocorrectRef.current = null;
+                  setComposer(nextValue);
                 }}
                 onKeyDown={(event) => {
+                  // #466: an immediate Backspace reverts the last
+                  // autocorrection to exactly what the operator typed.
+                  if (
+                    event.key === "Backspace" &&
+                    lastAutocorrectRef.current &&
+                    composer === lastAutocorrectRef.current.value
+                  ) {
+                    event.preventDefault();
+                    const { original, corrected, value } = lastAutocorrectRef.current;
+                    const terminator = value.slice(-1);
+                    const reverted =
+                      value.slice(0, value.length - 1 - corrected.length) + original + terminator;
+                    lastAutocorrectRef.current = null;
+                    setComposer(reverted);
+                    return;
+                  }
                   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
                     event.preventDefault();
                     // #65: stop the native window-level keydown listener
@@ -1862,53 +3661,85 @@ export default function ThreadPage() {
                     void onSend();
                   }
                 }}
-                rows={3}
-                className="w-full resize-none border-0 bg-transparent text-[15px] leading-[1.55] text-ink outline-none placeholder:text-ink-4"
+                rows={2}
+                ref={(el) => {
+                  if (!el) return;
+                  // Autosize: grow with content from 2 rows up to ~7 rows
+                  // before capping so the composer doesn't eat the chat
+                  // when pasting walls of text.
+                  el.style.height = "auto";
+                  el.style.height = `${Math.min(Math.max(el.scrollHeight, 44), 160)}px`;
+                }}
+                className="block w-full resize-none border-0 bg-transparent text-[14px] leading-[1.45] text-ink outline-none placeholder:text-ink-4"
+                style={{ minHeight: 44, maxHeight: 160 }}
               />
-              {composer.trim().length >= 20 && voiceCorpus.sampleCount >= 2 ? (
-                <div
-                  data-testid="voice-meter"
-                  className="mt-2 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.06em]"
-                  title={voiceScore.signals[0]?.signal}
-                >
-                  <span
-                    className={`inline-block h-[6px] w-[6px] rounded-full ${
-                      voiceScore.band === "green"
-                        ? "bg-risk-fresh"
-                        : voiceScore.band === "amber"
-                          ? "bg-risk-waiting"
-                          : "bg-risk-overdue"
-                    }`}
-                  />
-                  <span
-                    className={
-                      voiceScore.band === "red"
-                        ? "text-risk-overdue"
-                        : voiceScore.band === "amber"
-                          ? "text-risk-waiting"
-                          : "text-ink-3"
-                    }
-                  >
-                    Voice match {voiceScore.score}/100
-                  </span>
-                  {voiceScore.signals[0] ? (
-                    <span className="normal-case tracking-normal text-ink-3">
-                      · {voiceScore.signals[0].signal.toLowerCase()}
-                    </span>
-                  ) : null}
-                </div>
-              ) : null}
-              <div className="mt-[12px] flex flex-wrap items-center gap-3 border-t border-hairline pt-[12px]">
-                {/* Suggested-replies dropdown. Replaces the row of chips that
-                    used to wrap onto multiple lines on narrower viewports;
-                    keeps the composer compact and previews each suggestion's
-                    text before the operator commits to it. */}
+              <div className="mt-1.5 flex flex-wrap items-center gap-2">
+                {/* Memory icon - opens the prior-conversations popover.
+                    Compact replacement for the old chip that used to sit
+                    above the composer and burn a row of vertical space. */}
+                {thread.relationshipMemory && thread.relationshipMemory.otherThreadCount > 0 ? (
+                  <div data-testid="memory-chip" className="relative">
+                    <button
+                      type="button"
+                      onClick={() => setMemoryOpen((prev) => !prev)}
+                      aria-expanded={memoryOpen}
+                      title={`Memory · ${thread.relationshipMemory.otherThreadCount} prior conversation${thread.relationshipMemory.otherThreadCount === 1 ? "" : "s"}${thread.relationshipMemory.tags.length > 0 ? ` · ${thread.relationshipMemory.tags.length} tag${thread.relationshipMemory.tags.length === 1 ? "" : "s"}` : ""}`}
+                      className="relative grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    >
+                      <Sparkles className="h-[13px] w-[13px]" strokeWidth={1.6} />
+                      <span className="absolute -right-[2px] -top-[2px] grid h-[14px] min-w-[14px] place-items-center rounded-full bg-ink px-[3px] font-mono text-[9px] font-medium text-paper">
+                        {thread.relationshipMemory.otherThreadCount}
+                      </span>
+                    </button>
+                    {memoryOpen ? (
+                      <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[480px] max-w-[80vw] rounded-card border border-hairline bg-paper p-3 text-[12px] leading-snug shadow-card">
+                        <div className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                          What the AI can lean on
+                        </div>
+                        {thread.relationshipMemory.tags.length > 0 ? (
+                          <div className="mb-2 flex flex-wrap gap-1">
+                            {thread.relationshipMemory.tags.map((tag) => (
+                              <span
+                                key={tag}
+                                className="rounded-full border border-hairline-strong px-2 py-[1px] text-[11px] text-ink-2"
+                              >
+                                {tag}
+                              </span>
+                            ))}
+                          </div>
+                        ) : null}
+                        {thread.relationshipMemory.notes ? (
+                          <p className="mb-2 text-ink-2">{thread.relationshipMemory.notes}</p>
+                        ) : null}
+                        <ul className="space-y-1">
+                          {thread.relationshipMemory.recentExchanges.map((ex) => (
+                            <li key={ex.threadId} className="text-ink-2">
+                              <span className="font-mono text-[10px] uppercase tracking-[0.04em] text-ink-3">
+                                {ex.platform.toLowerCase()}
+                                {ex.lastMessageAt ? ` · ${formatRelative(ex.lastMessageAt)}` : ""}
+                              </span>
+                              <br />
+                              <span className="text-ink-2">
+                                {ex.preview ?? ex.whatTheyWant ?? "(no recent message)"}
+                              </span>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+                {/* Suggested-replies dropdown. Complete sendable drafts —
+                    shown only when the operator has opted into full AI
+                    drafts via the AI help level. Lower levels keep the
+                    composer centred on the operator's own writing. */}
+                {showFullDrafts ? (
                 <div className="relative" ref={chipsMenuRef}>
                   <button
                     type="button"
                     onClick={() => setChipsMenuOpen((v) => !v)}
                     disabled={repliesGenerating}
-                    className="inline-flex items-center gap-2 rounded-pill border border-hairline px-3 py-[7px] text-[12px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
+                    className="inline-flex items-center gap-1.5 rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:opacity-50"
                   >
                     {repliesGenerating ? (
                       <Loader2 className="h-[13px] w-[13px] animate-spin" />
@@ -1959,48 +3790,68 @@ export default function ThreadPage() {
                     </div>
                   ) : null}
                 </div>
-                <div className="flex flex-1 items-center justify-end gap-3">
+                ) : null}
+                <div className="flex flex-1 items-center justify-end gap-2">
+                  {/* "shorten" / "warmer" rewrite the operator's OWN draft —
+                      writing support, shown unless AI help is memory-only. */}
+                  {showWritingSupport ? (
+                    <>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("SHORTEN")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "SHORTEN" ? "shortening…" : "shorten"}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!composer.trim() || transforming !== null}
+                        onClick={() => void transform("MAKE_WARMER")}
+                        className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                      >
+                        {transforming === "MAKE_WARMER" ? "warming…" : "warmer"}
+                      </button>
+                    </>
+                  ) : null}
+                  {/* #462 (pilot R-0061): Dictate — record speech and have
+                      the runner transcribe it into the composer for review.
+                      Distinct from the iMessage voice-note mic (that attaches
+                      audio to send). Available on every platform; disabled
+                      with an explanation when transcription isn't configured. */}
                   <button
                     type="button"
-                    disabled={!composer.trim() || transforming !== null}
-                    onClick={() => void transform("SHORTEN")}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
+                    onClick={() =>
+                      dictationStatus === "recording" ? stopDictation() : void startDictation()
+                    }
+                    disabled={!dictationAvailable || dictationStatus === "transcribing"}
+                    title={
+                      dictationAvailable
+                        ? dictationStatus === "recording"
+                          ? "Stop and transcribe"
+                          : "Dictate your reply"
+                        : "Voice dictation needs transcription enabled on the runner"
+                    }
+                    aria-label="Dictate"
+                    className={`inline-flex items-center gap-1.5 rounded-pill border px-2.5 py-1 text-[11px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-50 ${
+                      dictationStatus === "recording"
+                        ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
                   >
-                    {transforming === "SHORTEN" ? "shortening…" : "shorten"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!composer.trim() || transforming !== null}
-                    onClick={() => void transform("MAKE_WARMER")}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                  >
-                    {transforming === "MAKE_WARMER" ? "warming…" : "make warmer"}
-                  </button>
-                  {/* Voice rewrite: always-available action that polishes the
-                   * current composer text in the operator's voice. Distinct
-                   * from Compose (in the AI Assist sidebar) which takes
-                   * shorthand intent and writes a full reply. Per Q7. */}
-                  <button
-                    type="button"
-                    disabled={!composer.trim() || voiceRewritePending}
-                    onClick={() => {
-                      setVoiceRewritePending(true);
-                      apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/voice-rewrite`, {
-                        draft: composer
-                      })
-                        .then((r) => {
-                          if (r.text) setComposer(r.text);
-                        })
-                        .catch((rewriteErr: unknown) => {
-                          const message =
-                            rewriteErr instanceof Error ? rewriteErr.message : "Rewrite failed";
-                          setError(message);
-                        })
-                        .finally(() => setVoiceRewritePending(false));
-                    }}
-                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink disabled:opacity-40"
-                  >
-                    {voiceRewritePending ? "rewriting…" : "rewrite in voice"}
+                    {dictationStatus === "transcribing" ? (
+                      <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                    ) : (
+                      <Mic
+                        className={`h-[13px] w-[13px] ${dictationStatus === "recording" ? "animate-pulse" : ""}`}
+                        strokeWidth={1.8}
+                      />
+                    )}
+                    {dictationStatus === "recording"
+                      ? "Stop"
+                      : dictationStatus === "transcribing"
+                        ? "Transcribing…"
+                        : "Dictate"}
                   </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
@@ -2009,9 +3860,9 @@ export default function ThreadPage() {
                       disabled={!composer.trim() || sending || scheduling}
                       title="Schedule send"
                       aria-label="Schedule send"
-                      className="inline-flex h-[36px] w-[36px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                      className="inline-flex h-[30px] w-[30px] items-center justify-center rounded-full border border-hairline text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
                     >
-                      <Clock className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                      <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
                     </button>
                     {scheduleMenuOpen ? (
                       <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[300px] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
@@ -2080,16 +3931,16 @@ export default function ThreadPage() {
                       <button
                         type="button"
                         onClick={() => document.getElementById("composer-file-input")?.click()}
-                        className="rounded-pill border border-hairline bg-paper p-2 text-ink-2 hover:text-ink"
+                        className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
                         title="Attach photos / files"
                         aria-label="Attach files"
                       >
-                        <Paperclip className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                        <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
                       </button>
                       <button
                         type="button"
                         onClick={() => (recording ? stopRecording() : void startRecording())}
-                        className={`rounded-pill border p-2 ${
+                        className={`grid h-[30px] w-[30px] place-items-center rounded-full border ${
                           recording
                             ? "border-risk-overdue bg-risk-overdue/10 text-risk-overdue animate-pulse"
                             : "border-hairline bg-paper text-ink-2 hover:text-ink"
@@ -2097,7 +3948,7 @@ export default function ThreadPage() {
                         title={recording ? "Stop recording" : "Record voice note"}
                         aria-label={recording ? "Stop recording" : "Record voice note"}
                       >
-                        <Mic className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                        <Mic className="h-[13px] w-[13px]" strokeWidth={1.8} />
                       </button>
                     </>
                   ) : null}
@@ -2105,12 +3956,32 @@ export default function ThreadPage() {
                     variant="primary"
                     onClick={() => void onSend()}
                     disabled={sending || (!composer.trim() && composerAttachments.length === 0)}
+                    className="px-3.5 py-1.5 text-[12px]"
                   >
-                    {sending ? <Loader2 className="h-[14px] w-[14px] animate-spin" /> : <Send className="h-[14px] w-[14px]" strokeWidth={1.8} />}
+                    {sending ? <Loader2 className="h-[13px] w-[13px] animate-spin" /> : <Send className="h-[13px] w-[13px]" strokeWidth={1.8} />}
                     Send
                   </Button>
                 </div>
               </div>
+              {showLateNightNudge && lateNightSlot ? (
+                <button
+                  type="button"
+                  data-testid="late-night-schedule-nudge"
+                  onClick={() => void scheduleSend(lateNightSlot)}
+                  disabled={scheduling}
+                  title={`Send at ${lateNightSlot.toLocaleString(undefined, {
+                    weekday: "long",
+                    hour: "numeric",
+                    minute: "2-digit"
+                  })} instead of now`}
+                  className="mt-2 inline-flex items-center gap-1.5 text-[11px] text-ink-3 transition-colors duration-calm hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <Clock className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                  <span>
+                    {scheduling ? "Scheduling…" : "It’s late, schedule for 8 AM instead?"}
+                  </span>
+                </button>
+              ) : null}
               {composerAttachments.length > 0 ? (
                 <div className="mt-2 flex flex-wrap gap-2 border-t border-hairline pt-2">
                   {composerAttachments.map((a) => (
@@ -2213,110 +4084,248 @@ export default function ThreadPage() {
       {/* ───── Context rail ───── */}
       <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
         <div className="flex flex-col gap-7 px-7 py-10">
-          {trimmedSummary || trimmedAsk ? (
-            <section>
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                What they want
-              </p>
-              <p className="m-0 text-balance text-[14px] leading-[1.55] text-ink">
-                {trimmedSummary || trimmedAsk}
-              </p>
-              {showAsk && trimmedSummary ? (
-                <p className="mt-3 border-t border-hairline pt-3 text-[13px] leading-[1.55] text-ink-3">
-                  <span className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
-                    the ask ·{" "}
-                  </span>
-                  {trimmedAsk}
-                </p>
-              ) : null}
-            </section>
-          ) : null}
+          {/* Reply Brief - the single adaptive panel that drives the rail.
+              Default visible card carries only Where it stands + On you so
+              the operator can read the thread in under 10 seconds; everything
+              else (optional follow-ups, fuller context, tone steer, the
+              gated reply checklist with its existing auto-tick / dismiss
+              behaviour) sits behind one collapsed disclosure. Falls back to
+              a safe brief derived from the legacy fields when the runner
+              hasn't yet generated one for this row. */}
+          <ReplyBriefPanel
+            threadId={thread.id}
+            brief={displayBrief}
+            openLoops={thread.openLoops}
+            dismissedOpenLoops={thread.dismissedOpenLoops}
+            onDismissLoop={(loop, dismissed) => void toggleOpenLoop(loop, dismissed)}
+            aiCoverageItems={aiCoverageItems}
+            aiCoverageMode={
+              aiHelpLevel === "memory_only"
+                ? "off"
+                : aiHelpLevel === "full_drafts"
+                  ? "auto-tick"
+                  : "highlight"
+            }
+          />
 
-          {/* Open loops - active rows render with an unchecked box; ticking
-              dismisses the loop (#62). Dismissed loops still render below
-              in a muted, struck-through form so the operator can restore
-              one by un-ticking. */}
-          {thread.openLoops.length || thread.dismissedOpenLoops.length ? (
-            <section>
-              <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-                Open loops
-              </p>
-              <ul className="m-0 list-none space-y-[6px] p-0">
-                {thread.openLoops.map((item) => (
-                  <li key={`open:${item}`} className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-2">
-                    <input
-                      type="checkbox"
-                      checked={false}
-                      onChange={() => void toggleOpenLoop(item, true)}
-                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink"
-                      aria-label={`Mark "${item}" as resolved`}
-                    />
-                    {item}
-                  </li>
-                ))}
-                {thread.dismissedOpenLoops.map((item) => (
-                  <li
-                    key={`dismissed:${item}`}
-                    className="flex items-baseline gap-2 text-[13px] leading-[1.5] text-ink-4 line-through"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={true}
-                      onChange={() => void toggleOpenLoop(item, false)}
-                      className="mt-[2px] h-[12px] w-[12px] cursor-pointer accent-ink-3"
-                      aria-label={`Restore "${item}" as an open loop`}
-                    />
-                    {item}
-                  </li>
-                ))}
-              </ul>
-            </section>
-          ) : null}
+          {/* Things to remember - durable facts (exams, trips, life events)
+              the AI re-derives from the transcript each scan. Stays separate
+              from the Reply Brief on purpose: this is life context the
+              operator wants to carry forward, not reply-state. Read-only and
+              self-hiding when empty. */}
+          <ThingsToRemember remember={thread.remember ?? []} />
 
           <section>
             <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-              Compose
+              {effectiveComposeMode === "write" ? "Compose" : "Ask"}
             </p>
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-              Type shorthand. The AI composes a full reply in your voice. For polishing an existing draft, use the &quot;rewrite in my voice&quot; action above the composer instead.
+              {effectiveComposeMode === "write"
+                ? composeHelper
+                : "Ask a question about this thread or person. The AI answers from the transcript and what's on record. It won't make anything up."}
             </p>
+            {!showFullDrafts ? (
+              <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
+                Full AI reply drafts are off.{" "}
+                <Link href="/settings" className="text-ink-2 underline-offset-2 hover:underline">
+                  Change your AI help level in Settings
+                </Link>{" "}
+                to draft complete replies as well.
+              </p>
+            ) : null}
             <textarea
               value={composeIntent}
-              onChange={(event) => setComposeIntent(event.target.value)}
-              placeholder="e.g. ask if free for a quick coffee next week"
+              onChange={(event) => {
+                setComposeIntent(event.target.value);
+                if (askAnswer) setAskAnswer(null);
+                if (composeDraft) setComposeDraft("");
+              }}
+              placeholder={
+                effectiveComposeMode === "write"
+                  ? isReopenMode
+                    ? "e.g. ask how exams went"
+                    : "e.g. ask if free for a quick coffee next week"
+                  : "e.g. what did I say about the meeting with alex?"
+              }
               rows={3}
               className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
             />
+            {/* Mismatch hint: if the input shape clashes with the selected
+                mode, surface a one-line nudge below the textarea so the
+                operator can flip modes without burying it in a menu. Only
+                relevant when both modes are available (full AI drafts on). */}
+            {showFullDrafts ? (() => {
+              const trimmed = composeIntent.trim();
+              if (!trimmed) return null;
+              const looksLikeQuestion =
+                trimmed.endsWith("?") ||
+                /^(what|why|how|when|where|who|which|did|do|does|is|are|was|were|can|could|should|would|will|remind|tell|remember)\b/i.test(
+                  trimmed
+                );
+              if (composeMode === "write" && looksLikeQuestion) {
+                return (
+                  <p className="mt-1 text-[11px] text-ink-3">
+                    Looks like a question.{" "}
+                    <button
+                      type="button"
+                      onClick={() => setComposeMode("ask")}
+                      className="text-ink-2 underline-offset-2 hover:underline"
+                    >
+                      Switch to Ask?
+                    </button>
+                  </p>
+                );
+              }
+              if (composeMode === "ask" && !looksLikeQuestion) {
+                return (
+                  <p className="mt-1 text-[11px] text-ink-3">
+                    Looks like a directive.{" "}
+                    <button
+                      type="button"
+                      onClick={() => setComposeMode("write")}
+                      className="text-ink-2 underline-offset-2 hover:underline"
+                    >
+                      Switch to Compose?
+                    </button>
+                  </p>
+                );
+              }
+              return null;
+            })() : null}
             <div className="mt-2 flex items-center gap-2">
-              <Button
-                variant="primary"
-                disabled={composing || !composeIntent.trim()}
-                onClick={() => void composeFromIntent()}
-              >
-                {composing ? (
-                  <Loader2 className="h-[14px] w-[14px] animate-spin" />
-                ) : (
-                  <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.8} />
-                )}
-                {composing ? "Composing…" : "Compose"}
-              </Button>
+              {/* Split button: primary action + a chevron to flip the mode.
+                  The mode switcher only appears when full AI drafts are on;
+                  otherwise this is an Ask-only button. */}
+              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
+                <button
+                  type="button"
+                  disabled={composing || !composeIntent.trim()}
+                  onClick={() =>
+                    effectiveComposeMode === "write" ? void composeFromIntent() : void askAi()
+                  }
+                  className={`inline-flex items-center gap-2 bg-transparent px-4 py-[10px] text-sm font-medium tracking-[-0.005em] disabled:cursor-not-allowed disabled:opacity-50 ${showFullDrafts ? "rounded-l-pill" : "rounded-pill"}`}
+                >
+                  {composing ? (
+                    <Loader2 className="h-[14px] w-[14px] animate-spin" />
+                  ) : (
+                    <Sparkles className="h-[14px] w-[14px]" strokeWidth={1.8} />
+                  )}
+                  {composing
+                    ? effectiveComposeMode === "write"
+                      ? "Composing…"
+                      : "Thinking…"
+                    : effectiveComposeMode === "write"
+                      ? "Compose"
+                      : "Ask"}
+                </button>
+                {showFullDrafts ? (
+                  <>
+                <span className="my-[6px] w-px bg-paper/20" aria-hidden />
+                <button
+                  type="button"
+                  onClick={() => setComposeModeMenuOpen((v) => !v)}
+                  disabled={composing}
+                  aria-haspopup="menu"
+                  aria-expanded={composeModeMenuOpen}
+                  title="Switch mode"
+                  className="grid place-items-center rounded-r-pill bg-transparent px-2 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <ChevronDown
+                    className={`h-[14px] w-[14px] transition-transform duration-calm ${composeModeMenuOpen ? "rotate-180" : ""}`}
+                    strokeWidth={1.8}
+                  />
+                </button>
+                {composeModeMenuOpen ? (
+                  <div className="absolute bottom-[calc(100%+6px)] left-0 z-20 w-[240px] overflow-hidden rounded-row border border-hairline bg-paper p-1 shadow-pop">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setComposeMode("write");
+                        setComposeModeMenuOpen(false);
+                      }}
+                      className={`block w-full rounded-[8px] px-3 py-2 text-left transition-colors duration-calm hover:bg-paper-2 ${composeMode === "write" ? "bg-paper-2" : ""}`}
+                    >
+                      <p className="m-0 text-[13px] font-medium text-ink">Compose</p>
+                      <p className="m-0 mt-0.5 text-[11px] text-ink-3">
+                        AI writes a sendable draft in your voice
+                      </p>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setComposeMode("ask");
+                        setComposeModeMenuOpen(false);
+                      }}
+                      className={`block w-full rounded-[8px] px-3 py-2 text-left transition-colors duration-calm hover:bg-paper-2 ${composeMode === "ask" ? "bg-paper-2" : ""}`}
+                    >
+                      <p className="m-0 text-[13px] font-medium text-ink">Ask</p>
+                      <p className="m-0 mt-0.5 text-[11px] text-ink-3">
+                        AI answers from the thread context (no draft)
+                      </p>
+                    </button>
+                  </div>
+                ) : null}
+                  </>
+                ) : null}
+              </div>
               {composeError ? (
                 <span className="font-mono text-[11px] text-risk-overdue">{composeError}</span>
               ) : null}
             </div>
             {composeDraft ? (
-              <div className="mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink">
+              // #436.4: "try again" re-runs composeFromIntent, which keeps the
+              // old draft mounted while the new one streams. Fade the stale
+              // text and swap the actions for a Regenerating… indicator so two
+              // suggestions never sit side by side.
+              <div
+                className={`mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink transition-opacity duration-calm ${
+                  composing ? "opacity-40" : "opacity-100"
+                }`}
+              >
                 <p className="m-0 whitespace-pre-wrap">{composeDraft}</p>
                 <div className="mt-3 flex items-center gap-3">
-                  <Button variant="quiet" onClick={useDraft}>
-                    Use this
-                  </Button>
+                  {composing ? (
+                    <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
+                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                      Regenerating…
+                    </span>
+                  ) : (
+                    <>
+                      <Button variant="quiet" onClick={useDraft}>
+                        Use this
+                      </Button>
+                      <button
+                        type="button"
+                        onClick={() => void composeFromIntent()}
+                        className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                      >
+                        try again
+                      </button>
+                    </>
+                  )}
+                </div>
+              </div>
+            ) : null}
+            {askAnswer ? (
+              <div className="mt-3 rounded-row border border-hairline bg-paper-2/50 p-3 text-[13.5px] leading-[1.55] text-ink">
+                <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                  Answer
+                </p>
+                <p className="m-0 whitespace-pre-wrap text-ink-2">{askAnswer}</p>
+                <div className="mt-3 flex items-center gap-3">
                   <button
                     type="button"
-                    onClick={() => void composeFromIntent()}
+                    onClick={() => setAskAnswer(null)}
                     className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
                   >
-                    try again
+                    dismiss
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void askAi()}
+                    className="font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 hover:text-ink"
+                  >
+                    ask again
                   </button>
                 </div>
               </div>
@@ -2325,18 +4334,22 @@ export default function ThreadPage() {
         </div>
       </aside>
 
-      <ReceiptsDrawer
-        open={receiptsOpen}
-        onClose={() => setReceiptsOpen(false)}
-        rows={thread.receipts}
-        title="Thread receipts"
-      />
+      {receiptsEverOpened ? (
+        <ReceiptsDrawer
+          open={receiptsOpen}
+          onClose={() => setReceiptsOpen(false)}
+          rows={thread.receipts}
+          title="Thread receipts"
+        />
+      ) : null}
 
-      <ProfileDrawer
-        open={profileDrawerOpen}
-        personId={thread.personId ?? null}
-        onClose={() => setProfileDrawerOpen(false)}
-      />
+      {profileEverOpened ? (
+        <ProfileDrawer
+          open={profileDrawerOpen}
+          personId={thread.personId ?? null}
+          onClose={() => setProfileDrawerOpen(false)}
+        />
+      ) : null}
     </div>
   );
 }
