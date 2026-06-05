@@ -27,16 +27,24 @@
  * unit-tested); this file is the DB-touching executable wrapper.
  *
  * Usage:
- *   tsx src/scripts/dedupe-imessage-people.ts            # dry run (default)
- *   tsx src/scripts/dedupe-imessage-people.ts --apply    # perform the merge
+ *   tsx src/scripts/dedupe-imessage-people.ts                # dry run (default)
+ *   tsx src/scripts/dedupe-imessage-people.ts --apply        # perform the merge
+ *   tsx src/scripts/dedupe-imessage-people.ts --apply --force # also override the
+ *                                                            # wide-delete cap
  */
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prisma } from "../db";
-import { type DedupePersonRow, mergeNotes, planPersonDedupe } from "./dedupe-imessage-people-plan";
+import {
+  assessDeletionSafety,
+  type DedupePersonRow,
+  mergeNotes,
+  planPersonDedupe,
+} from "./dedupe-imessage-people-plan";
 
 async function main(): Promise<void> {
   const apply = process.argv.includes("--apply");
+  const force = process.argv.includes("--force");
 
   const rows: DedupePersonRow[] = await prisma.person.findMany({
     where: { platform: "IMESSAGE" },
@@ -64,6 +72,13 @@ async function main(): Promise<void> {
 
   if (!apply) {
     console.log("[dedupe] DRY RUN — nothing written. Re-run with --apply to perform the merge.");
+    return;
+  }
+
+  const safety = assessDeletionSafety(plan, { apply, force });
+  if (!safety.ok) {
+    console.error(`[dedupe] ABORTED — ${safety.reason} Nothing written.`);
+    process.exitCode = 1;
     return;
   }
 
