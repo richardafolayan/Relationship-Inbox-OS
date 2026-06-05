@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { InboxRow } from "@/lib/types";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { formatRelative } from "@/lib/time";
-import { normalizePreview } from "@/lib/preview";
+import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
 
@@ -42,7 +42,8 @@ export function SelectableThreadRow({
     row.lastMessageDirection === "OUT" ? `You: ${cleanPreview}` : cleanPreview;
   // Threads awaiting a reply lead with the AI context line ("what they
   // want"); replied/handled threads keep the literal "You: …" preview.
-  const nudge = row.whatTheyWant?.trim();
+  // cleanAskSummary repairs legacy summaries stored hard-cut mid-word.
+  const nudge = cleanAskSummary(row.whatTheyWant);
   const bodyText = row.needsReply !== false && nudge ? nudge : previewBody;
   const rightLabel =
     risk === "overdue"

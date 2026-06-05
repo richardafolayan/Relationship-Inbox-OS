@@ -16,7 +16,7 @@ import type {
 } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
-import { normalizePreview } from "@/lib/preview";
+import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { isInTodayQueue } from "@/lib/today";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
@@ -332,7 +332,7 @@ export default function TodayPage() {
     }
     if (heroSummary?.id === hero.id) return;
     void apiGet<ThreadResponse>(`/runner/data/thread/${hero.id}`)
-      .then((t) => setHeroSummary({ id: hero.id, summary: t.whatTheyWant?.trim() || t.summary?.trim() || null }))
+      .then((t) => setHeroSummary({ id: hero.id, summary: cleanAskSummary(t.whatTheyWant) || t.summary?.trim() || null }))
       .catch(() => setHeroSummary({ id: hero.id, summary: null }));
   }, [hero, heroSummary?.id]);
 
