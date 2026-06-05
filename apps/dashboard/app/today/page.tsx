@@ -765,7 +765,7 @@ export default function TodayPage() {
               {allDone ? (
                 <p className="mt-[18px] text-[13.5px] leading-[1.5] text-ink-2">
                   <strong className="font-semibold text-risk-fresh">That’s everyone.</strong> Nothing
-                  left tonight — close the laptop and get some sleep.
+                  left tonight. Close the laptop and get some sleep.
                 </p>
               ) : null}
             </section>
