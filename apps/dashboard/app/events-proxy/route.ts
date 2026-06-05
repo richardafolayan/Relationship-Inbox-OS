@@ -1,9 +1,10 @@
 import type { NextRequest } from "next/server";
+import { resolveRunnerBase } from "@/lib/runner-base";
 
 export const runtime = "nodejs";
 
 function buildRunnerEventsUrl(request: NextRequest): string {
-  const base = process.env.RUNNER_ORIGIN ?? "http://localhost:4001";
+  const base = resolveRunnerBase();
   const url = new URL("/events", base);
 
   const since = request.nextUrl.searchParams.get("sinceEventId");
