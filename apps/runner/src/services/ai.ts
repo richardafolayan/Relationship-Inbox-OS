@@ -309,6 +309,56 @@ export const BRIEF_FIDELITY_REMINDER = [
   "NO INVENTED CADENCE (strict, #464). This applies to EVERY field including summary and what_they_want, not just the brief. Do NOT characterise the FORMAT, FREQUENCY, or TIMING of the messages themselves. Claims like \"single-word replies\", \"one-word messages\", \"you keep saying X\", \"rapid back-and-forth\", or \"for the last few minutes\" must be plainly and literally true of the recent transcript or be left out. Describe what was said, not how tersely, how often, or how recently it was said. A word that recurs in the messages (a topic, a name, a game like chess) is NOT evidence that the messages are one-word or repetitive."
 ].join(" ");
 
+/**
+ * Stale-beat bug ("Why is it referencing things that occurred ages ago, the
+ * internship finished nearly a year ago?"). updateThreadSummary feeds up to
+ * the most recent 120 messages, which on a long-running thread reaches back
+ * many months. Every message carries an ISO timestamp and the prompt states
+ * today's date, but the reply-brief sections had NO recency horizon — so the
+ * model surfaced a one-off beat from ~10 months earlier ("I'm doing an
+ * internship") in they_said and on_you as though it were current substance
+ * the operator still owed a reply on, and even framed a 3-week-old exam as
+ * happening "this week".
+ *
+ * This block defines the LIVE exchange and forbids dragging older background
+ * into the live brief fields. The transcript also carries a code-computed
+ * boundary line (LIVE_EXCHANGE_MARKER) so the model has an unambiguous cutoff
+ * rather than only timestamps to reason about.
+ *
+ * Exported so tests can assert the language is present without snapshotting
+ * the whole template.
+ */
+export const BRIEF_RECENCY_DISCIPLINE = [
+  "RECENCY (strict, the brief is about the LIVE exchange, not the whole history).",
+  "The transcript can span months. The LIVE exchange is the most recent inbound from the contact plus the messages clustered around it (roughly the last 2 to 3 weeks up to that inbound). When the transcript is long enough to have older history, a boundary line reading \"LIVE EXCHANGE BELOW\" marks where it starts: everything BELOW that line is the live exchange, everything ABOVE it is OLDER BACKGROUND.",
+  "where_it_stands, they_said, on_you and required_points describe ONLY the live exchange. NEVER lift a beat out of the OLDER BACKGROUND into these fields as if it were current. A topic the contact raised once weeks or months ago and never returned to is NOT live reply debt.",
+  "Use the per-message timestamps and today's date to judge age. A beat far older than the most recent inbound is stale (an internship mentioned ~10 months ago, an exam that was 3 weeks ago): keep it out of they_said / on_you / required_points, and never describe a long-past event as if it were happening \"this week\".",
+  "A stale-but-durable fact (a job, a course, a house move) belongs in remember or durable_context, never the live brief. A stale loop that was genuinely never answered can go in handled_points with a reason, it does not become a required action.",
+  "If the live exchange itself is old (the contact went quiet weeks or months ago) that is RECONNECT mode: set they_said to [] and do not mine the older background for substance."
+].join(" ");
+
+/**
+ * Attribution reversal (same Annalise thread). The contact's own messages
+ * said "you're nearly done with uni" and "congratulations on finishing uni",
+ * addressed TO the operator. The brief flipped it into "Annalise finished
+ * university, congratulate her", crediting the contact with the operator's
+ * milestone and inverting the obligation (the operator should be THANKING
+ * her for the congratulations, not congratulating her).
+ *
+ * "you"/"your" inside an inbound (contact) line refers to the OPERATOR;
+ * inside an operator line it refers to the contact. This block pins that
+ * resolution so a congratulation the contact sent the operator never becomes
+ * the contact's own achievement.
+ *
+ * Exported so tests can assert the language is present.
+ */
+export const SECOND_PERSON_RESOLUTION = [
+  "SECOND-PERSON RESOLUTION (strict, resolve every \"you\" against the speaker).",
+  "In a contact (inbound / IN) line, \"you\" and \"your\" mean the OPERATOR, and \"I\"/\"me\"/\"my\" mean the contact. In an operator (OUT) line it is the reverse. Read the speaker label first, then decide who each pronoun points at.",
+  "So if the contact writes \"you finished uni\", \"congrats on your new job\", \"well done on the move\", the achievement is the OPERATOR's: the contact is acknowledging the operator. NEVER record it as the contact's own milestone, and NEVER tell the operator to congratulate the contact for it.",
+  "When the contact congratulates, thanks, or praises the operator, the obligation is to receive it (thank them, respond warmly), not to mirror it back as though the contact did the thing."
+].join(" ");
+
 // Voice profile tier — picks between the formal (professional) prompt and
 // the casual-DM prompt based on platform. Casual covers WhatsApp / iMessage
 // / Instagram / TikTok DMs; LinkedIn uses the professional register. Both
@@ -378,6 +428,73 @@ export function formatMessageForPrompt(
 ): string {
   const speaker = message.direction === "OUT" ? "operator" : contactLabel;
   return `${speaker} (${message.timestamp}): ${renderMessageBody(message)}`;
+}
+
+// Reply-brief recency boundary (paired with BRIEF_RECENCY_DISCIPLINE). The
+// reassess transcript can reach back months; this line marks where the LIVE
+// exchange starts so the model has an unambiguous cutoff between current
+// reply debt and older background, instead of inferring recency from the
+// per-message timestamps alone.
+export const LIVE_EXCHANGE_MARKER =
+  "----- LIVE EXCHANGE BELOW (everything above is OLDER BACKGROUND, not live reply debt) -----";
+
+// Window before the most recent inbound that still counts as the live
+// exchange. 21 days: a normal back-and-forth spanning a couple of weeks
+// reads as one live exchange, but a beat from months earlier falls outside
+// it (the 10-month-old internship, the 3-week-old exam mention).
+export const LIVE_EXCHANGE_WINDOW_MS = 21 * 24 * 60 * 60 * 1000;
+
+/**
+ * Index of the first message in the LIVE exchange: the most recent inbound
+ * plus any message within LIVE_EXCHANGE_WINDOW_MS before it. Messages MUST be
+ * chronological (oldest first), the order resummarizeThread passes.
+ *
+ * Returns -1 when there is no boundary worth drawing:
+ *   - no inbound at all (nothing to anchor recency on), or
+ *   - the live exchange already starts at message 0 (the whole transcript is
+ *     recent, so a short thread renders unchanged with no marker).
+ */
+export function liveExchangeStartIndex(messages: readonly MessageForPrompt[]): number {
+  let mostRecentInboundTs: number | null = null;
+  for (const m of messages) {
+    if (m.direction !== "IN") continue;
+    const ts = Date.parse(m.timestamp);
+    if (Number.isNaN(ts)) continue;
+    if (mostRecentInboundTs === null || ts > mostRecentInboundTs) {
+      mostRecentInboundTs = ts;
+    }
+  }
+  if (mostRecentInboundTs === null) return -1;
+  const cutoff = mostRecentInboundTs - LIVE_EXCHANGE_WINDOW_MS;
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (!msg) continue;
+    const ts = Date.parse(msg.timestamp);
+    if (Number.isNaN(ts)) continue;
+    if (ts >= cutoff) {
+      return i > 0 ? i : -1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Render the reassess transcript with LIVE_EXCHANGE_MARKER inserted at the
+ * start of the live exchange, when there is older background above it.
+ * Short / all-recent threads and threads with no inbound render exactly as
+ * before, so the marker only appears when it actually separates old from new.
+ */
+export function buildReassessTranscript(
+  messages: readonly MessageForPrompt[],
+  contactLabel: string
+): string {
+  const liveStart = liveExchangeStartIndex(messages);
+  return messages
+    .map((m, i) => {
+      const line = formatMessageForPrompt(m, contactLabel);
+      return i === liveStart ? `${LIVE_EXCHANGE_MARKER}\n${line}` : line;
+    })
+    .join("\n");
 }
 
 /**
@@ -1616,9 +1733,12 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // `direction: "IN"` = contact (the recipient). Reinforced in the
     // system prompt's ATTRIBUTION DISCIPLINE section.
     const contactLabel = contactTranscriptLabel(input.displayName);
-    const transcript = input.messages
-      .map((m) => formatMessageForPrompt(m, contactLabel))
-      .join("\n");
+    // buildReassessTranscript inserts the LIVE_EXCHANGE_MARKER at the start of
+    // the recent exchange (when there is older background above it), giving the
+    // brief an unambiguous recency cutoff. Paired with BRIEF_RECENCY_DISCIPLINE
+    // in the prompt below so a months-old one-off beat can't surface as live
+    // reply debt. Short threads render exactly as before.
+    const transcript = buildReassessTranscript(input.messages, contactLabel);
 
     // Summaries refer to the operator in second person ("you") regardless
     // of whether they've configured a displayName. The transcript label
@@ -1706,11 +1826,15 @@ Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve rela
 
 Reminder: lines starting with \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 
+${SECOND_PERSON_RESOLUTION}
+
 OPERATOR OUTPUT VOICE: Write user-facing strings (summary, what_they_want, open_loops, remember notes, tone_notes, urgency_hint) in SECOND PERSON. Refer to the operator as "you" (e.g. "Ashley is waiting on you to reply"). NEVER write the literal phrases "the operator" or "operator" in output text — those words exist only as the transcript attribution label.
 
 ${modeBlock}
 
 REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail. It must let the operator write a thoughtful reply WITHOUT scrolling up into the message history. The default visible card surfaces where_it_stands → they_said → on_you in that order, so structure the brief as: context (what was asked / what's the topic), substance (what the contact actually said), obligation (what's on the operator). The substance is the part operators consistently say is too compressed — do not over-summarise it.
+
+${BRIEF_RECENCY_DISCIPLINE}
 
 ${BRIEF_FIDELITY_REMINDER}
 
@@ -1725,7 +1849,7 @@ where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - DO NOT attribute operator words to the contact, or vice versa. The transcript speaker labels (\`operator:\` and the contact's own name) are authoritative — a name appearing INSIDE a message body is a third party being discussed, not the speaker, and never the contact's own name.
 
 they_said (SUBSTANCE — the most important field):
-- A bulleted list of every reply-relevant detail from the LATEST UNANSWERED INBOUND from the contact.
+- A bulleted list of every reply-relevant detail from the LATEST UNANSWERED INBOUND from the contact — that inbound sits below the LIVE EXCHANGE marker. NEVER pull substance from the older background above the marker, even if it reads as more interesting; a beat from weeks or months ago is not what the operator is replying to now.
 - The test for each bullet: "would the operator need this detail to write a thoughtful reply?" If yes, include it.
 - Capture each of these when present in the inbound: direct answers to the operator's question(s), decisions, constraints, reasons / explanations, news, updates, plans, anything implying emotional weight or significance, and follow-up opportunities the contact opened.
 - One detail per bullet — do NOT merge ("recruiters pitch your CV and he has interviews and one offer" must split into three bullets). The whole point is to lay the substance out so the operator can scan it.
