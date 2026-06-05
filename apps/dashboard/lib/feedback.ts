@@ -2,7 +2,9 @@
 
 import { ApiRequestError } from "./api";
 
-export type ToastKind = "info" | "success" | "error";
+// `pending` is the in-flight kind: shows a spinner instead of a static dot,
+// stays put until the same id is replaced by a success/error toast.
+export type ToastKind = "pending" | "info" | "success" | "error";
 
 export interface ToastInput {
   id?: string;
@@ -11,11 +13,16 @@ export interface ToastInput {
   description?: string;
   receiptId?: string;
   durationMs?: number;
+  // Optional in-app route. When set, the toast becomes clickable and
+  // navigates here (e.g. a new-message toast opens the thread). Action
+  // feedback toasts leave this unset and stay non-interactive.
+  href?: string;
 }
 
 export interface Toast extends Required<Pick<ToastInput, "id" | "kind" | "title" | "durationMs">> {
   description?: string;
   receiptId?: string;
+  href?: string;
   createdAt: number;
 }
 
@@ -35,7 +42,10 @@ export function showToast(input: ToastInput): void {
     title: input.title,
     description: input.description,
     receiptId: input.receiptId,
-    durationMs: input.durationMs ?? (input.kind === "error" ? 8000 : 3500),
+    href: input.href,
+    durationMs:
+      input.durationMs ??
+      (input.kind === "pending" ? 60_000 : input.kind === "error" ? 8000 : 3500),
     createdAt: Date.now()
   };
   window.dispatchEvent(new CustomEvent<Toast>(TOAST_EVENT, { detail: toast }));
@@ -64,7 +74,7 @@ export function runActionWithFeedback<T>(
   }
 ): void {
   const pendingId = nextId();
-  showToast({ id: pendingId, kind: "info", title: opts.pending, durationMs: 60_000 });
+  showToast({ id: pendingId, kind: "pending", title: opts.pending });
 
   promise
     .then(async (value) => {

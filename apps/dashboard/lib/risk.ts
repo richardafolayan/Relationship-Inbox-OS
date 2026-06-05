@@ -18,6 +18,14 @@ export const PLATFORM_LABEL: Record<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESS
   IMESSAGE: "imessage"
 };
 
+// Platforms whose adapter is live in the runner. The "X/N connected"
+// denominator and the platforms list both key off this so adding a new
+// adapter only requires updating one place.
+export const IMPLEMENTED_PLATFORMS: ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE"> = [
+  "LINKEDIN",
+  "IMESSAGE"
+];
+
 export function initials(name: string): string {
   // Only take the first character of name parts that START with a letter.
   // Without this filter, "Cynthia (ACS)" would render as "C(" because the

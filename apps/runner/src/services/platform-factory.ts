@@ -85,6 +85,17 @@ export function createAdapters(input: {
               username: runnerConfig.linkedInUsername,
               password: runnerConfig.linkedInPassword
             }
+          : undefined,
+      // Personal-mode only: lets the cookie bridge decrypt the live
+      // LinkedIn session out of the real Chrome profile and inject it into
+      // the launched (mirrored) context, since a Playwright-launched Chrome
+      // can't transparently decrypt the Keychain-encrypted profile cookies.
+      personalProfile:
+        runnerConfig.browserProfile.mode === "personal"
+          ? {
+              sourceUserDataDir: runnerConfig.browserProfile.personalChromeUserDataDir,
+              profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory
+            }
           : undefined
     }),
     INSTAGRAM: new BetaAdapter({

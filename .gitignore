@@ -11,10 +11,12 @@ apps/dashboard/.next
 apps/dashboard/out
 apps/runner/dist
 packages/core/generated
+*.tsbuildinfo
 
 # Data runtime state
 /data/
 /logs/runs/
+/logs/*.log
 /apps/runner/logs/runs
 /apps/runner/LATEST_LINKEDIN_SCAN.txt
 /apps/runner/logs/runs/LATEST_LINKEDIN_SMOKE.txt
@@ -25,4 +27,17 @@ packages/core/generated
 # Local tooling state (not part of the project)
 /.claude/
 /.codex-disabled-*/
+# Impeccable design-skill machinery installed into the GitHub-Copilot harness
+# folder. Local tooling, like /.claude; the design *context* lives in the
+# committed PRODUCT.md / DESIGN.md instead.
+/.github/skills/
 migration-log.md
+# Worktree-only convenience symlinks to the main checkout's data/ dir and
+# one-shot operator scripts (filenames prefixed `_`) stay outside the
+# committed project surface.
+data
+apps/runner/scripts/_*.mjs
+
+# Personal operator-profile seed (local voice data; never committed).
+# See apps/runner/operator-profile.seed.example.json for the shape.
+/apps/runner/operator-profile.seed.json

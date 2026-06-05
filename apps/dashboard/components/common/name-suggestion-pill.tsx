@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { apiPost } from "@/lib/api";
+import { apiPost, runAction } from "@/lib/api";
 
 interface NameSuggestionPillProps {
   personId: string;
@@ -36,6 +36,12 @@ export function NameSuggestionPill({ personId, inferredName, currentName, onChan
   const [editing, setEditing] = useState(editOnlyMode);
   const [draft, setDraft] = useState(inferredName ?? currentName ?? "");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // `disabled={busy}` only takes effect on the next render, so a fast
+  // double-click (or a re-click when nothing visibly happened) can fire two
+  // requests before the button disables. This ref dedupes synchronously so a
+  // duplicate confirm never leaves the browser.
+  const busyRef = useRef(false);
   const containerRef = useRef<HTMLSpanElement>(null);
 
   useEffect(() => {
@@ -56,16 +62,27 @@ export function NameSuggestionPill({ personId, inferredName, currentName, onChan
     event.stopPropagation();
   };
 
-  async function call(body: { action: "confirm" | "rename" | "dismiss"; name?: string }) {
+  function call(body: { action: "confirm" | "rename" | "dismiss"; name?: string }) {
+    if (busyRef.current) return;
+    busyRef.current = true;
     setBusy(true);
-    try {
-      await apiPost(`/runner/control/person/${personId}/rename`, body);
-      setOpen(false);
-      setEditing(false);
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
+    // runAction swallows the rejection into `error` instead of letting it
+    // bubble out as an unhandled promise rejection that Next.js's dev overlay
+    // counts (the spurious "no inferred name to confirm" the operator saw on a
+    // confirm that had actually succeeded). `.finally` always clears busy; its
+    // rejection is handled by runAction's own `.catch`, so nothing leaks.
+    runAction(
+      apiPost(`/runner/control/person/${personId}/rename`, body).finally(() => {
+        busyRef.current = false;
+        setBusy(false);
+      }),
+      setError,
+      () => {
+        setOpen(false);
+        setEditing(false);
+        onChanged();
+      }
+    );
   }
 
   return (
@@ -74,6 +91,7 @@ export function NameSuggestionPill({ personId, inferredName, currentName, onChan
         type="button"
         onClick={(event) => {
           stop(event);
+          setError(null);
           setEditing(editOnlyMode);
           setDraft(inferredName ?? currentName ?? "");
           setOpen((prev) => !prev);
@@ -153,6 +171,9 @@ export function NameSuggestionPill({ personId, inferredName, currentName, onChan
               </button>
             </>
           )}
+          {error ? (
+            <span className="px-2 py-1 text-[11px] text-risk-overdue">{error}</span>
+          ) : null}
         </span>
       ) : null}
     </span>

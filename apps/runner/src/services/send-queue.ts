@@ -36,6 +36,12 @@ export interface SendQueueService {
     text: string;
     clientSendId: string;
     attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    /**
+     * App-level threading. Forwarded to sendService.enqueueSend → persisted
+     * on the SendRequest, then copied onto the resulting Message row so the
+     * dashboard renders the new bubble inline under its parent.
+     */
+    replyToMessageId?: string;
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";
@@ -54,26 +60,17 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   let running = false;
 
   async function tick(): Promise<void> {
-    if (running) {
-      console.warn("[send-queue] tick called but already running — skipping (this is normal)");
-      return;
-    }
+    if (running) return;
     running = true;
-    console.warn("[send-queue] tick started");
     try {
       while (true) {
         const next = await prisma.sendRequest.findFirst({
           where: { status: "PENDING" },
           orderBy: { createdAt: "asc" }
         });
-        if (!next) {
-          console.warn("[send-queue] no PENDING rows — tick exiting");
-          break;
-        }
-        console.warn(`[send-queue] processing ${next.id} clientSendId=${next.clientSendId}`);
+        if (!next) break;
         try {
           await deps.sendService.processSendRequest(next.id);
-          console.warn(`[send-queue] processed ${next.id}`);
         } catch (error) {
           // processSendRequest is supposed to record FAILED status on the row
           // before throwing only for programmer-error cases (missing thread,
@@ -129,6 +126,17 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     threadId: string;
     text: string;
     clientSendId: string;
+    // attachments must mirror the public interface above so iMessage
+    // voice notes / photos survive the type contract — without this the
+    // field is silently dropped by any future refactor that relies on
+    // the inferred parameter type.
+    attachments?: Array<{ absolutePath: string; displayName: string; mimeType?: string; kind?: string }>;
+    /**
+     * App-level threading. Forwarded to sendService.enqueueSend → persisted
+     * on the SendRequest, then copied onto the resulting Message row so the
+     * dashboard renders the new bubble inline under its parent.
+     */
+    replyToMessageId?: string;
   }): Promise<{
     clientSendId: string;
     status: "PENDING" | "SENT" | "FAILED";

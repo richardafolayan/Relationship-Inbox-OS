@@ -81,7 +81,7 @@ function parseVcardEntries(raw: string): VcardEntry[] {
   return entries;
 }
 
-function normalizePhone(raw: string): string | null {
+export function normalizePhone(raw: string): string | null {
   const digits = raw.replace(/[^\d]/g, "");
   if (digits.length < 7) return null;
   // Match on the trailing 10 digits — handles UK mobiles in any of:
@@ -89,7 +89,7 @@ function normalizePhone(raw: string): string | null {
   return digits.slice(-10);
 }
 
-function normalizeEmail(raw: string): string | null {
+export function normalizeEmail(raw: string): string | null {
   const trimmed = raw.trim().toLowerCase();
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(trimmed) ? trimmed : null;
 }

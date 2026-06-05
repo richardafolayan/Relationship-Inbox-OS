@@ -24,7 +24,7 @@ interface PageHeadProps {
 // decorative bottom rule - content sections own their own dividers.
 export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
   return (
-    <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_82%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+    <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
       <div className="min-w-0">
         {eyebrow ? (
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
@@ -47,12 +47,20 @@ export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
 
 interface SectionDividerProps {
   label: string;
+  // `tight` trims the leading gap for the first divider in a list, where
+  // the full `mt-14` would leave a dead band under the page controls.
+  tight?: boolean;
 }
 
 // `[label] ─────` divider used to bucket lists.
-export function SectionDivider({ label }: SectionDividerProps) {
+export function SectionDivider({ label, tight }: SectionDividerProps) {
   return (
-    <div className="mb-[18px] mt-14 flex items-center gap-[14px] px-1">
+    <div
+      className={cn(
+        "mb-[18px] flex items-center gap-[14px] px-1",
+        tight ? "mt-7" : "mt-14"
+      )}
+    >
       <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
     </div>

@@ -2,6 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { shapeThreadRows, toInboxRow } from "../apps/runner/dist/services/thread-row-shaping.js";
 
+const THRESHOLDS = { amberHours: 6, redHours: 18 };
+const hoursAgo = (h) => new Date(Date.now() - h * 3600 * 1000);
+
 function buildRow(overrides = {}) {
   const base = {
     id: "thread-1",
@@ -92,7 +95,7 @@ test("thread row shaping keeps unresolved rows with messages and marks warning",
   ]);
 
   assert.equal(rows.length, 1);
-  const shaped = toInboxRow(rows[0]);
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
   assert.equal(shaped.identityWarning, "unresolved_id");
   assert.equal(shaped.messageCount, 3);
 });
@@ -109,7 +112,76 @@ test("thread row shaping derives needsReply from inbound/outbound timestamps for
   ]);
 
   assert.equal(rows.length, 1);
-  const shaped = toInboxRow(rows[0]);
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
   assert.equal(shaped.unreadCount, 0);
   assert.equal(shaped.needsReply, true);
+});
+
+// Risk is recomputed at view time from the timestamps + current thresholds,
+// not read from the level frozen at the last scan/send. Timestamps are
+// relative to now so the waited durations are deterministic.
+test("toInboxRow recomputes a long-overdue inbound to RED even when the stored level says GREEN", () => {
+  const rows = shapeThreadRows([
+    buildRow({
+      id: "stale-green",
+      riskLevel: "GREEN",
+      lastInboundAt: hoursAgo(30),
+      lastOutboundAt: hoursAgo(40)
+    })
+  ]);
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
+  assert.equal(shaped.needsReply, true);
+  assert.equal(shaped.riskLevel, "RED");
+});
+
+test("toInboxRow recomputes a fresh inbound to GREEN even when the stored level says RED", () => {
+  const rows = shapeThreadRows([
+    buildRow({
+      id: "stale-red",
+      riskLevel: "RED",
+      lastInboundAt: hoursAgo(1),
+      lastOutboundAt: hoursAgo(50)
+    })
+  ]);
+  assert.equal(toInboxRow(rows[0], 1, THRESHOLDS).riskLevel, "GREEN");
+});
+
+test("toInboxRow recomputes an inbound past the amber threshold to AMBER", () => {
+  const rows = shapeThreadRows([
+    buildRow({ id: "amber", riskLevel: "GREEN", lastInboundAt: hoursAgo(8), lastOutboundAt: hoursAgo(40) })
+  ]);
+  assert.equal(toInboxRow(rows[0], 1, THRESHOLDS).riskLevel, "AMBER");
+});
+
+test("toInboxRow keeps a replied thread GREEN with no SLA countdown regardless of the stored level", () => {
+  const rows = shapeThreadRows([
+    buildRow({
+      id: "replied",
+      riskLevel: "RED",
+      lastInboundAt: hoursAgo(30),
+      lastOutboundAt: hoursAgo(1)
+    })
+  ]);
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
+  assert.equal(shaped.needsReply, false);
+  assert.equal(shaped.riskLevel, "GREEN");
+  assert.equal(shaped.slaCountdown, "");
+});
+
+test("toInboxRow risk reflects the CURRENT thresholds, not the scan-time ones", () => {
+  const rows = shapeThreadRows([
+    buildRow({ id: "thresh", riskLevel: "GREEN", lastInboundAt: hoursAgo(7), lastOutboundAt: hoursAgo(40) })
+  ]);
+  assert.equal(toInboxRow(rows[0], 1, { amberHours: 6, redHours: 18 }).riskLevel, "AMBER");
+  assert.equal(toInboxRow(rows[0], 1, { amberHours: 8, redHours: 18 }).riskLevel, "GREEN");
+});
+
+test("toInboxRow maps a favourited contact's favouritedAt to personFavourite (R-0066)", () => {
+  const favourited = shapeThreadRows([
+    buildRow({ id: "fav", person: { favouritedAt: new Date("2026-06-05T12:00:00.000Z") } })
+  ]);
+  assert.equal(toInboxRow(favourited[0], 1, THRESHOLDS).personFavourite, true);
+
+  const notFavourited = shapeThreadRows([buildRow({ id: "plain", person: { favouritedAt: null } })]);
+  assert.equal(toInboxRow(notFavourited[0], 1, THRESHOLDS).personFavourite, false);
 });

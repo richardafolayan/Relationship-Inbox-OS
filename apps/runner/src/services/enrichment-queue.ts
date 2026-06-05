@@ -230,6 +230,15 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     return 24 * 60 * 60 * 1000;
   }
 
+  // Reasons that won't resolve by retrying: the person row is missing /
+  // has no profileUrl, LinkedIn returned a not-found page, or the profile
+  // is private. Without this, jobs against profile-less people sit in
+  // PENDING with nextAttemptAt in the past and keep the "Enriching N
+  // profiles" banner glued on between attempts.
+  function isPermanentFailure(reason: string): boolean {
+    return reason === "not_found" || reason === "private";
+  }
+
   async function processJob(job: { id: string; personId: string; attempts: number }): Promise<{ visited: boolean }> {
     const platform: PlatformName = "LINKEDIN";
     const scanLock = deps.scanLockKey(platform);
@@ -264,6 +273,22 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       return { visited: false };
     }
 
+    // Mark the row RUNNING BEFORE the pacing sleep. If the runner crashes
+    // mid-sleep, recoverInflightOnStart will transition the row back to
+    // PENDING on next boot. The previous order (sleep, then mark RUNNING)
+    // let a crash-during-pace drop the in-memory recentVisits ring, so the
+    // very next boot could fire a visit immediately and bypass the
+    // automation-detection guard the pacing is supposed to provide.
+    // Mark RUNNING for crash recovery, but do NOT bump attempts yet — the job
+    // may still defer on a busy enrich-lock below without ever visiting a
+    // profile. Burning an attempt there let repeated lock contention push a
+    // job to permanent FAILED with zero real visits. attempts is incremented
+    // only on the failure path, where a visit was actually attempted.
+    await prisma.enrichmentJob.update({
+      where: { id: job.id },
+      data: { status: "RUNNING" }
+    });
+
     // Pacing — randomised gap in [paceMinMs, paceMaxMs] since the last
     // visit. After every `longIdleEvery` visits, an additional extended
     // pause in [longIdleMinMs, longIdleMaxMs] is layered on top.
@@ -280,11 +305,6 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if (longIdleGap > 0) {
       visitsSinceLongIdle = 0;
     }
-
-    await prisma.enrichmentJob.update({
-      where: { id: job.id },
-      data: { status: "RUNNING", attempts: job.attempts + 1 }
-    });
 
     let result: ProfileExtractionResult;
     try {
@@ -311,17 +331,22 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if ("failed" in result && result.failed) {
       await persistFailure(job.personId, result.reason);
       const attempts = job.attempts + 1;
-      const giveUp = attempts >= 3;
+      const permanent = isPermanentFailure(result.reason);
+      const giveUp = permanent || attempts >= 3;
       await prisma.enrichmentJob.update({
         where: { id: job.id },
         data: {
           status: giveUp ? "FAILED" : "PENDING",
+          // Persist the real attempt count here (no longer bumped at the
+          // RUNNING step) so the next run's give-up check sees an accurate
+          // number that only counts attempts where a visit actually ran.
+          attempts,
           lastError: `${result.reason}${result.detail ? `: ${result.detail}` : ""}`,
           nextAttemptAt: giveUp ? null : new Date(Date.now() + exponentialDelayMs(attempts))
         }
       });
       console.warn(
-        `[enrichment-queue] job=${job.id} person=${job.personId} failed reason=${result.reason} attempts=${attempts} giveUp=${giveUp}`
+        `[enrichment-queue] job=${job.id} person=${job.personId} failed reason=${result.reason} attempts=${attempts} giveUp=${giveUp}${permanent ? " (permanent)" : ""}`
       );
       return { visited: true };
     }
@@ -368,7 +393,16 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if (recentVisits.length >= deps.dailyCap) {
       return { deferred: true };
     }
-    const result = await visitProfile(personId);
+    // Acquire the enrich lock so a concurrent drain pass can't collide on
+    // the same managed page. Defer if the lock is held — the caller will
+    // fall back to enqueue and the worker drains it normally.
+    const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
+      visitProfile(personId)
+    );
+    if (!acquired.acquired) {
+      return { deferred: true };
+    }
+    const result = acquired.value;
     lastVisitAt = Date.now();
     recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
@@ -404,12 +438,18 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
 
   function start(): void {
     stopped = false;
+    // Always kick — even if recovery throws — so any pre-existing PENDING
+    // rows are picked up on next boot. Otherwise a flaky DB read at start
+    // could leave the queue idle for up to a full periodicTimer interval
+    // (1h) before the next chance to drain.
     void recoverInflightOnStart()
-      .then(() => kick())
       .catch((error) => {
         console.warn(
           `[enrichment-queue] recover failed: ${error instanceof Error ? error.message : String(error)}`
         );
+      })
+      .finally(() => {
+        if (!stopped) kick();
       });
     if (!periodicTimer) {
       periodicTimer = setInterval(() => {
