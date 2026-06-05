@@ -110,8 +110,14 @@ export function planArtifactCleanup(candidates: CleanupCandidate[], options: Cle
   const keepCutoff = options.nowMs - options.keepDays * DAY_MS;
   const keepPaths = new Set<string>();
 
-  for (const entry of sorted.slice(0, Math.max(0, options.keepRecent))) {
-    keepPaths.add(entry.path);
+  const keepRecentLimit = Math.max(0, options.keepRecent);
+  const keptPerSource = new Map<CleanupCandidate["source"], number>();
+  for (const entry of sorted) {
+    const kept = keptPerSource.get(entry.source) ?? 0;
+    if (kept < keepRecentLimit) {
+      keepPaths.add(entry.path);
+      keptPerSource.set(entry.source, kept + 1);
+    }
   }
   for (const entry of sorted) {
     if (entry.mtimeMs >= keepCutoff) {
