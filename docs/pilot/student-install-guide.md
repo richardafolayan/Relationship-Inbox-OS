@@ -1,231 +1,177 @@
-# Student Pilot: Install Guide
+# Install Relationship Inbox OS on your Mac
 
-This is the setup guide for the Relationship Inbox OS student pilot. It is
-written to be followed **on a short call with me**. You do not need to be
-technical, and you do **not** need git, a GitHub account, or any coding
-experience. If a step looks confusing, stop there and we will do it together.
+This guide is for student pilots. **You do not need to know how to code.**
+
+You paste one command into Terminal. It checks your Mac, installs anything
+that's missing, downloads the app, sets it up, and opens it in your browser.
+Then the app walks you through connecting iMessage and LinkedIn.
 
 The app runs entirely on your own Mac. Nothing is uploaded to a server.
 
-## What you need
+## You will need
 
-- A **MacBook**. The first pilot is Mac-only: iMessage support is
-  macOS-only, and I want to keep the first round simple.
-- **Google Chrome**, and you signed into LinkedIn in it as normal. (Don't
-  have Chrome? Get it free from [google.com/chrome](https://www.google.com/chrome/).)
-- **The Messages app on your Mac, signed in**, so your iMessages can be
-  included. If you have ever sent an iMessage from this Mac, you are set.
-- About 20 minutes, and me on a call with you.
+- A **Mac** (a MacBook is fine). iMessage doesn't work on Windows, so the
+  pilot is Mac-only.
+- **Messages working on your Mac.** If you've ever sent an iMessage from this
+  Mac, you're set.
+- A **LinkedIn account**, if you want to test LinkedIn.
+- **At least 10GB free space** (20GB is comfortable).
+- **Stable Wi-Fi.**
+- About **20 to 30 minutes** for the first setup, mostly waiting and clicking
+  "Allow".
 
-You do **not** need a GitHub account or any developer tools. I will send you
-the code as a normal download, and an AI key to paste into one file. You do
-not need your own.
+## You do **not** need
 
-## Step 1: Get the code
+- GitHub or a GitHub account
+- git
+- Python
+- Xcode
+- Homebrew
+- nvm
+- Any coding experience
 
-I will send you the project as a single **ZIP file**, by AirDrop, email, or a
-download link. There is no git and no GitHub account involved.
+If you have none of these, that's exactly right. The installer brings its own.
 
-1. Save the ZIP. It normally lands in your **Downloads** folder.
-2. **Double-click the ZIP** to unzip it. You will get a folder called
-   `relationship-inbox-os` (the name may have some extra text on the end,
-   that is fine).
+---
 
-Leave that folder in Downloads, that is perfectly OK. Just remember where it
-is, you will point the Terminal at it in Step 3.
+## Step 1: Run the install command
 
-## Step 2: Install Node.js (one time)
+I'll send you the install command privately. There are two shapes it can
+take, and I'll tell you which one you've got.
 
-The app needs a small, free tool called **Node.js** to run. You install it
-once, by clicking through an installer, no typing.
+### A) A one-line command
 
-1. Go to [nodejs.org](https://nodejs.org).
-2. Download the macOS version labelled **LTS** (the recommended one).
-3. Open the file you downloaded (it ends in `.pkg`) and click
-   **Continue → Agree → Install**. Enter your Mac password if it asks.
-4. When it says the install succeeded, you are done. Nothing new opens on
-   screen, that is normal.
-
-## Step 3: Open Terminal and go to the project folder
-
-The next steps use the **Terminal** app. It is a plain, text-only window,
-that is normal, not a sign anything is wrong.
-
-1. Open it: press **⌘ + Space**, type `Terminal`, and press **Enter**.
-2. In the Terminal window type `cd` followed by a space (the letters c, d,
-   then a space). **Do not press Enter yet.**
-3. Open **Finder**, find your unzipped `relationship-inbox-os` folder, and
-   **drag it onto the Terminal window**. The folder's location fills itself
-   in for you.
-4. Now press **Enter**. You are now "inside" the project folder.
-
-If you ever close Terminal and need to come back, just repeat this step to
-get back into the folder.
-
-## Step 4: Install it
-
-First, install the app and its tools. Run these two commands one at a time,
-and **wait for each to completely finish** (the prompt comes back and the
-text stops scrolling) before running the next. The first one is the big one
-and takes a few minutes.
+If I send you a command that looks like this, open **Terminal** (press
+**⌘ + Space**, type `Terminal`, press **Enter**), paste the whole line, and
+press **Enter**:
 
 ```bash
-npm install --include=dev
-npx playwright install
+/bin/bash -c "$(curl -fsSL <the link I send you>)"
 ```
 
-The `--include=dev` part makes sure the small database tool the next steps
-need is installed, even if your Mac is set up to skip it.
+That's it. Skip to [Step 2](#step-2-follow-the-permission-prompts).
 
-Now check the install worked. Run:
+### B) A ZIP file
 
-```bash
-npx --no-install prisma --version
-```
+If I instead send you the app as a **ZIP** (by AirDrop, email, or a download
+link):
 
-You should see a few lines of version numbers, starting with
-`prisma : 6.x.x`. If instead you see `command not found` or `could not
-determine an executable to run`, the install did not finish: run
-`npm install --include=dev` again, let it complete, and check once more
-before carrying on.
+1. **Double-click the ZIP** to unzip it. You'll get a folder called
+   `relationship-inbox-os` (extra text on the end is fine). Leaving it in
+   **Downloads** is OK.
+2. Open **Terminal** (⌘ + Space, type `Terminal`, Enter).
+3. Type `bash ` (the word `bash` and a space, don't press Enter yet).
+4. Open **Finder**, go inside the unzipped folder to **scripts**, and drag
+   **install-student-macos.sh** onto the Terminal window. It fills in the
+   path for you.
+5. Press **Enter**.
 
-Once that check passes, set up the local database:
+Either way, the installer takes over from here. While it runs it will:
 
-```bash
-npm run db:generate
-npm run db:push
-```
+- check your Mac and free space,
+- install **Node 22** if it's missing (it may ask for your Mac password, the
+  one you use to unlock your Mac),
+- download/prepare the app and install what it needs,
+- set up your local database,
+- start the app and open it at **http://localhost:3100**.
 
-If a command prints a wall of text and ends without the word `error`, it
-worked.
+The long part is "Installing the app", which takes a few minutes. It's normal
+for the Terminal to sit quietly while it works.
 
-## Step 5: Create your settings file
+> **Keep this Terminal window open.** It's what keeps the app running. To stop
+> the app, click the window and press **Ctrl + C**. To start it again later,
+> run `node scripts/start-student.mjs` from the app folder (or `npm run dev`).
 
-In the project folder there is a file called `.env.example`. Make a copy of
-it named `.env`:
+---
 
-```bash
-cp .env.example .env
-```
+## Step 2: Follow the permission prompts
 
-Then open `.env` in a text editor. You only need to touch two things, I
-will give you both on the call:
+Once the app opens in your browser, it guides you through the rest:
 
-- `OPENAI_API_KEY=`: paste the key I send you after the `=`.
-- `BROWSER_PROFILE_MODE=personal`: leave this as `personal` (see
-  [Browser modes](#browser-modes) below).
+1. **iMessage access**: a one-time macOS permission (see below).
+2. **Connecting LinkedIn**: you log in yourself.
+3. **Your first scan**: pulls your conversations in.
+4. **Your inbox**: opens once the scan finishes.
 
-Leave everything else as it is. We will fill in the Chrome profile details
-together on the call. They depend on your Mac.
+### Connect iMessage
 
-## Step 6: Turn on iMessage (Mac)
+Relationship Inbox OS reads the messages already stored on your Mac. It never
+logs into anything and never sends anything on its own.
 
-This is what makes your iMessage conversations show up next to LinkedIn. It is
-already switched on in your settings file; it just needs one macOS permission.
-
-1. **Be signed into Messages.** Open the **Messages** app on your Mac once and
-   check you can see your conversations. The app only ever reads your Mac's own
-   Messages, it never logs in anywhere.
-2. **Give Terminal Full Disk Access.** Open **System Settings → Privacy &
-   Security → Full Disk Access**, find **Terminal** in the list, and turn its
-   switch **on**. If Terminal is not in the list, click **+** and add it from
-   Applications → Utilities.
+1. Open **Messages** on your Mac and check you can see recent conversations.
+2. Give **Terminal Full Disk Access** so the app can read your local message
+   history: **System Settings → Privacy & Security → Full Disk Access**, find
+   **Terminal**, and turn it **on**. (If Terminal isn't listed, click **+**
+   and add it from Applications → Utilities.)
 3. macOS will say Terminal must quit to use the new permission. **Quit
-   Terminal** (⌘ + Q), reopen it, and go back into the project folder the same
-   way as Step 3 (type `cd `, drag the folder onto the window, press Enter).
+   Terminal** (⌘ + Q), then start the app again.
+4. The first time you *send* an iMessage reply, macOS asks "Terminal wants to
+   control Messages". Click **Allow**.
 
-Your iMessages then appear after the first scan (Step 9). The first time you
-send an iMessage reply, macOS asks "Terminal wants to control Messages",
-click **Allow**.
+What it does: reads your local iMessage/SMS history, summarises it, and shows
+what needs a reply. What it doesn't do: send anything unless you press send.
 
-## Step 7: Start the app
+### Connect LinkedIn
+
+Relationship Inbox OS uses a normal, signed-in Chrome. **It never asks for or
+stores your LinkedIn password.**
+
+1. In the app, click **Connect LinkedIn**.
+2. Log into LinkedIn yourself, the normal way.
+3. Complete any security check (2FA) if LinkedIn asks.
+4. Come back to Relationship Inbox OS and press **Start LinkedIn scan**.
+
+You only log in once; it remembers the session.
+
+### Set up your reply style
+
+The first time you open the app, the **Today** page has a "Set up your reply
+style" card. Fill it in (your name and a sentence on how you usually message
+people). This is what makes the app support *your* words instead of sounding
+generic. You can change it later in Settings.
+
+---
+
+## If something looks wrong
+
+Run the built-in health check from the app folder:
 
 ```bash
-npm run dev
+node scripts/doctor.mjs
 ```
 
-Leave that Terminal window open. It keeps the app running. When it settles,
-open **Chrome** and go to:
+It prints a plain-English **PASS / WARN / FAIL** for each part of the setup
+and tells you the exact next step for anything that failed.
 
+For specific problems ("inbox is empty", "can't reach the runner", "Node
+version is wrong", and so on), see
+[student-install-troubleshooting.md](./student-install-troubleshooting.md).
+
+When you're up and running, [student-pilot-instructions.md](./student-pilot-instructions.md)
+covers what to actually test.
+
+---
+
+## Uninstall
+
+Everything the app knows lives in one folder, so removing it removes the app:
+
+```bash
+bash scripts/uninstall-student-macos.sh
 ```
-http://localhost:3100
-```
 
-## Step 8: Set up your reply style
+It asks you to confirm, then deletes the app and its local data. It does
+**not** touch Node, your Messages, your Chrome, or your LinkedIn account.
 
-The first time you open it, the **Today** page shows a short welcome card
-and a "Set up your reply style" card. Fill the reply-style card in: your
-name and a sentence on how you usually message people. This is what makes
-the app support *your* words rather than sounding generic. It takes a minute
-and you can change it later in Settings.
+---
 
-## Step 9: Pull in your messages
+## Privacy
 
-The app reads your messages in the background. To pull them in the first
-time, press **⌘K** to open the command bar, type `scan`, and choose
-**Run scan now**. Your conversations appear on **Today** and **Inbox**.
-
-Both your LinkedIn and iMessage conversations show up here. If iMessage threads
-are missing, it is almost always Full Disk Access (Step 6) not being granted
-yet, see [troubleshooting.md](./troubleshooting.md).
-
-That is the whole setup. From here, see
-[student-pilot-instructions.md](./student-pilot-instructions.md) for what to
-actually test, and [troubleshooting.md](./troubleshooting.md) if something
-looks stuck.
-
-## If a command says "command not found: npm"
-
-That means the Node.js install in Step 2 has not been picked up yet. It is an
-easy fix:
-
-1. Make sure Step 2 actually finished (the installer said it succeeded).
-2. Fully quit Terminal: press **⌘ + Q** in the Terminal window.
-3. Reopen Terminal and redo **Step 3** (the drag-the-folder step) to get back
-   into the project folder.
-4. Try the command again.
-
-A freshly opened Terminal only notices Node.js after Node.js is installed, so
-quitting and reopening it is what does the trick.
-
-## If a command says "command not found: prisma"
-
-This means the small database tool did not get installed, usually because
-`npm install` was interrupted or did not fully finish. To fix it:
-
-1. Run `npm install --include=dev` again.
-2. **Wait for it to completely finish.** The Terminal prompt comes back and
-   the text stops scrolling. This can take a few minutes, that is normal.
-3. Check it with `npx --no-install prisma --version`. You should see a few
-   lines of version numbers.
-4. Then run `npm run db:generate` and `npm run db:push` again.
-
-## Browser modes
-
-The app needs a browser session to read LinkedIn. There are two modes, set
-by `BROWSER_PROFILE_MODE` in your `.env` file.
-
-- **`personal` (use this for the pilot).** The app reuses your real Chrome
-  profile, so it sees the LinkedIn you are already signed into. Nothing new
-  to log into. This is the gentlest option for LinkedIn: a normal,
-  signed-in Chrome looks far less unusual than a fresh automated browser.
-- **`isolated` (fallback only).** The app opens its own separate browser
-  window and you sign into LinkedIn inside that one. Use this **only** if
-  personal Chrome mode cannot be set up, for example if you do not use
-  Chrome as your main browser.
-
-Two more things, both already set for you:
-
-- **Keep the headless browser off.** There is a toggle in Settings, leave
-  it off. A visible browser (it runs quietly offscreen) looks more like a
-  real person than a hidden one.
-- **Chrome is preferred** for this pilot. If you mainly use Safari or
-  Firefox, tell me, we will use `isolated` mode and you will sign into
-  LinkedIn in the app's own window.
-
-## A note on Windows
-
-The app can technically run on Windows, but the first pilot is **Mac-only**
-on purpose: iMessage is macOS-only, and I want a small, consistent first
-round. If you only have a Windows PC, let me know and we will sort something
-out. Just do not treat Windows as the normal pilot path yet.
+- **Nothing sends automatically.** The app never replies for you.
+- **Your messages stay on your Mac.** There's no server and no tracking.
+- **AI help is optional.** You can ignore it entirely.
+- **Feedback and bug reports never include your message content**, only what
+  you choose to type. A screenshot you attach may show private messages, so
+  check before sending; the app asks you to confirm.
+- **Don't connect any account you're uncomfortable testing** with an early
+  build.
