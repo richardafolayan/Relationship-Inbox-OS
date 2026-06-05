@@ -269,12 +269,19 @@ export function truncateAtWord(text: string, maxCodePoints: number): string {
     return "";
   }
   const trimmed = text.trim();
-  if (Array.from(trimmed).length <= maxCodePoints) {
+  const codePoints = Array.from(trimmed);
+  if (codePoints.length <= maxCodePoints) {
     return trimmed;
   }
-  const cut = safeTruncate(trimmed, maxCodePoints).replace(/\s+$/u, "");
-  const match = cut.match(/^(.*\S)\s+\S+$/u);
-  const atWord = match?.[1] ?? cut;
+  const hard = codePoints.slice(0, maxCodePoints).join("").replace(/\s+$/u, "");
+  // Only retreat to the previous word boundary when the cut actually bisected a
+  // word — i.e. the last kept char AND the first dropped char are both word
+  // characters. If the cut already fell on a space or punctuation, the last
+  // kept word is whole, so keep it (this avoids dropping a complete final word).
+  const isWordChar = (c: string | undefined) => !!c && /[\p{L}\p{N}]/u.test(c);
+  const bisectsWord =
+    isWordChar(codePoints[maxCodePoints - 1]) && isWordChar(codePoints[maxCodePoints]);
+  const atWord = bisectsWord ? hard.match(/^(.*\S)\s+\S+$/u)?.[1] ?? hard : hard;
   return atWord.replace(/[\s,;:–—-]+$/u, "").trim();
 }
 

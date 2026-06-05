@@ -29,6 +29,19 @@ test("backs up to the last whole word instead of cutting mid-word", () => {
   assert.ok(!/[\s,;:]$/u.test(out), "no dangling separator");
 });
 
+test("keeps the final word when the cut already lands on a space boundary", () => {
+  const text = "alpha bravo charlie delta echo";
+  // 19 code points = "alpha bravo charlie"; the next char is a space, so the
+  // cut is already at a boundary -> "charlie" must NOT be dropped.
+  assert.equal(truncateAtWord(text, 19), "alpha bravo charlie");
+});
+
+test("keeps the final word when the cut lands just before punctuation", () => {
+  const text = "pick a time. He then asked about the date for the call.";
+  // 11 code points = "pick a time"; the next char is '.', a boundary.
+  assert.equal(truncateAtWord(text, 11), "pick a time");
+});
+
 test("reproduces and fixes the Ngoni case (120-char mid-word cut)", () => {
   const full =
     "Ngoni asked what kind of project you are working on and you described your personal coding project and current skills focus on backend systems";

@@ -26,14 +26,22 @@ test("repairs the Ngoni 120-char mid-word cut", () => {
   assert.ok(Array.from(out).length < 120);
 });
 
-test("repairs a 140-char fallback mid-word cut", () => {
-  const full =
-    "Ngoni asked what kind of project you are working on and you described your personal coding project and current skills focus on backend systems";
-  const stored = cutTo(full, 140);
-  assert.equal(Array.from(stored).length, 140);
-  const out = cleanAskSummary(stored);
-  assert.ok(!/\bsyste$/.test(out), "drops the bisected word");
-  assert.ok(out.endsWith("backend"), `got: ${out}`);
+test("leaves a 119-char summary untouched even without trailing punctuation", () => {
+  // A blind cut yields EXACTLY 120 code points, never 119, so a natural
+  // 119-char summary must keep its final whole word (the PM's over-trim flag).
+  const base =
+    "Ngoni asked what kind of project you are working on and you described your personal coding project and current focus area";
+  const natural = cutTo(base, 119);
+  assert.equal(Array.from(natural).length, 119);
+  assert.ok(!/[.!?]$/.test(natural), "fixture has no terminal punctuation");
+  assert.equal(cleanAskSummary(natural), natural, "119-char value must be returned unchanged");
+});
+
+test("leaves a 121-char summary untouched (only exactly 120 is a cut)", () => {
+  const text =
+    "She shared lots of photos from the recent Lagos trip and asked when you would next be free to grab some dinner soon";
+  assert.ok(Array.from(text).length !== 120);
+  assert.equal(cleanAskSummary(text), text);
 });
 
 test("leaves a cleanly-ended summary untouched (ends with punctuation)", () => {
