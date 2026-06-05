@@ -127,19 +127,28 @@ export function loadContactResolver(vcfPath: string | undefined): ContactResolve
   const entries = parseVcardEntries(raw);
   const phoneMap = new Map<string, string>();
   const emailMap = new Map<string, string>();
-  // name → entry, for siblingHandles(). Last-wins on name collision matches
-  // the resolve() last-wins semantics.
-  const entryByName = new Map<string, VcardEntry>();
-  for (const entry of entries) {
+  // handle key → owning entry index, for siblingHandles(). Keyed on entry
+  // identity (its index in `entries`) rather than display name, so two
+  // distinct contacts that share an FN don't cross-contaminate each other's
+  // handle pools. Last-wins on handle-key collision matches resolve().
+  const phoneEntryMap = new Map<string, number>();
+  const emailEntryMap = new Map<string, number>();
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i]!;
     for (const phone of entry.phones) {
       const key = normalizePhone(phone);
-      if (key) phoneMap.set(key, entry.name);
+      if (key) {
+        phoneMap.set(key, entry.name);
+        phoneEntryMap.set(key, i);
+      }
     }
     for (const email of entry.emails) {
       const key = normalizeEmail(email);
-      if (key) emailMap.set(key, entry.name);
+      if (key) {
+        emailMap.set(key, entry.name);
+        emailEntryMap.set(key, i);
+      }
     }
-    entryByName.set(entry.name, entry);
   }
   function resolveName(handle: string): string | null {
     if (!handle) return null;
@@ -153,9 +162,16 @@ export function loadContactResolver(vcfPath: string | undefined): ContactResolve
   return {
     resolve: resolveName,
     siblingHandles(handle: string): string[] {
-      const name = resolveName(handle);
-      if (!name) return [handle];
-      const entry = entryByName.get(name);
+      if (!handle) return [handle];
+      const trimmed = handle.trim();
+      const index = trimmed.includes("@")
+        ? emailEntryMap.get(trimmed.toLowerCase())
+        : (() => {
+            const key = normalizePhone(trimmed);
+            return key ? phoneEntryMap.get(key) : undefined;
+          })();
+      if (index === undefined) return [handle];
+      const entry = entries[index];
       if (!entry) return [handle];
       return [...entry.phones, ...entry.emails];
     },
