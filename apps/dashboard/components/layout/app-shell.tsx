@@ -12,6 +12,7 @@ import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiPost } from "@/lib/api";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
   buildNewMessageDigestNotice,
@@ -205,9 +206,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   // every tick. /health and /data/inbox still fire because the sidebar
   // and attention-count badge depend on them.
   const refreshMeta = useCallback(async () => {
+    // Short TTLs so this 8s background poll de-dupes with the page-level
+    // /data/inbox and /health reads instead of issuing parallel duplicates.
     const [healthData, inboxData] = await Promise.all([
-      apiGet<HealthResponse>("/runner/health").catch(() => null),
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null)
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null),
+      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 4000 }).catch(() => null)
     ]);
 
     // healthData ?? prev ?? null: a fresh result wins; a failed poll
@@ -224,13 +227,9 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   }, [maybeNotify]);
 
-  useEffect(() => {
-    void refreshMeta();
-    const timer = setInterval(() => {
-      void refreshMeta();
-    }, 8000);
-    return () => clearInterval(timer);
-  }, [refreshMeta]);
+  // Poll health + inbox every 8s while visible; pause in background tabs and
+  // catch up on return (the hook fires an immediate tick on mount).
+  useVisiblePolling(() => void refreshMeta(), 8000);
 
   useEffect(() => {
     if (autoScanDisabled) {
@@ -380,8 +379,15 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [router]);
 
-  // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
-  // `runner-resync` window events.
+  // SSE event stream. Pages subscribe to `runner-event` / `runner-resync`
+  // window events. The stream is created ONCE for the shell's lifetime: it
+  // used to list `pathname` (and `refreshMeta`) in its deps, so every route
+  // change tore down the EventSource and reconnected with `sinceEventId`,
+  // making the runner replay its whole buffered window and re-dispatch a
+  // burst of events on the freshly-mounted page. refreshMeta is read through
+  // a ref so its changing identity never re-arms the stream.
+  const refreshMetaRef = useRef(refreshMeta);
+  refreshMetaRef.current = refreshMeta;
   useEffect(() => {
     const previousEventId = Number(window.sessionStorage.getItem("runner_last_event_id") ?? "0");
     const eventUrl = previousEventId > 0 ? `/events?sinceEventId=${previousEventId}` : "/events";
@@ -401,7 +407,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         // promptly - background tabs throttle the 8s poll hard, which is
         // exactly when the notification matters most.
         if (payload.type === "RESYNC_REQUIRED" || payload.type === "SCAN_FINISHED") {
-          void refreshMeta();
+          void refreshMetaRef.current();
         }
       } catch {
         // Ignore malformed event payloads.
@@ -411,7 +417,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       // Let EventSource auto-reconnect.
     };
     return () => source.close();
-  }, [refreshMeta, pathname]);
+  }, []);
 
   // ⌘K toggles the palette. Esc closes the palette and, when there is no
   // palette open, navigates back from a thread to /today (matches the

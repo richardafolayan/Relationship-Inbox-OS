@@ -388,6 +388,11 @@ model Message {
   @@unique([threadId, platformMessageKey])
   @@index([threadId, timestamp])
   @@index([replyToMessageId])
+  // Serves the inbox KPI queries that scan by time across all threads: the
+  // 7-day reply-latency findMany (timestamp range + chronological sort) and
+  // the "sent today" OUT count. Without a timestamp-leading index both
+  // full-scan the 150k-row messages table on every inbox poll.
+  @@index([timestamp, direction])
   @@map("messages")
 }
 

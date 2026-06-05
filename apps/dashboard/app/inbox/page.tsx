@@ -5,12 +5,13 @@ import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import { Archive, Search, Star } from "lucide-react";
-import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
+import { apiGet, apiPost, peekCache, runAction, ApiRequestError } from "@/lib/api";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import dynamic from "next/dynamic";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
@@ -19,6 +20,7 @@ import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { cn } from "@/lib/utils";
+import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 import {
   OXBLOOD_PAGE_VARS,
   TOOL_CLASS,
@@ -35,6 +37,14 @@ type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
 type SortMode = "oldest" | "recent" | "name";
+
+// Lazy-load the receipts drawer so its chunk stays out of the inbox's
+// initial bundle; an "opened-once" latch keeps the existing open-prop
+// behaviour once it has been shown.
+const ReceiptsDrawer = dynamic(
+  () => import("@/components/common/receipts-drawer").then((m) => m.ReceiptsDrawer),
+  { ssr: false }
+);
 
 const TABS: { key: RiskTab; label: string }[] = [
   { key: "all", label: "All" },
@@ -194,12 +204,23 @@ interface SectionGroup {
 // flat list. Older / likely-closed threads are hidden by default
 // (issue #287) and surfaced via the Show all affordance.
 export default function InboxPage() {
-  const [data, setData] = useState<InboxResponse | null>(null);
-  const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
+  // Seed from the shared client cache so returning to the Inbox (e.g. back
+  // from a thread, or Today -> Inbox) paints the last-known list instantly
+  // and then revalidates, instead of flashing an empty skeleton.
+  const [data, setData] = useState<InboxResponse | null>(
+    () => peekCache<InboxResponse>("/runner/data/inbox") ?? null
+  );
+  const [platforms, setPlatforms] = useState<PlatformCard[]>(
+    () => peekCache<PlatformCard[]>("/runner/data/platforms") ?? []
+  );
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const [receiptsEverOpened, setReceiptsEverOpened] = useState(false);
+  useEffect(() => {
+    if (receiptsOpen) setReceiptsEverOpened(true);
+  }, [receiptsOpen]);
+  const [loaded, setLoaded] = useState(() => peekCache<InboxResponse>("/runner/data/inbox") !== undefined);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<RiskTab>("all");
   const [category, setCategory] = useState<CategoryFilter>("any");
@@ -222,29 +243,36 @@ export default function InboxPage() {
   const [bulkPending, setBulkPending] = useState<string | null>(null);
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
+  const applyInbox = useCallback((inbox: InboxResponse) => {
+    setData(inbox);
+    const stillPending = new Set(
+      inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+    );
+    setRemovedIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, []);
+
   const refresh = useCallback(async () => {
     const [inbox, platformRows, logRows] = await Promise.all([
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => []),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100").catch(() => [])
+      // SWR: paint the cached list immediately, revalidate in the background.
+      apiGet<InboxResponse>("/runner/data/inbox", {
+        ttlMs: 4000,
+        swr: true,
+        onFresh: (d) => applyInbox(d as InboxResponse)
+      }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => []),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100", { ttlMs: 5000 }).catch(() => [])
     ]);
-    if (inbox) {
-      setData(inbox);
-      const stillPending = new Set(
-        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
-      );
-      setRemovedIds((prev) => {
-        const next = new Set<string>();
-        prev.forEach((id) => {
-          if (stillPending.has(id)) next.add(id);
-        });
-        return next;
-      });
-    }
+    if (inbox) applyInbox(inbox);
     setPlatforms(platformRows ?? []);
     setLogs(logRows ?? []);
     setLoaded(true);
-  }, []);
+  }, [applyInbox]);
 
   // Seed search from a ?q= deep link (the thread participant popover's
   // "Find 1:1 thread" → /inbox?q=<handle>). Runs once on mount; the inbox
@@ -255,15 +283,15 @@ export default function InboxPage() {
   }, []);
 
   useEffect(() => {
-    void refresh();
     const onResync = () => void refresh();
     window.addEventListener("runner-resync", onResync);
-    const timer = setInterval(() => void refresh(), 10000);
     return () => {
       window.removeEventListener("runner-resync", onResync);
-      clearInterval(timer);
     };
   }, [refresh]);
+  // Poll every 10s while visible; paused in background tabs (the hook fires an
+  // immediate tick on mount and a catch-up tick on return to foreground).
+  useVisiblePolling(() => void refresh(), 10000);
 
   const { sandboxActive } = useFullDemo();
   // In a sandbox guided flow (pilot tour / presenter sandbox), the Inbox shows
@@ -892,12 +920,14 @@ export default function InboxPage() {
         </div>
       ) : null}
 
-      <ReceiptsDrawer
-        open={receiptsOpen}
-        onClose={() => setReceiptsOpen(false)}
-        rows={logs}
-        title="Inbox receipts"
-      />
+      {receiptsEverOpened ? (
+        <ReceiptsDrawer
+          open={receiptsOpen}
+          onClose={() => setReceiptsOpen(false)}
+          rows={logs}
+          title="Inbox receipts"
+        />
+      ) : null}
     </Canvas>
   );
 }
@@ -1090,6 +1120,9 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
     <Link
       href={`/thread/${row.id}`}
       onClick={onClick}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={cancelThreadPrefetch}
+      onFocus={() => prefetchThreadData(row.id)}
       className={cn(
         "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
         selected ? "bg-paper-2" : ""
