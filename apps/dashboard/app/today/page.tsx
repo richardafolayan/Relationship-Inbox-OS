@@ -20,6 +20,7 @@ import { normalizePreview } from "@/lib/preview";
 import { isInTodayQueue } from "@/lib/today";
 import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
+import { FitText } from "@/components/common/fit-text";
 import { ThreadRow } from "@/components/common/thread-row";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
@@ -439,13 +440,18 @@ export default function TodayPage() {
     heroSummary && heroSummary.id === hero?.id && heroSummary.summary
       ? heroSummary.summary
       : normalizePreview(hero?.preview);
+  // The hero summary renders IN FULL via <FitText> (it shrinks the font to
+  // fit, never truncates), so the only cap here is a generous safety net for a
+  // pathological `summary` fallback. whatTheyWant is already ≤120 chars
+  // server-side, so the normal ask is never touched; this just stops a runaway
+  // multi-sentence fallback from forcing the font to the readability floor.
   const heroHeadline = (() => {
     if (!heroHeadlineRaw) return "";
     const trimmed = heroHeadlineRaw.trim();
-    if (trimmed.length <= 120) return trimmed;
-    const cut = trimmed.slice(0, 120);
+    if (trimmed.length <= 200) return trimmed;
+    const cut = trimmed.slice(0, 200);
     const lastSpace = cut.lastIndexOf(" ");
-    return (lastSpace > 60 ? cut.slice(0, lastSpace) : cut).trim();
+    return (lastSpace > 120 ? cut.slice(0, lastSpace) : cut).trim();
   })();
   const heroIsTransitioning = transitioning && hero && transitioning.id === hero.id;
 
@@ -572,17 +578,27 @@ export default function TodayPage() {
                   <span className="inline-block h-[6px] w-[6px] rounded-full bg-accent" />
                   {heroIsTransitioning ? transitioning?.label ?? "First up" : `First up${META_SEP}1 of ${rows.length}`}
                 </p>
-                {/* #348: line-clamp-3 caps the hero at 3 lines. The
-                    36px display type inside a 22ch container can grow
-                    to 5+ tall lines when the bound source (whatTheyWant
-                    / preview) runs long, which dominates the card and
-                    pushes the message preview, action row and queue
-                    counter below the fold. The prompt cap (runner side)
-                    is the primary fix; this is the visual safety net so
-                    legacy long content stays readable. */}
-                <h2 className="m-0 mb-[14px] line-clamp-3 max-w-[22ch] text-balance font-display text-[36px] font-semibold leading-[1.15] tracking-[-0.025em]">
-                  {heroHeadline || "Catching up with someone"}
-                </h2>
+                {/* The hero summary must always show IN FULL — never an
+                    ellipsis (Richard: "the summary must fit so I see the whole
+                    thing"). <FitText> renders the complete text and shrinks the
+                    font (36 → 22px floor) until it fits the height budget below,
+                    using more of the row's width as needed. This both removes
+                    the old line-clamp-3 truncation AND keeps the original #348
+                    guarantee — a long ask can't grow unbounded and push the
+                    actions below the fold, because the block height is capped
+                    (the font shrinks instead of the card growing). */}
+                <div className="mb-[14px] max-w-[600px]">
+                  <FitText
+                    as="h2"
+                    maxPx={36}
+                    minPx={22}
+                    maxHeightPx={150}
+                    data-testid="today-hero-summary"
+                    className="m-0 text-balance font-display font-semibold leading-[1.15] tracking-[-0.025em]"
+                  >
+                    {heroHeadline || "Catching up with someone"}
+                  </FitText>
+                </div>
                 <div className="mb-[18px] flex items-center gap-3">
                   <PersonAvatar name={hero.personName} avatarUrl={hero.personAvatarUrl} size={28} />
                   <span className="font-medium text-ink">{hero.personName}</span>
@@ -765,7 +781,7 @@ export default function TodayPage() {
               {allDone ? (
                 <p className="mt-[18px] text-[13.5px] leading-[1.5] text-ink-2">
                   <strong className="font-semibold text-risk-fresh">That’s everyone.</strong> Nothing
-                  left tonight — close the laptop and get some sleep.
+                  left tonight. Close the laptop and get some sleep.
                 </p>
               ) : null}
             </section>
