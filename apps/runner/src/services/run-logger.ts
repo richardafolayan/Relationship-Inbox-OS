@@ -249,8 +249,25 @@ function csvEscape(value: unknown): string {
   return `"${text.replace(/"/g, "\"\"")}"`;
 }
 
-function appendLine(path: string, line: string): void {
-  appendFileSync(path, `${line}\n`, "utf8");
+let loggedAppendFailure = false;
+
+export function appendLine(path: string, line: string): void {
+  try {
+    appendFileSync(path, `${line}\n`, "utf8");
+  } catch (error) {
+    // Logging is best-effort: a failed trace write (disk full, permissions,
+    // a removed run dir) must never propagate into or mask the traced
+    // operation it is recording. Observe it once, then swallow.
+    if (!loggedAppendFailure) {
+      loggedAppendFailure = true;
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[run-trace] failed to append to ${path}: ${
+          error instanceof Error ? error.message : String(error)
+        } (further append failures suppressed)`
+      );
+    }
+  }
 }
 
 function appendPretty(path: string | undefined, line: string): void {
