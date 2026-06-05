@@ -10,7 +10,7 @@ import type {
 import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
-import { safeTruncate, truncateAtWord, stripUnpairedSurrogates } from "../platforms/utils";
+import { safeTruncate, capAskSummary, stripUnpairedSurrogates } from "../platforms/utils";
 import {
   mirrorRequiredToOpenLoops,
   sanitizeReplyBrief,
@@ -1694,18 +1694,15 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
 
-    const fallbackWhatTheyWant = lastInbound ? truncateAtWord(lastInbound.text, 120) : "No clear ask yet.";
+    const fallbackWhatTheyWant = lastInbound ? capAskSummary(lastInbound.text) : "No clear ask yet.";
     const fallbackNeedsReply = lastMessage?.direction === "IN";
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
-      // safeTruncate splits on Unicode code points so the cut won't bisect
-      // an emoji's surrogate pair. Without it, a message ending in an
-      // emoji at the boundary corrupts every subsequent prisma.thread
-      // .update — see Sarah Nwisi sync-fail bug.
-      // 120-char cap matches the Today hero headline's 4-line budget
-      // (max-w-22ch, 36px display, ~31 chars/line). Staying within budget
-      // means the operator reads the full fallback rather than an
-      // ellipsis truncation (issue #193).
+      // capAskSummary backs the fallback up to a whole word at the ask-summary
+      // budget (200 code points) and drops any dangling connective, so the cut
+      // never bisects a word or emoji surrogate pair and never stores a
+      // trailing "...and". The Today hero renders this in full via <FitText>,
+      // shrinking the font rather than clipping (issue #193).
       what_they_want: fallbackWhatTheyWant,
       open_loops: input.previousOpenLoops,
       remember: input.previousRemember,
@@ -1779,7 +1776,7 @@ MODE DECISION (made by you, the model, after reading the transcript):
   In RECONNECT mode, what_they_want and open_loops reframe as warm callbacks the operator could send to reopen the thread.
 
 what_they_want guidance (ACTIVE REPLY):
-- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
 - Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
 - Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
 - Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
@@ -1796,7 +1793,7 @@ open_loops guidance (ACTIVE REPLY):
 - Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".
 
 what_they_want guidance (RECONNECT — only when the three criteria above all hold):
-- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
 - Frame as: "what's the warmest, most natural way for the operator to reopen this thread, grounded in something specific the contact has shared." Reference a real detail from the transcript — something they mentioned doing, a thing they were working through, a small life update.
 - Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
 - Examples: "Sultan mentioned exam stress last month, a 'how'd they go?' check-in is natural.", "She was deciding between two job offers, worth asking how that landed.", "He said he'd send the doc but went quiet, a light nudge would land well."
@@ -1958,14 +1955,16 @@ ${transcript}`;
     const { result } = input.race
       ? await raceModelJson(prompt, fallback, parseSummary, undefined, "reassess-summary")
       : await modelJson(prompt, fallback, parseSummary);
-    // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
-    // returns longer prose; this keeps the Today hero headline within its
-    // budget. truncateAtWord trims at the code-point boundary AND backs up to
-    // the last whole word, so a long ask never stores mid-word ("...skills fo")
-    // — it ends cleanly ("...skills"). No ellipsis (issue #193).
-    if (result.what_they_want.length > 120) {
-      result.what_they_want = truncateAtWord(result.what_they_want, 120);
-    }
+    // Safety net. The prompt asks for a complete, self-contained ask within
+    // ~200 chars; this guards a runaway multi-sentence response. capAskSummary
+    // backs up to a whole word at the 200-char budget AND drops a trailing
+    // dangling connective, so an over-long ask ends cleanly ("...come along")
+    // rather than mid-word ("...skills fo") or on a connective ("...and").
+    // A complete ask (the norm) is well under the budget and passes through
+    // untouched, so the cap can no longer amputate a full thought (the old
+    // 120-char cut that stored "...acknowledge the update and gently"). The
+    // Today hero renders the result in full via <FitText> (issue #193).
+    result.what_they_want = capAskSummary(result.what_they_want);
     // Sanitise remember items: strip unpaired surrogates from notes (the
     // same SQLite-write hazard the summary fields guard against), coerce
     // dates to strict ISO-or-null, and drop anything left without a note.
@@ -2011,7 +2010,7 @@ ${transcript}`;
     // what reply_brief fields already get via sanitizeReplyBrief.
     const output: SummaryOutput = {
       summary: stripBannedPhrases(result.summary),
-      what_they_want: truncateAtWord(stripBannedPhrases(result.what_they_want), 120),
+      what_they_want: capAskSummary(stripBannedPhrases(result.what_they_want)),
       open_loops: finalOpenLoops.map((loop) => stripBannedPhrases(loop)).filter((loop) => loop.length > 0),
       remember: result.remember,
       tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
