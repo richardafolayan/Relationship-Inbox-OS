@@ -9814,10 +9814,16 @@ export class LinkedInAdapter implements PlatformAdapter {
       try {
         if (thread.threadUrl) {
           console.warn(`${tag} goto threadUrl=${thread.threadUrl}`);
-          await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
+          await this.tracedGoto(page, thread.threadUrl, {
+            stage: "send_message",
+            note: "send_open_by_thread_url"
+          });
           console.warn(`${tag} goto end url=${page.url()}`);
         } else {
-          await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
+          await this.tracedGoto(page, selectors.inbox_url, {
+            stage: "send_message",
+            note: "send_open_by_inbox_navigation"
+          });
           const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
           const fallbackRow = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
           const rowExists = (await rowRoot.count()) > 0;
