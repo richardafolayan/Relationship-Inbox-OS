@@ -257,6 +257,35 @@ export function safeTruncate(text: string, maxCodePoints: number): string {
 }
 
 /**
+ * Truncate `text` to at most `maxCodePoints` code points WITHOUT ending
+ * mid-word. Backs `safeTruncate` up to the last whole-word boundary and drops
+ * any dangling separator, so the result reads cleanly ("...current skills")
+ * instead of bisecting a word ("...current skills fo"). Falls back to the hard
+ * `safeTruncate` only when there is no word boundary to retreat to (a single
+ * oversized token). Trailing sentence punctuation (. ! ?) is preserved.
+ */
+export function truncateAtWord(text: string, maxCodePoints: number): string {
+  if (typeof text !== "string") {
+    return "";
+  }
+  const trimmed = text.trim();
+  const codePoints = Array.from(trimmed);
+  if (codePoints.length <= maxCodePoints) {
+    return trimmed;
+  }
+  const hard = codePoints.slice(0, maxCodePoints).join("").replace(/\s+$/u, "");
+  // Only retreat to the previous word boundary when the cut actually bisected a
+  // word — i.e. the last kept char AND the first dropped char are both word
+  // characters. If the cut already fell on a space or punctuation, the last
+  // kept word is whole, so keep it (this avoids dropping a complete final word).
+  const isWordChar = (c: string | undefined) => !!c && /[\p{L}\p{N}]/u.test(c);
+  const bisectsWord =
+    isWordChar(codePoints[maxCodePoints - 1]) && isWordChar(codePoints[maxCodePoints]);
+  const atWord = bisectsWord ? hard.match(/^(.*\S)\s+\S+$/u)?.[1] ?? hard : hard;
+  return atWord.replace(/[\s,;:–—-]+$/u, "").trim();
+}
+
+/**
  * Drop any unpaired UTF-16 surrogates that sneak through from page
  * scraping or AI output. The defensive last line for every string we write
  * to Prisma — see `safeTruncate` for the full motivation.

@@ -10,7 +10,7 @@ import type {
 import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
-import { safeTruncate, stripUnpairedSurrogates } from "../platforms/utils";
+import { safeTruncate, truncateAtWord, stripUnpairedSurrogates } from "../platforms/utils";
 import {
   mirrorRequiredToOpenLoops,
   sanitizeReplyBrief,
@@ -1558,7 +1558,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
 
-    const fallbackWhatTheyWant = lastInbound ? safeTruncate(lastInbound.text, 120) : "No clear ask yet.";
+    const fallbackWhatTheyWant = lastInbound ? truncateAtWord(lastInbound.text, 120) : "No clear ask yet.";
     const fallbackNeedsReply = lastMessage?.direction === "IN";
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
@@ -1817,10 +1817,11 @@ ${transcript}`;
       : await modelJson(prompt, fallback, parseSummary);
     // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
     // returns longer prose; this keeps the Today hero headline within its
-    // 4-line budget. safeTruncate trims at the code-point boundary and
-    // does not append an ellipsis (issue #193).
+    // budget. truncateAtWord trims at the code-point boundary AND backs up to
+    // the last whole word, so a long ask never stores mid-word ("...skills fo")
+    // — it ends cleanly ("...skills"). No ellipsis (issue #193).
     if (result.what_they_want.length > 120) {
-      result.what_they_want = safeTruncate(result.what_they_want, 120);
+      result.what_they_want = truncateAtWord(result.what_they_want, 120);
     }
     // Sanitise remember items: strip unpaired surrogates from notes (the
     // same SQLite-write hazard the summary fields guard against), coerce
@@ -1867,7 +1868,7 @@ ${transcript}`;
     // what reply_brief fields already get via sanitizeReplyBrief.
     const output: SummaryOutput = {
       summary: stripBannedPhrases(result.summary),
-      what_they_want: safeTruncate(stripBannedPhrases(result.what_they_want), 120),
+      what_they_want: truncateAtWord(stripBannedPhrases(result.what_they_want), 120),
       open_loops: finalOpenLoops.map((loop) => stripBannedPhrases(loop)).filter((loop) => loop.length > 0),
       remember: result.remember,
       tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
