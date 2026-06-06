@@ -20,9 +20,12 @@ test("a servePersistedOnly flag is derived from beforeMessageId", () => {
 });
 
 test("a paginated fetch serves persisted replies, bypassing the cacheKey compare", () => {
+  // Cache fields now read from the CANONICAL sibling (aiThread) so a split
+  // iMessage conversation serves the live row's replies; servePersistedOnly
+  // still short-circuits the cacheKey compare on a scroll-up fetch.
   assert.match(
     indexSrc,
-    /\(servePersistedOnly \|\| thread\.suggestedRepliesCacheKey === cacheKey\) && thread\.suggestedRepliesJson/
+    /\(servePersistedOnly \|\| aiThread\.suggestedRepliesCacheKey === cacheKey\) && aiThread\.suggestedRepliesJson/
   );
 });
 

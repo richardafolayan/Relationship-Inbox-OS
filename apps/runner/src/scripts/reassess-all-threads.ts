@@ -15,7 +15,14 @@
  * source (tsx runs source, so the fixed prompt is used):
  *
  *   DATABASE_URL=file:/abs/path/to/data/inbox-os.sqlite \
- *     npx tsx apps/runner/src/scripts/reassess-all-threads.ts [--limit N] [--concurrency N] [--ids id1,id2] [--from-scratch]
+ *     npx tsx apps/runner/src/scripts/reassess-all-threads.ts --apply [--limit N] [--concurrency N] [--ids id1,id2] [--from-scratch]
+ *
+ * FAIL-CLOSED. Without `--apply` this is a DRY RUN: it counts the threads it
+ * WOULD rewrite and writes nothing. `--apply` performs the (destructive)
+ * overwrite. An `--ids`-scoped verification run is exempt from the gate. The
+ * script also runs a live AI probe up front and aborts (exit 1) if the provider
+ * returns a fallback — a present-but-expired/rate-limited key no longer flattens
+ * summaries (each thread's write is also skipped individually on a fallback).
  *
  * --from-scratch drops each thread's prior summary/loops/remember from the
  * prompt so the model regenerates purely from the transcript. Use it to
@@ -94,6 +101,12 @@ async function main(): Promise<void> {
   // De-poison mode: regenerate purely from the transcript, dropping the
   // (possibly poisoned) prior summary so a bad name can't perpetuate itself.
   const fromScratch = parseFlag("from-scratch") !== undefined;
+  // FAIL-CLOSED. This rewrites the persisted summary on EVERY targeted thread,
+  // so default to a dry run and require an explicit --apply to write. A
+  // verification run scoped with `--ids` is exempt — it targets a handful of
+  // threads the operator named, not the whole inbox. Mirrors the --apply gate
+  // on the other destructive scripts (purge-automated-imessage.ts etc.).
+  const apply = process.argv.includes("--apply");
 
   const settingsStore = createSettingsStore();
   const aiService = createAiService(settingsStore);
@@ -101,6 +114,30 @@ async function main(): Promise<void> {
 
   if (!runnerConfig.openAiApiKey && !runnerConfig.zAiApiKey && !runnerConfig.geminiApiKey) {
     console.error("[reassess-all] No AI provider key configured (OPENAI_API_KEY / Z_AI_API_KEY / GEMINI_API_KEY). Aborting — a backfill with no provider would overwrite summaries with fallbacks.");
+    process.exit(1);
+  }
+
+  // A key being PRESENT does not mean the provider WORKS — it can be expired,
+  // rate-limited, out of balance, or the provider can be down. The old guard
+  // only checked presence, so a present-but-dead key sailed past it and the run
+  // overwrote every summary with the fallback. Probe the live AI once up front:
+  // resummarizeThread now skips the write on a fallback, but a probe lets us
+  // abort the WHOLE run instead of churning N no-op "failures". Any real
+  // provider source ⇒ proceed; a fallback (source null/absent) ⇒ exit(1).
+  const probe = await aiService.updateThreadSummary({
+    displayName: "Probe",
+    previousOpenLoops: [],
+    previousRemember: [],
+    messages: [{ direction: "IN", text: "ping", timestamp: new Date().toISOString() }],
+    needsReply: true
+  });
+  if (!probe.source || probe.source.providerId === null) {
+    console.error(
+      `[reassess-all] Live AI probe returned the FALLBACK (no provider produced output) — key present but provider unusable` +
+        `${probe.source?.fellBackMessage ? `: ${probe.source.fellBackMessage}` : ""}. ` +
+        `Aborting before any write so summaries are not flattened.`
+    );
+    await prisma.$disconnect();
     process.exit(1);
   }
 
@@ -116,6 +153,21 @@ async function main(): Promise<void> {
   console.log(
     `[reassess-all] DB=${process.env.DATABASE_URL}\n[reassess-all] reassessing ${threads.length} thread(s) at concurrency ${concurrency}${limit ? ` (limit ${limit})` : ""}${fromScratch ? " [from-scratch: dropping prior summaries]" : ""}…`
   );
+
+  // FAIL-CLOSED gate. Overwriting the summary on every thread is destructive
+  // (the more so with --from-scratch, which discards each prior summary first),
+  // so a bare invocation is a DRY RUN: it reports the blast radius and writes
+  // nothing. `--apply` performs the rewrite; an `--ids`-scoped verification run
+  // is exempt because it only touches the handful of threads the operator named.
+  if (!apply && !targetIds) {
+    console.log(
+      `[reassess-all] DRY RUN — would reassess and OVERWRITE the summary on ${threads.length} thread(s)` +
+        `${fromScratch ? " (from-scratch: each prior summary/loops/remember dropped first)" : ""}. ` +
+        `Nothing written. Re-run with --apply to perform the rewrite (or scope a test with --ids id1,id2).`
+    );
+    await prisma.$disconnect();
+    process.exit(0);
+  }
 
   let done = 0;
   let ok = 0;

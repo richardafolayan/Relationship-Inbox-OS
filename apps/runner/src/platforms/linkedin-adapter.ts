@@ -1,4 +1,4 @@
-import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
+import type { BrowserContext, ElementHandle, Locator, Page, Request } from "patchright";
 import { writeFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import type {
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
+  linkedInVoiceResponseMatchesRequest,
   linkedInVoicePath,
   writeLinkedInVoice
 } from "../services/linkedin-voice-store.js";
@@ -41,6 +42,7 @@ import {
   executeTracedOperation,
   type RunLogger
 } from "../services/run-logger.js";
+import { parseAllowedProfileUrl } from "../services/profile-url-policy.js";
 import {
   buildTemporaryCandidateId,
   normalizeCanonicalLinkedInThreadId
@@ -50,6 +52,7 @@ import {
   isSponsoredPillText,
   needsReplyFromPreview
 } from "../linkedin/linkedinRowSignals.js";
+import { stableMessageKey } from "../linkedin/linkedinMessageKey.js";
 
 interface LinkedInAdapterDependencies {
   screenshotDir: string;
@@ -6607,6 +6610,21 @@ export class LinkedInAdapter implements PlatformAdapter {
       }
 
       const textParts = raw.textParts.length > 0 ? raw.textParts : ["[system event]"];
+      // When the bubble had no stable DOM id the in-page walk fell back to a
+      // positional `li-msg-<index>` key. That index shifts between delta scans
+      // (the rendered window moves), so the same older inbound bubble would be
+      // re-keyed and persisted again — inbound has no content dedup. Mirror the
+      // backfill path and derive a content fingerprint that is stable across
+      // passes. `headingForBubble` is the inherited date heading, matching the
+      // deep-fetch path exactly.
+      const stableBaseKey = stableMessageKey({
+        existingKey: raw.platformMessageKey,
+        direction: raw.direction,
+        senderName: raw.senderName,
+        dateHeading: headingForBubble,
+        timeText: raw.timeText,
+        firstTextPart: textParts[0] ?? ""
+      });
       textParts.forEach((text, partIndex) => {
         const parsedTimestampMs = Date.parse(isoTimestamp);
         const partTimestamp = Number.isNaN(parsedTimestampMs)
@@ -6614,7 +6632,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           : new Date(parsedTimestampMs + partIndex).toISOString();
         parsed.push({
           platformMessageKey:
-            partIndex === 0 ? raw.platformMessageKey : `${raw.platformMessageKey}:body:${partIndex}`,
+            partIndex === 0 ? stableBaseKey : `${stableBaseKey}:body:${partIndex}`,
           direction: raw.direction,
           timestamp: partTimestamp,
           text,
@@ -8214,14 +8232,45 @@ export class LinkedInAdapter implements PlatformAdapter {
       })
       .catch(() => undefined);
 
+    // Scope the captured audio to THIS play-click. The signed CDN URL for
+    // the audio bytes does not carry the message's inner id, so a plain
+    // `messaging-audio-analyzed` URL match accepts ANY voice response. When
+    // the backfill loop captures 2+ voice notes sequentially and an earlier
+    // note's fetch is slow enough that its 8s wait times out (the click has
+    // already fired, the fetch is still in flight), the loop arms a fresh
+    // unscoped wait for the next note — and the earlier note's late response
+    // resolves it first, writing one message's audio under another's urn.
+    // Correlate on the exact request this click triggers to remove the
+    // cross-talk. The response wait is armed before the click so no response
+    // is missed in the gap between learning the request and listening for it;
+    // the `audioRequest !== null` guard keeps it inert until then.
+    let audioRequest: Request | null = null;
     const responsePromise = page
       .waitForResponse(
-        (response) => /messaging-audio-analyzed/.test(response.url()),
+        (response) =>
+          audioRequest !== null &&
+          linkedInVoiceResponseMatchesRequest(
+            response.url(),
+            response.request(),
+            audioRequest
+          ),
+        { timeout: 8000 }
+      )
+      .catch(() => null);
+
+    const requestPromise = page
+      .waitForRequest(
+        (request) => /messaging-audio-analyzed/.test(request.url()),
         { timeout: 8000 }
       )
       .catch(() => null);
 
     await audioButton.click({ timeout: 4000 }).catch(() => undefined);
+
+    audioRequest = await requestPromise;
+    if (!audioRequest) {
+      return null;
+    }
 
     const response = await responsePromise;
     if (!response || !response.ok()) {
@@ -8364,30 +8413,23 @@ export class LinkedInAdapter implements PlatformAdapter {
         // trigger a real click via Playwright and intercept the
         // resulting `messaging-audio-analyzed` response. Bytes land on
         // disk under a URN-hashed filename that LinkedInAttachmentResolver
-        // looks back up by the same URN we set as `guid` below. Each
-        // capture is gated on `hasLinkedInVoice(urn)` so repeated
-        // backfill passes don't re-click messages we've already grabbed.
+        // looks back up by the same URN we set as `guid` below.
+        //
+        // The capture itself is deferred until after `stableBaseKey` is
+        // computed (below): for id-less bubbles `basePlatformMessageKey`
+        // is the positional `li-msg-<index>` fallback, which renumbers on
+        // every backfill pass. Keying the on-disk file and the attachment
+        // guid off that positional value means `hasLinkedInVoice` always
+        // misses (re-fetch every pass, orphaned files) and the surviving
+        // message's guid points at a urn with no file. The fingerprinted
+        // `stableBaseKey` is stable across passes, so we key both the
+        // voice store and the guid off it instead.
         const voiceContainerCount = await root
           .locator(".msg-s-event-listitem__audio-container")
           .count()
           .catch(() => 0);
+        const hasVoice = voiceContainerCount > 0;
         let voiceAttachment: AttachmentPlaceholder | null = null;
-        if (voiceContainerCount > 0) {
-          const audioButton = root.locator(".msg-s-event-listitem__audio").first();
-          const captured = await this.captureLinkedInVoiceMessage(
-            page,
-            audioButton,
-            basePlatformMessageKey
-          ).catch(() => null);
-          voiceAttachment = {
-            type: LINKEDIN_VOICE_MIME,
-            manualReview: false,
-            rawLabel: "Voice message",
-            kind: "voice_note",
-            guid: basePlatformMessageKey,
-            ...(captured ? { byteSize: captured.byteSize } : {})
-          };
-        }
         // Match path 1's (`collectVisibleThreadMessages`) filtering: the
         // raw img/video/svg sweep otherwise picks up profile-pictures,
         // the play-button SVG inside the voice container, and UI icons,
@@ -8413,7 +8455,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           })
           .catch(() => 0);
         const attachmentCount = nonVoiceAttachmentCount + voiceContainerCount;
-        const fallbackBodyText = voiceAttachment
+        const fallbackBodyText = hasVoice
           ? "[voice message]"
           : attachmentCount > 0
             ? "[non-text message]"
@@ -8488,10 +8530,37 @@ export class LinkedInAdapter implements PlatformAdapter {
         // pass (older messages prepend and renumber), so the same bubble would
         // merge under two keys and duplicate. Derive a content fingerprint
         // instead so the key is stable across passes.
-        const stableBaseKey =
-          basePlatformMessageKey === `li-msg-${index}`
-            ? `li-msg-fp:${inbound ? "IN" : "OUT"}|${senderName}|${headingForBubble}|${bubbleTimeData.timeText}|${(textParts[0] ?? "").slice(0, 48)}`
-            : basePlatformMessageKey;
+        const stableBaseKey = stableMessageKey({
+          existingKey: basePlatformMessageKey,
+          direction: inbound ? "IN" : "OUT",
+          senderName,
+          dateHeading: headingForBubble,
+          timeText: bubbleTimeData.timeText,
+          firstTextPart: textParts[0] ?? ""
+        });
+        // Capture the voice note NOW that we have the stable key. Both the
+        // on-disk file (voice store) and the attachment `guid` are keyed off
+        // `stableBaseKey`, so `hasLinkedInVoice` hits across backfill passes
+        // and the surviving message's guid always resolves to a real file.
+        // `stableBaseKey` is either a real `urn:li:` event urn or a
+        // fingerprinted `li-msg-fp:...` key — the composite attachment
+        // resolver (index.ts) routes both to the LinkedIn voice resolver.
+        if (hasVoice) {
+          const audioButton = root.locator(".msg-s-event-listitem__audio").first();
+          const captured = await this.captureLinkedInVoiceMessage(
+            page,
+            audioButton,
+            stableBaseKey
+          ).catch(() => null);
+          voiceAttachment = {
+            type: LINKEDIN_VOICE_MIME,
+            manualReview: false,
+            rawLabel: "Voice message",
+            kind: "voice_note",
+            guid: stableBaseKey,
+            ...(captured ? { byteSize: captured.byteSize } : {})
+          };
+        }
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
           const partTimestamp = Number.isNaN(parsedTimestampMs)
@@ -9794,10 +9863,16 @@ export class LinkedInAdapter implements PlatformAdapter {
       try {
         if (thread.threadUrl) {
           console.warn(`${tag} goto threadUrl=${thread.threadUrl}`);
-          await page.goto(thread.threadUrl, { waitUntil: "domcontentloaded" });
+          await this.tracedGoto(page, thread.threadUrl, {
+            stage: "send_message",
+            note: "send_open_by_thread_url"
+          });
           console.warn(`${tag} goto end url=${page.url()}`);
         } else {
-          await page.goto(selectors.inbox_url, { waitUntil: "domcontentloaded" });
+          await this.tracedGoto(page, selectors.inbox_url, {
+            stage: "send_message",
+            note: "send_open_by_inbox_navigation"
+          });
           const rowRoot = page.locator(".msg-conversation-listitem").filter({ hasText: thread.displayName }).first();
           const fallbackRow = page.locator(selectors.thread_item).filter({ hasText: thread.displayName }).first();
           const rowExists = (await rowRoot.count()) > 0;
@@ -9919,10 +9994,16 @@ export class LinkedInAdapter implements PlatformAdapter {
   // wants to land in the runner's authenticated Chrome rather than their
   // default browser. Reuses the same auth-recovery path as openThread.
   async openProfileUrl(url: string, displayName?: string): Promise<void> {
+    // Re-validate at the navigation boundary: persisted/legacy profileUrl rows
+    // predate the write-time allowlist, so a stored file:// / view-source: /
+    // intranet URL must be rejected here before we point the authenticated
+    // Chrome tab at it. parseAllowedProfileUrl throws on anything that isn't
+    // https/http on linkedin.com.
+    const safeUrl = parseAllowedProfileUrl(url, this.platform);
     return this.runWithPlatformLease(async () => {
       const page = await this.getPage();
       await page.bringToFront();
-      await this.tracedGoto(page, url, {
+      await this.tracedGoto(page, safeUrl, {
         stage: "open_profile",
         note: displayName ? `open_profile:${displayName}` : "open_profile"
       });

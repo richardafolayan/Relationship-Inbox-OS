@@ -5,6 +5,7 @@ import { Loader2, Sparkles } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import type { AiHelpLevel, OperatorProfile, ReplyStyle } from "@/lib/types";
 import { cn } from "@/lib/utils";
+import { buildPendingSavePartial, type PendingProfileSave } from "@/lib/voice-profile-save";
 
 // The reply-style fields that "Analyse my sent messages" (#438) can fill.
 // displayName (identity) and aiHelpLevel (a preference) are never inferred.
@@ -90,6 +91,9 @@ export function UserVoiceProfile({
   const [status, setStatus] = useState<SaveStatus>("idle");
   const [finishing, setFinishing] = useState(false);
   const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Latest text save still waiting on the debounce, so we can flush it on
+  // unmount instead of dropping it (e.g. a name typed then "Done" clicked).
+  const pendingSave = useRef<PendingProfileSave | null>(null);
   // Reply-style analysis (#438). `review` holds an editable suggestion that
   // is NOT persisted until the operator clicks Save, so analysis never writes
   // behind their back.
@@ -107,13 +111,6 @@ export function UserVoiceProfile({
       .finally(() => setLoaded(true));
   }, []);
 
-  useEffect(
-    () => () => {
-      if (saveTimer.current) clearTimeout(saveTimer.current);
-    },
-    []
-  );
-
   // Persist a partial profile to the runner. The runner store is what the
   // AI prompts read, so this is not a UI-only preference.
   const persist = useCallback(async (partial: Partial<OperatorProfile>) => {
@@ -129,13 +126,35 @@ export function UserVoiceProfile({
     }
   }, []);
 
+  useEffect(
+    () => () => {
+      // Flush a still-pending debounced save before tearing down, so the
+      // last-typed value (e.g. the onboarding name) isn't lost on unmount.
+      const partial = buildPendingSavePartial(pendingSave.current);
+      if (partial) void persist(partial);
+      pendingSave.current = null;
+      if (saveTimer.current) clearTimeout(saveTimer.current);
+    },
+    [persist]
+  );
+
+
   // Text fields: update local state now, debounce the save.
   const onTextChange = useCallback(
     (field: keyof OperatorProfile, value: string) => {
       setProfile((prev) => ({ ...prev, [field]: value }));
       setStatus("saving");
+      // If a DIFFERENT field's edit is still pending on the debounce, flush it
+      // now — otherwise replacing pendingSave below would drop that field's
+      // just-typed value (it was only ever in local state, never persisted).
+      const prevPending = pendingSave.current;
+      if (prevPending && prevPending.field !== field) {
+        void persist({ [prevPending.field]: prevPending.value });
+      }
+      pendingSave.current = { field, value };
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
+        pendingSave.current = null;
         void persist({ [field]: value });
       }, 600);
     },
@@ -383,7 +402,7 @@ export function UserVoiceProfile({
             value={styleText("about")}
             onChange={(event) => onStyleText("about", event.target.value)}
             placeholder="e.g. Short and friendly. I get to the point but I'm never cold about it."
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
@@ -421,7 +440,7 @@ export function UserVoiceProfile({
             value={styleText("commonPhrases")}
             onChange={(event) => onStyleText("commonPhrases", event.target.value)}
             placeholder="e.g. no worries, sounds good, let's do it"
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
@@ -432,7 +451,7 @@ export function UserVoiceProfile({
             value={styleText("avoidedPhrases")}
             onChange={(event) => onStyleText("avoidedPhrases", event.target.value)}
             placeholder="e.g. circle back, touch base, reach out"
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
@@ -446,7 +465,7 @@ export function UserVoiceProfile({
             value={styleText("interests")}
             onChange={(event) => onStyleText("interests", event.target.value)}
             placeholder="e.g. design, running, keeping in touch with old friends"
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>

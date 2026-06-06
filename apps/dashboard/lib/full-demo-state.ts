@@ -92,3 +92,35 @@ export function clearFullDemoState(): void {
   safeWrite(KEYS.autoplay, null);
   safeWrite(KEYS.liveThreads, null);
 }
+
+/**
+ * Build the platformThreadId → internal-id map the presenter/pilot flows use
+ * to resolve script-referenced showcase threads to the runner's cuid. Rows
+ * without a platformThreadId are skipped. Pure so the provider's refresh can be
+ * unit-tested for content-stability (see threadIdMapsEqual).
+ */
+export function buildThreadIdMap(
+  rows: ReadonlyArray<{ id: string; platformThreadId?: string | null }> | null | undefined
+): Map<string, string> {
+  const next = new Map<string, string>();
+  for (const row of rows ?? []) {
+    if (row.platformThreadId) next.set(row.platformThreadId, row.id);
+  }
+  return next;
+}
+
+/**
+ * Content-equality for two threadId maps. Used to skip a setState (and the
+ * re-render it triggers) when a refetch produced the same map. Without this,
+ * a showcase thread that never seeds churns the route-change effect into an
+ * unbounded /data/inbox refetch loop: each identical fetch replaces the map
+ * with a new reference, re-running the effect, which refetches again.
+ */
+export function threadIdMapsEqual(a: Map<string, string>, b: Map<string, string>): boolean {
+  if (a === b) return true;
+  if (a.size !== b.size) return false;
+  for (const [key, value] of a) {
+    if (b.get(key) !== value) return false;
+  }
+  return true;
+}

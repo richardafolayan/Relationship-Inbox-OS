@@ -3,9 +3,10 @@
 import { useEffect, useState } from "react";
 import { Bell, X } from "lucide-react";
 import {
-  notificationsSupported,
+  readNotificationPermission,
   requestNotificationPermission,
-  shouldShowNotificationCta
+  shouldShowNotificationCta,
+  subscribeNotificationPermission
 } from "@/lib/notifications";
 
 // #359 keeps notification permission behind an explicit gesture (a cold
@@ -24,12 +25,18 @@ export function NotificationCta() {
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    const supported = notificationsSupported();
-    const permission: NotificationPermission | "unsupported" = supported
-      ? Notification.permission
-      : "unsupported";
-    const dismissed = window.localStorage.getItem(DISMISS_KEY) === "1";
-    setVisible(shouldShowNotificationCta({ supported, permission, dismissed }));
+    // Re-sync on every permission change (a grant/block from elsewhere — the
+    // Settings toggle, OS settings, another tab) and read `dismissed` FRESH each
+    // time so a mid-session dismiss is honoured. Returns the unsubscribe so the
+    // listener is cleaned up on unmount.
+    const sync = () => {
+      const permission = readNotificationPermission();
+      const supported = permission !== "unsupported";
+      const dismissed = window.localStorage.getItem(DISMISS_KEY) === "1";
+      setVisible(shouldShowNotificationCta({ supported, permission, dismissed }));
+    };
+    sync();
+    return subscribeNotificationPermission(sync);
   }, []);
 
   const enable = async () => {

@@ -18,6 +18,8 @@ export interface OverdueDigestCandidate {
 export interface OverdueDigestSettings {
   cadence: OverdueDigestCadence;
   lastDigestAt: string | null;
+  /** Browser-local date the last digest fired on; drives the daily cadence (#628). */
+  lastDigestLocalDate: string | null;
   dismissForLocalDate: string | null;
   perPerson: Record<string, {
     displayName: string;
