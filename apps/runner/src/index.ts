@@ -49,7 +49,7 @@ import { streamIMessageAttachment } from "./services/imessage-attachment-server"
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resummarizeThread } from "./services/resummarize-thread";
-import { pickCanonicalThread } from "./services/canonical-thread";
+import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
 import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
@@ -3282,7 +3282,7 @@ function isStaleSummary(rollingSummary: string | null | undefined, displayName: 
 // there so it is testable without booting Express. `race` opts two AI
 // providers into the cross-provider race; only operator-initiated paths
 // (Reassess) set it — it doubles provider spend per raced call.
-function resummarizeThreadById(
+async function resummarizeThreadById(
   threadId: string,
   options?: { race?: boolean }
 ): Promise<
@@ -3293,7 +3293,41 @@ function resummarizeThreadById(
   // `ok` alone, so this is purely a wider failure tag, not new control flow.
   | { ok: false; reason: "not_found" | "ai_unavailable" }
 > {
-  return resummarizeThread({ prisma, aiService, siblingThreadIds }, threadId, options);
+  // Redirect the WRITE to the canonical sibling so AI fields land on the row
+  // the readers (/data/thread) source from. Without this, a send-side reassess
+  // (reassess-on-send) or the stale-summary self-heal — both of which fire on
+  // whatever row the caller passed — write the fresh brief/summary onto a
+  // dormant iMessage sibling while the rail reads the live one, so the operator
+  // sees nothing change. runReassessForThread already pre-resolves canonical;
+  // resolving again here is idempotent (canonical-of-canonical is itself).
+  // Non-iMessage / single-sibling threads resolve to `threadId` unchanged.
+  const writeTargetId = await resolveCanonicalWriteTargetId(threadId);
+  return resummarizeThread({ prisma, aiService, siblingThreadIds }, writeTargetId, options);
+}
+
+// Resolve the canonical sibling id an AI-field write should target for a given
+// requested thread, mirroring /data/thread's resolution. Only IMESSAGE Persons
+// with >1 handle-sibling are redirected; everything else short-circuits to the
+// requested id with no extra query.
+async function resolveCanonicalWriteTargetId(threadId: string): Promise<string> {
+  const requested = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { id: true, platform: true, personId: true }
+  });
+  if (!requested || requested.platform !== "IMESSAGE") return threadId;
+  const siblingRows = await prisma.thread.findMany({
+    where: { platform: requested.platform, personId: requested.personId },
+    select: { id: true, lastInboundAt: true, _count: { select: { messages: true } } }
+  });
+  return canonicalWriteTargetId(
+    threadId,
+    requested.platform,
+    siblingRows.map((row) => ({
+      id: row.id,
+      lastInboundAt: row.lastInboundAt,
+      messageCount: row._count?.messages ?? 0
+    }))
+  );
 }
 
 app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
@@ -4406,7 +4440,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // above the timeline without a second fetch. Only SCHEDULED rows leak
   // here — PENDING/SENT/FAILED already drive the live optimistic-UI flow.
   const scheduledSendRows = await prisma.sendRequest.findMany({
-    where: { threadId: thread.id, status: "SCHEDULED" },
+    where: { threadId: { in: siblingIds }, status: "SCHEDULED" },
     orderBy: { scheduledFor: "asc" }
   });
 
@@ -4476,8 +4510,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // is frozen at the last scan).
   const threadRiskSettings = await settingsStore.getSettings();
   const liveThreadRisk = calculateRisk({
-    lastInboundAt: thread.lastInboundAt,
-    lastOutboundAt: thread.lastOutboundAt,
+    // Use the MERGED last inbound/outbound across siblings (the same values
+    // aiNeedsReply and the fallback brief derive from) rather than the
+    // requested row's frozen columns, so the risk pill, the reopen framing,
+    // and the suggested replies all agree on a split iMessage conversation.
+    lastInboundAt: lastInbound?.timestamp ?? thread.lastInboundAt,
+    lastOutboundAt: lastOutbound?.timestamp ?? thread.lastOutboundAt,
     amberHours: threadRiskSettings.amberHours,
     redHours: threadRiskSettings.redHours
   });
@@ -4500,6 +4538,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     personBirthday: thread.person.birthday ?? null,
     personBirthYear: thread.person.birthYear ?? null,
     platform: thread.platform,
+    // Sibling cohort for this Person (iMessage phone + email handle rows; a
+    // single-element [thread.id] for everything else). The thread page matches
+    // SSE THREAD_UPDATED / SUGGESTED_REPLIES_UPDATED / SCAN_THREAD_* events on
+    // this cohort, so a new inbound that lands on the OTHER handle refetches
+    // the open view even though its event carries the sibling's id.
+    siblingIds,
     riskLevel: liveThreadRisk.level,
     riskReason: liveThreadRisk.riskReason,
     snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
@@ -5761,17 +5805,59 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return;
   }
 
+  // iMessage splits one Person across handle-specific sibling threads. /data/thread
+  // sources its AI inputs from the CANONICAL sibling (most-recent inbound) and
+  // builds its recent/style windows over the merged sibling cohort. The predraft
+  // pre-warm MUST resolve the same canonical row and the same cohort, or it
+  // computes a cacheKey the reader can never hit — the warm is wasted and the
+  // operator opens to a "Generating suggestions…" spinner. Non-iMessage /
+  // single-sibling threads are their own canonical row over [thread.id].
+  let aiSource: typeof thread & {
+    rollingSummary: string | null;
+    whatTheyWant: string | null;
+    openLoopsJson: string | null;
+    replyBriefJson: string | null;
+    category: string | null;
+    suggestedRepliesJson: string | null;
+    suggestedRepliesCacheKey: string | null;
+  } = thread;
+  let predraftSiblingIds: string[] = [thread.id];
+  if (thread.platform === "IMESSAGE") {
+    const siblingRows = await prisma.thread.findMany({
+      where: { platform: thread.platform, personId: thread.personId },
+      select: {
+        id: true,
+        lastInboundAt: true,
+        rollingSummary: true,
+        whatTheyWant: true,
+        openLoopsJson: true,
+        replyBriefJson: true,
+        category: true,
+        suggestedRepliesJson: true,
+        suggestedRepliesCacheKey: true,
+        _count: { select: { messages: true } }
+      }
+    });
+    predraftSiblingIds = siblingRows.map((row) => row.id);
+    const canonical = pickCanonicalThread(
+      siblingRows.map((row) => ({ ...row, messageCount: row._count?.messages ?? 0 }))
+    );
+    if (canonical) aiSource = { ...thread, ...canonical };
+  }
+  const messageScope = { threadId: { in: predraftSiblingIds } };
+
   // Fetch the last ~6 turns to mirror the /data/thread call site. Pulling
-  // the full recent window means a predraft pre-warm builds the same
-  // recentSignature, so the cacheKey matches and the operator's next
-  // /data/thread fetch reuses the warmed cache row. The style sample is
-  // fetched on the same fixed window as /data/thread so the style part
-  // of the cacheKey matches too (issue #299).
+  // the full recent window over the SAME sibling cohort means a predraft
+  // pre-warm builds the same recentSignature, so the cacheKey matches and the
+  // operator's next /data/thread fetch reuses the warmed cache row. The style
+  // sample is fetched on the same fixed window as /data/thread so the style
+  // part of the cacheKey matches too (issue #299). last-IN/last-OUT are the
+  // MERGED-cohort values /data/thread folds into the late-reply bucket.
   const RECENT_TURN_WINDOW = 6;
   const STYLE_SAMPLE_LIMIT = 40;
-  const [recentTurnsDesc, operatorProfile, contactSnapshot, styleSampleDesc] = await Promise.all([
+  const [recentTurnsDesc, operatorProfile, contactSnapshot, styleSampleDesc, lastInbound, lastOutbound] = await Promise.all([
     prisma.message.findMany({
-      where: { threadId },
+      where: messageScope,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: RECENT_TURN_WINDOW,
       select: { direction: true, text: true, timestamp: true }
@@ -5779,10 +5865,20 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName),
     prisma.message.findMany({
-      where: { threadId },
+      where: messageScope,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: STYLE_SAMPLE_LIMIT,
       select: { direction: true, text: true }
+    }),
+    prisma.message.findFirst({
+      where: { ...messageScope, direction: "IN" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      select: { timestamp: true }
+    }),
+    prisma.message.findFirst({
+      where: { ...messageScope, direction: "OUT" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      select: { timestamp: true }
     })
   ]);
   const operatorStyle = analyzeStyle(
@@ -5797,17 +5893,16 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     timestamp: m.timestamp.toISOString()
   }));
   const aiNeedsReply = Boolean(
-    thread.lastInboundAt &&
-      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
+    lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
   );
 
-  // Parse the persisted brief the same way /data/thread does so the
-  // predraft prompt and the subsequent /data/thread fetch hit the same
-  // cache row. Older rows with no brief pass null through unchanged.
+  // Parse the persisted brief the same way /data/thread does — from the
+  // CANONICAL sibling — so the predraft prompt and the subsequent /data/thread
+  // fetch hit the same cache row. Older rows with no brief pass null unchanged.
   const briefForReplies: ReturnType<typeof sanitizeReplyBrief> = (() => {
-    if (!thread.replyBriefJson) return null;
+    if (!aiSource.replyBriefJson) return null;
     try {
-      return sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+      return sanitizeReplyBrief(JSON.parse(aiSource.replyBriefJson));
     } catch {
       return null;
     }
@@ -5815,15 +5910,15 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
 
   const aiInputs = {
     displayName: thread.person.displayName,
-    summary: thread.rollingSummary ?? "",
-    whatTheyWant: thread.whatTheyWant ?? "",
-    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    summary: aiSource.rollingSummary ?? "",
+    whatTheyWant: aiSource.whatTheyWant ?? "",
+    openLoops: aiSource.openLoopsJson ? (JSON.parse(aiSource.openLoopsJson) as string[]) : [],
     recentMessages,
     needsReply: aiNeedsReply,
     platform: thread.platform as PlatformName,
-    category: (thread.category as "outreach" | "genuine" | null) ?? null,
-    lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
-    lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
+    category: (aiSource.category as "outreach" | "genuine" | null) ?? null,
+    lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+    lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null,
     operatorProfile,
     contact: contactSnapshot,
     operatorStyle,
@@ -5855,18 +5950,20 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     .update(`v5|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}|${styleFingerprint(operatorStyle, contactStyle)}|${briefSignature}`)
     .digest("hex");
 
-  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+  if (aiSource.suggestedRepliesCacheKey === cacheKey && aiSource.suggestedRepliesJson) {
     res.json({ status: "cached", cacheKey });
     return;
   }
 
   // Fire and forget — the operator's next /data/thread fetch picks
-  // up the cache once the AI call resolves.
+  // up the cache once the AI call resolves. Persist to the CANONICAL sibling
+  // (aiSource.id) so the reader finds it under the same cache key; the SSE
+  // event keeps the requested threadId so the open view refetches.
   void aiService
     .generateSuggestedReplies(aiInputs)
     .then(async (generated) => {
       await prisma.thread.update({
-        where: { id: threadId },
+        where: { id: aiSource.id },
         data: {
           suggestedRepliesJson: JSON.stringify(generated),
           suggestedRepliesCacheKey: cacheKey
@@ -5890,7 +5987,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       // doesn't loop into another doomed generation.
       try {
         await prisma.thread.update({
-          where: { id: threadId },
+          where: { id: aiSource.id },
           data: {
             suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
             suggestedRepliesCacheKey: cacheKey

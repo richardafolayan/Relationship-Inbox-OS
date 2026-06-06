@@ -16,3 +16,22 @@ export function shouldApplyThreadScopedResult(
 ): boolean {
   return startThreadId === currentThreadId;
 }
+
+// SSE refetch routing for an iMessage Person split across handle-specific
+// sibling threads. A new inbound (or a reassess / scan) that lands on the OTHER
+// handle emits its event with the SIBLING's thread id, not the one the operator
+// has open — so an exact `eventThreadId === openThreadId` match drops it and the
+// rail goes stale. The runner now returns the sibling cohort (`siblingIds`) on
+// the ThreadResponse; refetch when the event targets the open thread OR any
+// sibling in that cohort. An unrelated thread's event (a scan burst on other
+// contacts) is ignored so the open view does not jank. Degrades to exact-id
+// matching when `siblingIds` is missing/empty (older runner build).
+export function shouldRefetchForThreadEvent(
+  eventThreadId: string | null | undefined,
+  openThreadId: string | null | undefined,
+  siblingIds: readonly string[] | null | undefined
+): boolean {
+  if (!eventThreadId || !openThreadId) return false;
+  if (eventThreadId === openThreadId) return true;
+  return Boolean(siblingIds && siblingIds.includes(eventThreadId));
+}

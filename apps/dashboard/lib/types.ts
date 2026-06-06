@@ -413,6 +413,16 @@ export interface ThreadResponse {
   /** Birth year if known; lets the rail render "turns 30" when surfacing the birthday pill. */
   personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /**
+   * Thread ids in this Person's sibling cohort. For an iMessage contact split
+   * across handle-specific chats (phone + Apple-ID email) this lists every
+   * sibling row; for every other thread it is just `[id]`. The thread page
+   * matches SSE THREAD_UPDATED / SUGGESTED_REPLIES_UPDATED / SCAN_THREAD_*
+   * events against this cohort so a new inbound on the OTHER handle refetches
+   * the open view. Optional so a dashboard talking to a runner build that
+   * predates the field still parses (the page degrades to exact-id matching).
+   */
+  siblingIds?: string[];
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;
   /** ISO timestamp until which this thread is snoozed; null when active. */
