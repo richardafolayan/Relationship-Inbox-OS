@@ -4,11 +4,13 @@ The technical fallback page for **install-time** problems. For problems once
 the app is running (scans, sending, the inbox UI), see
 [troubleshooting.md](./troubleshooting.md).
 
-**First thing to try, always:** run the health check from the app folder. It
-diagnoses most of what's below in one go and tells you the next step.
+**First thing to try, always:** run the health check from the app folder
+(`~/RelationshipInboxOS`). It diagnoses most of what's below in one go and
+tells you the next step.
 
 ```bash
-node scripts/doctor.mjs
+cd ~/RelationshipInboxOS
+npm run doctor
 ```
 
 The full installer log is written to
@@ -78,10 +80,10 @@ The app has two halves: the dashboard (port 3100) and the runner (port 4001).
 "Can't reach the runner" means the runner half isn't up.
 
 1. Check the Terminal running the app is still open and didn't print an error.
-2. Run `node scripts/doctor.mjs`. It pings both ports and the runner's
-   `/health` endpoint.
-3. Restart the app: `Ctrl + C` in that Terminal, then `npm run dev` (or
-   `node scripts/start-student.mjs`).
+2. Run `npm run doctor` (from `~/RelationshipInboxOS`). It pings both ports and
+   the runner's `/health` endpoint.
+3. Restart the app: `Ctrl + C` in that Terminal, then `cd ~/RelationshipInboxOS
+   && npm run start:student`.
 
 If the runner crashes immediately on start, the log
 (`~/Library/Logs/RelationshipInboxOS/install-*.log`) has the reason. Send it
@@ -174,9 +176,11 @@ scripts/doctor.mjs` shows the **AI key** line as a warning until one is set.
 
 ## How to uninstall everything
 
-Everything lives in the app folder, so removing it removes the app:
+Everything lives in one folder (`~/RelationshipInboxOS`), so removing it removes
+the app:
 
 ```bash
+cd ~/RelationshipInboxOS
 bash scripts/uninstall-student-macos.sh          # asks to confirm
 bash scripts/uninstall-student-macos.sh --yes    # skip the prompt
 ```

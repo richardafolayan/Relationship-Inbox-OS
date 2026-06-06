@@ -40,7 +40,8 @@ Slightly more capable, but the OpenAI API needs a small amount of credit.
 
 ## Paste your key into your settings
 
-1. Open the app folder the installer created (for example `RelationshipInboxOS`).
+1. Open the app folder the installer created at **`~/RelationshipInboxOS`**
+   (in Finder: **Go > Home**, then open **RelationshipInboxOS**).
 2. Open the file called **`.env`** in a text editor (TextEdit is fine).
 3. Fill in the line for the key (or keys) you made:
 
@@ -67,11 +68,18 @@ Slightly more capable, but the OpenAI API needs a small amount of credit.
 ## Restart and check it worked
 
 1. Stop the app: click its Terminal window and press **Ctrl + C**.
-2. Start it again: `npm run dev` (or `node scripts/start-student.mjs`).
-3. Check the setup: in a Terminal in the app folder, run:
+2. Start it again:
 
    ```bash
-   node scripts/doctor.mjs
+   cd ~/RelationshipInboxOS
+   npm run start:student
+   ```
+
+3. Check the setup: in a Terminal, run:
+
+   ```bash
+   cd ~/RelationshipInboxOS
+   npm run doctor
    ```
 
    The **AI key** line should say **PASS**.
