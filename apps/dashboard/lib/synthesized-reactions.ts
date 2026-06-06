@@ -93,10 +93,13 @@ export interface FoldOutput {
  *   - parentId → folded reactions array
  *   - messageIds the renderer should hide
  *
- * The match is "first-prior bubble whose text, after quote
- * normalisation, equals (or starts with) the quoted parent text".
- * If no plausible parent is found, the synthesised message is left
- * visible — the operator will see slightly noisier UI instead of a
+ * Matching is two-pass: the nearest prior bubble whose normalised text
+ * *equals* the quoted parent text wins; only if none equals do we fall
+ * back to the nearest prior bubble that is a strictly-longer prefix
+ * (Apple ellipsis-truncates the quote). The exact pass runs first so an
+ * unrelated later bubble that merely shares a prefix can't swallow the
+ * reaction. If no plausible parent is found, the synthesised message is
+ * left visible — the operator will see slightly noisier UI instead of a
  * misattributed reaction.
  */
 export function foldSynthesizedReactions(
@@ -111,6 +114,17 @@ export function foldSynthesizedReactions(
     if (!parsed) continue;
 
     const want = normaliseQuoteText(parsed.quotedParentText);
+    // Two passes. An exact `parentText === want` match always wins over
+    // a prefix match, regardless of recency — otherwise an unrelated
+    // *later* bubble that merely shares a prefix with the reacted text
+    // (e.g. "Lunch? Or dinner…" vs a reaction quoting "Lunch?") would
+    // swallow the reaction before we ever reach the bubble that says
+    // exactly "Lunch?". Only when no exact match exists do we fall back
+    // to the nearest strictly-longer prefix — Apple truncates the quote
+    // with an ellipsis, and NFC normalisation can shave trailing
+    // variation selectors off the parent, so the real parent is a
+    // proper (strictly longer) prefix of nothing / a superstring of the
+    // quote. Within each pass we still take the most-recent prior bubble.
     let parentId: string | null = null;
     for (let j = i - 1; j >= 0; j -= 1) {
       const candidateParent = messagesInChronologicalOrder[j]!;
@@ -119,13 +133,23 @@ export function foldSynthesizedReactions(
       if (hiddenMessageIds.has(candidateParent.id)) continue;
       const parentText = normaliseQuoteText(candidateParent.text);
       if (!parentText) continue;
-      // Apple sometimes truncates the quoted text with an ellipsis,
-      // and sometimes the parent's text has trailing variation
-      // selectors that NFC normalisation handles. Equal first; then
-      // startsWith fallback for truncation.
-      if (parentText === want || parentText.startsWith(want)) {
+      if (parentText === want) {
         parentId = candidateParent.id;
         break;
+      }
+    }
+    if (!parentId) {
+      for (let j = i - 1; j >= 0; j -= 1) {
+        const candidateParent = messagesInChronologicalOrder[j]!;
+        if (hiddenMessageIds.has(candidateParent.id)) continue;
+        const parentText = normaliseQuoteText(candidateParent.text);
+        if (!parentText) continue;
+        // Strictly-longer prefix only: the quote is a truncation of the
+        // parent, never the parent of an equal-length sibling.
+        if (parentText.length > want.length && parentText.startsWith(want)) {
+          parentId = candidateParent.id;
+          break;
+        }
       }
     }
     if (!parentId) continue;

@@ -71,12 +71,23 @@ export function parseRememberDate(date: string | null | undefined): Date | null 
 }
 
 /**
- * Whole calendar days from `now` to `date`, both reduced to a UTC day index
- * so the result counts day boundaries crossed rather than 24h windows.
- * Positive = future, 0 = today, negative = past.
+ * Whole calendar days from `now` to `date`, counting day boundaries crossed
+ * rather than 24h windows. Positive = future, 0 = today, negative = past.
+ *
+ * `date` is a remember date: UTC midnight of a bare calendar date (see
+ * parseRememberDate), so its UTC day index *is* its calendar day. `now`,
+ * however, is a wall-clock instant from the operator's machine, so it must be
+ * reduced by the operator's LOCAL midnight — not UTC midnight. Flooring `now`
+ * by UTC drifts a day for any non-UTC operator (e.g. an evening in the
+ * Americas has already rolled to the next UTC day), which made today/tomorrow
+ * items mislabel and silently drop out of the section.
  */
 export function daysUntil(date: Date, now: Date): number {
-  return Math.floor(date.getTime() / DAY_MS) - Math.floor(now.getTime() / DAY_MS);
+  const nowLocalMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const nowDayIndex = Math.floor(
+    (nowLocalMidnight.getTime() - nowLocalMidnight.getTimezoneOffset() * 60 * 1000) / DAY_MS
+  );
+  return Math.floor(date.getTime() / DAY_MS) - nowDayIndex;
 }
 
 /** Classify how soon a remember date is. Undated / unparseable -> "none". */
