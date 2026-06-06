@@ -164,6 +164,16 @@ export function shouldTearDownDeferredSkip(skipRequestedDuringBootstrap: boolean
   return skipRequestedDuringBootstrap;
 }
 
+/**
+ * Whether a `pilot-tour-start` event should actually start the tour. A second
+ * start fired mid-tour (the Settings replay button, or a re-dispatched invite /
+ * welcome card) must be ignored: re-entering startTour would reset the operator
+ * to step 0 and re-seed the sandbox. Only start when no tour is already active.
+ */
+export function shouldStartPilotTour(active: boolean): boolean {
+  return !active;
+}
+
 // ── Window-event bridge ────────────────────────────────────────────────
 
 export function startPilotTour(options: { replay?: boolean } = {}): void {

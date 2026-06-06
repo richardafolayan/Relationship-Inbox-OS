@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight, Loader2 } from "lucide-react";
 import { onToast, type Toast } from "@/lib/feedback";
+import { resolveToastGesture } from "@/lib/toast-gesture";
 
 const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: string }> = {
   pending: {
@@ -27,14 +28,6 @@ const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: stri
     label: "text-risk-overdue"
   }
 };
-
-// How far (px) a pointer-drag must travel before the toast is dismissed on
-// release. Below the threshold it springs back.
-const SWIPE_DISMISS_PX = 80;
-
-// A release within this travel counts as a click rather than a swipe, so a
-// clickable toast (one with an href) navigates instead of springing back.
-const CLICK_SLOP_PX = 6;
 
 export function ToastHost() {
   const [toasts, setToasts] = useState<Toast[]>([]);
@@ -121,7 +114,7 @@ function ToastCard({
   const interactive = Boolean(toast.href);
 
   // Navigate to the toast's route and clear it. Used by both a pointer
-  // click (release within CLICK_SLOP_PX) and the keyboard handler.
+  // click (any release below the swipe threshold) and the keyboard handler.
   const activate = useCallback(() => {
     if (!toast.href) return;
     onDismiss(toast.id);
@@ -151,14 +144,19 @@ function ToastCard({
     } catch {
       /* pointer already released */
     }
-    if (Math.abs(travelled) > SWIPE_DISMISS_PX) {
-      onDismiss(toast.id);
-    } else if (interactive && Math.abs(travelled) <= CLICK_SLOP_PX) {
-      // A near-stationary release on a clickable toast is a click, not a
-      // swipe: open the linked thread / view.
-      activate();
-    } else {
-      setDragX(0);
+    switch (resolveToastGesture(travelled, interactive)) {
+      case "dismiss":
+        onDismiss(toast.id);
+        break;
+      case "activate":
+        // Any release below the swipe threshold on a clickable toast is a
+        // click, not a swipe: open the linked thread / view. A click rarely
+        // lands pixel-perfect, so we no longer require a near-stationary
+        // release (which left a 7-80px dead zone that swallowed the click).
+        activate();
+        break;
+      default:
+        setDragX(0);
     }
   };
 
