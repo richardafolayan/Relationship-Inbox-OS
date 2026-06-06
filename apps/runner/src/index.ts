@@ -48,6 +48,7 @@ import { loadContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
+import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
 import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
 import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
@@ -1450,7 +1451,12 @@ app.get("/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const sinceEventId = Number(req.query.sinceEventId ?? req.header("last-event-id") ?? 0);
+  // Prefer the live `Last-Event-ID` header over the mount-time `sinceEventId`
+  // query param: on the browser's native auto-reconnect both arrive, but the
+  // query param is frozen at AppShell mount while the header reflects the last
+  // event actually delivered. Letting the stale param win replayed the whole
+  // buffered window on every reconnect (see resolveSseResumeCursor).
+  const sinceEventId = resolveSseResumeCursor(req.query.sinceEventId, req.header("last-event-id"));
   const oldest = eventBus.oldestEventId();
 
   // Emit every event as the default ("message") SSE type. EventSource
