@@ -111,7 +111,7 @@ export interface RunnerConfig {
      * explicitly sets AUDIO_TRANSCRIPTION_PROVIDER=openai. Unknown or
      * mis-spelled values also fall through to local-whisper.
      */
-    provider: "openai" | "local-whisper";
+    provider: "openai" | "local-whisper" | "transformers";
     /**
      * OpenAI provider model. Default `gpt-4o-mini-transcribe`. Override
      * to `gpt-4o-transcribe` for higher accuracy at higher cost. Other
@@ -137,6 +137,19 @@ export interface RunnerConfig {
      * `whisper.cpp` (`-l`). Default `en`.
      */
     language: string;
+    /**
+     * transformers.js + ONNX local provider (the pilot default). Needs no
+     * external binary or build tools; the ONNX model is downloaded into
+     * `modelDir` on install and reused across app updates.
+     */
+    transformers: {
+      /** transformers.js model id, e.g. "Xenova/whisper-base.en". */
+      modelId: string;
+      /** Absolute dir the model is cached in (under data/, survives updates). */
+      modelDir: string;
+      /** Per-call + model-load timeout in ms. */
+      timeoutMs: number;
+    };
     localWhisper: {
       /**
        * Path / name of the whisper.cpp CLI binary. Default `whisper-cli`
@@ -576,16 +589,22 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // wrong env doesn't crash ingestion.
       enabled:
         (env.AUDIO_TRANSCRIPTION_ENABLED ?? "").trim().toLowerCase() === "true",
-      // Default `local-whisper` so ongoing transcription is cost-safe
-      // by default — the runner never spends OpenAI tokens unless the
-      // operator explicitly opts in by setting
-      // `AUDIO_TRANSCRIPTION_PROVIDER=openai`. Unknown / mis-spelled
-      // values also fall through to local-whisper rather than
-      // silently picking the paid path.
-      provider:
-        env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase() === "openai"
-          ? "openai"
-          : "local-whisper",
+      // Provider options:
+      //   - "transformers": local transformers.js + ONNX (the pilot
+      //     default in .env.example). No external binary or build tools;
+      //     the model is downloaded into data/models on install.
+      //   - "local-whisper": whisper.cpp CLI (advanced — needs a
+      //     separately built binary + ggml model).
+      //   - "openai": /v1/audio/transcriptions (paid; explicit opt-in).
+      // The CODE default stays `local-whisper` so the cost-safe path is
+      // chosen when the var is unset/mis-spelled; pilots get
+      // `transformers` from .env.example.
+      provider: ((): "openai" | "local-whisper" | "transformers" => {
+        const value = env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase();
+        if (value === "openai") return "openai";
+        if (value === "transformers") return "transformers";
+        return "local-whisper";
+      })(),
       // Default to gpt-4o-mini-transcribe: the cheaper, sufficiently
       // accurate OpenAI transcription model. Operators wanting higher
       // quality can set AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe.
@@ -608,6 +627,14 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
           .trim()
           .split(/\s+/)
           .filter((arg) => arg.length > 0)
+      },
+      // transformers.js + ONNX local provider (the pilot default). No
+      // external binary; the model is downloaded into `modelDir` on
+      // install. `modelDir` lives under data/ so it survives app updates.
+      transformers: {
+        modelId: env.AUDIO_TRANSCRIPTION_LOCAL_MODEL?.trim() || "Xenova/whisper-base.en",
+        modelDir: env.TRANSCRIPTION_MODEL_DIR?.trim() || resolve(dataDir, "models"),
+        timeoutMs: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_LOCAL_TIMEOUT_MS, 120_000)
       },
       progressive: (() => {
         // Auto-enable progressive mode when the operator has set at
