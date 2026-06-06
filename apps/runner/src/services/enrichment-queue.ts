@@ -352,7 +352,20 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       // Acquire the enrich lock so two drains don't fight; non-blocking
       // tryAcquire on scan/send already ran above. The enrich lock is
       // local to this worker — if it's somehow held, just defer.
-      const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () => visitProfile(job.personId));
+      //
+      // Run the actual visit INSIDE operationMutex.runExclusive(scanLock):
+      // scanLock is the shared `${personKey}:${platform}` key that scans
+      // (runWithQueueOne) and sends (runExclusive) serialise on, and
+      // getManagedPage hands back the SAME page to all of them. The
+      // isRunning(scanLock) pre-check above is only a TOCTOU hint — a scan
+      // that starts after it would otherwise drive the page concurrently
+      // with this visit and destroy scan DOM handles mid-loop. Holding the
+      // shared key for the whole visit makes that scan queue behind us
+      // instead of racing. (No re-entrancy: visitProfile only touches the
+      // session manager's personMutex / lease refcount, never this mutex.)
+      const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
+        deps.operationMutex.runExclusive(scanLock, () => visitProfile(job.personId))
+      );
       if (!acquired.acquired) {
         await prisma.enrichmentJob.update({
           where: { id: job.id },
@@ -479,10 +492,16 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     // Acquire the enrich lock so a concurrent drain pass can't collide on
     // the same managed page. Defer if the lock is held — the caller will
     // fall back to enqueue and the worker drains it normally.
+    //
+    // Run the visit INSIDE operationMutex.runExclusive(scanLock) — the
+    // shared `${personKey}:${platform}` key scans/sends serialise on — so
+    // a scan that slips past the isRunning() pre-check above queues behind
+    // this visit instead of driving the same managed page concurrently.
+    const scanLock = deps.scanLockKey(platform);
     let result: ProfileExtractionResult;
     try {
       const acquired = await deps.operationMutex.tryAcquire(deps.enrichLockKey, () =>
-        visitProfile(personId)
+        deps.operationMutex.runExclusive(scanLock, () => visitProfile(personId))
       );
       if (!acquired.acquired) {
         return { deferred: true };
