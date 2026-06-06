@@ -241,14 +241,39 @@ export function describeAttachments(attachments: IMessageAttachment[]): string {
 export class IMessageDb {
   private db: Db;
 
+  /**
+   * Test-only seam. When set, the constructor calls this with the SQLite
+   * handle *after* it has been closed, on the failure path where the pragma
+   * or smoke-test threw. Lets a regression test observe that the half-opened
+   * connection was cleaned up before the error propagated. Unused in prod.
+   */
+  static onConstructError: ((db: Db) => void) | undefined;
+
   constructor(private readonly dbPath: string) {
     // `immutable=1` tells SQLite not to attempt any locking; we accept the
     // risk of reading slightly-stale rows during a concurrent Messages write
     // (the next poll picks them up).
     this.db = new Database(dbPath, { readonly: true, fileMustExist: true });
-    this.db.pragma("journal_mode = WAL");
-    // Smoke test
-    this.db.prepare("SELECT 1 FROM chat LIMIT 1").get();
+    try {
+      this.db.pragma("journal_mode = WAL");
+      // Smoke test
+      this.db.prepare("SELECT 1 FROM chat LIMIT 1").get();
+    } catch (error) {
+      // The pragma or smoke-test failed (chat.db locked while Messages.app
+      // writes, file corrupt, Full Disk Access partially revoked, or `chat`
+      // unreadable). `new Database` above already opened the connection, and
+      // this half-constructed instance is never returned, so the caller has
+      // no handle to close(). Close it here before rethrowing — getDb() is
+      // re-invoked on every poll of the always-on scan loop, so without this
+      // each failed open would leak one SQLite connection / file descriptor.
+      try {
+        this.db.close();
+      } catch {
+        // best-effort; ignore secondary close errors
+      }
+      IMessageDb.onConstructError?.(this.db);
+      throw error;
+    }
   }
 
   close(): void {

@@ -59,6 +59,37 @@ test("a real, non-empty profile is preserved and not seeded", () => {
   assert.equal(shouldSeedOperatorProfile(real, { force: true }), true);
 });
 
+test("a text-blank profile with a deliberate AI-help choice is preserved (not empty)", () => {
+  // Regression for P3-PL13: an operator who finished first-run setup and set
+  // aiHelpLevel to a non-default value but left the free-text voice fields
+  // blank must NOT be classified as empty, or the seeder would silently
+  // overwrite their AI-help choice and setup timestamp without --force.
+  const configured = {
+    ...EMPTY,
+    aiHelpLevel: "full_drafts",
+    setupCompletedAt: "2026-05-01T00:00:00.000Z"
+  };
+  assert.equal(classifyOperatorProfile(configured), "real");
+  assert.equal(shouldSeedOperatorProfile(configured), false);
+  // Only an explicit force may overwrite it.
+  assert.equal(shouldSeedOperatorProfile(configured, { force: true }), true);
+
+  // A non-default aiHelpLevel alone (no setup timestamp) is also preserved.
+  const aiOnly = { ...EMPTY, aiHelpLevel: "memory_only" };
+  assert.equal(classifyOperatorProfile(aiOnly), "real");
+  assert.equal(shouldSeedOperatorProfile(aiOnly), false);
+
+  // A stamped setupCompletedAt alone is also preserved.
+  const setupOnly = { ...EMPTY, setupCompletedAt: "2026-05-01T00:00:00.000Z" };
+  assert.equal(classifyOperatorProfile(setupOnly), "real");
+  assert.equal(shouldSeedOperatorProfile(setupOnly), false);
+
+  // A profile at the defaults (default aiHelpLevel, no setup time) is still
+  // empty and seedable, so genuinely-fresh users are unaffected.
+  assert.equal(classifyOperatorProfile(EMPTY), "empty");
+  assert.equal(shouldSeedOperatorProfile(EMPTY), true);
+});
+
 test("normaliseSeedProfile fills missing fields and stamps the setup time", () => {
   const profile = normaliseSeedProfile(
     { displayName: "Test User", about: "hi", preferredStyle: "bogus", aiHelpLevel: "nope" },

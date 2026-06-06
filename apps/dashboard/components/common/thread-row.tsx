@@ -71,8 +71,9 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
       id={id}
       href={`/thread/${row.id}`}
       onMouseEnter={() => prefetchThreadData(row.id)}
-      onMouseLeave={cancelThreadPrefetch}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
       onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
       data-demo-target={row.platformThreadId ? `thread-row-${row.platformThreadId}` : undefined}
       className="group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
     >

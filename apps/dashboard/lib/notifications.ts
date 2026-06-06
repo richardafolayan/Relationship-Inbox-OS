@@ -85,11 +85,18 @@ export function subscribeNotificationPermission(
   // "notifications" name; both are fine - the focus listener still covers us.
   let permissionStatus: { removeEventListener: (type: string, cb: () => void) => void } | null =
     null;
+  // permissions.query is async: the caller can run this cleanup BEFORE it
+  // resolves (a fast mount/unmount, or React Strict Mode's mount-unmount-
+  // remount). `cancelled` lets the resolved branch detect that and skip
+  // attaching - otherwise it would add a 'change' listener bound to a stale
+  // onChange that nothing could ever remove (a leaked listener per cycle).
+  let cancelled = false;
   const permissions = (navigator as Navigator & { permissions?: Permissions }).permissions;
   if (permissions && typeof permissions.query === "function") {
     permissions
       .query({ name: "notifications" as PermissionName })
       .then((status) => {
+        if (cancelled) return;
         permissionStatus = status;
         status.addEventListener("change", handler);
       })
@@ -99,6 +106,7 @@ export function subscribeNotificationPermission(
   }
 
   return () => {
+    cancelled = true;
     window.removeEventListener("focus", handler);
     permissionStatus?.removeEventListener("change", handler);
   };
