@@ -51,7 +51,22 @@ export function classifyOperatorProfile(profile: OperatorProfile): OperatorProfi
     profile.avoidedPhrases
   ].map((value) => str(value).trim());
 
-  if (filled.every((value) => value === "") && !str(profile.preferredStyle)) {
+  // A profile is only "empty" when every voice field is blank AND the
+  // operator has not made a deliberate preference choice. A non-default
+  // aiHelpLevel or a stamped setupCompletedAt means first-run setup ran and
+  // the operator configured AI help on purpose, so the profile is NOT empty
+  // and must not be overwritten without --force (it falls through to the
+  // placeholder/real check below and classifies as "real").
+  const aiHelpLevel = str(profile.aiHelpLevel) || DEFAULT_AI_HELP_LEVEL;
+  const setupCompletedAt = str(profile.setupCompletedAt).trim();
+  const usesDefaultPreferences =
+    aiHelpLevel === DEFAULT_AI_HELP_LEVEL && setupCompletedAt === "";
+
+  if (
+    filled.every((value) => value === "") &&
+    !str(profile.preferredStyle) &&
+    usesDefaultPreferences
+  ) {
     return "empty";
   }
 

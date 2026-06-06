@@ -254,7 +254,13 @@ function deriveNeedsReply(row: ThreadRowSource): boolean {
   if (row.lastInboundAt) {
     return !row.lastOutboundAt || row.lastInboundAt.getTime() > row.lastOutboundAt.getTime();
   }
-  return row.needsReply;
+  // No inbound = nothing is owed. Mirror calculateRisk, which returns
+  // needsReply:false / GREEN / no SLA when lastInboundAt is null (risk.ts).
+  // Trusting the stored row.needsReply column here (it can be true from an AI
+  // summary or a seeded thread) produced a self-contradictory row: flagged
+  // needs-reply, yet GREEN with "No SLA", surviving the needsReplyOnly inbox
+  // filter while never aging to amber/red.
+  return false;
 }
 
 function imessagePersonKey(row: Pick<ThreadRowSource, "platform" | "personId">): string {

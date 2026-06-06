@@ -1,6 +1,13 @@
-# Builds, publishes, and verifies a student release to Dropbox in one manual
-# run. Deliberately workflow_dispatch ONLY — publishing to pilots is a
-# deliberate "yes, ship this" action, never automatic on push.
+# Builds, publishes, and verifies a student release to Dropbox.
+#
+# Publishing happens AUTOMATICALLY on every push to `main` (the default
+# branch): reaching main IS the "ship to pilots" gate. develop/staging/v1 and
+# feature branches never publish. You can also run it manually
+# (workflow_dispatch) to re-publish or to ship with custom release notes.
+#
+# Pilots only SEE a new build when the version in package.json changes, so a
+# release = merge a version bump to main. The run publishes the exact commit
+# that triggered it.
 #
 # Required GitHub Actions secrets (Settings > Secrets and variables > Actions):
 #   Dropbox auth (refresh-token / offline flow — access tokens are short-lived):
@@ -13,15 +20,24 @@
 name: Publish Student Release
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       release_notes:
-        description: "Release notes, one per line (optional)."
+        description: "Release notes, one per line (optional; manual runs only)."
         required: false
         default: ""
 
 permissions:
   contents: read
+
+# Serialise publishes so two runs can never overwrite Dropbox at the same time.
+# Do NOT cancel an in-progress publish (that could leave Dropbox half-updated);
+# a newer run waits for the current one to finish.
+concurrency:
+  group: publish-student-release
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -29,7 +45,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: v1/strip-back-pr1
+          # Publish the EXACT commit that triggered this run (the pushed commit
+          # on main, or the dispatched ref's tip), not a hard-coded branch.
+          ref: ${{ github.sha }}
           fetch-depth: 0
 
       - name: Check required secrets are set
@@ -75,6 +93,8 @@ jobs:
           RIOS_DROPBOX_MANIFEST_PATH: ${{ secrets.RIOS_DROPBOX_MANIFEST_PATH }}
           RIOS_DROPBOX_ZIP_URL: ${{ secrets.RIOS_DROPBOX_ZIP_URL }}
           RIOS_UPDATE_FEED_URL: ${{ secrets.RIOS_UPDATE_FEED_URL }}
+          # Empty on push runs (no inputs) -> the publish script uses its
+          # default notes. Manual runs can supply custom notes.
           RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
         run: |
           ARGS=()

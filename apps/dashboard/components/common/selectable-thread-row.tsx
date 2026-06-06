@@ -167,8 +167,9 @@ export function SelectableThreadRow({
       href={`/thread/${row.id}`}
       className={className}
       onMouseEnter={() => prefetchThreadData(row.id)}
-      onMouseLeave={cancelThreadPrefetch}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
       onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
       onClick={(event) => {
         // Cmd/Ctrl-click enters select mode without losing the inbox.
         // (Shift-click is reserved by the browser for "open in new
