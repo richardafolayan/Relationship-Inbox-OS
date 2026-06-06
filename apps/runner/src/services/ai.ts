@@ -1994,7 +1994,7 @@ ${transcript}`;
     // the call is purely additive — the worst case is identical to
     // today.
     const parseSummary = (value: unknown) => summarySchema.parse(value);
-    const { result } = input.race
+    const { result, source } = input.race
       ? await raceModelJson(prompt, fallback, parseSummary, undefined, "reassess-summary")
       : await modelJson(prompt, fallback, parseSummary);
     // Safety net. The prompt asks for a complete, self-contained ask within
@@ -2058,7 +2058,12 @@ ${transcript}`;
       tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
       needs_reply: result.needs_reply,
       urgency_hint: result.urgency_hint,
-      reply_brief: finalBrief
+      reply_brief: finalBrief,
+      // Carry the provider source through so persisting callers can tell a
+      // real summary from the synthesised fallback (source.providerId === null
+      // ⇒ every provider failed). Mirrors generateSuggestedReplies, which
+      // returns `source` for the same reason.
+      source
     };
     return output;
   }

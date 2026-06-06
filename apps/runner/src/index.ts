@@ -3287,7 +3287,11 @@ function resummarizeThreadById(
   options?: { race?: boolean }
 ): Promise<
   | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
-  | { ok: false; reason: "not_found" }
+  // `ai_unavailable` joins `not_found` when the AI call returned the fallback
+  // (every provider failed) — resummarizeThread skips the write in that case.
+  // Both the /data/thread self-heal and the Reassess endpoint already branch on
+  // `ok` alone, so this is purely a wider failure tag, not new control flow.
+  | { ok: false; reason: "not_found" | "ai_unavailable" }
 > {
   return resummarizeThread({ prisma, aiService, siblingThreadIds }, threadId, options);
 }

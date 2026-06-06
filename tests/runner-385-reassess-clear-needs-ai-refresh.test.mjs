@@ -78,7 +78,19 @@ const SUMMARY = {
   tone_notes: [],
   remember: [],
   reply_brief: null,
-  needs_reply: true
+  needs_reply: true,
+  // A real provider source. resummarizeThread persists only when the AI call
+  // actually produced output; a result with no source (or a null providerId)
+  // is the synthesised fallback and is NOT written (Bug Q2 data-loss guard).
+  // These #385 tests exercise the SUCCESS path, so they carry a real source.
+  source: {
+    providerId: "openai",
+    providerDisplayName: "OpenAI",
+    fellBackFromProviderId: null,
+    fellBackFromProviderDisplayName: null,
+    fellBackReason: null,
+    fellBackMessage: null
+  }
 };
 
 function makeFakePrisma({ thread, messages }) {
