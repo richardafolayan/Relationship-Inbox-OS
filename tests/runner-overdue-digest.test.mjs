@@ -1,12 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-// Pure service. No Prisma, no Express. Imports the .ts sources through
-// the tsx loader (the same pattern dashboard-horizon.test.mjs uses) rather
-// than the runner's compiled dist, because the worktree's shared
-// node_modules symlinks @inbox-os/core to the parent project — building
-// the worktree's core dist doesn't update what the dist's `import
-// "@inbox-os/core"` resolves to.
+// Pure service. No Prisma, no Express. Imports the .ts sources through the tsx
+// loader (the same pattern dashboard-horizon.test.mjs uses) so the runner
+// service and core SOURCE are exercised directly.
+//
+// IMPORTANT — this file's verdict depends on the BUILT @inbox-os/core, not only
+// on the source imports below. `computeTick` (runner service) resolves
+// `isDigestDue` / `buildStateKey` from the *package* `@inbox-os/core` (its
+// compiled dist), NOT from `../packages/core/src`. So a STALE core dist makes
+// computeTick silently run the pre-#628 UTC-prefix rule while the source-level
+// unit tests here keep passing — and the resulting "computeTick … not due"
+// failure *looks* like a timezone bug but is really a stale build. (That is the
+// actual #628 footgun: it fails identically in every timezone when the dist is
+// stale, and passes in every timezone when fresh — see the GUARD and TZ-matrix
+// tests below.) The runner-service import already requires the dist to resolve,
+// so importing it directly adds no new prerequisite.
+//
+// Focused run — MUST rebuild core first (a bare `node --test` does NOT):
+//   npm run build --workspace @inbox-os/core \
+//     && node --import tsx --test tests/runner-overdue-digest.test.mjs
 const {
   applyAck,
   applyDismissToday,
@@ -20,6 +33,10 @@ const {
 const { DEFAULT_OVERDUE_DIGEST_SETTINGS, isDigestDue, buildStateKey } = await import(
   "../packages/core/src/overdue-digest.ts"
 );
+// The BUILT package copy — the exact module `computeTick` imports. Used by the
+// source/dist parity GUARD below so a stale dist fails loudly and actionably
+// instead of masquerading as a timezone bug.
+const builtCore = await import("@inbox-os/core");
 const { isNonActionableInboundPlaceholder } = await import(
   "../packages/core/src/deleted-placeholder.ts"
 );
@@ -50,6 +67,46 @@ function row(overrides = {}) {
 function defaults() {
   return JSON.parse(JSON.stringify(DEFAULT_OVERDUE_DIGEST_SETTINGS));
 }
+
+const REBUILD_HINT =
+  "Rebuild the core package: `npm run build --workspace @inbox-os/core`";
+
+test("GUARD: built @inbox-os/core implements the #628 local-date rule (a stale dist is the real cause of the 'timezone' failure)", () => {
+  // `computeTick` imports `isDigestDue` from the BUILT @inbox-os/core, not from
+  // this test's source import. If that dist is stale (pre-#628) it ignores the
+  // 5th arg (lastDigestLocalDate) and falls back to the UTC prefix — which makes
+  // the #628 computeTick test below fail with a misleading "not due" in EVERY
+  // timezone. Pin the built copy directly so a stale build fails HERE, loudly
+  // and actionably, rather than looking like a timezone determinism bug.
+  assert.equal(
+    typeof builtCore.isDigestDue,
+    "function",
+    `built @inbox-os/core must export isDigestDue. ${REBUILD_HINT}`
+  );
+  // West-of-UTC evening fire: persisted local date is YESTERDAY → the next local
+  // morning MUST be due. The pre-#628 dist ignores lastDigestLocalDate and
+  // returns false here.
+  assert.equal(
+    builtCore.isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", "2026-05-25"),
+    true,
+    `STALE built @inbox-os/core: it ignores lastDigestLocalDate (pre-#628). ${REBUILD_HINT}`
+  );
+  // Same persisted local date as today → already fired today → not due.
+  assert.equal(
+    builtCore.isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", "2026-05-26"),
+    false,
+    `STALE built @inbox-os/core: same-day suppression broken. ${REBUILD_HINT}`
+  );
+  // The built and source copies must agree on the canonical #628 inputs — if
+  // they diverge, the dist is out of date with the source the tests reason about.
+  for (const lastLocal of ["2026-05-25", "2026-05-26", null]) {
+    assert.equal(
+      builtCore.isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", lastLocal),
+      isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", lastLocal),
+      `built and source @inbox-os/core disagree (lastDigestLocalDate=${lastLocal}). ${REBUILD_HINT}`
+    );
+  }
+});
 
 test("default settings are cadence=off, no memory", () => {
   assert.deepEqual(defaults(), {
@@ -396,6 +453,8 @@ test("computeTick: daily is due the next local morning after an evening fire wes
   // Full path: ack at 18:00 PDT (May 25 local, 01:00Z May 26), then tick the next
   // local morning (May 26 local, ~08:00 PDT = 15:00Z). Must be due — the pre-#628
   // code derived the same UTC date for both and reported not_due, skipping the day.
+  // Zone-invariance of this same verdict is pinned separately by the TZ-matrix
+  // test below; the GUARD test pins that the BUILT core honours it too.
   const acked = applyAck(
     { ...defaults(), cadence: "daily" },
     [{ personId: "p-1", displayName: "Brandon", stateKey: "sk-1" }],
@@ -420,6 +479,89 @@ test("computeTick: daily is due the next local morning after an evening fire wes
   });
   assert.equal(sameDay.due, false, "already fired today (local)");
   assert.equal(sameDay.reason, "not_due");
+});
+
+// ---- Timezone determinism (#628 follow-up) ----------------------------------
+//
+// The daily cadence compares LOCAL calendar-date STRINGS, so its verdict must
+// not depend on the process timezone. Node re-reads `process.env.TZ` at runtime
+// for Date's local methods, so we can prove invariance in-process: run the same
+// decision under UTC, Europe/London (BST, east of UTC) and America/New_York
+// (EDT, west of UTC) and assert byte-identical results. If a future change
+// reintroduces a UTC-vs-local mix (e.g. deriving a calendar date from a
+// near-midnight UTC instant via `new Date(...).getDate()`), the verdict would
+// diverge across these zones and these tests fail. The 01:00Z instant is chosen
+// because it lands on a DIFFERENT local date per zone:
+//   01:00Z → 2026-05-26 (UTC) · 2026-05-26 02:00 (London) · 2026-05-25 21:00 (NY)
+
+const TZ_MATRIX = ["UTC", "Europe/London", "America/New_York"];
+
+function inTimezone(tz, fn) {
+  const prev = process.env.TZ;
+  process.env.TZ = tz;
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.TZ;
+    else process.env.TZ = prev;
+  }
+}
+
+function acrossZones(fn) {
+  return TZ_MATRIX.map((tz) => inTimezone(tz, fn));
+}
+
+test("isDigestDue: daily verdict is identical under UTC / Europe-London / America-New_York (#628)", () => {
+  // West-of-UTC evening fire (persisted local date = yesterday) → next local
+  // morning is due, in every zone.
+  assert.deepEqual(
+    acrossZones(() =>
+      isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", "2026-05-25")
+    ),
+    [true, true, true],
+    "next-local-morning due-ness must not depend on the process timezone"
+  );
+  // Already fired today (persisted local date = today) → not due, in every zone.
+  assert.deepEqual(
+    acrossZones(() =>
+      isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", "2026-05-26")
+    ),
+    [false, false, false],
+    "already-fired-today suppression must not depend on the process timezone"
+  );
+  // Legacy fallback (no persisted local date): the UTC-prefix branch is a pure
+  // string slice, so it too must be zone-invariant even for a near-midnight
+  // instant whose LOCAL date differs by zone.
+  assert.deepEqual(
+    acrossZones(() =>
+      isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", null)
+    ),
+    [false, false, false],
+    "legacy UTC-prefix fallback must be zone-invariant"
+  );
+});
+
+test("computeTick: the #628 next-local-morning path is due under every timezone", () => {
+  const acked = applyAck(
+    { ...defaults(), cadence: "daily" },
+    [{ personId: "p-1", displayName: "Brandon", stateKey: "sk-1" }],
+    "2026-05-26T01:00:00.000Z",
+    "2026-05-25"
+  );
+  const verdicts = acrossZones(() => {
+    const r = computeTick({
+      settings: acked,
+      rows: [row()],
+      nowIso: "2026-05-26T15:00:00.000Z",
+      localDate: "2026-05-26"
+    });
+    return `${r.due}:${r.reason}`;
+  });
+  assert.deepEqual(
+    verdicts,
+    ["true:due", "true:due", "true:due"],
+    "computeTick's #628 verdict must be identical in every timezone"
+  );
 });
 
 test("computeTick does NOT mutate memory (only ack does)", () => {
