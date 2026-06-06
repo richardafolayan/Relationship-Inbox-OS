@@ -71,8 +71,9 @@ link):
 Either way, the installer takes over from here. While it runs it will:
 
 - check your Mac and free space,
-- install **Node 22** if it's missing (it may ask for your Mac password, the
-  one you use to unlock your Mac),
+- install **Node 22** if it's missing, into a folder in your home directory,
+  so **no admin rights or Mac password are needed** (it works on a managed or
+  non-admin Mac too),
 - install the app into **`~/RelationshipInboxOS`** and set up what it needs,
 - set up your local database,
 - download a small voice-transcription model (about 150 MB) so voice notes

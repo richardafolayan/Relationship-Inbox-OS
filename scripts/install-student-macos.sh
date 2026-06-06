@@ -7,9 +7,10 @@
 # browser — with NO GitHub account, git, Homebrew, nvm, Python, or Xcode.
 #
 # It is safe to run more than once. It never installs Homebrew, nvm, git,
-# Python, or the Xcode command-line tools. The only system change it can make
-# is installing Node.js 22 from Node's own official installer, and only if a
-# working Node 22 isn't already present.
+# Python, or the Xcode command-line tools, and it never needs admin rights or
+# your Mac password: if Node 22 is missing it installs Node into a user-owned
+# folder (~/.rios-node) from Node's official tarball, so it works on managed /
+# non-admin Macs (e.g. university accounts) too.
 #
 # Wherever it gets the app from, it installs into ONE predictable place:
 # ~/RelationshipInboxOS. Two ways it gets the app, picked automatically:
@@ -52,6 +53,9 @@ APP_ZIP_URL="${RIOS_APP_ZIP_URL:-$APP_ZIP_URL_DEFAULT}"
 INSTALL_DIR="${RIOS_INSTALL_DIR:-$HOME/RelationshipInboxOS}"
 NODE_MAJOR=22
 NODE_RELEASE_DIR="https://nodejs.org/download/release/latest-v22.x"
+# Where a user-local Node 22 is installed when one isn't already present.
+# A plain folder in the home dir — no admin rights needed to write here.
+RIOS_NODE_DIR="${RIOS_NODE_DIR:-$HOME/.rios-node}"
 MIN_FREE_GB=10
 REC_FREE_GB=20
 MIN_MACOS_MAJOR=13            # Ventura
@@ -195,11 +199,22 @@ ensure_node() {
     return 0
   fi
 
+  # A working Node 22 already first on PATH? Use it as-is.
   local have
   have="$(node_major || echo "")"
   if [ "$have" = "$NODE_MAJOR" ]; then
     ok "Node.js $(node -v) is already installed"
     return 0
+  fi
+
+  # A Node 22 we installed on a previous run? Put it back on PATH.
+  if [ -x "$RIOS_NODE_DIR/bin/node" ]; then
+    export PATH="$RIOS_NODE_DIR/bin:$PATH"; hash -r 2>/dev/null || true
+    if [ "$(node_major || echo "")" = "$NODE_MAJOR" ]; then
+      ok "Using the app's own Node.js $(node -v) ($(display_path "$RIOS_NODE_DIR"))"
+      ensure_node_on_path
+      return 0
+    fi
   fi
 
   if [ -n "$have" ]; then
@@ -209,55 +224,92 @@ ensure_node() {
   fi
 
   if [ "$DRY_RUN" = true ]; then
-    warn "[dry-run] would install Node $NODE_MAJOR from $NODE_RELEASE_DIR"
+    warn "[dry-run] would install Node $NODE_MAJOR into $(display_path "$RIOS_NODE_DIR") (no admin needed)"
     return 0
   fi
 
-  install_node_pkg
+  install_node_local
 }
 
-install_node_pkg() {
-  # Fetch the exact current Node 22 .pkg filename (universal: Apple Silicon +
-  # Intel) from Node's official release directory. The .pkg installs Node
-  # cleanly without Homebrew or nvm.
-  local pkg_name pkg_url tmp_pkg
-  info "Looking up the latest Node $NODE_MAJOR installer…"
-  pkg_name="$(curl -fsSL --max-time 30 "$NODE_RELEASE_DIR/SHASUMS256.txt" 2>>"$LOG_FILE" \
-    | awk '/\.pkg$/ {print $2; exit}')"
-  if [ -z "${pkg_name:-}" ]; then
+# Install Node 22 into a user-owned folder ($RIOS_NODE_DIR) from Node's
+# official macOS tarball. No sudo, no admin rights, no Mac password — so it
+# works on managed / non-admin accounts (e.g. university Macs). curl
+# downloads are not Gatekeeper-quarantined, so the binary runs with no prompt.
+install_node_local() {
+  local arch na line name url sha tmp_tgz now
+  arch="$(uname -m)"
+  case "$arch" in
+    arm64)  na="arm64" ;;
+    x86_64) na="x64" ;;
+    *)      na="x64"; warn "Unknown CPU $arch — trying the Intel (x64) Node build." ;;
+  esac
+
+  info "Looking up the latest Node $NODE_MAJOR build for $na…"
+  line="$(curl -fsSL --max-time 30 "$NODE_RELEASE_DIR/SHASUMS256.txt" 2>>"$LOG_FILE" \
+    | grep "darwin-$na\.tar\.gz$" | head -1)"
+  name="$(printf '%s' "$line" | awk '{print $2}')"
+  sha="$(printf '%s' "$line" | awk '{print $1}')"
+  if [ -z "$name" ] || [ -z "$sha" ]; then
     die "Couldn't reach nodejs.org to download Node $NODE_MAJOR. Check your Wi-Fi and try again."
   fi
-  pkg_url="$NODE_RELEASE_DIR/$pkg_name"
-  tmp_pkg="${TMPDIR:-/tmp}/$pkg_name"
+  url="$NODE_RELEASE_DIR/$name"
+  tmp_tgz="${TMPDIR:-/tmp}/$name"
 
-  info "Downloading $pkg_name (about 70 MB)…"
-  if ! curl -fSL --progress-bar --max-time 600 "$pkg_url" -o "$tmp_pkg" 2>>"$LOG_FILE"; then
+  info "Downloading $name (about 40 MB)…"
+  if ! curl -fSL --progress-bar --max-time 600 "$url" -o "$tmp_tgz" 2>>"$LOG_FILE"; then
     die "Download of Node $NODE_MAJOR failed. Check your Wi-Fi and try again."
   fi
 
-  say ""
-  say "  macOS will now ask for your Mac password to install Node $NODE_MAJOR."
-  say "  ${DIM}(This is the password you use to unlock your Mac.)${RESET}"
-  if ! sudo installer -pkg "$tmp_pkg" -target / >>"$LOG_FILE" 2>&1; then
-    die "Installing Node $NODE_MAJOR failed. The log has the details: $LOG_FILE"
+  # Verify the checksum before trusting the binary.
+  if ! printf '%s  %s\n' "$sha" "$tmp_tgz" | shasum -a 256 -c - >>"$LOG_FILE" 2>&1; then
+    rm -f "$tmp_tgz" 2>/dev/null
+    die "The Node download didn't match its checksum. Try again; if it keeps failing, tell Richard."
   fi
-  rm -f "$tmp_pkg" 2>/dev/null
 
-  # The .pkg drops node/npm into /usr/local/bin; make sure this shell sees it.
-  case ":$PATH:" in *":/usr/local/bin:"*) : ;; *) export PATH="/usr/local/bin:$PATH" ;; esac
+  info "Installing Node into $(display_path "$RIOS_NODE_DIR") (no admin needed)…"
+  rm -rf "$RIOS_NODE_DIR"
+  mkdir -p "$RIOS_NODE_DIR" || die "Couldn't create $RIOS_NODE_DIR."
+  if ! tar -xzf "$tmp_tgz" -C "$RIOS_NODE_DIR" --strip-components=1 >>"$LOG_FILE" 2>&1; then
+    rm -f "$tmp_tgz" 2>/dev/null
+    die "Couldn't unpack Node. The log has the details: $LOG_FILE"
+  fi
+  rm -f "$tmp_tgz" 2>/dev/null
+
+  # Put it first on PATH for the rest of this install...
+  export PATH="$RIOS_NODE_DIR/bin:$PATH"
   hash -r 2>/dev/null || true
 
-  local now
   now="$(node_major || echo "")"
-  if [ "$now" = "$NODE_MAJOR" ]; then
-    ok "Node.js $(node -v) installed"
-  elif [ -n "$now" ]; then
-    warn "Node $NODE_MAJOR was installed, but '$(node -v)' is still first on your PATH."
-    warn "Quit Terminal completely (Cmd+Q), reopen it, and run the command again."
-    die "Node version needs a fresh Terminal to take effect."
-  else
-    die "Node $NODE_MAJOR installed but 'node' still isn't found. Quit and reopen Terminal, then retry."
+  if [ "$now" != "$NODE_MAJOR" ]; then
+    die "Node $NODE_MAJOR installed into $RIOS_NODE_DIR but isn't runnable. The log has the details: $LOG_FILE"
   fi
+  ok "Node.js $(node -v) installed (no admin needed)"
+
+  # ...and for every future Terminal the pilot opens.
+  ensure_node_on_path
+}
+
+# Persist $RIOS_NODE_DIR/bin on PATH for future shells, idempotently. The
+# block is marked so the uninstaller can remove it cleanly.
+ensure_node_on_path() {
+  local bindir="$RIOS_NODE_DIR/bin"
+  local marker="# added by Relationship Inbox OS (Node on PATH)"
+  local rc
+  for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+    # zsh is the macOS default; only touch .bash_profile if it already exists.
+    if [ "$rc" = "$HOME/.bash_profile" ] && [ ! -f "$rc" ]; then
+      continue
+    fi
+    if [ -f "$rc" ] && grep -qF "$marker" "$rc" 2>/dev/null; then
+      continue
+    fi
+    if {
+      printf '\n%s\n' "$marker"
+      printf 'export PATH="%s:$PATH"\n' "$bindir"
+    } >>"$rc" 2>/dev/null; then
+      info "Added Node to your PATH in $(display_path "$rc")"
+    fi
+  done
 }
 
 # --------------------------------------------------------------------------
