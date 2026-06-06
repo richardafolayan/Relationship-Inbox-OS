@@ -5,6 +5,7 @@ import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
+import { AppUpdates } from "@/components/settings/AppUpdates";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -219,6 +220,13 @@ export default function SettingsPage() {
       <section className="mt-10">
         <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Demo</p>
         <FullDemoSettingsCard />
+      </section>
+
+      <section className="mt-10">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          App updates
+        </p>
+        <AppUpdates />
       </section>
 
       <section className="mt-10">

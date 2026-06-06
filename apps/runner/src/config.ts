@@ -46,6 +46,13 @@ export interface RunnerConfig {
   geminiApiKey?: string;
   geminiBaseUrl: string;
   geminiModel: string;
+  /**
+   * Update feed for the in-app updater: the URL of the published latest.json
+   * (a Dropbox raw=1 / dl=1 link for the pilot). Read from RIOS_UPDATE_FEED_URL.
+   * Undefined when unset, in which case /system/update-check reports the app as
+   * up to date and the dashboard shows no update banner. Never hard-coded.
+   */
+  updateFeedUrl?: string;
   dbFile: string;
   profileDirs: {
     LINKEDIN: string;
@@ -527,6 +534,9 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     geminiBaseUrl:
       env.GEMINI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
     geminiModel: env.GEMINI_MODEL?.trim() || "gemma-4-31b-it",
+    // Update feed (published latest.json URL). Never hard-coded; the pilot
+    // sets the Dropbox raw=1 link as RIOS_UPDATE_FEED_URL.
+    updateFeedUrl: env.RIOS_UPDATE_FEED_URL?.trim() || undefined,
     linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
     linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
     linkedInAutoLoginEnabled:

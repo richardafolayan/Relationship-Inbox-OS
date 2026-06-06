@@ -54,6 +54,7 @@ import { createSendQueue } from "./services/send-queue";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
+import { readAppVersion, runUpdateCheck, stagePendingUpdate } from "./services/system-update";
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
@@ -1754,6 +1755,64 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
     activeModel,
     configuredProviders,
     activeProviderConfigured: configuredProviders.includes(activeProvider)
+  });
+}));
+
+// ---- System / self-update -------------------------------------------------
+// Logic lives in services/system-update.ts (testable in isolation). The
+// running app never replaces its own code: POST /system/update only STAGES a
+// pending-update intent, which scripts/start-student.mjs applies before
+// booting on the next launch.
+
+app.get("/system/version", asyncRoute(async (_req, res) => {
+  res.json(readAppVersion(projectRoot));
+}));
+
+app.get("/system/update-check", asyncRoute(async (_req, res) => {
+  const feedUrl = runnerConfig.updateFeedUrl;
+  if (!feedUrl) {
+    const current = readAppVersion(projectRoot).version;
+    res.json({
+      configured: false,
+      currentVersion: current,
+      latestVersion: current,
+      updateAvailable: false,
+      releaseNotes: []
+    });
+    return;
+  }
+  const result = await runUpdateCheck({ projectRoot, feedUrl });
+  res.json({ configured: true, ...result });
+}));
+
+app.post("/system/update", asyncRoute(async (_req, res) => {
+  const feedUrl = runnerConfig.updateFeedUrl;
+  if (!feedUrl) {
+    res.status(409).json({ ok: false, reason: "no_feed_configured" });
+    return;
+  }
+  const check = await runUpdateCheck({ projectRoot, feedUrl });
+  if (check.error) {
+    res.status(502).json({ ok: false, reason: "check_failed", error: check.error });
+    return;
+  }
+  if (!check.updateAvailable) {
+    res.status(409).json({ ok: false, reason: "no_update_available", currentVersion: check.currentVersion });
+    return;
+  }
+  const intent = {
+    requestedAt: new Date().toISOString(),
+    fromVersion: check.currentVersion,
+    toVersion: check.latestVersion,
+    feedUrl
+  };
+  stagePendingUpdate(dataDir, intent);
+  res.json({
+    ok: true,
+    pending: true,
+    fromVersion: intent.fromVersion,
+    toVersion: intent.toVersion,
+    message: "Update staged. Relaunch the app to finish updating."
   });
 }));
 
