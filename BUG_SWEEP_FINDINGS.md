@@ -289,3 +289,21 @@ Passes 1-3 swept files in isolation. Pass 4 fanned out dynamic-workflow agents o
 - **File:** `apps/dashboard/components/layout/app-shell.tsx:362` · **Lens:** cross-boundary transaction ordering
 - The AppShell digest scheduler fires the desktop notification first, then POSTs `/control/overdue-digest/ack`, swallowing failure with `.catch(() => undefined)`. The runner ack is the ONLY thing that advances `lastDigestAt` and writes per-person `lastIncludedAt`. If the ack fails (network blip, or a 409 `cadence_off` because the operator flipped cadence off between tick and ack), `lastDigestAt` never advances; the next 5-minute poll still reports due with the same candidates and re-fires. The stable notification tag (`inbox-os:overdue-digest`) means the OS replaces rather than stacks, so the user sees one notification silently re-asserting every 5 minutes rather than a pile. Self-resolves once an ack succeeds, hence Low.
 - **Suggested fix:** Treat ack as part of the fire transaction — await it and, on failure, set an in-memory "already fired this digest" guard (keyed by lastDigestAt + localDate or the candidate set) so the scheduler does not re-fire the identical digest before a successful ack lands. Distinguish a 409 cadence_off (stop trying this window) from a transient failure (retry the ack without re-firing).
+
+# Backlog cleanup — logged Lows resolved (2026-06-06)
+
+After the 4-pass sweep, the documented Low backlog was worked down (PM-directed: module-grouped PRs, each Low re-verified to still reproduce on current v1, fixed minimally, shipped with a regression test). Also landed in this pass: the 4 intentionally-OPEN review PRs (#574 updater https-gate, #575 updater stop-before-DB-copy, #591 enrichment scan-lock serialize, #595 session teardown TOCTOU) and the deferred #628 (digest UTC-vs-local date, #647).
+
+**Fixed (28 Lows across 6 PRs):**
+- **#650** `dashboard-lib` (7): P1-L11 feedback toast, P1-L12 thread-source open-redirect, P3-PL6 notification-permission listener leak, P3-PL7 initials astral glyph, P3-PL8 row-aware prefetch cancel, P3-PL9 today-sort null-inbound (+ runner overdue-digest sibling sort), P3-PL10 voice-score exclamation signal.
+- **#652** `dashboard-app` (3): P1-L1 composer-source reset, P1-L2 attachment clobber/url-leak, P4-P4L1 inbox runner-event live updates.
+- **#654** `dashboard-components` (5): P3-PL1 PilotTour stale-invocation gate, P3-PL2 command-palette reopen reset, P3-PL3 person-avatar error reset, P3-PL4 pilot-feedback over-cap drop race, P3-PL5 top-status reconnect autoclose.
+- **#656** `runner` (10): P1-L3 scan-queue status, P1-L4 imessage-db handle leak, P1-L5/L6 github-attachments reattach+retry, P1-L7 attachment convert atomicity, P1-L8 admin-reset count race, P1-L10 smoke-logger write isolation, P2-PL5 thread-row-shaping null-inbound consistency, P3-PL13 operator-profile-seed overwrite guard, P4-P4L2 reconnect-candidate query parity.
+- **#658** overdue-digest fire/ack transaction guard (P4-P4L3).
+- this PR: P3-PL11 (imessage "kept an audio message" proper-noun guard — both core + dashboard copies) + P3-PL12 (dedupe mergeNotes no longer drops a coincidental-substring note before the irreversible delete).
+
+**Verified NOT a bug (no fix):**
+- **P1-L9** (`apps/runner/src/services/keyed-mutex.ts`): the cited tryAcquire TOCTOU is not reachable in single-threaded JS — the `state?.running` check and the enqueue are synchronous within one tick, so a second concurrent caller cannot observe a half-acquired state. Re-verified on current code; left as-is.
+
+**Deferred to a tracked issue:**
+- **P2-PL3** (`apps/runner/src/services/enrichment-queue.ts`) → **#659**: enqueue() check-then-act can create duplicate PENDING jobs. The auto-designed fix's test did not prove fails-before (and ESM caching broke its isolation); per policy a concurrency fix is not merged without a proving test. Needs a correctly-isolated regression, re-based on #591.

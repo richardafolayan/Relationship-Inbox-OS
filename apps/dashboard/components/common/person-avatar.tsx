@@ -1,7 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { avatarTone, initials } from "@/lib/risk";
+import { shouldResetAvatarError } from "@/lib/avatar-error-reset";
 
 interface PersonAvatarProps {
   name: string;
@@ -12,6 +13,18 @@ interface PersonAvatarProps {
 
 export function PersonAvatar({ name, avatarUrl, size = 32, className }: PersonAvatarProps) {
   const [errored, setErrored] = useState(false);
+  // A still-mounted row (keyed by stable row.id, polled in place every ~10s)
+  // can receive a different, valid avatarUrl over time because LinkedIn avatar
+  // URLs are signed and rotate. Without this reset the stale errored flag keeps
+  // showImage=false forever, so the new image is never attempted and the
+  // documented "next scan refreshes the row" recovery never fires.
+  const lastUrlRef = useRef(avatarUrl);
+  useEffect(() => {
+    if (shouldResetAvatarError(lastUrlRef.current, avatarUrl)) {
+      lastUrlRef.current = avatarUrl;
+      setErrored(false);
+    }
+  }, [avatarUrl]);
   const showImage = Boolean(avatarUrl) && !errored;
   const fontSize = Math.max(10, Math.round(size * 0.375));
   const baseClass =

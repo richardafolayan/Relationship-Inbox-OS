@@ -1,8 +1,24 @@
 # Automated student release publishing
 
-One command (or one manual GitHub Action) builds the student release,
-overwrites the two files in Dropbox so the pilots' feed URL stays the same,
-then verifies the live feed end to end. It fails loudly if anything is wrong.
+Publishing happens **automatically when code reaches `main`**: every push to
+`main` builds the student release, overwrites the two files in Dropbox (so the
+pilots' feed URL stays the same), verifies the live feed end to end, and fails
+loudly if anything is wrong. `develop`, `staging`, `v1/strip-back-pr1`, and
+feature branches **never** publish, so work can land there freely; reaching
+`main` is the "ship to pilots" gate. The run publishes the **exact commit**
+that reached `main`.
+
+Two important details:
+
+- **Pilots only SEE a new build when the version changes.** The updater
+  compares versions, so a release that matters to pilots is: bump `version` in
+  `package.json`, then get that commit onto `main`. A push to `main` with the
+  same version re-publishes the same version (pilots see no change).
+- **You can still publish manually** (Actions > Publish Student Release > Run
+  workflow), e.g. to re-publish or to ship with custom release notes.
+  Automatic push runs use the publish script's default notes.
+
+You can also publish from your Mac with one command (below).
 
 This replaces the manual upload + re-stamp dance in
 [releasing-student-builds.md](./releasing-student-builds.md).
@@ -89,17 +105,22 @@ the checksum. Useful flags:
 Bump `version` in `package.json` before publishing when you want pilots to see
 a new version.
 
-## Publish from GitHub (manual)
+## Publish from GitHub (automatic on main, or manual)
 
-Add these repository secrets (**Settings > Secrets and variables > Actions**):
-`DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`,
+Add these repository secrets once (**Settings > Secrets and variables >
+Actions**): `DROPBOX_APP_KEY`, `DROPBOX_APP_SECRET`, `DROPBOX_REFRESH_TOKEN`,
 `RIOS_DROPBOX_ZIP_PATH`, `RIOS_DROPBOX_MANIFEST_PATH`, `RIOS_DROPBOX_ZIP_URL`,
 `RIOS_UPDATE_FEED_URL`.
 
-Then **Actions > Publish Student Release > Run workflow** (optionally paste
-release notes). It runs the typecheck and full test suite first, publishes,
-verifies the live feed, and uploads the zip, `latest.json`, and checksum as
-build artefacts.
+After that, **every push to `main` publishes automatically.** The run
+typechecks and runs the full suite first, then publishes, verifies the live
+feed, and uploads the zip, `latest.json`, and checksum as build artefacts. A
+concurrency group serialises runs so two pushes can never overwrite Dropbox at
+once.
+
+To ship a release: get a **version bump** onto `main` (pilots only see a change
+when the version changes). To re-publish or ship with custom release notes,
+run it manually: **Actions > Publish Student Release > Run workflow**.
 
 ## Check that pilots see the latest version
 
@@ -125,11 +146,14 @@ same URL, and pilots update forward to it. (To stop pilots who have not yet
 updated from getting a bad build, you can also just re-publish the previous
 good build over it straight away.)
 
-## Why it is manual-triggered
+## Why `main` is the publish gate
 
-Publishing to pilots is a deliberate "yes, ship this to people" decision, so
-the workflow is `workflow_dispatch` only. It never auto-publishes on a merge.
-You decide when a build is ready.
+Publishing to pilots is a deliberate "yes, ship this" decision, and that
+decision is "merge to `main`". Work flows freely through `develop`, `staging`,
+`v1/strip-back-pr1`, and feature branches without ever touching pilots; only
+reaching `main` publishes. Manual `workflow_dispatch` stays as an escape hatch
+for re-publishing or custom notes. Because pilots only see a build when the
+version changes, a no-op re-publish (same version) is harmless.
 
 ## Safety
 

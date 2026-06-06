@@ -174,6 +174,22 @@ export function shouldStartPilotTour(active: boolean): boolean {
   return !active;
 }
 
+/**
+ * Whether a resolving `startTour` invocation is still the current one. Each
+ * startTour run captures a monotonically increasing token at entry; the most
+ * recent run always holds the latest value. After its `startPilotSandbox()`
+ * POST resolves, an invocation must check this before touching the shared
+ * skip ref or calling setState: if a NEWER start has since begun (mid-bootstrap
+ * skip followed by a replay), the older POST resolving must not clear the
+ * newer tour's bootstrapping flag nor steal its deferred skip.
+ */
+export function isCurrentStartInvocation(
+  invocationToken: number,
+  currentToken: number
+): boolean {
+  return invocationToken === currentToken;
+}
+
 // ── Window-event bridge ────────────────────────────────────────────────
 
 export function startPilotTour(options: { replay?: boolean } = {}): void {

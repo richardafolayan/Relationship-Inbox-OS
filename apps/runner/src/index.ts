@@ -38,6 +38,7 @@ import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
 import { decidePersonFavouriteAction } from "./services/person-favourite-action";
+import { buildReconnectCandidateWhere } from "./services/reconnect-candidate-query";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
@@ -2147,19 +2148,20 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
 
   const horizonCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
+  // Mirror the dashboard's isReconnectCandidate predicate
+  // (apps/dashboard/lib/reconnect.ts): a dormant thread with a queued reply
+  // (scheduledSendAt set) drops off the Reconnect page, so the runner must not
+  // spend an AI call scoring - and persist a reconnectScore onto - a row the
+  // dashboard never shows. Fetch the SCHEDULED sendRequest threadIds first
+  // (same source /data/inbox uses) and exclude them from the candidate query.
+  const scheduledSends = await prisma.sendRequest.findMany({
+    where: { status: "SCHEDULED" },
+    select: { threadId: true }
+  });
+  const scheduledThreadIds = [...new Set(scheduledSends.map((s) => s.threadId))];
+
   const candidates = await prisma.thread.findMany({
-    where: {
-      platform: "LINKEDIN",
-      archivedAt: null,
-      // Dormant = last activity older than the 30-day horizon. Threads
-      // whose lastMessageAt is null are out of scope: the scorer needs
-      // at least one timestamp to anchor "days dormant".
-      lastMessageAt: { lt: horizonCutoff },
-      // Skip outreach threads regardless of category - reconnecting
-      // with a cold pitch contact is the opposite of what this page
-      // exists for. Threads without a category yet are still eligible.
-      NOT: { category: "outreach" }
-    },
+    where: buildReconnectCandidateWhere(horizonCutoff, scheduledThreadIds),
     select: {
       id: true,
       platform: true,

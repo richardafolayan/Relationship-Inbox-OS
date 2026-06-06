@@ -7,6 +7,7 @@ import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
+import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Single 44px status row. Mostly read-only in v1:
@@ -403,6 +404,20 @@ export function TopStatus() {
   // type /platforms directly for the full diagnostics.)
   const degradedPlatforms = implemented?.filter((p) => p.status !== "CONNECTED") ?? [];
   const hasDegraded = degradedPlatforms.length > 0;
+
+  // Keep the reconnect modal's open-state honest. `reconnectOpen` is tracked
+  // separately from `degradedPlatforms` (derived fresh each render from the
+  // polled snapshot), so when the last degraded platform reconnects — via the
+  // operator's own Reconnect click, a background poll, or a runner-event
+  // refresh — the list empties but the boolean stays true, leaving the modal
+  // showing its "These platforms aren't connected" header over an empty list.
+  // Auto-close once there is nothing left to reconnect; this doubles as
+  // confirmation the reconnect worked.
+  useEffect(() => {
+    if (shouldAutoCloseReconnect(reconnectOpen, hasDegraded)) {
+      setReconnectOpen(false);
+    }
+  }, [reconnectOpen, hasDegraded]);
 
   const runPlatformAction = useCallback(
     async (platform: string, endpoint: "connect" | "reset-session") => {

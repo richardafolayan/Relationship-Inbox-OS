@@ -7,6 +7,7 @@ import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import { Archive, Search, Star } from "lucide-react";
 import { apiGet, apiPost, peekCache, runAction, ApiRequestError } from "@/lib/api";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
+import { shouldInboxRefreshOnRunnerEvent } from "@/lib/inbox-events";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
@@ -283,13 +284,43 @@ export default function InboxPage() {
     if (q) setQuery(q);
   }, []);
 
+  // Debounced refetch (mirrors Today): a multi-thread scan emits a burst of
+  // runner events, so collapse them into one refresh rather than N.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh();
+    }, 450);
+  }, [refresh]);
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    },
+    []
+  );
+
+  // Live updates: the runner streams THREAD_UPDATED / MESSAGE_SENT /
+  // MESSAGE_SEND_FAILED / SCAN_FINISHED to the browser as `runner-event`
+  // window events (the reassess-on-send path included). Today already
+  // refetches on these, so a scan finishing or a send from the thread page /
+  // another tab reflected near-instantly there while the Inbox stayed stale
+  // until its 10s poll (P4L1). Subscribe to the same stream so the Inbox keeps
+  // pace; the 10s poll below stays as a backstop.
   useEffect(() => {
-    const onResync = () => void refresh();
+    const onResync = () => scheduleRefresh();
+    const onRunnerEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      if (shouldInboxRefreshOnRunnerEvent(detail?.type)) scheduleRefresh();
+    };
     window.addEventListener("runner-resync", onResync);
+    window.addEventListener("runner-event", onRunnerEvent as EventListener);
     return () => {
       window.removeEventListener("runner-resync", onResync);
+      window.removeEventListener("runner-event", onRunnerEvent as EventListener);
     };
-  }, [refresh]);
+  }, [scheduleRefresh]);
   // Poll every 10s while visible; paused in background tabs (the hook fires an
   // immediate tick on mount and a catch-up tick on return to foreground).
   useVisiblePolling(() => void refresh(), 10000);
@@ -1135,8 +1166,9 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
       href={`/thread/${row.id}`}
       onClick={onClick}
       onMouseEnter={() => prefetchThreadData(row.id)}
-      onMouseLeave={cancelThreadPrefetch}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
       onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
       className={cn(
         "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
         selected ? "bg-paper-2" : ""
