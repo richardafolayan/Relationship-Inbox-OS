@@ -132,3 +132,33 @@ export function rankReconnectCandidates<T extends ReconnectCandidate>(
     return bTs - aTs;
   });
 }
+
+/** Status the runner's POST /control/reconnect/refresh-scores can return. */
+export type RefreshScoresStatus = "ok" | "ai_unavailable" | "disabled_by_settings";
+
+/**
+ * Map a refresh-scores result to the operator-facing summary + tone for the
+ * Reconnect "Refresh AI scores" button. Mirrors the Inbox "Refresh closed
+ * verdicts" handler so the two consumers of the identical runner contract
+ * agree. The runner short-circuits to `disabled_by_settings` (scored 0,
+ * skipped 0) whenever the operator's AI tier is `memory_only`; without this
+ * branch the button fell through to a neutral "Scored 0", implying the scorer
+ * ran and found nothing rather than telling the operator AI is off.
+ */
+export function interpretRefreshScoresResult(result: {
+  status: RefreshScoresStatus;
+  scored: number;
+  skipped: number;
+}): { summary: string; tone: "ok" | "warn" } {
+  const summary =
+    result.status === "disabled_by_settings"
+      ? "AI is off (Settings)"
+      : result.scored === 0 && result.skipped > 0
+        ? "Already up to date"
+        : result.status === "ai_unavailable"
+          ? `Scored ${result.scored}, then AI went quiet`
+          : `Scored ${result.scored}${result.skipped > 0 ? `, skipped ${result.skipped} already done` : ""}`;
+  const tone: "ok" | "warn" =
+    result.status === "ai_unavailable" || result.status === "disabled_by_settings" ? "warn" : "ok";
+  return { summary, tone };
+}
