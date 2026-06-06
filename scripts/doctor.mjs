@@ -14,7 +14,7 @@
 // Exit code is 0 when nothing FAILed, 1 otherwise.
 
 import { execSync } from "node:child_process";
-import { accessSync, constants, existsSync, readFileSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -301,6 +301,36 @@ function checkAiKey() {
   }
 }
 
+function checkTranscription() {
+  const enabled = (env.AUDIO_TRANSCRIPTION_ENABLED || "").trim().toLowerCase() === "true";
+  if (!enabled) {
+    add(PASS, "Voice transcription", "Off (AUDIO_TRANSCRIPTION_ENABLED is not true).");
+    return;
+  }
+  const provider = (env.AUDIO_TRANSCRIPTION_PROVIDER || "local-whisper").trim().toLowerCase();
+  if (provider === "transformers") {
+    const dir = (env.TRANSCRIPTION_MODEL_DIR || "").trim() || join(APP_DIR, "data", "models");
+    let count = 0;
+    try { count = existsSync(dir) ? readdirSync(dir).length : 0; } catch { count = 0; }
+    if (count > 0) {
+      add(PASS, "Voice transcription", "On — local model is downloaded.");
+    } else {
+      add(WARN, "Voice transcription", "On, but the local model isn't downloaded yet.",
+        `Run: cd "${APP_DIR}" && npm run fetch:whisper-model`);
+    }
+  } else if (provider === "openai") {
+    if ((env.OPENAI_API_KEY || "").trim()) {
+      add(PASS, "Voice transcription", "On (OpenAI provider).");
+    } else {
+      add(WARN, "Voice transcription", "On with provider=openai but OPENAI_API_KEY is unset.",
+        "Add OPENAI_API_KEY to .env, or set AUDIO_TRANSCRIPTION_PROVIDER=transformers (no key, no setup).");
+    }
+  } else {
+    add(WARN, "Voice transcription", "On with provider=local-whisper (needs a whisper-cli binary + ggml model).",
+      "Pilots should use AUDIO_TRANSCRIPTION_PROVIDER=transformers — no extra setup; run npm run fetch:whisper-model.");
+  }
+}
+
 // ---- run + report --------------------------------------------------------
 
 async function main() {
@@ -316,6 +346,7 @@ async function main() {
   checkMessagesDb();
   checkLinkedInBrowser();
   checkAiKey();
+  checkTranscription();
 
   const badge = (s) =>
     s === PASS ? `${C.green}PASS${C.reset}` :
