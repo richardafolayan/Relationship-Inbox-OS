@@ -5,11 +5,19 @@ import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
+import { AppUpdates } from "@/components/settings/AppUpdates";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
-import { notificationsSupported, requestNotificationPermission } from "@/lib/notifications";
+import {
+  notificationsSupported,
+  readNotificationPermission,
+  requestNotificationPermission,
+  subscribeNotificationPermission
+} from "@/lib/notifications";
 import { localDateString } from "@/lib/overdue-digest";
+import { interpretReassessAllResult } from "@/lib/reassess-all-result";
+import type { MarkAllReassessResponse } from "@/lib/reassess-all-result";
 import type {
   OverdueDigestCadence,
   OverdueDigestCandidate,
@@ -217,6 +225,13 @@ export default function SettingsPage() {
       </section>
 
       <section className="mt-10">
+        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+          App updates
+        </p>
+        <AppUpdates />
+      </section>
+
+      <section className="mt-10">
         <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Pilot</p>
         <PilotWelcomeCard />
         <div className="flex flex-wrap items-center gap-[10px]">
@@ -267,7 +282,7 @@ export default function SettingsPage() {
 // reset for reassessment") rather than a vague "done", so the action
 // feels grounded.
 function ReassessAllControl() {
-  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "running" | "done" | "intercepted" | "error">("idle");
   const [count, setCount] = useState<number | null>(null);
 
   const handleClick = async () => {
@@ -278,12 +293,17 @@ function ReassessAllControl() {
     if (!ok) return;
     setStatus("running");
     try {
-      const result = await apiPost<{ ok: true; threadsMarked: number }>(
+      const result = await apiPost<MarkAllReassessResponse>(
         "/runner/control/threads/mark-all-for-reassess",
         {}
       );
-      setCount(result.threadsMarked);
-      setStatus("done");
+      // In the live presenter demo the fetch interceptor swallows this
+      // mutation and resolves with a read-only sentinel that has no
+      // `threadsMarked` — fold it into an explicit outcome so we never
+      // render "undefined active threads reset for reassessment".
+      const outcome = interpretReassessAllResult(result);
+      setCount(outcome.count);
+      setStatus(outcome.status);
     } catch {
       setStatus("error");
     }
@@ -294,6 +314,10 @@ function ReassessAllControl() {
       {status === "done" && count !== null ? (
         <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
           {count} active threads reset for reassessment
+        </span>
+      ) : status === "intercepted" ? (
+        <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+          read-only demo, nothing changed
         </span>
       ) : status === "error" ? (
         <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
@@ -496,12 +520,14 @@ function OverdueDigestRow() {
   }, []);
 
   useEffect(() => {
-    if (notificationsSupported()) {
-      setPermission(Notification.permission);
-    } else {
-      setPermission("unsupported");
-    }
+    // Seed from the live permission, then stay in sync: granting from the
+    // sibling NotificationsPermissionControl in the same session must enable
+    // the cadence control here without a reload (it used to read once on
+    // mount and go stale).
+    setPermission(readNotificationPermission());
+    const unsubscribe = subscribeNotificationPermission(setPermission);
     void refresh();
+    return unsubscribe;
   }, [refresh]);
 
   const writeCadence = async (cadence: OverdueDigestCadence) => {

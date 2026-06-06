@@ -361,7 +361,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         );
         if (!fired) return;
         await apiPost("/runner/control/overdue-digest/ack", {
-          included: summariseCandidatesForAck(tick.candidates)
+          included: summariseCandidatesForAck(tick.candidates),
+          // Same local date used for the tick gate above, persisted so the daily
+          // cadence compares like-for-like local dates next time (#628).
+          localDate: localDateString()
         }).catch(() => undefined);
       } finally {
         overdueDigestInFlightRef.current = false;

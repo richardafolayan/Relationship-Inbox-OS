@@ -45,12 +45,18 @@ export const LIVE_INTERCEPTED_PATHS: Array<[RegExp, string]> = [
   [/\/control\/thread\/[^/]+\/mark-done$/, "mark the thread handled"],
   [/\/control\/thread\/[^/]+\/open-loop$/, "edit the reply checklist"],
   [/\/control\/thread\/[^/]+\/rescan$/, "rescan the thread"],
+  [/\/control\/thread\/[^/]+\/open$/, "open the thread in the browser"],
+  [/\/control\/thread\/[^/]+\/remind$/, "set a reminder"],
+  [/\/control\/thread\/[^/]+\/message\/[^/]+\/react$/, "react to a message"],
+  [/\/control\/message\/[^/]+\/transcribe$/, "transcribe a voice message"],
   [/\/control\/person\/[^/]+\/rename$/, "rename the contact"],
   [/\/control\/person\/[^/]+\/notes$/, "save contact notes"],
   [/\/control\/person\/[^/]+\/profile-url$/, "set the contact profile URL"],
   [/\/control\/person\/[^/]+\/enrich$/, "enrich the contact"],
   [/\/control\/person\/[^/]+\/friendship-summary$/, "summarise the friendship"],
   [/\/control\/person\/[^/]+\/ask$/, "ask about the contact"],
+  [/\/control\/person\/[^/]+\/favourite$/, "favourite the contact"],
+  [/\/control\/person\/[^/]+\/open-profile$/, "open the contact profile"],
   [/\/control\/closed-status\/refresh-stale$/, "refresh closed verdicts"],
   [/\/control\/reconnect\/refresh-scores$/, "refresh reconnect scores"],
   [/\/control\/platform\/connect$/, "connect a platform"],
@@ -60,7 +66,9 @@ export const LIVE_INTERCEPTED_PATHS: Array<[RegExp, string]> = [
   [/\/control\/platform\/reset-session$/, "reset the platform session"],
   [/\/control\/people\/scan-all$/, "scan all people"],
   [/\/control\/scan$/, "run a scan"],
-  [/\/control\/operator-profile$/, "save your profile"]
+  [/\/control\/operator-profile\/analyze-style$/, "analyse your writing style"],
+  [/\/control\/operator-profile$/, "save your profile"],
+  [/\/control\/overdue-digest\/[^/]+$/, "change overdue-digest settings"]
 ];
 
 /**
@@ -88,7 +96,12 @@ export function isExitPath(url: string): boolean {
 export function shouldInterceptLive(method: string, url: string): boolean {
   if (method.toUpperCase() === "GET") return false;
   if (isExitPath(url)) return false;
-  return describeInterceptedAction(url) !== null;
+  // Default-deny: any non-GET request to a runner /control/ path is a
+  // mutation and is blocked in live read-only mode unless it matched an
+  // exit path above. LIVE_INTERCEPTED_PATHS is now only a verb lookup for
+  // the toast (describeInterceptedAction), NOT the gate — so a newly added
+  // /control mutation endpoint can never be silently omitted again.
+  return /\/control\//.test(url);
 }
 
 function urlFromInput(input: RequestInfo | URL): string {

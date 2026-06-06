@@ -15,10 +15,21 @@
 // but adds package.json exports + tsconfig paths churn for a 20-line
 // helper. Duplication is cheaper.
 
+// A contact display name as it appears in these system rows: 1-3
+// whitespace-separated tokens of letters / dots / apostrophes / hyphens
+// ("Seyi", "Marianne Acheampong", "Mary-Jane O'Brien"). Deliberately NOT
+// a `[^\n]{1,80}?` wildcard — that absorbed arbitrary prefix prose, so a
+// real message merely ENDING in the canonical phrase ("…she kept an audio
+// message from you") matched and was silently dropped.
+const NAME = "[\\p{L}][\\p{L}.'\\-]{0,39}(?: [\\p{L}.'\\-]{1,39}){0,2}";
+// The "from <name>" slot may instead hold a phone number or email handle
+// (e.g. "+447951711949"), so widen just that trailing slot.
+const FROM_NAME = `(?:${NAME}|[+\\d][\\d ()\\-]{3,30}|[^\\s@]+@[^\\s@]+)`;
+
 const KEPT_AUDIO_PATTERNS: RegExp[] = [
-  /^[^\n]{1,80}? kept an audio message from you\.?$/i,
-  /^you kept an audio message from [^\n]{1,80}?\.?$/i,
-  /^[^\n]{1,80}? kept an audio message\.?$/i,
+  new RegExp(`^${NAME} kept an audio message from you\\.?$`, "iu"),
+  new RegExp(`^you kept an audio message from ${FROM_NAME}\\.?$`, "iu"),
+  new RegExp(`^${NAME} kept an audio message\\.?$`, "iu"),
   /^you kept an audio message\.?$/i
 ];
 
