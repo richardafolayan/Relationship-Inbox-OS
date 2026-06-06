@@ -173,19 +173,22 @@ export const FORBIDDEN_RELEASE_PATTERNS = [
   /(^|\/)\.env(\.[^/]*)?$/i, // .env, .env.local, .env.production (not .env.example)
   /\.sqlite(-wal|-shm|-journal)?$/i,
   /\.db$/i,
-  /\.pem$/i,
-  /\.key$/i,
-  /(^|\/)id_rsa\b/i,
+  /\.(pem|key|p12|pfx|jks|keystore|ppk|asc|gpg)$/i, // private keys / keystores / credentials
+  /(^|\/)id_(rsa|dsa|ecdsa|ed25519)\b/i, // SSH private keys
+  /(^|\/)[^/]*(service[-_]?account|client[_-]?secret|adminsdk|application_default_credentials)[^/]*\.json$/i, // cloud/service-account creds
+  /(^|\/)\.npmrc$/i, // can carry an npm auth token
   /(^|\/)\.DS_Store$/
 ];
 
 /**
- * Runtime / dependency directories that must not ship as a release zip's own
- * top-level content. Checked only at the first or second path segment (i.e.
- * the repo root, or one wrapper folder down) so legitimate SOURCE routes like
- * apps/dashboard/app/logs/page.tsx are never mistaken for a runtime log dir.
+ * Runtime / dependency directories that must not ship in a release zip.
+ *  - node_modules / .git are forbidden at ANY depth (never legitimate source).
+ *  - data / logs are forbidden only at the top (segment 0 or 1), because they
+ *    are common SOURCE names deeper in the tree (e.g.
+ *    apps/dashboard/app/logs/page.tsx) and must not be mistaken for runtime dirs.
  */
-const FORBIDDEN_TOP_DIRS = new Set(["node_modules", "data", "logs"]);
+const FORBIDDEN_ANY_DEPTH_DIRS = new Set(["node_modules", ".git"]);
+const FORBIDDEN_TOP_DIRS = new Set(["data", "logs"]);
 
 /**
  * Return the subset of `entries` (relative paths) that are forbidden in a
@@ -197,7 +200,7 @@ export function findForbiddenEntries(entries) {
     if (/(^|\/)\.env\.example$/.test(entry)) return false;
     if (FORBIDDEN_RELEASE_PATTERNS.some((re) => re.test(entry))) return true;
     const segs = entry.split("/").filter(Boolean);
-    if (segs.includes(".git")) return true;
+    if (segs.some((s) => FORBIDDEN_ANY_DEPTH_DIRS.has(s))) return true;
     if (segs.length >= 1 && FORBIDDEN_TOP_DIRS.has(segs[0])) return true;
     if (segs.length >= 2 && FORBIDDEN_TOP_DIRS.has(segs[1])) return true;
     return false;
