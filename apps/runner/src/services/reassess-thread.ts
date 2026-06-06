@@ -30,7 +30,10 @@ export interface ReassessThreadDeps {
     options?: { race?: boolean }
   ) => Promise<
     | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
-    | { ok: false; reason: "not_found" }
+    // `ai_unavailable` (AI fallback used → write skipped) is handled the same
+    // as not_found below: `if (!resummarised.ok)` returns kind:"not_found", so
+    // the operator gets a clean 404-retry rather than a persisted fallback.
+    | { ok: false; reason: "not_found" | "ai_unavailable" }
   >;
   /**
    * Resolve the sibling thread ids for an iMessage Person (phone + email
