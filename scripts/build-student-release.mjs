@@ -2,18 +2,27 @@
 //
 // Relationship Inbox OS — student release builder.
 //
-// Produces a clean, secret-free source zip a pilot can install, plus the
-// latest.json the updater reads. Run it from a checkout of the branch you
-// want to release (normally v1/strip-back-pr1):
+// Produces a pilot-install source zip plus the latest.json the updater reads.
+// Run it from a checkout of the branch you want to release (normally
+// v1/strip-back-pr1):
 //
 //   npm run build:student-release
 //   npm run build:student-release -- --zip-url "https://www.dropbox.com/...?dl=1"
 //
 // The zip contains only git-TRACKED files (so .env, data/, logs, the SQLite
 // database and node_modules can never leak — they are gitignored and never
-// tracked), with one generated release.json baked in so the installed app
-// knows its version. A belt-and-braces scan still hard-fails if any forbidden
-// path sneaks into the archive.
+// tracked), with a generated release.json baked in. It carries NO high-value
+// secrets, no user data, no AI keys, and no Dropbox tokens.
+//
+// The ONE exception is the low-value, rotatable pilot-feedback token
+// (PILOT_FEEDBACK_WEBHOOK_URL / _SECRET / _STATUS_URL): when those are provided
+// at release time (via env or a gitignored .env.release.local — never
+// committed) they are baked into the shipped .env.example so a fresh install's
+// in-app "Report a bug / Share feedback" reaches your Google Sheet. A path scan
+// hard-fails on forbidden files, and a CONTENT scan hard-fails if any OTHER
+// secret-like value lands in .env.example. To ROTATE the feedback secret:
+// change it in the Apps Script, update .env.release.local + the GitHub secret,
+// and republish.
 //
 // Real-world flow (see docs/pilot/releasing-student-builds.md):
 //   1. Build:    npm run build:student-release
@@ -44,6 +53,89 @@ import { findForbiddenEntries, sha256File } from "./lib/release-manifest.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const APP_FOLDER_NAME = "relationship-inbox-os";
+
+// The ONLY config values ever baked into the shipped .env.example. Treated as
+// a DISTRIBUTED pilot-feedback token (low value, rotatable) — never a private
+// secret. Sourced at release time from env or a gitignored .env.release.local.
+const PILOT_FEEDBACK_KEYS = [
+  "PILOT_FEEDBACK_WEBHOOK_URL",
+  "PILOT_FEEDBACK_SECRET",
+  "PILOT_FEEDBACK_STATUS_URL"
+];
+
+// A non-blank value on a key matching this in the shipped .env.example is a
+// high-value secret leak. The PILOT_FEEDBACK_* token is the one allowed
+// exception (whitelisted in the content scan below).
+const SECRET_KEY_RE = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$|^DROPBOX_/i;
+
+// Load env + an optional gitignored .env.release.local (real env wins),
+// mirroring publish-student-release.mjs so a direct `build:student-release`
+// run also picks up release config. RIOS_RELEASE_ENV_FILE overrides the path
+// (keeps tests isolated from a developer's real .env.release.local).
+function loadReleaseEnv() {
+  const file = process.env.RIOS_RELEASE_ENV_FILE || join(ROOT, ".env.release.local");
+  const env = { ...process.env };
+  if (existsSync(file)) {
+    for (const raw of readFileSync(file, "utf8").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq === -1) continue;
+      const key = line.slice(0, eq).trim();
+      let val = line.slice(eq + 1).trim();
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+        val = val.slice(1, -1);
+      }
+      if (env[key] === undefined) env[key] = val; // real env wins
+    }
+  }
+  return env;
+}
+
+// Bake the pilot-feedback token into the staged .env.example so a fresh
+// install's .env (the installer copies it from .env.example) can deliver
+// in-app feedback. Returns the keys actually injected.
+function injectFeedbackConfig(appDir, env) {
+  const file = join(appDir, ".env.example");
+  if (!existsSync(file)) return [];
+  let text = readFileSync(file, "utf8");
+  const injected = [];
+  for (const key of PILOT_FEEDBACK_KEYS) {
+    const val = String(env[key] || "").trim();
+    if (!val) continue;
+    const re = new RegExp(`^${key}=.*$`, "m");
+    text = re.test(text) ? text.replace(re, `${key}=${val}`) : `${text}\n${key}=${val}\n`;
+    injected.push(key);
+  }
+  if (injected.length) writeFileSync(file, text);
+  return injected;
+}
+
+// Hard-fail if any HIGH-value secret (AI key, Dropbox token, *_SECRET/_TOKEN,
+// etc.) carries a non-blank value in the shipped .env.example. The
+// PILOT_FEEDBACK_* token is the single allowed exception.
+function assertEnvExampleHasNoHighValueSecrets(appDir) {
+  const file = join(appDir, ".env.example");
+  if (!existsSync(file)) return;
+  const offenders = [];
+  for (const raw of readFileSync(file, "utf8").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (!val) continue;
+    if (PILOT_FEEDBACK_KEYS.includes(key)) continue; // the one allowed token
+    if (SECRET_KEY_RE.test(key)) offenders.push(key);
+  }
+  if (offenders.length) {
+    die(
+      "Refusing to build — .env.example carries non-blank secret values that aren't the\n" +
+      `   allowed pilot-feedback token:\n   ${offenders.join("\n   ")}`
+    );
+  }
+}
 
 // ---- args ----------------------------------------------------------------
 function parseArgs(argv) {
@@ -183,6 +275,16 @@ async function build() {
       join(appDir, "release.json"),
       JSON.stringify({ version, build, commit: fullCommit, channel: "student" }, null, 2) + "\n"
     );
+
+    // 2b. Bake the pilot-feedback token into .env.example (if provided at
+    // release time), then hard-fail if any OTHER secret value rode along.
+    const injected = injectFeedbackConfig(appDir, loadReleaseEnv());
+    assertEnvExampleHasNoHighValueSecrets(appDir);
+    if (injected.length) {
+      process.stdout.write(`  Baked pilot-feedback config into .env.example (${injected.join(", ")}).\n`);
+    } else {
+      process.stdout.write(`  ! No pilot-feedback config provided — in-app feedback will be OFF for pilots.\n`);
+    }
 
     // 3. Belt-and-braces: scan the staged tree for anything forbidden.
     const staged = walk(appDir).map((p) => `${APP_FOLDER_NAME}/${p}`);
