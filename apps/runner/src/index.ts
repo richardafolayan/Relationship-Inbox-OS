@@ -58,6 +58,7 @@ import { readAppVersion, runUpdateCheck, stagePendingUpdate } from "./services/s
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
+  isLinkedInVoiceGuid,
   linkedInVoicePath
 } from "./services/linkedin-voice-store";
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
@@ -357,14 +358,18 @@ const linkedinAttachmentResolver: AttachmentResolver = {
 
 // Composite resolver dispatched on the guid format. iMessage attachments
 // are UUID-shaped (`3C3CA15E-7C18-...`); LinkedIn voice notes set the
-// URN as the guid (`urn:li:msg_message:...`). Falls back to null when
-// neither resolver recognises the id so the transcription service skips
-// gracefully instead of crashing.
+// message key as the guid. That key is either a real LinkedIn event URN
+// (`urn:li:msg_message:...`) or — when the bubble had no stable DOM id —
+// a content fingerprint (`li-msg-fp:...`) or the raw positional fallback
+// (`li-msg-<index>`); the voice store hashes whichever key we used to
+// write the file, so all three LinkedIn shapes must route to the LinkedIn
+// resolver. Falls back to null when neither resolver recognises the id so
+// the transcription service skips gracefully instead of crashing.
 const compositeAttachmentResolver: AttachmentResolver | null =
   imessageAttachmentResolver || linkedinAttachmentResolver
     ? {
         async resolve(id: string) {
-          if (id.startsWith("urn:li:")) {
+          if (isLinkedInVoiceGuid(id)) {
             return linkedinAttachmentResolver.resolve(id);
           }
           return imessageAttachmentResolver?.resolve(id) ?? null;
