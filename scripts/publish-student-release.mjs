@@ -87,7 +87,9 @@ if (args.help) {
 
 // ---- config (env + optional .env.release.local) --------------------------
 function loadConfig() {
-  const file = join(ROOT, ".env.release.local");
+  // Path overridable via RIOS_RELEASE_ENV_FILE so tests stay isolated from a
+  // real .env.release.local a developer may have on disk.
+  const file = process.env.RIOS_RELEASE_ENV_FILE || join(ROOT, ".env.release.local");
   const env = { ...process.env };
   if (existsSync(file)) {
     for (const raw of readFileSync(file, "utf8").split(/\r?\n/)) {
