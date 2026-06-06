@@ -343,6 +343,30 @@ export const providerRegistry: Record<AiProvider, AiProviderEntry> = {
 export const fallbackChain: AiProvider[] = ["openai"];
 
 /**
+ * Choose which provider to actually use, given the requested one and the set
+ * that has a key configured.
+ *
+ * If the requested provider has a key, use it. Otherwise fall back to the
+ * first CONFIGURED provider (in a stable preference order) so an operator only
+ * needs ANY one key — e.g. a pilot who set only GEMINI_API_KEY but left the
+ * default AI_PROVIDER=openai still gets working AI instead of silent nothing.
+ * When nothing is configured, the requested provider is returned and the
+ * caller handles the null client.
+ *
+ * This is a key-presence fallback only. It does NOT mask runtime outages of a
+ * configured provider — that is the separate, deliberately narrow
+ * `fallbackChain` above.
+ */
+export function pickActiveProvider(requested: AiProvider, configured: AiProvider[]): AiProvider {
+  if (configured.includes(requested)) return requested;
+  const preference: AiProvider[] = ["openai", "gemini", "glm"];
+  for (const candidate of preference) {
+    if (configured.includes(candidate)) return candidate;
+  }
+  return requested;
+}
+
+/**
  * Backwards-compatible facade for the old `classifyLlmError(error,
  * provider) => string` signature. Keeps the existing test suite + log
  * lines intact while the structured classification is what drives the
