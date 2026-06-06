@@ -138,6 +138,7 @@ export async function resetPlatformInboxGraph(
 
   const orphanPeople = await client.person.findMany({
     where: {
+      platform,
       threads: {
         none: {}
       }

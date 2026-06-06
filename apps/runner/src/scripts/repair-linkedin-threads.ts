@@ -65,6 +65,76 @@ export interface RepairApplyResult {
   messagesRepointed: number;
   threadsDeleted: number;
   threadsUpdated: number;
+  draftsRepointed: number;
+  draftsDropped: number;
+  sendRequestsRepointed: number;
+}
+
+/**
+ * Decide what to do with a merge duplicate's Draft and SendRequest rows
+ * BEFORE its Thread row is deleted. Both relations cascade-delete on
+ * `prisma.thread.delete` (schema: Draft.thread / SendRequest.thread carry
+ * `onDelete: Cascade`), so without re-pointing them first a queued or
+ * scheduled send — and any saved reply draft — is silently dropped when two
+ * LinkedIn threads for the same canonical conversation are merged.
+ *
+ * Rules:
+ * - SendRequest rows always move to the keeper. `clientSendId` is globally
+ *   unique so re-pointing never collides; PENDING/SCHEDULED rows are live
+ *   queued/scheduled sends that must never vanish, and SENT/FAILED rows are
+ *   receipts worth keeping with the surviving thread.
+ * - The duplicate's Draft moves to the keeper only when the keeper has no
+ *   draft of its own. The keeper is the higher-priority thread (more
+ *   messages / more recent), so when it already holds a draft we keep that
+ *   one and drop the duplicate's rather than leaving two competing drafts on
+ *   one thread (the dashboard save path uses findFirst and would otherwise
+ *   surface a non-deterministic pick).
+ */
+export function planThreadMergeRelinkage(input: {
+  keepThreadId: string;
+  mergeThreadId: string;
+  keeperHasDraft: boolean;
+}): { relinkSendRequests: boolean; relinkDraft: boolean; dropDuplicateDraft: boolean } {
+  return {
+    relinkSendRequests: true,
+    relinkDraft: !input.keeperHasDraft,
+    dropDuplicateDraft: input.keeperHasDraft
+  };
+}
+
+/**
+ * Resolve the `replyToMessageId` a merged-in message should carry once it has
+ * been re-pointed onto the keeper thread.
+ *
+ * `replyToMessageId` references a parent Message by its cuid `id`. When the
+ * duplicate thread's messages are re-created on the keeper they receive brand
+ * new cuids (the upsert `create` does not carry the original `id`), so the
+ * original parent id is stale the moment the duplicate thread is
+ * cascade-deleted. Copying it verbatim would leave a dangling reference.
+ *
+ * Rules, in order:
+ * - No original link → null.
+ * - Parent was part of this same merge batch (its old id is in the
+ *   old→new map) → point at the parent's new cuid on the keeper.
+ * - Parent was NOT in the batch but still resolves to a live Message
+ *   (e.g. a cross-thread reply whose parent already lives on the keeper) →
+ *   keep the original id.
+ * - Otherwise the parent is gone → drop the link (null) rather than dangle.
+ */
+export function resolveRemappedReplyToMessageId(input: {
+  originalReplyToMessageId: string | null;
+  oldToNewMessageId: Map<string, string>;
+  parentSurvivesOutsideMerge: boolean;
+}): string | null {
+  const original = input.originalReplyToMessageId;
+  if (!original) {
+    return null;
+  }
+  const remapped = input.oldToNewMessageId.get(original);
+  if (remapped) {
+    return remapped;
+  }
+  return input.parentSurvivesOutsideMerge ? original : null;
 }
 
 function clean(value: string | null | undefined): string {
@@ -195,6 +265,9 @@ export async function applyLinkedInRepairPlan(plan: RepairPlan): Promise<RepairA
   const prisma = await getPrisma();
   let messagesRepointed = 0;
   let threadsDeleted = 0;
+  let draftsRepointed = 0;
+  let draftsDropped = 0;
+  let sendRequestsRepointed = 0;
 
   for (const merge of plan.merges) {
     const sourceMessages = await prisma.message.findMany({
@@ -205,6 +278,14 @@ export async function applyLinkedInRepairPlan(plan: RepairPlan): Promise<RepairA
         createdAt: "asc"
       }
     });
+
+    // Re-point the duplicate's messages onto the keeper. We record each
+    // message's old id -> new (keeper) id so a second pass can remap
+    // `replyToMessageId` (which references a Message by cuid) instead of
+    // copying the stale id verbatim, which would dangle once the duplicate
+    // thread is cascade-deleted below.
+    const oldToNewMessageId = new Map<string, string>();
+    const pendingReplyLinks: Array<{ newMessageId: string; originalReplyToMessageId: string }> = [];
 
     for (const message of sourceMessages) {
       let key = message.platformMessageKey;
@@ -224,7 +305,7 @@ export async function applyLinkedInRepairPlan(plan: RepairPlan): Promise<RepairA
         key = `${message.platformMessageKey}:merged:${merge.mergeThreadId.slice(0, 8)}`;
       }
 
-      await prisma.message.upsert({
+      const upserted = await prisma.message.upsert({
         where: {
           threadId_platformMessageKey: {
             threadId: merge.keepThreadId,
@@ -237,7 +318,8 @@ export async function applyLinkedInRepairPlan(plan: RepairPlan): Promise<RepairA
           text: message.text,
           senderName: message.senderName,
           rawJson: message.rawJson,
-          attachmentsJson: message.attachmentsJson
+          attachmentsJson: message.attachmentsJson,
+          sentVia: message.sentVia
         },
         create: {
           threadId: merge.keepThreadId,
@@ -247,10 +329,78 @@ export async function applyLinkedInRepairPlan(plan: RepairPlan): Promise<RepairA
           text: message.text,
           senderName: message.senderName,
           rawJson: message.rawJson,
-          attachmentsJson: message.attachmentsJson
-        }
+          attachmentsJson: message.attachmentsJson,
+          sentVia: message.sentVia
+        },
+        select: { id: true }
       });
+      oldToNewMessageId.set(message.id, upserted.id);
+      if (message.replyToMessageId) {
+        pendingReplyLinks.push({
+          newMessageId: upserted.id,
+          originalReplyToMessageId: message.replyToMessageId
+        });
+      }
       messagesRepointed += 1;
+    }
+
+    // Second pass: now that every merged-in message has its new keeper id,
+    // remap reply linkage. A parent that was part of this batch points at its
+    // new cuid; a parent that still resolves to a live Message (e.g. already
+    // on the keeper) is kept; anything else is dropped so we never leave a
+    // dangling reference to a message that is about to be cascade-deleted.
+    for (const link of pendingReplyLinks) {
+      const parentSurvivesOutsideMerge =
+        !oldToNewMessageId.has(link.originalReplyToMessageId) &&
+        (await prisma.message.findUnique({
+          where: { id: link.originalReplyToMessageId },
+          select: { id: true }
+        })) !== null;
+      const resolved = resolveRemappedReplyToMessageId({
+        originalReplyToMessageId: link.originalReplyToMessageId,
+        oldToNewMessageId,
+        parentSurvivesOutsideMerge
+      });
+      if (resolved !== null) {
+        await prisma.message.update({
+          where: { id: link.newMessageId },
+          data: { replyToMessageId: resolved }
+        });
+      }
+    }
+
+    // Preserve the duplicate's Draft and SendRequest rows before deleting its
+    // Thread. Both relations cascade-delete on prisma.thread.delete, so a
+    // queued/scheduled send or a saved reply draft would otherwise be lost.
+    const keeperDraft = await prisma.draft.findFirst({
+      where: { threadId: merge.keepThreadId },
+      select: { id: true }
+    });
+    const relinkage = planThreadMergeRelinkage({
+      keepThreadId: merge.keepThreadId,
+      mergeThreadId: merge.mergeThreadId,
+      keeperHasDraft: keeperDraft !== null
+    });
+
+    if (relinkage.relinkSendRequests) {
+      const moved = await prisma.sendRequest.updateMany({
+        where: { threadId: merge.mergeThreadId },
+        data: { threadId: merge.keepThreadId }
+      });
+      sendRequestsRepointed += moved.count;
+    }
+
+    if (relinkage.relinkDraft) {
+      const moved = await prisma.draft.updateMany({
+        where: { threadId: merge.mergeThreadId },
+        data: { threadId: merge.keepThreadId }
+      });
+      draftsRepointed += moved.count;
+    } else if (relinkage.dropDuplicateDraft) {
+      const dropped = await prisma.draft.deleteMany({
+        where: { threadId: merge.mergeThreadId }
+      });
+      draftsDropped += dropped.count;
     }
 
     await prisma.thread.delete({
@@ -290,7 +440,10 @@ export async function applyLinkedInRepairPlan(plan: RepairPlan): Promise<RepairA
   return {
     messagesRepointed,
     threadsDeleted,
-    threadsUpdated
+    threadsUpdated,
+    draftsRepointed,
+    draftsDropped,
+    sendRequestsRepointed
   };
 }
 
@@ -425,7 +578,10 @@ export async function runRepairLinkedInThreads(argv = process.argv.slice(2)): Pr
     deleteCandidates: plan.summary.deleteCandidates,
     messagesRepointed: applyResult?.messagesRepointed ?? 0,
     threadsDeleted: applyResult?.threadsDeleted ?? 0,
-    threadsUpdated: applyResult?.threadsUpdated ?? 0
+    threadsUpdated: applyResult?.threadsUpdated ?? 0,
+    draftsRepointed: applyResult?.draftsRepointed ?? 0,
+    draftsDropped: applyResult?.draftsDropped ?? 0,
+    sendRequestsRepointed: applyResult?.sendRequestsRepointed ?? 0
   };
 
   // eslint-disable-next-line no-console
