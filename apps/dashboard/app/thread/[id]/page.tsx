@@ -2398,10 +2398,17 @@ export default function ThreadPage() {
   const toggleFavourite = () => {
     const next = !favourite;
     const personId = thread.personId;
+    const startThreadId = threadId;
     setFavOverride(next);
     void setFavourite(personId, next)
       .then(() => refresh())
-      .catch(() => setFavOverride(!next));
+      .catch(() => {
+        // favOverride is thread-local; don't revert it onto a different thread
+        // if the operator navigated away before this request failed.
+        if (shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) {
+          setFavOverride(!next);
+        }
+      });
   };
 
   // Late-night LinkedIn send nudge (see lib/late-night-send.ts). Shown only
