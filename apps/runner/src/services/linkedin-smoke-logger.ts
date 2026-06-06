@@ -107,7 +107,17 @@ export async function createLinkedInSmokeLogger(input: {
       // eslint-disable-next-line no-console
       console.info(line);
     }
-    writeQueue = writeQueue.then(() => appendFile(prettyLogPath, `${line}\n`, "utf8"));
+    writeQueue = writeQueue
+      .then(() => appendFile(prettyLogPath, `${line}\n`, "utf8"))
+      .catch((error) => {
+        // Best-effort logging: a single failed append (disk full, file removed,
+        // permission change mid-run) must not poison the chain or abort the
+        // smoke run. Swallow the write error and keep the queue resolvable.
+        if (terminalEnabled) {
+          // eslint-disable-next-line no-console
+          console.warn(`[LI][SMOKE] pretty.log write failed: ${String(error)}`);
+        }
+      });
     await writeQueue;
   };
 

@@ -517,6 +517,22 @@ export type EnqueueScanResult =
       platform?: PlatformName;
     };
 
+/**
+ * Decide the status an accepted enqueue should report. The decision MUST be
+ * made from the `processing` flag read BEFORE `triggerProcessNext()` runs:
+ * `triggerProcessNext` calls `void processNext()`, which synchronously shifts
+ * the job and sets `processing = true` before its first `await`. So by the
+ * time `enqueueScan` returns, `processing` is already `true` even for the job
+ * that just started — reading it there would always report "queued" and the
+ * "running" branch would be dead. Pass `processingBeforeEnqueue = !processing`
+ * captured up front instead.
+ */
+export function resolveEnqueueStatus(
+  processingBeforeEnqueue: boolean
+): "queued" | "running" {
+  return processingBeforeEnqueue ? "queued" : "running";
+}
+
 export function createScanQueue(deps: ScanQueueDeps) {
   const runnerRootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
   const latestLinkedInScanPointerPath = resolve(runnerRootDir, "LATEST_LINKEDIN_SCAN.txt");
@@ -1011,13 +1027,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
       fromScheduler: options?.fromScheduler === true
     };
 
+    // Capture whether a job is already in flight BEFORE triggerProcessNext():
+    // processNext() synchronously sets `processing = true` for this very job
+    // before its first await, so reading `processing` after the trigger would
+    // always report "queued". See resolveEnqueueStatus.
+    const processingBeforeEnqueue = processing;
     queue.push(job);
     triggerProcessNext();
 
     return {
       ok: true,
       jobId: job.jobId,
-      status: processing ? "queued" : "running",
+      status: resolveEnqueueStatus(processingBeforeEnqueue),
       requestId: job.jobId,
       platform
     };
