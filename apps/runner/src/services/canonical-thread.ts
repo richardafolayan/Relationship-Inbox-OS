@@ -55,3 +55,25 @@ export function pickCanonicalThread<T extends CanonicalCandidate>(rows: readonly
   }
   return best;
 }
+
+/**
+ * The thread id an AI-field WRITE (summary / what-they-want / reply brief /
+ * predraft / category / suggested replies) must land on, so writers agree with
+ * the readers. For an IMESSAGE Person split across handle-specific siblings the
+ * fresh AI state lives on the canonical (most-recent-inbound) row — the same
+ * row /data/thread reads from — so a write triggered on a dormant sibling (e.g.
+ * a send-side reassess or the stale-summary self-heal firing on the old phone
+ * thread) is redirected there. Non-iMessage threads and single-sibling Persons
+ * are their own canonical row and write to `requestedId` unchanged. Falls back
+ * to `requestedId` when the sibling set is empty (defensive — callers always
+ * include the requested row). Mirrors the resolution in /data/thread; keeping
+ * the decision here lets both the read and write paths share one rule.
+ */
+export function canonicalWriteTargetId(
+  requestedId: string,
+  platform: string,
+  siblingRows: readonly CanonicalCandidate[]
+): string {
+  if (platform !== "IMESSAGE" || siblingRows.length <= 1) return requestedId;
+  return pickCanonicalThread(siblingRows)?.id ?? requestedId;
+}

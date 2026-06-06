@@ -26,7 +26,7 @@ import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
-import { shouldApplyThreadScopedResult } from "@/lib/thread-identity-guard";
+import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
 import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
@@ -707,6 +707,21 @@ export default function ThreadPage() {
     pendingSendsRef.current = pendingSends;
   }, [pendingSends]);
 
+  // Sibling cohort for SSE routing (iMessage phone + email handle rows). Held
+  // in a ref so the []-stable SSE handler reads the latest cohort without
+  // re-subscribing on every thread fetch. Falls back to [threadId] until the
+  // first /data/thread payload (or when talking to a runner that predates
+  // siblingIds), which makes the match degrade to exact-id — the old behaviour.
+  const siblingIdsRef = useRef<string[]>(threadId ? [threadId] : []);
+  useEffect(() => {
+    siblingIdsRef.current =
+      thread?.siblingIds && thread.siblingIds.length > 0
+        ? thread.siblingIds
+        : threadId
+          ? [threadId]
+          : [];
+  }, [thread?.siblingIds, threadId]);
+
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   // #461 (pilot R-0060): controls the floating "jump to latest" button.
@@ -977,7 +992,11 @@ export default function ThreadPage() {
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
         stage?: string;
       }>).detail;
-      if (!detail || !threadId || detail.threadId !== threadId) return;
+      if (!detail || !threadId) return;
+      // Sibling-aware routing: accept events for the open thread OR any sibling
+      // in its cohort (a split iMessage Person's other handle), so a new inbound
+      // / reassess / scan on the other handle refetches the open view.
+      if (!shouldRefetchForThreadEvent(detail.threadId, threadId, siblingIdsRef.current)) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
         void refreshThread().finally(() => {
           setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
