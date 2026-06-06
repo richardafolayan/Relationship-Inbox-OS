@@ -244,7 +244,7 @@ install_node_local() {
     *)      na="x64"; warn "Unknown CPU $arch — trying the Intel (x64) Node build." ;;
   esac
 
-  info "Looking up the latest Node $NODE_MAJOR build for $na…"
+  info "Looking up the latest Node $NODE_MAJOR build for $na..."
   line="$(curl -fsSL --max-time 30 "$NODE_RELEASE_DIR/SHASUMS256.txt" 2>>"$LOG_FILE" \
     | grep "darwin-$na\.tar\.gz$" | head -1)"
   name="$(printf '%s' "$line" | awk '{print $2}')"
@@ -255,7 +255,7 @@ install_node_local() {
   url="$NODE_RELEASE_DIR/$name"
   tmp_tgz="${TMPDIR:-/tmp}/$name"
 
-  info "Downloading $name (about 40 MB)…"
+  info "Downloading $name (about 40 MB)..."
   if ! curl -fSL --progress-bar --max-time 600 "$url" -o "$tmp_tgz" 2>>"$LOG_FILE"; then
     die "Download of Node $NODE_MAJOR failed. Check your Wi-Fi and try again."
   fi
@@ -266,7 +266,7 @@ install_node_local() {
     die "The Node download didn't match its checksum. Try again; if it keeps failing, tell Richard."
   fi
 
-  info "Installing Node into $(display_path "$RIOS_NODE_DIR") (no admin needed)…"
+  info "Installing Node into $(display_path "$RIOS_NODE_DIR") (no admin needed)..."
   rm -rf "$RIOS_NODE_DIR"
   mkdir -p "$RIOS_NODE_DIR" || die "Couldn't create $RIOS_NODE_DIR."
   if ! tar -xzf "$tmp_tgz" -C "$RIOS_NODE_DIR" --strip-components=1 >>"$LOG_FILE" 2>&1; then
@@ -324,7 +324,7 @@ resolve_app_dir() {
   step "Finding the app"
 
   # Where are we installing FROM? The script lives inside the project
-  # (scripts/…) when run from an unzipped folder; otherwise we download.
+  # (scripts/...) when run from an unzipped folder; otherwise we download.
   local src_dir=""
   case "${BASH_SOURCE[0]:-}" in
     ""|/dev/fd/*|/dev/stdin|bash|sh) : ;;          # piped from curl — no path
@@ -434,13 +434,13 @@ download_app() {
   tmp_zip="${TMPDIR:-/tmp}/relationship-inbox-os.zip"
   extract_tmp="${TMPDIR:-/tmp}/rios-extract-$$"
 
-  info "Downloading Relationship Inbox OS…"
+  info "Downloading Relationship Inbox OS..."
   if ! curl -fSL --progress-bar --max-time 1200 "$APP_ZIP_URL" -o "$tmp_zip" 2>>"$LOG_FILE"; then
     die "Couldn't download the app. Check your Wi-Fi and the link, then try again."
   fi
 
   rm -rf "$extract_tmp"; mkdir -p "$extract_tmp"
-  info "Unpacking…"
+  info "Unpacking..."
   if ! ditto -x -k "$tmp_zip" "$extract_tmp" >>"$LOG_FILE" 2>&1 && \
      ! unzip -q "$tmp_zip" -d "$extract_tmp" >>"$LOG_FILE" 2>&1; then
     die "The download couldn't be unzipped. Send the log to Richard: $LOG_FILE"
@@ -465,7 +465,7 @@ download_app() {
 # --------------------------------------------------------------------------
 
 set_env_var() {
-  # set_env_var FILE KEY VALUE  — replace KEY=… line in FILE, or append it.
+  # set_env_var FILE KEY VALUE  — replace KEY=... line in FILE, or append it.
   local file="$1" key="$2" value="$3" tmp
   tmp="$(mktemp)"
   if grep -q "^${key}=" "$file" 2>/dev/null; then
@@ -542,24 +542,24 @@ install_app() {
     return 0
   fi
 
-  run "Installing app dependencies (npm install)…" npm install --include=dev \
+  run "Installing app dependencies (npm install)..." npm install --include=dev \
     || die "Installing dependencies failed. The log has the details: $LOG_FILE"
   ok "Dependencies installed"
 
-  run "Installing the browser for LinkedIn (Chromium only)…" npx playwright install chromium \
+  run "Installing the browser for LinkedIn (Chromium only)..." npx playwright install chromium \
     || warn "Couldn't install the LinkedIn browser now — you can retry later with: npx playwright install chromium"
   ok "LinkedIn browser ready"
 
-  run "Preparing the local database…" npm run db:generate \
+  run "Preparing the local database..." npm run db:generate \
     || die "Database setup (generate) failed. The log has the details: $LOG_FILE"
-  run "Creating the local database…" npm run db:push \
+  run "Creating the local database..." npm run db:push \
     || die "Database setup (create) failed. The log has the details: $LOG_FILE"
   ok "Local database ready"
 
   # Download the local voice-transcription model so transcription works on
   # first run. Non-fatal: a network hiccup must not fail the whole install —
   # voice notes simply transcribe once the model is fetched (retryable).
-  if run "Downloading the voice-transcription model (one-time, ~150 MB)…" \
+  if run "Downloading the voice-transcription model (one-time, ~150 MB)..." \
        env TRANSCRIPTION_MODEL_DIR="$APP_DIR/data/models" npm run fetch:whisper-model; then
     ok "Voice-transcription model ready"
   else
@@ -579,7 +579,7 @@ wait_for_dashboard() {
       return 0
     fi
     sleep 3; waited=$((waited + 3))
-    [ $((waited % 15)) -eq 0 ] && info "Still starting up… (${waited}s)"
+    [ $((waited % 15)) -eq 0 ] && info "Still starting up... (${waited}s)"
   done
   return 1
 }
@@ -600,12 +600,12 @@ start_app() {
   step "Starting Relationship Inbox OS"
   cd "$APP_DIR" || die "Couldn't open the app folder $APP_DIR."
 
-  info "Launching the app (the first start takes a minute)…"
+  info "Launching the app (the first start takes a minute)..."
   # Keep the dev server attached to this Terminal so Ctrl+C stops it, the way
   # the guide describes. Its verbose output streams to the log.
   npm run dev >>"$LOG_FILE" 2>&1 &
   local dev_pid=$!
-  trap 'printf "\n  Stopping the app…\n"; kill "$dev_pid" 2>/dev/null; wait "$dev_pid" 2>/dev/null; exit 0' INT TERM
+  trap 'printf "\n  Stopping the app...\n"; kill "$dev_pid" 2>/dev/null; wait "$dev_pid" 2>/dev/null; exit 0' INT TERM
 
   if wait_for_dashboard; then
     ok "The app is up"
