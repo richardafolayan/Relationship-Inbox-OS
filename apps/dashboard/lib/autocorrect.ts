@@ -189,14 +189,37 @@ export interface AutocorrectResult {
   corrected: string;
 }
 
+// Abbreviations whose trailing period is NOT a sentence boundary (so the
+// next word should not be capitalised). Compared case-insensitively against
+// the whitespace-delimited token that ends in the period.
+const SENTENCE_ABBREVIATIONS = new Set([
+  "p.m.", "a.m.", "i.e.", "e.g.", "etc.", "vs.",
+  "mr.", "mrs.", "ms.", "dr.", "u.s."
+]);
+
+// True when the period at `text[dot]` closes a known abbreviation (p.m.,
+// e.g., Dr., …) or a run of single-letter-dot groups (A.B., U.S., p.m.), so
+// it must not be treated as a sentence terminator.
+function isAbbreviationDot(text: string, dot: number): boolean {
+  let s = dot;
+  while (s > 0 && !isWordCommit(text[s - 1])) s--;
+  const token = text.slice(s, dot + 1); // includes the trailing period
+  if (SENTENCE_ABBREVIATIONS.has(token.toLowerCase())) return true;
+  if (/^(?:[A-Za-z]\.)+$/.test(token)) return true; // A.B. / U.S. / p.m.
+  return false;
+}
+
 // True when the word starting at `start` begins a sentence: nothing but
 // whitespace precedes it back to either the start of the text or a sentence
-// terminator (. ! ?).
+// terminator (. ! ?). A period that closes a known abbreviation is not a
+// terminator (so "p.m. today" stays lowercase), but ! and ? always are.
 function startsSentence(text: string, start: number): boolean {
   let i = start - 1;
   while (i >= 0 && isWordCommit(text[i])) i--;
   if (i < 0) return true;
-  return text[i] === "." || text[i] === "!" || text[i] === "?";
+  if (text[i] === "!" || text[i] === "?") return true;
+  if (text[i] === ".") return !isAbbreviationDot(text, i);
+  return false;
 }
 
 /**
