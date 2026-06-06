@@ -59,6 +59,25 @@ export function validateScreenshotFile(file: { type: string; size: number }): Sc
   return { ok: true };
 }
 
+export type ScreenshotMergeResult<T> = { merged: T[]; overflow: boolean };
+
+/**
+ * Merge freshly-picked screenshots onto the current set, capping the result
+ * at MAX_SCREENSHOTS. Pure so the capacity accounting can be done against the
+ * freshest committed array (inside a functional state updater) rather than a
+ * length captured before an async file read — two near-simultaneous drops
+ * would otherwise both read the same stale length, pass their per-call cap
+ * check, and silently discard the over-cap images. `overflow` is true when
+ * anything was dropped, so the caller can surface the over-cap message.
+ */
+export function mergeScreenshots<T>(prev: T[], picked: T[]): ScreenshotMergeResult<T> {
+  const combined = [...prev, ...picked];
+  return {
+    merged: combined.slice(0, MAX_SCREENSHOTS),
+    overflow: combined.length > MAX_SCREENSHOTS
+  };
+}
+
 // --- Report payload ------------------------------------------------------
 
 /** Safe, message-content-free metadata gathered on the dashboard side. */
