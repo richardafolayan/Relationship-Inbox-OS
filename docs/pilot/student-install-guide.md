@@ -75,6 +75,8 @@ Either way, the installer takes over from here. While it runs it will:
   one you use to unlock your Mac),
 - install the app into **`~/RelationshipInboxOS`** and set up what it needs,
 - set up your local database,
+- download a small voice-transcription model (about 150 MB) so voice notes
+  transcribe automatically,
 - start the app and open it at **http://localhost:3100**.
 
 The long part is "Installing the app", which takes a few minutes. It's normal

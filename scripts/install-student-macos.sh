@@ -458,6 +458,10 @@ ensure_env() {
   # Personal Chrome mode is the recommended pilot default.
   set_env_var "$env_file" "BROWSER_PROFILE_MODE" "personal"
 
+  # Pin the local transcription model cache to an absolute path under data/
+  # so it survives app updates and the runner + fetch script agree on it.
+  set_env_var "$env_file" "TRANSCRIPTION_MODEL_DIR" "$APP_DIR/data/models"
+
   if [ -n "${RIOS_OPENAI_API_KEY:-}" ]; then
     set_env_var "$env_file" "OPENAI_API_KEY" "$RIOS_OPENAI_API_KEY"
     ok "OpenAI key saved"
@@ -499,6 +503,17 @@ install_app() {
   run "Creating the local database…" npm run db:push \
     || die "Database setup (create) failed. The log has the details: $LOG_FILE"
   ok "Local database ready"
+
+  # Download the local voice-transcription model so transcription works on
+  # first run. Non-fatal: a network hiccup must not fail the whole install —
+  # voice notes simply transcribe once the model is fetched (retryable).
+  if run "Downloading the voice-transcription model (one-time, ~150 MB)…" \
+       env TRANSCRIPTION_MODEL_DIR="$APP_DIR/data/models" npm run fetch:whisper-model; then
+    ok "Voice-transcription model ready"
+  else
+    warn "Couldn't download the transcription model now — voice notes will transcribe once it's fetched."
+    warn "Retry later with:  cd \"$APP_DIR\" && npm run fetch:whisper-model"
+  fi
 }
 
 # --------------------------------------------------------------------------
