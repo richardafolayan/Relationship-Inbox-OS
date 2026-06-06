@@ -4,8 +4,8 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  compareVersions, findForbiddenEntries, isNewer, parseVersion,
-  sha256Buffer, validateLatestJson
+  bakeFeedbackEnv, compareVersions, findEnvExampleSecretLeaks, findForbiddenEntries,
+  isNewer, parseVersion, sha256Buffer, validateLatestJson
 } from "../scripts/lib/release-manifest.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -141,4 +141,53 @@ test("no tracked file in the repo would leak into a release", () => {
     .split("\n").map((l) => l.trim()).filter(Boolean);
   const leaked = findForbiddenEntries(tracked);
   assert.deepEqual(leaked, [], `tracked secrets would leak: ${leaked.join(", ")}`);
+});
+
+// ---- pilot-feedback token baking + leak guard ----------------------------
+
+const SAMPLE_ENV = [
+  "OPENAI_API_KEY=",
+  "AI_PROVIDER=openai",
+  "GEMINI_MODEL=gemma-4-31b-it",
+  "PILOT_FEEDBACK_WEBHOOK_URL=",
+  "PILOT_FEEDBACK_SECRET=",
+  "PILOT_FEEDBACK_STATUS_URL="
+].join("\n");
+
+test("bakeFeedbackEnv fills the PILOT_FEEDBACK_* lines from the source env", () => {
+  const { text, injected } = bakeFeedbackEnv(SAMPLE_ENV, {
+    PILOT_FEEDBACK_WEBHOOK_URL: "https://example.test/exec",
+    PILOT_FEEDBACK_SECRET: "shh-123",
+    OPENAI_API_KEY: "sk-should-not-be-baked"
+  });
+  assert.match(text, /^PILOT_FEEDBACK_WEBHOOK_URL=https:\/\/example\.test\/exec$/m);
+  assert.match(text, /^PILOT_FEEDBACK_SECRET=shh-123$/m);
+  assert.match(text, /^PILOT_FEEDBACK_STATUS_URL=$/m, "unset key stays blank");
+  assert.match(text, /^OPENAI_API_KEY=$/m, "only PILOT_FEEDBACK_* are ever baked");
+  assert.deepEqual(injected, ["PILOT_FEEDBACK_WEBHOOK_URL", "PILOT_FEEDBACK_SECRET"]);
+});
+
+test("bakeFeedbackEnv with no feedback config injects nothing", () => {
+  const { text, injected } = bakeFeedbackEnv(SAMPLE_ENV, { OPENAI_API_KEY: "sk-x" });
+  assert.equal(injected.length, 0);
+  assert.equal(text, SAMPLE_ENV);
+});
+
+test("findEnvExampleSecretLeaks passes a baked feedback token but catches real secrets", () => {
+  const baked = bakeFeedbackEnv(SAMPLE_ENV, {
+    PILOT_FEEDBACK_WEBHOOK_URL: "https://example.test/exec",
+    PILOT_FEEDBACK_SECRET: "shh-123"
+  }).text;
+  assert.deepEqual(findEnvExampleSecretLeaks(baked), [], "feedback token alone is allowed");
+
+  const leaked = baked + "\nOPENAI_API_KEY=sk-real\nGITHUB_TOKEN=ghp_real\nDROPBOX_REFRESH_TOKEN=abc";
+  assert.deepEqual(
+    findEnvExampleSecretLeaks(leaked).sort(),
+    ["DROPBOX_REFRESH_TOKEN", "GITHUB_TOKEN", "OPENAI_API_KEY"]
+  );
+});
+
+test("findEnvExampleSecretLeaks ignores non-secret config keys", () => {
+  const cfg = "AI_PROVIDER=openai\nGEMINI_BASE_URL=https://x\nGEMINI_MODEL=gemma\nOPENAI_MODEL=gpt-5-nano\nZ_AI_BASE_URL=https://y";
+  assert.deepEqual(findEnvExampleSecretLeaks(cfg), []);
 });

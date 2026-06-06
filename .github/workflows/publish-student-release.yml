@@ -93,6 +93,13 @@ jobs:
           RIOS_DROPBOX_MANIFEST_PATH: ${{ secrets.RIOS_DROPBOX_MANIFEST_PATH }}
           RIOS_DROPBOX_ZIP_URL: ${{ secrets.RIOS_DROPBOX_ZIP_URL }}
           RIOS_UPDATE_FEED_URL: ${{ secrets.RIOS_UPDATE_FEED_URL }}
+          # Pilot-feedback token (low-value, rotatable) baked into the shipped
+          # .env.example so pilots can submit in-app feedback. OPTIONAL: if
+          # unset, the build just ships blank feedback config (in-app feedback
+          # stays off) rather than failing.
+          PILOT_FEEDBACK_WEBHOOK_URL: ${{ secrets.PILOT_FEEDBACK_WEBHOOK_URL }}
+          PILOT_FEEDBACK_SECRET: ${{ secrets.PILOT_FEEDBACK_SECRET }}
+          PILOT_FEEDBACK_STATUS_URL: ${{ secrets.PILOT_FEEDBACK_STATUS_URL }}
           # Empty on push runs (no inputs) -> the publish script uses its
           # default notes. Manual runs can supply custom notes.
           RELEASE_NOTES: ${{ github.event.inputs.release_notes }}

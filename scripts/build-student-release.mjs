@@ -49,24 +49,12 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { findForbiddenEntries, sha256File } from "./lib/release-manifest.mjs";
+import {
+  bakeFeedbackEnv, findEnvExampleSecretLeaks, findForbiddenEntries, sha256File
+} from "./lib/release-manifest.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const APP_FOLDER_NAME = "relationship-inbox-os";
-
-// The ONLY config values ever baked into the shipped .env.example. Treated as
-// a DISTRIBUTED pilot-feedback token (low value, rotatable) — never a private
-// secret. Sourced at release time from env or a gitignored .env.release.local.
-const PILOT_FEEDBACK_KEYS = [
-  "PILOT_FEEDBACK_WEBHOOK_URL",
-  "PILOT_FEEDBACK_SECRET",
-  "PILOT_FEEDBACK_STATUS_URL"
-];
-
-// A non-blank value on a key matching this in the shipped .env.example is a
-// high-value secret leak. The PILOT_FEEDBACK_* token is the one allowed
-// exception (whitelisted in the content scan below).
-const SECRET_KEY_RE = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$|^DROPBOX_/i;
 
 // Load env + an optional gitignored .env.release.local (real env wins),
 // mirroring publish-student-release.mjs so a direct `build:student-release`
@@ -92,49 +80,22 @@ function loadReleaseEnv() {
   return env;
 }
 
-// Bake the pilot-feedback token into the staged .env.example so a fresh
-// install's .env (the installer copies it from .env.example) can deliver
-// in-app feedback. Returns the keys actually injected.
-function injectFeedbackConfig(appDir, env) {
+// Bake the pilot-feedback token into the staged .env.example (the installer
+// copies it to .env), then hard-fail if any OTHER secret rode along. Uses the
+// pure helpers from release-manifest.mjs so the logic is unit-tested.
+function bakeAndGuardEnvExample(appDir) {
   const file = join(appDir, ".env.example");
   if (!existsSync(file)) return [];
-  let text = readFileSync(file, "utf8");
-  const injected = [];
-  for (const key of PILOT_FEEDBACK_KEYS) {
-    const val = String(env[key] || "").trim();
-    if (!val) continue;
-    const re = new RegExp(`^${key}=.*$`, "m");
-    text = re.test(text) ? text.replace(re, `${key}=${val}`) : `${text}\n${key}=${val}\n`;
-    injected.push(key);
-  }
+  const { text, injected } = bakeFeedbackEnv(readFileSync(file, "utf8"), loadReleaseEnv());
   if (injected.length) writeFileSync(file, text);
-  return injected;
-}
-
-// Hard-fail if any HIGH-value secret (AI key, Dropbox token, *_SECRET/_TOKEN,
-// etc.) carries a non-blank value in the shipped .env.example. The
-// PILOT_FEEDBACK_* token is the single allowed exception.
-function assertEnvExampleHasNoHighValueSecrets(appDir) {
-  const file = join(appDir, ".env.example");
-  if (!existsSync(file)) return;
-  const offenders = [];
-  for (const raw of readFileSync(file, "utf8").split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line || line.startsWith("#")) continue;
-    const eq = line.indexOf("=");
-    if (eq === -1) continue;
-    const key = line.slice(0, eq).trim();
-    const val = line.slice(eq + 1).trim();
-    if (!val) continue;
-    if (PILOT_FEEDBACK_KEYS.includes(key)) continue; // the one allowed token
-    if (SECRET_KEY_RE.test(key)) offenders.push(key);
-  }
-  if (offenders.length) {
+  const leaks = findEnvExampleSecretLeaks(readFileSync(file, "utf8"));
+  if (leaks.length) {
     die(
       "Refusing to build — .env.example carries non-blank secret values that aren't the\n" +
-      `   allowed pilot-feedback token:\n   ${offenders.join("\n   ")}`
+      `   allowed pilot-feedback token:\n   ${leaks.join("\n   ")}`
     );
   }
+  return injected;
 }
 
 // ---- args ----------------------------------------------------------------
@@ -278,8 +239,7 @@ async function build() {
 
     // 2b. Bake the pilot-feedback token into .env.example (if provided at
     // release time), then hard-fail if any OTHER secret value rode along.
-    const injected = injectFeedbackConfig(appDir, loadReleaseEnv());
-    assertEnvExampleHasNoHighValueSecrets(appDir);
+    const injected = bakeAndGuardEnvExample(appDir);
     if (injected.length) {
       process.stdout.write(`  Baked pilot-feedback config into .env.example (${injected.join(", ")}).\n`);
     } else {
