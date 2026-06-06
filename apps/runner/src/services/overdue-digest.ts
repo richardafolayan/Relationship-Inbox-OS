@@ -248,8 +248,12 @@ export function selectCandidates(input: {
     if (rank(a.riskLevel) !== rank(b.riskLevel)) {
       return rank(a.riskLevel) - rank(b.riskLevel);
     }
-    const aIn = a.lastInboundAt ? Date.parse(a.lastInboundAt) : Number.MAX_SAFE_INTEGER;
-    const bIn = b.lastInboundAt ? Date.parse(b.lastInboundAt) : Number.MAX_SAFE_INTEGER;
+    const inboundKey = (iso: string | null) => {
+      const ts = iso ? Date.parse(iso) : Number.NaN;
+      return Number.isFinite(ts) ? ts : Number.MAX_SAFE_INTEGER;
+    };
+    const aIn = inboundKey(a.lastInboundAt);
+    const bIn = inboundKey(b.lastInboundAt);
     if (aIn !== bIn) return aIn - bIn;
     return a.personId.localeCompare(b.personId);
   });
