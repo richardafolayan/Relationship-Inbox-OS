@@ -3,6 +3,7 @@ import { prisma } from "../db";
 import type { KeyedMutex } from "./keyed-mutex";
 import type { SessionManager } from "./session-manager";
 import { extractProfile, type ExtractedProfile, type ProfileExtractionResult } from "../platforms/linkedin-profile-adapter";
+import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./profile-url-policy";
 
 /**
  * Trigger source for an enqueue request. Diagnostic only — the picker
@@ -183,6 +184,18 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     if (!person.profileUrl) {
       return { failed: true, reason: "not_found", detail: "person has no profileUrl" };
     }
+    // Enrichment auto-visits whatever is stored in person.profileUrl in the
+    // authenticated Chrome. Stored/legacy rows predate the write-time
+    // allowlist, so re-check scheme/host before navigating: a file:// /
+    // view-source: / intranet URL would otherwise be a stored SSRF / local
+    // file read. parseAllowedProfileUrl returns the normalised URL or throws.
+    let safeProfileUrl: string;
+    try {
+      safeProfileUrl = parseAllowedProfileUrl(person.profileUrl, platform);
+    } catch (error) {
+      const detail = error instanceof ProfileUrlPolicyError ? error.message : String(error);
+      return { failed: true, reason: "navigation_error", detail };
+    }
     const page = await deps.sessionManager.getManagedPage({ platform, personKey });
     if (deps.ensureConnected) {
       try {
@@ -192,7 +205,7 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
         return { failed: true, reason: "auth_required", detail };
       }
     }
-    return extractProfile(page, person.profileUrl);
+    return extractProfile(page, safeProfileUrl);
   }
 
   async function persistSuccess(personId: string, profile: ExtractedProfile): Promise<void> {
