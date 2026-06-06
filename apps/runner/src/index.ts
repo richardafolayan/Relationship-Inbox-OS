@@ -1750,7 +1750,20 @@ app.get("/data/linkedin-voice-message/:urn", asyncRoute(async (req, res) => {
   const rawUrn = req.params.urn;
   const urnParam = typeof rawUrn === "string" ? rawUrn : "";
   const { urn } = z
-    .object({ urn: z.string().min(8).max(400).startsWith("urn:li:") })
+    .object({
+      urn: z
+        .string()
+        .min(8)
+        .max(400)
+        // The voice guid is the message key the adapter persisted under:
+        // a real `urn:li:` event urn, a `li-msg-fp:...` fingerprint for an
+        // id-less bubble (the common case, ~120 chars), or the legacy
+        // positional `li-msg-<index>`. All three are valid; only the
+        // single canonical predicate decides membership.
+        .refine(isLinkedInVoiceGuid, {
+          message: "not a LinkedIn voice-message guid"
+        })
+    })
     .parse({ urn: decodeURIComponent(urnParam) });
   if (!hasLinkedInVoice(urn)) {
     res.status(404).json({ error: "linkedin voice message not yet captured" });
