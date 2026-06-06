@@ -16,6 +16,8 @@ import {
   subscribeNotificationPermission
 } from "@/lib/notifications";
 import { localDateString } from "@/lib/overdue-digest";
+import { interpretReassessAllResult } from "@/lib/reassess-all-result";
+import type { MarkAllReassessResponse } from "@/lib/reassess-all-result";
 import type {
   OverdueDigestCadence,
   OverdueDigestCandidate,
@@ -280,7 +282,7 @@ export default function SettingsPage() {
 // reset for reassessment") rather than a vague "done", so the action
 // feels grounded.
 function ReassessAllControl() {
-  const [status, setStatus] = useState<"idle" | "running" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "running" | "done" | "intercepted" | "error">("idle");
   const [count, setCount] = useState<number | null>(null);
 
   const handleClick = async () => {
@@ -291,12 +293,17 @@ function ReassessAllControl() {
     if (!ok) return;
     setStatus("running");
     try {
-      const result = await apiPost<{ ok: true; threadsMarked: number }>(
+      const result = await apiPost<MarkAllReassessResponse>(
         "/runner/control/threads/mark-all-for-reassess",
         {}
       );
-      setCount(result.threadsMarked);
-      setStatus("done");
+      // In the live presenter demo the fetch interceptor swallows this
+      // mutation and resolves with a read-only sentinel that has no
+      // `threadsMarked` — fold it into an explicit outcome so we never
+      // render "undefined active threads reset for reassessment".
+      const outcome = interpretReassessAllResult(result);
+      setCount(outcome.count);
+      setStatus(outcome.status);
     } catch {
       setStatus("error");
     }
@@ -307,6 +314,10 @@ function ReassessAllControl() {
       {status === "done" && count !== null ? (
         <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
           {count} active threads reset for reassessment
+        </span>
+      ) : status === "intercepted" ? (
+        <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+          read-only demo, nothing changed
         </span>
       ) : status === "error" ? (
         <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
