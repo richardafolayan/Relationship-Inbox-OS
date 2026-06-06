@@ -28,9 +28,16 @@ import {
 } from "@/lib/notifications";
 import { showToast } from "@/lib/feedback";
 import {
+  classifyDigestAckError,
+  digestFireFingerprint,
+  EMPTY_DIGEST_FIRE_GUARD,
   localDateString,
+  nextDigestFireGuard,
+  planDigestFire,
   shouldQueryDigestTick,
   summariseCandidatesForAck,
+  type DigestAckOutcome,
+  type DigestFireGuard,
   type OverdueDigestSettings,
   type OverdueDigestTickResult
 } from "@/lib/overdue-digest";
@@ -329,6 +336,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   // off or when permission is not granted. /ack is only called when the
   // notification actually fires.
   const overdueDigestInFlightRef = useRef(false);
+  // Fire/ack transaction guard (#P4L3): remembers a digest we already fired
+  // whose ack has not yet landed, so a failed ack does not re-fire the
+  // identical notification on the next 5-minute poll.
+  const overdueDigestGuardRef = useRef<DigestFireGuard>(EMPTY_DIGEST_FIRE_GUARD);
   useEffect(() => {
     const check = async () => {
       if (overdueDigestInFlightRef.current) return;
@@ -355,17 +366,32 @@ export function AppShell({ children }: { children: ReactNode }) {
           { localDate: localDateString() }
         ).catch(() => null);
         if (!tick || !tick.due || tick.candidates.length === 0) return;
-        const fired = notifyOverdueReplyDigest(
-          tick.candidates.map((c) => ({ personId: c.personId, personName: c.personName })),
-          () => router.push("/today")
-        );
-        if (!fired) return;
-        await apiPost("/runner/control/overdue-digest/ack", {
-          included: summariseCandidatesForAck(tick.candidates),
-          // Same local date used for the tick gate above, persisted so the daily
-          // cadence compares like-for-like local dates next time (#628).
-          localDate: localDateString()
-        }).catch(() => undefined);
+        // Fire + ack are one transaction: only a successful ack advances the
+        // runner's lastDigestAt. If the ack failed last time, retry it WITHOUT
+        // re-firing the identical notification (#P4L3).
+        const fingerprint = digestFireFingerprint(settings.lastDigestAt, tick.candidates);
+        if (planDigestFire(fingerprint, overdueDigestGuardRef.current) === "fire-then-ack") {
+          const fired = notifyOverdueReplyDigest(
+            tick.candidates.map((c) => ({ personId: c.personId, personName: c.personName })),
+            () => router.push("/today")
+          );
+          if (!fired) return;
+          // Arm the guard BEFORE awaiting the ack so a re-entrant poll cannot
+          // re-fire while the ack is still in flight.
+          overdueDigestGuardRef.current = { pendingFingerprint: fingerprint };
+        }
+        let outcome: DigestAckOutcome = "ok";
+        try {
+          await apiPost("/runner/control/overdue-digest/ack", {
+            included: summariseCandidatesForAck(tick.candidates),
+            // Same local date used for the tick gate above, persisted so the daily
+            // cadence compares like-for-like local dates next time (#628).
+            localDate: localDateString()
+          });
+        } catch (error) {
+          outcome = classifyDigestAckError(error);
+        }
+        overdueDigestGuardRef.current = nextDigestFireGuard(fingerprint, outcome);
       } finally {
         overdueDigestInFlightRef.current = false;
       }
