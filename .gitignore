@@ -9,6 +9,8 @@ coverage
 /release-dist/
 /.update-backups/
 release.json
+# Local publishing config: Dropbox token + stable URLs. NEVER commit.
+.env.release.local
 .DS_Store
 .env
 .env.local

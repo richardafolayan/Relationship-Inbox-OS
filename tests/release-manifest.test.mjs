@@ -105,13 +105,32 @@ test("the forbidden scan flags secrets and runtime dirs", () => {
   assert.equal(flagged.length, 6);
 });
 
+test("the forbidden scan flags key / credential file types", () => {
+  const flagged = findForbiddenEntries([
+    "r/cert.p12", "r/cert.pfx", "r/release.jks", "r/my.keystore",
+    "r/.ssh/id_ed25519", "r/id_ecdsa", "r/id_dsa",
+    "r/firebase-adminsdk-abc.json", "r/my-service-account.json", "r/client_secret_123.json",
+    "r/.npmrc", "r/key.ppk", "r/secret.asc"
+  ]);
+  assert.equal(flagged.length, 13);
+});
+
+test("node_modules is flagged at any depth", () => {
+  assert.deepEqual(
+    findForbiddenEntries(["r/apps/dashboard/node_modules/leftpad/index.js"]),
+    ["r/apps/dashboard/node_modules/leftpad/index.js"]
+  );
+});
+
 test("the forbidden scan does NOT flag legitimate source paths", () => {
   const flagged = findForbiddenEntries([
     "relationship-inbox-os/apps/dashboard/app/logs/page.tsx", // a UI route named 'logs'
     "relationship-inbox-os/apps/runner/src/db.ts",
     "relationship-inbox-os/.env.example", // template, no secrets
     "relationship-inbox-os/scripts/build-student-release.mjs",
-    "relationship-inbox-os/package.json"
+    "relationship-inbox-os/package.json",
+    "relationship-inbox-os/apps/dashboard/lib/data-table.tsx", // 'data-table' != 'data'
+    "relationship-inbox-os/tsconfig.json"
   ]);
   assert.deepEqual(flagged, []);
 });
