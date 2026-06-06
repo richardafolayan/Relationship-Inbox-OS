@@ -241,7 +241,15 @@ async function applyUpdate(current, manifest) {
     die("The downloaded update didn't contain the app. Aborted with nothing changed.");
   }
 
-  // 4. Preserve personal data into the new copy.
+  // 4. Stop the app FIRST — before copying data/. The preserved data/ dir holds
+  //    the live SQLite DB (main file + -wal/-shm). A non-atomic cpSync while the
+  //    runner is mid-write/checkpoint can produce a copy whose WAL is
+  //    inconsistent with the main file, and the pilot then boots on that
+  //    torn/corrupt DB (rollback only fires on a deps-step throw, not on a
+  //    silently-corrupt-but-openable DB). Stopping first closes the DB handles.
+  stopAppProcesses(APP_DIR);
+
+  // 5. Preserve personal data into the new copy.
   for (const item of PRESERVE) {
     const from = join(APP_DIR, item);
     if (existsSync(from)) {
@@ -250,8 +258,7 @@ async function applyUpdate(current, manifest) {
     }
   }
 
-  // 5. Stop the app, then swap (rename within the same parent = atomic-ish).
-  stopAppProcesses(APP_DIR);
+  // 6. Swap (rename within the same parent = atomic-ish).
   try {
     renameSync(APP_DIR, backupDir);
   } catch (err) {
