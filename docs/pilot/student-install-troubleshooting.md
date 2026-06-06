@@ -26,13 +26,15 @@ breaks: it has no prebuilt binary for the `better-sqlite3` database library,
 so npm tries to compile it from source, which then needs Xcode and Python,
 exactly the toolchain the pilot is meant to avoid.
 
-The installer handles this automatically: if Node isn't 22, it installs the
-official Node 22 `.pkg` from
-<https://nodejs.org/download/release/latest-v22.x/>. If you ever need to do it
-by hand, download the macOS **.pkg** from that page and run it.
+The installer handles this automatically and **needs no admin rights or Mac
+password**: if Node isn't 22, it downloads the official Node 22 tarball from
+<https://nodejs.org/download/release/latest-v22.x/>, checks its checksum, and
+unpacks it into a folder in your home directory (`~/.rios-node`), then adds it
+to your PATH. This is why it works on managed / non-admin Macs where you can't
+install system software.
 
 After installing, **quit Terminal (⌘ + Q) and reopen it**. A Terminal only
-notices a new Node once it's reopened. Check with:
+notices the new Node once it's reopened. Check with:
 
 ```bash
 node -v        # should print v22.x.x
@@ -42,6 +44,15 @@ If it still shows an old version, another Node (e.g. one from Homebrew or nvm)
 is earlier on your `PATH`. The pilot doesn't manage those; the simplest fix is
 to use the Terminal session the installer opened, or tell me and we'll sort
 your `PATH`.
+
+## "... is not in the sudoers file" / "you need admin rights"
+
+You saw something like `yourname is not in the sudoers file`. That means your
+Mac account isn't an administrator, which is common on university or work Macs.
+**The current installer doesn't need admin rights at all**; it installs Node
+into a folder in your home directory. If you hit this on an older build,
+re-download the latest install command/ZIP from me and run it again. No
+password needed.
 
 ## "Messages is not signed in" / iMessage threads missing
 

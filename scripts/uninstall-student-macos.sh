@@ -7,8 +7,9 @@
 # Everything Relationship Inbox OS knows lives inside that one folder, so
 # deleting it removes the app completely.
 #
-# It does NOT uninstall Node.js (you may want it for other things) and it does
-# NOT touch your Messages, your Chrome, or your LinkedIn account.
+# It removes the app's OWN copy of Node (the ~/.rios-node folder the installer
+# created on non-admin Macs) and the PATH line it added — but never a Node you
+# already had, and never your Messages, Chrome, or LinkedIn account.
 #
 #   bash scripts/uninstall-student-macos.sh          # asks before deleting
 #   bash scripts/uninstall-student-macos.sh --yes    # no prompt
@@ -86,6 +87,22 @@ for port in "${DASHBOARD_PORT:-3100}" "${RUNNER_PORT:-4001}"; do
 done
 
 rm -rf "$TARGET" && echo "Removed $TARGET."
+
+# Remove the app's own user-local Node + the PATH line the installer added.
+# A Node you already had on your system is never touched.
+RIOS_NODE_DIR="${RIOS_NODE_DIR:-$HOME/.rios-node}"
+if [ -d "$RIOS_NODE_DIR" ]; then
+  rm -rf "$RIOS_NODE_DIR" && echo "Removed the app's Node ($RIOS_NODE_DIR)."
+fi
+marker="# added by Relationship Inbox OS (Node on PATH)"
+for rc in "$HOME/.zshrc" "$HOME/.bash_profile"; do
+  [ -f "$rc" ] || continue
+  if grep -qF "$marker" "$rc" 2>/dev/null; then
+    tmp="$(mktemp)"
+    awk -v m="$marker" 'index($0,m){skip=2} skip>0{skip--;next} {print}' "$rc" >"$tmp" \
+      && mv "$tmp" "$rc" && echo "Removed the Node PATH line from $rc."
+  fi
+done
+
 echo ""
 echo "Done. To also remove the logs:  rm -rf \"$HOME/Library/Logs/RelationshipInboxOS\""
-echo "Node.js is still installed. To remove it too, see Node's docs (optional)."
