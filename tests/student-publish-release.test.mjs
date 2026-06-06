@@ -11,6 +11,10 @@ const PUBLISH = join(ROOT, "scripts", "publish-student-release.mjs");
 const BUILD = join(ROOT, "scripts", "build-student-release.mjs");
 const LATEST_ZIP = join(ROOT, "release-dist", "relationship-inbox-os-student-latest.zip");
 
+// Isolate every spawned publish from a real .env.release.local a developer may
+// have on disk (it would otherwise inject config the tests deliberately omit).
+process.env.RIOS_RELEASE_ENV_FILE = "/nonexistent/.env.release.local";
+
 // Spawn publish async so this process's mock-Dropbox HTTP server keeps serving
 // while the child uploads + verifies (execFileSync would deadlock).
 function runPublish(extraArgs, env) {
