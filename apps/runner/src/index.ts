@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -14,7 +14,7 @@ import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIM
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
-import { ensurePathInside, safeUploadFilename } from "./utils/fs";
+import { ensurePathInside, safeUploadFilename, streamFileToResponse } from "./utils/fs";
 import { safeJsonParse } from "./utils/json";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
@@ -1502,7 +1502,7 @@ app.get("/artifacts/:type/:name", (req, res) => {
         : "text/html; charset=utf-8";
 
     res.setHeader("Content-Type", contentType);
-    createReadStream(resolved).pipe(res);
+    streamFileToResponse(resolved, res, 404);
   } catch {
     res.status(400).json({ error: "Invalid artifact name" });
   }
@@ -1730,7 +1730,7 @@ app.get("/data/linkedin-voice-message/:urn", asyncRoute(async (req, res) => {
   const path = linkedInVoicePath(urn);
   res.setHeader("Content-Type", LINKEDIN_VOICE_MIME);
   res.setHeader("Cache-Control", "private, max-age=3600");
-  createReadStream(path).pipe(res);
+  streamFileToResponse(path, res, 404);
 }));
 
 app.get("/data/settings", asyncRoute(async (_req, res) => {
