@@ -18,6 +18,13 @@ export {
   type LocalWhisperProviderConfig,
   type ProcessRunner
 } from "./local-whisper-provider";
+export {
+  createTransformersWhisperProvider,
+  readMonoPcm16Wav,
+  type AsrPipeline,
+  type PipelineLoader,
+  type TransformersWhisperProviderConfig
+} from "./transformers-whisper-provider";
 export type {
   TranscriptionOutcome,
   TranscriptionProvider,

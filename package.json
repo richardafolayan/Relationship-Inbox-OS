@@ -1,7 +1,7 @@
 {
   "name": "relationship-inbox-os",
   "private": true,
-  "version": "0.1.3",
+  "version": "0.1.4",
   "packageManager": "npm@10.8.2",
   "workspaces": [
     "apps/*",
@@ -14,6 +14,7 @@
     "uninstall:student": "bash scripts/uninstall-student-macos.sh",
     "start:student": "node scripts/start-student.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "fetch:whisper-model": "node scripts/fetch-whisper-model.mjs",
     "build:student-release": "node scripts/build-student-release.mjs",
     "publish:student-release": "node scripts/publish-student-release.mjs",
     "update:student": "node scripts/update-student.mjs",
