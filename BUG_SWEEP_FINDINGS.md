@@ -6,10 +6,8 @@ Pipeline: fan-out readers → adversarial refute-by-default verification → fix
 ## Summary
 
 - **42 raw findings** → after adversarial verification: **7 High + 19 Medium confirmed** (4 Medium-tier refuted), 12 Low logged.
-- **Fixed, tested, and merged to v1:** all 7 Highs, both Mediums re-rated High (M15, M19), 11 Mediums, and a 4-fix low-risk hardening batch — each with a regression test. Full suite green.
-- **Deferred (concurrent-session contention on the shared working tree):**
-  - **M2** (`scan-queue.ts`, Low) — cross-sibling outbound dedup drops `sentVia=automation`/`replyToMessageId`. Fix designed + tested, not merged because another session held uncommitted edits to `scan-queue.ts` and the file could not be staged cleanly.
-  - **M18** (`repair-linkedin-synthetic-timestamps.ts`, Medium) — synthetic-cluster anchoring. A concurrent session was already implementing the same fix (present uncommitted in the working tree), so it was not double-applied.
+- **Fixed, tested, and merged to v1:** all 7 Highs, both Mediums re-rated High (M15, M19), 11 Mediums, a 4-fix low-risk hardening batch, plus **M2** (#548) and **M18** (#546) — each with a regression test. Full suite green.
+- **M2** (`scan-queue.ts`, Low — preserve `sentVia=automation`/`replyToMessageId` when collapsing outbound twins) and **M18** (`repair-linkedin-synthetic-timestamps.ts`, Medium — only anchor the genuinely-last synthetic cluster to `lastMessageAt`) were initially deferred because a concurrent session held uncommitted edits to those exact files in the shared working tree; they were subsequently implemented + tested in an isolated git worktree (off clean v1) and merged, without disturbing that session's uncommitted work.
 
 ## Refuted Medium findings (verified NOT real — no issue filed)
 
