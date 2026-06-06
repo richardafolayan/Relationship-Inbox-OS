@@ -269,7 +269,7 @@ function syncGithubForRow_(props, sheet, rowNumber) {
     // Commit any screenshots into the repo first, so the issue body can link
     // to them (viewable in GitHub). Best effort: if embedding is off, the
     // token lacks Contents access, or an upload fails, this stays empty and
-    // the body falls back to the Sheet/Drive note — the issue is still created.
+    // the body falls back to the Sheet/Drive note; the issue is still created.
     var githubScreenshotUrls = [];
     if (screenshotEmbedEnabled_(props)) {
       try {
@@ -359,11 +359,11 @@ function buildIssueContent_(props, values, githubScreenshotUrls) {
     lines.push('');
     var ghShots = githubScreenshotUrls || [];
     if (ghShots.length) {
-      // Committed into this private repo — click to view the image in GitHub
+      // Committed into this private repo; click to view the image in GitHub
       // (authenticated), no Drive and no Sheet hop.
       lines.push('### Screenshots');
       for (var si = 0; si < ghShots.length; si++) {
-        lines.push('- 📎 [Screenshot ' + (si + 1) + ' — view in GitHub](' + ghShots[si] + ')');
+        lines.push('- 📎 [View screenshot ' + (si + 1) + ' in GitHub](' + ghShots[si] + ')');
       }
       lines.push('');
       lines.push('_Also saved to the feedback Sheet (column W, Google Drive)._');
@@ -701,7 +701,7 @@ function backfillScreenshotComments() {
       var body = AUTO_SCREENSHOT_MARKER + '\n' +
         '**Screenshots** (auto-attached for ' + reportId + ', viewable in GitHub):\n' +
         urls.map(function (u, i) {
-          return '- 📎 [Screenshot ' + (i + 1) + ' — view in GitHub](' + u + ')';
+          return '- 📎 [View screenshot ' + (i + 1) + ' in GitHub](' + u + ')';
         }).join('\n');
       if (postIssueComment_(owner, repo, token, issueNumber, body)) posted++;
       else failed++;
@@ -749,9 +749,9 @@ they attach can show real private messages**.
   With `GITHUB_ATTACH_SCREENSHOTS` on (the default), the script commits each
   screenshot to the attachments branch and the issue links to it, so anyone
   who can read the repo sees the image straight from the issue. This is the
-  point — but it means **the repo must be private**, because the image bytes
+  point, but it means **the repo must be private**, because the image bytes
   now live in it. (A private repo's `raw.githubusercontent.com` URLs do not
-  render inline anyway — GitHub's image proxy can't read them — so the issue
+  render inline anyway, because GitHub's image proxy can't read them, so the issue
   links to the file's GitHub page, where a repo member sees it rendered.) Set
   `GITHUB_ATTACH_SCREENSHOTS` to `false` to keep screenshots out of the repo
   entirely (Drive only), the old behaviour.
@@ -777,7 +777,7 @@ repo, with the **minimum** permission needed to create issues.
    ("Metadata" switches to "Read-only" on its own; that is required and fine.)
    Contents access lets the script commit each screenshot into the repo (and
    create the attachments branch) so the image is viewable straight from the
-   issue. Without it, issues are still created — just without screenshot links.
+   issue. Without it, issues are still created, just without screenshot links.
 7. **Generate token**, then copy it once. GitHub will not show it again.
 8. Paste it into the Apps Script Script Property `GITHUB_TOKEN` (next section).
    Do not paste it anywhere else: not into the repo, not into `.env`, not into
@@ -883,8 +883,8 @@ To attach screenshots to issues that **already exist** (filed before screenshot
 embedding was on, like the early pilot reports), pick `backfillScreenshotComments`
 instead and **Run** it. For every row that has a screenshot and an issue, it
 commits the screenshot into the repo and posts one comment on the issue with
-"view in GitHub" links. It is idempotent — an issue that already has the
-auto-posted comment is skipped — so it is safe to re-run. It logs
+"view in GitHub" links. It is idempotent: an issue that already has the
+auto-posted comment is skipped, so it is safe to re-run. It logs
 `Screenshot backfill complete. posted=…, skipped=…, failed=….`
 
 ### Duplicate protection and its limit
