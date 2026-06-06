@@ -16,14 +16,27 @@ import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { groupStubFields } from "./imessage-group-name";
 import { imessageMessageBodyText } from "./imessage-message-text";
 import { sendIMessage } from "./imessage-send";
-import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
+import { loadBestContactResolver, type ContactResolver } from "../services/contact-resolver";
 
 const execFileAsync = promisify(execFile);
 
 interface IMessageAdapterDependencies {
   dbPath: string;
   contactsVcfPath?: string;
+  /** AddressBook DB paths; defaults to auto-discovery under $HOME. Tests inject fixtures. */
+  addressBookDbPaths?: string[];
+  /** Force-enable/disable the live macOS Contacts read. Defaults to macOS-only. */
+  useAddressBook?: boolean;
 }
+
+/**
+ * How long a built contact resolver is reused before it is rebuilt from the
+ * live macOS Contacts. The adapter is long-lived, so without a refresh a
+ * contact added (or Full Disk Access granted) after boot would never resolve
+ * until the runner restarts. 5 minutes keeps the read cheap while picking up
+ * changes within one scan cycle.
+ */
+const CONTACT_RESOLVER_TTL_MS = 5 * 60_000;
 
 /**
  * Read-via-SQLite, send-via-AppleScript adapter for macOS Messages.app.
@@ -39,10 +52,27 @@ interface IMessageAdapterDependencies {
 export class IMessageAdapter implements PlatformAdapter {
   readonly platform: PlatformName = "IMESSAGE";
   private db?: IMessageDb;
-  private contactResolver: ContactResolver;
+  private resolverCache: { resolver: ContactResolver; builtAt: number } | null = null;
 
-  constructor(private readonly deps: IMessageAdapterDependencies) {
-    this.contactResolver = loadContactResolver(deps.contactsVcfPath);
+  constructor(private readonly deps: IMessageAdapterDependencies) {}
+
+  /**
+   * The contact resolver, rebuilt from the live macOS Contacts (+ optional
+   * vCard) at most once per TTL window. Cheap to call repeatedly: a cache hit
+   * is one timestamp comparison, so per-row/per-message callers can ask freely.
+   */
+  private resolver(): ContactResolver {
+    const now = Date.now();
+    if (this.resolverCache && now - this.resolverCache.builtAt < CONTACT_RESOLVER_TTL_MS) {
+      return this.resolverCache.resolver;
+    }
+    const resolver = loadBestContactResolver({
+      vcfPath: this.deps.contactsVcfPath,
+      addressBookDbPaths: this.deps.addressBookDbPaths,
+      useAddressBook: this.deps.useAddressBook
+    });
+    this.resolverCache = { resolver, builtAt: now };
+    return resolver;
   }
 
   /**
@@ -61,12 +91,13 @@ export class IMessageAdapter implements PlatformAdapter {
    */
   private resolveDisplayName(row: IMessageThreadRow): string {
     if (row.userSetName) return row.userSetName;
+    const resolver = this.resolver();
     if (!row.isGroup) {
-      return this.contactResolver.resolve(row.chatIdentifier) ?? row.displayName;
+      return resolver.resolve(row.chatIdentifier) ?? row.displayName;
     }
     if (row.participants.length === 0) return row.displayName;
     return row.participants
-      .map((p) => this.contactResolver.resolve(p) ?? p)
+      .map((p) => resolver.resolve(p) ?? p)
       .join(", ");
   }
 
@@ -147,6 +178,7 @@ export class IMessageAdapter implements PlatformAdapter {
     // again at the read paths (scan-queue aggregates, AI context, thread
     // render, inbox preview) so the operator never sees them either way.
     const filteredRows = rows.filter((r) => !isNonContentIMessageSystemEvent(r.text));
+    const resolver = this.resolver();
     return filteredRows.map((r) => {
       // Persist reactions + reply parent on rawJson. Both fields are read
       // back by the dashboard's thread page; absent fields stay omitted so
@@ -162,7 +194,7 @@ export class IMessageAdapter implements PlatformAdapter {
       // raw handle when no match — unknown senders still get *something*
       // human-readable to label by.
       const resolvedSender =
-        r.senderHandle ? this.contactResolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
+        r.senderHandle ? resolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
       const text = imessageMessageBodyText(r.text, r.attachments.length);
       return {
         platformMessageKey: r.guid,
@@ -373,17 +405,17 @@ export class IMessageAdapter implements PlatformAdapter {
    *      previous session.
    *   3. The original handle, as a last resort.
    *
-   * The siblings come from the operator's vCard via `contactResolver`.
-   * Without this, a contact who has both an iMessage email and a phone
-   * (the phone may or may not currently be iMessage-active) tends to
-   * get routed via SMS — which silently fails on Macs without Text
-   * Message Forwarding from an iPhone.
+   * The siblings come from the operator's contacts (live macOS Contacts +
+   * optional vCard) via the resolver. Without this, a contact who has both
+   * an iMessage email and a phone (the phone may or may not currently be
+   * iMessage-active) tends to get routed via SMS — which silently fails on
+   * Macs without Text Message Forwarding from an iPhone.
    */
   private pickBestSendHandle(handle: string): string {
     const db = this.getDb();
-    // Build the full handle pool (vcard siblings + the original itself,
-    // in case the original isn't in the vcard).
-    const pool = Array.from(new Set([handle, ...this.contactResolver.siblingHandles(handle)]));
+    // Build the full handle pool (contact siblings + the original itself,
+    // in case the original isn't in the address book).
+    const pool = Array.from(new Set([handle, ...this.resolver().siblingHandles(handle)]));
     // Prefer iMessage-registered emails first.
     const iMessageEmails = pool.filter(
       (h) => h.includes("@") && db.findHandleService(h) === "iMessage"
