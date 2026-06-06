@@ -42,6 +42,7 @@ import { describeReactionsForPrompt, parseReactionsFromRawJson } from "./reactio
 import {
   providerRegistry,
   fallbackChain,
+  pickActiveProvider,
   classifyLlmError as classifyLlmErrorImpl,
   type AiErrorClassification
 } from "./ai-providers";
@@ -1439,7 +1440,16 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
-    const providerId: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    const requested: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    // Key-presence fallback: if the requested provider has no key but another
+    // is configured, use that one. Lets an operator (e.g. a pilot) set just
+    // ANY one key without also flipping AI_PROVIDER. Only providers with a
+    // built client are considered configured.
+    const configured: AiProvider[] = [];
+    if (openAiClient) configured.push("openai");
+    if (geminiClient) configured.push("gemini");
+    if (glmClient) configured.push("glm");
+    const providerId = pickActiveProvider(requested, configured);
     if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
       return { client: glmClient, model, provider: providerId };
