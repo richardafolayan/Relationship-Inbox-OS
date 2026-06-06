@@ -16,6 +16,7 @@ import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
 import { ensurePathInside, safeUploadFilename, streamFileToResponse } from "./utils/fs";
 import { safeJsonParse } from "./utils/json";
+import { filterDismissedOpenLoops } from "./utils/open-loops";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
@@ -293,12 +294,6 @@ function enrichLockKeyFor(): string {
 }
 function globalResetLockKey(): string {
   return `${defaultPersonKey}:GLOBAL_RESET`;
-}
-
-function filterDismissedOpenLoops(loops: string[], dismissedJson: string | null): string[] {
-  if (!dismissedJson) return loops;
-  const dismissed = new Set(JSON.parse(dismissedJson) as string[]);
-  return loops.filter((loop) => !dismissed.has(loop));
 }
 
 // Forward reference: the scan-queue's `onNewPerson` hook needs to call
@@ -3558,7 +3553,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
       whatTheyWant: t.whatTheyWant ?? null
     })),
     notes: thread.person.notes ?? null,
-    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+    tags: safeJsonParse<string[]>(thread.person.tagsJson, [])
   };
 
   const [composeOperatorProfile, composeContactSnapshot] = await Promise.all([
@@ -4197,7 +4192,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     displayName: thread.person.displayName,
     summary: aiThread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: aiThread.whatTheyWant ?? "No clear ask yet.",
-    openLoops: aiThread.openLoopsJson ? (JSON.parse(aiThread.openLoopsJson) as string[]) : [],
+    openLoops: safeJsonParse<string[]>(aiThread.openLoopsJson, []),
     recentMessages,
     needsReply: aiNeedsReply,
     // Drives the voice tier (LinkedIn → formal; everything else → casual)
@@ -4407,7 +4402,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       whatTheyWant: t.whatTheyWant ?? null
     })),
     notes: thread.person.notes ?? null,
-    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+    tags: safeJsonParse<string[]>(thread.person.tagsJson, [])
   };
 
   // Reply Brief surface. Persisted as JSON on the Thread row; older rows
@@ -4415,9 +4410,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // from the legacy fields so the dashboard rail always has something
   // grounded to render. The real brief regenerates on next scan /
   // Reassess / stale-summary self-heal.
-  const persistedOpenLoops: string[] = aiThread.openLoopsJson
-    ? (JSON.parse(aiThread.openLoopsJson) as string[])
-    : [];
+  const persistedOpenLoops: string[] = safeJsonParse<string[]>(aiThread.openLoopsJson, []);
   let parsedReplyBrief: ReturnType<typeof sanitizeReplyBrief> = null;
   if (aiThread.replyBriefJson) {
     try {
@@ -4488,11 +4481,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       persistedOpenLoops,
       thread.dismissedOpenLoopsJson
     ),
-    dismissedOpenLoops: thread.dismissedOpenLoopsJson
-      ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
-      : [],
-    toneNotes: aiThread.toneNotesJson ? (JSON.parse(aiThread.toneNotesJson) as string[]) : [],
-    remember: aiThread.rememberJson ? (JSON.parse(aiThread.rememberJson) as RememberItem[]) : [],
+    dismissedOpenLoops: safeJsonParse<string[]>(thread.dismissedOpenLoopsJson, []),
+    toneNotes: safeJsonParse<string[]>(aiThread.toneNotesJson, []),
+    remember: safeJsonParse<RememberItem[]>(aiThread.rememberJson, []),
     replyBrief: replyBriefResponse,
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
