@@ -35,9 +35,14 @@ export function chooseDisplayBrief(thread: Pick<
   const trimmedAsk = (thread.whatTheyWant ?? "").trim();
   const isStaticFallbackAsk =
     trimmedAsk.length === 0 || trimmedAsk.toLowerCase() === "no clear ask yet.";
+  // Mirror the server fallback (apps/runner/src/services/reply-brief.ts):
+  // a real ask only counts as a live obligation when the thread is still
+  // waiting on a reply. Without the needsReply guard, a stale ask on a
+  // dormant (needsReply=false) thread surfaces as a phantom Reply job.
+  const hasRealAsk = !isStaticFallbackAsk && thread.needsReply;
 
   const whereItStands = trimmedSummary || latestInboundText.slice(0, 360);
-  const onYou = !isStaticFallbackAsk
+  const onYou = hasRealAsk
     ? trimmedAsk
     : thread.needsReply
       ? "They're waiting on a reply, but nothing specific has been asked. A short acknowledgement is enough."

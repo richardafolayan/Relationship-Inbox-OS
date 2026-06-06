@@ -7,7 +7,7 @@ import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { openPilotFeedback } from "@/lib/pilot";
-import { paletteItemMatches } from "@/lib/command-palette-search";
+import { clampActiveIndex, paletteItemMatches } from "@/lib/command-palette-search";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -107,9 +107,19 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     return all.filter((item) => paletteItemMatches(item, query)).slice(0, 12);
   }, [query, router, threads]);
 
+  // Reset to the top match whenever the *query* changes — the best match
+  // should be highlighted as the operator types.
   useEffect(() => {
     setActiveIndex(0);
-  }, [items]);
+  }, [query]);
+
+  // A *data*-driven change to the list (the inbox fetch landing after open,
+  // or a background refresh) must NOT yank the selection back to the top
+  // mid-keyboard-navigation (#605). Only clamp the current index back into
+  // range — with no query the length is unchanged, so this is a no-op.
+  useEffect(() => {
+    setActiveIndex((i) => clampActiveIndex(i, items.length));
+  }, [items.length]);
 
   if (!open) return null;
 

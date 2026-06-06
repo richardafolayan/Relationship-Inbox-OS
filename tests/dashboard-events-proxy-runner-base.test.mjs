@@ -72,3 +72,34 @@ test("RUNNER_ORIGIN alone still works (back-compat)", () => {
     restoreEnv();
   }
 });
+
+// Regression for #Q15: ?? let a set-but-blank env var slip past the default.
+// RUNNER_ORIGIN="" returned "" (new URL("/events", "") throws -> SSE proxy
+// 500s); RUNNER_PORT="" returned "http://localhost:" (-> http://localhost,
+// port 80). Blank/whitespace-only must now count as unset.
+test("blank RUNNER_ORIGIN falls back to the RUNNER_PORT default", () => {
+  setEnv({ origin: "", port: undefined });
+  try {
+    assert.equal(resolveRunnerBase(), "http://localhost:4001");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("blank RUNNER_PORT falls back to 4001", () => {
+  setEnv({ origin: undefined, port: "" });
+  try {
+    assert.equal(resolveRunnerBase(), "http://localhost:4001");
+  } finally {
+    restoreEnv();
+  }
+});
+
+test("blank RUNNER_ORIGIN still honours a set RUNNER_PORT", () => {
+  setEnv({ origin: "", port: "4002" });
+  try {
+    assert.equal(resolveRunnerBase(), "http://localhost:4002");
+  } finally {
+    restoreEnv();
+  }
+});
