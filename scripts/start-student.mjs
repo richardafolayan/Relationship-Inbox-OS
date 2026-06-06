@@ -11,7 +11,8 @@
 // prints plain-English status. Stop the app with Ctrl+C.)
 
 import { spawn } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -58,6 +59,51 @@ async function openWhenReady() {
   say(`  The app is taking a while to start. Try opening ${DASHBOARD_URL} yourself,`);
   say(`  or run the health check:  ${C.bold}node scripts/doctor.mjs${C.reset}`);
 }
+
+// Apply a staged update (written by the dashboard's "Update and relaunch")
+// BEFORE booting, so the running app never has to replace its own code.
+function runUpdaterApply(feedUrl) {
+  return new Promise((doneResolve) => {
+    const child = spawn(
+      process.execPath,
+      [resolve(APP_DIR, "scripts/update-student.mjs"), "--apply", "--url", feedUrl, "--dir", APP_DIR],
+      { cwd: APP_DIR, stdio: "inherit" }
+    );
+    child.on("error", () => doneResolve(false));
+    child.on("close", (code) => doneResolve(code === 0));
+  });
+}
+
+async function applyPendingUpdate() {
+  const intentPath = join(APP_DIR, "data", "pending-update.json");
+  if (!existsSync(intentPath)) return;
+  let intent = {};
+  try {
+    intent = JSON.parse(readFileSync(intentPath, "utf8"));
+  } catch {
+    /* malformed intent — treated as no feed below */
+  }
+  const feedUrl = intent.feedUrl || process.env.RIOS_UPDATE_FEED_URL || "";
+  // Clear the intent FIRST so a failed apply can never loop on every launch.
+  try {
+    rmSync(intentPath, { force: true });
+  } catch {
+    /* ignore */
+  }
+  if (!feedUrl) {
+    say(`  A staged update was found but no update link is set; skipping it.`);
+    return;
+  }
+  say(`\n${C.bold}Applying a staged update before starting…${C.reset}`);
+  const ok = await runUpdaterApply(feedUrl);
+  say(
+    ok
+      ? `  ${C.green}Update applied.${C.reset}`
+      : `  The update could not be applied and was rolled back; starting your current version.`
+  );
+}
+
+await applyPendingUpdate();
 
 say(`\n${C.bold}Starting Relationship Inbox OS…${C.reset}`);
 say(`${C.dim}(first start takes a minute)${C.reset}`);
