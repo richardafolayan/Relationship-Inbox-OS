@@ -42,6 +42,14 @@ interface SessionState {
   pages: Map<PlatformName, Page>;
   pageOwners: Map<Page, PlatformName>;
   activeLeases: Map<PlatformName, number>;
+  // Teardown intent, set under personMutex BEFORE waitForLeaseDrain so
+  // withPlatformLease refuses a new lease for the whole drain -> teardown
+  // window (incl. the gap between drain-complete and the teardown's separate
+  // mutex re-acquisition). tearingDownContext = whole-context reset;
+  // tearingDownPlatforms = single-page close (per-platform so closing one
+  // page does not block leases for other platforms).
+  tearingDownContext: boolean;
+  tearingDownPlatforms: Set<PlatformName>;
   runLoggers: Map<PlatformName, RunLogger>;
 }
 
@@ -222,6 +230,15 @@ export class SessionManager {
     const personKey = sanitizePersonKey(input.personKey ?? "default");
     await this.personMutex.runExclusive(`person:${personKey}`, async () => {
       const state = this.getOrCreateState(personKey);
+      // Refuse the lease if a teardown is in progress for this context/platform.
+      // The flag is set under THIS mutex before the drain begins, so a teardown
+      // that has already passed waitForLeaseDrain cannot have its page/context
+      // closed out from under a lease that lands in the post-drain gap.
+      if (state.tearingDownContext || state.tearingDownPlatforms.has(input.platform)) {
+        throw new Error(
+          `Cannot acquire ${input.platform} platform lease for ${personKey}: session is tearing down`
+        );
+      }
       const current = state.activeLeases.get(input.platform) ?? 0;
       state.activeLeases.set(input.platform, current + 1);
     });
@@ -271,53 +288,88 @@ export class SessionManager {
     const clearProfileDir = input.clearProfileDir ?? true;
 
     return this.globalResetMutex.runExclusive(`global-reset:${personKey}`, async () => {
-      await this.waitForLeaseDrain({
-        personKey,
-        timeoutMs: 12_000
+      // Mark the whole context as tearing down BEFORE draining so
+      // withPlatformLease refuses any new lease across the entire
+      // drain -> teardown window. Without this, waitForLeaseDrain releases the
+      // personMutex on return and the teardown below re-acquires it separately,
+      // so a lease acquired in that gap would have its context closed out from
+      // under it ('target page/context closed').
+      const tearingState = await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+        const state = this.getOrCreateState(personKey);
+        state.tearingDownContext = true;
+        return state;
       });
-      return this.personMutex.runExclusive(`person:${personKey}`, async () => {
-        const state = this.states.get(personKey);
-        const profileDir = this.getProfileDir(personKey);
-
-        if (state) {
-          await this.closeState(state);
-          this.states.delete(personKey);
-        }
-
-        if (clearProfileDir) {
-          await rm(profileDir, { recursive: true, force: true });
-          await mkdir(profileDir, { recursive: true });
-        }
-
-        return {
+      try {
+        await this.waitForLeaseDrain({
           personKey,
-          profileDir,
-          clearedProfileDir: clearProfileDir
-        };
-      });
+          timeoutMs: 12_000
+        });
+        return await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+          const state = this.states.get(personKey);
+          const profileDir = this.getProfileDir(personKey);
+
+          if (state) {
+            await this.closeState(state);
+            this.states.delete(personKey);
+          }
+
+          if (clearProfileDir) {
+            await rm(profileDir, { recursive: true, force: true });
+            await mkdir(profileDir, { recursive: true });
+          }
+
+          return {
+            personKey,
+            profileDir,
+            clearedProfileDir: clearProfileDir
+          };
+        });
+      } finally {
+        // Clear on the captured reference. If teardown deleted the state, a
+        // later lease creates a fresh state (flag defaults false); clearing the
+        // stale object is a harmless no-op.
+        await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+          tearingState.tearingDownContext = false;
+        });
+      }
     });
   }
 
   async closePlatformPage(input: { platform: PlatformName; personKey?: string }): Promise<void> {
     const personKey = sanitizePersonKey(input.personKey ?? "default");
-    await this.waitForLeaseDrain({
-      personKey,
-      platform: input.platform,
-      timeoutMs: 8_000
+    // Mark this platform as tearing down BEFORE draining so withPlatformLease
+    // refuses a new lease for this platform across the whole drain -> teardown
+    // window (incl. the gap between drain-complete and the teardown's separate
+    // mutex re-acquisition). Per-platform: other platforms can still lease.
+    const tearingState = await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+      const state = this.getOrCreateState(personKey);
+      state.tearingDownPlatforms.add(input.platform);
+      return state;
     });
-    await this.personMutex.runExclusive(`person:${personKey}`, async () => {
-      const state = this.states.get(personKey);
-      const page = state?.pages.get(input.platform);
-      if (!state || !page) {
-        return;
-      }
+    try {
+      await this.waitForLeaseDrain({
+        personKey,
+        platform: input.platform,
+        timeoutMs: 8_000
+      });
+      await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+        const state = this.states.get(personKey);
+        const page = state?.pages.get(input.platform);
+        if (!state || !page) {
+          return;
+        }
 
-      state.pages.delete(input.platform);
-      state.pageOwners.delete(page);
-      if (!page.isClosed()) {
-        await page.close().catch(() => undefined);
-      }
-    });
+        state.pages.delete(input.platform);
+        state.pageOwners.delete(page);
+        if (!page.isClosed()) {
+          await page.close().catch(() => undefined);
+        }
+      });
+    } finally {
+      await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+        tearingState.tearingDownPlatforms.delete(input.platform);
+      });
+    }
   }
 
   private getOrCreateState(personKey: string): SessionState {
@@ -333,6 +385,8 @@ export class SessionManager {
       pages: new Map<PlatformName, Page>(),
       pageOwners: new Map<Page, PlatformName>(),
       activeLeases: new Map<PlatformName, number>(),
+      tearingDownContext: false,
+      tearingDownPlatforms: new Set<PlatformName>(),
       runLoggers: new Map<PlatformName, RunLogger>()
     };
     this.states.set(personKey, created);
