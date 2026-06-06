@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, statSync, createReadStream, mkdirSync } from "node:fs";
+import { createHash, randomBytes } from "node:crypto";
+import { existsSync, statSync, createReadStream, mkdirSync, renameSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -114,8 +114,16 @@ function pipeFile(path: string, contentType: string, res: Response, downloadName
 /**
  * Convert `src` once and cache the result keyed by source path + mtime.
  * Returns the converted file path on success, or null when conversion fails.
+ *
+ * The converter writes to a unique temp sibling and we `renameSync` it onto
+ * the final `dst`. Rename is atomic on the same filesystem (temp and dst both
+ * live in CACHE_DIR), so a concurrent request's `existsSync(dst)` can only ever
+ * observe a fully written file — never a half-written one mid-`sips`/`afconvert`.
+ * If two requests race on the same uncached source, each produces its own
+ * complete temp file and the second rename atomically replaces the first; both
+ * still return a complete `dst`. Exported for the concurrency regression test.
  */
-async function convertOnce(
+export async function convertOnce(
   src: string,
   outExt: string,
   run: (src: string, dst: string) => Promise<void>
@@ -125,11 +133,19 @@ async function convertOnce(
   const key = createHash("sha1").update(`${src}|${stat.mtimeMs}|${outExt}`).digest("hex");
   const dst = join(CACHE_DIR, `${key}.${outExt}`);
   if (existsSync(dst)) return dst;
+  const tmp = `${dst}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    await run(src, dst);
-    if (existsSync(dst)) return dst;
-    return null;
+    await run(src, tmp);
+    if (!existsSync(tmp)) return null;
+    renameSync(tmp, dst);
+    return dst;
   } catch {
+    // Best-effort: drop the partial temp file so it can't linger in the cache dir.
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // Nothing more to do.
+    }
     return null;
   }
 }

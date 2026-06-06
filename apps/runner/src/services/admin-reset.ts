@@ -107,7 +107,13 @@ export async function resetPlatformInboxGraph(
   });
   const threadIds = matchedThreadIds.map((entry) => entry.id);
 
-  const [sendRequests, drafts, messages, threads] = await Promise.all([
+  // Delete the child rows (sendRequest, draft, message) BEFORE the parent
+  // thread rows. thread.deleteMany cascades to those children natively
+  // (onDelete: Cascade with SQLite foreign_keys on), so if the thread delete
+  // raced ahead of the child deletes the child deleteMany calls would count 0
+  // and under-report. The three children are independent of each other, so
+  // they can still run in parallel; only the thread delete must come after.
+  const [sendRequests, drafts, messages] = await Promise.all([
     client.sendRequest.deleteMany({
       where: {
         thread: {
@@ -128,13 +134,13 @@ export async function resetPlatformInboxGraph(
           platform
         }
       }
-    }),
-    client.thread.deleteMany({
-      where: {
-        platform
-      }
     })
   ]);
+  const threads = await client.thread.deleteMany({
+    where: {
+      platform
+    }
+  });
 
   const orphanPeople = await client.person.findMany({
     where: {
