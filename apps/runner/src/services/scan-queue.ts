@@ -20,6 +20,7 @@ import { effectiveLastOutboundAt } from "./reaction-effects.js";
 import type { AiService, EventBus, ScanJobOutcome, SettingsStore } from "../types/runtime";
 import { AdapterFailure, cleanMessageText, cleanText, humanDelay, stripUnpairedSurrogates } from "../platforms/utils";
 import { shouldRefreshGroupDisplayName } from "../platforms/imessage-group-name";
+import { NON_TEXT_MESSAGE_PLACEHOLDER } from "../platforms/imessage-message-text";
 import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapter";
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
@@ -301,6 +302,19 @@ export function decideOutboundDedup(input: {
 }): OutboundDedupAction {
   const windowMs = input.windowMs ?? 5 * 60 * 1000;
   const normalizedNewText = normalizeOutboundTextForDedup(input.newText);
+  // Attachment-only iMessages (photos / voice notes with no caption) all
+  // persist the shared NON_TEXT_MESSAGE_PLACEHOLDER body, and a genuinely
+  // empty outbound carries no content at all. Two such distinct sends in the
+  // same thread within the window would otherwise normalize-match and get
+  // collapsed onto one row (migrate_twin_key rewrites the survivor's key +
+  // timestamp), silently losing one bubble. Content-equality dedup is only
+  // safe for real text, so never treat placeholder / empty bodies as twins.
+  if (
+    normalizedNewText.length === 0 ||
+    normalizedNewText === normalizeOutboundTextForDedup(NON_TEXT_MESSAGE_PLACEHOLDER)
+  ) {
+    return { kind: "no_op" };
+  }
   const twin = input.existingTwins.find((row) => {
     if (row.platformMessageKey === input.newKey) {
       return false;
@@ -3056,9 +3070,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // collapsed. decideOutboundDedup re-checks the same way for the
         // same-thread set.
         const normalizedMessageText = normalizeOutboundTextForDedup(messageText);
-        const contentTwins = twins.filter(
-          (t) => normalizeOutboundTextForDedup(t.text) === normalizedMessageText
-        );
+        // Attachment-only iMessages share the NON_TEXT_MESSAGE_PLACEHOLDER body
+        // (and an empty body carries no content), so content-equality dedup
+        // would wrongly collapse two distinct such sends — same-thread (via
+        // decideOutboundDedup below) and cross-sibling (the block that follows).
+        // Exclude placeholder / empty bodies from the twin set so neither path
+        // can fire on them. decideOutboundDedup re-checks the same way.
+        const isContentlessOutbound =
+          normalizedMessageText.length === 0 ||
+          normalizedMessageText === normalizeOutboundTextForDedup(NON_TEXT_MESSAGE_PLACEHOLDER);
+        const contentTwins = isContentlessOutbound
+          ? []
+          : twins.filter(
+              (t) => normalizeOutboundTextForDedup(t.text) === normalizedMessageText
+            );
         const sameThreadTwins = contentTwins.filter((t) => t.threadId === thread.id);
         const crossSiblingTwins = contentTwins.filter((t) => t.threadId !== thread.id);
 

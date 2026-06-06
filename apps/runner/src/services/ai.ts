@@ -1189,6 +1189,122 @@ export function stripOperatorMetaTalk(text: string): string {
   const cleaned = kept.join(" ").replace(/\s{2,}/g, " ").trim();
   return cleaned.length > 0 ? cleaned : text;
 }
+
+/**
+ * Render an instant as a human-readable wall-clock reference in a named
+ * IANA zone, e.g. "2026-06-06 19:32". Paired with the zone name in the
+ * reminder prompt so the model resolves "tomorrow morning" against the
+ * operator's actual local clock instead of guessing what "local" means
+ * from a bare UTC ISO. Returns null when the inputs are unusable so the
+ * caller can fall back to the raw ISO reference.
+ */
+export function formatLocalClockReference(
+  referenceTimeIso: string,
+  timeZone: string
+): string | null {
+  const ms = Date.parse(referenceTimeIso);
+  if (!Number.isFinite(ms) || !timeZone) return null;
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      hour12: false,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    }).formatToParts(new Date(ms));
+    const map: Record<string, string> = {};
+    for (const p of parts) map[p.type] = p.value;
+    if (!map.year || !map.month || !map.day || !map.hour || !map.minute) return null;
+    // Intl can emit "24" for midnight under hour12:false on some platforms.
+    const hour = map.hour === "24" ? "00" : map.hour;
+    return `${map.year}-${map.month}-${map.day} ${hour}:${map.minute}`;
+  } catch {
+    // Unknown/invalid IANA zone — let the caller degrade to the raw ISO.
+    return null;
+  }
+}
+
+/**
+ * Reconstruct the absolute UTC instant (ms since epoch) for a wall-clock
+ * date+time interpreted in a named IANA zone. "2026-06-07T09:00" in
+ * "America/Los_Angeles" → the ms for 16:00Z. Uses the Intl round-trip
+ * offset trick rather than a date library (none is bundled). Returns NaN
+ * when the wall-clock string or zone can't be parsed so callers can
+ * demote to low confidence rather than schedule a nonsensical time.
+ */
+export function zonedWallClockToUtcMs(localDateTime: string, timeZone: string): number {
+  const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2}))?$/.exec(
+    String(localDateTime).trim()
+  );
+  if (!m || !timeZone) return NaN;
+  const [, y, mo, d, h, mi, s] = m;
+  const naiveUtc = Date.UTC(+y, +mo - 1, +d, +h, +mi, s ? +s : 0);
+  if (!Number.isFinite(naiveUtc)) return NaN;
+  try {
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      hour12: false,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit"
+    }).formatToParts(new Date(naiveUtc));
+    const map: Record<string, string> = {};
+    for (const p of parts) map[p.type] = p.value;
+    if (!map.year || !map.hour) return NaN;
+    const hour = map.hour === "24" ? "00" : map.hour;
+    const zonedAsUtc = Date.UTC(
+      +map.year,
+      +map.month - 1,
+      +map.day,
+      +hour,
+      +map.minute,
+      +map.second
+    );
+    if (!Number.isFinite(zonedAsUtc)) return NaN;
+    const offset = zonedAsUtc - naiveUtc;
+    return naiveUtc - offset;
+  } catch {
+    return NaN;
+  }
+}
+
+/**
+ * Turn the model's reminder time output into a validated UTC ISO string.
+ * Prefers a wall-clock {localDateTime, timeZone} pair (resolved on the JS
+ * side so "09:00" really means 09:00 in the operator's zone), and only
+ * falls back to a raw absolute ISO when the model didn't supply a zoned
+ * pair. Enforces the future-time guard against the reference. Returns
+ * null when the time is missing, unparseable, or not in the future — the
+ * caller demotes that to low confidence rather than snoozing wrongly.
+ */
+export function resolveReminderInstant(input: {
+  localDateTime?: string | null;
+  timeZone?: string | null;
+  remindAtIso?: string | null;
+  referenceTimeIso: string;
+}): string | null {
+  const referenceMs = Date.parse(input.referenceTimeIso);
+  let resolvedMs = NaN;
+
+  const zone = input.timeZone?.trim();
+  const wall = input.localDateTime?.trim();
+  if (wall && zone) {
+    resolvedMs = zonedWallClockToUtcMs(wall, zone);
+  }
+  if (!Number.isFinite(resolvedMs) && input.remindAtIso) {
+    resolvedMs = Date.parse(input.remindAtIso);
+  }
+
+  if (!Number.isFinite(resolvedMs)) return null;
+  if (Number.isFinite(referenceMs) && resolvedMs <= referenceMs) return null;
+  return new Date(resolvedMs).toISOString();
+}
+
 const startersSchema = z.object({
   starters: z
     .array(
@@ -2950,8 +3066,10 @@ If the message has no time hint, return { "suggestions": [] }.`;
    *
    * The AI's job is to:
    *   - Extract the time hint and resolve it against referenceTimeIso
-   *     into an absolute ISO timestamp. Default to 9am local-ish if
-   *     no time-of-day is named.
+   *     into a WALL-CLOCK time in the operator's zone (default 09:00 if
+   *     no time-of-day is named). This service reconstructs the absolute
+   *     UTC instant from that wall-clock + zone, so "9am" really means
+   *     9am where the operator is — not 9am UTC.
    *   - Strip the "remind me to" / "ping me about" prefix from the
    *     reminder text so the stored note reads as an action.
    *   - Refuse to invent a time when none is named — the caller
@@ -2961,6 +3079,7 @@ If the message has no time hint, return { "suggestions": [] }.`;
     intent: string;
     referenceTimeIso: string;
     displayName: string;
+    timeZone?: string;
   }): Promise<{
     remindAtIso: string | null;
     reminderText: string;
@@ -2981,22 +3100,36 @@ If the message has no time hint, return { "suggestions": [] }.`;
       };
     }
 
+    const zone = input.timeZone?.trim();
+    const localReference = zone
+      ? formatLocalClockReference(input.referenceTimeIso, zone)
+      : null;
+    const referenceLine =
+      zone && localReference
+        ? `Reference time (operator's local clock): ${localReference} ${zone}`
+        : `Reference time (now, UTC): ${input.referenceTimeIso}`;
+    const zoneLine = zone
+      ? `Operator's time zone: ${zone}`
+      : `Operator's time zone: unknown — treat all times as UTC.`;
+
     const prompt = `Parse the operator's "remind me to…" request into a structured reminder for ${input.displayName}.
 
-Reference time (now): ${input.referenceTimeIso}
+${referenceLine}
+${zoneLine}
 
 Operator's request: ${safeTruncate(trimmed, 600)}
 
 Your job:
 1. Find the time hint in the request ("next Tuesday", "in 3 days", "tomorrow morning", "later this week").
-2. Resolve it against the reference time into an absolute ISO timestamp. If the operator names a date but no time-of-day, default to 09:00 local. If they say "morning" default to 09:00, "afternoon" 14:00, "evening" 18:00.
+2. Resolve it against the reference time into a wall-clock date and time IN THE OPERATOR'S TIME ZONE. If the operator names a date but no time-of-day, default to 09:00. If they say "morning" default to 09:00, "afternoon" 14:00, "evening" 18:00.
 3. Extract the reminder text. Strip prefixes like "remind me to", "ping me about", "remember to". The stored note should read as an action ("Follow up on the offer", "Ask how the interviews went").
 4. Set confidence = "high" when the time hint is clear and unambiguous. Set "low" when the time is missing, vague ("eventually", "soon"), or could mean multiple things ("Tuesday" without specifying which one).
-5. NEVER invent a time when none is given. If confidence is "low", set remindAtIso to null and explain briefly in reason.
+5. NEVER invent a time when none is given. If confidence is "low", set localDateTime to null and explain briefly in reason.
 
 Return strict JSON:
 {
-  "remindAtIso": "ISO timestamp string, or null when confidence is low",
+  "localDateTime": "wall-clock time in the operator's zone as YYYY-MM-DDTHH:MM (no offset, no Z), or null when confidence is low",
+  "timeZone": "the operator's IANA time zone you resolved against (echo the one given above), or null when confidence is low",
   "reminderText": "the action the operator wants to be reminded to do, 1 short clause",
   "confidence": "high" | "low",
   "reason": "short explanation when confidence is low; omit otherwise"
@@ -3026,28 +3159,37 @@ Return strict JSON:
       }
       const parsed = z
         .object({
-          remindAtIso: z.string().nullable(),
+          // Wall-clock time in the operator's zone (preferred). remindAtIso
+          // is kept as a legacy fallback for older/looser model outputs.
+          localDateTime: z.string().nullable().optional(),
+          timeZone: z.string().nullable().optional(),
+          remindAtIso: z.string().nullable().optional(),
           reminderText: z.string().min(1).max(240),
           confidence: z.enum(["high", "low"]),
           reason: z.string().max(240).optional()
         })
         .parse(parseAiJson(content, model));
-      // Belt-and-braces: if confidence is high but remindAtIso isn't
-      // a valid future ISO, demote to low rather than schedule
-      // something nonsensical.
-      if (parsed.confidence === "high" && parsed.remindAtIso) {
-        const ms = Date.parse(parsed.remindAtIso);
-        if (!Number.isFinite(ms) || ms <= Date.parse(input.referenceTimeIso)) {
-          return {
-            remindAtIso: null,
-            reminderText: parsed.reminderText,
-            confidence: "low",
-            reason: "parsed time was invalid or not in the future"
-          };
-        }
+      // Resolve "local" on the JS side: reconstruct the absolute instant
+      // from the wall-clock time + named zone (falling back to a raw ISO),
+      // and enforce the future-time guard. A null result means the time
+      // was missing, unparseable, or not in the future — demote to low
+      // rather than schedule something nonsensical.
+      const remindAtIso = resolveReminderInstant({
+        localDateTime: parsed.localDateTime,
+        timeZone: parsed.timeZone ?? input.timeZone ?? null,
+        remindAtIso: parsed.remindAtIso,
+        referenceTimeIso: input.referenceTimeIso
+      });
+      if (parsed.confidence === "high" && !remindAtIso) {
+        return {
+          remindAtIso: null,
+          reminderText: applyVoiceRules(parsed.reminderText),
+          confidence: "low",
+          reason: "parsed time was invalid or not in the future"
+        };
       }
       return {
-        remindAtIso: parsed.remindAtIso,
+        remindAtIso,
         reminderText: applyVoiceRules(parsed.reminderText),
         confidence: parsed.confidence,
         reason: parsed.reason

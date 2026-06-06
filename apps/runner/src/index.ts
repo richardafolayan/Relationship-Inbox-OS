@@ -6279,7 +6279,10 @@ app.post("/control/thread/:threadId/remind", asyncRoute(async (req, res) => {
   const parsed = await aiService.parseReminderRequest({
     intent: payload.intent,
     referenceTimeIso: new Date().toISOString(),
-    displayName: thread.person.displayName
+    displayName: thread.person.displayName,
+    // Resolve "tomorrow morning" against the operator's local clock,
+    // not UTC, so a 09:00 reminder fires at 9am where they are.
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
   });
 
   if (parsed.confidence === "low" || !parsed.remindAtIso) {
