@@ -8380,30 +8380,23 @@ export class LinkedInAdapter implements PlatformAdapter {
         // trigger a real click via Playwright and intercept the
         // resulting `messaging-audio-analyzed` response. Bytes land on
         // disk under a URN-hashed filename that LinkedInAttachmentResolver
-        // looks back up by the same URN we set as `guid` below. Each
-        // capture is gated on `hasLinkedInVoice(urn)` so repeated
-        // backfill passes don't re-click messages we've already grabbed.
+        // looks back up by the same URN we set as `guid` below.
+        //
+        // The capture itself is deferred until after `stableBaseKey` is
+        // computed (below): for id-less bubbles `basePlatformMessageKey`
+        // is the positional `li-msg-<index>` fallback, which renumbers on
+        // every backfill pass. Keying the on-disk file and the attachment
+        // guid off that positional value means `hasLinkedInVoice` always
+        // misses (re-fetch every pass, orphaned files) and the surviving
+        // message's guid points at a urn with no file. The fingerprinted
+        // `stableBaseKey` is stable across passes, so we key both the
+        // voice store and the guid off it instead.
         const voiceContainerCount = await root
           .locator(".msg-s-event-listitem__audio-container")
           .count()
           .catch(() => 0);
+        const hasVoice = voiceContainerCount > 0;
         let voiceAttachment: AttachmentPlaceholder | null = null;
-        if (voiceContainerCount > 0) {
-          const audioButton = root.locator(".msg-s-event-listitem__audio").first();
-          const captured = await this.captureLinkedInVoiceMessage(
-            page,
-            audioButton,
-            basePlatformMessageKey
-          ).catch(() => null);
-          voiceAttachment = {
-            type: LINKEDIN_VOICE_MIME,
-            manualReview: false,
-            rawLabel: "Voice message",
-            kind: "voice_note",
-            guid: basePlatformMessageKey,
-            ...(captured ? { byteSize: captured.byteSize } : {})
-          };
-        }
         // Match path 1's (`collectVisibleThreadMessages`) filtering: the
         // raw img/video/svg sweep otherwise picks up profile-pictures,
         // the play-button SVG inside the voice container, and UI icons,
@@ -8429,7 +8422,7 @@ export class LinkedInAdapter implements PlatformAdapter {
           })
           .catch(() => 0);
         const attachmentCount = nonVoiceAttachmentCount + voiceContainerCount;
-        const fallbackBodyText = voiceAttachment
+        const fallbackBodyText = hasVoice
           ? "[voice message]"
           : attachmentCount > 0
             ? "[non-text message]"
@@ -8512,6 +8505,29 @@ export class LinkedInAdapter implements PlatformAdapter {
           timeText: bubbleTimeData.timeText,
           firstTextPart: textParts[0] ?? ""
         });
+        // Capture the voice note NOW that we have the stable key. Both the
+        // on-disk file (voice store) and the attachment `guid` are keyed off
+        // `stableBaseKey`, so `hasLinkedInVoice` hits across backfill passes
+        // and the surviving message's guid always resolves to a real file.
+        // `stableBaseKey` is either a real `urn:li:` event urn or a
+        // fingerprinted `li-msg-fp:...` key — the composite attachment
+        // resolver (index.ts) routes both to the LinkedIn voice resolver.
+        if (hasVoice) {
+          const audioButton = root.locator(".msg-s-event-listitem__audio").first();
+          const captured = await this.captureLinkedInVoiceMessage(
+            page,
+            audioButton,
+            stableBaseKey
+          ).catch(() => null);
+          voiceAttachment = {
+            type: LINKEDIN_VOICE_MIME,
+            manualReview: false,
+            rawLabel: "Voice message",
+            kind: "voice_note",
+            guid: stableBaseKey,
+            ...(captured ? { byteSize: captured.byteSize } : {})
+          };
+        }
         textParts.forEach((text, partIndex) => {
           const parsedTimestampMs = Date.parse(timestamp);
           const partTimestamp = Number.isNaN(parsedTimestampMs)
