@@ -41,6 +41,7 @@ import {
   executeTracedOperation,
   type RunLogger
 } from "../services/run-logger.js";
+import { parseAllowedProfileUrl } from "../services/profile-url-policy.js";
 import {
   buildTemporaryCandidateId,
   normalizeCanonicalLinkedInThreadId
@@ -9961,10 +9962,16 @@ export class LinkedInAdapter implements PlatformAdapter {
   // wants to land in the runner's authenticated Chrome rather than their
   // default browser. Reuses the same auth-recovery path as openThread.
   async openProfileUrl(url: string, displayName?: string): Promise<void> {
+    // Re-validate at the navigation boundary: persisted/legacy profileUrl rows
+    // predate the write-time allowlist, so a stored file:// / view-source: /
+    // intranet URL must be rejected here before we point the authenticated
+    // Chrome tab at it. parseAllowedProfileUrl throws on anything that isn't
+    // https/http on linkedin.com.
+    const safeUrl = parseAllowedProfileUrl(url, this.platform);
     return this.runWithPlatformLease(async () => {
       const page = await this.getPage();
       await page.bringToFront();
-      await this.tracedGoto(page, url, {
+      await this.tracedGoto(page, safeUrl, {
         stage: "open_profile",
         note: displayName ? `open_profile:${displayName}` : "open_profile"
       });

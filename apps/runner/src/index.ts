@@ -48,6 +48,7 @@ import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resummarizeThread } from "./services/resummarize-thread";
 import { pickCanonicalThread } from "./services/canonical-thread";
+import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
@@ -5168,15 +5169,30 @@ app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) =>
     res.status(404).json({ error: "person not found" });
     return;
   }
+  // The stored value is later navigated to in the runner's authenticated
+  // Chrome (open-profile + the enrichment auto-visit), so a bare URL string
+  // isn't safe to persist: file://, view-source:, data:, link-local hosts
+  // and intranet hosts all parse as valid URLs. Pin it to https/http on the
+  // platform's allowlisted host before it ever reaches the database.
+  let safeProfileUrl: string;
+  try {
+    safeProfileUrl = parseAllowedProfileUrl(payload.profileUrl, person.platform);
+  } catch (error) {
+    if (error instanceof ProfileUrlPolicyError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
   await prisma.person.update({
     where: { id: personId },
     data: {
-      profileUrl: payload.profileUrl,
+      profileUrl: safeProfileUrl,
       profileUrlSource: "manual",
       enrichmentFailedReason: null
     }
   });
-  res.json({ status: "ok", profileUrl: payload.profileUrl });
+  res.json({ status: "ok", profileUrl: safeProfileUrl });
 }));
 
 // Bulk-enqueue every person with a known profile URL for re-enrichment.
