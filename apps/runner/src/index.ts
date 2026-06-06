@@ -2011,7 +2011,11 @@ app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
             stateKey: z.string().min(1)
           })
         )
-        .min(1)
+        .min(1),
+      // The dashboard-local date the digest fired on. Persisted so the daily
+      // cadence compares like-for-like local dates (#628). Optional so a stale
+      // dashboard build that omits it still acks (falls back to the UTC prefix).
+      localDate: localDateSchema.optional()
     })
     .parse(req.body ?? {});
   const current = await overdueDigestStore.get();
@@ -2022,7 +2026,7 @@ app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
     return;
   }
   const nowIso = new Date().toISOString();
-  const next = await overdueDigestStore.put(applyAck(current, payload.included, nowIso));
+  const next = await overdueDigestStore.put(applyAck(current, payload.included, nowIso, payload.localDate));
   await auditService.log({
     action: "OVERDUE_DIGEST_FIRED",
     stage: "Notify",
