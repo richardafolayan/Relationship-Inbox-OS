@@ -1375,6 +1375,38 @@ export function selectSuggestedReplyMode(input: {
   return "reopen";
 }
 
+/**
+ * Render the recent exchange for generateSuggestedReplies as `speaker: body`
+ * lines, oldest first. Operator turns are labelled `operator:`; contact turns
+ * are labelled with `contactLabel`, which callers derive from
+ * `contactTranscriptLabel(displayName)` so the contact's own messages are
+ * prefixed with their REAL name when it is known.
+ *
+ * This is the anti-leak invariant the injected #463 TRANSCRIPT LABELS
+ * discipline depends on: that block tells the model the contact's turns are
+ * name-prefixed and are the only authority on who the contact is, so any
+ * OTHER proper noun in a body is a third party. Previously this transcript
+ * hardcoded `contact:`, leaving the discipline's claim unbacked and letting
+ * the model address a reply to a body-mentioned third party (Lanre -> Anu,
+ * #463/#399). For a placeholder handle `contactTranscriptLabel` returns
+ * "contact", so nameless threads render exactly as before.
+ *
+ * Note: deliberately NOT `formatMessageForPrompt` — that adds a `(timestamp)`
+ * and would change the prompt the suggested-replies model sees. This keeps
+ * the historical `speaker: body` shape.
+ */
+export function renderSuggestedRepliesExchange(
+  messages: MessageForPrompt[],
+  contactLabel = "contact"
+): string {
+  return messages
+    .map((m) => {
+      const speaker = m.direction === "OUT" ? "operator" : contactLabel;
+      return `${speaker}: ${renderMessageBody(m)}`;
+    })
+    .join("\n");
+}
+
 export function createAiService(settingsStore: SettingsStore): AiService {
   // Build one client per provider up front, guarded by API key presence.
   // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
@@ -2166,12 +2198,10 @@ ${transcript}`;
     // turn. The operator's own entries here also serve as per-thread
     // voice calibration — register, vocabulary, length, punctuation
     // habits to mirror.
-    const recentExchange = input.recentMessages
-      .map((m) => {
-        const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker}: ${renderMessageBody(m)}`;
-      })
-      .join("\n");
+    const recentExchange = renderSuggestedRepliesExchange(
+      input.recentMessages,
+      contactTranscriptLabel(input.displayName)
+    );
 
     // Mode switches the whole framing. In reply mode the model produces
     // three responses to the contact's pending message. In reopen mode

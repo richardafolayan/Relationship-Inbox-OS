@@ -1,4 +1,4 @@
-import type { BrowserContext, ElementHandle, Locator, Page } from "patchright";
+import type { BrowserContext, ElementHandle, Locator, Page, Request } from "patchright";
 import { writeFile } from "node:fs/promises";
 import { statSync } from "node:fs";
 import { join } from "node:path";
@@ -14,6 +14,7 @@ import type {
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
+  linkedInVoiceResponseMatchesRequest,
   linkedInVoicePath,
   writeLinkedInVoice
 } from "../services/linkedin-voice-store.js";
@@ -8231,14 +8232,45 @@ export class LinkedInAdapter implements PlatformAdapter {
       })
       .catch(() => undefined);
 
+    // Scope the captured audio to THIS play-click. The signed CDN URL for
+    // the audio bytes does not carry the message's inner id, so a plain
+    // `messaging-audio-analyzed` URL match accepts ANY voice response. When
+    // the backfill loop captures 2+ voice notes sequentially and an earlier
+    // note's fetch is slow enough that its 8s wait times out (the click has
+    // already fired, the fetch is still in flight), the loop arms a fresh
+    // unscoped wait for the next note — and the earlier note's late response
+    // resolves it first, writing one message's audio under another's urn.
+    // Correlate on the exact request this click triggers to remove the
+    // cross-talk. The response wait is armed before the click so no response
+    // is missed in the gap between learning the request and listening for it;
+    // the `audioRequest !== null` guard keeps it inert until then.
+    let audioRequest: Request | null = null;
     const responsePromise = page
       .waitForResponse(
-        (response) => /messaging-audio-analyzed/.test(response.url()),
+        (response) =>
+          audioRequest !== null &&
+          linkedInVoiceResponseMatchesRequest(
+            response.url(),
+            response.request(),
+            audioRequest
+          ),
+        { timeout: 8000 }
+      )
+      .catch(() => null);
+
+    const requestPromise = page
+      .waitForRequest(
+        (request) => /messaging-audio-analyzed/.test(request.url()),
         { timeout: 8000 }
       )
       .catch(() => null);
 
     await audioButton.click({ timeout: 4000 }).catch(() => undefined);
+
+    audioRequest = await requestPromise;
+    if (!audioRequest) {
+      return null;
+    }
 
     const response = await responsePromise;
     if (!response || !response.ok()) {
