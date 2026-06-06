@@ -346,6 +346,29 @@ export function decideOutboundMetadataMerge(input: {
   return updates;
 }
 
+/**
+ * Same-thread outbound dedup can also delete a twin: when a canonical row
+ * already holds the scan key, decideOutboundDedup returns `delete_twin` and the
+ * row we drop is usually the send-side persistence — the only one carrying
+ * sentVia=automation + replyToMessageId (send.ts sets both; the scan upsert
+ * sets neither). Mirror the cross-sibling merge and copy that metadata onto the
+ * surviving canonical before deleting, so the dashboard bubble keeps its
+ * automation badge and reply nesting. Thin pure wrapper over
+ * decideOutboundMetadataMerge so the same-thread field mapping is unit-testable
+ * away from Prisma.
+ */
+export function decideSameThreadTwinDeleteMerge(
+  twin: { sentVia: string | null; replyToMessageId: string | null },
+  survivor: { sentVia: string | null; replyToMessageId: string | null }
+): { sentVia?: string; replyToMessageId?: string } {
+  return decideOutboundMetadataMerge({
+    survivorSentVia: survivor.sentVia ?? null,
+    survivorReplyToMessageId: survivor.replyToMessageId ?? null,
+    hasAutomationTwin: twin.sentVia === "automation",
+    twinReplyToMessageId: twin.replyToMessageId ?? null
+  });
+}
+
 export function normalizePositiveScanCap(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
@@ -452,6 +475,28 @@ export function evaluateLinkedInFallbackDecision(input: {
       input.fallbackEnabled && fallbackEligible
         ? "zero_primary_rows_with_selector_signals"
         : undefined
+  };
+}
+
+/**
+ * Per-job cancellation gate. Reads the queue's monotonically-increasing
+ * `abortVersion` EAGERLY at construction and remembers it as the baseline.
+ * `shouldAbort()` then returns true once a later `requestAbort()` has bumped
+ * the version past that baseline.
+ *
+ * The eager read is the whole point: `runJob` must capture its baseline
+ * BEFORE its startup awaits (`ensurePlatformRows()`, `getSettings()`), so a
+ * Cancel/reset fired while the job is parked in those awaits — which has
+ * already incremented `abortVersion` — is reflected in `shouldAbort()`.
+ * Capturing late made `baseline === abortVersion`, permanently disabling the
+ * abort for the whole run.
+ */
+export function createJobAbortGate(readAbortVersion: () => number): {
+  shouldAbort: () => boolean;
+} {
+  const baseline = readAbortVersion();
+  return {
+    shouldAbort: (): boolean => readAbortVersion() !== baseline
   };
 }
 
@@ -1068,6 +1113,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
   }
 
   async function runJob(job: ScanJob): Promise<ScanJobOutcome> {
+    // Capture the abort baseline BEFORE the SCAN_STARTED emit and the startup
+    // awaits below. requestAbort() does `abortVersion += 1`; if a Cancel/reset
+    // fires while this job is parked in ensurePlatformRows()/getSettings(),
+    // reading the baseline afterwards would capture the already-bumped value
+    // and permanently disable shouldAbort() for the whole run.
+    const abortGate = createJobAbortGate(() => abortVersion);
     deps.eventBus.emit({
       type: "SCAN_STARTED",
       jobId: job.jobId,
@@ -1081,10 +1132,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
       : settings.enabledPlatforms.filter((platform) => allPlatforms.includes(platform));
 
     let updatedThreads = 0;
-    const jobAbortVersion = abortVersion;
     let aborted = false;
 
-    const shouldAbort = (): boolean => abortVersion !== jobAbortVersion;
+    const shouldAbort = abortGate.shouldAbort;
     const resolveAbortReason = (): string => abortReason ?? "session_preempt";
 
     const markAborted = async (
@@ -3046,6 +3096,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
           existingCanonical: canonical
         });
         if (decision.kind === "delete_twin") {
+          // The twin we drop is usually the send-side row — the only one
+          // carrying sentVia=automation + replyToMessageId (send.ts sets both;
+          // the scan upsert sets neither). decideOutboundDedup only returns
+          // delete_twin when a canonical already holds the scan key, so the
+          // survivor is that canonical. Merge the twin's metadata onto it
+          // before deleting, mirroring the cross-sibling branch above, so the
+          // bubble keeps its automation badge and reply nesting.
+          const deletedTwin = sameThreadTwins.find((t) => t.id === decision.twinId);
+          if (canonical && deletedTwin) {
+            const updates = decideSameThreadTwinDeleteMerge(deletedTwin, canonical);
+            if (Object.keys(updates).length > 0) {
+              await prisma.message.update({ where: { id: canonical.id }, data: updates });
+            }
+          }
           await prisma.message.delete({ where: { id: decision.twinId } });
         } else if (decision.kind === "migrate_twin_key") {
           await prisma.message.update({
