@@ -123,6 +123,14 @@ stores your LinkedIn password.**
 
 You only log in once; it remembers the session.
 
+### Add an AI key (for summaries and reply help)
+
+The summaries, action items, and reply suggestions are written by an AI model,
+which needs a key (yours, kept private on your Mac). The free Google Gemini key
+is the easiest. It takes a few minutes and the steps are in
+[getting-ai-keys.md](./getting-ai-keys.md). Without a key the app still shows
+your conversations, but without the summaries and reply help.
+
 ### Set up your reply style
 
 The first time you open the app, the **Today** page has a "Set up your reply
