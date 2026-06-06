@@ -247,6 +247,30 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     });
   }
 
+  // Close out any unfinished EnrichmentJob rows for a person after a manual
+  // visit (runOnce). runOnce visits + persists directly against
+  // Person/PersonEnrichment but is decoupled from the durable job table, so a
+  // PENDING/RUNNING job left by first_seen auto-enrich, a prior queued manual,
+  // or a race would otherwise survive and the background drain would visit the
+  // SAME profile a second time — wasting the daily cap and adding an extra
+  // high-fingerprint visit. The enrich lock only serialises the two visits; it
+  // does not suppress the second. Mark them DONE (mirroring processJob's
+  // terminal transition) so pickNextJob skips them — it only selects PENDING.
+  // Best-effort: a failure here must not fail the manual request, which has
+  // already done the real work.
+  async function resolveOutstandingJobs(personId: string): Promise<void> {
+    try {
+      await prisma.enrichmentJob.updateMany({
+        where: { personId, status: { in: ["PENDING", "RUNNING"] } },
+        data: { status: "DONE", lastError: null }
+      });
+    } catch (error) {
+      console.warn(
+        `[enrichment-queue] resolveOutstandingJobs failed for person=${personId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   // Reasons that won't resolve by retrying: the person row is missing /
   // has no profileUrl, LinkedIn returned a not-found page, or the profile
   // is private. Without this, jobs against profile-less people sit in
@@ -345,40 +369,77 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
 
-    if ("failed" in result && result.failed) {
-      await persistFailure(job.personId, result.reason);
-      const attempts = job.attempts + 1;
-      const permanent = isPermanentFailure(result.reason);
-      const giveUp = permanent || attempts >= 3;
+    // The visit happened above (rate-limit accounting already ran). Guard the
+    // post-visit persist + terminal job-status update: the row's last durable
+    // write was RUNNING (set before the pacing sleep) and pickNextJob only
+    // ever selects PENDING rows, so a throw here — from persistSuccess /
+    // persistFailure or the terminal enrichmentJob.update — would otherwise
+    // escape processJob (via drainPass -> kick's swallowing .catch) and leave
+    // the row stuck RUNNING until the next boot's recoverInflightOnStart. The
+    // health endpoint counts RUNNING into the "Enriching N" banner, so that
+    // orphan keeps the dashboard indicator glued on indefinitely.
+    try {
+      if ("failed" in result && result.failed) {
+        await persistFailure(job.personId, result.reason);
+        const attempts = job.attempts + 1;
+        const permanent = isPermanentFailure(result.reason);
+        const giveUp = permanent || attempts >= 3;
+        await prisma.enrichmentJob.update({
+          where: { id: job.id },
+          data: {
+            status: giveUp ? "FAILED" : "PENDING",
+            // Persist the real attempt count here (no longer bumped at the
+            // RUNNING step) so the next run's give-up check sees an accurate
+            // number that only counts attempts where a visit actually ran.
+            attempts,
+            lastError: `${result.reason}${result.detail ? `: ${result.detail}` : ""}`,
+            // Pass the PRE-increment count (job.attempts) — exponentialDelayMs
+            // is contracted on "attempts before the failed run", so the first
+            // failure (job.attempts=0) hits the 1h tier instead of jumping to
+            // 6h. The persisted `attempts` above (post-increment) still drives
+            // the give-up check.
+            nextAttemptAt: giveUp ? null : new Date(Date.now() + exponentialDelayMs(job.attempts))
+          }
+        });
+        console.warn(
+          `[enrichment-queue] job=${job.id} person=${job.personId} failed reason=${result.reason} attempts=${attempts} giveUp=${giveUp}${permanent ? " (permanent)" : ""}`
+        );
+        return { visited: true };
+      }
+
+      await persistSuccess(job.personId, result as ExtractedProfile);
       await prisma.enrichmentJob.update({
         where: { id: job.id },
-        data: {
-          status: giveUp ? "FAILED" : "PENDING",
-          // Persist the real attempt count here (no longer bumped at the
-          // RUNNING step) so the next run's give-up check sees an accurate
-          // number that only counts attempts where a visit actually ran.
-          attempts,
-          lastError: `${result.reason}${result.detail ? `: ${result.detail}` : ""}`,
-          // Pass the PRE-increment count (job.attempts) — exponentialDelayMs
-          // is contracted on "attempts before the failed run", so the first
-          // failure (job.attempts=0) hits the 1h tier instead of jumping to
-          // 6h. The persisted `attempts` above (post-increment) still drives
-          // the give-up check.
-          nextAttemptAt: giveUp ? null : new Date(Date.now() + exponentialDelayMs(job.attempts))
-        }
+        data: { status: "DONE", lastError: null }
       });
+      return { visited: true };
+    } catch (persistError) {
+      // A post-visit DB write threw. Reset the orphaned RUNNING row to PENDING
+      // with a short backoff so a transient DB error reschedules the job
+      // instead of stranding it (and the banner) until the next restart.
+      // Best-effort: if the recovery write itself throws we swallow it rather
+      // than re-propagate (which would re-orphan RUNNING) — boot-time
+      // recoverInflightOnStart remains the backstop.
+      const detail = persistError instanceof Error ? persistError.message : String(persistError);
       console.warn(
-        `[enrichment-queue] job=${job.id} person=${job.personId} failed reason=${result.reason} attempts=${attempts} giveUp=${giveUp}${permanent ? " (permanent)" : ""}`
+        `[enrichment-queue] job=${job.id} person=${job.personId} persist failed after visit, rescheduling: ${detail}`
       );
+      try {
+        await prisma.enrichmentJob.update({
+          where: { id: job.id },
+          data: {
+            status: "PENDING",
+            nextAttemptAt: new Date(Date.now() + 60_000),
+            lastError: `persist failed after visit: ${detail}`
+          }
+        });
+      } catch (recoverError) {
+        console.warn(
+          `[enrichment-queue] job=${job.id} reschedule after persist failure also failed: ${recoverError instanceof Error ? recoverError.message : String(recoverError)}`
+        );
+      }
       return { visited: true };
     }
-
-    await persistSuccess(job.personId, result as ExtractedProfile);
-    await prisma.enrichmentJob.update({
-      where: { id: job.id },
-      data: { status: "DONE", lastError: null }
-    });
-    return { visited: true };
   }
 
   async function drainPass(): Promise<void> {
@@ -438,6 +499,12 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     lastVisitAt = Date.now();
     recentVisits.push(lastVisitAt);
     visitsSinceLongIdle += 1;
+    // The manual visit has now run (success or recorded failure), so retire any
+    // PENDING/RUNNING job for this person — otherwise the background drain would
+    // pick it up and visit the same profile again. Runs on both terminal paths;
+    // the earlier deferral returns (scan/send active, daily cap, lock busy) bail
+    // out before here, leaving the job for the drain as they should.
+    await resolveOutstandingJobs(personId);
     if ("failed" in result && result.failed) {
       await persistFailure(personId, result.reason);
       return { failed: true, reason: result.reason };
