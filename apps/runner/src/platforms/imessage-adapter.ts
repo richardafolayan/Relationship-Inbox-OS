@@ -167,7 +167,15 @@ export class IMessageAdapter implements PlatformAdapter {
       return {
         platformMessageKey: r.guid,
         direction: r.direction,
-        timestamp: r.timestamp ?? new Date().toISOString(),
+        // Pass the parsed chat.db timestamp through as-is. When `date` was
+        // NULL/0/non-finite, appleTimeToIso returned undefined; leave it
+        // undefined (timestamp is optional on NormalizedMessage) so
+        // scan-queue's `adapterReportedTimestamp` is false and
+        // buildMessageUpsertPayload preserves the existing row's timestamp
+        // on re-scan instead of re-stamping it to "now" (issue #245 drift).
+        // New inserts still fall back via normalizeMessageTimestamp. Mirrors
+        // the LinkedIn adapter's `timestamp || undefined`.
+        timestamp: r.timestamp,
         text,
         senderName: resolvedSender,
         raw: Object.keys(raw).length > 0 ? raw : undefined,
