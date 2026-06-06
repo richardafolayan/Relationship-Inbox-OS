@@ -27,6 +27,16 @@ export interface OverdueDigestSettings {
   /** ISO timestamp of the most-recent digest that fired. Null until `ack`. */
   lastDigestAt: string | null;
   /**
+   * Browser-LOCAL date (YYYY-MM-DD) the most-recent digest fired on, captured
+   * from the dashboard's clock at `ack` time. The daily cadence compares THIS
+   * against today's local date, because `lastDigestAt` is a UTC `.toISOString()`
+   * written on the runner — deriving a calendar date from its prefix mixed
+   * zones and skipped days for operators west of UTC (#628). Null for legacy
+   * rows persisted before this field; the daily check then falls back to the
+   * UTC prefix until the next ack writes a local date.
+   */
+  lastDigestLocalDate: string | null;
+  /**
    * Local-date (YYYY-MM-DD) the operator dismissed today's digest. Compared
    * against the client-supplied `localDate` on each tick. Cleared on the
    * next calendar day automatically (we never persist server time-zones).
@@ -39,6 +49,7 @@ export interface OverdueDigestSettings {
 export const DEFAULT_OVERDUE_DIGEST_SETTINGS: OverdueDigestSettings = {
   cadence: "off",
   lastDigestAt: null,
+  lastDigestLocalDate: null,
   dismissForLocalDate: null,
   perPerson: {}
 };
@@ -81,7 +92,8 @@ export function isDigestDue(
   cadence: OverdueDigestCadence,
   lastDigestAt: string | null,
   nowIso: string,
-  localDate: string
+  localDate: string,
+  lastDigestLocalDate: string | null = null
 ): boolean {
   if (cadence === "off") return false;
   if (!lastDigestAt) return true;
@@ -89,7 +101,11 @@ export function isDigestDue(
   const now = Date.parse(nowIso);
   if (Number.isNaN(last) || Number.isNaN(now)) return true;
   if (cadence === "daily") {
-    return localDateOf(lastDigestAt) !== localDate;
+    // Compare like-for-like LOCAL calendar dates. Prefer the local date captured
+    // at the last ack; fall back to the UTC prefix of `lastDigestAt` only for
+    // legacy rows that predate `lastDigestLocalDate` (self-heals on next ack).
+    const lastLocal = lastDigestLocalDate || localDateOf(lastDigestAt);
+    return lastLocal !== localDate;
   }
   // weekly
   const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
@@ -97,13 +113,12 @@ export function isDigestDue(
 }
 
 /**
- * Extracts the YYYY-MM-DD prefix of an ISO timestamp interpreted in the
- * SAME zone the caller is using. The runner stores client-supplied local
- * dates, so the most consistent comparison is to take the date portion of
- * the persisted ISO string. This is fine because every write goes through
- * the runner which always stores ISO timestamps generated locally on the
- * dashboard's clock — the dashboard's date and the timestamp's date are in
- * the same zone.
+ * LEGACY fallback only. Extracts the YYYY-MM-DD prefix of an ISO timestamp,
+ * i.e. its calendar date interpreted in UTC. `lastDigestAt` is a UTC
+ * `.toISOString()` written on the runner, so this prefix is a UTC date, NOT
+ * the operator's local date — using it for the daily cadence skipped days west
+ * of UTC (#628). The daily check now prefers the persisted `lastDigestLocalDate`
+ * and only calls this for rows persisted before that field existed.
  */
 function localDateOf(iso: string): string {
   const match = /^(\d{4}-\d{2}-\d{2})/.exec(iso);

@@ -13,6 +13,7 @@ import type { PrismaClient } from "@prisma/client";
 import type { PlatformName } from "@inbox-os/core";
 import type { AiService } from "../types/runtime.js";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai.js";
+import { pickCanonicalThread } from "./canonical-thread.js";
 
 export interface ReassessThreadDeps {
   prisma: PrismaClient;
@@ -29,8 +30,17 @@ export interface ReassessThreadDeps {
     options?: { race?: boolean }
   ) => Promise<
     | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
-    | { ok: false; reason: "not_found" }
+    // `ai_unavailable` (AI fallback used → write skipped) is handled the same
+    // as not_found below: `if (!resummarised.ok)` returns kind:"not_found", so
+    // the operator gets a clean 404-retry rather than a persisted fallback.
+    | { ok: false; reason: "not_found" | "ai_unavailable" }
   >;
+  /**
+   * Resolve the sibling thread ids for an iMessage Person (phone + email
+   * handle chats). Same closure resummarize uses, injected so this service
+   * stays DB-free in tests. Only called for IMESSAGE threads.
+   */
+  siblingThreadIds: (platform: PlatformName, personId: string) => Promise<string[]>;
 }
 
 export type ReassessThreadResult =
@@ -88,16 +98,79 @@ export async function runReassessForThread(
     return { kind: "not_found" };
   }
 
-  const orderedMessages = [...thread.messages].reverse();
+  // iMessage splits one Person across handle-specific sibling threads. The
+  // thread view and resummarize already MERGE messages across siblings; manual
+  // Reassess must match, on BOTH ends:
+  //   - classify over the merged sibling messages (not just this row's), and
+  //   - target the CANONICAL sibling (most-recent inbound) for the summary
+  //     refresh + cache burn.
+  // Otherwise Reassess on a dormant high-message-count sibling (e.g. an old
+  // phone thread) would refresh THAT row while the readers consult the
+  // live email-handle sibling — the operator clicks Reassess and nothing
+  // visibly changes. Single-thread iMessage persons and non-iMessage threads
+  // skip the extra queries and behave exactly as before.
+  let canonicalThreadId = thread.id;
+  // Summary/what-they-want fed to the classifier. Default to the requested
+  // row's values (correct for single-sibling iMessage persons and every
+  // non-iMessage thread); the >1-sibling branch overrides these with the
+  // CANONICAL sibling's values so the classifier prompt isn't steered by a
+  // dormant sibling's stale AI fields.
+  let classifierSummary: string | null = thread.rollingSummary;
+  let classifierWhatTheyWant: string | null = thread.whatTheyWant;
+  let orderedMessages = [...thread.messages].reverse();
+  if (thread.platform === "IMESSAGE") {
+    const siblingIds = await deps.siblingThreadIds(
+      thread.platform as PlatformName,
+      thread.personId
+    );
+    if (siblingIds.length > 1) {
+      const siblingRows = await deps.prisma.thread.findMany({
+        where: { id: { in: siblingIds } },
+        select: {
+          id: true,
+          lastInboundAt: true,
+          rollingSummary: true,
+          whatTheyWant: true,
+          _count: { select: { messages: true } }
+        }
+      });
+      const canonicalRow = pickCanonicalThread(
+        siblingRows.map((row) => ({
+          id: row.id,
+          lastInboundAt: row.lastInboundAt,
+          messageCount: row._count?.messages ?? 0,
+          rollingSummary: row.rollingSummary,
+          whatTheyWant: row.whatTheyWant
+        }))
+      );
+      canonicalThreadId = canonicalRow?.id ?? thread.id;
+      // AI fields are persisted per-row, so a dormant sibling carries stale
+      // summary/what-they-want. Classify off the CANONICAL sibling's values
+      // (the row the readers + the summary refresh + the category write all
+      // agree on) rather than the requested row's, which may be dormant.
+      if (canonicalRow) {
+        classifierSummary = canonicalRow.rollingSummary;
+        classifierWhatTheyWant = canonicalRow.whatTheyWant;
+      }
+      const mergedDesc = await deps.prisma.message.findMany({
+        where: { threadId: { in: siblingIds } },
+        orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+        take: 80,
+        include: { audioTranscription: true }
+      });
+      orderedMessages = [...mergedDesc].reverse();
+    }
+  }
+
   const [resummarised, category] = await Promise.all([
-    deps.resummarize(threadId, { race: true }),
+    deps.resummarize(canonicalThreadId, { race: true }),
     deps.aiService
       .classifyThreadCategory({
         platform: thread.platform as PlatformName,
         displayName: thread.person.displayName,
         messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-        summary: thread.rollingSummary,
-        whatTheyWant: thread.whatTheyWant,
+        summary: classifierSummary,
+        whatTheyWant: classifierWhatTheyWant,
         race: true
       })
       .catch(() => null)
@@ -111,7 +184,7 @@ export async function runReassessForThread(
   }
 
   await deps.prisma.thread.update({
-    where: { id: thread.id },
+    where: { id: canonicalThreadId },
     data: {
       ...(category ? { category } : {}),
       suggestedRepliesCacheKey: null,

@@ -21,14 +21,27 @@
 // A false positive here silently hides a needs-reply turn, which is
 // much worse than a false negative.
 
+// A contact display name as it appears in these system rows: 1-3
+// whitespace-separated tokens of letters / dots / apostrophes / hyphens
+// ("Seyi", "Marianne Acheampong", "Mary-Jane O'Brien"). Deliberately NOT a
+// `[^\n]{1,80}?` wildcard: anchored with `$`, that lazy wildcard absorbed
+// up to 80 characters of arbitrary prefix prose, so a real inbound message
+// merely ENDING in the canonical phrase ("Can you believe she kept an
+// audio message from you") matched and was silently dropped. A bounded
+// name-shaped class can't swallow a run of sentence words.
+const NAME = "[\\p{L}][\\p{L}.'\\-]{0,39}(?: [\\p{L}.'\\-]{1,39}){0,2}";
+// The "from <name>" slot may instead hold a phone number or email handle
+// (e.g. "+447951711949"), so widen just that trailing slot.
+const FROM_NAME = `(?:${NAME}|[+\\d][\\d ()\\-]{3,30}|[^\\s@]+@[^\\s@]+)`;
+
 const KEPT_AUDIO_PATTERNS: RegExp[] = [
   // "<name> kept an audio message from you[.]"
-  /^[^\n]{1,80}? kept an audio message from you\.?$/i,
+  new RegExp(`^${NAME} kept an audio message from you\\.?$`, "iu"),
   // "You kept an audio message from <name>[.]"
-  /^you kept an audio message from [^\n]{1,80}?\.?$/i,
+  new RegExp(`^you kept an audio message from ${FROM_NAME}\\.?$`, "iu"),
   // "<name> kept an audio message[.]" (no "from" suffix; some macOS
   // versions emit the shorter form).
-  /^[^\n]{1,80}? kept an audio message\.?$/i,
+  new RegExp(`^${NAME} kept an audio message\\.?$`, "iu"),
   // "You kept an audio message[.]" — the operator-side shorter variant.
   /^you kept an audio message\.?$/i
 ];

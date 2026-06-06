@@ -42,6 +42,7 @@ import { describeReactionsForPrompt, parseReactionsFromRawJson } from "./reactio
 import {
   providerRegistry,
   fallbackChain,
+  pickActiveProvider,
   classifyLlmError as classifyLlmErrorImpl,
   type AiErrorClassification
 } from "./ai-providers";
@@ -1374,6 +1375,38 @@ export function selectSuggestedReplyMode(input: {
   return "reopen";
 }
 
+/**
+ * Render the recent exchange for generateSuggestedReplies as `speaker: body`
+ * lines, oldest first. Operator turns are labelled `operator:`; contact turns
+ * are labelled with `contactLabel`, which callers derive from
+ * `contactTranscriptLabel(displayName)` so the contact's own messages are
+ * prefixed with their REAL name when it is known.
+ *
+ * This is the anti-leak invariant the injected #463 TRANSCRIPT LABELS
+ * discipline depends on: that block tells the model the contact's turns are
+ * name-prefixed and are the only authority on who the contact is, so any
+ * OTHER proper noun in a body is a third party. Previously this transcript
+ * hardcoded `contact:`, leaving the discipline's claim unbacked and letting
+ * the model address a reply to a body-mentioned third party (Lanre -> Anu,
+ * #463/#399). For a placeholder handle `contactTranscriptLabel` returns
+ * "contact", so nameless threads render exactly as before.
+ *
+ * Note: deliberately NOT `formatMessageForPrompt` — that adds a `(timestamp)`
+ * and would change the prompt the suggested-replies model sees. This keeps
+ * the historical `speaker: body` shape.
+ */
+export function renderSuggestedRepliesExchange(
+  messages: MessageForPrompt[],
+  contactLabel = "contact"
+): string {
+  return messages
+    .map((m) => {
+      const speaker = m.direction === "OUT" ? "operator" : contactLabel;
+      return `${speaker}: ${renderMessageBody(m)}`;
+    })
+    .join("\n");
+}
+
 export function createAiService(settingsStore: SettingsStore): AiService {
   // Build one client per provider up front, guarded by API key presence.
   // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
@@ -1439,7 +1472,16 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
-    const providerId: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    const requested: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    // Key-presence fallback: if the requested provider has no key but another
+    // is configured, use that one. Lets an operator (e.g. a pilot) set just
+    // ANY one key without also flipping AI_PROVIDER. Only providers with a
+    // built client are considered configured.
+    const configured: AiProvider[] = [];
+    if (openAiClient) configured.push("openai");
+    if (geminiClient) configured.push("gemini");
+    if (glmClient) configured.push("glm");
+    const providerId = pickActiveProvider(requested, configured);
     if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
       return { client: glmClient, model, provider: providerId };
@@ -1952,7 +1994,7 @@ ${transcript}`;
     // the call is purely additive — the worst case is identical to
     // today.
     const parseSummary = (value: unknown) => summarySchema.parse(value);
-    const { result } = input.race
+    const { result, source } = input.race
       ? await raceModelJson(prompt, fallback, parseSummary, undefined, "reassess-summary")
       : await modelJson(prompt, fallback, parseSummary);
     // Safety net. The prompt asks for a complete, self-contained ask within
@@ -2016,7 +2058,12 @@ ${transcript}`;
       tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
       needs_reply: result.needs_reply,
       urgency_hint: result.urgency_hint,
-      reply_brief: finalBrief
+      reply_brief: finalBrief,
+      // Carry the provider source through so persisting callers can tell a
+      // real summary from the synthesised fallback (source.providerId === null
+      // ⇒ every provider failed). Mirrors generateSuggestedReplies, which
+      // returns `source` for the same reason.
+      source
     };
     return output;
   }
@@ -2156,12 +2203,10 @@ ${transcript}`;
     // turn. The operator's own entries here also serve as per-thread
     // voice calibration — register, vocabulary, length, punctuation
     // habits to mirror.
-    const recentExchange = input.recentMessages
-      .map((m) => {
-        const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker}: ${renderMessageBody(m)}`;
-      })
-      .join("\n");
+    const recentExchange = renderSuggestedRepliesExchange(
+      input.recentMessages,
+      contactTranscriptLabel(input.displayName)
+    );
 
     // Mode switches the whole framing. In reply mode the model produces
     // three responses to the contact's pending message. In reopen mode

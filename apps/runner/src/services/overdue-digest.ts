@@ -69,6 +69,7 @@ function parseSettings(raw: unknown): OverdueDigestSettings {
   const partial = raw as {
     cadence?: unknown;
     lastDigestAt?: unknown;
+    lastDigestLocalDate?: unknown;
     dismissForLocalDate?: unknown;
     perPerson?: unknown;
   };
@@ -88,6 +89,7 @@ function parseSettings(raw: unknown): OverdueDigestSettings {
   return {
     cadence,
     lastDigestAt: asNullableString(partial.lastDigestAt),
+    lastDigestLocalDate: asNullableString(partial.lastDigestLocalDate),
     dismissForLocalDate: asNullableString(partial.dismissForLocalDate),
     perPerson
   };
@@ -97,6 +99,7 @@ export function cloneSettings(s: OverdueDigestSettings): OverdueDigestSettings {
   return {
     cadence: s.cadence,
     lastDigestAt: s.lastDigestAt,
+    lastDigestLocalDate: s.lastDigestLocalDate,
     dismissForLocalDate: s.dismissForLocalDate,
     perPerson: Object.fromEntries(
       Object.entries(s.perPerson).map(([id, entry]) => [id, { ...entry }])
@@ -271,7 +274,7 @@ export function computeTick(input: TickInputs): OverdueDigestTickResult {
   if (settings.dismissForLocalDate && settings.dismissForLocalDate === localDate) {
     return { due: false, reason: "dismissed_today", candidates: [] };
   }
-  if (!isDigestDue(settings.cadence, settings.lastDigestAt, nowIso, localDate)) {
+  if (!isDigestDue(settings.cadence, settings.lastDigestAt, nowIso, localDate, settings.lastDigestLocalDate)) {
     return { due: false, reason: "not_due", candidates: [] };
   }
   const candidates = selectCandidates({ rows, settings, nowIso }).slice(0, PREVIEW_CANDIDATE_CAP);
@@ -290,15 +293,19 @@ export interface AckPersonInput {
 /**
  * Pure: returns the settings state to persist after a successful digest.
  * Idempotent on `(now, included)` — passing identical inputs twice writes
- * the same row.
+ * the same row. `localDate` is the dashboard-LOCAL date the digest fired on
+ * (the daily cadence compares against it, #628); omitted/legacy callers leave
+ * `lastDigestLocalDate` null and the daily check falls back to the UTC prefix.
  */
 export function applyAck(
   settings: OverdueDigestSettings,
   included: AckPersonInput[],
-  nowIso: string
+  nowIso: string,
+  localDate?: string | null
 ): OverdueDigestSettings {
   const next = cloneSettings(settings);
   next.lastDigestAt = nowIso;
+  next.lastDigestLocalDate = asNullableString(localDate);
   for (const person of included) {
     const existing = next.perPerson[person.personId];
     next.perPerson[person.personId] = {

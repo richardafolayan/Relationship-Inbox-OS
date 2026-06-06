@@ -240,6 +240,16 @@ export interface SummaryOutput {
    * absent, the dashboard derives a safe brief from the legacy fields.
    */
   reply_brief?: ReplyBrief | null;
+  /**
+   * Which provider actually produced this output. Set on freshly-generated
+   * outputs (mirrors `SuggestedRepliesOutput.source`); absent on legacy cached
+   * rows. `source === null` or `source.providerId === null` means every
+   * provider in the chain failed and the fields below are the synthesised
+   * FALLBACK, not a real summary — callers that PERSIST the result (the
+   * Reassess pipeline, the bulk backfill) MUST NOT overwrite a good stored
+   * summary with a fallback. See resummarizeThread.
+   */
+  source?: AiSource | null;
 }
 
 /**

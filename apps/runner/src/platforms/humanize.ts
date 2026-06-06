@@ -201,6 +201,18 @@ export interface HumanTypeOptions {
 }
 
 /**
+ * Split text into the units `humanType` types one at a time. Uses
+ * `Array.from`, which iterates by Unicode code point, so a non-BMP
+ * character (emoji, e.g. 😂) stays a single unit instead of being cut
+ * into its two UTF-16 surrogate halves. Iterating by `text.length` /
+ * `text[i]` would feed `page.keyboard.type` a lone surrogate and corrupt
+ * the sent message; for plain BMP/ASCII text this is a no-op.
+ */
+export function toTypingUnits(text: string): string[] {
+  return Array.from(text);
+}
+
+/**
  * Type text into a target with jittered per-keystroke delays and
  * occasional mid-word "thinking" pauses. Replaces both `locator.fill()`
  * and `page.keyboard.type(text, { delay })` — `fill()` is instant and
@@ -227,10 +239,11 @@ export async function humanType(
   }
   const minDelay = options.delay?.min ?? TYPING_DELAY_MIN_MS;
   const maxDelay = options.delay?.max ?? TYPING_DELAY_MAX_MS;
-  for (let i = 0; i < text.length; i += 1) {
-    await page.keyboard.type(text[i] ?? "");
+  const units = toTypingUnits(text);
+  for (let i = 0; i < units.length; i += 1) {
+    await page.keyboard.type(units[i] ?? "");
     await sleep(randInt(minDelay, maxDelay));
-    if (!options.noThink && Math.random() < TYPING_THINK_CHANCE && i < text.length - 1) {
+    if (!options.noThink && Math.random() < TYPING_THINK_CHANCE && i < units.length - 1) {
       await sleep(randInt(TYPING_THINK_MIN_MS, TYPING_THINK_MAX_MS));
     }
   }
