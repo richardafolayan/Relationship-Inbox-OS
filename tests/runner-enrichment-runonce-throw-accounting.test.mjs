@@ -19,9 +19,11 @@ import { createKeyedMutex } from "../apps/runner/dist/services/keyed-mutex.js";
 // accounting + persistFailure. These tests pin all three guarantees.
 
 // In-memory fake of the slice of Prisma that runOnce -> visitProfile /
-// persistFailure touches. runOnce never reads enrichmentJob (that is
-// processJob's table), so person is all we need. getManagedPage throwing
-// stands in for the real "visit threw" path the bug is about.
+// persistFailure touches: person (read for the profileUrl, update for the
+// failure reason) plus enrichmentJob.updateMany — runOnce now retires the
+// person's PENDING/RUNNING jobs after a terminal visit (PM9), so the table
+// must exist on the fake or the call throws. getManagedPage throwing stands
+// in for the real "visit threw" path the bug is about.
 function createHarness({ throwOnVisit }) {
   const personUpdates = [];
   const fakePrisma = {
@@ -32,6 +34,11 @@ function createHarness({ throwOnVisit }) {
       async update({ where, data }) {
         personUpdates.push({ id: where.id, data });
         return { id: where.id, ...data };
+      }
+    },
+    enrichmentJob: {
+      async updateMany() {
+        return { count: 0 };
       }
     }
   };
