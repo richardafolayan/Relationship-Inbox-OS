@@ -4,6 +4,11 @@ node_modules
 .next
 dist
 coverage
+# Student release artefacts (zips, latest.json, checksums) + backups the
+# updater makes. Never commit built release zips — rebuild them.
+/release-dist/
+/.update-backups/
+release.json
 .DS_Store
 .env
 .env.local
