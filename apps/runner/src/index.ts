@@ -1580,6 +1580,10 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
   // listThreads already drops automated/shortcode senders and decodes
   // lastMessageAt. 5000 comfortably exceeds the total chat count.
   const rows = db.listThreads(5000, { unreadOnly: false });
+  // listThreads materialises its rows; the rest of the handler uses scanQueue,
+  // not db. Close the chat.db handle now so each import-history call doesn't
+  // leak an open SQLite connection.
+  db.close();
   const candidates = rows.filter(
     (r) => r.lastMessageAt !== undefined && Date.parse(r.lastMessageAt) >= cutoffMs
   );
