@@ -27,6 +27,7 @@ import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
 import { shouldApplyThreadScopedResult } from "@/lib/thread-identity-guard";
+import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
 import type {
@@ -61,6 +62,7 @@ const ProfileDrawer = dynamic(
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import { blobToWhisperWav } from "@/lib/dictation-audio";
+import { stopRecorderAndStream } from "@/lib/recorder-teardown";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
@@ -529,6 +531,9 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  // Held so the mic stream can be released on unmount even if onstop never
+  // runs (e.g. navigating away mid-record).
+  const recordingStreamRef = useRef<MediaStream | null>(null);
   // #466 (pilot R-0065): remembers the most recent autocorrection so an
   // immediate Backspace can revert it (iOS-style). Cleared on any other edit.
   const lastAutocorrectRef = useRef<{ original: string; corrected: string; value: string } | null>(null);
@@ -539,6 +544,9 @@ export default function ThreadPage() {
   const [dictationAvailable, setDictationAvailable] = useState(false);
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<BlobPart[]>([]);
+  // Held so the mic stream can be released on unmount even if onstop never
+  // runs (e.g. navigating away mid-dictation).
+  const dictationStreamRef = useRef<MediaStream | null>(null);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -918,6 +926,14 @@ export default function ThreadPage() {
     setTransforming(null);
     setSnoozeSuggestions(null);
     setSnoozeMenuOpen(false);
+    // The suggested-replies safety-timeout flag is thread-local: it means
+    // "we gave up waiting on THIS thread's spinner". The safety-timer effect
+    // only clears it when generatingActive flips false, which never happens
+    // for a thread that is continuously generating, so it must be reset here
+    // on navigation. Otherwise a timeout latched on the previous thread keeps
+    // repliesGenerating false for a still-generating next thread and the
+    // spinner is replaced by static fallback chips.
+    setSuggestionsTimedOut(false);
     setPendingSends([]);
     setComposerAttachments((prev) => {
       for (const a of prev) {
@@ -1186,6 +1202,23 @@ export default function ThreadPage() {
     []
   );
 
+  // Stop any in-progress voice-note / dictation recorder and release its mic
+  // stream when the thread view unmounts (e.g. navigating away mid-record) so
+  // the microphone isn't left live and the stream/recorder don't leak. The
+  // recorders only stop their tracks in onstop, which fires solely on an
+  // explicit stop* call that never runs on unmount.
+  useEffect(
+    () => () => {
+      stopRecorderAndStream(recorderRef.current, recordingStreamRef.current);
+      recorderRef.current = null;
+      recordingStreamRef.current = null;
+      stopRecorderAndStream(dictationRecorderRef.current, dictationStreamRef.current);
+      dictationRecorderRef.current = null;
+      dictationStreamRef.current = null;
+    },
+    []
+  );
+
   const startRecording = useCallback(async () => {
     if (recording) return;
     try {
@@ -1206,9 +1239,11 @@ export default function ThreadPage() {
         const file = new File([blob], `Voice Message.${ext}`, { type: recorder.mimeType });
         addFiles([file]);
         stream.getTracks().forEach((t) => t.stop());
+        recordingStreamRef.current = null;
       };
       recorder.start();
       recorderRef.current = recorder;
+      recordingStreamRef.current = stream;
       setRecording(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Microphone access denied");
@@ -1259,6 +1294,7 @@ export default function ThreadPage() {
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
+        dictationStreamRef.current = null;
         const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
         if (raw.size === 0) {
           setDictationStatus("idle");
@@ -1306,6 +1342,7 @@ export default function ThreadPage() {
       };
       recorder.start();
       dictationRecorderRef.current = recorder;
+      dictationStreamRef.current = stream;
       setDictationStatus("recording");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Microphone access denied");
@@ -2409,7 +2446,7 @@ export default function ThreadPage() {
   // pinned forever. After 30s we locally fall back to the static
   // suggestion set so the operator isn't blocked. If the runner does
   // eventually finish, the next thread refresh swaps in real chips.
-  const repliesGenerating = serverSaysGenerating && !suggestionsTimedOut;
+  const repliesGenerating = computeRepliesGenerating(serverSaysGenerating, suggestionsTimedOut);
   const chips = repliesReady
     ? thread.suggestedReplies.replies.slice(0, 3).map((reply) => ({
         intent: reply.intent,
