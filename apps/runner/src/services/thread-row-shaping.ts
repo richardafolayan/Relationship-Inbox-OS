@@ -162,12 +162,51 @@ export interface ShapedThreadRow {
   personThreadCount: number;
 }
 
+// Display fields describe the LATEST message in either direction. They are
+// folded SEPARATELY from the canonical (AI-field) sibling pick: an iMessage
+// person's collapsed row reads id + AI fields from the most-recent-INBOUND
+// sibling, but its preview / lastMessageAt / direction must come from
+// whichever sibling owns the most-recent MESSAGE (often a newer outbound the
+// operator sent from the other handle). See pickNewerDisplay + PM17.
+export interface DisplayFields {
+  lastMessageAt: Date | null;
+  lastMessagePreview: string | null;
+  lastMessageText: string | null;
+  lastMessageDirection: "IN" | "OUT" | null;
+}
+
+function displayFieldsFor(row: ThreadRowSource): DisplayFields {
+  return {
+    lastMessageAt: row.lastMessageAt,
+    lastMessagePreview: row.lastMessagePreview,
+    lastMessageText: row.lastMessageText,
+    lastMessageDirection: row.lastMessageDirection
+  };
+}
+
+// Of two siblings' display bundles, keep the one whose latest message is
+// newer (null lastMessageAt = epoch 0, matching the inbox sort + canonical
+// tie-handling). Ties keep the incumbent so the fold is deterministic. The
+// preview/text/direction always travel together with the lastMessageAt they
+// belong to, so the preview never describes a different message than the
+// timestamp.
+function pickNewerDisplay(current: DisplayFields, next: DisplayFields): DisplayFields {
+  const currentTime = current.lastMessageAt?.getTime() ?? 0;
+  const nextTime = next.lastMessageAt?.getTime() ?? 0;
+  return nextTime > currentTime ? next : current;
+}
+
 export interface ShapedThreadGroupRow {
   source: ThreadRowSource;
   dedupeKey: string;
   messageCount: number;
   needsReply: boolean;
   identityWarning: IdentityWarning | null;
+  // Display fields (preview / lastMessageAt / direction) folded across the
+  // person's siblings: the newest-MESSAGE sibling wins, independent of which
+  // sibling is canonical for AI fields. For non-collapsed rows this equals
+  // the source's own display fields.
+  display: DisplayFields;
 }
 
 function resolveLinkedInCanonicalId(row: ThreadRowSource): string | null {
@@ -218,7 +257,99 @@ function deriveNeedsReply(row: ThreadRowSource): boolean {
   return row.needsReply;
 }
 
-export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[] {
+function imessagePersonKey(row: Pick<ThreadRowSource, "platform" | "personId">): string {
+  return `person:${row.platform}:${row.personId}`;
+}
+
+// Return the visible representative row with the AI-analysis fields the thread
+// endpoint sources from the CANONICAL sibling (see canonical-thread.ts)
+// overlaid, so the inbox row's preview + whatTheyWant match what the rail shows
+// once the thread is opened. Identity, visibility (archivedAt / snoozedUntil),
+// timestamps and risk deliberately STAY on the visible representative — exactly
+// the split #499 made on the thread endpoint, and required because the
+// dashboard filters/styles rows on archivedAt / snoozedUntil (swapping those in
+// from an archived canonical would mis-hide or mis-bucket an otherwise-active
+// row). The preview trio (lastMessageText / lastMessagePreview /
+// lastMessageDirection) moves together so the rendered "You: …" prefix can
+// never describe a different message than the previewed text.
+function adoptCanonicalAiFields(
+  visible: ThreadRowSource,
+  canonical: ThreadRowSource
+): ThreadRowSource {
+  if (canonical.id === visible.id) {
+    return visible;
+  }
+  return {
+    ...visible,
+    whatTheyWant: canonical.whatTheyWant,
+    rollingSummary: canonical.rollingSummary,
+    category: canonical.category,
+    closedStatus: canonical.closedStatus,
+    closedStatusReason: canonical.closedStatusReason,
+    reconnectScore: canonical.reconnectScore,
+    reconnectScoreReason: canonical.reconnectScoreReason,
+    lastMessageText: canonical.lastMessageText,
+    lastMessagePreview: canonical.lastMessagePreview,
+    lastMessageDirection: canonical.lastMessageDirection
+  };
+}
+
+// Reduce the FULL (visibility-unfiltered) iMessage sibling set to the
+// canonical row per person, using the SAME ordering pickCanonicalThread runs
+// on the thread endpoint. This is what lets the inbox pick canonical over the
+// same population the rail does — without it, the loader's active-only filter
+// can hand shapeThreadRows a different sibling set and the two sites diverge.
+function canonicalByImessagePerson(siblings: ThreadRowSource[]): Map<string, ThreadRowSource> {
+  const byPerson = new Map<string, ThreadRowSource>();
+  for (const row of siblings) {
+    if (row.platform !== "IMESSAGE") {
+      continue;
+    }
+    const key = imessagePersonKey(row);
+    const current = byPerson.get(key);
+    const next = { id: row.id, lastInboundAt: row.lastInboundAt, messageCount: messageCountForRow(row) };
+    if (
+      !current ||
+      isMoreCanonical(next, {
+        id: current.id,
+        lastInboundAt: current.lastInboundAt,
+        messageCount: messageCountForRow(current)
+      })
+    ) {
+      byPerson.set(key, row);
+    }
+  }
+  return byPerson;
+}
+
+// Newest DISPLAY bundle per iMessage person across ALL siblings (incl.
+// archived/snoozed ones absent from the visible `rows`). Folded into the
+// collapsed row so its preview/lastMessageAt reflect the newest message in the
+// merged thread view, even when that message lives on a non-visible sibling.
+function newestDisplayByImessagePerson(siblings: ThreadRowSource[]): Map<string, DisplayFields> {
+  const byPerson = new Map<string, DisplayFields>();
+  for (const row of siblings) {
+    if (row.platform !== "IMESSAGE") {
+      continue;
+    }
+    const key = imessagePersonKey(row);
+    const current = byPerson.get(key);
+    const next = displayFieldsFor(row);
+    byPerson.set(key, current ? pickNewerDisplay(current, next) : next);
+  }
+  return byPerson;
+}
+
+export function shapeThreadRows(
+  rows: ThreadRowSource[],
+  // The full, visibility-UNFILTERED iMessage sibling set for the persons being
+  // shaped. When supplied, an iMessage person-group adopts its canonical
+  // sibling's AI fields (see adoptCanonicalAiFields) so the row matches the
+  // thread endpoint even when the live sibling is archived/snoozed and absent
+  // from `rows`. Omitted (or empty) reproduces the legacy in-set behaviour, so
+  // non-iMessage and pure-unit callers are unchanged.
+  canonicalSiblings?: ThreadRowSource[]
+): ShapedThreadGroupRow[] {
   const byThreadId = new Map<string, ThreadRowSource>();
   for (const row of rows) {
     const existing = byThreadId.get(row.id);
@@ -246,19 +377,54 @@ export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[]
     // LinkedIn threads with the same person are intentional.
     const dedupeKey =
       row.platform === "IMESSAGE"
-        ? `person:${row.platform}:${row.personId}`
+        ? imessagePersonKey(row)
         : `thread:${row.id}`;
     const candidate: ShapedThreadGroupRow = {
       source: row,
       dedupeKey,
       messageCount,
       needsReply: deriveNeedsReply(row),
-      identityWarning
+      identityWarning,
+      display: displayFieldsFor(row)
     };
 
     const existing = deduped.get(dedupeKey);
-    if (!existing || prefersCandidate(existing, candidate)) {
+    if (!existing) {
       deduped.set(dedupeKey, candidate);
+    } else {
+      // Canonical pick (id + AI fields) and display fold are independent:
+      // keep the more-canonical source, but always fold display across BOTH
+      // siblings so a newer message on the losing sibling still surfaces.
+      const winner = prefersCandidate(existing, candidate) ? candidate : existing;
+      deduped.set(dedupeKey, {
+        ...winner,
+        display: pickNewerDisplay(existing.display, candidate.display)
+      });
+    }
+  }
+
+  // Final pass: align each surviving iMessage person-group's AI fields with the
+  // canonical sibling computed over ALL siblings (not just the visible subset
+  // `deduped` was built from). Keeps the visible row as the representative for
+  // identity/visibility/link-target; only the AI-analysis fields move.
+  if (canonicalSiblings && canonicalSiblings.length > 0) {
+    const canonicalByPerson = canonicalByImessagePerson(canonicalSiblings);
+    const newestDisplayByPerson = newestDisplayByImessagePerson(canonicalSiblings);
+    for (const group of deduped.values()) {
+      if (group.source.platform !== "IMESSAGE") {
+        continue;
+      }
+      const canonical = canonicalByPerson.get(group.dedupeKey);
+      if (canonical) {
+        group.source = adoptCanonicalAiFields(group.source, canonical);
+      }
+      // Fold display across ALL siblings (not just the visible subset), so a
+      // newer message on an archived/snoozed sibling still drives the row's
+      // preview/lastMessageAt — matching the merged thread view.
+      const newestDisplay = newestDisplayByPerson.get(group.dedupeKey);
+      if (newestDisplay) {
+        group.display = pickNewerDisplay(group.display, newestDisplay);
+      }
     }
   }
 
@@ -266,14 +432,16 @@ export function shapeThreadRows(rows: ThreadRowSource[]): ShapedThreadGroupRow[]
 }
 
 function prefersCandidate(current: ShapedThreadGroupRow, next: ShapedThreadGroupRow): boolean {
-  // Pick the CANONICAL sibling thread for an iMessage person: the one still
-  // receiving inbound (most recent lastInboundAt), tie-broken by message count
-  // then id. This is the same row the thread endpoint reads AI fields from and
-  // the reassess pipeline writes to, so Today/Inbox preview + whatTheyWant and
-  // the row's link target the LIVE conversation rather than a high-message-
-  // count but dormant handle (e.g. an old phone thread frozen days behind the
-  // email thread the contact now uses). Shares isMoreCanonical with
-  // canonical-thread.ts so the rule can't drift between selection sites.
+  // Pick the representative sibling thread for an iMessage person from the rows
+  // shapeThreadRows was handed: the one still receiving inbound (most recent
+  // lastInboundAt), tie-broken by message count then id. This decides the link
+  // target / identity row. The AI-analysis fields are then re-aligned to the
+  // canonical sibling computed over ALL siblings in the final pass above (see
+  // canonicalByImessagePerson + adoptCanonicalAiFields), because the loader can
+  // hand this only the active subset — so the representative chosen here may not
+  // be the live sibling when that live sibling is archived/snoozed. Shares
+  // isMoreCanonical with canonical-thread.ts so the rule can't drift between
+  // selection sites.
   return isMoreCanonical(
     { id: next.source.id, lastInboundAt: next.source.lastInboundAt, messageCount: next.messageCount },
     { id: current.source.id, lastInboundAt: current.source.lastInboundAt, messageCount: current.messageCount }
@@ -306,9 +474,14 @@ export function toInboxRow(
   // Prefer the latest-message text (which respects direction) over the
   // legacy lastMessagePreview field (which only tracks inbound). Falls
   // through to AI-summary fields when neither is set, then a constant.
+  // Read the message fields from the folded display bundle (the newest-
+  // message sibling) rather than source, which is the canonical (newest-
+  // INBOUND) sibling and can be older — see PM17. whatTheyWant /
+  // rollingSummary stay on source because they are AI fields.
+  const display = row.display;
   const previewText =
-    source.lastMessageText ??
-    source.lastMessagePreview ??
+    display.lastMessageText ??
+    display.lastMessagePreview ??
     source.whatTheyWant ??
     source.rollingSummary ??
     "No summary yet";
@@ -324,11 +497,11 @@ export function toInboxRow(
     personFavourite: source.person.favouritedAt != null,
     platform: source.platform,
     preview: previewText,
-    lastMessageDirection: source.lastMessageDirection ?? null,
+    lastMessageDirection: display.lastMessageDirection ?? null,
     unreadCount: source.unreadCount,
     riskLevel: risk.level,
     needsReply: row.needsReply,
-    lastMessageAt: source.lastMessageAt?.toISOString() ?? null,
+    lastMessageAt: display.lastMessageAt?.toISOString() ?? null,
     lastInboundAt: source.lastInboundAt?.toISOString() ?? null,
     lastOutboundAt: source.lastOutboundAt?.toISOString() ?? null,
     riskReason: risk.riskReason,

@@ -11,6 +11,7 @@ import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
+import { Prisma } from "@prisma/client";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
@@ -1117,6 +1118,56 @@ async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
   });
 }
 
+// Shared Prisma projection for inbox-row shaping. Hoisted so the visible-row
+// query and the canonical-sibling query below select the IDENTICAL field set —
+// shapeThreadRows adopts AI fields from a canonical sibling, so any field it
+// reads must be present on BOTH result sets or the two would silently drift.
+const threadRowSelect = {
+  id: true,
+  platform: true,
+  platformThreadId: true,
+  threadUrl: true,
+  personId: true,
+  unreadCount: true,
+  needsReply: true,
+  lastMessagePreview: true,
+  lastMessageAt: true,
+  lastInboundAt: true,
+  lastOutboundAt: true,
+  lastMessageDirection: true,
+  lastMessageText: true,
+  riskLevel: true,
+  riskReason: true,
+  slaDueAt: true,
+  snoozedUntil: true,
+  whatTheyWant: true,
+  rollingSummary: true,
+  archivedAt: true,
+  category: true,
+  closedStatus: true,
+  closedStatusReason: true,
+  reconnectScore: true,
+  reconnectScoreReason: true,
+  updatedAt: true,
+  person: {
+    select: {
+      id: true,
+      displayName: true,
+      inferredName: true,
+      platform: true,
+      avatarUrl: true,
+      birthday: true,
+      birthYear: true,
+      favouritedAt: true
+    }
+  },
+  _count: {
+    select: {
+      messages: true
+    }
+  }
+} satisfies Prisma.ThreadSelect;
+
 async function loadVisibleThreadRows(options?: {
   /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
   archived?: boolean;
@@ -1132,54 +1183,33 @@ async function loadVisibleThreadRows(options?: {
           // within that window once snoozedUntil <= now.
           OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }]
         },
-    select: {
-      id: true,
-      platform: true,
-      platformThreadId: true,
-      threadUrl: true,
-      personId: true,
-      unreadCount: true,
-      needsReply: true,
-      lastMessagePreview: true,
-      lastMessageAt: true,
-      lastInboundAt: true,
-      lastOutboundAt: true,
-      lastMessageDirection: true,
-      lastMessageText: true,
-      riskLevel: true,
-      riskReason: true,
-      slaDueAt: true,
-      snoozedUntil: true,
-      whatTheyWant: true,
-      rollingSummary: true,
-      archivedAt: true,
-      category: true,
-      closedStatus: true,
-      closedStatusReason: true,
-      reconnectScore: true,
-      reconnectScoreReason: true,
-      updatedAt: true,
-      person: {
-        select: {
-          id: true,
-          displayName: true,
-          inferredName: true,
-          platform: true,
-          avatarUrl: true,
-          birthday: true,
-          birthYear: true,
-          favouritedAt: true
-        }
-      },
-      _count: {
-        select: {
-          messages: true
-        }
-      }
-    }
+    select: threadRowSelect
   });
 
-  return shapeThreadRows(threads as ThreadRowSource[]);
+  // shapeThreadRows collapses an iMessage person's sibling handle-chats to one
+  // row and sources its AI fields (whatTheyWant, summary, preview, …) from the
+  // CANONICAL sibling — the most-recent-inbound one, which the thread endpoint
+  // also resolves over ALL siblings. The `threads` query above is visibility-
+  // filtered (active-only, or archived-only), so the live sibling can be absent
+  // from it; load the person's FULL sibling set so the inbox picks canonical
+  // over the same population the rail does and the two can't disagree (#499
+  // follow-up). Only iMessage persons need this; other platforms are 1:1.
+  const imessagePersonIds = [
+    ...new Set(
+      threads
+        .filter((thread) => thread.platform === "IMESSAGE")
+        .map((thread) => thread.personId)
+    )
+  ];
+  const canonicalSiblings =
+    imessagePersonIds.length > 0
+      ? await prisma.thread.findMany({
+          where: { platform: "IMESSAGE", personId: { in: imessagePersonIds } },
+          select: threadRowSelect
+        })
+      : [];
+
+  return shapeThreadRows(threads as ThreadRowSource[], canonicalSiblings as ThreadRowSource[]);
 }
 
 app.post("/admin/reset", asyncRoute(async (req, res) => {
