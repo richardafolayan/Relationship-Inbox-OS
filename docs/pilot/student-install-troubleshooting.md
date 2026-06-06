@@ -160,6 +160,18 @@ for the correct link.
 If an update ever fails partway, it rolls back to your previous version
 automatically and keeps a backup folder next to the app, so your data is safe.
 
+## "No summaries or reply suggestions appear"
+
+The summaries, action items, and reply help need an AI key, and `node
+scripts/doctor.mjs` shows the **AI key** line as a warning until one is set.
+
+- Follow [getting-ai-keys.md](./getting-ai-keys.md) to add a key (the free
+  Gemini one is easiest).
+- Common gotcha: if you set up a **Gemini** key, also set `AI_PROVIDER=gemini`
+  in `.env`. Leaving it as `AI_PROVIDER=openai` makes the app look for an
+  OpenAI key it does not have.
+- After editing `.env`, restart the app and run a scan again.
+
 ## How to uninstall everything
 
 Everything lives in the app folder, so removing it removes the app:
