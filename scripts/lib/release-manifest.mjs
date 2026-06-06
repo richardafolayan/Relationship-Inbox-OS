@@ -129,6 +129,24 @@ export function isHttpUrl(value) {
   }
 }
 
+// Gate for URLs an auto-updater will DOWNLOAD + INSTALL. The manifest sha256 is
+// corruption-only, not tamper-proof, so over plain http a network MITM could
+// swap in an attacker zip + matching sha256 and the post-swap npm scripts would
+// run it. Require https, EXCEPT loopback http (local test server / same-machine
+// mirror), which a remote attacker can't reach. See #553 (signed manifest is
+// the real fix).
+export function isAllowedRemoteUpdateUrl(value) {
+  if (typeof value !== "string") return false;
+  let u;
+  try { u = new URL(value); } catch { return false; }
+  if (u.protocol === "https:") return true;
+  if (u.protocol === "http:") {
+    const h = u.hostname;
+    return h === "localhost" || h === "127.0.0.1" || h === "::1" || h === "[::1]";
+  }
+  return false;
+}
+
 /** Lowercase hex sha256 of a buffer or string. */
 export function sha256Buffer(data) {
   return createHash("sha256").update(data).digest("hex");
