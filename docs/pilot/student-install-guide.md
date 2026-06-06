@@ -57,8 +57,10 @@ If I instead send you the app as a **ZIP** (by AirDrop, email, or a download
 link):
 
 1. **Double-click the ZIP** to unzip it. You'll get a folder called
-   `relationship-inbox-os` (extra text on the end is fine). Leaving it in
-   **Downloads** is OK.
+   `relationship-inbox-os` (extra text on the end is fine). Unzip it
+   anywhere. **Downloads is fine.** This folder is only the source: the
+   installer copies the app to one permanent home at **`~/RelationshipInboxOS`**
+   and runs it from there, so you can delete the unzipped folder afterwards.
 2. Open **Terminal** (⌘ + Space, type `Terminal`, Enter).
 3. Type `bash ` (the word `bash` and a space, don't press Enter yet).
 4. Open **Finder**, go inside the unzipped folder to **scripts**, and drag
@@ -71,7 +73,7 @@ Either way, the installer takes over from here. While it runs it will:
 - check your Mac and free space,
 - install **Node 22** if it's missing (it may ask for your Mac password, the
   one you use to unlock your Mac),
-- download/prepare the app and install what it needs,
+- install the app into **`~/RelationshipInboxOS`** and set up what it needs,
 - set up your local database,
 - start the app and open it at **http://localhost:3100**.
 
@@ -79,8 +81,12 @@ The long part is "Installing the app", which takes a few minutes. It's normal
 for the Terminal to sit quietly while it works.
 
 > **Keep this Terminal window open.** It's what keeps the app running. To stop
-> the app, click the window and press **Ctrl + C**. To start it again later,
-> run `node scripts/start-student.mjs` from the app folder (or `npm run dev`).
+> the app, click the window and press **Ctrl + C**. To start it again later:
+>
+> ```bash
+> cd ~/RelationshipInboxOS
+> npm run start:student
+> ```
 
 ---
 
@@ -145,7 +151,8 @@ generic. You can change it later in Settings.
 Run the built-in health check from the app folder:
 
 ```bash
-node scripts/doctor.mjs
+cd ~/RelationshipInboxOS
+npm run doctor
 ```
 
 It prints a plain-English **PASS / WARN / FAIL** for each part of the setup
@@ -162,7 +169,8 @@ covers what to actually test.
 
 ## Updating
 
-When I publish a new build, your app can update itself. From the app folder:
+When I publish a new build, your app can update itself. From the app folder
+(`cd ~/RelationshipInboxOS`):
 
 ```bash
 npm run update:student -- --check-only   # is there a new version?
