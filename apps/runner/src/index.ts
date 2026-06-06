@@ -45,7 +45,7 @@ import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
 import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
-import { loadContactResolver } from "./services/contact-resolver";
+import { loadBestContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
@@ -59,6 +59,7 @@ import { createSendQueue } from "./services/send-queue";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
+import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
 import { readAppVersion, runUpdateCheck, stagePendingUpdate } from "./services/system-update";
 import {
   LINKEDIN_VOICE_MIME,
@@ -677,6 +678,18 @@ scheduledSendPromoter.start();
 // when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
 if (runnerConfig.contacts.birthdaySyncEnabled) {
   createBirthdaySync().start();
+}
+
+// Rewrites existing iMessage rows whose name is still a raw phone/email handle
+// to the real contact name (live macOS Contacts + optional vCard), once at
+// boot and then daily. Repairs threads imported before a contact source was
+// wired in so a pilot stops seeing bare numbers (issue #676). Mac-only;
+// idempotent (steady-state ticks write nothing). Also feeds the dashboard's
+// "this Mac has no saved contacts" hint via getHealth().
+let imessageNameSync: ImessageNameSync | null = null;
+if (process.platform === "darwin") {
+  imessageNameSync = createImessageNameSync();
+  imessageNameSync.start();
 }
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
@@ -1640,14 +1653,15 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
     (r) => r.lastMessageAt !== undefined && Date.parse(r.lastMessageAt) >= cutoffMs
   );
 
-  // Resolve handles to real names via the same vCard the scanner uses.
-  // Without this, `chat.db` only stores the raw phone/email so every
-  // imported person lands as "+447506440284" instead of "Lubosi" and is
-  // unsearchable by name. Mirrors the adapter's resolveDisplayName: an
-  // operator-set chat name wins; 1:1s resolve the chatIdentifier against
-  // the vCard; groups keep chat.db's participant-join name (per-member
-  // vCard resolution happens later in the scanner / backfill).
-  const resolver = loadContactResolver(runnerConfig.imessage.contactsVcfPath);
+  // Resolve handles to real names via the same source the scanner uses
+  // (live macOS Contacts + optional vCard). Without this, `chat.db` only
+  // stores the raw phone/email so every imported person lands as
+  // "+447506440284" instead of "Lubosi" and is unsearchable by name.
+  // Mirrors the adapter's resolveDisplayName: an operator-set chat name
+  // wins; 1:1s resolve the chatIdentifier; groups keep chat.db's
+  // participant-join name (per-member resolution happens later in the
+  // scanner / backfill).
+  const resolver = loadBestContactResolver({ vcfPath: runnerConfig.imessage.contactsVcfPath });
   const resolveName = (r: (typeof rows)[number]): string => {
     if (r.userSetName) return r.userSetName;
     if (r.isGroup) return r.displayName;
@@ -5104,6 +5118,13 @@ app.get("/data/birthdays", asyncRoute(async (_req, res) => {
     .sort((a, b) => a.daysUntil - b.daysUntil || a.personName.localeCompare(b.personName));
 
   res.json({ upcoming });
+}));
+
+// Drives the dashboard's "this Mac has no saved contacts" hint. Returns the
+// latest iMessage name-sync health snapshot, or null until the first tick
+// completes / on non-macOS hosts where the sync doesn't run.
+app.get("/data/imessage-contact-health", asyncRoute(async (_req, res) => {
+  res.json(imessageNameSync?.getHealth() ?? null);
 }));
 
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {

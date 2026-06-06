@@ -11,6 +11,7 @@ import { Button } from "@/components/ui/button";
 import { Menu } from "@/components/ui/menu";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
@@ -79,6 +80,10 @@ export default function PlatformsPage() {
       {actionError ? (
         <p className="mb-6 font-mono text-[11px] text-risk-overdue">{actionError}</p>
       ) : null}
+
+      {/* iMessage names show as numbers when this Mac's Contacts app is empty
+          (issue #676). Renders nothing unless the runner confirms it. */}
+      <MacContactsHint />
 
       {visibleRows
         .filter((row) => row.status === "DEGRADED")

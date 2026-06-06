@@ -151,6 +151,19 @@ export interface BirthdaysResponse {
   upcoming: UpcomingBirthday[];
 }
 
+/**
+ * iMessage contact-name health, read from the runner's name-sync. Drives the
+ * "this Mac has no saved contacts" hint (issue #676). Null until the first
+ * sync tick completes, or on non-macOS hosts.
+ */
+export interface ImessageContactHealth {
+  contactsLoaded: number;
+  addressBookContactCount: number;
+  unresolvedImessageHandleCount: number;
+  shouldHintEmptyContacts: boolean;
+  lastCheckedAt: string;
+}
+
 export interface PeopleRow {
   id: string;
   name: string;
