@@ -41,7 +41,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  compareVersions, isNewer, sha256Buffer, validateLatestJson
+  compareVersions, isAllowedRemoteUpdateUrl, isNewer, sha256Buffer, validateLatestJson
 } from "./lib/release-manifest.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
@@ -101,6 +101,14 @@ function looksLikeHtml(buf) {
 }
 
 async function fetchBuffer(url) {
+  // Updates auto-install (post-swap npm scripts run), and the manifest's sha256
+  // is self-referential — it only guards against corruption, NOT tampering. So
+  // require https for BOTH the feed and the zip: over http (or a downgraded
+  // redirect) a network MITM could swap in an attacker zip + matching sha256.
+  // (Defence-in-depth only; a signed manifest is the real fix — see #553.)
+  if (!isAllowedRemoteUpdateUrl(url)) {
+    throw new Error(`refusing to fetch an update over a non-https URL (must be https): ${url}`);
+  }
   // Global fetch follows redirects by default, which Dropbox dl=1/raw=1 links need.
   const res = await fetch(url, { redirect: "follow" });
   if (!res.ok) throw new Error(`fetch failed (${res.status} ${res.statusText}) for ${url}`);
