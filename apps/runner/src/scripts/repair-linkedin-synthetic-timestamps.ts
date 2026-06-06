@@ -97,6 +97,25 @@ export function findSyntheticClusters(timestamps: Date[]): SyntheticCluster[] {
   return clusters;
 }
 
+/**
+ * Decide what timestamp a cluster's tail (most recent row) should be
+ * anchored to. Only a cluster that is genuinely the thread's last
+ * cluster — i.e. no real messages exist after it — may be jumped onto
+ * `thread.lastMessageAt`. For any earlier cluster, anchoring to
+ * `lastMessageAt` would move the synthetic rows on top of (or past) the
+ * later real messages and reorder the thread, so we keep it inside its
+ * own local range by anchoring to its existing tail timestamp. Exported
+ * for unit tests.
+ */
+export function resolveClusterAnchor(
+  cluster: SyntheticCluster,
+  timestamps: Date[],
+  lastMessageAt: Date
+): Date {
+  const isLastCluster = cluster.endIndex === timestamps.length - 1;
+  return isLastCluster ? lastMessageAt : timestamps[cluster.endIndex]!;
+}
+
 async function main(): Promise<void> {
   const flags = parseFlags();
   const tag = flags.apply ? "[apply]" : "[dry-run]";
@@ -138,31 +157,37 @@ async function main(): Promise<void> {
     const clusters = findSyntheticClusters(messages.map((m) => m.timestamp));
     if (clusters.length === 0) continue;
 
+    const timestamps = messages.map((m) => m.timestamp);
     let threadDidChange = false;
     for (const cluster of clusters) {
       const tail = messages[cluster.endIndex]!.timestamp;
+      // Only the thread's genuinely-last cluster may be anchored onto
+      // thread.lastMessageAt; an earlier cluster anchors within its own
+      // local range so it can't be reordered past later real messages.
+      const anchor = resolveClusterAnchor(cluster, timestamps, thread.lastMessageAt);
       // Only repair clusters whose tail is recent (i.e. plausibly a
-      // scan-time synthesis) AND whose tail diverges from the thread's
-      // anchor by more than the tolerance.
+      // scan-time synthesis) AND whose tail diverges from the cluster's
+      // anchor by more than the tolerance. (For a non-last cluster the
+      // anchor is its own tail, so divergence is 0 and it is skipped.)
       if (tail < nearScanCutoff) continue;
-      const divergence = Math.abs(tail.getTime() - thread.lastMessageAt.getTime());
+      const divergence = Math.abs(tail.getTime() - anchor.getTime());
       if (divergence <= ANCHOR_DIVERGENCE_TOLERANCE_MS) continue;
 
       const clusterSize = cluster.endIndex - cluster.startIndex + 1;
       const personLabel = thread.person?.displayName ?? "?";
       console.log(
         `  [cluster] thread=${thread.id} (${personLabel}) rows=${clusterSize} ` +
-          `tail=${tail.toISOString()} anchor=${thread.lastMessageAt.toISOString()} ` +
+          `tail=${tail.toISOString()} anchor=${anchor.toISOString()} ` +
           `divergence=${Math.round(divergence / 60_000)}m`
       );
 
-      // Anchor the last message in the cluster to thread.lastMessageAt;
+      // Anchor the last message in the cluster to its resolved anchor;
       // shift earlier rows 1s backwards each. Preserves the dashboard's
       // visible ordering while landing the "last reply" on the right
       // calendar day.
       for (let i = cluster.startIndex; i <= cluster.endIndex; i += 1) {
         const offsetFromTail = cluster.endIndex - i;
-        const newTs = new Date(thread.lastMessageAt.getTime() - offsetFromTail * 1_000);
+        const newTs = new Date(anchor.getTime() - offsetFromTail * 1_000);
         const row = messages[i]!;
         if (flags.apply) {
           await prisma.message.update({
