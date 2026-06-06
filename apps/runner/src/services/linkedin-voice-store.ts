@@ -57,3 +57,24 @@ export function writeLinkedInVoice(urn: string, bytes: Buffer): string {
   writeFileSync(path, bytes);
   return path;
 }
+
+/**
+ * True when a `messaging-audio-analyzed` response belongs to the specific
+ * request a voice capture is waiting on. The adapter captures voice notes
+ * sequentially during backfill; the signed audio CDN URL does not carry the
+ * message's inner id, so matching on the URL pattern alone lets a slow
+ * earlier note's late response satisfy a later note's wait — writing one
+ * message's audio bytes under another message's urn. Correlating on request
+ * identity (the exact request the play-click triggered) prevents the
+ * cross-talk. `responseRequest` and `awaitedRequest` are Playwright `Request`
+ * objects, compared by identity; typed `unknown` here so this module stays
+ * free of any browser-driver dependency.
+ */
+export function linkedInVoiceResponseMatchesRequest(
+  responseUrl: string,
+  responseRequest: unknown,
+  awaitedRequest: unknown
+): boolean {
+  if (!/messaging-audio-analyzed/.test(responseUrl)) return false;
+  return responseRequest === awaitedRequest;
+}
