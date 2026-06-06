@@ -28,6 +28,7 @@ import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
 import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
 import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
+import { composerSourceAfterClear } from "@/lib/composer-source";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
 import type {
@@ -67,6 +68,7 @@ import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
+import { restoreFailedAttachments } from "@/lib/composer-attachments";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
 
 // Thread workspace - landscape layout.
@@ -1130,6 +1132,10 @@ export default function ThreadPage() {
     const sentAt = new Date().toISOString();
     setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
     setComposer("");
+    // Reset the source too: an emptied composer must never keep the AI-predraft
+    // accent frame + badge (#350). Without this the badge frames a blank input
+    // after sending a predraft on the same thread until the operator types.
+    setComposerSource(composerSourceAfterClear());
     setComposerAttachments([]);
     setSending(true);
     setError(null);
@@ -1177,7 +1183,12 @@ export default function ThreadPage() {
       );
       setError(message);
       setComposer(text);
-      setComposerAttachments(attachmentsToSend);
+      // Merge rather than overwrite: prepend the failed attachments to whatever
+      // the operator staged while the send was in flight. The optimistic clear
+      // emptied the list at send time, so `prev` holds only newly-staged items
+      // and there are no duplicates. Overwriting (the old behaviour) discarded
+      // those new items and leaked their previewUrl object URLs.
+      setComposerAttachments((prev) => restoreFailedAttachments(attachmentsToSend, prev));
     } finally {
       sendingRef.current = false;
       setSending(false);
@@ -1406,6 +1417,10 @@ export default function ThreadPage() {
           scheduledFor: at.toISOString()
         });
         setComposer("");
+        // Reset the source too (see onSend): a scheduled predraft empties the
+        // composer, so the predraft badge/frame must not linger over a blank
+        // input.
+        setComposerSource(composerSourceAfterClear());
         setScheduleMenuOpen(false);
         setCustomScheduleValue("");
         await refresh();
