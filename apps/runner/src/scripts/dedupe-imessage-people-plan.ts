@@ -149,16 +149,27 @@ export function assessDeletionSafety(
   return { ok: true, deletions, cap, reason: "" };
 }
 
+/** Divider that precedes every appended duplicate note. Used both to build the
+ *  merged block and to detect a genuine re-run (so we don't drop a note merely
+ *  because it happens to be a substring of the canonical's existing text). */
+const MERGED_NOTES_DIVIDER = "\n\n--- merged from duplicate ---\n";
+
 /**
  * Merge a duplicate's notes onto the canonical's without ever dropping content.
- * Empty canonical → copy; both present → concatenate with a divider; duplicate
- * already contained → no-op (so re-runs don't keep appending).
+ * Empty canonical → copy; both present → append under a divider. The ONLY
+ * no-op (so re-runs don't keep appending) is a genuine re-run: the incoming
+ * note IS the whole canonical, or it has already been appended as its own
+ * '--- merged from duplicate ---' block. A note that is merely a coincidental
+ * substring of a larger note is still appended — distinct operator-authored
+ * notes are never silently lost.
  */
 export function mergeNotes(canonicalNotes: string | null, dupNotes: string | null): string | null {
   const existing = (canonicalNotes ?? "").trim();
   const incoming = (dupNotes ?? "").trim();
   if (!incoming) return canonicalNotes ?? null;
   if (!existing) return dupNotes;
-  if (existing.includes(incoming)) return canonicalNotes ?? null;
-  return `${canonicalNotes}\n\n--- merged from duplicate ---\n${dupNotes}`;
+  const alreadyMerged =
+    existing === incoming || existing.includes(`${MERGED_NOTES_DIVIDER}${incoming}`);
+  if (alreadyMerged) return canonicalNotes ?? null;
+  return `${canonicalNotes}${MERGED_NOTES_DIVIDER}${incoming}`;
 }
