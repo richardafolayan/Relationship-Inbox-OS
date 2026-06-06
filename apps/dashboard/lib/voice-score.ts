@@ -77,11 +77,15 @@ export function buildCorpusStats(samples: string[]): VoiceCorpusStats {
   for (const sample of cleaned) {
     if (looksLikeNameGreeting(sample)) greetingCount += 1;
     totalLength += sample.length;
+    // Count '!' over the whole sample (mirrors the draft side in
+    // scoreDraftAgainstCorpus). splitSentences uses SENTENCE_RE, which consumes
+    // the terminating '.!?', so counting per-sentence piece would strip every
+    // sentence-ending '!' and collapse an exclamatory corpus to ~0.
+    totalExclamations += (sample.match(/!/g) ?? []).length;
     const sentences = splitSentences(sample);
     totalSentences += Math.max(1, sentences.length);
     for (const sentence of sentences.length > 0 ? sentences : [sample]) {
       totalSentenceLengthChars += sentence.length;
-      totalExclamations += (sentence.match(/!/g) ?? []).length;
       totalEmojis += (sentence.match(EMOJI_RE) ?? []).length;
     }
   }

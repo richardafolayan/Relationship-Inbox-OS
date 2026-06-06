@@ -1135,8 +1135,9 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
       href={`/thread/${row.id}`}
       onClick={onClick}
       onMouseEnter={() => prefetchThreadData(row.id)}
-      onMouseLeave={cancelThreadPrefetch}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
       onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
       className={cn(
         "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
         selected ? "bg-paper-2" : ""

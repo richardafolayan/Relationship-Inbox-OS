@@ -1,6 +1,6 @@
 "use client";
 
-import { warmApiGet } from "@/lib/api";
+import { warmApiGet } from "./api";
 
 // Hover/focus prefetch for inbox & today rows.
 //
@@ -10,24 +10,37 @@ import { warmApiGet } from "@/lib/api";
 // endpoint into the shared apiGet cache (same path + default window the
 // thread page reads) so the conversation paints instantly on click.
 //
-// A single module-level debounce timer is enough: only one row is hovered
-// at a time, so a fast scroll past many rows only warms the one the cursor
-// settles on. The 5s TTL means re-hovering the same row doesn't re-fetch.
+// A single module-level debounce timer is enough, but it must be
+// row-aware: keyboard focus (onFocus) and mouse hover (onMouseEnter) are
+// two independent input paths, so a different row's onMouseLeave can fire
+// while a focus-scheduled prefetch is still pending. We therefore remember
+// which row scheduled the pending timer and only let a cancel for THAT row
+// clear it - an unrelated row's cancel is ignored. The 5s TTL means
+// re-hovering the same row doesn't re-fetch.
 
 let timer: ReturnType<typeof setTimeout> | null = null;
+let pendingId: string | null = null;
 
 export function prefetchThreadData(threadId: string): void {
   if (!threadId) return;
   if (timer) clearTimeout(timer);
+  pendingId = threadId;
   timer = setTimeout(() => {
     timer = null;
+    pendingId = null;
     warmApiGet(`/runner/data/thread/${threadId}`, { ttlMs: 5000 });
   }, 80);
 }
 
-export function cancelThreadPrefetch(): void {
+// Cancel the pending prefetch, but only when it belongs to `id`. Passing the
+// leaving/blurring row's id stops one row's onMouseLeave/onBlur from cancelling
+// a different row's still-pending (e.g. focus-scheduled) prefetch. Called with
+// no id it cancels unconditionally (legacy behaviour).
+export function cancelThreadPrefetch(id?: string): void {
+  if (id && id !== pendingId) return;
   if (timer) {
     clearTimeout(timer);
     timer = null;
   }
+  pendingId = null;
 }
