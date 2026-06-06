@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { apiPost } from "@/lib/api";
+import { isLinkedInVoiceGuid } from "@/lib/linkedin-voice-guid";
 import type { ThreadMessage } from "@/lib/types";
 
 interface IMessageMediaProps {
@@ -197,13 +198,16 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
       </span>
     );
   }
-  // LinkedIn voice notes set the message URN (`urn:li:msg_message:...`)
-  // as the attachment guid; the runner serves them from a separate
-  // endpoint that reads the captured bytes off disk. iMessage guids are
-  // UUID-shaped (no `urn:` prefix), so the runtime check is unambiguous
-  // without needing a separate `platform` prop here.
-  const isLinkedInUrn = attachment.guid.startsWith("urn:li:");
-  const url = isLinkedInUrn
+  // LinkedIn voice notes set the message key as the attachment guid; the
+  // runner serves them from a separate endpoint that reads the captured
+  // bytes off disk. That key is one of three shapes: a real event URN
+  // (`urn:li:msg_message:...`), a content fingerprint for an id-less bubble
+  // (`li-msg-fp:...`, the common case), or the legacy positional fallback
+  // (`li-msg-<index>`). iMessage guids are UUID-shaped (none of the above),
+  // so `isLinkedInVoiceGuid` disambiguates without needing a `platform`
+  // prop here. It is kept in lockstep with the runner's predicate.
+  const isLinkedInVoice = isLinkedInVoiceGuid(attachment.guid);
+  const url = isLinkedInVoice
     ? `/runner/data/linkedin-voice-message/${encodeURIComponent(attachment.guid)}`
     : `/runner/data/imessage-attachment/${encodeURIComponent(attachment.guid)}`;
 
