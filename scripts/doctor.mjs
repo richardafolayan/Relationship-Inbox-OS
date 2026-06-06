@@ -282,12 +282,22 @@ function checkAiKey() {
   const keyByProvider = {
     openai: env.OPENAI_API_KEY, glm: env.Z_AI_API_KEY, gemini: env.GEMINI_API_KEY
   };
-  const key = (keyByProvider[provider] || "").trim();
-  if (key) {
+  const has = (p) => Boolean((keyByProvider[p] || "").trim());
+  if (has(provider)) {
     add(PASS, "AI key", `${provider} key set.`);
+    return;
+  }
+  // The runner falls back to any configured provider when the selected one
+  // has no key (see pickActiveProvider), so AI works as long as ANY key is
+  // set. Mirror that here, preferring the same order.
+  const configured = ["openai", "gemini", "glm"].find(has);
+  if (configured) {
+    add(PASS, "AI key",
+      `${configured} key set (AI_PROVIDER is ${provider} with no key, so the app uses ${configured}).`);
   } else {
-    add(WARN, "AI key", `No ${provider} key in .env.`,
-      "AI summaries and reply help stay off until a key is set. The app still works without it.");
+    add(WARN, "AI key", "No AI key in .env.",
+      "Add an OpenAI or Gemini key (see docs/pilot/getting-ai-keys.md). " +
+      "AI summaries and reply help stay off until then; the app still works without it.");
   }
 }
 
