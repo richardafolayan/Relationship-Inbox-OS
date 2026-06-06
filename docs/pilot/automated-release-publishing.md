@@ -155,12 +155,31 @@ reaching `main` publishes. Manual `workflow_dispatch` stays as an escape hatch
 for re-publishing or custom notes. Because pilots only see a build when the
 version changes, a no-op re-publish (same version) is harmless.
 
+## Pilot feedback delivery (Apps Script webhook)
+
+For pilots to submit in-app feedback ("Report a bug" / "Share feedback"), every
+pilot's runner needs the Google Apps Script webhook URL + secret in its `.env`.
+So at release time the builder bakes `PILOT_FEEDBACK_WEBHOOK_URL`,
+`PILOT_FEEDBACK_SECRET`, and `PILOT_FEEDBACK_STATUS_URL` into the shipped
+`.env.example` (the installer copies it to `.env`). Source them the same way as
+the Dropbox config: a gitignored `.env.release.local` for local publishes, or
+GitHub secrets of the same names for the Action. They are never committed.
+
+Treat this as a **low-value, rotatable distributed token**, not a private
+secret: it ships inside the pilot zip, so anyone with the build could POST
+feedback to your Sheet. To **rotate** it: change the secret in the Apps Script,
+update `.env.release.local` (and the `PILOT_FEEDBACK_SECRET` GitHub secret), then
+publish a new build. Leave all three blank and in-app feedback is simply off
+(the build still succeeds).
+
 ## Safety
 
-- The release zip never contains `.env`, `data/`, databases, logs,
-  `node_modules`, `.git`, API keys, or message history. The builder excludes
-  them and the publisher re-scans the finished zip and refuses to upload if
-  anything slipped in.
+- The release zip carries **no high-value secrets, no user data, no AI keys, and
+  no Dropbox tokens**. It excludes `.env`, `data/`, databases, logs,
+  `node_modules`, `.git`, and message history; a content scan hard-fails the
+  build if any secret-like value (other than the low-value pilot-feedback token
+  above) lands in `.env.example`; and the publisher re-scans the finished zip
+  and refuses to upload if anything slipped in.
 - Your Dropbox token and links live only in GitHub secrets or your gitignored
   `.env.release.local`, never in the repository.
 - A Dropbox share link is not private authentication: anyone with the link can

@@ -206,3 +206,57 @@ export function findForbiddenEntries(entries) {
     return false;
   });
 }
+
+// ---- pilot-feedback token (baked into the shipped .env.example) -----------
+
+// The ONLY config values ever baked into a shipped .env.example. Treated as a
+// DISTRIBUTED, low-value, rotatable pilot-feedback token — never a private
+// secret. Sourced at release time from env / a gitignored .env.release.local.
+export const PILOT_FEEDBACK_KEYS = [
+  "PILOT_FEEDBACK_WEBHOOK_URL",
+  "PILOT_FEEDBACK_SECRET",
+  "PILOT_FEEDBACK_STATUS_URL"
+];
+
+// A non-blank value on a key matching this (other than the whitelisted
+// PILOT_FEEDBACK_* token) is a high-value secret leak in .env.example.
+const SECRET_KEY_RE = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$|^DROPBOX_/i;
+
+/**
+ * Return a copy of `.env.example` text with the PILOT_FEEDBACK_* values from
+ * `sourceEnv` filled in (existing blank lines rewritten, missing keys
+ * appended). Pure: returns `{ text, injected }`; never mutates input.
+ */
+export function bakeFeedbackEnv(envExampleText, sourceEnv) {
+  let text = String(envExampleText);
+  const injected = [];
+  for (const key of PILOT_FEEDBACK_KEYS) {
+    const val = String((sourceEnv && sourceEnv[key]) || "").trim();
+    if (!val) continue;
+    const re = new RegExp(`^${key}=.*$`, "m");
+    text = re.test(text) ? text.replace(re, `${key}=${val}`) : `${text}\n${key}=${val}\n`;
+    injected.push(key);
+  }
+  return { text, injected };
+}
+
+/**
+ * Return the keys in `.env.example` text that carry a non-blank, high-value
+ * secret value. The PILOT_FEEDBACK_* token is the one allowed exception.
+ * Used to keep the "no high-value secrets in the zip" guarantee honest.
+ */
+export function findEnvExampleSecretLeaks(envExampleText) {
+  const offenders = [];
+  for (const raw of String(envExampleText).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    const val = line.slice(eq + 1).trim();
+    if (!val) continue;
+    if (PILOT_FEEDBACK_KEYS.includes(key)) continue;
+    if (SECRET_KEY_RE.test(key)) offenders.push(key);
+  }
+  return offenders;
+}
