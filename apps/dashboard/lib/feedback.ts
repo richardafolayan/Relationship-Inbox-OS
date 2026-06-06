@@ -82,7 +82,18 @@ export function runActionWithFeedback<T>(
       // Replace the pending toast by reusing its id.
       showToast({ id: pendingId, kind: "success", title: successText });
       opts.setError?.(null);
-      if (opts.onDone) await opts.onDone(value);
+      // The action has already SUCCEEDED and we've already shown the success
+      // toast, so a throwing onDone (e.g. a refresh() that explodes) must not
+      // reach the outer .catch - that would overwrite the success toast with a
+      // contradictory error toast and flip setError to a failure. Isolate the
+      // follow-up: log its failure for DevTools only, leave the success UI.
+      if (opts.onDone) {
+        try {
+          await opts.onDone(value);
+        } catch (onDoneErr) {
+          console.warn("[action] onDone failed after success", onDoneErr);
+        }
+      }
     })
     .catch((err: unknown) => {
       const fallback =
