@@ -1,7 +1,7 @@
 import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import compression from "compression";
@@ -14,7 +14,7 @@ import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIM
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
-import { ensurePathInside } from "./utils/fs";
+import { ensurePathInside, safeUploadFilename } from "./utils/fs";
 import { safeJsonParse } from "./utils/json";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
@@ -164,8 +164,11 @@ const uploadAttachments = multer({
       cb(null, dir);
     },
     filename: (_req, file, cb) => {
-      // Keep extension so Messages.app can sniff the right file type.
-      cb(null, file.originalname);
+      // Keep extension so Messages.app can sniff the right file type, but never
+      // trust the client name verbatim: multer path.join()s it onto the
+      // per-request dir, so a "../.." originalname would escape it (arbitrary
+      // file write). safeUploadFilename strips separators and ".."/"." names.
+      cb(null, safeUploadFilename(file.originalname, `${uuid()}.bin`));
     }
   }),
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
@@ -194,7 +197,7 @@ const uploadDictation = multer({
       mkdirSync(dir, { recursive: true });
       cb(null, dir);
     },
-    filename: (_req, file, cb) => cb(null, file.originalname || "dictation.webm")
+    filename: (_req, file, cb) => cb(null, safeUploadFilename(file.originalname, "dictation.webm"))
   }),
   limits: { fileSize: 25 * 1024 * 1024 } // ~ several minutes of speech
 }).single("audio");
@@ -3386,7 +3389,7 @@ app.post(
     const cleanup = () => {
       if (file) {
         try {
-          rmSync(dirname(file.path), { recursive: true, force: true });
+          rmSync(file.destination, { recursive: true, force: true });
         } catch {
           /* best-effort temp cleanup */
         }
