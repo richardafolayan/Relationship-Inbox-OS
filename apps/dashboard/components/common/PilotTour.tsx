@@ -12,6 +12,7 @@ import {
   markTourSeen,
   onPilotTourStart,
   planPilotSkip,
+  shouldStartPilotTour,
   shouldTearDownDeferredSkip,
   PILOT_TOUR_ACTIVE_KEY
 } from "@/lib/pilot-tour";
@@ -99,6 +100,11 @@ export function PilotTour() {
 
   const startTour = useCallback(
     async (replay: boolean) => {
+      // Re-entrancy guard. A second `pilot-tour-start` fired mid-tour (the
+      // Settings replay button, or a re-dispatched welcome card) must be
+      // ignored: re-entering here would reset the operator to step 0 and
+      // re-seed the sandbox via startPilotSandbox(). Only start when idle.
+      if (!shouldStartPilotTour(state.active)) return;
       if (typeof window !== "undefined") markTourActive(window.localStorage);
       setState({ active: true, stepIndex: 0, bootstrapping: true });
       endingRef.current = false;
@@ -127,7 +133,7 @@ export function PilotTour() {
       setState((prev) => (prev.active ? { ...prev, bootstrapping: false } : prev));
       void replay;
     },
-    [fullDemo]
+    [fullDemo, state.active]
   );
 
   useEffect(() => onPilotTourStart((replay) => void startTour(replay)), [startTour]);

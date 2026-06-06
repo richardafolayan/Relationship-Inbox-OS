@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { apiPost } from "@/lib/api";
 import type { ThreadMessage } from "@/lib/types";
 
@@ -41,6 +41,16 @@ export function VoiceMessageTranscript({
   const [local, setLocal] = useState<ThreadMessage["audioTranscription"]>(transcription ?? null);
   const [running, setRunning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // The thread page re-fetches /data/thread on SSE events, sends, and a 3s
+  // poll, so the `transcription` prop changes as the runner finishes work in
+  // the background (a row flips pending -> transcribed, a higher-tier
+  // refinement transcript lands, or `isImproving` toggles). Reconcile those
+  // server-driven updates into local state instead of freezing at the
+  // mount-time value. `trigger` still sets `local` directly for optimism.
+  useEffect(() => {
+    setLocal(transcription ?? null);
+  }, [transcription]);
 
   const isVideo = attachmentKind === "video";
   const transcriptLabel = isVideo ? "video transcript" : "voice message transcript";
