@@ -3,7 +3,7 @@
 Quick fixes for the common snags while **using** the app. For **install-time**
 problems (Node version, ports, "inbox empty after install", uninstall), see
 [student-install-troubleshooting.md](./student-install-troubleshooting.md), or
-just run `node scripts/doctor.mjs` from the app folder for a plain-English
+just run `npm run doctor` from `~/RelationshipInboxOS` for a plain-English
 health check.
 
 None of this is your fault. It is an early build, and a thing not working *is*
@@ -12,16 +12,16 @@ useful pilot feedback. If a fix here does not sort it, open a bug from the
 
 ## The app keeps the Terminal window busy
 
-That is normal. The Terminal window running `npm run dev` has to stay open
+That is normal. The Terminal window running the app has to stay open
 the whole time you are using the app. To stop the app, click that window
-and press `Ctrl + C`. To start it again, run `npm run dev`.
+and press `Ctrl + C`. To start it again: `cd ~/RelationshipInboxOS && npm run start:student`.
 
 ## The page says "Can't reach the runner"
 
 The app has two halves and one of them is not up. Almost always: the
-Terminal running `npm run dev` was closed or crashed.
+Terminal running the app was closed or crashed.
 
-1. Open Terminal, `cd` into the project folder, run `npm run dev` again.
+1. Open Terminal, run `cd ~/RelationshipInboxOS && npm run start:student`.
 2. Wait for it to settle, then reload `http://localhost:3100`.
 
 ## A scan finished but no messages showed up
@@ -38,12 +38,12 @@ Terminal running `npm run dev` was closed or crashed.
 iMessage needs one macOS permission that LinkedIn does not. Check these, in
 order:
 
-1. **Full Disk Access.** The Terminal running `npm run dev` must have it.
+1. **Full Disk Access.** The Terminal running the app must have it.
    Open **System Settings → Privacy & Security → Full Disk Access** and make
    sure **Terminal** is switched on.
 2. **Restart the app after granting it.** The permission only takes effect on
    a fresh start: click the Terminal, press `Ctrl + C` to stop the app, then
-   run `npm run dev` again.
+   run `cd ~/RelationshipInboxOS && npm run start:student`.
 3. **Be signed into Messages.** Open the **Messages** app once and confirm you
    can see your chats.
 4. **Run a scan.** Press **⌘K**, type `scan`, choose **Run scan now**.
@@ -61,7 +61,7 @@ If it keeps happening, tell me. That is worth knowing.
 ## "Port already in use"
 
 Another copy of the app is still running. Close any other Terminal windows
-running `npm run dev`, then start it once more. If it persists, restart your
+running the app, then start it once more. If it persists, restart your
 Mac and try again.
 
 ## macOS asked for permission
@@ -87,7 +87,7 @@ bug worth reporting.
 ## I want to start completely fresh
 
 1. Stop the app (`Ctrl + C` in the Terminal).
-2. Start it again: `npm run dev`.
+2. Start it again: `cd ~/RelationshipInboxOS && npm run start:student`.
 
 That is usually enough. A full data reset is a bigger step, ask me first
 rather than doing it yourself.
