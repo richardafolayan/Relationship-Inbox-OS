@@ -19,6 +19,7 @@ import { normalizePreview } from "@/lib/preview";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
+import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
 import { cn } from "@/lib/utils";
 import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 import {
@@ -544,11 +545,20 @@ export default function InboxPage() {
       if (ids.length === 0) return;
       setBulkPending(label);
       setBulkResult(null);
-      setRemovedIds((prev) => {
-        const next = new Set(prev);
-        ids.forEach((id) => next.add(id));
-        return next;
-      });
+      // Only membership-changing actions (mark-done / snooze) optimistically
+      // hide their rows: applyInbox self-heals removedIds by keeping ids whose
+      // row is gone or whose needsReply flipped to false. Rescan does neither
+      // (it just re-parses messages), so optimistically removing a still-needs-
+      // reply thread would strand it in removedIds until a full reload. For
+      // those actions we skip the add and let refresh() update the row in place.
+      const removesRow = bulkActionRemovesRow(label);
+      if (removesRow) {
+        setRemovedIds((prev) => {
+          const next = new Set(prev);
+          ids.forEach((id) => next.add(id));
+          return next;
+        });
+      }
       const results = await Promise.allSettled(
         ids.map((id) => apiPost(buildPath(id), body))
       );
@@ -560,11 +570,15 @@ export default function InboxPage() {
             r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
           )
         );
-        setRemovedIds((prev) => {
-          const next = new Set(prev);
-          failedIds.forEach((id) => next.delete(id));
-          return next;
-        });
+        // Mirror the optimistic add: only roll the failed ids back out of
+        // removedIds for actions that put them there in the first place.
+        if (removesRow) {
+          setRemovedIds((prev) => {
+            const next = new Set(prev);
+            failedIds.forEach((id) => next.delete(id));
+            return next;
+          });
+        }
         const firstReason = failed
           .map((f) => (f.status === "rejected" ? (f.reason as Error | ApiRequestError) : null))
           .find(Boolean);

@@ -132,6 +132,48 @@ export function clearTourActive(storage: PilotTourStorage): void {
   storage.removeItem(PILOT_TOUR_ACTIVE_KEY);
 }
 
+// ── Skip lifecycle ─────────────────────────────────────────────────────
+// Skipping the tour while the sandbox is still bootstrapping is the
+// dangerous moment: the `startPilotSandbox` POST has already flipped the
+// runner into demo mode (flow="pilot", sandboxActive=true), so closing the
+// card alone leaves the real inbox hidden with no recovery affordance
+// (recoveryNeeded is gated on flow===null). The skip must instead defer
+// teardown until the in-flight bootstrap settles, then tear the sandbox
+// down so the real inbox is restored without a page reload.
+
+export type PilotSkipPlan =
+  /** Sandbox already seeded → tear it down now via the normal end path. */
+  | { kind: "end-tour" }
+  /**
+   * Sandbox is mid-bootstrap → close the card now, but remember that a skip
+   * was requested so the bootstrap-resolve path tears the sandbox down.
+   */
+  | { kind: "defer-teardown" };
+
+/** What `skipTour` should do, given whether the sandbox is still bootstrapping. */
+export function planPilotSkip(bootstrapping: boolean): PilotSkipPlan {
+  return bootstrapping ? { kind: "defer-teardown" } : { kind: "end-tour" };
+}
+
+/**
+ * Whether the resolved-bootstrap path must tear the sandbox down. True only
+ * when a skip was requested while the sandbox was still bootstrapping — the
+ * fix that stops the real inbox from staying hidden after a mid-bootstrap skip.
+ */
+export function shouldTearDownDeferredSkip(skipRequestedDuringBootstrap: boolean): boolean {
+  return skipRequestedDuringBootstrap;
+}
+
+/**
+ * Whether a `pilot-tour-start` event should actually start the tour. A second
+ * start fired mid-tour (the Settings replay button, or a re-dispatched invite /
+ * welcome card) must be ignored: re-entering startTour would reset the operator
+ * to step 0 and re-seed the sandbox. Only start when no tour is already active.
+ */
+export function shouldStartPilotTour(active: boolean): boolean {
+  return !active;
+}
+
 // ── Window-event bridge ────────────────────────────────────────────────
 
 export function startPilotTour(options: { replay?: boolean } = {}): void {

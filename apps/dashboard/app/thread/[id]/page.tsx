@@ -26,6 +26,8 @@ import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
+import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
+import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
 import type {
@@ -60,6 +62,7 @@ const ProfileDrawer = dynamic(
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import { blobToWhisperWav } from "@/lib/dictation-audio";
+import { stopRecorderAndStream } from "@/lib/recorder-teardown";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
@@ -458,6 +461,15 @@ export default function ThreadPage() {
   const [reassessing, setReassessing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
+  // Mirrors the live route thread id so an in-flight transform that resolves
+  // AFTER the operator navigates to another thread can detect the switch and
+  // refuse to write A's text into B's composer. Synced in the threadId reset
+  // effect (the one place that fires on navigation, before B loads).
+  const transformRouteIdRef = useRef<string>(threadId);
+  // Threads on which the operator has explicitly dismissed the AI predraft
+  // (Discard / Delete draft). applyThread must not re-inject a predraft the
+  // operator just cleared; keyed by route thread id, cleared on navigation.
+  const predraftDismissedRef = useRef<Set<string>>(new Set());
   const [composeIntent, setComposeIntent] = useState("");
   const [composing, setComposing] = useState(false);
   const [composeDraft, setComposeDraft] = useState("");
@@ -519,6 +531,9 @@ export default function ThreadPage() {
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
+  // Held so the mic stream can be released on unmount even if onstop never
+  // runs (e.g. navigating away mid-record).
+  const recordingStreamRef = useRef<MediaStream | null>(null);
   // #466 (pilot R-0065): remembers the most recent autocorrection so an
   // immediate Backspace can revert it (iOS-style). Cleared on any other edit.
   const lastAutocorrectRef = useRef<{ original: string; corrected: string; value: string } | null>(null);
@@ -529,6 +544,9 @@ export default function ThreadPage() {
   const [dictationAvailable, setDictationAvailable] = useState(false);
   const dictationRecorderRef = useRef<MediaRecorder | null>(null);
   const dictationChunksRef = useRef<BlobPart[]>([]);
+  // Held so the mic stream can be released on unmount even if onstop never
+  // runs (e.g. navigating away mid-dictation).
+  const dictationStreamRef = useRef<MediaStream | null>(null);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -689,6 +707,21 @@ export default function ThreadPage() {
     pendingSendsRef.current = pendingSends;
   }, [pendingSends]);
 
+  // Sibling cohort for SSE routing (iMessage phone + email handle rows). Held
+  // in a ref so the []-stable SSE handler reads the latest cohort without
+  // re-subscribing on every thread fetch. Falls back to [threadId] until the
+  // first /data/thread payload (or when talking to a runner that predates
+  // siblingIds), which makes the match degrade to exact-id — the old behaviour.
+  const siblingIdsRef = useRef<string[]>(threadId ? [threadId] : []);
+  useEffect(() => {
+    siblingIdsRef.current =
+      thread?.siblingIds && thread.siblingIds.length > 0
+        ? thread.siblingIds
+        : threadId
+          ? [threadId]
+          : [];
+  }, [thread?.siblingIds, threadId]);
+
   const timelineRef = useRef<HTMLDivElement>(null);
   const stickToBottomRef = useRef(true);
   // #461 (pilot R-0060): controls the floating "jump to latest" button.
@@ -792,7 +825,15 @@ export default function ThreadPage() {
       // opted into full AI drafts — at lower help levels the composer
       // stays empty so they write it themselves.
       const aiPredraft = fresh.suggestedReplies?.replies?.[0]?.text?.trim();
-      if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
+      // Don't re-inject a predraft the operator explicitly dismissed on this
+      // thread (Discard / Delete draft). transformRouteIdRef.current is the
+      // live route thread id (this callback is []-memoised so `threadId` would
+      // be stale here).
+      if (
+        aiPredraft &&
+        profileRef.current?.aiHelpLevel === "full_drafts" &&
+        !predraftDismissedRef.current.has(transformRouteIdRef.current)
+      ) {
         setComposerSource("predraft");
         return aiPredraft;
       }
@@ -882,6 +923,12 @@ export default function ThreadPage() {
   // would carry into B — risking A's draft being sent to B. Keyed on the
   // route param so it clears the instant navigation starts, before B loads.
   useEffect(() => {
+    // Point the guard ref at the thread we're now on. An in-flight transform
+    // started on the previous thread will see this changed value once it
+    // resolves and skip its setComposer.
+    transformRouteIdRef.current = threadId;
+    // A freshly-opened thread starts with its predraft un-dismissed.
+    predraftDismissedRef.current.delete(threadId);
     setComposer("");
     setComposerSource("empty");
     setHasSavedDraft(false);
@@ -889,8 +936,19 @@ export default function ThreadPage() {
     setComposeDraft("");
     setComposeError(null);
     setAskAnswer(null);
+    // Clear the in-flight transform flag so the new thread's shorten/warmer
+    // buttons aren't stranded disabled by the previous thread's pending call.
+    setTransforming(null);
     setSnoozeSuggestions(null);
     setSnoozeMenuOpen(false);
+    // The suggested-replies safety-timeout flag is thread-local: it means
+    // "we gave up waiting on THIS thread's spinner". The safety-timer effect
+    // only clears it when generatingActive flips false, which never happens
+    // for a thread that is continuously generating, so it must be reset here
+    // on navigation. Otherwise a timeout latched on the previous thread keeps
+    // repliesGenerating false for a still-generating next thread and the
+    // spinner is replaced by static fallback chips.
+    setSuggestionsTimedOut(false);
     setPendingSends([]);
     setComposerAttachments((prev) => {
       for (const a of prev) {
@@ -934,7 +992,11 @@ export default function ThreadPage() {
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
         stage?: string;
       }>).detail;
-      if (!detail || !threadId || detail.threadId !== threadId) return;
+      if (!detail || !threadId) return;
+      // Sibling-aware routing: accept events for the open thread OR any sibling
+      // in its cohort (a split iMessage Person's other handle), so a new inbound
+      // / reassess / scan on the other handle refetches the open view.
+      if (!shouldRefetchForThreadEvent(detail.threadId, threadId, siblingIdsRef.current)) return;
       if (detail.type === "MESSAGE_SENT" && detail.clientSendId) {
         void refreshThread().finally(() => {
           setPendingSends((prev) => prev.filter((p) => p.clientSendId !== detail.clientSendId));
@@ -1159,6 +1221,23 @@ export default function ThreadPage() {
     []
   );
 
+  // Stop any in-progress voice-note / dictation recorder and release its mic
+  // stream when the thread view unmounts (e.g. navigating away mid-record) so
+  // the microphone isn't left live and the stream/recorder don't leak. The
+  // recorders only stop their tracks in onstop, which fires solely on an
+  // explicit stop* call that never runs on unmount.
+  useEffect(
+    () => () => {
+      stopRecorderAndStream(recorderRef.current, recordingStreamRef.current);
+      recorderRef.current = null;
+      recordingStreamRef.current = null;
+      stopRecorderAndStream(dictationRecorderRef.current, dictationStreamRef.current);
+      dictationRecorderRef.current = null;
+      dictationStreamRef.current = null;
+    },
+    []
+  );
+
   const startRecording = useCallback(async () => {
     if (recording) return;
     try {
@@ -1179,9 +1258,11 @@ export default function ThreadPage() {
         const file = new File([blob], `Voice Message.${ext}`, { type: recorder.mimeType });
         addFiles([file]);
         stream.getTracks().forEach((t) => t.stop());
+        recordingStreamRef.current = null;
       };
       recorder.start();
       recorderRef.current = recorder;
+      recordingStreamRef.current = stream;
       setRecording(true);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Microphone access denied");
@@ -1232,6 +1313,7 @@ export default function ThreadPage() {
       };
       recorder.onstop = async () => {
         stream.getTracks().forEach((t) => t.stop());
+        dictationStreamRef.current = null;
         const raw = new Blob(dictationChunksRef.current, { type: recorder.mimeType });
         if (raw.size === 0) {
           setDictationStatus("idle");
@@ -1279,6 +1361,7 @@ export default function ThreadPage() {
       };
       recorder.start();
       dictationRecorderRef.current = recorder;
+      dictationStreamRef.current = stream;
       setDictationStatus("recording");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Microphone access denied");
@@ -1658,6 +1741,11 @@ export default function ThreadPage() {
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
     if (!thread || !composer.trim() || transforming) return;
+    // Snapshot the route thread id BEFORE the await. The page does not remount
+    // across /thread/A -> /thread/B, so a transform fired on A can resolve
+    // after navigation; without this guard its setComposer would overwrite B's
+    // composer with A's text -> wrong-recipient send.
+    const startThreadId = threadId;
     setTransforming(mode);
     setError(null);
     try {
@@ -1665,12 +1753,19 @@ export default function ThreadPage() {
         mode,
         text: composer
       });
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setComposer(output.text);
     } catch (transformError) {
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       const message = transformError instanceof Error ? transformError.message : "Transform failed";
       setError(message);
     } finally {
-      setTransforming(null);
+      // Only clear if we're still on the thread that started this transform.
+      // After a switch the reset effect already cleared the flag for the new
+      // thread; clearing here would clobber a transform B may have started.
+      if (shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) {
+        setTransforming(null);
+      }
     }
   };
 
@@ -1741,10 +1836,15 @@ export default function ThreadPage() {
     setComposing(true);
     setComposeError(null);
     setAskAnswer(null);
+    const startThreadId = threadId;
     try {
       const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/compose`, {
         intent
       });
+      // Multi-second LLM call; the page does not remount across /thread/A ->
+      // /thread/B, so bail if the operator navigated away rather than writing
+      // A's draft into B's drawer (a wrong-recipient hazard).
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setComposeDraft(output.text);
     } catch (composeErr) {
       const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
@@ -1761,11 +1861,13 @@ export default function ThreadPage() {
     setComposing(true);
     setComposeError(null);
     setComposeDraft("");
+    const startThreadId = threadId;
     try {
       const output = await apiPost<{ answer: string }>(
         `/runner/control/person/${thread.personId}/ask`,
         { question }
       );
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setAskAnswer(output.answer ?? "");
     } catch (askErr) {
       const message = askErr instanceof Error ? askErr.message : "Ask failed";
@@ -2315,10 +2417,17 @@ export default function ThreadPage() {
   const toggleFavourite = () => {
     const next = !favourite;
     const personId = thread.personId;
+    const startThreadId = threadId;
     setFavOverride(next);
     void setFavourite(personId, next)
       .then(() => refresh())
-      .catch(() => setFavOverride(!next));
+      .catch(() => {
+        // favOverride is thread-local; don't revert it onto a different thread
+        // if the operator navigated away before this request failed.
+        if (shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) {
+          setFavOverride(!next);
+        }
+      });
   };
 
   // Late-night LinkedIn send nudge (see lib/late-night-send.ts). Shown only
@@ -2363,7 +2472,7 @@ export default function ThreadPage() {
   // pinned forever. After 30s we locally fall back to the static
   // suggestion set so the operator isn't blocked. If the runner does
   // eventually finish, the next thread refresh swaps in real chips.
-  const repliesGenerating = serverSaysGenerating && !suggestionsTimedOut;
+  const repliesGenerating = computeRepliesGenerating(serverSaysGenerating, suggestionsTimedOut);
   const chips = repliesReady
     ? thread.suggestedReplies.replies.slice(0, 3).map((reply) => ({
         intent: reply.intent,
@@ -2699,6 +2808,7 @@ export default function ThreadPage() {
                     apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {})
                   }
                   onSuccess={() => {
+                    predraftDismissedRef.current.add(thread.id);
                     setComposer("");
                     setComposerSource("empty");
                     setHasSavedDraft(false);
@@ -3591,6 +3701,7 @@ export default function ThreadPage() {
                   <button
                     type="button"
                     onClick={() => {
+                      predraftDismissedRef.current.add(threadId);
                       setComposer("");
                       setComposerSource("empty");
                     }}

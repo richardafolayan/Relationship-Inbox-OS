@@ -735,6 +735,42 @@ export class IMessageDb {
   }
 
   /**
+   * Resolve the chat.db guid of the 1:1 chat that belongs to `handle`.
+   *
+   * The send path's `pickBestSendHandle` may route a message to a *sibling*
+   * handle of the contact (e.g. their iMessage email instead of the SMS
+   * phone the Thread happens to be keyed by). Messages.app then delivers the
+   * message into that handle's *own* chat row, which has a different chat
+   * ROWID — and a different guid — than the chat we looked the Thread up by.
+   * The post-send receipt lookups (delivery status / attachments) key on a
+   * chat guid, so without re-resolving to the picked handle's chat they
+   * miss the row entirely.
+   *
+   * Restricted to genuinely 1:1 chats (exactly one participant handle) so a
+   * group chat that also contains this handle can't be returned. When the
+   * handle has more than one 1:1 chat (e.g. one per service), the chat with
+   * the most recent message wins — that's the one the send just wrote to.
+   * Returns undefined when no 1:1 chat for the handle exists.
+   */
+  findChatGuidForHandle(handle: string): string | undefined {
+    const row = this.db
+      .prepare(
+        `SELECT c.guid AS guid
+           FROM chat c
+           JOIN chat_handle_join chj ON chj.chat_id = c.ROWID
+           JOIN handle h ON h.ROWID = chj.handle_id
+          WHERE h.id = ?
+            AND (SELECT COUNT(*) FROM chat_handle_join chj2 WHERE chj2.chat_id = c.ROWID) = 1
+          ORDER BY (SELECT MAX(m.date) FROM message m
+                      JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                     WHERE cmj.chat_id = c.ROWID) DESC NULLS LAST
+          LIMIT 1`
+      )
+      .get(handle) as { guid: string | null } | undefined;
+    return row?.guid ?? undefined;
+  }
+
+  /**
    * Poll chat.db for a freshly-sent outbound message and report whether
    * Messages.app considers it delivered. Returns the most recent
    * outbound row in the chat newer than `afterUnixMs` along with its
