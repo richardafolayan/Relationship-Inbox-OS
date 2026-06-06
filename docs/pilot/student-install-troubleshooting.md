@@ -144,6 +144,22 @@ Usually one of:
    database file it's using, and you can re-run `npm run db:push` then scan
    again.
 
+## "The update check says no feed is set"
+
+The updater needs to know where the update info lives. Set the link I send you
+as `RIOS_UPDATE_FEED_URL` in `.env`, or pass it directly:
+
+```bash
+npm run update:student -- --check-only --url "<the latest.json link I sent>"
+```
+
+If the check reports that the feed "returned a web page, not JSON", the link
+is a normal Dropbox page link. It needs to end in `raw=1` (or `dl=1`). Ask me
+for the correct link.
+
+If an update ever fails partway, it rolls back to your previous version
+automatically and keeps a backup folder next to the app, so your data is safe.
+
 ## How to uninstall everything
 
 Everything lives in the app folder, so removing it removes the app:

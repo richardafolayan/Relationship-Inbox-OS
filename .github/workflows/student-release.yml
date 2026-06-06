@@ -1,0 +1,91 @@
+# Builds a student-pilot release zip + latest.json and uploads them as
+# GitHub Actions artifacts. Manual-dispatch only for now: Richard runs it,
+# downloads the artifacts, and uploads them to Dropbox by hand (see
+# docs/pilot/releasing-student-builds.md). Automating the Dropbox upload is
+# intentionally left out until there is a secure token flow.
+name: Student Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_url:
+        description: "Dropbox dl=1 URL of the uploaded zip (optional; bakes it into latest.json). Leave blank to fill in later with --manifest-only."
+        required: false
+        default: ""
+      release_notes:
+        description: "Release notes, one per line (optional)."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history so the builder can stamp the commit into latest.json.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pilots run Node 22, so build + test on 22 to match.
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema packages/core/prisma/schema.prisma
+
+      - name: Typecheck + tests (gate the release on green)
+        run: |
+          npm run lint
+          npm run test:all
+
+      - name: Build student release
+        # Read inputs from env (never interpolate them straight into the
+        # command line) and assemble args with a bash array, no eval.
+        env:
+          ZIP_URL: ${{ github.event.inputs.zip_url }}
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+        run: |
+          ARGS=()
+          if [ -n "$ZIP_URL" ]; then ARGS+=(--zip-url "$ZIP_URL"); fi
+          if [ -n "$RELEASE_NOTES" ]; then
+            printf '%s\n' "$RELEASE_NOTES" > "$RUNNER_TEMP/release-notes.txt"
+            ARGS+=(--notes-file "$RUNNER_TEMP/release-notes.txt")
+          fi
+          node scripts/build-student-release.mjs "${ARGS[@]}"
+
+      - name: Show release contents
+        run: |
+          ls -la release-dist
+          echo "----- latest.json -----"
+          cat release-dist/latest.json
+
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-release
+          path: |
+            release-dist/relationship-inbox-os-student-*.zip
+            release-dist/latest.json
+            release-dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+      # ----------------------------------------------------------------------
+      # Future: automate the Dropbox (or S3 / R2) upload here once a secure
+      # token flow exists. It would replace the manual download + upload step:
+      #
+      #   - name: Publish to Dropbox
+      #     env:
+      #       DROPBOX_TOKEN: ${{ secrets.DROPBOX_TOKEN }}
+      #     run: node scripts/publish-dropbox.mjs release-dist
+      #
+      # Keep manual dispatch + manual upload as the safe default until then.
+      # ----------------------------------------------------------------------

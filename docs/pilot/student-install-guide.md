@@ -152,6 +152,21 @@ covers what to actually test.
 
 ---
 
+## Updating
+
+When I publish a new build, your app can update itself. From the app folder:
+
+```bash
+npm run update:student -- --check-only   # is there a new version?
+npm run update:student -- --apply        # download and install it
+```
+
+An update only replaces the app's code. It keeps your settings (`.env`), your
+local database, your conversations, and your sign-ins. It also makes a backup
+first and rolls back automatically if anything goes wrong, so it is safe to
+run. I will send you a one update link to put in your `.env` as
+`RIOS_UPDATE_FEED_URL` (or you can pass it with `--url`).
+
 ## Uninstall
 
 Everything the app knows lives in one folder, so removing it removes the app:

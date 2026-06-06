@@ -14,6 +14,8 @@
     "uninstall:student": "bash scripts/uninstall-student-macos.sh",
     "start:student": "node scripts/start-student.mjs",
     "doctor": "node scripts/doctor.mjs",
+    "build:student-release": "node scripts/build-student-release.mjs",
+    "update:student": "node scripts/update-student.mjs",
     "build": "turbo run build",
     "lint": "npm run build --workspace @inbox-os/core && turbo run lint",
     "test": "npm run test:all",
