@@ -144,6 +144,13 @@ export function UserVoiceProfile({
     (field: keyof OperatorProfile, value: string) => {
       setProfile((prev) => ({ ...prev, [field]: value }));
       setStatus("saving");
+      // If a DIFFERENT field's edit is still pending on the debounce, flush it
+      // now — otherwise replacing pendingSave below would drop that field's
+      // just-typed value (it was only ever in local state, never persisted).
+      const prevPending = pendingSave.current;
+      if (prevPending && prevPending.field !== field) {
+        void persist({ [prevPending.field]: prevPending.value });
+      }
       pendingSave.current = { field, value };
       if (saveTimer.current) clearTimeout(saveTimer.current);
       saveTimer.current = setTimeout(() => {
@@ -395,7 +402,7 @@ export function UserVoiceProfile({
             value={styleText("about")}
             onChange={(event) => onStyleText("about", event.target.value)}
             placeholder="e.g. Short and friendly. I get to the point but I'm never cold about it."
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
@@ -433,7 +440,7 @@ export function UserVoiceProfile({
             value={styleText("commonPhrases")}
             onChange={(event) => onStyleText("commonPhrases", event.target.value)}
             placeholder="e.g. no worries, sounds good, let's do it"
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
@@ -444,7 +451,7 @@ export function UserVoiceProfile({
             value={styleText("avoidedPhrases")}
             onChange={(event) => onStyleText("avoidedPhrases", event.target.value)}
             placeholder="e.g. circle back, touch base, reach out"
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
@@ -458,7 +465,7 @@ export function UserVoiceProfile({
             value={styleText("interests")}
             onChange={(event) => onStyleText("interests", event.target.value)}
             placeholder="e.g. design, running, keeping in touch with old friends"
-            disabled={!loaded}
+            disabled={!loaded || analyzing}
             className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
           />
         </Field>
