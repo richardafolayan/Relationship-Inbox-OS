@@ -73,6 +73,7 @@ import {
   createOpenAITranscriptionProvider,
   createTextRefinementService,
   createTranscriptionService,
+  createTransformersWhisperProvider,
   type AttachmentResolver,
   type TranscriptionProvider
 } from "./services/transcription";
@@ -463,6 +464,20 @@ if (runnerConfig.audioTranscription.enabled) {
         }
       });
     }
+  } else if (runnerConfig.audioTranscription.provider === "transformers") {
+    // Local transformers.js + ONNX — the pilot default. Needs no external
+    // binary or build tools; the model is downloaded into data/models on
+    // install. The provider self-skips gracefully (reason
+    // transformers_model_unavailable) until the model is present, so no
+    // missing-config warning is needed here.
+    const tw = runnerConfig.audioTranscription.transformers;
+    transcriptionProvider = createTransformersWhisperProvider({
+      config: {
+        modelId: tw.modelId,
+        modelDir: tw.modelDir,
+        timeoutMs: tw.timeoutMs
+      }
+    });
   } else {
     if (!runnerConfig.openAiApiKey) {
       console.warn(

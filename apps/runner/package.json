@@ -27,6 +27,7 @@
     "seed:operator-profile": "tsx src/scripts/seed-operator-profile.ts"
   },
   "dependencies": {
+    "@huggingface/transformers": "^3.0.0",
     "@inbox-os/core": "0.1.0",
     "@prisma/client": "^6.3.1",
     "@types/multer": "^2.1.0",
