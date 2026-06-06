@@ -1824,6 +1824,11 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/system/update", asyncRoute(async (_req, res) => {
+  // /system/update is NOT a /control/ path, so the dashboard's default-deny
+  // fetch interceptor never sees it — the Settings "Update and relaunch"
+  // button would otherwise stage a real self-update mid-presentation. Gate
+  // it server-side as an external action (blocked live + sandbox).
+  if (await checkPresenterGuard(res, settingsStore, { action: "stage an app update", kind: "external-action" })) return;
   const feedUrl = runnerConfig.updateFeedUrl;
   if (!feedUrl) {
     res.status(409).json({ ok: false, reason: "no_feed_configured" });
@@ -3698,6 +3703,13 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
 app.post(
   "/control/threads/mark-all-for-reassess",
   asyncRoute(async (_req, res) => {
+    // No single threadId — this wipes the cached AI brief + predraft on
+    // EVERY active thread. The client interceptor only guards a fresh tab
+    // that loaded it; a recovered tab (localStorage gone) skips it, so the
+    // server is the real boundary. As a thread-mutation with no threadId
+    // this is rejected by presenter-readonly (live) and demo-mode-foreign-
+    // thread (sandbox), and passes through in normal use.
+    if (await checkPresenterGuard(res, settingsStore, { action: "reset all threads for reassessment", kind: "thread-mutation" })) return;
     const { markAllThreadsForReassess } = await import(
       "./services/reassess-all.js"
     );
