@@ -94,6 +94,12 @@ test("findIssueByReportId: returns null when no match after retries", async () =
 
 test("uploadScreenshotToRepo: PUT contents API + returns raw URL on success", async () => {
   const fetchImpl = makeFetchStub([
+    // GET existing-file probe — 404 means a fresh create (no sha).
+    (url, init) => {
+      assert.equal(init.method, "GET");
+      assert.match(url, /ref=main/);
+      return { ok: false, status: 404 };
+    },
     (url, init) => {
       assert.match(url, /\/repos\/owner\/name\/contents\/pilot-feedback-attachments\/R-1-1\.png/);
       assert.equal(init.method, "PUT");
@@ -117,7 +123,12 @@ test("uploadScreenshotToRepo: PUT contents API + returns raw URL on success", as
 });
 
 test("uploadScreenshotToRepo: returns null on upload failure", async () => {
-  const fetchImpl = makeFetchStub([() => ({ ok: false, status: 422 })]);
+  const fetchImpl = makeFetchStub([
+    // GET probe — file doesn't exist (404), so this is a create.
+    () => ({ ok: false, status: 404 }),
+    // PUT create still fails with a genuine 422.
+    () => ({ ok: false, status: 422 })
+  ]);
   const url = await uploadScreenshotToRepo({
     repo: "owner/name",
     branch: "main",
@@ -180,12 +191,17 @@ test("attachScreenshotsToIssue: end-to-end happy path posts comment with inline 
   const fetchImpl = makeFetchStub([
     // search
     () => ({ ok: true, json: { items: [{ number: 99, title: "(R-2050)" }] } }),
+    // GET probe for screenshot 1 — fresh create (404)
+    () => ({ ok: false, status: 404 }),
     // upload screenshot 1
     (_url, init) => {
       const body = JSON.parse(init.body);
       assert.equal(body.branch, "v1/strip-back-pr1");
+      assert.equal(body.sha, undefined);
       return { ok: true, json: { content: {} } };
     },
+    // GET probe for screenshot 2 — fresh create (404)
+    () => ({ ok: false, status: 404 }),
     // upload screenshot 2
     (_url, init) => {
       const body = JSON.parse(init.body);
@@ -244,6 +260,9 @@ test("attachScreenshotsToIssue: reports a clean failure when issue not found", a
 test("attachScreenshotsToIssue: returns false when all uploads fail", async () => {
   const fetchImpl = makeFetchStub([
     () => ({ ok: true, json: { items: [{ number: 5, title: "(R-X)" }] } }),
+    // GET probe — fresh create (404)
+    () => ({ ok: false, status: 404 }),
+    // PUT create still fails (genuine 422)
     () => ({ ok: false, status: 422 })
   ]);
   const result = await attachScreenshotsToIssue({
