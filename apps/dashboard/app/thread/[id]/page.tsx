@@ -26,6 +26,7 @@ import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
+import { shouldApplyThreadScopedResult } from "@/lib/thread-identity-guard";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
 import type {
@@ -458,6 +459,15 @@ export default function ThreadPage() {
   const [reassessing, setReassessing] = useState(false);
   const [archiving, setArchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
+  // Mirrors the live route thread id so an in-flight transform that resolves
+  // AFTER the operator navigates to another thread can detect the switch and
+  // refuse to write A's text into B's composer. Synced in the threadId reset
+  // effect (the one place that fires on navigation, before B loads).
+  const transformRouteIdRef = useRef<string>(threadId);
+  // Threads on which the operator has explicitly dismissed the AI predraft
+  // (Discard / Delete draft). applyThread must not re-inject a predraft the
+  // operator just cleared; keyed by route thread id, cleared on navigation.
+  const predraftDismissedRef = useRef<Set<string>>(new Set());
   const [composeIntent, setComposeIntent] = useState("");
   const [composing, setComposing] = useState(false);
   const [composeDraft, setComposeDraft] = useState("");
@@ -792,7 +802,15 @@ export default function ThreadPage() {
       // opted into full AI drafts — at lower help levels the composer
       // stays empty so they write it themselves.
       const aiPredraft = fresh.suggestedReplies?.replies?.[0]?.text?.trim();
-      if (aiPredraft && profileRef.current?.aiHelpLevel === "full_drafts") {
+      // Don't re-inject a predraft the operator explicitly dismissed on this
+      // thread (Discard / Delete draft). transformRouteIdRef.current is the
+      // live route thread id (this callback is []-memoised so `threadId` would
+      // be stale here).
+      if (
+        aiPredraft &&
+        profileRef.current?.aiHelpLevel === "full_drafts" &&
+        !predraftDismissedRef.current.has(transformRouteIdRef.current)
+      ) {
         setComposerSource("predraft");
         return aiPredraft;
       }
@@ -882,6 +900,12 @@ export default function ThreadPage() {
   // would carry into B — risking A's draft being sent to B. Keyed on the
   // route param so it clears the instant navigation starts, before B loads.
   useEffect(() => {
+    // Point the guard ref at the thread we're now on. An in-flight transform
+    // started on the previous thread will see this changed value once it
+    // resolves and skip its setComposer.
+    transformRouteIdRef.current = threadId;
+    // A freshly-opened thread starts with its predraft un-dismissed.
+    predraftDismissedRef.current.delete(threadId);
     setComposer("");
     setComposerSource("empty");
     setHasSavedDraft(false);
@@ -889,6 +913,9 @@ export default function ThreadPage() {
     setComposeDraft("");
     setComposeError(null);
     setAskAnswer(null);
+    // Clear the in-flight transform flag so the new thread's shorten/warmer
+    // buttons aren't stranded disabled by the previous thread's pending call.
+    setTransforming(null);
     setSnoozeSuggestions(null);
     setSnoozeMenuOpen(false);
     setPendingSends([]);
@@ -1658,6 +1685,11 @@ export default function ThreadPage() {
 
   const transform = async (mode: "SHORTEN" | "MAKE_WARMER") => {
     if (!thread || !composer.trim() || transforming) return;
+    // Snapshot the route thread id BEFORE the await. The page does not remount
+    // across /thread/A -> /thread/B, so a transform fired on A can resolve
+    // after navigation; without this guard its setComposer would overwrite B's
+    // composer with A's text -> wrong-recipient send.
+    const startThreadId = threadId;
     setTransforming(mode);
     setError(null);
     try {
@@ -1665,12 +1697,19 @@ export default function ThreadPage() {
         mode,
         text: composer
       });
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setComposer(output.text);
     } catch (transformError) {
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       const message = transformError instanceof Error ? transformError.message : "Transform failed";
       setError(message);
     } finally {
-      setTransforming(null);
+      // Only clear if we're still on the thread that started this transform.
+      // After a switch the reset effect already cleared the flag for the new
+      // thread; clearing here would clobber a transform B may have started.
+      if (shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) {
+        setTransforming(null);
+      }
     }
   };
 
@@ -1741,10 +1780,15 @@ export default function ThreadPage() {
     setComposing(true);
     setComposeError(null);
     setAskAnswer(null);
+    const startThreadId = threadId;
     try {
       const output = await apiPost<{ text: string }>(`/runner/control/thread/${thread.id}/compose`, {
         intent
       });
+      // Multi-second LLM call; the page does not remount across /thread/A ->
+      // /thread/B, so bail if the operator navigated away rather than writing
+      // A's draft into B's drawer (a wrong-recipient hazard).
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setComposeDraft(output.text);
     } catch (composeErr) {
       const message = composeErr instanceof Error ? composeErr.message : "Compose failed";
@@ -1761,11 +1805,13 @@ export default function ThreadPage() {
     setComposing(true);
     setComposeError(null);
     setComposeDraft("");
+    const startThreadId = threadId;
     try {
       const output = await apiPost<{ answer: string }>(
         `/runner/control/person/${thread.personId}/ask`,
         { question }
       );
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setAskAnswer(output.answer ?? "");
     } catch (askErr) {
       const message = askErr instanceof Error ? askErr.message : "Ask failed";
@@ -2699,6 +2745,7 @@ export default function ThreadPage() {
                     apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {})
                   }
                   onSuccess={() => {
+                    predraftDismissedRef.current.add(thread.id);
                     setComposer("");
                     setComposerSource("empty");
                     setHasSavedDraft(false);
@@ -3591,6 +3638,7 @@ export default function ThreadPage() {
                   <button
                     type="button"
                     onClick={() => {
+                      predraftDismissedRef.current.add(threadId);
                       setComposer("");
                       setComposerSource("empty");
                     }}
