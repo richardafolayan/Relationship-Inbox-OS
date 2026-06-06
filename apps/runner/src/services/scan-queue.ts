@@ -320,6 +320,32 @@ export function decideOutboundDedup(input: {
   return { kind: "migrate_twin_key", twinId: twin.id };
 }
 
+/**
+ * When cross-sibling outbound twins are collapsed onto a surviving row, decide
+ * which metadata to carry forward. The sibling row was almost always the
+ * send-side persistence, so it holds the sentVia=automation tag and the
+ * replyToMessageId linkage that the chat.db scan row lacks. We copy those onto
+ * the survivor — which is the canonical row when one already exists, otherwise
+ * the same-thread twin that decideOutboundDedup migrates the key onto — but
+ * only when the survivor doesn't already carry the value, so we never clobber
+ * good data. Pure so the rule is unit-testable away from Prisma.
+ */
+export function decideOutboundMetadataMerge(input: {
+  survivorSentVia: string | null;
+  survivorReplyToMessageId: string | null;
+  hasAutomationTwin: boolean;
+  twinReplyToMessageId: string | null;
+}): { sentVia?: string; replyToMessageId?: string } {
+  const updates: { sentVia?: string; replyToMessageId?: string } = {};
+  if (input.hasAutomationTwin && input.survivorSentVia !== "automation") {
+    updates.sentVia = "automation";
+  }
+  if (input.twinReplyToMessageId && !input.survivorReplyToMessageId) {
+    updates.replyToMessageId = input.twinReplyToMessageId;
+  }
+  return updates;
+}
+
 export function normalizePositiveScanCap(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
@@ -2990,22 +3016,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
             }
           } else {
             // Canonical (or a same-thread twin) already in current thread —
-            // delete all cross-sibling twins, copying useful metadata onto
-            // the canonical first if it doesn't have it yet.
+            // delete all cross-sibling twins, copying useful metadata onto the
+            // surviving row first if it doesn't have it yet. The survivor is the
+            // canonical when present, otherwise the same-thread twin that
+            // decideOutboundDedup migrates the new key onto below — either way it
+            // must inherit the deleted sibling's sentVia=automation tag and
+            // replyToMessageId linkage.
             for (const twin of crossSiblingTwins) {
               await prisma.message.delete({ where: { id: twin.id } });
             }
-            if (canonical) {
-              const updates: { sentVia?: string; replyToMessageId?: string } = {};
-              if (automationTwin && canonical.sentVia !== "automation") {
-                updates.sentVia = "automation";
-              }
-              if (replyToTwin?.replyToMessageId && !canonical.replyToMessageId) {
-                updates.replyToMessageId = replyToTwin.replyToMessageId;
-              }
-              if (Object.keys(updates).length > 0) {
-                await prisma.message.update({ where: { id: canonical.id }, data: updates });
-              }
+            const survivor = canonical ?? sameThreadTwins[0]!;
+            const updates = decideOutboundMetadataMerge({
+              survivorSentVia: survivor.sentVia ?? null,
+              survivorReplyToMessageId: survivor.replyToMessageId ?? null,
+              hasAutomationTwin: Boolean(automationTwin),
+              twinReplyToMessageId: replyToTwin?.replyToMessageId ?? null
+            });
+            if (Object.keys(updates).length > 0) {
+              await prisma.message.update({ where: { id: survivor.id }, data: updates });
             }
           }
         }
