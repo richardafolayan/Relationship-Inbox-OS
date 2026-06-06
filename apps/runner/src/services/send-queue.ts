@@ -65,7 +65,11 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
     try {
       while (true) {
         const next = await prisma.sendRequest.findFirst({
-          where: { status: "PENDING" },
+          // `receiptJson: null` excludes in-doubt rows — a PENDING row that a
+          // previous (crashed) process already claimed carries the claim marker
+          // in receiptJson. Those must not be re-dispatched (the adapter send is
+          // not idempotent); resume() reconciles them to FAILED separately.
+          where: { status: "PENDING", receiptJson: null },
           orderBy: { createdAt: "asc" }
         });
         if (!next) break;
@@ -116,8 +120,31 @@ export function createSendQueue(deps: SendQueueDeps): SendQueueService {
   }
 
   function resume(): void {
-    // Same as kick — the loop will find any leftover PENDING rows from
-    // before the last process exited. Separate name for clarity at the
+    // First reconcile any in-doubt rows: a PENDING row claimed by the previous
+    // process but never terminalised (it crashed between the physical send and
+    // the SENT write). Re-dispatching those would re-message the recipient, so
+    // they are flipped to FAILED (INTERRUPTED) for the operator to verify. THEN
+    // drain the genuinely-unclaimed PENDING rows. Reconcile is fire-and-forget
+    // before the kick — the drain's findFirst already filters claimed rows out,
+    // so ordering between the two is not load-bearing for safety.
+    void deps.sendService
+      .reconcileInterruptedSends()
+      .then((reconciled) => {
+        if (reconciled > 0) {
+          console.warn(
+            `[send-queue] reconciled ${reconciled} interrupted send(s) to FAILED after restart`
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `[send-queue] reconcileInterruptedSends failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      });
+    // Same as kick — the loop will find any leftover (unclaimed) PENDING rows
+    // from before the last process exited. Separate name for clarity at the
     // call site (createPlatformFactory at runner boot).
     kick();
   }
