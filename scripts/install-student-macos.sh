@@ -11,10 +11,16 @@
 # is installing Node.js 22 from Node's own official installer, and only if a
 # working Node 22 isn't already present.
 #
-# Two ways it runs, picked automatically:
-#   • From inside an unzipped project folder  → installs the app in place.
-#   • Piped straight from a download link      → downloads the app zip into
-#     ~/RelationshipInboxOS, then installs it there.
+# Wherever it gets the app from, it installs into ONE predictable place:
+# ~/RelationshipInboxOS. Two ways it gets the app, picked automatically:
+#   • Run from inside an unzipped project folder  → copies the app into
+#     ~/RelationshipInboxOS and installs it there (it does NOT run from
+#     Downloads).
+#   • Piped straight from a download link          → downloads the app zip and
+#     installs it into ~/RelationshipInboxOS.
+# Re-running over an existing ~/RelationshipInboxOS refreshes the code and
+# KEEPS your data: .env, data/ (database + browser profiles), and logs/. The
+# previous version is set aside until the new one is safely in place.
 #
 # Detailed output goes to a log file; the pilot only sees plain-English status.
 #
@@ -27,6 +33,8 @@
 # Flags:
 #   --dry-run     check the Mac and print the plan; change nothing
 #   --no-start    do everything except launch the app
+#   --skip-deps   relocate + write .env only; skip Node/npm/database/launch
+#                 (used by the installer's own tests)
 #   --help        show this help
 
 set -u
@@ -52,16 +60,22 @@ DASHBOARD_URL="http://localhost:${DASHBOARD_PORT}"
 RUNNER_PORT="${RUNNER_PORT:-4001}"
 APP_START_TIMEOUT=180         # seconds to wait for the dashboard to come up
 
+# Items inside the app folder that belong to the USER and must survive a
+# re-install / update. Everything else is replaceable code.
+PRESERVE_ITEMS=(.env .env.bak data logs)
+
 DRY_RUN=false
 NO_START=false
+SKIP_DEPS=false
 [ "${RIOS_NO_START:-}" = "1" ] && NO_START=true
 
 for arg in "$@"; do
   case "$arg" in
     --dry-run) DRY_RUN=true ;;
     --no-start) NO_START=true ;;
+    --skip-deps) SKIP_DEPS=true; NO_START=true ;;
     -h|--help)
-      sed -n '2,40p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
+      sed -n '2,38p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) ;;
@@ -113,6 +127,9 @@ run() {
   log "EXIT $code: $*"
   return $code
 }
+
+# Show a path with the home directory shortened to ~ for friendlier output.
+display_path() { printf '%s' "${1/#$HOME/~}"; }
 
 # --------------------------------------------------------------------------
 # Pre-flight environment checks
@@ -172,6 +189,11 @@ node_major() {
 
 ensure_node() {
   step "Checking Node.js (the engine the app runs on)"
+
+  if [ "$SKIP_DEPS" = true ]; then
+    info "[skip-deps] skipping the Node.js check"
+    return 0
+  fi
 
   local have
   have="$(node_major || echo "")"
@@ -239,7 +261,7 @@ install_node_pkg() {
 }
 
 # --------------------------------------------------------------------------
-# Locate or download the app
+# Locate the app source, then install it into ~/RelationshipInboxOS
 # --------------------------------------------------------------------------
 
 is_app_root() {
@@ -249,27 +271,96 @@ is_app_root() {
 resolve_app_dir() {
   step "Finding the app"
 
-  # In-place mode: the script lives inside the project (scripts/…). Works
-  # whether run as ./scripts/install-student-macos.sh or by absolute path.
+  # Where are we installing FROM? The script lives inside the project
+  # (scripts/…) when run from an unzipped folder; otherwise we download.
   local src_dir=""
   case "${BASH_SOURCE[0]:-}" in
     ""|/dev/fd/*|/dev/stdin|bash|sh) : ;;          # piped from curl — no path
     *) src_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." 2>/dev/null && pwd)" ;;
   esac
 
+  local source=""
   if [ -n "$src_dir" ] && is_app_root "$src_dir"; then
-    APP_DIR="$src_dir"
-    ok "Installing from this folder: $APP_DIR"
-    return 0
+    source="$src_dir"
+  elif is_app_root "$PWD"; then
+    source="$PWD"
   fi
-  if is_app_root "$PWD"; then
-    APP_DIR="$PWD"
-    ok "Installing from the current folder: $APP_DIR"
+
+  if [ -n "$source" ]; then
+    if [ "$source" = "$INSTALL_DIR" ]; then
+      # Already running from the install location — nothing to relocate.
+      APP_DIR="$INSTALL_DIR"
+      ok "Using the app at $(display_path "$APP_DIR")"
+      return 0
+    fi
+    ok "Found the app to install from: $(display_path "$source")"
+    install_from_source "$source"
     return 0
   fi
 
-  # Download mode.
+  # No local copy → download it.
   download_app
+}
+
+# install_from_source SRC
+#   Place the app code from SRC into $INSTALL_DIR and set APP_DIR=$INSTALL_DIR.
+#   - Fresh target: copy SRC in.
+#   - Existing install: refresh the code but KEEP the user's data (.env, data/,
+#     logs). The old version is held as a backup until the new one is in place,
+#     so user data is never deleted, even if the swap fails.
+#   SRC is only ever read, never moved or deleted (it may hold the running
+#   script), so the app never ends up running from Downloads.
+install_from_source() {
+  local source="$1"
+
+  if [ "$DRY_RUN" = true ]; then
+    APP_DIR="$INSTALL_DIR"
+    warn "[dry-run] would install into $(display_path "$INSTALL_DIR") (keeping any existing .env, data, logs)"
+    return 0
+  fi
+
+  mkdir -p "$(dirname "$INSTALL_DIR")" || die "Couldn't create $(dirname "$INSTALL_DIR")."
+
+  if [ ! -e "$INSTALL_DIR" ]; then
+    step "Installing into $(display_path "$INSTALL_DIR")"
+    cp -R "$source" "$INSTALL_DIR" || die "Couldn't copy the app into $INSTALL_DIR."
+    ok "Installed into $(display_path "$INSTALL_DIR")"
+  elif is_app_root "$INSTALL_DIR"; then
+    step "Updating your existing install at $(display_path "$INSTALL_DIR")"
+    info "Your settings (.env), data, and logs are kept"
+
+    local staging backup item
+    staging="${INSTALL_DIR}.new-$$"
+    backup="${INSTALL_DIR}.previous"
+
+    rm -rf "$staging"
+    cp -R "$source" "$staging" || { rm -rf "$staging"; die "Couldn't stage the new app version."; }
+
+    # Carry the user's data forward into the new copy (replacing the fresh
+    # code's copies, if any).
+    for item in "${PRESERVE_ITEMS[@]}"; do
+      if [ -e "$INSTALL_DIR/$item" ]; then
+        rm -rf "$staging/$item"
+        cp -R "$INSTALL_DIR/$item" "$staging/$item" \
+          || { rm -rf "$staging"; die "Couldn't preserve your existing $item — nothing was changed."; }
+      fi
+    done
+
+    # Swap: old → backup, new → live. Keep the backup until the new copy is
+    # confirmed in place, then remove it. User data is never deleted.
+    rm -rf "$backup"
+    mv "$INSTALL_DIR" "$backup" || { rm -rf "$staging"; die "Couldn't set aside the previous version — nothing was changed."; }
+    if ! mv "$staging" "$INSTALL_DIR"; then
+      mv "$backup" "$INSTALL_DIR" 2>/dev/null
+      die "Couldn't put the new version in place; restored your previous install."
+    fi
+    rm -rf "$backup"
+    ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
+  else
+    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like Relationship Inbox OS. Move it aside and run the installer again."
+  fi
+
+  APP_DIR="$INSTALL_DIR"
 }
 
 download_app() {
@@ -283,19 +374,13 @@ download_app() {
 
   if [ "$DRY_RUN" = true ]; then
     APP_DIR="$INSTALL_DIR"
-    warn "[dry-run] would download $APP_ZIP_URL into $INSTALL_DIR"
+    warn "[dry-run] would download $APP_ZIP_URL and install into $(display_path "$INSTALL_DIR") (keeping any existing data)"
     return 0
   fi
 
   local tmp_zip extract_tmp inner
   tmp_zip="${TMPDIR:-/tmp}/relationship-inbox-os.zip"
   extract_tmp="${TMPDIR:-/tmp}/rios-extract-$$"
-
-  if [ -d "$INSTALL_DIR" ] && is_app_root "$INSTALL_DIR"; then
-    info "Found an existing install at $INSTALL_DIR — reusing it"
-    APP_DIR="$INSTALL_DIR"
-    return 0
-  fi
 
   info "Downloading Relationship Inbox OS…"
   if ! curl -fSL --progress-bar --max-time 1200 "$APP_ZIP_URL" -o "$tmp_zip" 2>>"$LOG_FILE"; then
@@ -318,12 +403,9 @@ download_app() {
   fi
   is_app_root "$inner" || die "The download didn't contain the app. Send the log to Richard: $LOG_FILE"
 
-  rm -rf "$INSTALL_DIR"
-  mkdir -p "$(dirname "$INSTALL_DIR")"
-  mv "$inner" "$INSTALL_DIR" || die "Couldn't move the app into $INSTALL_DIR."
+  # Same predictable destination + data-preserving install as the in-folder route.
+  install_from_source "$inner"
   rm -rf "$extract_tmp" "$tmp_zip" 2>/dev/null
-  APP_DIR="$INSTALL_DIR"
-  ok "Installed into $APP_DIR"
 }
 
 # --------------------------------------------------------------------------
@@ -399,6 +481,11 @@ install_app() {
     return 0
   fi
 
+  if [ "$SKIP_DEPS" = true ]; then
+    warn "[skip-deps] skipping npm install, the LinkedIn browser, and database setup"
+    return 0
+  fi
+
   run "Installing app dependencies (npm install)…" npm install --include=dev \
     || die "Installing dependencies failed. The log has the details: $LOG_FILE"
   ok "Dependencies installed"
@@ -431,11 +518,14 @@ wait_for_dashboard() {
 }
 
 start_app() {
+  local disp; disp="$(display_path "$APP_DIR")"
+
   if [ "$NO_START" = true ] || [ "$DRY_RUN" = true ]; then
     step "Skipping app launch (per your request)"
     say ""
     say "  To start the app yourself:"
-    say "    ${BOLD}cd \"$APP_DIR\" && npm run dev${RESET}"
+    say "    ${BOLD}cd $disp${RESET}"
+    say "    ${BOLD}npm run start:student${RESET}"
     say "  Then open ${BOLD}$DASHBOARD_URL${RESET} in Chrome."
     return 0
   fi
@@ -457,7 +547,7 @@ start_app() {
   else
     warn "The app is taking longer than usual to start."
     say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
-    say "  doctor check:  ${BOLD}cd \"$APP_DIR\" && node scripts/doctor.mjs${RESET}"
+    say "  doctor check:  ${BOLD}cd $disp && npm run doctor${RESET}"
   fi
 
   # Hand the Terminal to the running app.
@@ -465,14 +555,18 @@ start_app() {
 }
 
 print_success() {
+  local disp; disp="$(display_path "$APP_DIR")"
   cat <<EOF
 
   ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
+  • The app is installed at  ${BOLD}$disp${RESET}
   • ${BOLD}Leave this Terminal window open${RESET} — it keeps the app running.
   • To stop the app: click this window and press ${BOLD}Ctrl + C${RESET}.
-  • To start it again later:  ${BOLD}cd "$APP_DIR" && npm run dev${RESET}
+  • To start it again later:
+        ${BOLD}cd $disp${RESET}
+        ${BOLD}npm run start:student${RESET}
 
   Next, the app walks you through:
     1. iMessage access   (a one-time macOS permission)
@@ -481,7 +575,7 @@ print_success() {
 
   Setup guide:  docs/pilot/student-install-guide.md
   Stuck?        docs/pilot/student-install-troubleshooting.md
-  Health check: node scripts/doctor.mjs
+  Health check: npm run doctor
 
 EOF
 }
