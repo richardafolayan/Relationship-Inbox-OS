@@ -107,6 +107,13 @@ export async function runReassessForThread(
   // visibly changes. Single-thread iMessage persons and non-iMessage threads
   // skip the extra queries and behave exactly as before.
   let canonicalThreadId = thread.id;
+  // Summary/what-they-want fed to the classifier. Default to the requested
+  // row's values (correct for single-sibling iMessage persons and every
+  // non-iMessage thread); the >1-sibling branch overrides these with the
+  // CANONICAL sibling's values so the classifier prompt isn't steered by a
+  // dormant sibling's stale AI fields.
+  let classifierSummary: string | null = thread.rollingSummary;
+  let classifierWhatTheyWant: string | null = thread.whatTheyWant;
   let orderedMessages = [...thread.messages].reverse();
   if (thread.platform === "IMESSAGE") {
     const siblingIds = await deps.siblingThreadIds(
@@ -116,16 +123,32 @@ export async function runReassessForThread(
     if (siblingIds.length > 1) {
       const siblingRows = await deps.prisma.thread.findMany({
         where: { id: { in: siblingIds } },
-        select: { id: true, lastInboundAt: true, _count: { select: { messages: true } } }
+        select: {
+          id: true,
+          lastInboundAt: true,
+          rollingSummary: true,
+          whatTheyWant: true,
+          _count: { select: { messages: true } }
+        }
       });
-      canonicalThreadId =
-        pickCanonicalThread(
-          siblingRows.map((row) => ({
-            id: row.id,
-            lastInboundAt: row.lastInboundAt,
-            messageCount: row._count?.messages ?? 0
-          }))
-        )?.id ?? thread.id;
+      const canonicalRow = pickCanonicalThread(
+        siblingRows.map((row) => ({
+          id: row.id,
+          lastInboundAt: row.lastInboundAt,
+          messageCount: row._count?.messages ?? 0,
+          rollingSummary: row.rollingSummary,
+          whatTheyWant: row.whatTheyWant
+        }))
+      );
+      canonicalThreadId = canonicalRow?.id ?? thread.id;
+      // AI fields are persisted per-row, so a dormant sibling carries stale
+      // summary/what-they-want. Classify off the CANONICAL sibling's values
+      // (the row the readers + the summary refresh + the category write all
+      // agree on) rather than the requested row's, which may be dormant.
+      if (canonicalRow) {
+        classifierSummary = canonicalRow.rollingSummary;
+        classifierWhatTheyWant = canonicalRow.whatTheyWant;
+      }
       const mergedDesc = await deps.prisma.message.findMany({
         where: { threadId: { in: siblingIds } },
         orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -143,8 +166,8 @@ export async function runReassessForThread(
         platform: thread.platform as PlatformName,
         displayName: thread.person.displayName,
         messages: orderedMessages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
-        summary: thread.rollingSummary,
-        whatTheyWant: thread.whatTheyWant,
+        summary: classifierSummary,
+        whatTheyWant: classifierWhatTheyWant,
         race: true
       })
       .catch(() => null)
