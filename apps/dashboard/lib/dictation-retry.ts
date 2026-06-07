@@ -26,11 +26,11 @@ export type DictationOutcome =
 
 /** Shown when the request never completed (fetch threw — no response). */
 export const DICTATION_LOST_CONNECTION_MESSAGE =
-  "Lost connection to the transcription service. Your recording is still here — try again.";
+  "Lost connection to the transcription service. Your recording is still here. Try again.";
 
 /** Shown when the runner replied with a 5xx / non-JSON (transport) failure. */
 export const DICTATION_TRANSPORT_MESSAGE =
-  "Couldn't reach the transcription service. Your recording is still here — try again.";
+  "Couldn't reach the transcription service. Your recording is still here. Try again.";
 
 /** Fallback when the runner declines but gives no usable reason. */
 export const DICTATION_GENERIC_ERROR_MESSAGE = "Could not transcribe the recording.";
