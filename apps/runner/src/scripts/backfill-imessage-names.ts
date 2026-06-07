@@ -25,15 +25,22 @@
  */
 import { prisma } from "../db";
 import { runnerConfig } from "../config";
-import { loadContactResolver } from "../services/contact-resolver";
+import { loadBestContactResolver } from "../services/contact-resolver";
 import { planNameBackfill } from "./backfill-imessage-names-plan";
 
 async function main(): Promise<void> {
   const apply = process.argv.includes("--apply");
 
-  const resolver = loadContactResolver(runnerConfig.imessage.contactsVcfPath);
+  // Live macOS Contacts + optional data/contacts.vcf. The runner's
+  // imessage-name-sync service does this automatically at boot now; this
+  // script stays as a manual, dry-run-by-default escape hatch.
+  const resolver = loadBestContactResolver({ vcfPath: runnerConfig.imessage.contactsVcfPath });
   if (resolver.size() === 0) {
-    console.error(`[backfill] no contacts loaded from ${runnerConfig.imessage.contactsVcfPath ?? "(unset)"}`);
+    console.error(
+      "[backfill] no contacts loaded. This Mac's Contacts is empty and there is no " +
+        `data/contacts.vcf (${runnerConfig.imessage.contactsVcfPath ?? "unset"}). ` +
+        "See docs/pilot/imessage-contact-names.md to get contacts onto this Mac."
+    );
     process.exit(1);
   }
   console.log(`[backfill] loaded ${resolver.size()} contact entries`);

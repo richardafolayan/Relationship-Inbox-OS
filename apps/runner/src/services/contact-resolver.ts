@@ -1,11 +1,18 @@
 import { existsSync, readFileSync } from "node:fs";
+import { readAllAddressBookContacts } from "../platforms/addressbook-db";
 
 /**
- * Resolves phone numbers / emails to display names by reading a vCard 3.0
- * export of the operator's address book. Used by the iMessage adapter so
- * chat.db threads come back with real names instead of phone numbers.
+ * Resolves phone numbers / emails to display names so chat.db threads come
+ * back with real names instead of phone numbers.
  *
- * Privacy: the vcf path is read locally; we never log handle→name pairs.
+ * Two sources feed the resolver (see loadBestContactResolver):
+ *   1. The live macOS Contacts (AddressBook) databases — read directly, the
+ *      same way birthday-sync does, so names resolve on a fresh install with
+ *      zero setup. This is the default and needs no manual export.
+ *   2. An optional vCard 3.0 export at data/contacts.vcf — a manual override
+ *      that wins on a handle collision, so a power user can correct names.
+ *
+ * Privacy: both sources are read locally; we never log handle→name pairs.
  * The data/ directory is gitignored so the operator's contacts stay on
  * their machine.
  *
@@ -18,11 +25,14 @@ import { existsSync, readFileSync } from "node:fs";
  * operator can still confirm/edit via the dashboard pill.
  */
 
-interface VcardEntry {
+/** One contact: a display name plus its raw phone/email handles. */
+export interface ContactEntry {
   name: string;
   phones: string[];
   emails: string[];
 }
+
+type VcardEntry = ContactEntry;
 
 function unfoldVcardLines(raw: string): string[] {
   // vCard line folding: a line that starts with whitespace is a continuation
@@ -116,15 +126,87 @@ const NULL_RESOLVER: ContactResolver = {
   size: () => 0
 };
 
-export function loadContactResolver(vcfPath: string | undefined): ContactResolver {
-  if (!vcfPath || !existsSync(vcfPath)) return NULL_RESOLVER;
-  let raw: string;
+/**
+ * Parse a vCard file into entries, or return [] when the file is missing or
+ * unreadable. Never throws — a bad vcf must degrade to "no names", never crash
+ * a scan.
+ */
+export function loadVcardEntries(vcfPath: string | undefined): ContactEntry[] {
+  if (!vcfPath || !existsSync(vcfPath)) return [];
   try {
-    raw = readFileSync(vcfPath, "utf8");
+    return parseVcardEntries(readFileSync(vcfPath, "utf8"));
   } catch {
-    return NULL_RESOLVER;
+    return [];
   }
-  const entries = parseVcardEntries(raw);
+}
+
+/**
+ * Read the live macOS Contacts databases into entries. macOS-only; returns []
+ * off darwin or when Contacts is unreadable (no Full Disk Access) so the
+ * caller degrades cleanly to the vCard (or to "no names"). Never throws.
+ */
+export function loadAddressBookEntries(options: {
+  /** AddressBook DB paths; defaults to auto-discovery under $HOME. */
+  dbPaths?: string[];
+  /** Force-enable/disable the read. Defaults to macOS-only. */
+  enabled?: boolean;
+} = {}): ContactEntry[] {
+  const enabled = options.enabled ?? process.platform === "darwin";
+  if (!enabled) return [];
+  try {
+    return readAllAddressBookContacts(options.dbPaths).map((c) => ({
+      name: c.name,
+      phones: c.phones,
+      emails: c.emails
+    }));
+  } catch {
+    return [];
+  }
+}
+
+export interface BestContactResolverOptions {
+  /** Optional vCard 3.0 export path. Wins on a handle collision when present. */
+  vcfPath?: string;
+  /** AddressBook DB paths; defaults to auto-discovery under $HOME. */
+  addressBookDbPaths?: string[];
+  /** Force-enable/disable the AddressBook read. Defaults to macOS-only. */
+  useAddressBook?: boolean;
+}
+
+/**
+ * Build the resolver the runner actually uses: live macOS Contacts merged with
+ * the optional manual vCard. The vCard is appended last so an explicit export
+ * wins on a handle collision (last-wins, matching buildContactResolver), while
+ * a fresh install with no vCard still resolves every name straight from the
+ * Mac's address book.
+ */
+export function loadBestContactResolver(options: BestContactResolverOptions = {}): ContactResolver {
+  const entries = [
+    ...loadAddressBookEntries({
+      dbPaths: options.addressBookDbPaths,
+      enabled: options.useAddressBook
+    }),
+    // vCard last → manual override wins on collision.
+    ...loadVcardEntries(options.vcfPath)
+  ];
+  return buildContactResolver(entries);
+}
+
+/**
+ * Back-compat vCard-only loader. Prefer loadBestContactResolver, which also
+ * reads the live macOS Contacts. Kept for callers/tests that pass an explicit
+ * vcf path.
+ */
+export function loadContactResolver(vcfPath: string | undefined): ContactResolver {
+  return buildContactResolver(loadVcardEntries(vcfPath));
+}
+
+/**
+ * Build a ContactResolver from already-parsed entries. Pure (no I/O), so it is
+ * the shared core behind every loader above and is trivially unit-testable.
+ */
+export function buildContactResolver(entries: ContactEntry[]): ContactResolver {
+  if (entries.length === 0) return NULL_RESOLVER;
   const phoneMap = new Map<string, string>();
   const emailMap = new Map<string, string>();
   // handle key → owning entry index, for siblingHandles(). Keyed on entry
