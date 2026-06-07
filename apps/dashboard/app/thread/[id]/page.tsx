@@ -1377,8 +1377,8 @@ export default function ThreadPage() {
       failedDictationWavRef.current = wav;
       setDictationRetry(
         err instanceof Error && err.message
-          ? `${err.message} — your recording is still here, try again.`
-          : "Dictation failed. Your recording is still here — try again."
+          ? `${err.message}. Your recording is still here, try again.`
+          : "Dictation failed. Your recording is still here. Try again."
       );
     } finally {
       setDictationStatus("idle");
