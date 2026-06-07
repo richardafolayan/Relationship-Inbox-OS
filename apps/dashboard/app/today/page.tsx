@@ -28,6 +28,7 @@ import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { FocusRailCard } from "@/components/common/focus/focus-rail-card";
 import { NotificationCta } from "@/components/common/notification-cta";
 import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -526,15 +527,9 @@ export default function TodayPage() {
 
       <NotificationCta />
 
-      {welcomeDismissed === false ? (
-        <PilotWelcomeCard
-          onDismiss={() => {
-            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
-            setWelcomeDismissed(true);
-          }}
-        />
-      ) : null}
-
+      {/* The pilot welcome moved into the right rail (compact) so it sits
+          beside the focus block, per Richard. The first-run tour invite
+          still leads the page once the welcome has been dismissed. */}
       {welcomeDismissed === true && tourSeen === false ? (
         <PilotTourInviteCard
           onStart={() => {
@@ -765,11 +760,26 @@ export default function TodayPage() {
           ) : null}
         </div>
 
-        {/* Right rail: tonight's progress. Per the redesign the rail is no
-            longer a boxed card — it's an open titled section sitting on the
-            page, so the focus column and the rail read as one calm surface. */}
-        <aside className="hidden lg:block">
-          <div className="sticky top-[110px] flex flex-col gap-10">
+        {/* Right rail: the focus block + pilot welcome sit above tonight's
+            progress and upcoming birthdays. Per the redesign the rail's lower
+            sections are open titled groups, not boxed cards, so the focus
+            column and the rail read as one calm surface. The rail stacks below
+            the queue on narrow screens (it used to be desktop-only) so the
+            focus entry stays reachable; birthdays render exactly as before. */}
+        <aside>
+          <div className="flex flex-col gap-10 lg:sticky lg:top-[110px]">
+            <FocusRailCard rows={rows} />
+
+            {welcomeDismissed === false ? (
+              <PilotWelcomeCard
+                compact
+                onDismiss={() => {
+                  window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+                  setWelcomeDismissed(true);
+                }}
+              />
+            ) : null}
+
             <section>
               <h5 className="m-0 mb-[18px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
                 Tonight’s progress

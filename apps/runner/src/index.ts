@@ -5505,7 +5505,35 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
         .enum(["warm", "direct", "casual", "thoughtful", "concise", ""])
         .optional(),
       aiHelpLevel: z.enum(["memory_only", "writing_support", "full_drafts"]).optional(),
-      setupCompletedAt: z.string().max(40).optional()
+      setupCompletedAt: z.string().max(40).optional(),
+      // Focus Reply Buffer state. Each top-level field is sent whole (the
+      // dashboard never sends a partial sub-object), so strict object shapes
+      // are safe; the store still coerces defensively on read.
+      focusWindow: z
+        .object({
+          active: z.boolean(),
+          startedAt: z.string().max(40),
+          endsAt: z.string().max(40),
+          reason: z.string().max(80),
+          note: z.string().max(2000),
+          audience: z.enum(["favourites", "all_personal"]),
+          windowId: z.string().max(80),
+          ackedPersonIds: z.array(z.string().max(120)).max(5000)
+        })
+        .optional(),
+      ackTemplates: z
+        .object({
+          close: z.string().max(2000),
+          professional: z.string().max(2000)
+        })
+        .optional(),
+      focusSettings: z
+        .object({
+          reasonLabel: z.boolean(),
+          oneNotePerPerson: z.boolean(),
+          audience: z.enum(["favourites", "all_personal"])
+        })
+        .optional()
     })
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);

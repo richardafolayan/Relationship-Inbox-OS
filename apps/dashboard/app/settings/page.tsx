@@ -5,6 +5,7 @@ import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
+import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
@@ -218,6 +219,8 @@ export default function SettingsPage() {
       <div data-demo-target="settings-user-voice">
         <UserVoiceProfile variant="settings" />
       </div>
+
+      <FocusSettingsSection />
 
       <section className="mt-10">
         <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Demo</p>
