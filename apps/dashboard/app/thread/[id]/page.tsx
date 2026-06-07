@@ -61,6 +61,7 @@ const ProfileDrawer = dynamic(
   { ssr: false }
 );
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { FocusThreadStrip } from "@/components/common/focus/focus-thread-strip";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import { blobToWhisperWav } from "@/lib/dictation-audio";
 import {
@@ -3760,6 +3761,10 @@ export default function ThreadPage() {
                 </button>
               </div>
             ) : null}
+            {/* Focus Reply Buffer: when this thread arrived during the active
+                window, a one-tap acknowledgement sits above the composer. The
+                proper reply still gets written in the composer below. */}
+            <FocusThreadStrip thread={thread} onSent={refresh} />
             <div
               data-thread-composer="true"
               data-demo-target="composer-input"

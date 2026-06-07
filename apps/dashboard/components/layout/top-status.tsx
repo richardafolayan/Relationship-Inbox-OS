@@ -1,7 +1,10 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Moon } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import { formatUntil } from "@/lib/focus";
+import { openFocusReview, openFocusSetup, useFocusWindow } from "@/lib/use-focus-window";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
@@ -332,6 +335,9 @@ export function TopStatus() {
   // (TopStatus lives in the persistent shell), so it only shows once.
   const [ready, setReady] = useState(false);
   const [, setTick] = useState(0);
+  // Focus Reply Buffer: a calm top-bar entry point, reachable from any page
+  // (and any width). Off -> open the setup sheet; on -> open the review sheet.
+  const { active: focusActive, focusWindow } = useFocusWindow();
 
   const refresh = useCallback(async () => {
     // Short TTLs so /health and /data/platforms de-dupe with the app-shell's
@@ -587,6 +593,21 @@ export function TopStatus() {
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
+        <button
+          type="button"
+          onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}
+          title={focusActive ? "Focus block active, review acknowledgements" : "Start a focus window"}
+          className={`inline-flex items-center gap-[6px] rounded-pill border px-[10px] py-[3px] font-sans text-[11.5px] tracking-[-0.005em] transition-colors duration-calm ${
+            focusActive
+              ? "border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-accent-soft text-accent-ink"
+              : "border-hairline-strong text-ink-2 hover:border-[color-mix(in_srgb,var(--accent)_30%,transparent)] hover:text-ink"
+          }`}
+        >
+          <Moon className="h-[12px] w-[12px]" strokeWidth={1.7} />
+          {focusActive
+            ? `Focus${focusWindow.endsAt ? ` · until ${formatUntil(focusWindow.endsAt)}` : ""}`
+            : "Focus off"}
+        </button>
         {/* #435: suppress "scan never" / "Scan now" until the first poll
             settles so a cold mount doesn't imply the runner has never run. */}
         {ready ? <span>{scanLabel}</span> : null}

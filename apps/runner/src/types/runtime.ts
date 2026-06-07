@@ -112,6 +112,66 @@ export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
  * All string fields default to "" meaning "not set" — an empty profile
  * makes the AI fall back to a plain, neutral voice rather than any persona.
  */
+/**
+ * Who a focus window's acknowledgements cover. "favourites" (the safe
+ * default) only ever touches starred contacts; "all_personal" widens to
+ * any saved personal contact but still never to unknown numbers, spam, or
+ * business/outreach threads. Mirrors the dashboard `FocusAudience`.
+ */
+export type FocusAudience = "favourites" | "all_personal";
+
+/**
+ * Focus Reply Buffer state. A single "heads-down" window the operator opens
+ * from Today / the top bar / Settings: while it's active, a covered contact
+ * who messages can get a one-tap acknowledgement ("seen this, I'll reply
+ * properly after") so silence doesn't read as being ignored. No auto-send,
+ * no AI-written text — plain token substitution into the operator's own
+ * note. One window at a time; persisted in the operator profile JSON so
+ * every dashboard surface (and a reload) reads the same state.
+ */
+export interface FocusWindowState {
+  /** True while a window is open. The dashboard surfaces read this. */
+  active: boolean;
+  /** ISO timestamp the window started. "" when no window has run. Inbound
+   *  messages newer than this on covered threads are "arrived during focus". */
+  startedAt: string;
+  /** ISO timestamp the operator chose to resurface. "" when unset. Fills
+   *  the [until] token and the "active until …" copy. */
+  endsAt: string;
+  /** Optional short reason ("deep work", "lecture"). "" = none. */
+  reason: string;
+  /** Live note text shown in the setup sheet (close-tier base with tokens). */
+  note: string;
+  /** Who this window covers. */
+  audience: FocusAudience;
+  /** Opaque id stamping this window, so per-window ack dedupe is unambiguous. */
+  windowId: string;
+  /** Person ids already acknowledged in this window (one note per person). */
+  ackedPersonIds: string[];
+}
+
+/**
+ * The operator's two acknowledgement note templates, in their own words.
+ * The app only picks which tier fits a contact and fills [Name]/[until]/
+ * [reason] — it never writes the words.
+ */
+export interface AckTemplates {
+  /** Friends / family — casual. */
+  close: string;
+  /** Professional contacts — calmer, still the operator's voice. */
+  professional: string;
+}
+
+/** Focus Reply Buffer preferences (not the live window). */
+export interface FocusSettings {
+  /** Include a reason word in the note so it reads as a real block. */
+  reasonLabel: boolean;
+  /** If someone messages twice in one window, only acknowledge once. */
+  oneNotePerPerson: boolean;
+  /** Default audience pre-selected when starting a new window. */
+  audience: FocusAudience;
+}
+
 export interface OperatorProfile {
   /** What the operator is called — used for the Today greeting and AI voice. */
   displayName: string;
@@ -129,6 +189,13 @@ export interface OperatorProfile {
   aiHelpLevel: AiHelpLevel;
   /** ISO timestamp the operator finished first-run setup. "" = not done. */
   setupCompletedAt: string;
+  /** Focus Reply Buffer: the live window state. Added after the voice
+   *  fields, so a pre-existing profile row parses fine (defaults below). */
+  focusWindow: FocusWindowState;
+  /** Focus Reply Buffer: the operator's two note templates. */
+  ackTemplates: AckTemplates;
+  /** Focus Reply Buffer: preferences (reason label, one-note-per-person, audience). */
+  focusSettings: FocusSettings;
 }
 
 /**
