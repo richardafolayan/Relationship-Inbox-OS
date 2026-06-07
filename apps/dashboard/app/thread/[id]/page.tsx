@@ -63,6 +63,11 @@ const ProfileDrawer = dynamic(
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import { blobToWhisperWav } from "@/lib/dictation-audio";
+import {
+  classifyDictationResponse,
+  DICTATION_LOST_CONNECTION_MESSAGE,
+  type DictationResponseBody
+} from "@/lib/dictation-retry";
 import { stopRecorderAndStream } from "@/lib/recorder-teardown";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
@@ -549,6 +554,15 @@ export default function ThreadPage() {
   // Held so the mic stream can be released on unmount even if onstop never
   // runs (e.g. navigating away mid-dictation).
   const dictationStreamRef = useRef<MediaStream | null>(null);
+  // #462 follow-up: when a dictation transcription fails for a *transient*
+  // reason (lost connection to the runner, a proxy hiccup, or a runner-side
+  // timeout), keep the already-prepared WAV in memory so the operator can
+  // retry the SAME clip with one tap instead of speaking again. The audio is
+  // never persisted server-side — this lives only in this page's memory and
+  // is dropped on success, on a fresh recording, or on dismiss. The message
+  // (non-null) drives the inline retry banner above the composer.
+  const failedDictationWavRef = useRef<Blob | null>(null);
+  const [dictationRetry, setDictationRetry] = useState<string | null>(null);
   // Source of the current composer text: empty / explicit draft typed
   // by the operator / AI predraft (first suggested reply auto-filled
   // when no explicit draft exists). Drives the "AI predraft" badge.
@@ -1303,11 +1317,81 @@ export default function ThreadPage() {
     };
   }, []);
 
-  // #462: record a short clip, post it to the runner for transcription, and
-  // append the returned text to the composer for the operator to review. No
-  // autosend; nothing is persisted server-side.
+  // #462 follow-up: POST a prepared 16 kHz WAV to the runner and fold the
+  // returned transcript into the composer. Extracted so the initial
+  // dictation and the inline "Try again" both submit through one path.
+  // Nothing is persisted server-side; on a *transient* failure we keep the
+  // WAV in memory (failedDictationWavRef) and show a retry banner so the
+  // operator never loses a recording to a dropped connection.
+  const submitDictationWav = useCallback(async (wav: Blob) => {
+    setDictationRetry(null);
+    setDictationStatus("transcribing");
+    try {
+      const form = new FormData();
+      form.append("audio", wav, "dictation.wav");
+      let resp: Response;
+      try {
+        resp = await fetch("/runner/control/transcribe-dictation", {
+          method: "POST",
+          body: form
+        });
+      } catch {
+        // The request never completed — network / dev-proxy drop. The clip
+        // is fine; keep it for a one-tap retry rather than losing the audio.
+        failedDictationWavRef.current = wav;
+        setDictationRetry(DICTATION_LOST_CONNECTION_MESSAGE);
+        return;
+      }
+      const data = (await resp.json().catch(() => ({}))) as DictationResponseBody;
+      const outcome = classifyDictationResponse({
+        ok: resp.ok,
+        status: resp.status,
+        data
+      });
+      switch (outcome.kind) {
+        case "text": {
+          failedDictationWavRef.current = null;
+          const spoken = outcome.text;
+          setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
+          setComposerSource("user");
+          break;
+        }
+        case "empty":
+          failedDictationWavRef.current = null;
+          setError("Didn't catch any speech. Try again.");
+          break;
+        case "retry":
+          // Transport / server hiccup — keep the clip and offer a retry.
+          failedDictationWavRef.current = wav;
+          setDictationRetry(outcome.message);
+          break;
+        case "error":
+          // A specific reason that a retry of the same audio won't fix.
+          failedDictationWavRef.current = null;
+          setError(outcome.message);
+          break;
+      }
+    } catch (err) {
+      // Defensive: anything unexpected after a completed request. Keep the
+      // clip so the operator can still retry without re-recording.
+      failedDictationWavRef.current = wav;
+      setDictationRetry(
+        err instanceof Error && err.message
+          ? `${err.message} — your recording is still here, try again.`
+          : "Dictation failed. Your recording is still here — try again."
+      );
+    } finally {
+      setDictationStatus("idle");
+    }
+  }, []);
+
+  // #462: record a short clip, prepare it as 16 kHz mono WAV, and hand it to
+  // submitDictationWav. No autosend; nothing is persisted server-side.
   const startDictation = useCallback(async () => {
     if (dictationStatus !== "idle") return;
+    // A fresh recording supersedes any earlier failed clip + retry banner.
+    failedDictationWavRef.current = null;
+    setDictationRetry(null);
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       // webm/opus is the broadly-supported recording format (incl. Firefox);
@@ -1331,44 +1415,19 @@ export default function ThreadPage() {
           return;
         }
         setDictationStatus("transcribing");
+        // Convert the recording to 16 kHz mono WAV in the browser. The
+        // runner's local-whisper provider normalises audio with macOS
+        // afconvert, which can't read the webm/opus MediaRecorder emits
+        // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
+        let wav: Blob;
         try {
-          // Convert the recording to 16 kHz mono WAV in the browser. The
-          // runner's local-whisper provider normalises audio with macOS
-          // afconvert, which can't read the webm/opus MediaRecorder emits
-          // (and ffmpeg isn't installed); WAV is afconvert-friendly. #462.
-          let wav: Blob;
-          try {
-            wav = await blobToWhisperWav(raw);
-          } catch {
-            setError("Could not prepare the recording for transcription.");
-            setDictationStatus("idle");
-            return;
-          }
-          const form = new FormData();
-          form.append("audio", wav, "dictation.wav");
-          const resp = await fetch("/runner/control/transcribe-dictation", {
-            method: "POST",
-            body: form
-          });
-          const data = (await resp.json().catch(() => ({}))) as {
-            ok?: boolean;
-            text?: string;
-            error?: string;
-          };
-          if (!resp.ok || !data.ok) {
-            setError(data?.error || "Could not transcribe the recording.");
-          } else if (typeof data.text === "string" && data.text.trim()) {
-            const spoken = data.text.trim();
-            setComposer((prev) => (prev && !/\s$/.test(prev) ? `${prev} ${spoken}` : `${prev}${spoken}`));
-            setComposerSource("user");
-          } else {
-            setError("Didn't catch any speech. Try again.");
-          }
-        } catch (err) {
-          setError(err instanceof Error ? err.message : "Dictation failed.");
-        } finally {
+          wav = await blobToWhisperWav(raw);
+        } catch {
+          setError("Could not prepare the recording for transcription.");
           setDictationStatus("idle");
+          return;
         }
+        await submitDictationWav(wav);
       };
       recorder.start();
       dictationRecorderRef.current = recorder;
@@ -1378,13 +1437,25 @@ export default function ThreadPage() {
       setError(err instanceof Error ? err.message : "Microphone access denied");
       setDictationStatus("idle");
     }
-  }, [dictationStatus]);
+  }, [dictationStatus, submitDictationWav]);
 
   const stopDictation = useCallback(() => {
     if (dictationStatus !== "recording" || !dictationRecorderRef.current) return;
     dictationRecorderRef.current.stop();
     dictationRecorderRef.current = null;
   }, [dictationStatus]);
+
+  // #462 follow-up: re-submit the last failed clip without re-recording.
+  const retryDictation = useCallback(() => {
+    const wav = failedDictationWavRef.current;
+    if (!wav || dictationStatus !== "idle") return;
+    void submitDictationWav(wav);
+  }, [dictationStatus, submitDictationWav]);
+
+  const dismissDictationRetry = useCallback(() => {
+    failedDictationWavRef.current = null;
+    setDictationRetry(null);
+  }, []);
 
   // Cmd/Ctrl-Enter sends.
   useEffect(() => {
@@ -3663,6 +3734,31 @@ export default function ThreadPage() {
           <div className="mx-auto w-full max-w-[820px] px-8 pb-2 pt-2">
             {error ? (
               <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
+            ) : null}
+            {/* #462 follow-up: a transient dictation failure keeps the
+                recorded clip in memory so the operator can retry the same
+                audio with one tap instead of speaking again. */}
+            {dictationRetry ? (
+              <div className="mb-1.5 flex items-center gap-2 rounded-[10px] border border-risk-overdue/30 bg-risk-overdue/5 px-2.5 py-1.5 text-[11px] text-risk-overdue">
+                <span className="flex-1 leading-snug">{dictationRetry}</span>
+                <button
+                  type="button"
+                  onClick={retryDictation}
+                  disabled={dictationStatus !== "idle"}
+                  className="shrink-0 rounded-pill border border-risk-overdue/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.06em] transition-colors duration-calm hover:bg-risk-overdue/10 disabled:opacity-50"
+                >
+                  {dictationStatus === "transcribing" ? "Retrying…" : "Try again"}
+                </button>
+                <button
+                  type="button"
+                  onClick={dismissDictationRetry}
+                  disabled={dictationStatus === "transcribing"}
+                  aria-label="Dismiss"
+                  className="shrink-0 text-risk-overdue/70 transition-colors duration-calm hover:text-risk-overdue disabled:opacity-50"
+                >
+                  <X className="h-3.5 w-3.5" strokeWidth={2} />
+                </button>
+              </div>
             ) : null}
             <div
               data-thread-composer="true"
