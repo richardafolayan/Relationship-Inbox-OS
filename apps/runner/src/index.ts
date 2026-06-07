@@ -5652,48 +5652,15 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
     }
   });
 
-  // Fire-and-forget: attach screenshots to the GitHub issue the Apps
-  // Script just created. Doesn't block the response — if it fails,
-  // the Drive-linked Sheet row remains the source of truth. See
-  // services/github-attachments.ts for the rationale.
-  if (result.ok && result.reportId && screenshots.length > 0 && runnerConfig.github.repo) {
-    const reportId = result.reportId;
-    (async () => {
-      // Prefer GITHUB_TOKEN / GH_TOKEN from env; fall back to the
-      // local `gh` CLI's keyring auth so operators don't have to
-      // paste a PAT into .env when they're already signed in via
-      // gh CLI (the common case on dev machines).
-      const { resolveGitHubToken } = await import("./services/gh-cli-token.js");
-      const token = await resolveGitHubToken({ envToken: runnerConfig.github.token });
-      if (!token) {
-        console.warn(
-          `[pilot-feedback] screenshot attach skipped for ${reportId}: no GITHUB_TOKEN in env and gh CLI auth unavailable`
-        );
-        return;
-      }
-      const { attachScreenshotsToIssue } = await import("./services/github-attachments.js");
-      try {
-        const outcome = await attachScreenshotsToIssue({
-          reportId,
-          screenshots,
-          repo: runnerConfig.github.repo,
-          token,
-          branch: runnerConfig.github.attachmentsBranch
-        });
-        if (outcome.ok) {
-          console.log(
-            `[pilot-feedback] attached ${outcome.uploadedUrls?.length ?? 0} screenshot(s) to issue #${outcome.issueNumber} (${outcome.commentUrl})`
-          );
-        } else {
-          console.warn(
-            `[pilot-feedback] screenshot attach skipped for ${reportId}: ${outcome.reason}`
-          );
-        }
-      } catch (error) {
-        console.warn(`[pilot-feedback] screenshot attach errored for ${reportId}:`, error);
-      }
-    })();
-  }
+  // Screenshot-to-GitHub attachment now happens server-side in the Apps
+  // Script (it has a secure token, already creates the issue, and already
+  // holds the screenshot bytes), so it works for every pilot install — not
+  // only machines with a local gh CLI / GITHUB_TOKEN. The old runner-side
+  // attach is intentionally not invoked here: a pilot build has no token, and
+  // a private repo's raw URLs don't render inline anyway. See
+  // docs/pilot/apps-script.md (GITHUB_ATTACH_SCREENSHOTS). The unused
+  // services/github-attachments.ts + gh-cli-token.ts are left for a separate
+  // cleanup PR.
 
   res.json(result);
 }));
