@@ -12,6 +12,7 @@ import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/t
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import dynamic from "next/dynamic";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
@@ -640,6 +641,10 @@ export default function InboxPage() {
           )
         }
       />
+
+      {/* Explains bare phone numbers when this Mac's Contacts app is empty
+          (issue #676). Renders nothing unless the runner confirms it. */}
+      <MacContactsHint />
 
       {/* Ghost search — a subtle field, not a heavy box (the redesign's
           calmer default). The border darkens on hover/focus; a clear
