@@ -103,7 +103,7 @@ export function shouldSeedOperatorProfile(
 export function normaliseSeedProfile(
   raw: unknown,
   now: () => string = () => new Date().toISOString()
-): OperatorProfile {
+): Partial<OperatorProfile> {
   const seed = (raw && typeof raw === "object" ? raw : {}) as Record<string, unknown>;
   const preferredStyle = str(seed.preferredStyle);
   const aiHelpLevel = str(seed.aiHelpLevel);

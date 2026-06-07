@@ -11,6 +11,7 @@ import { shouldInboxRefreshOnRunnerEvent } from "@/lib/inbox-events";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
+import { FocusInboxGroup } from "@/components/common/focus/focus-inbox-group";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import dynamic from "next/dynamic";
@@ -787,6 +788,11 @@ export default function InboxPage() {
       {bulkResult ? (
         <p className="mb-6 font-mono text-[11px] text-ink-3">{bulkResult}</p>
       ) : null}
+
+      {/* Focus Reply Buffer: covered threads that arrived during the active
+          window sit above the normal list with a one-tap acknowledgement.
+          Renders nothing when no window is active or nothing qualifies. */}
+      <FocusInboxGroup rows={allRows} onChanged={refresh} />
 
       {!loaded ? (
         <p className="font-mono text-[12px] text-ink-3">Loading…</p>
