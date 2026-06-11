@@ -360,6 +360,66 @@ export const SECOND_PERSON_RESOLUTION = [
   "When the contact congratulates, thanks, or praises the operator, the obligation is to receive it (thank them, respond warmly), not to mirror it back as though the contact did the thing."
 ].join(" ");
 
+/**
+ * Operator-name third-party misresolution (issue #685, the "phone handover"
+ * brief). Contacts often address the very person they are texting BY NAME,
+ * in third person ("<name> come back", "<name> can you send the pics",
+ * "who's on <name>'s phone"). TRANSCRIPT LABELS (#463) teaches that a name
+ * inside a message body is a third party — correct for OTHER names, but it
+ * left the operator's own name with no path back to the operator:
+ * SECOND_PERSON_RESOLUTION above only covers pronouns, and the reassess
+ * prompt never carried the operator's configured name at all. On a thread
+ * where the contact teased "who's on <operator>'s phone… give the brother
+ * his device back", the brief read the operator as a third party whose
+ * device the operator holds and invented a "phone handover" errand across
+ * where_it_stands / required_points / what_they_want.
+ *
+ * This fragment closes the gap: a name the contact uses to address, summon,
+ * or talk about their 1:1 counterpart resolves to the OPERATOR (second
+ * person), and the configured operator name is bound into the rule when one
+ * exists — the same rule-and-name-travel-together shape as
+ * contactNameContext(), so the rule can never ship without the name it
+ * points at when a name is configured.
+ *
+ * Exported so tests can pin the language without snapshotting templates.
+ */
+export function operatorNameResolution(operatorDisplayName?: string | null): string {
+  const parts = [
+    "OPERATOR NAME RESOLUTION (strict — the operator has a name too).",
+    "Contacts often address the very person they are texting BY NAME, in third person: \"<name> come back\", \"<name> can you send the pics\", \"who's on <name>'s phone\". In a 1:1 thread, a name the CONTACT uses to address, summon, tease, or talk ABOUT the person they are texting refers to the OPERATOR. Resolve it exactly like a second-person pronoun: it means \"you\" in every output field.",
+    "The operator's own name must NEVER surface in output text as if it were a third party (\"the <name> device\", \"<name>'s update\", \"handling <name>\", \"the <name> handover\") — write \"you\"/\"your\" instead.",
+    "This does NOT weaken the transcript-label rule: a name used this way is still NEVER the contact's name. And a genuinely different person who happens to share the name — clearly discussed as someone else (\"my cousin <name>\", \"<name> from work\") — stays a third party. When unsure in a 1:1 thread, a name used as direct address resolves to the operator.",
+    "The bracketed placeholders here (<name>, <operator>) are illustrative — NEVER output a bracketed placeholder."
+  ];
+  const trimmed = typeof operatorDisplayName === "string" ? operatorDisplayName.trim() : "";
+  if (trimmed) {
+    parts.push(
+      `The operator's configured name is "${trimmed}". When the contact writes that name in this thread, it refers to the OPERATOR unless the transcript clearly establishes a different person with the same name.`
+    );
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Banter literalism (issue #685, same thread as operatorNameResolution's
+ * doc). The contact spent an evening teasing that someone else must be on
+ * the operator's phone ("I know your method", "give the brother his device
+ * back"). The summariser took the bit literally and promoted it into
+ * logistics: where_it_stands "planning the phone handover", a required
+ * point "Outline next steps for handing <operator>'s phone" — and the
+ * predraft then composed a reply around the invented errand. Casual threads
+ * are full of jokes that pattern-match to tasks; nothing in the prompt said
+ * an obligation must have been meant in earnest.
+ *
+ * Exported so tests can pin the language without snapshotting templates.
+ */
+export const BANTER_DISCIPLINE = [
+  "BANTER IS NOT AN OBLIGATION (strict).",
+  "Casual threads are full of teasing, jokes, playful accusations, hyperbole, and running bits (\"who's on your phone\", \"I'm blocking you\", \"you owe me dinner for this\"). Banter is register and tone — it is NEVER a task, plan, errand, or logistics item.",
+  "Every obligation-bearing field — where_it_stands, what_they_want, on_you, required_points, open_loops, summary, durable_context — must trace to something the transcript states IN EARNEST: a real ask, commitment, plan, decision, or unresolved matter. If the only evidence for a task is a jokey exchange, the task does not exist.",
+  "Self-check each required point and each claim in where_it_stands: could you point at a message where this was meant literally and seriously? If not, drop it. At most, banter can inform tone_steer (\"keep it playful — she's been teasing you\")."
+].join(" ");
+
 // Voice profile tier — picks between the formal (professional) prompt and
 // the casual-DM prompt based on platform. Casual covers WhatsApp / iMessage
 // / Instagram / TikTok DMs; LinkedIn uses the professional register. Both
@@ -1763,6 +1823,17 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       })
     };
 
+    // Issue #685: the reassess prompt names the operator so the contact's
+    // habit of addressing them by name in third person ("<name> come back")
+    // resolves to "you" instead of reading as a third party. Read directly
+    // from settings rather than threading through every caller; a failed
+    // settings read must never sink a summary, so fall back to the generic
+    // (nameless) resolution rule.
+    const operatorDisplayName = await settingsStore
+      .getOperatorProfile()
+      .then((profile) => profile.displayName)
+      .catch(() => "");
+
     // Explicit schema in the prompt: gpt-5.4 honours response_format json_object
     // but interprets loose schemas creatively (returning {A,B,C} instead of
     // {replies:[{label,intent,text}]}). Spelling out the exact shape — keys,
@@ -1876,6 +1947,8 @@ Reminder: lines starting with \`operator:\` are the operator's own words; the co
 
 ${SECOND_PERSON_RESOLUTION}
 
+${operatorNameResolution(operatorDisplayName)}
+
 OPERATOR OUTPUT VOICE: Write user-facing strings (summary, what_they_want, open_loops, remember notes, tone_notes, urgency_hint) in SECOND PERSON. Refer to the operator as "you" (e.g. "Ashley is waiting on you to reply"). NEVER write the literal phrases "the operator" or "operator" in output text — those words exist only as the transcript attribution label.
 
 ${modeBlock}
@@ -1885,6 +1958,8 @@ REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail.
 ${BRIEF_RECENCY_DISCIPLINE}
 
 ${BRIEF_FIDELITY_REMINDER}
+
+${BANTER_DISCIPLINE}
 
 ${contactNameContext(input.displayName)}
 
