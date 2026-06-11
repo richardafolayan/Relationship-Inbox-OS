@@ -30,6 +30,11 @@ import {
   type ScanCooldownStatus
 } from "./scan-retry-controller";
 import { isLinkedInInFlight } from "./linkedin-inflight-guard";
+import {
+  adapterSupportsIncrementalScan,
+  resolveIncrementalScanPlan,
+  type IncrementalScanPlan
+} from "./incremental-scan";
 import { inferContactName, looksLikeUnresolvedHandle } from "./name-inference";
 import {
   createRunLogger,
@@ -383,6 +388,36 @@ export function sliceByPositiveCap<T>(values: T[], max?: number): T[] {
     return values;
   }
   return values.slice(0, cap);
+}
+
+// Per-platform scan watermark persistence (incremental scan gate). Stored in
+// the generic Setting KV table so no schema change is needed; the value is
+// the adapter-private opaque string from PlatformAdapter.getScanWatermark.
+const SCAN_WATERMARK_SETTING_PREFIX = "scan_watermark:";
+
+async function loadScanWatermark(platform: PlatformName): Promise<string | null> {
+  const row = await prisma.setting.findUnique({
+    where: { key: `${SCAN_WATERMARK_SETTING_PREFIX}${platform}` }
+  });
+  if (!row) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(row.valueJson) as unknown;
+    return typeof parsed === "string" && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveScanWatermark(platform: PlatformName, watermark: string): Promise<void> {
+  const key = `${SCAN_WATERMARK_SETTING_PREFIX}${platform}`;
+  const valueJson = JSON.stringify(watermark);
+  await prisma.setting.upsert({
+    where: { key },
+    update: { valueJson },
+    create: { key, valueJson }
+  });
 }
 
 export function resolveEffectiveCount(rawCount: number, max?: number): number {
@@ -1279,6 +1314,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let fallbackTriggerReason: string | undefined;
         let runSuccess = false;
         let runStopReason: string | undefined;
+        // Incremental scan gate state: the watermark captured BEFORE this
+        // run's sync work (persisted only after a clean completion) and
+        // whether the candidate loop processed everything it was given (a
+        // cap break or thread failure leaves work behind, so advancing the
+        // watermark would silently drop those threads' changes).
+        let capturedScanWatermark: string | null = null;
+        let candidateCapBroke = false;
         let runError: unknown;
 
         runLogger.logEvent({
@@ -2001,76 +2043,135 @@ export function createScanQueue(deps: ScanQueueDeps) {
               runStopReason = "aborted";
               return;
             }
-            const unread = await adapter.scanUnreadThreads();
-            unreadCandidatesCount = unread.length;
-            runLogger.logAction({
-              stage: "collect_threads",
-              action: "scan_unread_threads",
-              result: "ok",
-              counts: {
-                unreadCandidatesCount
-              }
-            });
-            if (await markAborted("after_scan_unread", platform)) {
-              runStopReason = "aborted";
-              return;
-            }
-            if (await markAborted("before_scan_recent", platform)) {
-              runStopReason = "aborted";
-              return;
-            }
-            const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
-            runLogger.logAction({
-              stage: "collect_threads",
-              action: "scan_recent_threads",
-              result: "ok",
-              counts: {
-                recentCandidatesCount: recent.length
-              }
-            });
-            if (await markAborted("after_scan_recent", platform)) {
-              runStopReason = "aborted";
-              return;
+
+            // Incremental scan gate (perf rank 13): platforms with a cheap
+            // upstream change signal (iMessage chat.db) skip candidate
+            // discovery entirely when nothing changed, and sync exactly the
+            // changed conversations otherwise. The full unread+recent sweep
+            // below costs seconds of synchronous SQLite per tick on a real
+            // Messages library and used to run on EVERY watcher tick.
+            let incrementalPlan: IncrementalScanPlan | null = null;
+            if (adapterSupportsIncrementalScan(adapter)) {
+              const storedWatermark = await loadScanWatermark(platform);
+              incrementalPlan = await resolveIncrementalScanPlan(adapter, storedWatermark);
+              capturedScanWatermark = incrementalPlan.watermark;
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Resolved incremental scan plan",
+                details: {
+                  mode: incrementalPlan.mode,
+                  reason: incrementalPlan.mode === "full" ? incrementalPlan.reason : undefined,
+                  changedThreads: incrementalPlan.mode === "delta" ? incrementalPlan.stubs.length : undefined,
+                  hadStoredWatermark: Boolean(storedWatermark)
+                }
+              });
             }
 
-            const merged = new Map<string, ThreadStub>();
-            for (const thread of unread) {
-              merged.set(thread.platformThreadId, thread);
-            }
-            for (const thread of recent) {
-              if (!merged.has(thread.platformThreadId)) {
+            if (incrementalPlan && incrementalPlan.mode === "skip") {
+              // Nothing changed upstream since the last completed scan -
+              // finish the tick with zero candidates. Same flow/events as a
+              // scan that found no work, so consumers see a normal scan.
+              candidatesToSync = [];
+              rawThreadCount = 0;
+              effectiveThreadCount = 0;
+              candidatesBeforeCap = 0;
+              threadsScannedCount = 0;
+              headline("COLLECT_SKIP_UNCHANGED", "upstream store unchanged since last scan - skipping candidate sweep", {
+                watermark: incrementalPlan.watermark
+              });
+            } else if (incrementalPlan && incrementalPlan.mode === "delta") {
+              // Only these conversations changed - sync exactly them. The
+              // usual thread cap still applies (deltas are typically 1-2).
+              const changedStubs = incrementalPlan.stubs;
+              rawThreadCount = changedStubs.length;
+              effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
+              const cappedChanged = sliceByPositiveCap(changedStubs, effectiveMaxThreads);
+              if (cappedChanged.length < changedStubs.length) {
+                // Some changed threads fell off the cap: they stay pending,
+                // so the watermark must not advance past them.
+                candidateCapBroke = true;
+              }
+              candidatesBeforeCap = changedStubs.length;
+              threadsScannedCount = changedStubs.length;
+              unreadCandidatesCount = changedStubs.filter((t) => (t.unreadCount ?? 0) > 0).length;
+              needsReplyCandidatesCount = changedStubs.filter((t) => Boolean(t.needsReplyFromList)).length;
+              candidatesToSync = cappedChanged.map((thread) => ({ thread }));
+              headline("COLLECT_DELTA_OK", "incremental candidate collection complete", {
+                changedThreads: changedStubs.length,
+                cappedCandidatesCount: candidatesToSync.length
+              });
+            } else {
+              const unread = await adapter.scanUnreadThreads();
+              unreadCandidatesCount = unread.length;
+              runLogger.logAction({
+                stage: "collect_threads",
+                action: "scan_unread_threads",
+                result: "ok",
+                counts: {
+                  unreadCandidatesCount
+                }
+              });
+              if (await markAborted("after_scan_unread", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+              if (await markAborted("before_scan_recent", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+              const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+              runLogger.logAction({
+                stage: "collect_threads",
+                action: "scan_recent_threads",
+                result: "ok",
+                counts: {
+                  recentCandidatesCount: recent.length
+                }
+              });
+              if (await markAborted("after_scan_recent", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+
+              const merged = new Map<string, ThreadStub>();
+              for (const thread of unread) {
                 merged.set(thread.platformThreadId, thread);
               }
-            }
-            const mergedCandidates = Array.from(merged.values());
-            rawThreadCount = mergedCandidates.length;
-            effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
-            const cappedCandidates = sliceByPositiveCap(mergedCandidates, effectiveMaxThreads);
-            candidatesBeforeCap = merged.size;
-            threadsScannedCount = merged.size;
-            needsReplyCandidatesCount = mergedCandidates.filter((thread) => Boolean(thread.needsReplyFromList)).length;
-            candidatesToSync = cappedCandidates.map((thread) => ({ thread }));
-            runLogger.logDecision({
-              stage: "collect_threads",
-              decision: "Merged unread and recent candidates",
-              details: {
-                unreadCandidatesCount,
-                recentCandidatesCount: recent.length,
-                rawThreadCount,
-                maxThreads: effectiveMaxThreads ?? null,
-                effectiveThreadCount,
-                mergedCandidatesCount: candidatesBeforeCap,
-                cappedCandidatesCount: candidatesToSync.length
+              for (const thread of recent) {
+                if (!merged.has(thread.platformThreadId)) {
+                  merged.set(thread.platformThreadId, thread);
+                }
               }
-            });
+              const mergedCandidates = Array.from(merged.values());
+              rawThreadCount = mergedCandidates.length;
+              effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
+              const cappedCandidates = sliceByPositiveCap(mergedCandidates, effectiveMaxThreads);
+              candidatesBeforeCap = merged.size;
+              threadsScannedCount = merged.size;
+              needsReplyCandidatesCount = mergedCandidates.filter((thread) => Boolean(thread.needsReplyFromList)).length;
+              candidatesToSync = cappedCandidates.map((thread) => ({ thread }));
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Merged unread and recent candidates",
+                details: {
+                  unreadCandidatesCount,
+                  recentCandidatesCount: recent.length,
+                  rawThreadCount,
+                  maxThreads: effectiveMaxThreads ?? null,
+                  effectiveThreadCount,
+                  mergedCandidatesCount: candidatesBeforeCap,
+                  cappedCandidatesCount: candidatesToSync.length
+                }
+              });
 
-            const metricsProvider = adapter as unknown as {
-              getLastCollectionMetrics?: () => Record<string, unknown> | null;
-            };
-            collectionMetrics =
-              typeof metricsProvider.getLastCollectionMetrics === "function"
-                ? metricsProvider.getLastCollectionMetrics()
-                : null;
+              const metricsProvider = adapter as unknown as {
+                getLastCollectionMetrics?: () => Record<string, unknown> | null;
+              };
+              collectionMetrics =
+                typeof metricsProvider.getLastCollectionMetrics === "function"
+                  ? metricsProvider.getLastCollectionMetrics()
+                  : null;
+            }
           }
           candidatesCount = candidatesToSync.length;
           if (threadsScannedCount <= 0) {
@@ -2129,6 +2230,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           for (const candidateToSync of candidatesToSync) {
             const thread = candidateToSync.thread;
             if (openedThreadsCount >= maxOpenCount) {
+              // Remaining candidates stay unsynced this run - the scan
+              // watermark must not advance past them (candidateCapBroke).
+              candidateCapBroke = true;
               break;
             }
             if (await markAborted("before_thread_sync", platform, thread)) {
@@ -2403,6 +2507,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
           retryController.markSuccess(platform);
           runError = undefined;
           runSuccess = true;
+
+          // Advance the incremental-scan watermark ONLY now: clean
+          // completion, every candidate processed, no per-thread failures.
+          // The value is the one captured BEFORE this run's sync work, so
+          // changes that landed mid-scan stay ahead of it and are picked up
+          // next tick. A failed/capped/aborted run leaves the old watermark
+          // in place and the next tick simply re-derives a (cheap) delta.
+          if (capturedScanWatermark && threadFailures === 0 && !candidateCapBroke) {
+            await saveScanWatermark(platform, capturedScanWatermark);
+          }
         } catch (error) {
           runError = error;
           if (await markAborted("platform_error", platform)) {
