@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { AppShell } from "@/components/layout/app-shell";
 import { FullDemoProvider } from "@/components/full-demo/FullDemoProvider";
@@ -7,6 +7,15 @@ import { FullDemoOverlay } from "@/components/full-demo/FullDemoOverlay";
 export const metadata: Metadata = {
   title: "Relationship Inbox OS",
   description: "Local-first command centre for relationship replies"
+};
+
+// viewportFit: "cover" lets the phone layout extend under the iOS home
+// indicator; the mobile dock + composer pad themselves back out with
+// env(safe-area-inset-bottom), which is zero everywhere else.
+export const viewport: Viewport = {
+  width: "device-width",
+  initialScale: 1,
+  viewportFit: "cover"
 };
 
 // Runs before paint to apply the persisted theme and avoid a flash of

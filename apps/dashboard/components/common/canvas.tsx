@@ -3,10 +3,19 @@ import { cn } from "@/lib/utils";
 
 // Centred 920px canvas. The README's master shell measurement. Top
 // padding is owned by the (sticky) PageHead so the glass bar sits flush
-// against main's top edge once scrolled.
+// against main's top edge once scrolled. Gutters breathe with the
+// viewport (20 → 32 → 48px) and the canvas widens on big screens so a
+// large monitor isn't a thin strip of content; the bottom padding also
+// clears the phone dock + home indicator.
 export function Canvas({ children, className, ...rest }: HTMLAttributes<HTMLDivElement>) {
   return (
-    <div className={cn("mx-auto w-full max-w-[920px] px-12 pb-[120px]", className)} {...rest}>
+    <div
+      className={cn(
+        "mx-auto w-full max-w-[920px] px-5 pb-[calc(132px+env(safe-area-inset-bottom))] sm:px-8 md:pb-[120px] lg:px-12 3xl:max-w-[1080px]",
+        className
+      )}
+      {...rest}
+    >
       {children}
     </div>
   );
@@ -20,17 +29,19 @@ interface PageHeadProps {
 }
 
 // Compact page header: title + optional one-line subtitle on the left,
-// meta on the right (same baseline as the title). Sticky + glassy, no
-// decorative bottom rule - content sections own their own dividers.
+// meta on the right (same baseline as the title; stacks underneath on
+// phone widths). Sticky + glassy, no decorative bottom rule - content
+// sections own their own dividers. The negative margins mirror the
+// Canvas gutters at every breakpoint so the glass runs edge to edge.
 export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
   return (
-    <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+    <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
       <div className="min-w-0">
         {eyebrow ? (
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{eyebrow}</p>
         ) : null}
         <div className="flex flex-col gap-y-1">
-          <h1 className="m-0 font-display text-[28px] font-semibold leading-[1.15] tracking-[-0.02em]">
+          <h1 className="m-0 font-display text-[24px] font-semibold leading-[1.15] tracking-[-0.02em] sm:text-[28px]">
             {title}
           </h1>
           {subtitle ? (
@@ -39,7 +50,7 @@ export function PageHead({ eyebrow, title, subtitle, meta }: PageHeadProps) {
         </div>
       </div>
       {meta ? (
-        <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">{meta}</div>
+        <div className="shrink-0 font-mono text-[12px] text-ink-3 sm:text-right">{meta}</div>
       ) : null}
     </header>
   );

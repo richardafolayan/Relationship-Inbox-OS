@@ -1,23 +1,30 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import Link from "next/link";
 import dynamic from "next/dynamic";
 import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import {
+  Archive,
+  Check,
   ChevronDown,
   ChevronLeft,
   Clock,
   Loader2,
   Mic,
+  Moon,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
+  Save,
   Send,
   Sparkles,
   Star,
+  Sun,
+  Trash2,
   X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
@@ -618,6 +625,18 @@ export default function ThreadPage() {
   // AI assist rail starts collapsed so a 1-message thread doesn't burn 25%
   // of the viewport on duplicate paraphrases. Operator opens it explicitly.
   const [aiOpen, setAiOpen] = useState(false);
+  // Phone-width header: the secondary actions (save draft, snooze, archive)
+  // leave no room for the person's name, so below sm they fold into the
+  // kebab menu instead. Tracked as state (not a render-time matchMedia
+  // read) so rotation / window resizes re-render the menu items.
+  const [compactActions, setCompactActions] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(max-width: 639px)");
+    const update = () => setCompactActions(mq.matches);
+    update();
+    mq.addEventListener("change", update);
+    return () => mq.removeEventListener("change", update);
+  }, []);
   // How much AI writing help to surface is driven by the operator's
   // configured aiHelpLevel (see the `profile` state below). Full sendable
   // drafts, predraft, and compose-in-voice only appear at "full_drafts".
@@ -643,6 +662,11 @@ export default function ThreadPage() {
   useEffect(() => {
     if (!thread || railAutoOpenForThreadRef.current === thread.id) return;
     railAutoOpenForThreadRef.current = thread.id;
+    // Below xl the rail is a slide-over covering the conversation, so
+    // auto-opening would bury the chat on every thread open. Narrower
+    // widths get the pinned brief band instead; the AI button summons
+    // the rail on demand.
+    if (!window.matchMedia("(min-width: 1280px)").matches) return;
     const brief = thread.replyBrief;
     const hasBriefContent = Boolean(
       brief && (brief.where_it_stands?.trim() || brief.on_you?.trim())
@@ -2482,7 +2506,7 @@ export default function ThreadPage() {
     // otherwise hang forever with the error trapped in the unreached main
     // render below.
     return (
-      <div className="px-12 pt-14">
+      <div className="px-5 pt-14 sm:px-12">
         {loading ? (
           <BrandLoader />
         ) : (
@@ -2620,14 +2644,28 @@ export default function ThreadPage() {
   );
 
   const threadsRailWidth = threadsCollapsed ? "56px" : "240px";
-  const gridTemplateColumns = aiOpen
+  // Two column plans: lg gets threads rail + chat (the AI rail floats as a
+  // slide-over there — docking it too would crush the chat to ~220px), xl
+  // and up docks the AI rail as a third column when open.
+  const gridColsLg = `${threadsRailWidth} minmax(0,1fr)`;
+  const gridColsXl = aiOpen
     ? `${threadsRailWidth} minmax(0,1fr) 360px`
     : `${threadsRailWidth} minmax(0,1fr)`;
 
   return (
     <div
-      className="grid h-full min-h-0 grid-cols-1 lg:[--threads-grid:var(--threads-grid-cols)]"
-      style={{ gridTemplateColumns }}
+      // Below lg the rails are hidden, so the grid must be a true single
+      // column — the column plans therefore travel in CSS vars that only
+      // apply from lg/xl up. Setting gridTemplateColumns as a plain inline
+      // style kept the 240px/360px rail tracks reserved at every width,
+      // which crushed the conversation into a thin centre strip on phones.
+      className="grid h-full min-h-0 grid-cols-1 lg:[grid-template-columns:var(--thread-cols-lg)] xl:[grid-template-columns:var(--thread-cols-xl)]"
+      style={
+        {
+          "--thread-cols-lg": gridColsLg,
+          "--thread-cols-xl": gridColsXl
+        } as CSSProperties
+      }
     >
       {/* ───── Sibling-thread list ───── */}
       <aside
@@ -2755,7 +2793,7 @@ export default function ThreadPage() {
       {/* ───── Chat column ───── */}
       <div className="flex h-full min-h-0 flex-col border-r border-hairline">
         {degraded ? (
-          <div className="flex-shrink-0 px-12 pt-6">
+          <div className="flex-shrink-0 px-4 pt-6 sm:px-8 lg:px-12">
             <DegradedBanner
               platform={degraded.platform}
               stage={degraded.lastScanFailure?.stage}
@@ -2808,8 +2846,8 @@ export default function ThreadPage() {
               to read as a layout bug — the operator saw a clipped bubble
               rather than a tinted bar. 92% + backdrop-blur reads as
               frosted glass while making clipped content visually fade. */}
-          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-8 py-2.5">
-            <header className="flex items-center gap-2">
+          <div className="sticky top-0 z-10 border-b border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] backdrop-blur-md backdrop-saturate-150 px-2 py-2 sm:px-6 sm:py-2.5 lg:px-8">
+            <header className="flex items-center gap-1 sm:gap-2">
               <button
                 type="button"
                 onClick={() => router.push("/today")}
@@ -2846,14 +2884,17 @@ export default function ThreadPage() {
                   <h2 className="m-0 truncate font-display text-[16px] font-semibold tracking-[-0.02em]">
                     {thread.personName}
                   </h2>
-                  <p className="m-0 flex flex-wrap items-center gap-x-1 text-[11px] text-ink-2">
-                    <span className="rounded bg-paper-2 px-[5px] py-[1px] text-[9px] font-medium uppercase tracking-[0.04em]">
+                  {/* Single clipped line, never wraps: on a crushed phone
+                      header the old flex-wrap stacked "overdue · last reply
+                      6d ago" one word per line beside the avatar. */}
+                  <p className="m-0 flex min-w-0 items-center gap-x-1 overflow-hidden whitespace-nowrap text-[11px] text-ink-2">
+                    <span className="shrink-0 rounded bg-paper-2 px-[5px] py-[1px] text-[9px] font-medium uppercase tracking-[0.04em]">
                       {platformLabel}
                     </span>
-                    <span className="text-ink-3">· {riskLabel}</span>
+                    <span className="truncate text-ink-3">· {riskLabel}</span>
                     {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
                       <span
-                        className="ml-1 rounded-full bg-[oklch(94%_0.03_85)] px-2 py-[1px] text-[9px] font-medium uppercase tracking-[0.04em] text-[oklch(45%_0.10_60)]"
+                        className="ml-1 hidden shrink-0 rounded-full bg-[oklch(94%_0.03_85)] px-2 py-[1px] text-[9px] font-medium uppercase tracking-[0.04em] text-[oklch(45%_0.10_60)] sm:inline"
                         title={`Hidden from active inbox until ${new Date(thread.snoozedUntil).toLocaleString()}`}
                       >
                         Snoozed · wakes {formatScheduledFor(thread.snoozedUntil)}
@@ -2887,9 +2928,11 @@ export default function ThreadPage() {
                   apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer })
                 }
                 onSuccess={() => setHasSavedDraft(composer.trim().length > 0)}
-                className="px-3 py-1.5 text-[12px]"
+                title="Save draft"
+                className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
               >
-                Save draft
+                <Save className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                <span className="hidden 2xl:inline">Save draft</span>
               </ActionButton>
               {/* Delete the persisted draft (issue #486 / pilot R-0067).
                   Only shown when a draft is actually saved server-side —
@@ -2912,14 +2955,15 @@ export default function ThreadPage() {
                     setHasSavedDraft(false);
                   }}
                   title="Delete the saved draft for this thread"
-                  className="px-3 py-1.5 text-[12px]"
+                  className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
                 >
-                  Delete draft
+                  <Trash2 className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                  <span className="hidden 2xl:inline">Delete draft</span>
                 </ActionButton>
               ) : null}
               {/* Clear-thread cluster: wrapped so the guided tour can spotlight
                   snooze + mark-done + archive together (data-demo-target). */}
-              <div data-demo-target="thread-actions" className="flex items-center gap-2">
+              <div data-demo-target="thread-actions" className="flex shrink-0 items-center gap-1 sm:gap-2">
                 {thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now() ? (
                 <Button
                   variant="ghost"
@@ -2931,9 +2975,10 @@ export default function ThreadPage() {
                     )
                   }
                   title="Bring this thread back into the active inbox now"
-                  className="px-3 py-1.5 text-[12px]"
+                  className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
                 >
-                  Wake up
+                  <Sun className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                  <span className="hidden 2xl:inline">Wake up</span>
                 </Button>
               ) : (
                 <Button
@@ -2953,9 +2998,10 @@ export default function ThreadPage() {
                   }}
                   aria-expanded={snoozeMenuOpen}
                   title="Hide from active inbox until later"
-                  className="px-3 py-1.5 text-[12px]"
+                  className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
                 >
-                  Snooze
+                  <Moon className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                  <span className="hidden 2xl:inline">Snooze</span>
                 </Button>
               )}
               <ActionButton
@@ -2965,9 +3011,11 @@ export default function ThreadPage() {
                 onError={setError}
                 onSuccess={refresh}
                 action={() => apiPost(`/runner/control/thread/${thread.id}/mark-done`, {})}
-                className="px-3 py-1.5 text-[12px]"
+                title="Mark as handled"
+                className="px-2 py-1.5 text-[12px] 2xl:px-3"
               >
-                Mark as handled
+                <Check className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                <span className="hidden 2xl:inline">Mark as handled</span>
               </ActionButton>
               <Button
                 variant="ghost"
@@ -2990,9 +3038,14 @@ export default function ThreadPage() {
                   );
                 }}
                 title="Move this thread out of the active inbox (you can find it in Archived)"
-                className="px-3 py-1.5 text-[12px]"
+                className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
               >
-                {archiving ? "Archiving…" : "Archive"}
+                <Archive className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                {/* In-flight label stays visible at icon-only widths — the
+                    button must show its own running state inline. */}
+                <span className={archiving ? "inline" : "hidden 2xl:inline"}>
+                  {archiving ? "Archiving…" : "Archive"}
+                </span>
               </Button>
               </div>
               <Button
@@ -3018,6 +3071,91 @@ export default function ThreadPage() {
                   </Button>
                 }
                 items={[
+                  // Phone-width header: the secondary actions live here so
+                  // the person's name keeps its space. Menu-launched actions
+                  // surface progress via pending/success toasts because the
+                  // menu closes on select (no inline button state to show).
+                  ...(compactActions
+                    ? [
+                        {
+                          label: "Save draft",
+                          onSelect: () =>
+                            runActionWithFeedback(
+                              apiPost(`/runner/control/thread/${thread.id}/draft`, { text: composer }),
+                              {
+                                pending: "Saving draft…",
+                                success: "Draft saved",
+                                setError,
+                                onDone: () => setHasSavedDraft(composer.trim().length > 0)
+                              }
+                            )
+                        },
+                        ...(hasSavedDraft
+                          ? [
+                              {
+                                label: "Delete draft",
+                                onSelect: () =>
+                                  runActionWithFeedback(
+                                    apiPost(`/runner/control/thread/${thread.id}/delete-draft`, {}),
+                                    {
+                                      pending: "Deleting draft…",
+                                      success: "Draft deleted",
+                                      setError,
+                                      onDone: () => {
+                                        predraftDismissedRef.current.add(thread.id);
+                                        setComposer("");
+                                        setComposerSource("empty");
+                                        setHasSavedDraft(false);
+                                      }
+                                    }
+                                  )
+                              }
+                            ]
+                          : []),
+                        thread.snoozedUntil && Date.parse(thread.snoozedUntil) > Date.now()
+                          ? {
+                              label: "Wake up",
+                              onSelect: () =>
+                                runAction(
+                                  apiPost(`/runner/control/thread/${thread.id}/unsnooze`, {}),
+                                  setError,
+                                  refresh
+                                )
+                            }
+                          : {
+                              label: "Snooze…",
+                              onSelect: () => {
+                                if (!snoozeSuggestions) {
+                                  setSnoozeSuggestions({ loading: true, items: [] });
+                                  void apiGet<{ suggestions: Array<{ label: string; hours: number; reason: string }> }>(
+                                    `/runner/control/thread/${thread.id}/suggest-snooze`
+                                  )
+                                    .then((r) =>
+                                      setSnoozeSuggestions({ loading: false, items: r.suggestions ?? [] })
+                                    )
+                                    .catch(() => setSnoozeSuggestions({ loading: false, items: [] }));
+                                }
+                                setSnoozeMenuOpen(true);
+                              }
+                            },
+                        {
+                          label: archiving ? "Archiving…" : "Archive",
+                          onSelect: () => {
+                            if (archiving) return;
+                            setArchiving(true);
+                            const returnTo = readThreadSource();
+                            runAction(
+                              apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
+                              (message) => {
+                                setError(message);
+                                if (message) setArchiving(false);
+                              },
+                              () => router.push(returnTo)
+                            );
+                          }
+                        }
+                      ]
+                    : []),
                   {
                     label: reassessing ? "Reassessing…" : "Reassess",
                     onSelect: () => {
@@ -3110,7 +3248,7 @@ export default function ThreadPage() {
                 full rail is open (it supersedes the summary there); stays
                 visible on mobile, where the rail can't open. */}
             {thread.needsReply !== false ? (
-              <div className={aiOpen ? "lg:hidden" : undefined}>
+              <div className={aiOpen ? "xl:hidden" : undefined}>
                 <ThreadBriefBand
                   onYou={displayBrief.on_you}
                   whereItStands={displayBrief.where_it_stands}
@@ -3120,7 +3258,7 @@ export default function ThreadPage() {
             ) : null}
           </div>
 
-          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-12 py-3">
+          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-4 py-3 sm:px-8 lg:px-12">
             {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
                 the contact's birthday is within the next 30 days
                 (pilot wanted "in the next month"). Wider than the
@@ -3285,7 +3423,7 @@ export default function ThreadPage() {
                   <div
                     data-message-id={message.id}
                     data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
-                    className={`flex max-w-[72%] flex-col ease-out transition-all ${
+                    className={`flex max-w-[86%] flex-col ease-out transition-all sm:max-w-[72%] ${
                       // Focus enter is animated too — same easing as
                       // exit, just faster (150ms vs 300ms) so the
                       // focused stack snaps into view without
@@ -3574,7 +3712,7 @@ export default function ThreadPage() {
               return (
                 <div
                   key={`scheduled-${scheduled.clientSendId}`}
-                  className="flex max-w-[72%] flex-col items-end self-end"
+                  className="flex max-w-[86%] flex-col items-end self-end sm:max-w-[72%]"
                 >
                   {isEditing ? (
                     <textarea
@@ -3663,7 +3801,7 @@ export default function ThreadPage() {
             {pendingSends.map((pending) => (
               <div
                 key={`pending-${pending.clientSendId}`}
-                className="flex max-w-[72%] flex-col items-end self-end"
+                className="flex max-w-[86%] flex-col items-end self-end sm:max-w-[72%]"
               >
                 <div
                   className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
@@ -3743,7 +3881,7 @@ export default function ThreadPage() {
               <ChevronDown className="h-[18px] w-[18px]" strokeWidth={2} />
             </button>
           ) : null}
-          <div className="mx-auto w-full max-w-[820px] px-8 pb-2 pt-2">
+          <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 sm:px-8 sm:pb-2">
             {error ? (
               <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
             ) : null}
@@ -3993,7 +4131,7 @@ export default function ThreadPage() {
                     )}
                   </button>
                   {chipsMenuOpen && !repliesGenerating ? (
-                    <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[360px] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                    <div className="absolute bottom-[calc(100%+8px)] left-0 z-20 w-[min(360px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
                       {fallbackSource ? (
                         <p
                           className="m-0 mb-1 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3"
@@ -4029,7 +4167,10 @@ export default function ThreadPage() {
                   ) : null}
                 </div>
                 ) : null}
-                <div className="flex flex-1 items-center justify-end gap-2">
+                {/* Tools take a full row of their own on phone (the cluster
+                    doesn't fit beside the suggestions pill), right-aligned
+                    like the design's composer foot. */}
+                <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:flex-1">
                   {/* "shorten" / "warmer" rewrite the operator's OWN draft —
                       writing support, shown unless AI help is memory-only. */}
                   {showWritingSupport ? (
@@ -4085,11 +4226,17 @@ export default function ThreadPage() {
                         strokeWidth={1.8}
                       />
                     )}
-                    {dictationStatus === "recording"
-                      ? "Stop"
-                      : dictationStatus === "transcribing"
-                        ? "Transcribing…"
-                        : "Dictate"}
+                    {/* Icon-only at rest until the chat column is genuinely
+                        wide (2xl, matching the header labels); the running
+                        states keep their label at every width so the
+                        in-flight status stays visible. */}
+                    <span className={dictationStatus === "idle" ? "hidden 2xl:inline" : undefined}>
+                      {dictationStatus === "recording"
+                        ? "Stop"
+                        : dictationStatus === "transcribing"
+                          ? "Transcribing…"
+                          : "Dictate"}
+                    </span>
                   </button>
                   <div className="relative" ref={scheduleMenuRef}>
                     <button
@@ -4103,7 +4250,7 @@ export default function ThreadPage() {
                       <Clock className="h-[13px] w-[13px]" strokeWidth={1.8} />
                     </button>
                     {scheduleMenuOpen ? (
-                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[300px] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
+                      <div className="absolute bottom-[calc(100%+8px)] right-0 z-20 w-[min(300px,calc(100vw-32px))] overflow-hidden rounded-row border border-hairline bg-paper p-[6px] shadow-pop">
                         <p className="m-0 px-3 pb-2 pt-2 font-mono text-[10.5px] uppercase tracking-[0.06em] text-ink-3">
                           Schedule send
                         </p>
@@ -4320,8 +4467,39 @@ export default function ThreadPage() {
       </div>
 
       {/* ───── Context rail ───── */}
-      <aside className={`${aiOpen ? "hidden lg:block" : "hidden"} h-full min-h-0 overflow-y-auto bg-paper-2/40`}>
-        <div className="flex flex-col gap-7 px-7 py-10">
+      {/* Below xl there is no grid column wide enough to live in, so the
+          open rail becomes a right-hand slide-over above the conversation
+          (the design's tablet/phone pattern) — same content, same AI
+          toggle. The backdrop closes it with a tap. */}
+      {aiOpen ? (
+        <button
+          type="button"
+          aria-label="Close AI assist"
+          onClick={() => setAiOpen(false)}
+          className="fixed inset-0 z-30 cursor-default bg-ink/20 xl:hidden"
+        />
+      ) : null}
+      <aside
+        className={
+          aiOpen
+            ? "fixed inset-y-0 right-0 z-40 w-[min(92vw,380px)] overflow-y-auto border-l border-hairline bg-paper shadow-pop xl:static xl:z-auto xl:h-full xl:min-h-0 xl:w-auto xl:border-l-0 xl:bg-paper-2/40 xl:shadow-none"
+            : "hidden"
+        }
+      >
+        <div className="flex items-center justify-between border-b border-hairline px-5 py-3 xl:hidden">
+          <span className="font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+            AI assist
+          </span>
+          <button
+            type="button"
+            onClick={() => setAiOpen(false)}
+            aria-label="Close AI assist"
+            className="grid h-8 w-8 place-items-center rounded-[8px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+          >
+            <X className="h-[16px] w-[16px]" strokeWidth={1.6} />
+          </button>
+        </div>
+        <div className="flex flex-col gap-7 px-5 py-6 sm:px-7 xl:py-10">
           {/* Reply Brief - the single adaptive panel that drives the rail.
               Default visible card carries only Where it stands + On you so
               the operator can read the thread in under 10 seconds; everything
