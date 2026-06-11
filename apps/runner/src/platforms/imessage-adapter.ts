@@ -115,7 +115,16 @@ export class IMessageAdapter implements PlatformAdapter {
         this.db = new IMessageDb(this.deps.dbPath);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException)?.code;
-        const isPermission = code === "EACCES" || /SQLITE_CANTOPEN|authorization/i.test(String(error));
+        // better-sqlite3 puts SQLITE_CANTOPEN in error.code; the message is
+        // just "unable to open database file", so String(error) never matches
+        // it. chat.db existed a moment ago (existsSync above), which makes
+        // CANTOPEN here a denied open in practice: missing Full Disk Access,
+        // or a runner launched from a sandboxed shell.
+        const isPermission =
+          code === "EACCES" ||
+          code === "EPERM" ||
+          code === "SQLITE_CANTOPEN" ||
+          /SQLITE_CANTOPEN|authorization/i.test(String(error));
         throw new AdapterFailure(
           isPermission
             ? "Cannot read iMessage chat.db - grant Full Disk Access to the runner's terminal."
