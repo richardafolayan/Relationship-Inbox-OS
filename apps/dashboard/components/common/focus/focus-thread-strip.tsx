@@ -64,7 +64,9 @@ export function FocusThreadStrip({
   if (status === "open" && !candidate) return null;
 
   const send = async () => {
-    if (busy) return;
+    // Re-check at click time: the window can lapse between render and tap,
+    // and a note promising "till X" must never go out after X.
+    if (busy || !candidate) return;
     setBusy(true);
     try {
       await sendAcknowledgement(thread.id, note ?? noteForRow(row, focusWindow, templates));

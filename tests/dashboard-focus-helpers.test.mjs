@@ -12,11 +12,14 @@ import {
   formatUntil,
   hasRepliedToday,
   isFocusAckCandidate,
+  isFocusActive,
   looksLikePhoneOrEmail,
   noteForRow,
   readAckTemplates,
   readFocusSettings,
   readFocusWindow,
+  resyncNoteUntilLabel,
+  rollsToTomorrow,
   tierForRow
 } from "../apps/dashboard/lib/focus.ts";
 
@@ -242,4 +245,96 @@ test("the pure focus module never sends — it only decides and formats", async 
   const before = JSON.stringify(window);
   isFocusAckCandidate(row(), window, settings(), { now: NOW });
   assert.equal(JSON.stringify(window), before);
+});
+
+// ─────────────────────────── expiry: the window must actually end ───────────────────────────
+// Regression for the pilot report "I set it as 8:31pm and it is still on":
+// liveness derives from the clock, never from the stored flag alone.
+
+test("isFocusActive flips false the moment endsAt passes", () => {
+  const window = baseWindow(); // ends 17:30Z
+  assert.equal(isFocusActive(window, new Date("2026-06-07T17:29:59.000Z")), true);
+  assert.equal(isFocusActive(window, new Date("2026-06-07T17:30:00.000Z")), false);
+  assert.equal(isFocusActive(window, new Date("2026-06-08T09:00:00.000Z")), false);
+  assert.equal(isFocusActive(window, NOW), true);
+});
+
+test("a window without a parseable endsAt only ends manually", () => {
+  assert.equal(isFocusActive(baseWindow({ endsAt: "" }), NOW), true);
+  assert.equal(isFocusActive(baseWindow({ endsAt: "not-a-date" }), NOW), true);
+  assert.equal(isFocusActive(baseWindow({ endsAt: "", active: false }), NOW), false);
+  assert.equal(isFocusActive(null, NOW), false);
+});
+
+test("an expired window stops offering acknowledgements entirely", () => {
+  const afterEnd = new Date("2026-06-07T17:31:00.000Z");
+  // The same thread IS a candidate while the window runs...
+  assert.equal(isFocusAckCandidate(row(), baseWindow(), settings(), { now: NOW }), true);
+  // ...and stops being one the moment the window lapses — a note promising
+  // "till 5:30pm" must never be offered at 5:31pm.
+  assert.equal(isFocusAckCandidate(row(), baseWindow(), settings(), { now: afterEnd }), false);
+  assert.equal(arrivedDuringFocus(row(), baseWindow(), afterEnd), false);
+});
+
+// ─────────────────────────── the operator's window note is what gets sent ───────────────────────────
+// Regression: the setup sheet saved the edited note to focusWindow.note but
+// every send path formatted from the saved templates, silently ignoring it.
+
+test("noteForRow prefers the operator's window note for close contacts", () => {
+  const window = baseWindow({
+    note: "On the bike till [until], will text back properly after, [Name]!"
+  });
+  const until = formatUntil(window.endsAt);
+  const out = noteForRow(row({ personName: "Tobi Ade" }), window, DEFAULT_ACK_TEMPLATES);
+  assert.equal(out, `On the bike till ${until}, will text back properly after, Tobi!`);
+});
+
+test("professional contacts keep the calmer saved template, not the window note", () => {
+  const window = baseWindow({ note: "On the bike till [until]!" });
+  const out = noteForRow(
+    row({ personName: "Ceri Jones", platform: "LINKEDIN" }),
+    window,
+    DEFAULT_ACK_TEMPLATES
+  );
+  assert.match(out, /^Hey Ceri,/);
+  assert.equal(out.includes("bike"), false);
+});
+
+test("a blank window note falls back to the close template", () => {
+  const out = noteForRow(row({ personName: "Tobi" }), baseWindow({ note: "   " }), DEFAULT_ACK_TEMPLATES);
+  assert.match(out, /^Yo Tobi,/);
+});
+
+test("a window note with the time already substituted passes through unchanged", () => {
+  const window = baseWindow({ note: "Heads down till 6:30pm, yours at 7 x" });
+  const out = noteForRow(row({ personName: "Tobi" }), window, DEFAULT_ACK_TEMPLATES);
+  assert.equal(out, "Heads down till 6:30pm, yours at 7 x");
+});
+
+// ─────────────────────────── until-label resync on time edits ───────────────────────────
+
+test("resyncNoteUntilLabel swaps every stale label occurrence and nothing else", () => {
+  assert.equal(
+    resyncNoteUntilLabel("Back at 8:31pm. If urgent before 8:31pm, call.", "8:31pm", "9:15pm"),
+    "Back at 9:15pm. If urgent before 9:15pm, call."
+  );
+});
+
+test("resyncNoteUntilLabel is a no-op when the old label is absent, blank or unchanged", () => {
+  assert.equal(resyncNoteUntilLabel("Back later tonight.", "8:31pm", "9:15pm"), "Back later tonight.");
+  assert.equal(resyncNoteUntilLabel("Back at 8:31pm.", "8:31pm", "8:31pm"), "Back at 8:31pm.");
+  assert.equal(resyncNoteUntilLabel("", "8:31pm", "9:15pm"), "");
+  assert.equal(resyncNoteUntilLabel("Back at 8:31pm.", "", "9:15pm"), "Back at 8:31pm.");
+});
+
+// ─────────────────────────── tomorrow rollover is said out loud ───────────────────────────
+
+test("rollsToTomorrow flags a picker time that already passed today", () => {
+  // Local wall-clock now (no Z), matching how the picker + helper work.
+  const atElevenLocal = new Date("2026-06-07T11:00:00");
+  assert.equal(rollsToTomorrow("06:00", atElevenLocal), true);
+  // Exactly "now" rolls forward too (endsAtIsoFromTime uses <=).
+  assert.equal(rollsToTomorrow("11:00", atElevenLocal), true);
+  assert.equal(rollsToTomorrow("17:30", atElevenLocal), false);
+  assert.equal(rollsToTomorrow("", atElevenLocal), false);
 });
