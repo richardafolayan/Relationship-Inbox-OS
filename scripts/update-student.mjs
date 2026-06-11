@@ -288,11 +288,19 @@ async function applyUpdate(current, manifest) {
       rollback(APP_DIR, backupDir);
       die(`Update rolled back to ${current}. Your data is safe.\n  ${err.message}`);
     }
+    // Pre-build the optimised dashboard so the relaunch is instant.
+    // Non-fatal: the launcher rebuilds (or falls back to dev mode) itself.
+    try {
+      say(`  Optimising the app for speed (about a minute)…`);
+      execFileSync("node", ["scripts/start-app.mjs", "--prepare-only"], { cwd: APP_DIR, stdio: "inherit" });
+    } catch {
+      say(`  ${C.y}Pre-build didn't finish — the next launch will do it instead.${C.reset}`);
+    }
   }
 
   pruneBackups(parent, Math.max(0, args.keepBackups));
   say(`\n  ${C.g}${C.b}Updated to ${manifest.version}.${C.reset}`);
-  say(`  Start the app again:  ${C.b}npm run dev${C.reset}  (or node scripts/start-student.mjs)`);
+  say(`  Start the app again:  ${C.b}npm run start:student${C.reset}  (or node scripts/start-student.mjs)`);
   say(`  Previous version kept at: ${backupDir}\n`);
 }
 

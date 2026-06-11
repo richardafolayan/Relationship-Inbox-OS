@@ -106,9 +106,16 @@ async function applyPendingUpdate() {
 await applyPendingUpdate();
 
 say(`\n${C.bold}Starting Relationship Inbox OS…${C.reset}`);
-say(`${C.dim}(first start takes a minute)${C.reset}`);
+say(`${C.dim}(the first start after an update takes a minute)${C.reset}`);
 
-const dev = spawn("npm", ["run", "dev"], { cwd: APP_DIR, stdio: "inherit" });
+// start-app.mjs prepares the app (database client, schema, optimised
+// production build of the dashboard - each step skipped when nothing
+// changed) and then runs the runner + dashboard. The production build is
+// what makes pages precompiled, so the app opens and navigates instantly.
+const dev = spawn(process.execPath, [resolve(APP_DIR, "scripts/start-app.mjs")], {
+  cwd: APP_DIR,
+  stdio: "inherit"
+});
 
 dev.on("error", (err) => {
   say(`Could not start the app: ${err.message}`);
