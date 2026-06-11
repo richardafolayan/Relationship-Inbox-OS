@@ -46,5 +46,26 @@ export interface PlatformAdapter {
    * invoking.
    */
   reactToMessage?(thread: ThreadStub, platformMessageKey: string, emoji: string): Promise<void>;
+  /**
+   * Optional. Returns a cheap, opaque change watermark for the platform's
+   * upstream message store (e.g. iMessage chat.db's max message ROWID, row
+   * count and read mark). The scan loop persists the value captured BEFORE
+   * a scan and, on the next run, either skips the scan entirely (watermark
+   * unchanged) or asks `collectChangedThreads` for exactly what changed.
+   * The format is adapter-private; callers only compare strings for
+   * equality. Adapters without a cheap signal leave this unset.
+   */
+  getScanWatermark?(): Promise<string>;
+  /**
+   * Optional, paired with `getScanWatermark`. Returns thread stubs for
+   * exactly the conversations that changed since `sinceWatermark`, or
+   * `fullSweepRequired: true` when the delta cannot be derived safely
+   * (unparseable / old-format watermark, or message rows disappeared -
+   * deletion / unsend - which cannot be attributed to a chat cheaply).
+   */
+  collectChangedThreads?(sinceWatermark: string): Promise<{
+    stubs: ThreadStub[];
+    fullSweepRequired: boolean;
+  }>;
   closeSession(reason?: string): Promise<void>;
 }

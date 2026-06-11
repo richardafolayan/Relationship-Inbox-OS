@@ -18,6 +18,26 @@ import {
 } from "../platforms/browser-launch.js";
 import { createKeyedMutex } from "./keyed-mutex.js";
 import type { RunLogger } from "./run-logger.js";
+import {
+  backgroundWindowLaunchArgs,
+  captureFrontmostMacApp,
+  hideBrowserWindow,
+  isVisibleBrowserLaunchForced,
+  revealBrowserWindow,
+  setBrowserActivateHint
+} from "./runner-window.js";
+
+// The Chrome.app bundle that owns `executablePath` (.../Foo.app/Contents/
+// MacOS/Foo -> .../Foo.app), so an operator-initiated reveal can foreground
+// the app. Best-effort; null when the path doesn't look like a macOS bundle.
+function deriveAppBundlePath(executablePath: string | undefined): string | null {
+  if (!executablePath) {
+    return null;
+  }
+  const marker = ".app/Contents/MacOS/";
+  const idx = executablePath.indexOf(marker);
+  return idx >= 0 ? executablePath.slice(0, idx + ".app".length) : null;
+}
 
 interface SessionManagerDependencies {
   profileRootDir: string;
@@ -96,8 +116,56 @@ export class SessionManager {
   private readonly globalResetMutex = createKeyedMutex();
   private readonly states = new Map<string, SessionState>();
   private readonly observedContexts = new WeakSet<BrowserContext>();
+  // Per-platform refcount of explicit "the operator wants to see this browser"
+  // requests in flight. A launch is hidden unless this is > 0 (or the
+  // kill-switch is set). Refcounted so overlapping operator actions compose.
+  private readonly visibleLaunchRefcount = new Map<PlatformName, number>();
 
-  constructor(private readonly deps: SessionManagerDependencies) {}
+  constructor(private readonly deps: SessionManagerDependencies) {
+    try {
+      // Only the real patchright launcher exposes executablePath; the test
+      // fake injects its own launcher, so guard the call.
+      setBrowserActivateHint(deriveAppBundlePath(chromium.executablePath?.()));
+    } catch {
+      setBrowserActivateHint(null);
+    }
+  }
+
+  /**
+   * Mark that an operator-initiated, user-visible browser action is in flight
+   * for `platform`, so a launch it triggers is NOT hidden. Returns a disposer
+   * that must be called when the action finishes (refcounted).
+   */
+  markVisibleLaunch(platform: PlatformName): () => void {
+    this.visibleLaunchRefcount.set(platform, (this.visibleLaunchRefcount.get(platform) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const next = (this.visibleLaunchRefcount.get(platform) ?? 1) - 1;
+      if (next <= 0) {
+        this.visibleLaunchRefcount.delete(platform);
+      } else {
+        this.visibleLaunchRefcount.set(platform, next);
+      }
+    };
+  }
+
+  /**
+   * Bring an existing (possibly hidden) platform window back on-screen and to
+   * the front. Used by operator "show me the browser" flows when the context
+   * was launched hidden by an earlier background scan/send. No-op when there
+   * is no live page for the platform.
+   */
+  async revealWindow(platform: PlatformName, personKey = "default"): Promise<void> {
+    const state = this.states.get(sanitizePersonKey(personKey));
+    const page = state?.pages.get(platform);
+    if (page) {
+      await revealBrowserWindow(page);
+    }
+  }
 
   getProfileDir(personKey = "default"): string {
     return join(this.deps.profileRootDir, sanitizePersonKey(personKey));
@@ -497,7 +565,22 @@ export class SessionManager {
     args?: string[];
   }): Promise<BrowserContext> {
     const settings = await this.deps.getSettings();
-    return launchPersistentContextForPlatform({
+    // Hide the launch unless an operator-visible action requested it (Connect /
+    // open-browser) or the kill-switch forces the old visible path. A headless
+    // launch has no window to hide. See runner-window.ts for the why.
+    const hideLaunch =
+      !settings.headless &&
+      !isVisibleBrowserLaunchForced() &&
+      (this.visibleLaunchRefcount.get(input.platform) ?? 0) === 0;
+
+    const launchArgs = hideLaunch
+      ? [...(input.args ?? []), ...backgroundWindowLaunchArgs()]
+      : input.args;
+    // Capture the operator's frontmost app BEFORE the launch self-activates
+    // Chrome, so we can hand focus straight back after minimizing.
+    const previousFrontmostApp = hideLaunch ? await captureFrontmostMacApp() : null;
+
+    const context = await launchPersistentContextForPlatform({
       platform: input.platform,
       launchPersistentContext:
         this.deps.launchPersistentContext ??
@@ -505,10 +588,20 @@ export class SessionManager {
       isolatedProfileDir: input.profileDir,
       headless: settings.headless,
       browserProfile: this.deps.browserProfile,
-      args: input.args,
+      args: launchArgs,
       onConnectStep: this.deps.onConnectStep,
       onPersonalProfileFallback: this.deps.onPersonalProfileFallback
     });
+
+    if (hideLaunch) {
+      // Off-screen position + minimize: the window is never visible and is
+      // removed from the window list so no later Space switch can surface it.
+      // Best-effort: a hide failure must never fail the launch.
+      const initialPage = typeof context.pages === "function" ? context.pages()[0] : undefined;
+      await hideBrowserWindow(initialPage, previousFrontmostApp).catch(() => undefined);
+    }
+
+    return context;
   }
 
   private async closeState(state: SessionState): Promise<void> {

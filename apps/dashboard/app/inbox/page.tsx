@@ -11,6 +11,8 @@ import { shouldInboxRefreshOnRunnerEvent } from "@/lib/inbox-events";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
+import { FocusInboxGroup } from "@/components/common/focus/focus-inbox-group";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import dynamic from "next/dynamic";
@@ -260,11 +262,15 @@ export default function InboxPage() {
     });
   }, []);
 
-  const refresh = useCallback(async () => {
+  // `force` skips the freshness TTL (still SWR: stale paints immediately,
+  // the network value lands via onFresh). Used by the SSE-driven path - a
+  // runner event means the data DID change, so serving a <4s-old cache and
+  // skipping revalidation would delay the update until the next poll.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
     const [inbox, platformRows, logRows] = await Promise.all([
       // SWR: paint the cached list immediately, revalidate in the background.
       apiGet<InboxResponse>("/runner/data/inbox", {
-        ttlMs: 4000,
+        ttlMs: opts?.force ? 0 : 4000,
         swr: true,
         onFresh: (d) => applyInbox(d as InboxResponse)
       }).catch(() => null),
@@ -292,7 +298,7 @@ export default function InboxPage() {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
-      void refresh();
+      void refresh({ force: true });
     }, 450);
   }, [refresh]);
   useEffect(
@@ -464,13 +470,13 @@ export default function InboxPage() {
       setClosedRefreshState({ kind: "done", summary, tone });
       window.setTimeout(() => {
         setClosedRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
-      }, 4500);
+      }, 2200);
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not reach the runner.";
       setClosedRefreshState({ kind: "error", message });
       window.setTimeout(() => {
         setClosedRefreshState((current) => (current.kind === "error" ? { kind: "idle" } : current));
-      }, 5000);
+      }, 3200);
     }
   }, [closedRefreshState.kind, refresh]);
   const closedRefreshLabel = (() => {
@@ -788,8 +794,13 @@ export default function InboxPage() {
         <p className="mb-6 font-mono text-[11px] text-ink-3">{bulkResult}</p>
       ) : null}
 
+      {/* Focus Reply Buffer: covered threads that arrived during the active
+          window sit above the normal list with a one-tap acknowledgement.
+          Renders nothing when no window is active or nothing qualifies. */}
+      <FocusInboxGroup rows={allRows} onChanged={refresh} />
+
       {!loaded ? (
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        <BrandLoader className="py-1" />
       ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
         <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
           {tab === "all" ? (

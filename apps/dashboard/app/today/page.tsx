@@ -6,6 +6,7 @@ import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
 import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import { prefetchThreadDataNow } from "@/lib/thread-prefetch";
 import type {
   HealthResponse,
   InboxResponse,
@@ -23,11 +24,13 @@ import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { FitText } from "@/components/common/fit-text";
 import { ThreadRow } from "@/components/common/thread-row";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { FocusRailCard } from "@/components/common/focus/focus-rail-card";
 import { NotificationCta } from "@/components/common/notification-cta";
 import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -167,11 +170,15 @@ export default function TodayPage() {
     });
   }, []);
 
-  const refresh = useCallback(async () => {
+  // `force` skips the freshness TTL (still SWR: stale paints immediately,
+  // the network value lands via onFresh). Used by the SSE-driven path and
+  // post-action refreshes - those fire BECAUSE the data changed, so serving
+  // a <4s-old cache would delay the update until the next poll.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
     const [inbox, platformRows, healthData] = await Promise.all([
       // SWR: paint the cached queue immediately, revalidate in the background.
       apiGet<InboxResponse>("/runner/data/inbox", {
-        ttlMs: 4000,
+        ttlMs: opts?.force ? 0 : 4000,
         swr: true,
         onFresh: (d) => applyInbox(d as InboxResponse)
       }).catch(() => null),
@@ -194,7 +201,7 @@ export default function TodayPage() {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
-      void refresh();
+      void refresh({ force: true });
     }, 450);
   }, [refresh]);
   useEffect(
@@ -269,6 +276,9 @@ export default function TodayPage() {
       return { ...base, [level]: base[level] + 1 };
     });
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
+    // Brief visual ack ("Handled, next up") before the queue advances. Kept
+    // short: the operator is mid-flow and the next thread should be in front
+    // of them as close to instantly as legibility allows.
     transitionTimer.current = setTimeout(() => {
       setRemovedIds((prev) => {
         const next = new Set(prev);
@@ -276,8 +286,8 @@ export default function TodayPage() {
         return next;
       });
       setTransitioning(null);
-      void refresh();
-    }, 700);
+      void refresh({ force: true });
+    }, 400);
   }, [refresh]);
 
   useEffect(() => {
@@ -340,6 +350,13 @@ export default function TodayPage() {
   // hero, but a non-favourite overdue still outranks a fresh favourite.
   const sortedRows = useMemo(() => sortTodayQueue(rows), [rows]);
   const hero = sortedRows[0];
+  // The hero is the single most likely next open (Enter/R open it from the
+  // keyboard, where hover-prefetch never fires). Warm its thread data the
+  // moment it becomes the hero so opening it is instant.
+  const heroId = hero?.id;
+  useEffect(() => {
+    if (heroId) prefetchThreadDataNow(heroId);
+  }, [heroId]);
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
   // Cap the "Then these, in order" stack; the long tail routes to Inbox.
   // overflowCount drives the "see all" link's label. (issue #291)
@@ -526,15 +543,9 @@ export default function TodayPage() {
 
       <NotificationCta />
 
-      {welcomeDismissed === false ? (
-        <PilotWelcomeCard
-          onDismiss={() => {
-            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
-            setWelcomeDismissed(true);
-          }}
-        />
-      ) : null}
-
+      {/* The pilot welcome moved into the right rail (compact) so it sits
+          beside the focus block, per Richard. The first-run tour invite
+          still leads the page once the welcome has been dismissed. */}
       {welcomeDismissed === true && tourSeen === false ? (
         <PilotTourInviteCard
           onStart={() => {
@@ -586,7 +597,7 @@ export default function TodayPage() {
               ref={heroRef}
               data-testid="today-hero"
               data-demo-target="today-hero"
-              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-300 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               {/* The hero is no longer a white card — per the redesign it
@@ -724,7 +735,7 @@ export default function TodayPage() {
           ) : loaded ? (
             <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
           ) : (
-            <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+            <BrandLoader className="py-1" />
           )}
 
           {remaining.length > 0 ? (
@@ -765,11 +776,26 @@ export default function TodayPage() {
           ) : null}
         </div>
 
-        {/* Right rail: tonight's progress. Per the redesign the rail is no
-            longer a boxed card — it's an open titled section sitting on the
-            page, so the focus column and the rail read as one calm surface. */}
-        <aside className="hidden lg:block">
-          <div className="sticky top-[110px] flex flex-col gap-10">
+        {/* Right rail: the focus block + pilot welcome sit above tonight's
+            progress and upcoming birthdays. Per the redesign the rail's lower
+            sections are open titled groups, not boxed cards, so the focus
+            column and the rail read as one calm surface. The rail stacks below
+            the queue on narrow screens (it used to be desktop-only) so the
+            focus entry stays reachable; birthdays render exactly as before. */}
+        <aside>
+          <div className="flex flex-col gap-10 lg:sticky lg:top-[110px]">
+            <FocusRailCard rows={rows} />
+
+            {welcomeDismissed === false ? (
+              <PilotWelcomeCard
+                compact
+                onDismiss={() => {
+                  window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+                  setWelcomeDismissed(true);
+                }}
+              />
+            ) : null}
+
             <section>
               <h5 className="m-0 mb-[18px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
                 Tonight’s progress
