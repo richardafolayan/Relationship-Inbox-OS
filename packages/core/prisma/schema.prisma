@@ -556,6 +556,11 @@ model AuditLog {
 
   @@index([timestamp, platform, action, status])
   @@index([threadId, timestamp])
+  // Selector-health receipts (action IN (...) AND platform = ?) are read on
+  // every thread open; without an action-leading index that arm filter-scans
+  // the whole recent window of the timestamp index (~80ms on a 500k-row
+  // table). With it, it's an index probe.
+  @@index([action, platform, timestamp])
   @@map("audit_logs")
 }
 

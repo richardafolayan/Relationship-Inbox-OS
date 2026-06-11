@@ -4498,24 +4498,35 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // Per-thread receipts via the indexed AuditLog.threadId column (mirrored
   // from details.threadId at write time). The old `detailsJson LIKE
   // '%threadId%'` arm had to walk the whole recent audit window per open -
-  // on an active runner that's the entire table (~25k rows/day), and a
+  // on an active runner that's the entire table (~25k rows/day), so a
   // thread with sparse receipts cost up to ~800ms PER OPEN while a busy one
-  // cost 10ms. The equality arm is single-digit ms regardless. Rows written
-  // before the column existed don't match and quietly age out of the
-  // drawer; the timestamp floor keeps the selector-health arm on the
-  // leading-timestamp index.
+  // cost 10ms. Two separate fully-indexed reads merged in JS: a single
+  // `timestamp >= ? AND (... OR ...)` query defeats SQLite's OR-by-union
+  // optimisation, and ORDER BY+LIMIT biases the planner into an ordered
+  // filter-scan of the whole recent window (measured ~800ms either way).
+  // Rows written before the column existed don't match and quietly age out
+  // of the drawer.
   const receiptsSince = new Date(Date.now() - RECEIPTS_LOOKBACK_MS);
-  const receipts = await prisma.auditLog.findMany({
-    where: {
-      timestamp: { gte: receiptsSince },
-      OR: [
-        { threadId: thread.id },
-        { action: { in: ["SELECTOR_TEST", "SELECTOR_FAIL"] }, platform: thread.platform }
-      ]
-    },
-    orderBy: { timestamp: "desc" },
-    take: 120
-  });
+  const RECEIPTS_LIMIT = 120;
+  const [threadReceipts, selectorReceipts] = await Promise.all([
+    prisma.auditLog.findMany({
+      where: { threadId: thread.id, timestamp: { gte: receiptsSince } },
+      orderBy: { timestamp: "desc" },
+      take: RECEIPTS_LIMIT
+    }),
+    prisma.auditLog.findMany({
+      where: {
+        action: { in: ["SELECTOR_TEST", "SELECTOR_FAIL"] },
+        platform: thread.platform,
+        timestamp: { gte: receiptsSince }
+      },
+      orderBy: { timestamp: "desc" },
+      take: RECEIPTS_LIMIT
+    })
+  ]);
+  const receipts = [...threadReceipts, ...selectorReceipts]
+    .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+    .slice(0, RECEIPTS_LIMIT);
 
   // Surfaced so the thread page can render scheduled sends as pinned pills
   // above the timeline without a second fetch. Only SCHEDULED rows leak
