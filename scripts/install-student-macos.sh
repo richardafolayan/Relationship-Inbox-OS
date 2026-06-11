@@ -566,6 +566,15 @@ install_app() {
     warn "Couldn't download the transcription model now — voice notes will transcribe once it's fetched."
     warn "Retry later with:  cd \"$APP_DIR\" && npm run fetch:whisper-model"
   fi
+
+  # Build the optimised (production) dashboard now so the first launch is
+  # instant instead of compiling pages on demand. Non-fatal: the launcher
+  # rebuilds (or falls back to dev mode) if this step didn't finish.
+  if run "Optimising the app for speed (one-time, about a minute)..." node scripts/start-app.mjs --prepare-only; then
+    ok "App optimised"
+  else
+    warn "Couldn't pre-build the app now — the first launch will do it instead."
+  fi
 }
 
 # --------------------------------------------------------------------------
@@ -600,10 +609,11 @@ start_app() {
   step "Starting Relationship Inbox OS"
   cd "$APP_DIR" || die "Couldn't open the app folder $APP_DIR."
 
-  info "Launching the app (the first start takes a minute)..."
-  # Keep the dev server attached to this Terminal so Ctrl+C stops it, the way
-  # the guide describes. Its verbose output streams to the log.
-  npm run dev >>"$LOG_FILE" 2>&1 &
+  info "Launching the app..."
+  # Keep the app attached to this Terminal so Ctrl+C stops it, the way the
+  # guide describes. Its verbose output streams to the log. start-app runs
+  # the optimised production build prepared above (with a dev fallback).
+  node scripts/start-app.mjs >>"$LOG_FILE" 2>&1 &
   local dev_pid=$!
   trap 'printf "\n  Stopping the app...\n"; kill "$dev_pid" 2>/dev/null; wait "$dev_pid" 2>/dev/null; exit 0' INT TERM
 

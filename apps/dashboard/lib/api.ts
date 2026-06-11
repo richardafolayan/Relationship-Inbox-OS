@@ -74,6 +74,135 @@ interface CacheEntry {
 
 const responseCache = new Map<string, CacheEntry>();
 
+// ---------------------------------------------------------------------------
+// Persistent snapshot layer (localStorage) under the in-memory cache.
+//
+// The in-memory cache makes navigation instant WITHIN a session, but a cold
+// open (fresh tab, app relaunch, next morning) still mounted blank and waited
+// on the runner. This persists the last response for the hot read paths so a
+// cold open paints the last-known state instantly and revalidates over it -
+// the same stale-while-revalidate contract, stretched across restarts.
+//
+// Snapshots are hydrated lazily inside apiGet (never during render, so
+// server-rendered HTML and the first client render always match) with their
+// ORIGINAL timestamp, so they are always treated as stale: ttl fresh-hits
+// can't serve them without revalidation, and swr callers paint them and
+// refresh in the background. Whitelisted paths only; thread snapshots are
+// capped to the most recent few; everything is best-effort (quota errors
+// fall back to pruning, then to skipping persistence entirely).
+// ---------------------------------------------------------------------------
+
+const SNAPSHOT_PREFIX_BASE = "rios.snapshot.";
+const SNAPSHOT_VERSION = 1;
+const SNAPSHOT_PREFIX = `${SNAPSHOT_PREFIX_BASE}v${SNAPSHOT_VERSION}:`;
+const SNAPSHOT_THREAD_LIMIT = 8;
+const SNAPSHOT_MAX_CHARS = 2_000_000;
+const SNAPSHOT_THREAD_PATH = "/runner/data/thread/";
+
+function snapshotEligible(path: string): boolean {
+  if (path === "/runner/data/inbox" || path === "/runner/data/archived") return true;
+  // Only the default thread window - paginated reads (?before=) are partial.
+  return path.startsWith(SNAPSHOT_THREAD_PATH) && !path.includes("?");
+}
+
+let snapshotsCleaned = false;
+function snapshotStorage(): Storage | undefined {
+  if (typeof window === "undefined") return undefined;
+  try {
+    const storage = window.localStorage;
+    if (!snapshotsCleaned) {
+      snapshotsCleaned = true;
+      // Drop snapshots from older payload-shape versions in one pass.
+      for (let i = storage.length - 1; i >= 0; i -= 1) {
+        const key = storage.key(i);
+        if (key && key.startsWith(SNAPSHOT_PREFIX_BASE) && !key.startsWith(SNAPSHOT_PREFIX)) {
+          storage.removeItem(key);
+        }
+      }
+    }
+    return storage;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Read a persisted snapshot into a cache entry shape (undefined if none). */
+function readSnapshot(path: string): CacheEntry | undefined {
+  if (!snapshotEligible(path)) return undefined;
+  const storage = snapshotStorage();
+  if (!storage) return undefined;
+  try {
+    const raw = storage.getItem(SNAPSHOT_PREFIX + path);
+    if (!raw) return undefined;
+    const parsed = JSON.parse(raw) as { ts?: unknown; data?: unknown };
+    if (typeof parsed?.ts !== "number" || parsed.data === undefined) return undefined;
+    return { data: parsed.data, ts: parsed.ts };
+  } catch {
+    return undefined;
+  }
+}
+
+/** Keep only the most recent N thread snapshots ("ts" is serialised first). */
+function pruneThreadSnapshots(storage: Storage): void {
+  const threadKeys: Array<{ key: string; ts: number }> = [];
+  for (let i = 0; i < storage.length; i += 1) {
+    const key = storage.key(i);
+    if (!key || !key.startsWith(SNAPSHOT_PREFIX + SNAPSHOT_THREAD_PATH)) continue;
+    const head = storage.getItem(key)?.slice(0, 32) ?? "";
+    const ts = Number(/"ts":(\d+)/.exec(head)?.[1] ?? 0);
+    threadKeys.push({ key, ts });
+  }
+  if (threadKeys.length <= SNAPSHOT_THREAD_LIMIT) return;
+  threadKeys
+    .sort((a, b) => b.ts - a.ts)
+    .slice(SNAPSHOT_THREAD_LIMIT)
+    .forEach(({ key }) => storage.removeItem(key));
+}
+
+function writeSnapshot(path: string, data: unknown): void {
+  if (!snapshotEligible(path)) return;
+  const storage = snapshotStorage();
+  if (!storage) return;
+  try {
+    // `ts` first so pruning can read it from the head without a full parse.
+    const raw = JSON.stringify({ ts: Date.now(), data });
+    if (raw.length > SNAPSHOT_MAX_CHARS) return;
+    const key = SNAPSHOT_PREFIX + path;
+    try {
+      storage.setItem(key, raw);
+    } catch {
+      // Quota: drop all our snapshots and retry once, else skip silently.
+      for (let i = storage.length - 1; i >= 0; i -= 1) {
+        const k = storage.key(i);
+        if (k && k.startsWith(SNAPSHOT_PREFIX_BASE)) storage.removeItem(k);
+      }
+      try {
+        storage.setItem(key, raw);
+      } catch {
+        return;
+      }
+    }
+    pruneThreadSnapshots(storage);
+  } catch {
+    /* persistence is best-effort */
+  }
+}
+
+/**
+ * Hydrate a missing in-memory entry from the persistent snapshot. Returns the
+ * (possibly seeded) entry. Only called from apiGet, i.e. after mount - never
+ * during render.
+ */
+function entryWithSnapshot(path: string): CacheEntry | undefined {
+  const entry = responseCache.get(path);
+  if (entry !== undefined) return entry;
+  const snapshot = readSnapshot(path);
+  if (snapshot) {
+    responseCache.set(path, snapshot);
+  }
+  return snapshot;
+}
+
 /** Synchronous read of the last cached value for a path (undefined if none). */
 export function peekCache<T>(path: string): T | undefined {
   return responseCache.get(path)?.data as T | undefined;
@@ -91,6 +220,7 @@ export function invalidateCache(path?: string): void {
 /** Write a value into the cache directly (e.g. optimistic update / SSE delta). */
 export function mutateCache<T>(path: string, data: T): void {
   responseCache.set(path, { data, ts: Date.now() });
+  writeSnapshot(path, data);
 }
 
 export type ApiGetOptions = RequestInit & {
@@ -118,7 +248,7 @@ export type ApiGetOptions = RequestInit & {
  */
 export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> {
   const { ttlMs = 0, swr = false, onFresh, ...init } = opts ?? {};
-  const entry = responseCache.get(path);
+  const entry = entryWithSnapshot(path);
   const hasData = entry !== undefined && entry.data !== undefined;
   const now = Date.now();
 
@@ -133,6 +263,7 @@ export async function apiGet<T>(path: string, opts?: ApiGetOptions): Promise<T> 
     inflight = apiGetRaw<T>(path, init)
       .then((data) => {
         responseCache.set(path, { data, ts: Date.now() });
+        writeSnapshot(path, data);
         return data;
       })
       .catch((err) => {
