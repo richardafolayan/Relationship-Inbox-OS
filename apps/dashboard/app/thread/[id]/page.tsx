@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
@@ -2483,7 +2484,7 @@ export default function ThreadPage() {
     return (
       <div className="px-12 pt-14">
         {loading ? (
-          <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+          <BrandLoader />
         ) : (
           <div className="max-w-[440px]">
             <p className="m-0 mb-2 font-display text-[18px] font-semibold text-ink">

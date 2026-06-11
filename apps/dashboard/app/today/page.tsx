@@ -24,6 +24,7 @@ import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { FitText } from "@/components/common/fit-text";
 import { ThreadRow } from "@/components/common/thread-row";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
@@ -734,7 +735,7 @@ export default function TodayPage() {
           ) : loaded ? (
             <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
           ) : (
-            <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+            <BrandLoader className="py-1" />
           )}
 
           {remaining.length > 0 ? (

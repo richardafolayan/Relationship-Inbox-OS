@@ -12,6 +12,7 @@ import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/t
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { FocusInboxGroup } from "@/components/common/focus/focus-inbox-group";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import dynamic from "next/dynamic";
@@ -799,7 +800,7 @@ export default function InboxPage() {
       <FocusInboxGroup rows={allRows} onChanged={refresh} />
 
       {!loaded ? (
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        <BrandLoader className="py-1" />
       ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
         <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
           {tab === "all" ? (

@@ -1,11 +1,13 @@
 import { Canvas } from "@/components/common/canvas";
+import { BrandLoader } from "@/components/common/brand-loader";
 
 // Dependency-free loading skeletons rendered by Next's route-level
 // loading.tsx files. They paint the page chrome the instant a navigation
 // starts — before the page's client JS chunk and its runner data have
 // arrived — so "click a page and stare at blank" becomes "click a page and
 // see the layout, then content fills in". Pure server components: no hooks,
-// no client bundle, no data.
+// no client bundle, no data. The BrandLoader mark fades in only if the wait
+// outlasts its reveal delay, so instant paints never flash it.
 
 function Bar({ className = "" }: { className?: string }) {
   return <span className={`block animate-pulse rounded bg-paper-3 ${className}`} aria-hidden />;
@@ -15,9 +17,12 @@ function Bar({ className = "" }: { className?: string }) {
 export function ListPageSkeleton({ rows = 7 }: { rows?: number }) {
   return (
     <Canvas className="max-w-[1240px] pb-10">
-      <div className="-mx-12 mb-6 px-12 pb-3 pt-6">
-        <Bar className="h-7 w-44" />
-        <Bar className="mt-3 h-3 w-72" />
+      <div className="-mx-12 mb-6 flex items-end justify-between px-12 pb-3 pt-6">
+        <div>
+          <Bar className="h-7 w-44" />
+          <Bar className="mt-3 h-3 w-72" />
+        </div>
+        <BrandLoader />
       </div>
       <div className="flex flex-col" aria-hidden>
         {Array.from({ length: rows }).map((_, i) => (
@@ -34,7 +39,6 @@ export function ListPageSkeleton({ rows = 7 }: { rows?: number }) {
           </div>
         ))}
       </div>
-      <span className="sr-only">Loading…</span>
     </Canvas>
   );
 }
@@ -45,12 +49,15 @@ export function ThreadSkeleton() {
     <div className="flex h-full w-full gap-6 px-6 py-6" aria-hidden>
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Header */}
-        <div className="mb-6 flex items-center gap-3">
-          <span className="h-9 w-9 animate-pulse rounded-full bg-paper-3" />
-          <div>
-            <Bar className="h-[16px] w-44" />
-            <Bar className="mt-2 h-[12px] w-28" />
+        <div className="mb-6 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-3">
+            <span className="h-9 w-9 animate-pulse rounded-full bg-paper-3" />
+            <div>
+              <Bar className="h-[16px] w-44" />
+              <Bar className="mt-2 h-[12px] w-28" />
+            </div>
           </div>
+          <BrandLoader />
         </div>
         {/* Bubbles */}
         <div className="flex flex-1 flex-col justify-end gap-4">
