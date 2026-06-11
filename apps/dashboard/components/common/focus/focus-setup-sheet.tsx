@@ -1,10 +1,18 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
 import { FocusSheet } from "@/components/common/focus/focus-sheet";
-import { DEFAULT_FOCUS_REASON, endsAtIsoFromTime, FOCUS_REASONS, fillNote, formatUntil } from "@/lib/focus";
+import {
+  DEFAULT_FOCUS_REASON,
+  endsAtIsoFromTime,
+  FOCUS_REASONS,
+  fillNote,
+  formatUntil,
+  resyncNoteUntilLabel,
+  rollsToTomorrow
+} from "@/lib/focus";
 import type { UseFocusWindow } from "@/lib/use-focus-window";
 import type { FocusAudience } from "@/lib/types";
 
@@ -59,7 +67,10 @@ export function FocusSetupSheet({
   const [noteEdited, setNoteEdited] = useState(false);
 
   // Seed the form whenever the sheet opens, from the live window (when
-  // editing) or the operator's preferences (when starting fresh).
+  // editing) or the operator's preferences (when starting fresh). A window
+  // counts as "edited" only when its note genuinely differs from what the
+  // template would produce for its own end time + reason — a note that is
+  // just the auto-filled default keeps auto-syncing with the picker.
   useEffect(() => {
     if (!open) return;
     const seedTime = (active ? timeFromIso(focusWindow.endsAt) : null) ?? defaultTime();
@@ -67,8 +78,13 @@ export function FocusSetupSheet({
     setReason(active && focusWindow.reason ? focusWindow.reason : DEFAULT_FOCUS_REASON);
     setAudience(active ? focusWindow.audience : settings.audience);
     setNote(active && focusWindow.note ? focusWindow.note : templates.close);
-    setNoteEdited(active && !!focusWindow.note);
-  }, [open, active, focusWindow.endsAt, focusWindow.reason, focusWindow.audience, focusWindow.note, settings.audience, templates.close]);
+    const derivedNote = fillNote(templates.close, {
+      name: "[Name]",
+      until: formatUntil(focusWindow.endsAt),
+      reason: settings.reasonLabel ? focusWindow.reason : ""
+    });
+    setNoteEdited(active && !!focusWindow.note && focusWindow.note !== derivedNote);
+  }, [open, active, focusWindow.endsAt, focusWindow.reason, focusWindow.audience, focusWindow.note, settings.audience, settings.reasonLabel, templates.close]);
 
   // Keep the note's [until] in step with the picker until the operator edits
   // the note themselves — then leave their words alone.
@@ -77,6 +93,23 @@ export function FocusSetupSheet({
     if (!open || noteEdited) return;
     setNote(fillNote(templates.close, { name: "[Name]", until: untilLabel, reason: settings.reasonLabel ? reason : "" }));
   }, [open, noteEdited, untilLabel, templates.close, reason, settings.reasonLabel]);
+
+  // Once the note IS the operator's own words, a time change still must not
+  // leave a stale "till 8:31pm" inside it — swap just the old label for the
+  // new one and touch nothing else they wrote.
+  const prevUntilRef = useRef(untilLabel);
+  useEffect(() => {
+    const previous = prevUntilRef.current;
+    prevUntilRef.current = untilLabel;
+    if (!open || !noteEdited) return;
+    if (previous && untilLabel && previous !== untilLabel) {
+      setNote((current) => resyncNoteUntilLabel(current, previous, untilLabel));
+    }
+  }, [open, noteEdited, untilLabel]);
+
+  // The picker rolls a time that already passed today to TOMORROW (so "until
+  // 6am" works at night). Say so, instead of silently making a ~24h window.
+  const endsTomorrow = useMemo(() => rollsToTomorrow(time), [time]);
 
   const submit = async () => {
     const endsAt = endsAtIsoFromTime(time);
@@ -128,6 +161,11 @@ export function FocusSetupSheet({
               onChange={(event) => setTime(event.target.value)}
               className="w-full rounded-[9px] border border-hairline bg-paper px-3 py-[9px] text-[13.5px] text-ink outline-none transition-colors duration-calm focus:border-accent"
             />
+            {endsTomorrow ? (
+              <span className="mt-[6px] block text-[11.5px] leading-[1.4] text-accent-ink">
+                That time has already passed today, so this window runs until {untilLabel} tomorrow.
+              </span>
+            ) : null}
           </label>
           {settings.reasonLabel ? (
             <div className="flex-[1.4]">
