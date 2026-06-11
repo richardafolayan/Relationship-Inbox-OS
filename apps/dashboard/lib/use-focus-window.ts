@@ -101,9 +101,23 @@ export interface UseFocusWindow {
   settings: FocusSettings;
   active: boolean;
   reload: () => void;
-  startFocus: (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) => Promise<OperatorProfile>;
-  /** Edit a live window's end/reason/note/audience without clearing acks. */
-  updateFocus: (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) => Promise<OperatorProfile>;
+  startFocus: (opts: {
+    endsAt: string;
+    reason: string;
+    note: string;
+    /** Professional-tier note for this window ("" = use the saved template). */
+    professionalNote?: string;
+    audience: FocusAudience;
+  }) => Promise<OperatorProfile>;
+  /** Edit a live window's end/reason/notes/audience without clearing acks. */
+  updateFocus: (opts: {
+    endsAt: string;
+    reason: string;
+    note: string;
+    /** Omitted = keep the window's current professional note. */
+    professionalNote?: string;
+    audience: FocusAudience;
+  }) => Promise<OperatorProfile>;
   endFocus: () => Promise<OperatorProfile>;
   editNote: (note: string) => Promise<OperatorProfile>;
   markAcked: (personId: string | undefined) => Promise<void>;
@@ -188,7 +202,13 @@ export function useFocusWindow(): UseFocusWindow {
   }, []);
 
   const startFocus = useCallback(
-    (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) =>
+    (opts: {
+      endsAt: string;
+      reason: string;
+      note: string;
+      professionalNote?: string;
+      audience: FocusAudience;
+    }) =>
       update({
         focusWindow: {
           active: true,
@@ -196,6 +216,7 @@ export function useFocusWindow(): UseFocusWindow {
           endsAt: opts.endsAt,
           reason: opts.reason,
           note: opts.note,
+          professionalNote: opts.professionalNote ?? "",
           audience: opts.audience,
           windowId: newWindowId(),
           ackedPersonIds: []
@@ -205,7 +226,13 @@ export function useFocusWindow(): UseFocusWindow {
   );
 
   const updateFocus = useCallback(
-    (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) =>
+    (opts: {
+      endsAt: string;
+      reason: string;
+      note: string;
+      professionalNote?: string;
+      audience: FocusAudience;
+    }) =>
       update({
         focusWindow: {
           ...readFocusWindow(profile),
@@ -213,6 +240,8 @@ export function useFocusWindow(): UseFocusWindow {
           endsAt: opts.endsAt,
           reason: opts.reason,
           note: opts.note,
+          professionalNote:
+            opts.professionalNote ?? readFocusWindow(profile).professionalNote ?? "",
           audience: opts.audience
         }
       }),

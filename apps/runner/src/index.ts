@@ -5552,6 +5552,9 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           endsAt: z.string().max(40),
           reason: z.string().max(80),
           note: z.string().max(2000),
+          // Older dashboard builds don't send it; default to "" (= fall
+          // back to the saved professional template).
+          professionalNote: z.string().max(2000).default(""),
           audience: z.enum(["favourites", "all_personal"]),
           windowId: z.string().max(80),
           ackedPersonIds: z.array(z.string().max(120)).max(5000)
@@ -5605,6 +5608,46 @@ app.post("/control/operator-profile/analyze-style", asyncRoute(async (_req, res)
     return;
   }
   res.json({ ok: true, sampleCount: sampleTexts.length, suggestion });
+}));
+
+// "Help me phrase this" for the Focus setup sheet. The operator types what
+// they're about to do; the AI phrases the two note tiers in their voice
+// (tokens [Name]/[until] kept literal), suggests a reason label and, when an
+// explicit end time was stated, the end time. Composes only — nothing is
+// saved or sent here; the sheet shows the result for the operator to edit.
+// Always 200; { ok:false, reason } lets the dashboard show a calm message.
+app.post("/control/focus/compose-note", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "phrase your focus note", kind: "external-action" })) return;
+  const payload = z
+    .object({ activity: z.string().trim().min(1).max(400) })
+    .parse(req.body);
+  // A handful of the operator's own authentic sends calibrates the voice —
+  // same selection rules as reply-style analysis (drops automation sends and
+  // placeholder bubbles), much smaller sample.
+  const rows = await prisma.message.findMany({
+    where: { direction: "OUT" },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: 200,
+    select: { text: true, direction: true, sentVia: true }
+  });
+  const voiceSampleTexts = selectStyleSampleTexts(rows, 8);
+  const operatorProfile = await settingsStore.getOperatorProfile();
+  const composed = await aiService.composeFocusNote({
+    activity: payload.activity,
+    operatorProfile,
+    voiceSampleTexts
+  });
+  if (!composed) {
+    res.json({ ok: false, reason: "ai_unavailable" });
+    return;
+  }
+  res.json({
+    ok: true,
+    close: composed.close,
+    professional: composed.professional,
+    reasonLabel: composed.reason,
+    untilTime: composed.untilTime
+  });
 }));
 
 // Pilot feedback intake. The dashboard posts a tester's bug / feedback
