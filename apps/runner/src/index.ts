@@ -2586,11 +2586,21 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         // (the map is now Partial<Record<PlatformName, PlatformAdapter>>;
         // see services/platform-factory.ts).
         const platformAdapter = requireAdapter(platform);
-        trackedPromise = platformAdapter.ensureConnected().finally(() => {
-          if (connectInFlight.get(platform) === trackedPromise) {
-            connectInFlight.delete(platform);
-          }
-        });
+        // Connect is operator-initiated: a launch it triggers should be
+        // VISIBLE (the operator may need to complete a login / 2FA), unlike
+        // the hidden background launches that scans and sends use. Mark the
+        // visible intent for the launch, and reveal an already-warm-but-hidden
+        // window so manual sign-in is reachable even when no new launch fires.
+        const releaseVisible = sessionManager.markVisibleLaunch(platform);
+        trackedPromise = platformAdapter
+          .ensureConnected()
+          .finally(() => sessionManager.revealWindow(platform).catch(() => undefined))
+          .finally(() => releaseVisible())
+          .finally(() => {
+            if (connectInFlight.get(platform) === trackedPromise) {
+              connectInFlight.delete(platform);
+            }
+          });
         connectInFlight.set(platform, trackedPromise);
         connectPromise = trackedPromise;
       }
@@ -5743,7 +5753,18 @@ app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
     // keep the runtime contract explicit (and to surface a clean error if
     // someone removes an adapter without updating the zod enum).
     const adapter = requireAdapter(payload.platform);
-    await adapter.ensureConnected();
+    // "Open the platform browser" is the operator explicitly asking to SEE the
+    // runner's Chrome (e.g. to log in). Mark the visible intent so a launch
+    // isn't hidden, and reveal a warm-but-hidden window so it surfaces even
+    // when ensureConnected reuses an existing background context (or throws
+    // auth-required - the operator still needs the window).
+    const releaseVisible = sessionManager.markVisibleLaunch(payload.platform);
+    try {
+      await adapter.ensureConnected();
+    } finally {
+      await sessionManager.revealWindow(payload.platform).catch(() => undefined);
+      releaseVisible();
+    }
     res.json({ status: "ok" });
   });
 }));
