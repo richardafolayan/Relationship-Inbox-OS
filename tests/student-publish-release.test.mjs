@@ -106,9 +106,36 @@ function baseEnv(port, opts = {}) {
 }
 
 test("publish-student-release: build once, then publish flows", async (t) => {
-  // Build the release once; subtests reuse it via --skip-build.
-  execFileSync(process.execPath, [BUILD], { cwd: ROOT, stdio: "ignore" });
+  // Build the release once; subtests reuse it via --skip-build. Distribution
+  // config is set so the build bakes it into the shipped .env.example (the
+  // dedicated subtest below asserts that end to end).
+  execFileSync(process.execPath, [BUILD], {
+    cwd: ROOT,
+    stdio: "ignore",
+    env: {
+      ...process.env,
+      RIOS_UPDATE_FEED_URL: "https://feed.example.test/latest.json?rlkey=k&raw=1",
+      PILOT_FEEDBACK_WEBHOOK_URL: "https://feedback.example.test/exec",
+    },
+  });
   assert.ok(existsSync(LATEST_ZIP), "release zip should exist after build");
+
+  await t.test("the shipped .env.example carries the baked distribution config", () => {
+    const envExample = execFileSync(
+      "unzip", ["-p", LATEST_ZIP, "relationship-inbox-os/.env.example"], { encoding: "utf8" }
+    );
+    assert.match(
+      envExample,
+      /^RIOS_UPDATE_FEED_URL=https:\/\/feed\.example\.test\/latest\.json\?rlkey=k&raw=1$/m,
+      "update feed link must be baked so updates work out of the box"
+    );
+    assert.match(
+      envExample,
+      /^PILOT_FEEDBACK_WEBHOOK_URL=https:\/\/feedback\.example\.test\/exec$/m,
+      "feedback webhook must still be baked"
+    );
+    assert.match(envExample, /^OPENAI_API_KEY=$/m, "no other key gains a value");
+  });
 
   const zipPath = "/pilot/relationship-inbox-os-student-latest.zip";
   const manifestPath = "/pilot/latest.json";

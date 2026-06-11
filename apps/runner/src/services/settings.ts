@@ -2,7 +2,17 @@ import type { AppSettings, PlatformName, SelectorOverrideStore, SelectorRegistry
 import { defaultSettings } from "@inbox-os/core";
 import { safeJsonParse } from "../utils/json";
 import { prisma } from "../db";
-import type { AiHelpLevel, DemoSeedManifest, OperatorProfile, ReplyStyle, SettingsStore } from "../types/runtime";
+import type {
+  AckTemplates,
+  AiHelpLevel,
+  DemoSeedManifest,
+  FocusAudience,
+  FocusSettings,
+  FocusWindowState,
+  OperatorProfile,
+  ReplyStyle,
+  SettingsStore
+} from "../types/runtime";
 
 const APP_SETTINGS_KEY = "app_settings";
 const SELECTOR_OVERRIDES_KEY = "selector_overrides";
@@ -14,10 +24,38 @@ const OPERATOR_PROFILE_KEY = "operator_profile_v1";
 
 const REPLY_STYLES: ReplyStyle[] = ["warm", "direct", "casual", "thoughtful", "concise"];
 const AI_HELP_LEVELS: AiHelpLevel[] = ["memory_only", "writing_support", "full_drafts"];
+const FOCUS_AUDIENCES: FocusAudience[] = ["favourites", "all_personal"];
 
 // Conservative default: full AI reply drafting is OFF until the operator
 // opts in. Summaries / open loops / "shorten" + "warmer" still work.
 const DEFAULT_AI_HELP_LEVEL: AiHelpLevel = "writing_support";
+
+// Focus Reply Buffer: the operator's two default acknowledgement notes, in
+// plain ASCII (no em/en dashes — the release no-ui-dashes gate). Only [Name]
+// / [until] / [reason] are ever substituted; the words stay the operator's.
+const DEFAULT_ACK_TEMPLATES: AckTemplates = {
+  close:
+    "Yo [Name], I'm locked in till [until] but I've seen this, I'll reply properly after, call me if it's urgent.",
+  professional:
+    "Hey [Name], I'm in a focused work block till [until] but I've seen this, I'll come back to it properly after."
+};
+
+const emptyFocusWindow: FocusWindowState = {
+  active: false,
+  startedAt: "",
+  endsAt: "",
+  reason: "",
+  note: "",
+  audience: "favourites",
+  windowId: "",
+  ackedPersonIds: []
+};
+
+const defaultFocusSettings: FocusSettings = {
+  reasonLabel: true,
+  oneNotePerPerson: true,
+  audience: "favourites"
+};
 
 const emptyOperatorProfile: OperatorProfile = {
   displayName: "",
@@ -27,7 +65,10 @@ const emptyOperatorProfile: OperatorProfile = {
   avoidedPhrases: "",
   preferredStyle: "",
   aiHelpLevel: DEFAULT_AI_HELP_LEVEL,
-  setupCompletedAt: ""
+  setupCompletedAt: "",
+  focusWindow: { ...emptyFocusWindow, ackedPersonIds: [] },
+  ackTemplates: { ...DEFAULT_ACK_TEMPLATES },
+  focusSettings: { ...defaultFocusSettings }
 };
 
 function asString(value: unknown): string {
@@ -44,6 +85,52 @@ function asAiHelpLevel(value: unknown): AiHelpLevel {
   return typeof value === "string" && (AI_HELP_LEVELS as string[]).includes(value)
     ? (value as AiHelpLevel)
     : DEFAULT_AI_HELP_LEVEL;
+}
+
+function asBoolean(value: unknown, fallback: boolean): boolean {
+  return typeof value === "boolean" ? value : fallback;
+}
+
+function asFocusAudience(value: unknown): FocusAudience {
+  return typeof value === "string" && (FOCUS_AUDIENCES as string[]).includes(value)
+    ? (value as FocusAudience)
+    : "favourites";
+}
+
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function asFocusWindow(value: unknown): FocusWindowState {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    active: asBoolean(raw.active, false),
+    startedAt: asString(raw.startedAt),
+    endsAt: asString(raw.endsAt),
+    reason: asString(raw.reason),
+    note: asString(raw.note),
+    audience: asFocusAudience(raw.audience),
+    windowId: asString(raw.windowId),
+    ackedPersonIds: asStringArray(raw.ackedPersonIds)
+  };
+}
+
+function asAckTemplates(value: unknown): AckTemplates {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    close: typeof raw.close === "string" ? raw.close : DEFAULT_ACK_TEMPLATES.close,
+    professional:
+      typeof raw.professional === "string" ? raw.professional : DEFAULT_ACK_TEMPLATES.professional
+  };
+}
+
+function asFocusSettings(value: unknown): FocusSettings {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    reasonLabel: asBoolean(raw.reasonLabel, defaultFocusSettings.reasonLabel),
+    oneNotePerPerson: asBoolean(raw.oneNotePerPerson, defaultFocusSettings.oneNotePerPerson),
+    audience: asFocusAudience(raw.audience)
+  };
 }
 
 function cloneSettings(settings: AppSettings): AppSettings {
@@ -226,7 +313,10 @@ export function createSettingsStore(): SettingsStore {
         avoidedPhrases: asString(parsed.avoidedPhrases),
         preferredStyle: asReplyStyle(parsed.preferredStyle),
         aiHelpLevel: asAiHelpLevel(parsed.aiHelpLevel),
-        setupCompletedAt: asString(parsed.setupCompletedAt)
+        setupCompletedAt: asString(parsed.setupCompletedAt),
+        focusWindow: asFocusWindow(parsed.focusWindow),
+        ackTemplates: asAckTemplates(parsed.ackTemplates),
+        focusSettings: asFocusSettings(parsed.focusSettings)
       };
     } catch {
       return { ...emptyOperatorProfile };
@@ -252,7 +342,17 @@ export function createSettingsStore(): SettingsStore {
       setupCompletedAt:
         typeof partial.setupCompletedAt === "string"
           ? partial.setupCompletedAt
-          : current.setupCompletedAt
+          : current.setupCompletedAt,
+      focusWindow:
+        partial.focusWindow !== undefined ? asFocusWindow(partial.focusWindow) : current.focusWindow,
+      ackTemplates:
+        partial.ackTemplates !== undefined
+          ? asAckTemplates(partial.ackTemplates)
+          : current.ackTemplates,
+      focusSettings:
+        partial.focusSettings !== undefined
+          ? asFocusSettings(partial.focusSettings)
+          : current.focusSettings
     };
     await prisma.setting.upsert({
       where: { key: OPERATOR_PROFILE_KEY },

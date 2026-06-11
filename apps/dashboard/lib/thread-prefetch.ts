@@ -28,8 +28,18 @@ export function prefetchThreadData(threadId: string): void {
   timer = setTimeout(() => {
     timer = null;
     pendingId = null;
-    warmApiGet(`/runner/data/thread/${threadId}`, { ttlMs: 5000 });
+    prefetchThreadDataNow(threadId);
   }, 80);
+}
+
+// Immediate (undebounced) warm - for moments where the navigation is already
+// certain or imminent: pointerdown on a row (fires ~100ms before the click
+// completes, so the fetch races the route transition instead of starting
+// after it) and the Today hero (the single most likely next open, also
+// reachable via keyboard where hover never fires).
+export function prefetchThreadDataNow(threadId: string): void {
+  if (!threadId) return;
+  warmApiGet(`/runner/data/thread/${threadId}`, { ttlMs: 5000 });
 }
 
 // Cancel the pending prefetch, but only when it belongs to `id`. Passing the

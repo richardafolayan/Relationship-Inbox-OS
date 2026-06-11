@@ -43,6 +43,7 @@ import {
   type RunLogger
 } from "../services/run-logger.js";
 import { parseAllowedProfileUrl } from "../services/profile-url-policy.js";
+import { revealBrowserWindow } from "../services/runner-window.js";
 import {
   buildTemporaryCandidateId,
   normalizeCanonicalLinkedInThreadId
@@ -9984,7 +9985,10 @@ export class LinkedInAdapter implements PlatformAdapter {
     return this.runWithPlatformLease(async () => {
       const selectors = await this.deps.resolveSelectors();
       const page = await this.getPage();
-      await page.bringToFront();
+      // Operator-initiated: bring the (possibly background-launched, hence
+      // minimized/off-screen) window fully on-screen and to the front. A bare
+      // bringToFront would raise the tab but leave a minimized OS window.
+      await revealBrowserWindow(page);
       await this.openThreadAndWaitForActivation(page, selectors, thread);
     });
   }
@@ -10002,7 +10006,9 @@ export class LinkedInAdapter implements PlatformAdapter {
     const safeUrl = parseAllowedProfileUrl(url, this.platform);
     return this.runWithPlatformLease(async () => {
       const page = await this.getPage();
-      await page.bringToFront();
+      // Operator clicked "open profile" - surface the runner's Chrome window
+      // (un-minimize + on-screen + front), not just raise the tab.
+      await revealBrowserWindow(page);
       await this.tracedGoto(page, safeUrl, {
         stage: "open_profile",
         note: displayName ? `open_profile:${displayName}` : "open_profile"

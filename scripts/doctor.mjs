@@ -212,7 +212,7 @@ async function checkDashboard() {
     add(PASS, "Dashboard", `Responding on port ${DASHBOARD_PORT}.`);
   } else {
     add(WARN, "Dashboard", `Nothing on port ${DASHBOARD_PORT}.`,
-      `Start the app: cd "${APP_DIR}" && npm run dev`);
+      `Start the app: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
@@ -225,7 +225,7 @@ async function checkRunner() {
       "The runner is starting or unhealthy — wait a moment, then reload the app.");
   } else {
     add(WARN, "Runner", `Nothing on port ${RUNNER_PORT}.`,
-      `Start the app: cd "${APP_DIR}" && npm run dev`);
+      `Start the app: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 

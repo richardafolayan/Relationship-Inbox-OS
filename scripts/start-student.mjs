@@ -11,9 +11,10 @@
 // prints plain-English status. Stop the app with Ctrl+C.)
 
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { reconcileEnvWithExample } from "./lib/release-manifest.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DASHBOARD_PORT = process.env.DASHBOARD_PORT || "3100";
@@ -103,12 +104,45 @@ async function applyPendingUpdate() {
   );
 }
 
+// An update keeps the existing .env untouched, so config that ships in a newer
+// .env.example (the update feed link, the feedback token, the version stamp)
+// would never reach an already-installed pilot. Heal that on every launch:
+// fill blank/missing distribution keys and keep the version stamp current —
+// never touching values the pilot set themselves. Runs AFTER a staged update
+// applies so it reads the .env.example that arrived with the new build.
+function reconcileEnvFile() {
+  const envPath = join(APP_DIR, ".env");
+  const examplePath = join(APP_DIR, ".env.example");
+  if (!existsSync(envPath) || !existsSync(examplePath)) return;
+  try {
+    const envText = readFileSync(envPath, "utf8");
+    const { text, filled, synced } = reconcileEnvWithExample(
+      envText,
+      readFileSync(examplePath, "utf8")
+    );
+    if (text === envText) return;
+    writeFileSync(envPath, text);
+    const keys = [...filled, ...synced];
+    if (keys.length) say(`  Updated your settings file (.env) with: ${keys.join(", ")}`);
+  } catch {
+    // Never block a launch on settings reconciliation.
+  }
+}
+
 await applyPendingUpdate();
+reconcileEnvFile();
 
 say(`\n${C.bold}Starting Relationship Inbox OS…${C.reset}`);
-say(`${C.dim}(first start takes a minute)${C.reset}`);
+say(`${C.dim}(the first start after an update takes a minute)${C.reset}`);
 
-const dev = spawn("npm", ["run", "dev"], { cwd: APP_DIR, stdio: "inherit" });
+// start-app.mjs prepares the app (database client, schema, optimised
+// production build of the dashboard - each step skipped when nothing
+// changed) and then runs the runner + dashboard. The production build is
+// what makes pages precompiled, so the app opens and navigates instantly.
+const dev = spawn(process.execPath, [resolve(APP_DIR, "scripts/start-app.mjs")], {
+  cwd: APP_DIR,
+  stdio: "inherit"
+});
 
 dev.on("error", (err) => {
   say(`Could not start the app: ${err.message}`);

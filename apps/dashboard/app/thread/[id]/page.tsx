@@ -21,7 +21,8 @@ import {
   X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
-import { apiGet, apiPost, runAction } from "@/lib/api";
+import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
@@ -61,6 +62,7 @@ const ProfileDrawer = dynamic(
   { ssr: false }
 );
 import { DegradedBanner } from "@/components/common/degraded-banner";
+import { FocusThreadStrip } from "@/components/common/focus/focus-thread-strip";
 import { autocorrectAtCaret } from "@/lib/autocorrect";
 import { blobToWhisperWav } from "@/lib/dictation-audio";
 import {
@@ -416,7 +418,13 @@ export default function ThreadPage() {
   const router = useRouter();
   const threadId = params.id;
 
-  const [thread, setThread] = useState<ThreadResponse | null>(null);
+  // Seed from the shared client cache so a prefetched (hover/pointerdown) or
+  // previously-seen thread paints the full conversation on the very first
+  // render - no "Loading..." frame. refresh() still runs on mount and
+  // revalidates, so this is never more than stale-while-revalidate.
+  const [thread, setThread] = useState<ThreadResponse | null>(
+    () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
+  );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
   const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
@@ -458,7 +466,11 @@ export default function ThreadPage() {
     setFocusTrigger((n) => n + 1);
   }, []);
   const [composer, setComposer] = useState("");
-  const [loading, setLoading] = useState(true);
+  // False from the start when the cache seeded `thread` above - the
+  // conversation is already on screen, the mount fetch is a revalidation.
+  const [loading, setLoading] = useState(
+    () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) === undefined
+  );
   const [loadingOlderMessages, setLoadingOlderMessages] = useState(false);
   const [sending, setSending] = useState(false);
   // Synchronous re-entrancy guard. The `sending` state lags a render, so a
@@ -2472,7 +2484,7 @@ export default function ThreadPage() {
     return (
       <div className="px-12 pt-14">
         {loading ? (
-          <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+          <BrandLoader />
         ) : (
           <div className="max-w-[440px]">
             <p className="m-0 mb-2 font-display text-[18px] font-semibold text-ink">
@@ -3760,6 +3772,10 @@ export default function ThreadPage() {
                 </button>
               </div>
             ) : null}
+            {/* Focus Reply Buffer: when this thread arrived during the active
+                window, a one-tap acknowledgement sits above the composer. The
+                proper reply still gets written in the composer below. */}
+            <FocusThreadStrip thread={thread} onSent={refresh} />
             <div
               data-thread-composer="true"
               data-demo-target="composer-input"

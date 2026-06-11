@@ -121,7 +121,6 @@ export interface InboxResponse {
   summary: {
     unreadThreads: number;
     atRiskThreads: number;
-    averageReplyTimeHours: number | null;
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
@@ -236,6 +235,48 @@ export type ReplyStyle = "warm" | "direct" | "casual" | "thoughtful" | "concise"
 export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
 
 /**
+ * Who a Focus Reply Buffer window's acknowledgements cover. "favourites" is
+ * the safe default (starred contacts only); "all_personal" widens to saved
+ * personal contacts but never to unknown numbers, spam, or business threads.
+ */
+export type FocusAudience = "favourites" | "all_personal";
+
+/** Note tier chosen per contact: casual "close" vs calmer "professional". */
+export type FocusTier = "close" | "professional";
+
+/**
+ * Focus Reply Buffer state — one "heads-down" window at a time, persisted in
+ * the operator profile JSON so Today, Inbox, Thread and Settings (and a
+ * reload) all read the same window. Mirrors runner-side `FocusWindowState`.
+ */
+export interface FocusWindowState {
+  active: boolean;
+  /** ISO start; covered inbound newer than this is "arrived during focus". */
+  startedAt: string;
+  /** ISO end the operator chose; fills the [until] token. */
+  endsAt: string;
+  reason: string;
+  note: string;
+  audience: FocusAudience;
+  windowId: string;
+  /** Person ids already acknowledged this window (one note per person). */
+  ackedPersonIds: string[];
+}
+
+/** The operator's two acknowledgement note templates (their own words). */
+export interface AckTemplates {
+  close: string;
+  professional: string;
+}
+
+/** Focus Reply Buffer preferences (not the live window). */
+export interface FocusSettings {
+  reasonLabel: boolean;
+  oneNotePerPerson: boolean;
+  audience: FocusAudience;
+}
+
+/**
  * The user's voice + identity profile used by the AI prompts and the Today
  * greeting. Matches runner-side `OperatorProfile`. String fields are stored
  * as plain strings; "" means "not set" (no opinion injected into prompts).
@@ -249,6 +290,14 @@ export interface OperatorProfile {
   preferredStyle: ReplyStyle | "";
   aiHelpLevel: AiHelpLevel;
   setupCompletedAt: string;
+  /**
+   * Focus Reply Buffer fields. Optional on the dashboard mirror so a profile
+   * payload from a runner build that predates the feature still parses; the
+   * focus helpers supply defaults when these are absent.
+   */
+  focusWindow?: FocusWindowState;
+  ackTemplates?: AckTemplates;
+  focusSettings?: FocusSettings;
 }
 
 export interface PlatformCard {

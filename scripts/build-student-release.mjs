@@ -50,7 +50,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  bakeFeedbackEnv, findEnvExampleSecretLeaks, findForbiddenEntries, sha256File
+  bakePilotEnv, findEnvExampleSecretLeaks, findForbiddenEntries, sha256File
 } from "./lib/release-manifest.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,19 +80,20 @@ function loadReleaseEnv() {
   return env;
 }
 
-// Bake the pilot-feedback token into the staged .env.example (the installer
-// copies it to .env), then hard-fail if any OTHER secret rode along. Uses the
-// pure helpers from release-manifest.mjs so the logic is unit-tested.
+// Bake the pilot distribution config (update feed link + feedback token) into
+// the staged .env.example (the installer copies it to .env), then hard-fail
+// if any OTHER secret rode along. Uses the pure helpers from
+// release-manifest.mjs so the logic is unit-tested.
 function bakeAndGuardEnvExample(appDir) {
   const file = join(appDir, ".env.example");
   if (!existsSync(file)) return [];
-  const { text, injected } = bakeFeedbackEnv(readFileSync(file, "utf8"), loadReleaseEnv());
+  const { text, injected } = bakePilotEnv(readFileSync(file, "utf8"), loadReleaseEnv());
   if (injected.length) writeFileSync(file, text);
   const leaks = findEnvExampleSecretLeaks(readFileSync(file, "utf8"));
   if (leaks.length) {
     die(
       "Refusing to build — .env.example carries non-blank secret values that aren't the\n" +
-      `   allowed pilot-feedback token:\n   ${leaks.join("\n   ")}`
+      `   allowed pilot distribution config:\n   ${leaks.join("\n   ")}`
     );
   }
   return injected;
@@ -241,7 +242,7 @@ async function build() {
     // release time), then hard-fail if any OTHER secret value rode along.
     const injected = bakeAndGuardEnvExample(appDir);
     if (injected.length) {
-      process.stdout.write(`  Baked pilot-feedback config into .env.example (${injected.join(", ")}).\n`);
+      process.stdout.write(`  Baked pilot config into .env.example (${injected.join(", ")}).\n`);
     } else {
       process.stdout.write(`  ! No pilot-feedback config provided — in-app feedback will be OFF for pilots.\n`);
     }

@@ -4,8 +4,8 @@ import { execFileSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  bakeFeedbackEnv, compareVersions, findEnvExampleSecretLeaks, findForbiddenEntries,
-  isNewer, parseVersion, sha256Buffer, validateLatestJson
+  bakePilotEnv, compareVersions, findEnvExampleSecretLeaks, findForbiddenEntries,
+  isNewer, parseVersion, reconcileEnvWithExample, sha256Buffer, validateLatestJson
 } from "../scripts/lib/release-manifest.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -143,42 +143,57 @@ test("no tracked file in the repo would leak into a release", () => {
   assert.deepEqual(leaked, [], `tracked secrets would leak: ${leaked.join(", ")}`);
 });
 
-// ---- pilot-feedback token baking + leak guard ----------------------------
+// ---- pilot distribution config baking + leak guard ------------------------
 
 const SAMPLE_ENV = [
   "OPENAI_API_KEY=",
   "AI_PROVIDER=openai",
   "GEMINI_MODEL=gemma-4-31b-it",
+  "RIOS_UPDATE_FEED_URL=",
   "PILOT_FEEDBACK_WEBHOOK_URL=",
   "PILOT_FEEDBACK_SECRET=",
   "PILOT_FEEDBACK_STATUS_URL="
 ].join("\n");
 
-test("bakeFeedbackEnv fills the PILOT_FEEDBACK_* lines from the source env", () => {
-  const { text, injected } = bakeFeedbackEnv(SAMPLE_ENV, {
+test("bakePilotEnv fills the distribution lines from the source env", () => {
+  const { text, injected } = bakePilotEnv(SAMPLE_ENV, {
+    RIOS_UPDATE_FEED_URL: "https://www.dropbox.com/scl/fi/f/latest.json?rlkey=k&raw=1",
     PILOT_FEEDBACK_WEBHOOK_URL: "https://example.test/exec",
     PILOT_FEEDBACK_SECRET: "shh-123",
     OPENAI_API_KEY: "sk-should-not-be-baked"
   });
+  assert.match(text, /^RIOS_UPDATE_FEED_URL=https:\/\/www\.dropbox\.com\/scl\/fi\/f\/latest\.json\?rlkey=k&raw=1$/m);
   assert.match(text, /^PILOT_FEEDBACK_WEBHOOK_URL=https:\/\/example\.test\/exec$/m);
   assert.match(text, /^PILOT_FEEDBACK_SECRET=shh-123$/m);
   assert.match(text, /^PILOT_FEEDBACK_STATUS_URL=$/m, "unset key stays blank");
-  assert.match(text, /^OPENAI_API_KEY=$/m, "only PILOT_FEEDBACK_* are ever baked");
-  assert.deepEqual(injected, ["PILOT_FEEDBACK_WEBHOOK_URL", "PILOT_FEEDBACK_SECRET"]);
+  assert.match(text, /^OPENAI_API_KEY=$/m, "only distribution keys are ever baked");
+  assert.deepEqual(injected, [
+    "RIOS_UPDATE_FEED_URL", "PILOT_FEEDBACK_WEBHOOK_URL", "PILOT_FEEDBACK_SECRET"
+  ]);
 });
 
-test("bakeFeedbackEnv with no feedback config injects nothing", () => {
-  const { text, injected } = bakeFeedbackEnv(SAMPLE_ENV, { OPENAI_API_KEY: "sk-x" });
+test("bakePilotEnv with no distribution config injects nothing", () => {
+  const { text, injected } = bakePilotEnv(SAMPLE_ENV, { OPENAI_API_KEY: "sk-x" });
   assert.equal(injected.length, 0);
   assert.equal(text, SAMPLE_ENV);
 });
 
-test("findEnvExampleSecretLeaks passes a baked feedback token but catches real secrets", () => {
-  const baked = bakeFeedbackEnv(SAMPLE_ENV, {
+test("bakePilotEnv appends a missing feed-url line", () => {
+  const noFeedLine = "AI_PROVIDER=openai";
+  const { text, injected } = bakePilotEnv(noFeedLine, {
+    RIOS_UPDATE_FEED_URL: "https://example.test/latest.json"
+  });
+  assert.match(text, /^RIOS_UPDATE_FEED_URL=https:\/\/example\.test\/latest\.json$/m);
+  assert.deepEqual(injected, ["RIOS_UPDATE_FEED_URL"]);
+});
+
+test("findEnvExampleSecretLeaks passes baked distribution config but catches real secrets", () => {
+  const baked = bakePilotEnv(SAMPLE_ENV, {
+    RIOS_UPDATE_FEED_URL: "https://www.dropbox.com/scl/fi/f/latest.json?rlkey=k&raw=1",
     PILOT_FEEDBACK_WEBHOOK_URL: "https://example.test/exec",
     PILOT_FEEDBACK_SECRET: "shh-123"
   }).text;
-  assert.deepEqual(findEnvExampleSecretLeaks(baked), [], "feedback token alone is allowed");
+  assert.deepEqual(findEnvExampleSecretLeaks(baked), [], "distribution config alone is allowed");
 
   const leaked = baked + "\nOPENAI_API_KEY=sk-real\nGITHUB_TOKEN=ghp_real\nDROPBOX_REFRESH_TOKEN=abc";
   assert.deepEqual(
@@ -190,4 +205,93 @@ test("findEnvExampleSecretLeaks passes a baked feedback token but catches real s
 test("findEnvExampleSecretLeaks ignores non-secret config keys", () => {
   const cfg = "AI_PROVIDER=openai\nGEMINI_BASE_URL=https://x\nGEMINI_MODEL=gemma\nOPENAI_MODEL=gpt-5-nano\nZ_AI_BASE_URL=https://y";
   assert.deepEqual(findEnvExampleSecretLeaks(cfg), []);
+});
+
+// ---- launch-time .env reconcile -------------------------------------------
+
+const EXAMPLE_WITH_CONFIG = [
+  "# template",
+  "AI_PROVIDER=openai",
+  "RIOS_UPDATE_FEED_URL=https://example.test/latest.json?raw=1",
+  "PILOT_FEEDBACK_WEBHOOK_URL=https://example.test/exec",
+  "PILOT_FEEDBACK_SECRET=shh-123",
+  "PILOT_FEEDBACK_STATUS_URL=https://example.test/status",
+  "NEXT_PUBLIC_APP_VERSION=0.1.9"
+].join("\n");
+
+test("reconcile fills blank and missing distribution keys from the example", () => {
+  const env = [
+    "OPENAI_API_KEY=sk-mine",
+    "RIOS_UPDATE_FEED_URL=",
+    "PILOT_FEEDBACK_WEBHOOK_URL="
+    // SECRET + STATUS_URL lines missing entirely
+  ].join("\n");
+  const { text, filled, synced } = reconcileEnvWithExample(env, EXAMPLE_WITH_CONFIG);
+  assert.match(text, /^RIOS_UPDATE_FEED_URL=https:\/\/example\.test\/latest\.json\?raw=1$/m);
+  assert.match(text, /^PILOT_FEEDBACK_WEBHOOK_URL=https:\/\/example\.test\/exec$/m);
+  assert.match(text, /^PILOT_FEEDBACK_SECRET=shh-123$/m);
+  assert.match(text, /^PILOT_FEEDBACK_STATUS_URL=https:\/\/example\.test\/status$/m);
+  assert.match(text, /^OPENAI_API_KEY=sk-mine$/m, "unrelated keys untouched");
+  assert.deepEqual(filled, [
+    "RIOS_UPDATE_FEED_URL", "PILOT_FEEDBACK_WEBHOOK_URL",
+    "PILOT_FEEDBACK_SECRET", "PILOT_FEEDBACK_STATUS_URL"
+  ]);
+  assert.deepEqual(synced, ["NEXT_PUBLIC_APP_VERSION"], "missing version stamp is added too");
+});
+
+test("reconcile never overwrites a non-blank distribution value", () => {
+  const env = "RIOS_UPDATE_FEED_URL=https://my-own-mirror.test/latest.json\nNEXT_PUBLIC_APP_VERSION=0.1.9";
+  const { text, filled, synced } = reconcileEnvWithExample(env, EXAMPLE_WITH_CONFIG);
+  assert.match(text, /^RIOS_UPDATE_FEED_URL=https:\/\/my-own-mirror\.test\/latest\.json$/m);
+  assert.deepEqual(filled, ["PILOT_FEEDBACK_WEBHOOK_URL", "PILOT_FEEDBACK_SECRET", "PILOT_FEEDBACK_STATUS_URL"]);
+  assert.deepEqual(synced, []);
+});
+
+test("reconcile keeps the version stamp equal to the example", () => {
+  const env = "NEXT_PUBLIC_APP_VERSION=0.1.7\nRIOS_UPDATE_FEED_URL=https://x.test/l.json";
+  const { text, synced } = reconcileEnvWithExample(env, EXAMPLE_WITH_CONFIG);
+  assert.match(text, /^NEXT_PUBLIC_APP_VERSION=0\.1\.9$/m);
+  assert.deepEqual(synced, ["NEXT_PUBLIC_APP_VERSION"]);
+});
+
+test("reconcile is a no-op when everything already matches", () => {
+  const env = [
+    "RIOS_UPDATE_FEED_URL=https://example.test/latest.json?raw=1",
+    "PILOT_FEEDBACK_WEBHOOK_URL=https://example.test/exec",
+    "PILOT_FEEDBACK_SECRET=shh-123",
+    "PILOT_FEEDBACK_STATUS_URL=https://example.test/status",
+    "NEXT_PUBLIC_APP_VERSION=0.1.9",
+    "# a comment",
+    "OPENAI_API_KEY=sk-mine"
+  ].join("\n");
+  const { text, filled, synced } = reconcileEnvWithExample(env, EXAMPLE_WITH_CONFIG);
+  assert.equal(text, env, "byte-identical when nothing to do");
+  assert.deepEqual(filled, []);
+  assert.deepEqual(synced, []);
+});
+
+test("reconcile ignores keys the example leaves blank and never copies other keys", () => {
+  const example = "RIOS_UPDATE_FEED_URL=\nOPENAI_API_KEY=sk-template\nAI_PROVIDER=glm";
+  const env = "RIOS_UPDATE_FEED_URL=\nOPENAI_API_KEY=\nAI_PROVIDER=openai";
+  const { text, filled, synced } = reconcileEnvWithExample(env, example);
+  assert.equal(text, env, "blank example value fills nothing; non-allowlisted keys never copied");
+  assert.deepEqual(filled, []);
+  assert.deepEqual(synced, []);
+});
+
+test("reconcile preserves comments, ordering, and unrelated lines", () => {
+  const env = [
+    "# my notes",
+    "OPENAI_API_KEY=sk-mine",
+    "RIOS_UPDATE_FEED_URL=",
+    "# more notes",
+    "BROWSER_PROFILE_MODE=personal"
+  ].join("\n");
+  const { text } = reconcileEnvWithExample(env, EXAMPLE_WITH_CONFIG);
+  const lines = text.split("\n");
+  assert.equal(lines[0], "# my notes");
+  assert.equal(lines[1], "OPENAI_API_KEY=sk-mine");
+  assert.equal(lines[2], "RIOS_UPDATE_FEED_URL=https://example.test/latest.json?raw=1");
+  assert.equal(lines[3], "# more notes");
+  assert.equal(lines[4], "BROWSER_PROFILE_MODE=personal");
 });

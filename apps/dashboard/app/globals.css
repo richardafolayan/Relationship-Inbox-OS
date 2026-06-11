@@ -125,10 +125,27 @@ button:active { transform: scale(0.98); }
 }
 .animate-pulse-dot { animation: pulseDot 1200ms ease-in-out infinite; }
 
+/* Branded loader reveal: stay invisible for the first beat so paints that
+ * resolve from cache never flash a loader, then fade in calmly for waits
+ * that are actually long enough to notice. */
+@keyframes brandLoaderReveal {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+.brand-loader-reveal {
+  opacity: 0;
+  animation: brandLoaderReveal 200ms ease-out 150ms forwards;
+}
+
 @media (prefers-reduced-motion: reduce) {
   * {
     animation: none !important;
     transition: none !important;
     scroll-behavior: auto !important;
+  }
+  /* animation:none would leave the loader stuck at opacity 0 - make it
+   * statically visible instead (the pulse dots simply stop pulsing). */
+  .brand-loader-reveal {
+    opacity: 1;
   }
 }
