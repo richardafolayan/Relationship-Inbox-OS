@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
+import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
@@ -512,10 +513,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className="grid h-screen overflow-hidden bg-paper text-ink"
+      // Single column below md (the sidebar hides; the MobileDock takes
+      // over). The sidebar width lives in a CSS var so the inline style
+      // can't override the phone layout — a plain gridTemplateColumns
+      // style would keep reserving the sidebar track at every width.
+      className="grid h-app-screen grid-cols-1 overflow-hidden bg-paper text-ink md:[grid-template-columns:var(--shell-cols)]"
       style={{
-        gridTemplateColumns: sidebarCollapsed ? "56px 1fr" : "200px 1fr"
-      }}
+        "--shell-cols": sidebarCollapsed ? "56px 1fr" : "200px 1fr"
+      } as CSSProperties}
     >
       <Sidebar
         health={health}
@@ -525,11 +530,12 @@ export function AppShell({ children }: { children: ReactNode }) {
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
       />
-      <div className="flex h-screen min-h-0 flex-col">
+      <div className="flex h-app-screen min-h-0 flex-col">
         <FullDemoBanner />
         <TopStatus />
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
+      <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />

@@ -407,7 +407,10 @@ function SettingRow({
           : undefined
       }
       className={cn(
-        "grid grid-cols-[1fr_auto] items-center gap-6 border-t border-hairline px-1 py-[16px]",
+        // Phone: control drops under the description (the trailing column
+        // otherwise squeezes the copy to a word per line); sm+ keeps the
+        // two-column row.
+        "grid grid-cols-1 gap-3 border-t border-hairline px-1 py-[16px] sm:grid-cols-[1fr_auto] sm:items-center sm:gap-6",
         interactive
           ? "cursor-pointer rounded-[6px] transition-colors duration-calm hover:bg-paper-2/60 focus:bg-paper-2/60 focus:outline-none"
           : null
@@ -606,7 +609,7 @@ function OverdueDigestRow() {
   const desktopNotEnabled = permission !== "granted";
 
   return (
-    <div className="grid grid-cols-[1fr_auto] items-start gap-6 border-t border-hairline px-1 py-[16px]">
+    <div className="grid grid-cols-1 gap-3 border-t border-hairline px-1 py-[16px] sm:grid-cols-[1fr_auto] sm:items-start sm:gap-6">
       <div>
         <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">Overdue reply digest</p>
         <p

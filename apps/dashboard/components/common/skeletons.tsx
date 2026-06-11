@@ -17,7 +17,7 @@ function Bar({ className = "" }: { className?: string }) {
 export function ListPageSkeleton({ rows = 7 }: { rows?: number }) {
   return (
     <Canvas className="max-w-[1240px] pb-10">
-      <div className="-mx-12 mb-6 flex items-end justify-between px-12 pb-3 pt-6">
+      <div className="-mx-5 mb-6 flex items-end justify-between px-5 pb-3 pt-6 sm:-mx-8 sm:px-8 lg:-mx-12 lg:px-12">
         <div>
           <Bar className="h-7 w-44" />
           <Bar className="mt-3 h-3 w-72" />

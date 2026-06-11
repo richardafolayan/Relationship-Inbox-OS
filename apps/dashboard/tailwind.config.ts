@@ -8,6 +8,11 @@ const config: Config = {
   ],
   theme: {
     extend: {
+      screens: {
+        // Big-screen tier: canvases widen before the zoom layer in
+        // globals.css scales the whole UI (≥2200px).
+        "3xl": "1700px"
+      },
       colors: {
         paper: "var(--paper)",
         "paper-2": "var(--paper-2)",

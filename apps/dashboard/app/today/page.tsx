@@ -522,17 +522,20 @@ export default function TodayPage() {
   const allDone = rows.length === 0 && clearedTotal > 0;
 
   return (
-    <Canvas className="max-w-[1240px] pb-10" style={OXBLOOD_TODAY_VARS}>
-      <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+    <Canvas
+      className="max-w-[1240px] pb-[calc(96px+env(safe-area-inset-bottom))] md:pb-10 3xl:max-w-[1400px]"
+      style={OXBLOOD_TODAY_VARS}
+    >
+      <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
         <div className="min-w-0">
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
             {dayLabel}
           </p>
-          <h1 className="m-0 font-display text-[32px] font-semibold leading-[1.1] tracking-[-0.025em]">
+          <h1 className="m-0 font-display text-[26px] font-semibold leading-[1.1] tracking-[-0.025em] sm:text-[32px]">
             {greetingLine}
           </h1>
         </div>
-        <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">
+        <div className="shrink-0 font-mono text-[12px] text-ink-3 sm:text-right">
           <span>
             <strong className="font-medium text-ink">{rows.length}</strong> need you tonight
           </span>
@@ -597,7 +600,7 @@ export default function TodayPage() {
               ref={heroRef}
               data-testid="today-hero"
               data-demo-target="today-hero"
-              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-300 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-5 pb-[22px] pt-6 transition-opacity duration-300 sm:px-[30px] sm:pt-7 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               {/* The hero is no longer a white card — per the redesign it
