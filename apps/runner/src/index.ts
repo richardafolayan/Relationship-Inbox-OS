@@ -225,6 +225,32 @@ const eventBus = createEventBus();
 const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
 
+// ---------------------------------------------------------------------------
+// Version-gated response cache for the hottest polled endpoint.
+//
+// /data/inbox is polled every 8-10s by the app shell and the list pages, and
+// every poll re-does the full row load + shaping even when nothing changed.
+// The runner is the only writer of its SQLite DB, so it knows when data may
+// have changed: any runner event (scans, sends, reassess) and any mutating
+// HTTP request. Between those moments an identical poll is served from
+// memory. A short hard TTL keeps purely time-derived fields (risk recolour,
+// snooze expiry) honest even if some future write path forgets to signal.
+// ---------------------------------------------------------------------------
+const INBOX_CACHE_TTL_MS = 20_000;
+const inboxResponseCache = new Map<string, { expires: number; body: unknown }>();
+let dataVersion = 0;
+function bumpDataVersion(): void {
+  dataVersion += 1;
+  inboxResponseCache.clear();
+}
+eventBus.subscribe(() => bumpDataVersion());
+app.use((req, res, next) => {
+  if (req.method !== "GET") {
+    res.on("finish", bumpDataVersion);
+  }
+  next();
+});
+
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
   onConnectStep: async (input) => {
@@ -3786,20 +3812,22 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const view = typeof req.query.view === "string" ? req.query.view : undefined;
   const archivedView = view === "archived";
 
+  // Serve the last computed response while nothing has changed (see
+  // inboxResponseCache above). Polls land every few seconds from multiple
+  // components; between data changes they are byte-identical.
+  const cacheKey = req.originalUrl;
+  const cached = inboxResponseCache.get(cacheKey);
+  if (cached && Date.now() < cached.expires) {
+    res.json(cached.body);
+    return;
+  }
+  const versionAtStart = dataVersion;
+
   const today = new Date();
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  const [visibleRows, recentMessages, sentToday, scheduledSends] = await Promise.all([
+  const [visibleRows, sentToday, scheduledSends] = await Promise.all([
     loadVisibleThreadRows(archivedView ? { archived: true } : undefined),
-    // Pull all messages across the last 7 days in one query so we can
-    // compute averageReplyTimeHours from real inbound→outbound deltas
-    // rather than the hardcoded placeholder this used to return.
-    prisma.message.findMany({
-      where: { timestamp: { gte: sevenDaysAgo } },
-      select: { threadId: true, direction: true, timestamp: true },
-      orderBy: { timestamp: "asc" }
-    }),
     prisma.message.count({
       where: {
         direction: "OUT",
@@ -3813,37 +3841,6 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
       select: { threadId: true, scheduledFor: true }
     })
   ]);
-
-  // Walk messages per-thread, in chronological order. Every inbound is a
-  // candidate "ball in our court"; the next outbound after it (still
-  // inside the 7-day window) gives a real reply latency. Average across
-  // all such pairs. Null when nothing replied in the window — better than
-  // pretending with a placeholder.
-  const repliesByThread = new Map<string, { lastInbound: Date | null }>();
-  const replyLatenciesMs: number[] = [];
-  for (const msg of recentMessages) {
-    let state = repliesByThread.get(msg.threadId);
-    if (!state) {
-      state = { lastInbound: null };
-      repliesByThread.set(msg.threadId, state);
-    }
-    if (msg.direction === "IN") {
-      state.lastInbound = msg.timestamp;
-    } else if (msg.direction === "OUT" && state.lastInbound) {
-      const delta = msg.timestamp.getTime() - state.lastInbound.getTime();
-      if (delta >= 0) replyLatenciesMs.push(delta);
-      state.lastInbound = null;
-    }
-  }
-  const averageReplyTimeHours =
-    replyLatenciesMs.length > 0
-      ? Math.round(
-          (replyLatenciesMs.reduce((sum, ms) => sum + ms, 0) /
-            replyLatenciesMs.length /
-            3_600_000) *
-            10
-        ) / 10
-      : null;
 
   // Earliest SCHEDULED scheduledFor per thread — Today uses this to skip
   // threads the operator has already queued a reply for.
@@ -3927,12 +3924,20 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const summary = {
     unreadThreads: rows.filter((row) => row.unreadCount > 0).length,
     atRiskThreads: rows.filter((row) => row.riskLevel !== "GREEN").length,
-    averageReplyTimeHours,
     oldestPendingInboundAt: oldestPending?.lastInboundAt ?? null,
     messagesSentToday: sentToday
   };
 
-  res.json({ rows, summary });
+  const body = { rows, summary };
+  // Only cache if no write/event landed while we were computing — otherwise
+  // this response may already be missing that change.
+  if (dataVersion === versionAtStart) {
+    if (inboxResponseCache.size > 50) {
+      inboxResponseCache.clear();
+    }
+    inboxResponseCache.set(cacheKey, { expires: Date.now() + INBOX_CACHE_TTL_MS, body });
+  }
+  res.json(body);
 }));
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {

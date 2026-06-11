@@ -347,6 +347,12 @@ model Thread {
 
   @@unique([platform, platformThreadId])
   @@index([platform, riskLevel, needsReply, lastInboundAt])
+  // Per-person lookups sit on hot paths: iMessage sibling discovery runs on
+  // every thread open / mark-done / snooze, and relationship memory loads a
+  // person's other threads on every thread open. A person has only a handful
+  // of threads, so leading with personId turns both from platform-wide scans
+  // into a few-row index hit.
+  @@index([personId, lastMessageAt])
   @@map("threads")
 }
 
