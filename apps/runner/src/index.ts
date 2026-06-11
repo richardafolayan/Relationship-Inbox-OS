@@ -1514,6 +1514,14 @@ app.get("/events", (req, res) => {
   const sinceEventId = resolveSseResumeCursor(req.query.sinceEventId, req.header("last-event-id"));
   const oldest = eventBus.oldestEventId();
 
+  // Immediate comment frame: EventSource fires `open` only once response
+  // bytes arrive, and the dashboard's /events-proxy (and `next start`'s
+  // streaming layer) forwards headers only with the first body byte. With a
+  // quiet runner the first byte used to be the 15s keepalive, so a freshly
+  // opened app could sit "connecting" for up to 15s. A comment frame is
+  // ignored by EventSource but opens the pipe instantly.
+  res.write(": connected\n\n");
+
   // Emit every event as the default ("message") SSE type. EventSource
   // only delivers an event to `source.onmessage` when no `event:` field
   // is set; named events fire only on per-name `addEventListener`
@@ -4487,19 +4495,21 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     suggestedRepliesStatus = "generating";
   }
 
-  // Bound the receipts lookup to a recent window. Without it this runs a
-  // `detailsJson LIKE '%threadId%'` scan over the ENTIRE audit_logs table
-  // (hundreds of thousands of telemetry rows) on EVERY thread open — the
-  // dominant chunk of "click a chat and it takes forever". The timestamp
-  // floor lets SQLite use the leading-timestamp index (@@index([timestamp,
-  // platform, action, status])) to range-scan only recent rows; a thread's
-  // own receipts are recent, so nothing visible is lost.
+  // Per-thread receipts via the indexed AuditLog.threadId column (mirrored
+  // from details.threadId at write time). The old `detailsJson LIKE
+  // '%threadId%'` arm had to walk the whole recent audit window per open -
+  // on an active runner that's the entire table (~25k rows/day), and a
+  // thread with sparse receipts cost up to ~800ms PER OPEN while a busy one
+  // cost 10ms. The equality arm is single-digit ms regardless. Rows written
+  // before the column existed don't match and quietly age out of the
+  // drawer; the timestamp floor keeps the selector-health arm on the
+  // leading-timestamp index.
   const receiptsSince = new Date(Date.now() - RECEIPTS_LOOKBACK_MS);
   const receipts = await prisma.auditLog.findMany({
     where: {
       timestamp: { gte: receiptsSince },
       OR: [
-        { detailsJson: { contains: thread.id } },
+        { threadId: thread.id },
         { action: { in: ["SELECTOR_TEST", "SELECTOR_FAIL"] }, platform: thread.platform }
       ]
     },

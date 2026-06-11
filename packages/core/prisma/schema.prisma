@@ -546,8 +546,16 @@ model AuditLog {
   detailsJson    String?
   screenshotFile String?
   domDumpFile    String?
+  // Structured copy of details.threadId, extracted at write time. The
+  // thread page's receipts lookup used to LIKE-scan detailsJson across the
+  // whole recent audit table (~500k rows on an active runner, up to ~800ms
+  // per thread open when a thread's receipts were sparse); an indexed
+  // equality read is single-digit ms. Nullable: rows predating the column
+  // (and rows about no particular thread) simply don't match.
+  threadId       String?
 
   @@index([timestamp, platform, action, status])
+  @@index([threadId, timestamp])
   @@map("audit_logs")
 }
 
