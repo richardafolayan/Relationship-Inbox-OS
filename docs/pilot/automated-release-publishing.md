@@ -118,6 +118,15 @@ feed, and uploads the zip, `latest.json`, and checksum as build artefacts. A
 concurrency group serialises runs so two pushes can never overwrite Dropbox at
 once.
 
+The build also bakes the pilot distribution config into the shipped
+`.env.example`: `RIOS_UPDATE_FEED_URL` (so updates work out of the box; since
+0.1.9) and the `PILOT_FEEDBACK_*` token (so in-app feedback works; since
+0.1.7). Both come from the same secrets/`.env.release.local`; a content scan
+hard-fails the build if any other secret-like value lands in `.env.example`.
+On launch the start wrapper fills these keys into an existing install's
+`.env` when they are missing or blank, so already-installed pilots pick them
+up with their next update too.
+
 To ship a release: get a **version bump** onto `main` (pilots only see a change
 when the version changes). To re-publish or ship with custom release notes,
 run it manually: **Actions > Publish Student Release > Run workflow**.

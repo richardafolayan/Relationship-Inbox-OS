@@ -133,6 +133,22 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
       const after = readdirSync(work).filter((n) => n.startsWith(".rios-backup-")).length;
       assert.equal(after, before, "a no-op update should not create a backup");
     });
+
+    await t.test("apply refuses to touch a git checkout", async () => {
+      // Release zips never contain .git, so .git == a development checkout.
+      mkdirSync(join(appDir, ".git"), { recursive: true });
+      const { code, stderr } = await runUpdater([
+        "--apply", "--no-deps", "--dir", appDir, "--url", url("/latest.json")
+      ]);
+      assert.notEqual(code, 0, "updater should refuse a git checkout");
+      assert.match(stderr, /git/i);
+      assert.equal(
+        JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version,
+        "0.1.0",
+        "checkout was modified"
+      );
+      assert.ok(existsSync(join(appDir, ".git")), ".git went missing");
+    });
   } finally {
     await new Promise((r) => server.close(r));
     rmSync(work, { recursive: true, force: true });

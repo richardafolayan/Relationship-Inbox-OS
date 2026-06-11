@@ -120,8 +120,13 @@ The updater reads the feed URL from, in order:
 1. the `--url` flag, or
 2. the `RIOS_UPDATE_FEED_URL` environment variable.
 
-Nothing is hard-coded in the source. You give pilots the `raw=1` link to put
-in their `.env` as `RIOS_UPDATE_FEED_URL`, or they pass it with `--url`.
+Nothing is hard-coded in the source. Since 0.1.9 the release build bakes the
+feed link into the shipped `.env.example` (from `RIOS_UPDATE_FEED_URL` at
+release time, exactly like the pilot-feedback token), the installer copies it
+into a fresh install's `.env`, and the start wrapper fills it into an
+existing install's `.env` on launch when the key is missing or blank. So
+pilots get updates out of the box; the manual `.env` / `--url` path remains
+as a fallback for pre-0.1.9 installs that never received the link.
 
 ## How a pilot updates
 

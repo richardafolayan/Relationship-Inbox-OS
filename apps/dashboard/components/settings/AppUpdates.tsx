@@ -135,8 +135,8 @@ export function AppUpdates() {
           Update staged (v{staged.from} to v{staged.to}). To finish, stop the app
           with <span className="font-mono">Ctrl + C</span> in its Terminal, then
           run <span className="font-mono">node scripts/start-student.mjs</span>{" "}
-          (or <span className="font-mono">npm run dev</span>). It installs on the
-          next start, and your messages and settings are kept.
+          (or <span className="font-mono">npm run start:student</span>). It
+          installs on the next start, and your messages and settings are kept.
         </p>
       ) : null}
 

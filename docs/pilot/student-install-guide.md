@@ -172,7 +172,15 @@ covers what to actually test.
 
 ## Updating
 
-When I publish a new build, your app can update itself. From the app folder
+When I publish a new build, your app can update itself. Updates work out of
+the box: the update link ships inside the app (builds 0.1.9 and later), so
+there is nothing to configure.
+
+The easy way is in the app itself: **Settings > App updates > Check for
+updates**, then **Update and relaunch** if one is available. It stages the
+update; stop the app with `Ctrl + C` and start it again to finish.
+
+The same thing from the Terminal, in the app folder
 (`cd ~/RelationshipInboxOS`):
 
 ```bash
@@ -183,8 +191,12 @@ npm run update:student -- --apply        # download and install it
 An update only replaces the app's code. It keeps your settings (`.env`), your
 local database, your conversations, and your sign-ins. It also makes a backup
 first and rolls back automatically if anything goes wrong, so it is safe to
-run. I will send you a one update link to put in your `.env` as
-`RIOS_UPDATE_FEED_URL` (or you can pass it with `--url`).
+run.
+
+If the app says "Updates aren't set up yet", you are on a build older than
+0.1.9 that never got the update link. One-time fix: ask me for the update
+link and put it in your `.env` as `RIOS_UPDATE_FEED_URL` (or pass it with
+`--url`). Every later update then carries the link automatically.
 
 ## Uninstall
 
