@@ -207,30 +207,38 @@ export function findForbiddenEntries(entries) {
   });
 }
 
-// ---- pilot-feedback token (baked into the shipped .env.example) -----------
+// ---- pilot distribution config (baked into the shipped .env.example) ------
 
-// The ONLY config values ever baked into a shipped .env.example. Treated as a
-// DISTRIBUTED, low-value, rotatable pilot-feedback token — never a private
-// secret. Sourced at release time from env / a gitignored .env.release.local.
+// The pilot-feedback token keys. Treated as a DISTRIBUTED, low-value,
+// rotatable token — never a private secret.
 export const PILOT_FEEDBACK_KEYS = [
   "PILOT_FEEDBACK_WEBHOOK_URL",
   "PILOT_FEEDBACK_SECRET",
   "PILOT_FEEDBACK_STATUS_URL"
 ];
 
+// The ONLY config values ever baked into a shipped .env.example: the update
+// feed link plus the pilot-feedback token. All are distribution config every
+// pilot receives anyway (anyone with the zip link has them) — never private
+// secrets. Sourced at release time from env / a gitignored .env.release.local.
+export const PILOT_DISTRIBUTION_KEYS = [
+  "RIOS_UPDATE_FEED_URL",
+  ...PILOT_FEEDBACK_KEYS
+];
+
 // A non-blank value on a key matching this (other than the whitelisted
-// PILOT_FEEDBACK_* token) is a high-value secret leak in .env.example.
+// distribution keys above) is a high-value secret leak in .env.example.
 const SECRET_KEY_RE = /(_API_KEY|_TOKEN|_SECRET|_PASSWORD)$|^DROPBOX_/i;
 
 /**
- * Return a copy of `.env.example` text with the PILOT_FEEDBACK_* values from
- * `sourceEnv` filled in (existing blank lines rewritten, missing keys
+ * Return a copy of `.env.example` text with the PILOT_DISTRIBUTION_KEYS values
+ * from `sourceEnv` filled in (existing blank lines rewritten, missing keys
  * appended). Pure: returns `{ text, injected }`; never mutates input.
  */
-export function bakeFeedbackEnv(envExampleText, sourceEnv) {
+export function bakePilotEnv(envExampleText, sourceEnv) {
   let text = String(envExampleText);
   const injected = [];
-  for (const key of PILOT_FEEDBACK_KEYS) {
+  for (const key of PILOT_DISTRIBUTION_KEYS) {
     const val = String((sourceEnv && sourceEnv[key]) || "").trim();
     if (!val) continue;
     const re = new RegExp(`^${key}=.*$`, "m");
@@ -242,7 +250,7 @@ export function bakeFeedbackEnv(envExampleText, sourceEnv) {
 
 /**
  * Return the keys in `.env.example` text that carry a non-blank, high-value
- * secret value. The PILOT_FEEDBACK_* token is the one allowed exception.
+ * secret value. The pilot distribution keys are the allowed exceptions.
  * Used to keep the "no high-value secrets in the zip" guarantee honest.
  */
 export function findEnvExampleSecretLeaks(envExampleText) {
@@ -255,8 +263,85 @@ export function findEnvExampleSecretLeaks(envExampleText) {
     const key = line.slice(0, eq).trim();
     const val = line.slice(eq + 1).trim();
     if (!val) continue;
-    if (PILOT_FEEDBACK_KEYS.includes(key)) continue;
+    if (PILOT_DISTRIBUTION_KEYS.includes(key)) continue;
     if (SECRET_KEY_RE.test(key)) offenders.push(key);
   }
   return offenders;
+}
+
+// ---- .env reconcile (run by the start wrapper on every launch) -------------
+
+// An update preserves the pilot's .env untouched, so config keys that ship in
+// a NEWER .env.example never reach existing installs on their own (this bit
+// the feedback token at 0.1.7 and the update feed link at 0.1.8). The start
+// wrapper heals that on every launch with two deliberately narrow rules:
+//
+//   - PILOT_DISTRIBUTION_KEYS: fill from .env.example only when the key is
+//     missing or blank in .env. A non-blank value is the pilot's (or
+//     Richard's) own choice and is NEVER overwritten.
+//   - PILOT_ENV_SYNC_KEYS: keep equal to .env.example. These describe the
+//     shipped code (not a user choice), so a stale value is always wrong.
+export const PILOT_ENV_SYNC_KEYS = ["NEXT_PUBLIC_APP_VERSION"];
+
+/** Parse KEY=value lines (first occurrence wins, comments skipped). */
+function parseEnvValues(text) {
+  const values = new Map();
+  for (const raw of String(text).split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue;
+    const eq = line.indexOf("=");
+    if (eq === -1) continue;
+    const key = line.slice(0, eq).trim();
+    if (!values.has(key)) values.set(key, line.slice(eq + 1).trim());
+  }
+  return values;
+}
+
+/**
+ * Reconcile a .env file's text with the shipped .env.example, per the rules
+ * above. Pure: returns `{ text, filled, synced }` where `filled` lists
+ * distribution keys that were blank/missing and got the example's value, and
+ * `synced` lists sync keys rewritten to match the example. Unrelated lines,
+ * ordering, and comments are preserved byte for byte.
+ */
+export function reconcileEnvWithExample(envText, envExampleText) {
+  const example = parseEnvValues(envExampleText);
+  const current = parseEnvValues(envText);
+  const updates = new Map();
+  const filled = [];
+  const synced = [];
+
+  for (const key of PILOT_DISTRIBUTION_KEYS) {
+    const want = example.get(key) || "";
+    if (!want) continue;
+    if ((current.get(key) || "") !== "") continue;
+    updates.set(key, want);
+    filled.push(key);
+  }
+  for (const key of PILOT_ENV_SYNC_KEYS) {
+    const want = example.get(key) || "";
+    if (!want) continue;
+    if ((current.get(key) || "") === want) continue;
+    updates.set(key, want);
+    synced.push(key);
+  }
+  if (updates.size === 0) return { text: String(envText), filled, synced };
+
+  const lines = String(envText).split(/\r?\n/);
+  const rewritten = new Set();
+  const out = lines.map((raw) => {
+    const eq = raw.indexOf("=");
+    if (eq === -1 || raw.trimStart().startsWith("#")) return raw;
+    const key = raw.slice(0, eq).trim();
+    if (!updates.has(key)) return raw;
+    rewritten.add(key);
+    return `${key}=${updates.get(key)}`;
+  });
+  let text = out.join("\n");
+  const missing = [...updates.keys()].filter((k) => !rewritten.has(k));
+  if (missing.length) {
+    if (text.length && !text.endsWith("\n")) text += "\n";
+    for (const key of missing) text += `${key}=${updates.get(key)}\n`;
+  }
+  return { text, filled, synced };
 }

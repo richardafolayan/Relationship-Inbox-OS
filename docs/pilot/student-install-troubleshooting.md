@@ -159,8 +159,11 @@ Usually one of:
 
 ## "The update check says no feed is set"
 
-The updater needs to know where the update info lives. Set the link I send you
-as `RIOS_UPDATE_FEED_URL` in `.env`, or pass it directly:
+On builds 0.1.9 and later this should not happen: the update link ships
+inside the app and the start wrapper fills it into `.env` automatically on
+launch. If you still see it, you are on an older build that never got the
+link. One-time fix: set the link I send you as `RIOS_UPDATE_FEED_URL` in
+`.env`, or pass it directly:
 
 ```bash
 npm run update:student -- --check-only --url "<the latest.json link I sent>"
