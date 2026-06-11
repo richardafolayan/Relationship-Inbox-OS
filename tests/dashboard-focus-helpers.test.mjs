@@ -300,6 +300,37 @@ test("professional contacts keep the calmer saved template, not the window note"
   assert.equal(out.includes("bike"), false);
 });
 
+test("a per-window professional note overrides the professional template", () => {
+  const window = baseWindow({
+    note: "On the bike till [until]!",
+    professionalNote: "Hi [Name], heads-down until [until], I'll come back to this properly after."
+  });
+  const until = formatUntil(window.endsAt);
+  const out = noteForRow(
+    row({ personName: "Ceri Jones", platform: "LINKEDIN" }),
+    window,
+    DEFAULT_ACK_TEMPLATES
+  );
+  assert.equal(out, `Hi Ceri, heads-down until ${until}, I'll come back to this properly after.`);
+  // Close contacts still read the close note, not the professional one.
+  const close = noteForRow(row({ personName: "Tobi" }), window, DEFAULT_ACK_TEMPLATES);
+  assert.equal(close, `On the bike till ${until}!`);
+});
+
+test("a blank or absent professional note falls back to the professional template", () => {
+  const blank = baseWindow({ professionalNote: "   " });
+  const absent = baseWindow(); // field omitted entirely (older runner payload)
+  delete absent.professionalNote;
+  for (const window of [blank, absent]) {
+    const out = noteForRow(
+      row({ personName: "Ceri Jones", platform: "LINKEDIN" }),
+      window,
+      DEFAULT_ACK_TEMPLATES
+    );
+    assert.match(out, /^Hey Ceri,/);
+  }
+});
+
 test("a blank window note falls back to the close template", () => {
   const out = noteForRow(row({ personName: "Tobi" }), baseWindow({ note: "   " }), DEFAULT_ACK_TEMPLATES);
   assert.match(out, /^Yo Tobi,/);
