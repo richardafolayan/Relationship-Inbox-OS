@@ -686,9 +686,11 @@ export default function InboxPage() {
 
       {/* Status tabs (the lens you switch most) + a compact tools cluster.
           Platform + Kind now live behind the Filters popover so this bar
-          stays one calm row instead of the old stack of dropdowns. */}
-      <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
-        <div className="flex flex-1 flex-wrap gap-[1px]">
+          stays one calm row instead of the old stack of dropdowns. On
+          phone the tools sit above a horizontally-scrollable tab strip
+          (no wrap) so the bar stays two calm rows instead of a tall pile. */}
+      <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
+        <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
           {TABS.map((entry) => {
             const active = tab === entry.key;
             const count = counts[entry.key];
@@ -699,7 +701,7 @@ export default function InboxPage() {
                 type="button"
                 onClick={() => setTab(entry.key)}
                 className={cn(
-                  "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                  "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
                   active
                     ? "border-accent font-medium text-ink"
                     : zero
@@ -720,7 +722,7 @@ export default function InboxPage() {
             );
           })}
         </div>
-        <div className="flex items-center gap-[4px] pb-[6px]">
+        <div className="flex items-center justify-end gap-[4px] pb-[6px]">
           <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
           <FiltersPopover
             platformFilter={platformFilter}
@@ -1231,8 +1233,11 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
         {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
       </span>
       <span className="flex min-w-0 flex-col gap-[2px]">
-        <span className="flex min-w-0 items-baseline gap-[10px]">
-          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+        {/* Phone: preview drops to its own line under the name so it gets
+            the full row width instead of the 2 characters left beside the
+            meta column. From sm up the two sit inline as before. */}
+        <span className="flex min-w-0 flex-col gap-[1px] sm:flex-row sm:items-baseline sm:gap-[10px]">
+          <span className="truncate text-[14px] font-medium tracking-[-0.005em] text-ink sm:shrink-0">
             {row.personName}
           </span>
           <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>

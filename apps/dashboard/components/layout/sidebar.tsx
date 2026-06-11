@@ -106,7 +106,8 @@ export function Sidebar({
   return (
     <aside
       className={cn(
-        "sticky top-0 z-10 flex h-screen flex-col border-r border-hairline bg-paper py-5",
+        // Hidden below md: phone navigation moves to the bottom MobileDock.
+        "sticky top-0 z-10 hidden h-app-screen flex-col border-r border-hairline bg-paper py-5 md:flex",
         collapsed ? "w-[56px] px-2" : "w-[200px] px-3"
       )}
     >
