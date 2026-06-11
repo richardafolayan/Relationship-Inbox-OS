@@ -238,6 +238,20 @@ export function describeAttachments(attachments: IMessageAttachment[]): string {
  * applies WAL semantics for reads. The caller is responsible for handling
  * EACCES (Full Disk Access not granted) and ENOENT (signed out / new mac).
  */
+interface ListedChatRow {
+  chatId: number;
+  guid: string;
+  displayName: string | null;
+  chatIdentifier: string;
+  service: string | null;
+  style: number | null;
+  unreadCount: number;
+  lastDate: number | bigint | null;
+  lastText: string | null;
+  lastBody: Buffer | null;
+  lastIsFromMe: number | null;
+}
+
 export class IMessageDb {
   private db: Db;
 
@@ -388,6 +402,33 @@ export class IMessageDb {
    * (decoded from attributedBody when text is NULL).
    */
   listThreads(limit: number, opts: { unreadOnly: boolean }): IMessageThreadRow[] {
+    const rows = this.db
+      .prepare(`${this.listThreadsSelect()} ORDER BY lastDate DESC NULLS LAST LIMIT ?`)
+      .all(limit) as ListedChatRow[];
+    return this.shapeListedThreads(rows, opts);
+  }
+
+  /**
+   * Same row shape and filtering as `listThreads`, but for an explicit set
+   * of chat guids. Used by the incremental scan path: once the watermark
+   * says only these chats changed, the scan fetches stubs for exactly them
+   * instead of sweeping every chat (the full sweep's per-chat subqueries
+   * cost seconds of synchronous SQLite on a real Messages library).
+   */
+  listThreadsByGuids(guids: string[]): IMessageThreadRow[] {
+    if (guids.length === 0) {
+      return [];
+    }
+    const placeholders = guids.map(() => "?").join(", ");
+    const rows = this.db
+      .prepare(
+        `${this.listThreadsSelect()} WHERE c.guid IN (${placeholders}) ORDER BY lastDate DESC NULLS LAST`
+      )
+      .all(...guids) as ListedChatRow[];
+    return this.shapeListedThreads(rows, { unreadOnly: false });
+  }
+
+  private listThreadsSelect(): string {
     // Exclude tapback/reaction rows (associated_message_type 2000-2005 /
     // 3000-3005, mirroring isTapbackType) from both the unread count and the
     // last-message preview. Without this a tapback inflates the unread badge
@@ -399,9 +440,7 @@ export class IMessageDb {
     const notTapback =
       "NOT (COALESCE(m.associated_message_type, 0) BETWEEN 2000 AND 2005 " +
       "OR COALESCE(m.associated_message_type, 0) BETWEEN 3000 AND 3005)";
-    const rows = this.db
-      .prepare(
-        `SELECT
+    return `SELECT
            c.ROWID                           AS chatId,
            c.guid                            AS guid,
            c.display_name                    AS displayName,
@@ -427,24 +466,10 @@ export class IMessageDb {
               JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
               WHERE cmj.chat_id = c.ROWID AND ${notTapback}
               ORDER BY m.date DESC, m.ROWID DESC LIMIT 1) AS lastIsFromMe
-         FROM chat c
-         ORDER BY lastDate DESC NULLS LAST
-         LIMIT ?`
-      )
-      .all(limit) as Array<{
-        chatId: number;
-        guid: string;
-        displayName: string | null;
-        chatIdentifier: string;
-        service: string | null;
-        style: number | null;
-        unreadCount: number;
-        lastDate: number | bigint | null;
-        lastText: string | null;
-        lastBody: Buffer | null;
-        lastIsFromMe: number | null;
-      }>;
+         FROM chat c`;
+  }
 
+  private shapeListedThreads(rows: ListedChatRow[], opts: { unreadOnly: boolean }): IMessageThreadRow[] {
     // Only apply the automated-sender heuristic to 1:1 chats. Group chats
     // (style 43) have synthetic "chatNNN" identifiers that the heuristic can
     // mistake for an alphanumeric service ID and wrongly drop.
@@ -476,6 +501,83 @@ export class IMessageDb {
         participants
       };
     });
+  }
+
+  // --- incremental-scan freshness signals -----------------------------------
+
+  private hasLastReadColumn: boolean | undefined;
+
+  /**
+   * `chat.last_read_message_timestamp` powers read-state change detection.
+   * Long-standing column, but feature-detect once so an old Messages library
+   * degrades to "read flips don't trigger a rescan" instead of throwing.
+   */
+  private chatHasLastReadColumn(): boolean {
+    if (this.hasLastReadColumn === undefined) {
+      try {
+        const cols = this.db.prepare("PRAGMA table_info(chat)").all() as Array<{ name: string }>;
+        this.hasLastReadColumn = cols.some((c) => c.name === "last_read_message_timestamp");
+      } catch {
+        this.hasLastReadColumn = false;
+      }
+    }
+    return this.hasLastReadColumn;
+  }
+
+  /**
+   * Cheap global freshness signal for the incremental scan gate (~25ms on a
+   * 200k-message library, vs seconds for a full candidate sweep):
+   *   - `maxRowId` moves on any insert (messages, tapbacks, attachments rows
+   *     ride along via their message row),
+   *   - `msgCount` catches deletions (unsend) that maxRowId cannot see,
+   *   - `readMark` moves when any chat's read watermark advances, so unread
+   *     badges still clear after reading in Messages.app.
+   * `readMark` stays TEXT end-to-end: Apple timestamps are nanoseconds since
+   * 2001 (~8e17), beyond Number.MAX_SAFE_INTEGER.
+   */
+  getScanWatermark(): { maxRowId: number; msgCount: number; readMark: string } {
+    const row = this.db
+      .prepare("SELECT COALESCE(MAX(ROWID), 0) AS maxRowId, COUNT(*) AS msgCount FROM message")
+      .get() as { maxRowId: number | bigint; msgCount: number | bigint };
+    let readMark = "0";
+    if (this.chatHasLastReadColumn()) {
+      const read = this.db
+        .prepare(
+          "SELECT CAST(COALESCE(MAX(last_read_message_timestamp), 0) AS TEXT) AS readMark FROM chat"
+        )
+        .get() as { readMark: string | null };
+      readMark = read.readMark ?? "0";
+    }
+    return { maxRowId: Number(row.maxRowId), msgCount: Number(row.msgCount), readMark };
+  }
+
+  /**
+   * Chat guids that may have changed since a watermark: chats that gained
+   * message rows after `sinceMaxRowId`, plus chats whose read watermark
+   * moved past `sinceReadMark`. Indexed lookups (~10ms) - never a sweep.
+   */
+  listChangedChatGuids(sinceMaxRowId: number, sinceReadMark: string): string[] {
+    const fromNewRows = this.db
+      .prepare(
+        `SELECT DISTINCT c.guid AS guid
+           FROM chat c
+           JOIN chat_message_join cmj ON cmj.chat_id = c.ROWID
+          WHERE cmj.message_id > ?`
+      )
+      .all(sinceMaxRowId) as Array<{ guid: string }>;
+    const guids = new Set(fromNewRows.map((r) => r.guid));
+    if (this.chatHasLastReadColumn()) {
+      const fromReads = this.db
+        .prepare(
+          `SELECT guid FROM chat
+            WHERE COALESCE(last_read_message_timestamp, 0) > CAST(? AS INTEGER)`
+        )
+        .all(sinceReadMark) as Array<{ guid: string }>;
+      for (const r of fromReads) {
+        guids.add(r.guid);
+      }
+    }
+    return [...guids];
   }
 
   private listParticipants(chatId: number): string[] {

@@ -158,6 +158,65 @@ export class IMessageAdapter implements PlatformAdapter {
     return rows.map((r) => this.toThreadStub(r, true, false));
   }
 
+  // --- incremental scan capability (PlatformAdapter.getScanWatermark) -------
+  //
+  // chat.db gives us cheap global freshness signals, so the scan loop can
+  // skip candidate discovery entirely when nothing changed (the full sweep's
+  // per-chat subqueries cost seconds of SYNCHRONOUS SQLite on a real library
+  // and ran on every watcher tick, stalling unrelated HTTP requests).
+  // Watermark format (adapter-private): "imsg1:<maxRowId>:<msgCount>:<readMark>".
+
+  private static readonly SCAN_WATERMARK_VERSION = "imsg1";
+
+  async getScanWatermark(): Promise<string> {
+    const w = this.getDb().getScanWatermark();
+    return `${IMessageAdapter.SCAN_WATERMARK_VERSION}:${w.maxRowId}:${w.msgCount}:${w.readMark}`;
+  }
+
+  async collectChangedThreads(
+    sinceWatermark: string
+  ): Promise<{ stubs: ThreadStub[]; fullSweepRequired: boolean }> {
+    const parts = sinceWatermark.split(":");
+    if (parts.length !== 4 || parts[0] !== IMessageAdapter.SCAN_WATERMARK_VERSION) {
+      // Unknown/older format (e.g. after an update changed the shape):
+      // resync everything once, then the new format takes over.
+      return { stubs: [], fullSweepRequired: true };
+    }
+    const sinceMaxRowId = Number(parts[1] ?? "");
+    const sinceMsgCount = Number(parts[2] ?? "");
+    const sinceReadMark = parts[3] ?? "0";
+    if (!Number.isFinite(sinceMaxRowId) || !Number.isFinite(sinceMsgCount)) {
+      return { stubs: [], fullSweepRequired: true };
+    }
+
+    const db = this.getDb();
+    const current = db.getScanWatermark();
+    // Deletion detector: if the row count grew by less than the ROWID
+    // high-water mark did, rows disappeared somewhere (unsend / deletion).
+    // Those can't be attributed to a chat cheaply, and the retraction sweep
+    // runs per synced thread, so fall back to a full sweep. ROWID gaps from
+    // rolled-back inserts can trip this too - rare, and the cost is one
+    // ordinary full scan tick.
+    const insertedUpperBound = current.maxRowId - sinceMaxRowId;
+    const countDelta = current.msgCount - sinceMsgCount;
+    if (countDelta < 0 || countDelta < insertedUpperBound) {
+      return { stubs: [], fullSweepRequired: true };
+    }
+
+    const guids = db.listChangedChatGuids(sinceMaxRowId, sinceReadMark);
+    if (guids.length === 0) {
+      return { stubs: [], fullSweepRequired: false };
+    }
+    const rows = db.listThreadsByGuids(guids);
+    // Same stub flags a changed chat would get from the unread/recent
+    // passes; listThreadsByGuids applies the same automated-sender filter,
+    // so chats the full sweep would never surface stay out here too.
+    return {
+      stubs: rows.map((r) => this.toThreadStub(r, r.unreadCount > 0, true)),
+      fullSweepRequired: false
+    };
+  }
+
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const db = this.getDb();
     const rows = db.listThreads(limit, { unreadOnly: false });
