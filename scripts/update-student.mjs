@@ -191,6 +191,15 @@ function pruneBackups(parent, keep) {
 }
 
 async function applyUpdate(current, manifest) {
+  // Pilot release zips never contain .git (the build forbids it), so a .git
+  // here means a development checkout. Swapping that for a zip would move the
+  // repo (.git, worktrees, branches) into the backup folder — refuse and
+  // point at git instead. Applies to --dry-run too: the plan would never run.
+  if (existsSync(join(APP_DIR, ".git"))) {
+    die(`This looks like a development checkout (it has .git): ${APP_DIR}\n` +
+      `  The zip updater would replace the working copy, so it refuses to run here.\n` +
+      `  Update a checkout with git instead (e.g. git pull).`);
+  }
   const parent = dirname(APP_DIR);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const stagingRoot = join(parent, `.rios-update-${stamp}`);
