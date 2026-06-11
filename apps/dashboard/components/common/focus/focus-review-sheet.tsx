@@ -29,7 +29,7 @@ export function FocusReviewSheet({
   onClose: () => void;
   focus: UseFocusWindow;
 }) {
-  const { focusWindow, settings, templates, markAcked, markManyAcked } = focus;
+  const { focusWindow, settings, templates, markAcked, markManyAcked, active } = focus;
   const [candidates, setCandidates] = useState<InboxRow[]>([]);
   const [state, setState] = useState<Record<string, RowState>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
@@ -84,7 +84,9 @@ export function FocusReviewSheet({
   const sendOne = useCallback(
     async (row: InboxRow) => {
       const key = rowKey(row);
-      if (state[key] !== "open" || busy) return;
+      // The window can lapse while the sheet is open; the notes promise a
+      // "till X" that has passed, so nothing may be sent past the end.
+      if (!active || state[key] !== "open" || busy) return;
       setBusy(true);
       try {
         await sendAcknowledgement(row.id, notes[key] ?? noteForRow(row, focusWindow, templates));
@@ -97,7 +99,7 @@ export function FocusReviewSheet({
         setBusy(false);
       }
     },
-    [state, busy, notes, focusWindow, templates, markAcked]
+    [active, state, busy, notes, focusWindow, templates, markAcked]
   );
 
   const dismissOne = useCallback(
@@ -113,7 +115,7 @@ export function FocusReviewSheet({
   );
 
   const sendAll = useCallback(async () => {
-    if (busy) return;
+    if (!active || busy) return;
     setBusy(true);
     try {
       const open = candidates.filter((row) => state[rowKey(row)] === "open");
@@ -130,10 +132,11 @@ export function FocusReviewSheet({
     } finally {
       setBusy(false);
     }
-  }, [busy, candidates, state, notes, focusWindow, templates, markManyAcked]);
+  }, [active, busy, candidates, state, notes, focusWindow, templates, markManyAcked]);
 
-  const title =
-    candidates.length === 0
+  const title = !active
+    ? "This focus window has ended."
+    : candidates.length === 0
       ? "Nothing's come in yet."
       : openCount === 0
         ? "All acknowledged."
@@ -146,13 +149,15 @@ export function FocusReviewSheet({
       eyebrow="During your focus block"
       title={title}
       sub={
-        candidates.length === 0
-          ? "When a covered contact messages, you'll be able to send them a quick note here."
-          : "Send a quick note so they know you've seen them. Your proper replies still wait in Today."
+        !active
+          ? "These quick notes only make sense mid-block, so none can be sent now."
+          : candidates.length === 0
+            ? "When a covered contact messages, you'll be able to send them a quick note here."
+            : "Send a quick note so they know you've seen them. Your proper replies still wait in Today."
       }
       footer={
         <>
-          {openCount > 0 ? (
+          {active && openCount > 0 ? (
             <Button variant="primary" onClick={() => void sendAll()} disabled={busy}>
               Send note to all waiting
             </Button>
@@ -163,7 +168,11 @@ export function FocusReviewSheet({
         </>
       }
     >
-      {candidates.length === 0 ? (
+      {!active ? (
+        <p className="py-4 text-[13.5px] leading-[1.5] text-ink-2">
+          You're back. Anyone still waiting is in Today, ready for their proper reply.
+        </p>
+      ) : candidates.length === 0 ? (
         <p className="py-4 text-[13.5px] leading-[1.5] text-ink-2">
           No covered contact has messaged since this window started. The buffer only ever offers a
           note for people you'd actually want to reassure.

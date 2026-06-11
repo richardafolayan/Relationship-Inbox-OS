@@ -90,8 +90,21 @@ export function readFocusSettings(profile: OperatorProfile | null | undefined): 
   return profile?.focusSettings ?? DEFAULT_FOCUS_SETTINGS;
 }
 
-export function isFocusActive(window: FocusWindowState | null | undefined): boolean {
-  return !!window?.active;
+/**
+ * A window is live only while the clock says so: the stored `active` flag
+ * AND `endsAt` still ahead. The flag alone can go stale (the app may not be
+ * open at the moment the window lapses to write it back), so every surface
+ * derives liveness from the clock and treats the flag as intent. A window
+ * with no parseable `endsAt` only ends manually.
+ */
+export function isFocusActive(
+  window: FocusWindowState | null | undefined,
+  now: Date = new Date()
+): boolean {
+  if (!window?.active) return false;
+  const ends = Date.parse(window.endsAt ?? "");
+  if (Number.isFinite(ends) && now.getTime() >= ends) return false;
+  return true;
 }
 
 // ─────────────────────────── formatting ───────────────────────────
@@ -193,13 +206,11 @@ export function arrivedDuringFocus(
   window: FocusWindowState,
   now: Date = new Date()
 ): boolean {
-  if (!isFocusActive(window) || !window.startedAt) return false;
+  if (!isFocusActive(window, now) || !window.startedAt) return false;
   if (!row.lastInboundAt) return false;
   const started = Date.parse(window.startedAt);
   const inbound = Date.parse(row.lastInboundAt);
   if (!Number.isFinite(started) || !Number.isFinite(inbound)) return false;
-  // Guard against a clock that hasn't reached the start yet.
-  void now;
   return inbound >= started;
 }
 
@@ -228,30 +239,71 @@ export function isFocusAckCandidate(
   settings: FocusSettings,
   opts: { now?: Date; quietHoursActive?: boolean } = {}
 ): boolean {
+  const now = opts.now ?? new Date();
   // Respect quiet hours: the app stays silent then, so no notes are offered.
   if (opts.quietHoursActive) return false;
-  if (!isFocusActive(window)) return false;
-  if (!arrivedDuringFocus(row, window, opts.now)) return false;
+  // An expired window offers nothing: a note saying "till 8:31pm" sent at
+  // 9pm reads as nonsense, so the gate closes the moment endsAt passes.
+  if (!isFocusActive(window, now)) return false;
+  if (!arrivedDuringFocus(row, window, now)) return false;
   // Only unanswered inbound threads. needsReply === false means handled.
   if (row.needsReply === false) return false;
   if (!coverageForRow(row, window.audience).covered) return false;
-  if (hasRepliedToday(row, opts.now)) return false;
+  if (hasRepliedToday(row, now)) return false;
   if (settings.oneNotePerPerson && isAcked(row, window)) return false;
   return true;
 }
 
 /** The acknowledgement note for a specific contact, tier-matched and tokens
- *  filled. Pure: the caller owns sending it (and only on an explicit tap). */
+ *  filled. Close contacts get the note the operator wrote for THIS window
+ *  (the setup sheet's "Your note") when there is one; professional contacts
+ *  always read the calmer saved template. Tokens still fill at send time, so
+ *  a window note that keeps [Name]/[until] literal stays correct per person.
+ *  Pure: the caller owns sending it (and only on an explicit tap). */
 export function noteForRow(
   row: FocusRow,
   window: FocusWindowState,
   templates: AckTemplates
 ): string {
   const { tier } = coverageForRow(row, window.audience);
-  const base = templates[tier] || DEFAULT_ACK_TEMPLATES[tier];
+  const windowNote = (window.note ?? "").trim();
+  const base =
+    tier === "close" && windowNote
+      ? window.note
+      : templates[tier] || DEFAULT_ACK_TEMPLATES[tier];
   return fillNote(base, {
     name: firstNameOf(row.personName),
     until: formatUntil(window.endsAt),
     reason: window.reason
   });
+}
+
+/**
+ * Swap an embedded until-label (e.g. "8:31pm") for the new one after the
+ * operator changes a live window's end time. Once a note counts as
+ * personally edited the setup sheet stops regenerating it from the template,
+ * so without this surgical swap the note would keep promising the old time.
+ */
+export function resyncNoteUntilLabel(
+  note: string,
+  previousUntil: string,
+  nextUntil: string
+): string {
+  if (!note || !previousUntil || !nextUntil) return note;
+  if (previousUntil === nextUntil || !note.includes(previousUntil)) return note;
+  return note.split(previousUntil).join(nextUntil);
+}
+
+/** True when a "HH:MM" picker value has already passed today, so the window
+ *  would end TOMORROW (endsAtIsoFromTime rolls it forward). The setup sheet
+ *  says so out loud rather than silently creating a near-24h window. */
+export function rollsToTomorrow(time: string, now: Date = new Date()): boolean {
+  const iso = endsAtIsoFromTime(time, now);
+  if (!iso) return false;
+  const d = new Date(iso);
+  return (
+    d.getDate() !== now.getDate() ||
+    d.getMonth() !== now.getMonth() ||
+    d.getFullYear() !== now.getFullYear()
+  );
 }
