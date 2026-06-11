@@ -64,13 +64,20 @@ function locateContainingMethodName(source, offset) {
   return matches[matches.length - 1][1];
 }
 
-test("every bringToFront() in linkedin-adapter sits inside an operator-initiated method", () => {
+test("every focus-raising call in linkedin-adapter sits inside an operator-initiated method", () => {
   const source = stripComments(readFileSync(resolve(process.cwd(), ADAPTER_PATH), "utf8"));
-  const occurrences = [...source.matchAll(/\bbringToFront\s*\(\s*\)/g)];
+  // The operator focus-raise moved from a bare page.bringToFront() to
+  // revealBrowserWindow() (un-minimize + on-screen + raise), since launches
+  // are now hidden by default (the send/scan focus-steal fix). Either form is
+  // a "surface Chrome to the operator" call and must stay out of scan/send
+  // paths. The `import` of revealBrowserWindow is excluded.
+  const occurrences = [...source.matchAll(/\b(?:bringToFront\s*\(\s*\)|revealBrowserWindow\s*\()/g)].filter(
+    (m) => !source.slice(Math.max(0, m.index - 40), m.index).includes("import")
+  );
 
   assert.ok(
     occurrences.length > 0,
-    "expected at least one bringToFront() — openThread/openProfileUrl rely on it for operator-initiated clicks"
+    "expected at least one focus-raising call — openThread/openProfileUrl surface Chrome on operator clicks"
   );
 
   const offenders = [];
@@ -87,7 +94,7 @@ test("every bringToFront() in linkedin-adapter sits inside an operator-initiated
   assert.deepEqual(
     offenders,
     [],
-    `bringToFront() found in non-operator-initiated method(s): ${JSON.stringify(
+    `focus-raising call found in non-operator-initiated method(s): ${JSON.stringify(
       offenders,
       null,
       2
