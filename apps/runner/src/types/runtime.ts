@@ -125,9 +125,11 @@ export type FocusAudience = "favourites" | "all_personal";
  * from Today / the top bar / Settings: while it's active, a covered contact
  * who messages can get a one-tap acknowledgement ("seen this, I'll reply
  * properly after") so silence doesn't read as being ignored. No auto-send,
- * no AI-written text — plain token substitution into the operator's own
- * note. One window at a time; persisted in the operator profile JSON so
- * every dashboard surface (and a reload) reads the same state.
+ * ever — the operator taps every send. The note is the operator's own words
+ * with plain token substitution; "Help me phrase this" can draft it in
+ * their voice on explicit request, and it stays editable before use.
+ * One window at a time; persisted in the operator profile JSON so every
+ * dashboard surface (and a reload) reads the same state.
  */
 export interface FocusWindowState {
   /** True while a window is open. The dashboard surfaces read this. */
@@ -142,6 +144,11 @@ export interface FocusWindowState {
   reason: string;
   /** Live note text shown in the setup sheet (close-tier base with tokens). */
   note: string;
+  /** Per-window professional-tier note override ("Help me phrase this"
+   *  writes one per register). "" = none, professional contacts fall back
+   *  to the saved ackTemplates.professional. Added after the feature
+   *  shipped, so older profile rows parse fine (coerced to ""). */
+  professionalNote: string;
   /** Who this window covers. */
   audience: FocusAudience;
   /** Opaque id stamping this window, so per-window ack dedupe is unambiguous. */
@@ -555,6 +562,32 @@ export interface AiService {
   inferReplyStyle(input: {
     sampleTexts: string[];
   }): Promise<{ suggestion: InferredReplyStyle; aiRan: boolean }>;
+  /**
+   * "Help me phrase this" for the Focus setup sheet: turn the operator's
+   * own description of what they're doing ("driving back from London till
+   * 9") into the two focus-note tiers in their voice, plus a short reason
+   * label and, when the activity names an explicit clock time, the end
+   * time. The notes keep [Name] and [until] as literal tokens — they fill
+   * per-person at send time. Null when no provider produced a usable
+   * result. Never sends, never saves — the sheet shows it for editing.
+   */
+  composeFocusNote(input: {
+    activity: string;
+    operatorProfile: OperatorProfile | null;
+    voiceSampleTexts: string[];
+  }): Promise<ComposedFocusNote | null>;
+}
+
+/** Result of AiService.composeFocusNote. */
+export interface ComposedFocusNote {
+  /** Casual note for close contacts, [Name]/[until] tokens literal. */
+  close: string;
+  /** Calmer note for professional contacts, same tokens literal. */
+  professional: string;
+  /** 1-3 word lowercase label for the window's reason chip. "" = none. */
+  reason: string;
+  /** "HH:MM" 24h end time, ONLY when the activity states one. Null else. */
+  untilTime: string | null;
 }
 
 export interface PilotReportTriage {

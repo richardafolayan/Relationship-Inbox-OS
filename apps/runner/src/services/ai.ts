@@ -19,6 +19,7 @@ import {
 } from "./reply-brief";
 import type {
   AiService,
+  ComposedFocusNote,
   ContactProfileSnapshot,
   ConversationStartersOutput,
   ConversationStarterCitedField,
@@ -1465,6 +1466,54 @@ export function renderSuggestedRepliesExchange(
       return `${speaker}: ${renderMessageBody(m)}`;
     })
     .join("\n");
+}
+
+/**
+ * Validate + post-process a raw model response for composeFocusNote
+ * ("Help me phrase this"). Module-level and pure so the token discipline is
+ * directly testable: both notes MUST keep [Name] and [until] literal — a
+ * baked-in real name or clock time would mis-personalise or go stale at
+ * send time — and a response that drops either token THROWS, which makes
+ * modelJson walk to the next provider instead of accepting a broken note.
+ * untilTime only survives as strict 24-hour "HH:MM"; anything else is null.
+ */
+export function parseComposedFocusNote(value: unknown): ComposedFocusNote {
+  const parsed = z
+    .object({
+      close: z.string().min(1),
+      professional: z.string().min(1),
+      reason: z.string().default(""),
+      untilTime: z.string().nullable().optional()
+    })
+    .parse(value);
+  const requireTokens = (note: string, field: string): string => {
+    const cleaned = enforceSentenceStartCapitals(applyVoiceRules(stripUnpairedSurrogates(note)));
+    if (!cleaned || cleaned.length < 8) {
+      throw new Error(`composeFocusNote: ${field} note too short`);
+    }
+    if (!cleaned.includes("[Name]") || !cleaned.includes("[until]")) {
+      throw new Error(`composeFocusNote: ${field} note dropped a required token`);
+    }
+    return safeTruncate(cleaned, 500);
+  };
+  const reason = parsed.reason
+    .toLowerCase()
+    .replace(/[^a-z0-9' ]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 3)
+    .join(" ");
+  const untilTime =
+    typeof parsed.untilTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(parsed.untilTime.trim())
+      ? parsed.untilTime.trim()
+      : null;
+  return {
+    close: requireTokens(parsed.close, "close"),
+    professional: requireTokens(parsed.professional, "professional"),
+    reason: safeTruncate(reason, 40),
+    untilTime
+  };
 }
 
 export function createAiService(settingsStore: SettingsStore): AiService {
@@ -3302,6 +3351,74 @@ ${safeTruncate(trimmed, 1_000)}`;
   }
 
   /**
+   * "Help me phrase this" (Focus setup sheet). The operator describes what
+   * they're about to do in their own words; this turns it into the two
+   * focus-note tiers in their voice. Both notes keep [Name] and [until] as
+   * literal tokens — the parser REJECTS a response that drops them (the
+   * provider chain then retries elsewhere), because a note with a baked-in
+   * name or time would go stale or mis-personalise at send time. Returns
+   * null when no provider produced a usable result. Composes only — the
+   * sheet shows the result for editing, and nothing ever auto-sends.
+   */
+  async function composeFocusNote(input: {
+    activity: string;
+    operatorProfile: OperatorProfile | null;
+    voiceSampleTexts: string[];
+  }): Promise<ComposedFocusNote | null> {
+    const activity = input.activity.trim();
+    if (!activity) return null;
+
+    const samples = input.voiceSampleTexts
+      .map((sample) => sample.trim())
+      .filter((sample) => sample.length > 0)
+      .slice(-8);
+
+    // Local wall-clock so "till 9" resolves to the NEXT 9 o'clock rather
+    // than a coin flip between 09:00 and 21:00.
+    const now = new Date();
+    const nowLabel = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+    const systemContent = [
+      "You are helping the operator of a personal relationship inbox write a short \"I'm heads-down\" note in their OWN voice. They are about to protect a block of time (gym, driving, a lecture, deep work) and want anyone who messages meanwhile to get a quick human acknowledgement: seen you, proper reply after.",
+      "",
+      "Strict output rules:",
+      "- Return strict JSON only.",
+      "- Write TWO variants: \"close\" (casual register, friends and family) and \"professional\" (calmer, work contacts). Both in the operator's own voice, guided by the voice profile and samples in the user message. The two variants must differ in register, not just punctuation.",
+      "- Each note MUST contain the literal token [Name] (where the recipient's first name will go) and the literal token [until] (where the end time will go). Never replace these tokens with a real name or a real clock time, and never invent other bracketed tokens.",
+      "- Place the tokens where they read naturally: the note must stay a grammatical sentence when [Name] is swapped for a first name like Sam and [until] for a time like 7:30pm. Never tack tokens onto the end.",
+      "- Never write a literal clock time anywhere in the note text — the [until] token carries it.",
+      "- The voice samples show HOW the operator writes (register, slang, punctuation). NEVER reuse their content: no topics, plans, names, or sentences from the samples may appear in the note.",
+      "- 1-2 short sentences per note. Plain ASCII. No em dashes, no en dashes. No emoji unless the operator's samples use them.",
+      "- It must read like a person dashing off a text, never an autoresponder. Banned: \"I am currently unavailable\", \"out of office\", anything corporate.",
+      "- Ground the note in what the operator said they are doing. Do not invent extra plans, places, or people.",
+      "- \"reason\" is REQUIRED: a 1-3 word lowercase label naming the activity, taken from the operator's description (e.g. \"driving\", \"gym\", \"revision\", \"family time\"). Never leave it empty, never name an activity they did not mention.",
+      "- \"untilTime\": ONLY when the operator states an explicit clock end time (\"till 9\", \"until 6:30pm\"), return it as 24-hour \"HH:MM\". Resolve a bare hour to the NEXT time it occurs after the current time given in the user message: at 19:40, \"till 9\" means 21:00 today; at 23:10, \"till 9\" means 09:00 tomorrow. For durations (\"for 2 hours\") or no stated time, return null — never guess.",
+      "",
+      "Worked example (format only — never copy its wording):",
+      "Operator said: \"driving back from London till 9\" (current time 19:40)",
+      "{\"close\": \"Yo [Name], driving back from London till [until], I'll reply properly after\", \"professional\": \"Hi [Name], I'm on the road till [until], I'll come back to this properly after.\", \"reason\": \"driving\", \"untilTime\": \"21:00\"}"
+    ].join("\n");
+
+    const prompt = `The operator is about to start a focus window and described it, in their words, as:
+"${safeTruncate(activity, 400)}"
+
+It is currently ${nowLabel} (24-hour clock) for the operator.${operatorProfileFragment(input.operatorProfile)}
+
+Recent messages the operator sent (their real voice, oldest first):
+${samples.length > 0 ? samples.map((s, i) => `${i + 1}. ${safeTruncate(s, 240)}`).join("\n") : "(no samples available — write plain, warm, peer-to-peer British English)"}
+
+Return strict JSON: { "close": "string", "professional": "string", "reason": "string", "untilTime": "HH:MM or null" }`;
+
+    const { result, source } = await modelJson<ComposedFocusNote | null>(
+      prompt,
+      null,
+      parseComposedFocusNote,
+      systemContent
+    );
+    return source?.providerId != null ? result : null;
+  }
+
+  /**
    * Optional triage of a pilot bug / feedback report. Operates ONLY on the
    * tester's typed words and safe metadata — never a screenshot, never
    * message content. Returns null when the AI service is unavailable or
@@ -3683,6 +3800,7 @@ ${safeTruncate(input.draft, 2000)}`;
     askAboutPerson,
     summarisePilotReport,
     checkDraftCoverage,
-    inferReplyStyle
+    inferReplyStyle,
+    composeFocusNote
   };
 }

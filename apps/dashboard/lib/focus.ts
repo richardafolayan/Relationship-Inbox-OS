@@ -7,9 +7,11 @@
 // in lib/use-focus-window.ts — none of that belongs in this file.
 //
 // The feature is deliberately conservative (PM call): one-tap only, never
-// auto-send, never AI-written text. The app only decides whether a contact
-// is COVERED and which note TIER fits, then fills [Name] / [until] / [reason]
-// into the operator's own template. The words stay the operator's.
+// auto-send. The app decides whether a contact is COVERED and which note
+// TIER fits, then fills [Name] / [until] / [reason] into the note. The words
+// are the operator's: their saved templates, their per-window edits, or — on
+// their explicit "Help me phrase this" request — an AI draft in their voice
+// that they review and can rewrite before anything is offered for sending.
 
 import type {
   AckTemplates,
@@ -43,6 +45,7 @@ export const EMPTY_FOCUS_WINDOW: FocusWindowState = {
   endsAt: "",
   reason: "",
   note: "",
+  professionalNote: "",
   audience: "favourites",
   windowId: "",
   ackedPersonIds: []
@@ -255,22 +258,22 @@ export function isFocusAckCandidate(
 }
 
 /** The acknowledgement note for a specific contact, tier-matched and tokens
- *  filled. Close contacts get the note the operator wrote for THIS window
- *  (the setup sheet's "Your note") when there is one; professional contacts
- *  always read the calmer saved template. Tokens still fill at send time, so
- *  a window note that keeps [Name]/[until] literal stays correct per person.
- *  Pure: the caller owns sending it (and only on an explicit tap). */
+ *  filled. Each tier prefers the note written for THIS window (the setup
+ *  sheet's "Your note", or the per-register pair "Help me phrase this"
+ *  produced), falling back to the saved template for that tier. Tokens still
+ *  fill at send time, so a window note that keeps [Name]/[until] literal
+ *  stays correct per person. Pure: the caller owns sending it (and only on
+ *  an explicit tap). */
 export function noteForRow(
   row: FocusRow,
   window: FocusWindowState,
   templates: AckTemplates
 ): string {
   const { tier } = coverageForRow(row, window.audience);
-  const windowNote = (window.note ?? "").trim();
-  const base =
-    tier === "close" && windowNote
-      ? window.note
-      : templates[tier] || DEFAULT_ACK_TEMPLATES[tier];
+  const windowNote = (tier === "close" ? window.note : window.professionalNote) ?? "";
+  const base = windowNote.trim()
+    ? windowNote
+    : templates[tier] || DEFAULT_ACK_TEMPLATES[tier];
   return fillNote(base, {
     name: firstNameOf(row.personName),
     until: formatUntil(window.endsAt),
