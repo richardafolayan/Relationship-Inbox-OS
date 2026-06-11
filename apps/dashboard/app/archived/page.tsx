@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { apiGet, apiPost, ApiRequestError } from "@/lib/api";
+import { apiGet, apiPost, ApiRequestError, peekCache } from "@/lib/api";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -123,7 +123,11 @@ function applyArchSort(items: InboxRow[], sort: ArchSort): InboxRow[] {
 // sections, and a calm foot note. Threads land here from Inbox; nothing is
 // deleted automatically.
 export default function ArchivedPage() {
-  const [rows, setRows] = useState<InboxRow[] | null>(null);
+  // Seed from the shared client cache so returning to Archived paints the
+  // last-known list instantly (refresh below revalidates immediately).
+  const [rows, setRows] = useState<InboxRow[] | null>(
+    () => peekCache<ArchivedResponse>("/runner/data/archived")?.rows ?? null
+  );
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<OutcomeTab>("all");
@@ -138,7 +142,14 @@ export default function ArchivedPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await apiGet<ArchivedResponse>("/runner/data/archived");
+      // SWR: paint the cached list immediately, revalidate in the background.
+      const response = await apiGet<ArchivedResponse>("/runner/data/archived", {
+        swr: true,
+        onFresh: (d) => {
+          setRows((d as ArchivedResponse).rows);
+          setError(null);
+        }
+      });
       setRows(response.rows);
       setError(null);
     } catch (refreshError) {
