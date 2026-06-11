@@ -6,6 +6,7 @@ import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
 import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import { prefetchThreadDataNow } from "@/lib/thread-prefetch";
 import type {
   HealthResponse,
   InboxResponse,
@@ -168,11 +169,15 @@ export default function TodayPage() {
     });
   }, []);
 
-  const refresh = useCallback(async () => {
+  // `force` skips the freshness TTL (still SWR: stale paints immediately,
+  // the network value lands via onFresh). Used by the SSE-driven path and
+  // post-action refreshes - those fire BECAUSE the data changed, so serving
+  // a <4s-old cache would delay the update until the next poll.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
     const [inbox, platformRows, healthData] = await Promise.all([
       // SWR: paint the cached queue immediately, revalidate in the background.
       apiGet<InboxResponse>("/runner/data/inbox", {
-        ttlMs: 4000,
+        ttlMs: opts?.force ? 0 : 4000,
         swr: true,
         onFresh: (d) => applyInbox(d as InboxResponse)
       }).catch(() => null),
@@ -195,7 +200,7 @@ export default function TodayPage() {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
-      void refresh();
+      void refresh({ force: true });
     }, 450);
   }, [refresh]);
   useEffect(
@@ -270,6 +275,9 @@ export default function TodayPage() {
       return { ...base, [level]: base[level] + 1 };
     });
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
+    // Brief visual ack ("Handled, next up") before the queue advances. Kept
+    // short: the operator is mid-flow and the next thread should be in front
+    // of them as close to instantly as legibility allows.
     transitionTimer.current = setTimeout(() => {
       setRemovedIds((prev) => {
         const next = new Set(prev);
@@ -277,8 +285,8 @@ export default function TodayPage() {
         return next;
       });
       setTransitioning(null);
-      void refresh();
-    }, 700);
+      void refresh({ force: true });
+    }, 400);
   }, [refresh]);
 
   useEffect(() => {
@@ -341,6 +349,13 @@ export default function TodayPage() {
   // hero, but a non-favourite overdue still outranks a fresh favourite.
   const sortedRows = useMemo(() => sortTodayQueue(rows), [rows]);
   const hero = sortedRows[0];
+  // The hero is the single most likely next open (Enter/R open it from the
+  // keyboard, where hover-prefetch never fires). Warm its thread data the
+  // moment it becomes the hero so opening it is instant.
+  const heroId = hero?.id;
+  useEffect(() => {
+    if (heroId) prefetchThreadDataNow(heroId);
+  }, [heroId]);
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
   // Cap the "Then these, in order" stack; the long tail routes to Inbox.
   // overflowCount drives the "see all" link's label. (issue #291)
@@ -581,7 +596,7 @@ export default function TodayPage() {
               ref={heroRef}
               data-testid="today-hero"
               data-demo-target="today-hero"
-              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-300 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               {/* The hero is no longer a white card — per the redesign it

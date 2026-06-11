@@ -261,11 +261,15 @@ export default function InboxPage() {
     });
   }, []);
 
-  const refresh = useCallback(async () => {
+  // `force` skips the freshness TTL (still SWR: stale paints immediately,
+  // the network value lands via onFresh). Used by the SSE-driven path - a
+  // runner event means the data DID change, so serving a <4s-old cache and
+  // skipping revalidation would delay the update until the next poll.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
     const [inbox, platformRows, logRows] = await Promise.all([
       // SWR: paint the cached list immediately, revalidate in the background.
       apiGet<InboxResponse>("/runner/data/inbox", {
-        ttlMs: 4000,
+        ttlMs: opts?.force ? 0 : 4000,
         swr: true,
         onFresh: (d) => applyInbox(d as InboxResponse)
       }).catch(() => null),
@@ -293,7 +297,7 @@ export default function InboxPage() {
     if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
-      void refresh();
+      void refresh({ force: true });
     }, 450);
   }, [refresh]);
   useEffect(
@@ -465,13 +469,13 @@ export default function InboxPage() {
       setClosedRefreshState({ kind: "done", summary, tone });
       window.setTimeout(() => {
         setClosedRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
-      }, 4500);
+      }, 2200);
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not reach the runner.";
       setClosedRefreshState({ kind: "error", message });
       window.setTimeout(() => {
         setClosedRefreshState((current) => (current.kind === "error" ? { kind: "idle" } : current));
-      }, 5000);
+      }, 3200);
     }
   }, [closedRefreshState.kind, refresh]);
   const closedRefreshLabel = (() => {
