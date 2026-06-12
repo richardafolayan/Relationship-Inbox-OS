@@ -18,6 +18,26 @@ import {
 } from "../platforms/browser-launch.js";
 import { createKeyedMutex } from "./keyed-mutex.js";
 import type { RunLogger } from "./run-logger.js";
+import {
+  backgroundWindowLaunchArgs,
+  captureFrontmostMacApp,
+  hideBrowserWindow,
+  isVisibleBrowserLaunchForced,
+  revealBrowserWindow,
+  setBrowserActivateHint
+} from "./runner-window.js";
+
+// The Chrome.app bundle that owns `executablePath` (.../Foo.app/Contents/
+// MacOS/Foo -> .../Foo.app), so an operator-initiated reveal can foreground
+// the app. Best-effort; null when the path doesn't look like a macOS bundle.
+function deriveAppBundlePath(executablePath: string | undefined): string | null {
+  if (!executablePath) {
+    return null;
+  }
+  const marker = ".app/Contents/MacOS/";
+  const idx = executablePath.indexOf(marker);
+  return idx >= 0 ? executablePath.slice(0, idx + ".app".length) : null;
+}
 
 interface SessionManagerDependencies {
   profileRootDir: string;
@@ -42,6 +62,14 @@ interface SessionState {
   pages: Map<PlatformName, Page>;
   pageOwners: Map<Page, PlatformName>;
   activeLeases: Map<PlatformName, number>;
+  // Teardown intent, set under personMutex BEFORE waitForLeaseDrain so
+  // withPlatformLease refuses a new lease for the whole drain -> teardown
+  // window (incl. the gap between drain-complete and the teardown's separate
+  // mutex re-acquisition). tearingDownContext = whole-context reset;
+  // tearingDownPlatforms = single-page close (per-platform so closing one
+  // page does not block leases for other platforms).
+  tearingDownContext: boolean;
+  tearingDownPlatforms: Set<PlatformName>;
   runLoggers: Map<PlatformName, RunLogger>;
 }
 
@@ -88,8 +116,56 @@ export class SessionManager {
   private readonly globalResetMutex = createKeyedMutex();
   private readonly states = new Map<string, SessionState>();
   private readonly observedContexts = new WeakSet<BrowserContext>();
+  // Per-platform refcount of explicit "the operator wants to see this browser"
+  // requests in flight. A launch is hidden unless this is > 0 (or the
+  // kill-switch is set). Refcounted so overlapping operator actions compose.
+  private readonly visibleLaunchRefcount = new Map<PlatformName, number>();
 
-  constructor(private readonly deps: SessionManagerDependencies) {}
+  constructor(private readonly deps: SessionManagerDependencies) {
+    try {
+      // Only the real patchright launcher exposes executablePath; the test
+      // fake injects its own launcher, so guard the call.
+      setBrowserActivateHint(deriveAppBundlePath(chromium.executablePath?.()));
+    } catch {
+      setBrowserActivateHint(null);
+    }
+  }
+
+  /**
+   * Mark that an operator-initiated, user-visible browser action is in flight
+   * for `platform`, so a launch it triggers is NOT hidden. Returns a disposer
+   * that must be called when the action finishes (refcounted).
+   */
+  markVisibleLaunch(platform: PlatformName): () => void {
+    this.visibleLaunchRefcount.set(platform, (this.visibleLaunchRefcount.get(platform) ?? 0) + 1);
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      const next = (this.visibleLaunchRefcount.get(platform) ?? 1) - 1;
+      if (next <= 0) {
+        this.visibleLaunchRefcount.delete(platform);
+      } else {
+        this.visibleLaunchRefcount.set(platform, next);
+      }
+    };
+  }
+
+  /**
+   * Bring an existing (possibly hidden) platform window back on-screen and to
+   * the front. Used by operator "show me the browser" flows when the context
+   * was launched hidden by an earlier background scan/send. No-op when there
+   * is no live page for the platform.
+   */
+  async revealWindow(platform: PlatformName, personKey = "default"): Promise<void> {
+    const state = this.states.get(sanitizePersonKey(personKey));
+    const page = state?.pages.get(platform);
+    if (page) {
+      await revealBrowserWindow(page);
+    }
+  }
 
   getProfileDir(personKey = "default"): string {
     return join(this.deps.profileRootDir, sanitizePersonKey(personKey));
@@ -222,6 +298,15 @@ export class SessionManager {
     const personKey = sanitizePersonKey(input.personKey ?? "default");
     await this.personMutex.runExclusive(`person:${personKey}`, async () => {
       const state = this.getOrCreateState(personKey);
+      // Refuse the lease if a teardown is in progress for this context/platform.
+      // The flag is set under THIS mutex before the drain begins, so a teardown
+      // that has already passed waitForLeaseDrain cannot have its page/context
+      // closed out from under a lease that lands in the post-drain gap.
+      if (state.tearingDownContext || state.tearingDownPlatforms.has(input.platform)) {
+        throw new Error(
+          `Cannot acquire ${input.platform} platform lease for ${personKey}: session is tearing down`
+        );
+      }
       const current = state.activeLeases.get(input.platform) ?? 0;
       state.activeLeases.set(input.platform, current + 1);
     });
@@ -271,53 +356,88 @@ export class SessionManager {
     const clearProfileDir = input.clearProfileDir ?? true;
 
     return this.globalResetMutex.runExclusive(`global-reset:${personKey}`, async () => {
-      await this.waitForLeaseDrain({
-        personKey,
-        timeoutMs: 12_000
+      // Mark the whole context as tearing down BEFORE draining so
+      // withPlatformLease refuses any new lease across the entire
+      // drain -> teardown window. Without this, waitForLeaseDrain releases the
+      // personMutex on return and the teardown below re-acquires it separately,
+      // so a lease acquired in that gap would have its context closed out from
+      // under it ('target page/context closed').
+      const tearingState = await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+        const state = this.getOrCreateState(personKey);
+        state.tearingDownContext = true;
+        return state;
       });
-      return this.personMutex.runExclusive(`person:${personKey}`, async () => {
-        const state = this.states.get(personKey);
-        const profileDir = this.getProfileDir(personKey);
-
-        if (state) {
-          await this.closeState(state);
-          this.states.delete(personKey);
-        }
-
-        if (clearProfileDir) {
-          await rm(profileDir, { recursive: true, force: true });
-          await mkdir(profileDir, { recursive: true });
-        }
-
-        return {
+      try {
+        await this.waitForLeaseDrain({
           personKey,
-          profileDir,
-          clearedProfileDir: clearProfileDir
-        };
-      });
+          timeoutMs: 12_000
+        });
+        return await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+          const state = this.states.get(personKey);
+          const profileDir = this.getProfileDir(personKey);
+
+          if (state) {
+            await this.closeState(state);
+            this.states.delete(personKey);
+          }
+
+          if (clearProfileDir) {
+            await rm(profileDir, { recursive: true, force: true });
+            await mkdir(profileDir, { recursive: true });
+          }
+
+          return {
+            personKey,
+            profileDir,
+            clearedProfileDir: clearProfileDir
+          };
+        });
+      } finally {
+        // Clear on the captured reference. If teardown deleted the state, a
+        // later lease creates a fresh state (flag defaults false); clearing the
+        // stale object is a harmless no-op.
+        await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+          tearingState.tearingDownContext = false;
+        });
+      }
     });
   }
 
   async closePlatformPage(input: { platform: PlatformName; personKey?: string }): Promise<void> {
     const personKey = sanitizePersonKey(input.personKey ?? "default");
-    await this.waitForLeaseDrain({
-      personKey,
-      platform: input.platform,
-      timeoutMs: 8_000
+    // Mark this platform as tearing down BEFORE draining so withPlatformLease
+    // refuses a new lease for this platform across the whole drain -> teardown
+    // window (incl. the gap between drain-complete and the teardown's separate
+    // mutex re-acquisition). Per-platform: other platforms can still lease.
+    const tearingState = await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+      const state = this.getOrCreateState(personKey);
+      state.tearingDownPlatforms.add(input.platform);
+      return state;
     });
-    await this.personMutex.runExclusive(`person:${personKey}`, async () => {
-      const state = this.states.get(personKey);
-      const page = state?.pages.get(input.platform);
-      if (!state || !page) {
-        return;
-      }
+    try {
+      await this.waitForLeaseDrain({
+        personKey,
+        platform: input.platform,
+        timeoutMs: 8_000
+      });
+      await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+        const state = this.states.get(personKey);
+        const page = state?.pages.get(input.platform);
+        if (!state || !page) {
+          return;
+        }
 
-      state.pages.delete(input.platform);
-      state.pageOwners.delete(page);
-      if (!page.isClosed()) {
-        await page.close().catch(() => undefined);
-      }
-    });
+        state.pages.delete(input.platform);
+        state.pageOwners.delete(page);
+        if (!page.isClosed()) {
+          await page.close().catch(() => undefined);
+        }
+      });
+    } finally {
+      await this.personMutex.runExclusive(`person:${personKey}`, async () => {
+        tearingState.tearingDownPlatforms.delete(input.platform);
+      });
+    }
   }
 
   private getOrCreateState(personKey: string): SessionState {
@@ -333,6 +453,8 @@ export class SessionManager {
       pages: new Map<PlatformName, Page>(),
       pageOwners: new Map<Page, PlatformName>(),
       activeLeases: new Map<PlatformName, number>(),
+      tearingDownContext: false,
+      tearingDownPlatforms: new Set<PlatformName>(),
       runLoggers: new Map<PlatformName, RunLogger>()
     };
     this.states.set(personKey, created);
@@ -443,7 +565,22 @@ export class SessionManager {
     args?: string[];
   }): Promise<BrowserContext> {
     const settings = await this.deps.getSettings();
-    return launchPersistentContextForPlatform({
+    // Hide the launch unless an operator-visible action requested it (Connect /
+    // open-browser) or the kill-switch forces the old visible path. A headless
+    // launch has no window to hide. See runner-window.ts for the why.
+    const hideLaunch =
+      !settings.headless &&
+      !isVisibleBrowserLaunchForced() &&
+      (this.visibleLaunchRefcount.get(input.platform) ?? 0) === 0;
+
+    const launchArgs = hideLaunch
+      ? [...(input.args ?? []), ...backgroundWindowLaunchArgs()]
+      : input.args;
+    // Capture the operator's frontmost app BEFORE the launch self-activates
+    // Chrome, so we can hand focus straight back after minimizing.
+    const previousFrontmostApp = hideLaunch ? await captureFrontmostMacApp() : null;
+
+    const context = await launchPersistentContextForPlatform({
       platform: input.platform,
       launchPersistentContext:
         this.deps.launchPersistentContext ??
@@ -451,10 +588,20 @@ export class SessionManager {
       isolatedProfileDir: input.profileDir,
       headless: settings.headless,
       browserProfile: this.deps.browserProfile,
-      args: input.args,
+      args: launchArgs,
       onConnectStep: this.deps.onConnectStep,
       onPersonalProfileFallback: this.deps.onPersonalProfileFallback
     });
+
+    if (hideLaunch) {
+      // Off-screen position + minimize: the window is never visible and is
+      // removed from the window list so no later Space switch can surface it.
+      // Best-effort: a hide failure must never fail the launch.
+      const initialPage = typeof context.pages === "function" ? context.pages()[0] : undefined;
+      await hideBrowserWindow(initialPage, previousFrontmostApp).catch(() => undefined);
+    }
+
+    return context;
   }
 
   private async closeState(state: SessionState): Promise<void> {

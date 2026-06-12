@@ -331,7 +331,14 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           warn(
             `[transcription] queue task failed (message=${item.messageId} tier=${item.tier}): ${error instanceof Error ? error.message : String(error)}`
           );
-          clearPending(item.messageId, item.tier);
+          // A thrown task bypasses runOneTierForQueue's cleanup (which
+          // clears the chained `standard` tier on success/non-throw
+          // failure). Clear ALL tracked tiers for this message — mirroring
+          // the manual force reset — so a single throw can't leak
+          // `standard` forever: that would freeze the dashboard's
+          // "Improving…" hint and block every future auto-enqueue via the
+          // de-dupe guard.
+          pendingTiersByMessage.delete(item.messageId);
         }
       }
     } finally {

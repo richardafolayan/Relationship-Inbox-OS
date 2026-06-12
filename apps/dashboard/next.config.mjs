@@ -1,5 +1,8 @@
 /** @type {import('next').NextConfig} */
-const runnerPort = process.env.RUNNER_PORT ?? "4001";
+// Truthiness (not ??) so a set-but-blank RUNNER_PORT ("") falls back to
+// the default instead of producing "http://localhost:" (port 80) and
+// pointing the /runner and /artifacts rewrites at the wrong place.
+const runnerPort = process.env.RUNNER_PORT?.trim() || "4001";
 const runnerBase = `http://localhost:${runnerPort}`;
 
 const nextConfig = {

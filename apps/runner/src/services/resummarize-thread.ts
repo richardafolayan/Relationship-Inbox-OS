@@ -21,7 +21,11 @@ export interface ResummarizeThreadDeps {
 
 export type ResummarizeThreadResult =
   | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
-  | { ok: false; reason: "not_found" };
+  // `ai_unavailable`: the AI call returned the synthesised FALLBACK (every
+  // provider in the chain failed at runtime — expired key, outage, rate-limit,
+  // 5xx). We deliberately DO NOT persist it, so a good stored summary is never
+  // overwritten with "Conversation with X." Counts as a failure for callers.
+  | { ok: false; reason: "not_found" | "ai_unavailable" };
 
 /**
  * Issue #385. The audio-transcription rows whose flag should be cleared after
@@ -115,6 +119,21 @@ export async function resummarizeThread(
     needsReply: computedNeedsReply,
     race: options?.race
   });
+
+  // Data-loss guard. updateThreadSummary returns the synthesised FALLBACK
+  // (summary "Conversation with {name}.", previous loops, the raw last inbound
+  // as whatTheyWant) — NOT a thrown error — when every AI provider in the chain
+  // fails at runtime. The key-presence check the backfill does up front can't
+  // catch a key that's present but expired, an outage, a rate-limit, or a 5xx.
+  // Persisting that fallback overwrites the real summary; with `fromScratch` it
+  // degrades to the bare "Conversation with {name}." (no prior to fall back on),
+  // so a single bad run could flatten every thread. Treat a fallback result as
+  // a FAILURE and write nothing — same signal raceModelJson validates with
+  // (source absent ⇒ legacy/mocked, or source.providerId === null ⇒ exhausted).
+  const usedFallback = !summary.source || summary.source.providerId === null;
+  if (usedFallback) {
+    return { ok: false, reason: "ai_unavailable" };
+  }
 
   const summaryData = {
     rollingSummary: summary.summary,

@@ -7,7 +7,7 @@ import type { InboxResponse } from "@/lib/types";
 import { PLATFORM_LABEL } from "@/lib/risk";
 import { normalizePreview } from "@/lib/preview";
 import { openPilotFeedback } from "@/lib/pilot";
-import { paletteItemMatches } from "@/lib/command-palette-search";
+import { clampActiveIndex, paletteItemMatches } from "@/lib/command-palette-search";
 
 interface CommandPaletteProps {
   open: boolean;
@@ -32,16 +32,26 @@ interface PaletteItem {
 // ⌘K palette. Replaces the topbar's search and the old "run scan now"
 // command rail. Two kinds of entries: page jumps and thread jumps.
 // Esc closes (this is wired in app-shell so it also closes any open thread).
+//
+// This component is mounted once for the whole app session (it lives in
+// AppShell), so its search state must not survive a close. The stateful body
+// lives in CommandPalettePanel, which is mounted ONLY while open — closing
+// unmounts it, so the next open always starts from a blank, fresh panel.
+// Resetting state in a post-commit [open] effect instead would flash the
+// previous session's typed query and stale highlight for one frame on reopen
+// (P3-PL2): the reset runs after the reopen render has already committed.
 export function CommandPalette({ open, onClose }: CommandPaletteProps) {
+  if (!open) return null;
+  return <CommandPalettePanel onClose={onClose} />;
+}
+
+function CommandPalettePanel({ onClose }: { onClose: () => void }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
 
   useEffect(() => {
-    if (!open) return;
-    setQuery("");
-    setActiveIndex(0);
     // Index the full inbox, not just the first 30 rows. With hundreds of
     // threads the old slice(0, 30) silently dropped most contacts from
     // search — e.g. a LinkedIn thread last active 12d ago would never
@@ -50,7 +60,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     void apiGet<InboxResponse>("/runner/data/inbox")
       .then((data) => setThreads(data.rows))
       .catch(() => undefined);
-  }, [open]);
+  }, []);
 
   const items: PaletteItem[] = useMemo(() => {
     const pages: PaletteItem[] = [
@@ -107,11 +117,19 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     return all.filter((item) => paletteItemMatches(item, query)).slice(0, 12);
   }, [query, router, threads]);
 
+  // Reset to the top match whenever the *query* changes — the best match
+  // should be highlighted as the operator types.
   useEffect(() => {
     setActiveIndex(0);
-  }, [items]);
+  }, [query]);
 
-  if (!open) return null;
+  // A *data*-driven change to the list (the inbox fetch landing after open,
+  // or a background refresh) must NOT yank the selection back to the top
+  // mid-keyboard-navigation (#605). Only clamp the current index back into
+  // range — with no query the length is unchanged, so this is a no-op.
+  useEffect(() => {
+    setActiveIndex((i) => clampActiveIndex(i, items.length));
+  }, [items.length]);
 
   const onKeyDown = (event: React.KeyboardEvent) => {
     if (event.key === "ArrowDown") {

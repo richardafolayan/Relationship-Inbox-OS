@@ -347,6 +347,12 @@ model Thread {
 
   @@unique([platform, platformThreadId])
   @@index([platform, riskLevel, needsReply, lastInboundAt])
+  // Per-person lookups sit on hot paths: iMessage sibling discovery runs on
+  // every thread open / mark-done / snooze, and relationship memory loads a
+  // person's other threads on every thread open. A person has only a handful
+  // of threads, so leading with personId turns both from platform-wide scans
+  // into a few-row index hit.
+  @@index([personId, lastMessageAt])
   @@map("threads")
 }
 
@@ -388,6 +394,11 @@ model Message {
   @@unique([threadId, platformMessageKey])
   @@index([threadId, timestamp])
   @@index([replyToMessageId])
+  // Serves the inbox KPI queries that scan by time across all threads: the
+  // 7-day reply-latency findMany (timestamp range + chronological sort) and
+  // the "sent today" OUT count. Without a timestamp-leading index both
+  // full-scan the 150k-row messages table on every inbox poll.
+  @@index([timestamp, direction])
   @@map("messages")
 }
 
@@ -535,8 +546,21 @@ model AuditLog {
   detailsJson    String?
   screenshotFile String?
   domDumpFile    String?
+  // Structured copy of details.threadId, extracted at write time. The
+  // thread page's receipts lookup used to LIKE-scan detailsJson across the
+  // whole recent audit table (~500k rows on an active runner, up to ~800ms
+  // per thread open when a thread's receipts were sparse); an indexed
+  // equality read is single-digit ms. Nullable: rows predating the column
+  // (and rows about no particular thread) simply don't match.
+  threadId       String?
 
   @@index([timestamp, platform, action, status])
+  @@index([threadId, timestamp])
+  // Selector-health receipts (action IN (...) AND platform = ?) are read on
+  // every thread open; without an action-leading index that arm filter-scans
+  // the whole recent window of the timestamp index (~80ms on a 500k-row
+  // table). With it, it's an index probe.
+  @@index([action, platform, timestamp])
   @@map("audit_logs")
 }
 

@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Loader2, RefreshCw, Star, X } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import { isCurrentDrawerRequest } from "@/lib/drawer-request-guard";
 import { setFavourite } from "@/lib/favourites";
 import type { PersonDetailResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
@@ -38,9 +39,20 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   // detail; a boolean wins until the toggle settles, reverting on failure.
   const [favOverride, setFavOverride] = useState<boolean | null>(null);
   const [favSaving, setFavSaving] = useState(false);
+  // Per-open-session request token (mirrors the thread page's route-id guard).
+  // Advanced on every open and every personId change so a slow Ask-AI /
+  // friendship-summary response that resolves after the drawer closed (or
+  // switched contact) can be discarded instead of resurfacing on the next open.
+  const drawerRequestTokenRef = useRef(0);
 
   useEffect(() => {
     if (!open || !personId) return;
+    // Start a new request session: bump the token so any in-flight AI writeback
+    // from the previous open/person is ignored, and clear last session's AI
+    // output so a post-close response can't survive into this open.
+    drawerRequestTokenRef.current += 1;
+    setAskAnswer(null);
+    setFriendshipSummary(null);
     // Drop the response if the drawer is closed (or switched to a
     // different person) before the fetch resolves — otherwise a slow
     // load can briefly flash stale data when the operator reopens the
@@ -105,11 +117,13 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
     setAsking(true);
     setAskAnswer(null);
     setError(null);
+    const startToken = drawerRequestTokenRef.current;
     try {
       const result = await apiPost<{ answer: string }>(
         `/runner/control/person/${personId}/ask`,
         { question: trimmed }
       );
+      if (!isCurrentDrawerRequest(startToken, drawerRequestTokenRef.current)) return;
       setAskAnswer(result.answer);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to ask the AI");
@@ -122,11 +136,13 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
     if (!personId) return;
     setGeneratingFriendship(true);
     setError(null);
+    const startToken = drawerRequestTokenRef.current;
     try {
       const result = await apiPost<FriendshipSummary>(
         `/runner/control/person/${personId}/friendship-summary`,
         {}
       );
+      if (!isCurrentDrawerRequest(startToken, drawerRequestTokenRef.current)) return;
       setFriendshipSummary(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to generate friendship summary");

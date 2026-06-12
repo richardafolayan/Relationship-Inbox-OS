@@ -66,7 +66,22 @@ export function readThreadSource(
   }
   if (!stored) return FALLBACK;
   if (!stored.startsWith("/")) return FALLBACK;
-  if (stored.startsWith("//")) return FALLBACK;
+  // Reject anything that resolves off-origin. A single leading slash
+  // followed by a second slash OR a backslash is the protocol-relative
+  // attack: browsers normalise '\\' to '/' when resolving a URL, so
+  // '/\\evil.com' becomes '//evil.com' and navigates the tab to
+  // evil.com. Percent-encoded variants ('/%2Fevil.com', '/%5Cevil.com')
+  // decode to the same shape, so test a best-effort decoded copy too.
+  const offOrigin = /^\/[\\/]/;
+  if (offOrigin.test(stored)) return FALLBACK;
+  let decoded = stored;
+  try {
+    decoded = decodeURIComponent(stored);
+  } catch {
+    // Malformed percent-encoding can't be a real local route; reject it.
+    return FALLBACK;
+  }
+  if (offOrigin.test(decoded)) return FALLBACK;
   if (stored.startsWith("/thread/")) return FALLBACK;
   return stored;
 }

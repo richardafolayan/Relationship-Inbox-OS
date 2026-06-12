@@ -1,22 +1,27 @@
 # Student Pilot: Troubleshooting
 
-Quick fixes for the common snags. None of this is your fault. It is an
-early build, and a thing not working *is* useful pilot feedback. If a fix
-here does not sort it, open a bug from the **Feedback** button in the
-sidebar (it walks you through it) or message me.
+Quick fixes for the common snags while **using** the app. For **install-time**
+problems (Node version, ports, "inbox empty after install", uninstall), see
+[student-install-troubleshooting.md](./student-install-troubleshooting.md), or
+just run `npm run doctor` from `~/RelationshipInboxOS` for a plain-English
+health check.
+
+None of this is your fault. It is an early build, and a thing not working *is*
+useful pilot feedback. If a fix here does not sort it, open a bug from the
+**Feedback** button in the sidebar (it walks you through it) or message me.
 
 ## The app keeps the Terminal window busy
 
-That is normal. The Terminal window running `npm run dev` has to stay open
+That is normal. The Terminal window running the app has to stay open
 the whole time you are using the app. To stop the app, click that window
-and press `Ctrl + C`. To start it again, run `npm run dev`.
+and press `Ctrl + C`. To start it again: `cd ~/RelationshipInboxOS && npm run start:student`.
 
 ## The page says "Can't reach the runner"
 
 The app has two halves and one of them is not up. Almost always: the
-Terminal running `npm run dev` was closed or crashed.
+Terminal running the app was closed or crashed.
 
-1. Open Terminal, `cd` into the project folder, run `npm run dev` again.
+1. Open Terminal, run `cd ~/RelationshipInboxOS && npm run start:student`.
 2. Wait for it to settle, then reload `http://localhost:3100`.
 
 ## A scan finished but no messages showed up
@@ -25,8 +30,26 @@ Terminal running `npm run dev` was closed or crashed.
 - Make sure you are **signed into LinkedIn in Chrome** (the normal Chrome
   window, not a private one).
 - Press **⌘K**, type `scan`, and run **Full LinkedIn rescan** once.
-- iMessage messages only appear on a Mac, and only after you have allowed
-  the macOS permission prompt.
+- iMessage threads need Full Disk Access for Terminal (see "My iMessage
+  conversations don't show up" below).
+
+## My iMessage conversations don't show up
+
+iMessage needs one macOS permission that LinkedIn does not. Check these, in
+order:
+
+1. **Full Disk Access.** The Terminal running the app must have it.
+   Open **System Settings → Privacy & Security → Full Disk Access** and make
+   sure **Terminal** is switched on.
+2. **Restart the app after granting it.** The permission only takes effect on
+   a fresh start: click the Terminal, press `Ctrl + C` to stop the app, then
+   run `cd ~/RelationshipInboxOS && npm run start:student`.
+3. **Be signed into Messages.** Open the **Messages** app once and confirm you
+   can see your chats.
+4. **Run a scan.** Press **⌘K**, type `scan`, choose **Run scan now**.
+
+LinkedIn works without any of this, so if only iMessage is missing, it is
+almost always step 1.
 
 ## LinkedIn wants me to log in again
 
@@ -38,14 +61,22 @@ If it keeps happening, tell me. That is worth knowing.
 ## "Port already in use"
 
 Another copy of the app is still running. Close any other Terminal windows
-running `npm run dev`, then start it once more. If it persists, restart your
+running the app, then start it once more. If it persists, restart your
 Mac and try again.
 
 ## macOS asked for permission
 
-The first time the app reads iMessage, macOS may ask to allow access to your
-Messages. Allowing it lets the app show your iMessage threads. If you would
-rather not, decline. LinkedIn still works fine on its own.
+Two different macOS permissions are involved with iMessage, and both are
+expected:
+
+- **Full Disk Access** lets the app *read* your iMessages. You grant this
+  yourself in System Settings (see "My iMessage conversations don't show up"
+  above).
+- **"Terminal wants to control Messages"** appears the first time you *send*
+  an iMessage reply. Click **Allow**. If you dismissed it by accident, sending
+  will fail, tell me and we will re-trigger it.
+
+You can decline both and LinkedIn still works fine on its own.
 
 ## A conversation won't open ("Can't open this thread")
 
@@ -56,7 +87,7 @@ bug worth reporting.
 ## I want to start completely fresh
 
 1. Stop the app (`Ctrl + C` in the Terminal).
-2. Start it again: `npm run dev`.
+2. Start it again: `cd ~/RelationshipInboxOS && npm run start:student`.
 
 That is usually enough. A full data reset is a bigger step, ask me first
 rather than doing it yourself.

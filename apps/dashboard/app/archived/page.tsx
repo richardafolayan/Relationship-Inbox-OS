@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { apiGet, apiPost, ApiRequestError } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -123,7 +124,13 @@ function applyArchSort(items: InboxRow[], sort: ArchSort): InboxRow[] {
 // sections, and a calm foot note. Threads land here from Inbox; nothing is
 // deleted automatically.
 export default function ArchivedPage() {
-  const [rows, setRows] = useState<InboxRow[] | null>(null);
+  // Seed from the shared client cache so returning to Archived paints the
+  // last-known list instantly (refresh below revalidates immediately). Read
+  // via useCacheSeed (NOT a useState initializer) so a warm cache can never
+  // leak into the hydration render and mismatch the server HTML.
+  const archivedSeed = useCacheSeed<ArchivedResponse>("/runner/data/archived");
+  const [rowsState, setRows] = useState<InboxRow[] | null>(null);
+  const rows = rowsState ?? archivedSeed?.rows ?? null;
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<OutcomeTab>("all");
@@ -138,7 +145,14 @@ export default function ArchivedPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const response = await apiGet<ArchivedResponse>("/runner/data/archived");
+      // SWR: paint the cached list immediately, revalidate in the background.
+      const response = await apiGet<ArchivedResponse>("/runner/data/archived", {
+        swr: true,
+        onFresh: (d) => {
+          setRows((d as ArchivedResponse).rows);
+          setError(null);
+        }
+      });
       setRows(response.rows);
       setError(null);
     } catch (refreshError) {
@@ -371,9 +385,11 @@ export default function ArchivedPage() {
             ) : null}
           </label>
 
-          {/* Outcome tabs + tools cluster */}
-          <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
-            <div className="flex flex-1 flex-wrap gap-[1px]">
+          {/* Outcome tabs + tools cluster. On phone the tools sit above a
+              horizontally-scrollable tab strip (no wrap) so the bar stays
+              two calm rows instead of a tall pile. */}
+          <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
+            <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
               {OUTCOME_TABS.map((entry) => {
                 const active = tab === entry.key;
                 const count = counts[entry.key];
@@ -384,7 +400,7 @@ export default function ArchivedPage() {
                     type="button"
                     onClick={() => setTab(entry.key)}
                     className={cn(
-                      "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                      "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
                       active
                         ? "border-accent font-medium text-ink"
                         : zero
@@ -405,7 +421,7 @@ export default function ArchivedPage() {
                 );
               })}
             </div>
-            <div className="flex items-center gap-[4px] pb-[6px]">
+            <div className="flex items-center justify-end gap-[4px] pb-[6px]">
               <SortMenu value={sortMode} options={ARCH_SORTS} onChange={setSortMode} />
               <PlatformPopover platformFilter={platformFilter} onPlatform={setPlatformFilter} />
               {orderedIds.length > 0 || selectMode ? (

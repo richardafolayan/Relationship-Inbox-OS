@@ -92,6 +92,32 @@ function isUniqueConstraintError(error: unknown): boolean {
   return error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002";
 }
 
+// Marker written into `receiptJson` the instant a worker claims a PENDING row,
+// BEFORE the (non-idempotent) adapter send. Two things hang off it:
+//
+//   1. Atomic claim. The claim is an `updateMany` guarded on
+//      `{ status: PENDING, receiptJson: null }`; only the worker whose write
+//      returns `count === 1` proceeds to the adapter. A second worker (a
+//      concurrent kick, or a resume() after restart) sees `receiptJson` already
+//      set, gets `count === 0`, and bails — so the recipient can't be messaged
+//      twice.
+//   2. Crash reconciliation. If the process dies between the physical send and
+//      the terminal SENT write, the row is left PENDING with this exact marker
+//      in `receiptJson`. On boot that's an *in-doubt* row: a send may or may not
+//      have physically gone out, so resume() must NOT blindly re-dispatch it.
+//      `reconcileInterruptedSends` flips these to FAILED for operator review.
+//
+// Safe to overload `receiptJson` because it is only ever parsed when
+// `status === "SENT"` (see enqueueSend's replay branch); on a PENDING/FAILED
+// row it is never read. The SENT write overwrites this marker with the real
+// receipt JSON.
+export const SEND_CLAIM_MARKER = "__claimed__";
+
+/** True when a PENDING row carries the in-flight claim marker (vs. a real receipt). */
+export function isClaimMarker(receiptJson: string | null | undefined): boolean {
+  return receiptJson === SEND_CLAIM_MARKER;
+}
+
 export interface EnqueueSendResult {
   clientSendId: string;
   status: "PENDING" | "SENT" | "FAILED";
@@ -221,6 +247,30 @@ export function createSendService(deps: SendServiceDeps) {
     }
     if (sendRequest.status !== "PENDING") {
       // Already processed — nothing to do. Defensive against double-kicks.
+      return;
+    }
+    // An in-doubt row left behind by a crash mid-send (PENDING + claim marker)
+    // must NOT be re-dispatched — the adapter send is not idempotent, so a
+    // blind retry would re-message the recipient. resume() reconciles these to
+    // FAILED before draining; if one slips through (a kick raced the
+    // reconcile), refuse it here too.
+    if (isClaimMarker(sendRequest.receiptJson)) {
+      return;
+    }
+
+    // Atomically claim the row BEFORE the (non-idempotent) adapter send. Only
+    // the worker whose guarded write wins (count === 1) proceeds; a concurrent
+    // kick or a post-restart resume() sees `receiptJson` already set and bails.
+    // Without this, a crash between the physical send and the SENT write at the
+    // bottom of this function leaves the row PENDING, and resume() re-dispatches
+    // it — sending the message twice.
+    const claim = await prisma.sendRequest.updateMany({
+      where: { id: sendRequestId, status: "PENDING", receiptJson: null },
+      data: { receiptJson: SEND_CLAIM_MARKER }
+    });
+    if (claim.count !== 1) {
+      // Lost the race — another worker already claimed (or terminalised) this
+      // row. Do nothing; the winner owns the send.
       return;
     }
 
@@ -705,12 +755,40 @@ export function createSendService(deps: SendServiceDeps) {
     };
   }
 
+  /**
+   * Reconcile send requests left in-doubt by a crash. A row that is still
+   * PENDING but already carries the {@link SEND_CLAIM_MARKER} was claimed by a
+   * previous process that died before writing the terminal SENT — the adapter
+   * send may or may not have physically gone out. Re-dispatching is unsafe
+   * (the adapter is not idempotent, no clientSendId on the wire), so these rows
+   * are flipped to FAILED with an INTERRUPTED kind and surfaced for the
+   * operator to verify and resend by hand. Returns the number reconciled.
+   *
+   * Called by the send-queue on boot, BEFORE the normal PENDING drain, so an
+   * in-doubt row is never picked up by the worker loop.
+   */
+  async function reconcileInterruptedSends(): Promise<number> {
+    const { count } = await prisma.sendRequest.updateMany({
+      where: { status: "PENDING", receiptJson: SEND_CLAIM_MARKER },
+      data: {
+        status: "FAILED",
+        errorJson: JSON.stringify({
+          message:
+            "Send interrupted by a runner restart — the message may or may not have been delivered. Verify in the conversation before resending.",
+          errorKind: "INTERRUPTED"
+        })
+      }
+    });
+    return count;
+  }
+
   return {
     enqueueSend,
     enqueueScheduledSend,
     cancelScheduledSend,
     updateScheduledSend,
-    processSendRequest
+    processSendRequest,
+    reconcileInterruptedSends
   };
 }
 

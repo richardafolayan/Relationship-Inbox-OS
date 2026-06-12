@@ -97,17 +97,23 @@ export async function findIssueByReportId(opts: {
   const delayMs = opts.delayMs ?? 1500;
   const query = encodeURIComponent(`repo:${opts.repo} in:title "${opts.reportId}"`);
   for (let i = 0; i < attempts; i += 1) {
-    const res = await fetchImpl(`https://api.github.com/search/issues?q=${query}&per_page=5`, {
-      headers: ghHeaders(opts.token)
-    });
-    if (res.ok) {
-      const body = (await res.json()) as {
-        items?: Array<{ number: number; title: string }>;
-      };
-      // The Apps Script titles include the reportId at the end; pick
-      // the freshest match.
-      const match = body.items?.find((item) => item.title.includes(opts.reportId));
-      if (match) return match.number;
+    try {
+      const res = await fetchImpl(`https://api.github.com/search/issues?q=${query}&per_page=5`, {
+        headers: ghHeaders(opts.token)
+      });
+      if (res.ok) {
+        const body = (await res.json()) as {
+          items?: Array<{ number: number; title: string }>;
+        };
+        // The Apps Script titles include the reportId at the end; pick
+        // the freshest match.
+        const match = body.items?.find((item) => item.title.includes(opts.reportId));
+        if (match) return match.number;
+      }
+    } catch {
+      // Transient network blip (DNS failure, reset, rejected 5xx). Fall
+      // through to the delay + retry, same as a non-ok response — the
+      // issue may exist and a retry could find it.
     }
     if (i < attempts - 1) {
       await new Promise((resolve) => setTimeout(resolve, delayMs));
@@ -130,18 +136,31 @@ export async function uploadScreenshotToRepo(opts: {
   fetchImpl?: typeof fetch;
 }): Promise<string | null> {
   const fetchImpl = opts.fetchImpl ?? fetch;
-  const res = await fetchImpl(
-    `https://api.github.com/repos/${opts.repo}/contents/${opts.path}`,
-    {
-      method: "PUT",
-      headers: ghHeaders(opts.token),
-      body: JSON.stringify({
-        message: opts.commitMessage,
-        content: opts.base64,
-        branch: opts.branch
-      })
-    }
+  const contentsUrl = `https://api.github.com/repos/${opts.repo}/contents/${opts.path}`;
+  // The path is deterministic per reportId, so a retry or a duplicate
+  // webhook re-attaches the same path. GitHub's Contents API rejects a
+  // PUT to an existing path (HTTP 422) unless the current blob `sha` is
+  // supplied to update in place. GET it first; a non-ok response (404)
+  // means a fresh create and we send no sha.
+  let existingSha: string | undefined;
+  const head = await fetchImpl(
+    `${contentsUrl}?ref=${encodeURIComponent(opts.branch)}`,
+    { method: "GET", headers: ghHeaders(opts.token) }
   );
+  if (head.ok) {
+    const meta = (await head.json()) as { sha?: string };
+    if (meta && typeof meta.sha === "string") existingSha = meta.sha;
+  }
+  const res = await fetchImpl(contentsUrl, {
+    method: "PUT",
+    headers: ghHeaders(opts.token),
+    body: JSON.stringify({
+      message: opts.commitMessage,
+      content: opts.base64,
+      branch: opts.branch,
+      ...(existingSha ? { sha: existingSha } : {})
+    })
+  });
   if (!res.ok) {
     return null;
   }

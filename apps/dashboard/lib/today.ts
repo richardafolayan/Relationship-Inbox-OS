@@ -26,6 +26,17 @@ function riskRank(level: InboxRow["riskLevel"]): number {
   return level === "RED" ? 0 : level === "AMBER" ? 1 : 2;
 }
 
+// Within-bucket tie-break key: oldest real inbound leads. A missing inbound
+// timestamp is "unknown waiting time", NOT an ancient inbound, so it must sort
+// to the BACK of its bucket (matching overdue-digest.ts), never the front.
+// A non-null but unparseable value yields NaN from Date.parse, which would make
+// the `aIn - bIn` comparator return NaN (an inconsistent comparator with
+// undefined sort order); coerce that to the back too.
+function inboundSortKey(lastInboundAt: string | null): number {
+  const ts = lastInboundAt ? Date.parse(lastInboundAt) : Number.NaN;
+  return Number.isFinite(ts) ? ts : Number.MAX_SAFE_INTEGER;
+}
+
 // Order for "tonight's work": most-urgent risk bucket first (overdue →
 // waiting → fresh), oldest-waiting first within a bucket. Favourited contacts
 // (R-0066 / #483) are lifted to the front of their OWN risk bucket only —
@@ -43,8 +54,8 @@ export function sortTodayQueue(rows: readonly InboxRow[]): InboxRow[] {
     if (aFav !== bFav) {
       return aFav - bFav;
     }
-    const aIn = a.lastInboundAt ? Date.parse(a.lastInboundAt) : 0;
-    const bIn = b.lastInboundAt ? Date.parse(b.lastInboundAt) : 0;
+    const aIn = inboundSortKey(a.lastInboundAt);
+    const bIn = inboundSortKey(b.lastInboundAt);
     return aIn - bIn;
   });
 }
