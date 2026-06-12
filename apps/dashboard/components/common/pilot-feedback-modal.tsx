@@ -14,6 +14,7 @@ import {
   buildPilotReportPayload,
   collectPilotMeta,
   onPilotFeedback,
+  mergeScreenshots,
   validateScreenshotFile,
   type PilotReportType
 } from "@/lib/pilot";
@@ -105,11 +106,6 @@ export function PilotFeedbackModal() {
       const files = fileList ? Array.from(fileList) : [];
       if (files.length === 0) return;
       setScreenshotError(null);
-      const room = MAX_SCREENSHOTS - screenshots.length;
-      if (room <= 0) {
-        setScreenshotError(`You can attach up to ${MAX_SCREENSHOTS} images.`);
-        return;
-      }
       const picked: PickedScreenshot[] = [];
       let error: string | null = null;
       for (const file of files) {
@@ -131,15 +127,20 @@ export function PilotFeedbackModal() {
           error = "Could not read that image.";
         }
       }
-      if (picked.length > room) {
-        error = `You can attach up to ${MAX_SCREENSHOTS} images.`;
-      }
       if (picked.length > 0) {
-        setScreenshots((prev) => [...prev, ...picked].slice(0, MAX_SCREENSHOTS));
+        setScreenshots((prev) => {
+          const { merged, overflow } = mergeScreenshots(prev, picked);
+          if (overflow) {
+            error = `You can attach up to ${MAX_SCREENSHOTS} images.`;
+          }
+          return merged;
+        });
+      } else if (picked.length === 0 && MAX_SCREENSHOTS - 0 <= 0) {
+        error = `You can attach up to ${MAX_SCREENSHOTS} images.`;
       }
       if (error) setScreenshotError(error);
     },
-    [screenshots.length]
+    []
   );
 
   const removeScreenshot = useCallback((id: string) => {

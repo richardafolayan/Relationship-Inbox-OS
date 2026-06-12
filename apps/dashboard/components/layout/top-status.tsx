@@ -1,11 +1,17 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Moon } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import { formatUntil } from "@/lib/focus";
+import { openFocusReview, openFocusSetup, useFocusWindow } from "@/lib/use-focus-window";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
+import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
+import { NotificationBell } from "@/components/common/notification-center";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Single 44px status row. Mostly read-only in v1:
@@ -330,32 +336,38 @@ export function TopStatus() {
   // (TopStatus lives in the persistent shell), so it only shows once.
   const [ready, setReady] = useState(false);
   const [, setTick] = useState(0);
+  // Focus Reply Buffer: a calm top-bar entry point, reachable from any page
+  // (and any width). Off -> open the setup sheet; on -> open the review sheet.
+  const { active: focusActive, focusWindow } = useFocusWindow();
 
   const refresh = useCallback(async () => {
+    // Short TTLs so /health and /data/platforms de-dupe with the app-shell's
+    // own 8s poll via the shared client cache instead of issuing duplicate
+    // requests on overlapping cadences.
     const [healthData, queueData, platformData] = await Promise.all([
-      apiGet<HealthResponse>("/runner/health").catch(() => null),
-      apiGet<SendQueueResponse>("/runner/data/send-queue").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => null)
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null),
+      apiGet<SendQueueResponse>("/runner/data/send-queue", { ttlMs: 3000 }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => null)
     ]);
     if (healthData) setHealth(healthData);
     if (queueData) setQueue(queueData);
     if (platformData) setPlatforms(platformData);
     setReady(true);
   }, []);
+  // Stable handle for the action handlers below that trigger an out-of-band
+  // refresh (scan now, reset session, etc.) without depending on refresh's
+  // identity.
   const refreshRef = useRef(refresh);
   refreshRef.current = refresh;
 
-  useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refreshRef.current(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
-  }, [refresh]);
+  // Poll while visible; paused in background tabs. The hook fires an
+  // immediate tick on mount and a catch-up tick on return to foreground.
+  useVisiblePolling(() => void refresh(), POLL_INTERVAL_MS);
 
-  // Tick once a second so the "scan Xm ago" caption stays current.
-  useEffect(() => {
-    const timer = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(timer);
-  }, []);
+  // Tick once a second so the "scan Xm ago" caption stays current — but only
+  // while the tab is visible, so a backgrounded tab isn't re-rendering the
+  // status bar every second for a caption nobody is reading.
+  useVisiblePolling(() => setTick((n) => n + 1), 1000);
 
   // Issue #369. Subscribe to per-thread Reassess in-flight signals so
   // the ticker surfaces "Reassessing thread" while a kebab → Reassess
@@ -399,6 +411,20 @@ export function TopStatus() {
   // type /platforms directly for the full diagnostics.)
   const degradedPlatforms = implemented?.filter((p) => p.status !== "CONNECTED") ?? [];
   const hasDegraded = degradedPlatforms.length > 0;
+
+  // Keep the reconnect modal's open-state honest. `reconnectOpen` is tracked
+  // separately from `degradedPlatforms` (derived fresh each render from the
+  // polled snapshot), so when the last degraded platform reconnects — via the
+  // operator's own Reconnect click, a background poll, or a runner-event
+  // refresh — the list empties but the boolean stays true, leaving the modal
+  // showing its "These platforms aren't connected" header over an empty list.
+  // Auto-close once there is nothing left to reconnect; this doubles as
+  // confirmation the reconnect worked.
+  useEffect(() => {
+    if (shouldAutoCloseReconnect(reconnectOpen, hasDegraded)) {
+      setReconnectOpen(false);
+    }
+  }, [reconnectOpen, hasDegraded]);
 
   const runPlatformAction = useCallback(
     async (platform: string, endpoint: "connect" | "reset-session") => {
@@ -495,7 +521,7 @@ export function TopStatus() {
     <div
       role="status"
       aria-live="polite"
-      className="sticky top-0 z-30 flex h-[44px] items-center gap-3 border-b border-hairline bg-paper/95 px-6 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur"
+      className="sticky top-0 z-30 flex h-[44px] items-center gap-2 border-b border-hairline bg-paper/95 px-4 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur md:gap-3 md:px-6"
     >
       {!ready ? (
         // #435: cold-mount placeholder. A grey pip + "Connecting…" instead
@@ -568,9 +594,27 @@ export function TopStatus() {
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
+        <NotificationBell />
+        <button
+          type="button"
+          onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}
+          title={focusActive ? "Focus block active, review acknowledgements" : "Start a focus window"}
+          className={`inline-flex items-center gap-[6px] rounded-pill border px-[10px] py-[3px] font-sans text-[11.5px] tracking-[-0.005em] transition-colors duration-calm ${
+            focusActive
+              ? "border-[color-mix(in_srgb,var(--accent)_30%,transparent)] bg-accent-soft text-accent-ink"
+              : "border-hairline-strong text-ink-2 hover:border-[color-mix(in_srgb,var(--accent)_30%,transparent)] hover:text-ink"
+          }`}
+        >
+          <Moon className="h-[12px] w-[12px]" strokeWidth={1.7} />
+          {focusActive
+            ? `Focus${focusWindow.endsAt ? ` · until ${formatUntil(focusWindow.endsAt)}` : ""}`
+            : "Focus off"}
+        </button>
         {/* #435: suppress "scan never" / "Scan now" until the first poll
-            settles so a cold mount doesn't imply the runner has never run. */}
-        {ready ? <span>{scanLabel}</span> : null}
+            settles so a cold mount doesn't imply the runner has never run.
+            The relative timestamp is the first thing to go on phone widths —
+            "Scan now" keeps the actionable part. */}
+        {ready ? <span className="hidden sm:inline">{scanLabel}</span> : null}
         {ready && ticker.kind !== "scanning" ? (
           <>
             <button

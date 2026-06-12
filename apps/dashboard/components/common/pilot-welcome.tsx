@@ -2,10 +2,64 @@
 
 import { X } from "lucide-react";
 
-// A calm product note for pilot testers — not a landing page. Used in two
-// places: as a dismissible first-run card on Today, and (without onDismiss)
-// as a static panel in Settings so it stays findable after dismissal.
-export function PilotWelcomeCard({ onDismiss }: { onDismiss?: () => void }) {
+// A calm product note for pilot testers — not a landing page. Used in three
+// places:
+//   - Today right rail: the compact variant, sitting beside the focus block
+//     (Richard: "reply properly, not just fast" reads better on the side),
+//   - Settings: the full static panel (no onDismiss) so it stays findable.
+// The dismiss + localStorage behaviour is owned by the caller via onDismiss.
+export function PilotWelcomeCard({
+  onDismiss,
+  compact
+}: {
+  onDismiss?: () => void;
+  compact?: boolean;
+}) {
+  if (compact) {
+    return (
+      <section
+        data-testid="pilot-welcome"
+        className="relative overflow-hidden rounded-[14px] border border-hairline bg-paper p-[18px]"
+      >
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-0"
+          style={{
+            background:
+              "radial-gradient(ellipse at 100% 0%, color-mix(in oklch, var(--accent) 9%, transparent), transparent 55%)"
+          }}
+        />
+        <div className="relative">
+          <div className="flex items-start justify-between gap-3">
+            <p className="m-0 font-mono text-[10px] uppercase tracking-[0.1em] text-accent-ink">
+              Pilot · welcome
+            </p>
+            {onDismiss ? (
+              <button
+                type="button"
+                onClick={onDismiss}
+                aria-label="Dismiss welcome card"
+                title="Dismiss"
+                className="-mr-1 -mt-1 grid h-6 w-6 place-items-center rounded-[6px] text-ink-3 transition-colors duration-calm hover:bg-paper-2 hover:text-ink"
+              >
+                <X className="h-[14px] w-[14px]" strokeWidth={1.7} />
+              </button>
+            ) : null}
+          </div>
+          <h2 className="m-0 mt-2 font-display text-[17px] font-semibold leading-[1.25] tracking-[-0.018em]">
+            Reply properly, not just fast.
+          </h2>
+          <p className="m-0 mt-[8px] text-[12.5px] leading-[1.5] text-ink-2">
+            RI-OS shows who’s waiting, what they said, and what you still need to address.
+          </p>
+          <p className="m-0 mt-[10px] border-t border-hairline pt-[10px] text-[12px] leading-[1.55] text-ink-3">
+            You write the reply. AI help is optional, and nothing sends unless you choose to.
+          </p>
+        </div>
+      </section>
+    );
+  }
+
   return (
     <section
       data-testid="pilot-welcome"

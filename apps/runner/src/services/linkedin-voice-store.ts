@@ -37,9 +37,44 @@ export function hasLinkedInVoice(urn: string): boolean {
   return existsSync(linkedInVoicePath(urn));
 }
 
+/**
+ * True when an attachment guid belongs to the LinkedIn voice store rather
+ * than iMessage. The guid is the message key the adapter persisted the
+ * voice file under, which is one of three shapes:
+ *   - a real LinkedIn event URN: `urn:li:msg_message:...`
+ *   - a content fingerprint for an id-less bubble: `li-msg-fp:...`
+ *   - the raw positional fallback (legacy rows): `li-msg-<index>`
+ * The composite attachment resolver dispatches on this so a LinkedIn voice
+ * guid is never mistaken for a UUID-shaped iMessage attachment guid.
+ */
+export function isLinkedInVoiceGuid(guid: string): boolean {
+  return guid.startsWith("urn:li:") || guid.startsWith("li-msg-");
+}
+
 export function writeLinkedInVoice(urn: string, bytes: Buffer): string {
   ensureDir();
   const path = linkedInVoicePath(urn);
   writeFileSync(path, bytes);
   return path;
+}
+
+/**
+ * True when a `messaging-audio-analyzed` response belongs to the specific
+ * request a voice capture is waiting on. The adapter captures voice notes
+ * sequentially during backfill; the signed audio CDN URL does not carry the
+ * message's inner id, so matching on the URL pattern alone lets a slow
+ * earlier note's late response satisfy a later note's wait — writing one
+ * message's audio bytes under another message's urn. Correlating on request
+ * identity (the exact request the play-click triggered) prevents the
+ * cross-talk. `responseRequest` and `awaitedRequest` are Playwright `Request`
+ * objects, compared by identity; typed `unknown` here so this module stays
+ * free of any browser-driver dependency.
+ */
+export function linkedInVoiceResponseMatchesRequest(
+  responseUrl: string,
+  responseRequest: unknown,
+  awaitedRequest: unknown
+): boolean {
+  if (!/messaging-audio-analyzed/.test(responseUrl)) return false;
+  return responseRequest === awaitedRequest;
 }

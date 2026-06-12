@@ -13,7 +13,13 @@ import {
   getStepIndex,
   isStepInMode
 } from "@/lib/full-demo-script";
-import { clearFullDemoState, readFullDemoState, writeFullDemoState } from "@/lib/full-demo-state";
+import {
+  buildThreadIdMap,
+  clearFullDemoState,
+  readFullDemoState,
+  threadIdMapsEqual,
+  writeFullDemoState
+} from "@/lib/full-demo-state";
 import { installLiveDemoFetchInterceptor } from "@/lib/full-demo-fetch";
 
 /**
@@ -206,11 +212,12 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   const refreshThreadIdMap = useCallback(async () => {
     try {
       const inbox = await apiGet<InboxResponse>("/runner/data/inbox");
-      const next = new Map<string, string>();
-      for (const row of inbox.rows ?? []) {
-        if (row.platformThreadId) next.set(row.platformThreadId, row.id);
-      }
-      setThreadIdMap(next);
+      const next = buildThreadIdMap(inbox.rows);
+      // Skip the setState when the refetch produced the same map. A new
+      // Map reference here would re-run the route-change effect, which
+      // refetches again — an unbounded loop when a showcase thread never
+      // seeds. Returning the previous reference keeps the effect stable.
+      setThreadIdMap((prev) => (threadIdMapsEqual(prev, next) ? prev : next));
     } catch {
       /* leave previous map */
     }
@@ -306,9 +313,10 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     // Seed the sandbox without engaging the presenter walkthrough.
     // Pilot tour owns its own GuidedTour overlay against the same
     // showcase data.
-    if (flow === "presenter") {
-      // The presenter walkthrough is already running. Pilot tour should
-      // bow out rather than fight for the overlay.
+    if (flow === "presenter" || flow === "pilot") {
+      // A guided flow is already running. The presenter walkthrough owns the
+      // overlay, and a pilot tour is already seeded — re-seeding here would
+      // re-POST the sandbox for a tour that's already live. Bow out either way.
       return;
     }
     const payload: Partial<AppSettings> = {

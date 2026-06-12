@@ -16,14 +16,27 @@ import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { groupStubFields } from "./imessage-group-name";
 import { imessageMessageBodyText } from "./imessage-message-text";
 import { sendIMessage } from "./imessage-send";
-import { loadContactResolver, type ContactResolver } from "../services/contact-resolver";
+import { loadBestContactResolver, type ContactResolver } from "../services/contact-resolver";
 
 const execFileAsync = promisify(execFile);
 
 interface IMessageAdapterDependencies {
   dbPath: string;
   contactsVcfPath?: string;
+  /** AddressBook DB paths; defaults to auto-discovery under $HOME. Tests inject fixtures. */
+  addressBookDbPaths?: string[];
+  /** Force-enable/disable the live macOS Contacts read. Defaults to macOS-only. */
+  useAddressBook?: boolean;
 }
+
+/**
+ * How long a built contact resolver is reused before it is rebuilt from the
+ * live macOS Contacts. The adapter is long-lived, so without a refresh a
+ * contact added (or Full Disk Access granted) after boot would never resolve
+ * until the runner restarts. 5 minutes keeps the read cheap while picking up
+ * changes within one scan cycle.
+ */
+const CONTACT_RESOLVER_TTL_MS = 5 * 60_000;
 
 /**
  * Read-via-SQLite, send-via-AppleScript adapter for macOS Messages.app.
@@ -39,10 +52,27 @@ interface IMessageAdapterDependencies {
 export class IMessageAdapter implements PlatformAdapter {
   readonly platform: PlatformName = "IMESSAGE";
   private db?: IMessageDb;
-  private contactResolver: ContactResolver;
+  private resolverCache: { resolver: ContactResolver; builtAt: number } | null = null;
 
-  constructor(private readonly deps: IMessageAdapterDependencies) {
-    this.contactResolver = loadContactResolver(deps.contactsVcfPath);
+  constructor(private readonly deps: IMessageAdapterDependencies) {}
+
+  /**
+   * The contact resolver, rebuilt from the live macOS Contacts (+ optional
+   * vCard) at most once per TTL window. Cheap to call repeatedly: a cache hit
+   * is one timestamp comparison, so per-row/per-message callers can ask freely.
+   */
+  private resolver(): ContactResolver {
+    const now = Date.now();
+    if (this.resolverCache && now - this.resolverCache.builtAt < CONTACT_RESOLVER_TTL_MS) {
+      return this.resolverCache.resolver;
+    }
+    const resolver = loadBestContactResolver({
+      vcfPath: this.deps.contactsVcfPath,
+      addressBookDbPaths: this.deps.addressBookDbPaths,
+      useAddressBook: this.deps.useAddressBook
+    });
+    this.resolverCache = { resolver, builtAt: now };
+    return resolver;
   }
 
   /**
@@ -61,12 +91,13 @@ export class IMessageAdapter implements PlatformAdapter {
    */
   private resolveDisplayName(row: IMessageThreadRow): string {
     if (row.userSetName) return row.userSetName;
+    const resolver = this.resolver();
     if (!row.isGroup) {
-      return this.contactResolver.resolve(row.chatIdentifier) ?? row.displayName;
+      return resolver.resolve(row.chatIdentifier) ?? row.displayName;
     }
     if (row.participants.length === 0) return row.displayName;
     return row.participants
-      .map((p) => this.contactResolver.resolve(p) ?? p)
+      .map((p) => resolver.resolve(p) ?? p)
       .join(", ");
   }
 
@@ -84,7 +115,16 @@ export class IMessageAdapter implements PlatformAdapter {
         this.db = new IMessageDb(this.deps.dbPath);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException)?.code;
-        const isPermission = code === "EACCES" || /SQLITE_CANTOPEN|authorization/i.test(String(error));
+        // better-sqlite3 puts SQLITE_CANTOPEN in error.code; the message is
+        // just "unable to open database file", so String(error) never matches
+        // it. chat.db existed a moment ago (existsSync above), which makes
+        // CANTOPEN here a denied open in practice: missing Full Disk Access,
+        // or a runner launched from a sandboxed shell.
+        const isPermission =
+          code === "EACCES" ||
+          code === "EPERM" ||
+          code === "SQLITE_CANTOPEN" ||
+          /SQLITE_CANTOPEN|authorization/i.test(String(error));
         throw new AdapterFailure(
           isPermission
             ? "Cannot read iMessage chat.db - grant Full Disk Access to the runner's terminal."
@@ -127,6 +167,65 @@ export class IMessageAdapter implements PlatformAdapter {
     return rows.map((r) => this.toThreadStub(r, true, false));
   }
 
+  // --- incremental scan capability (PlatformAdapter.getScanWatermark) -------
+  //
+  // chat.db gives us cheap global freshness signals, so the scan loop can
+  // skip candidate discovery entirely when nothing changed (the full sweep's
+  // per-chat subqueries cost seconds of SYNCHRONOUS SQLite on a real library
+  // and ran on every watcher tick, stalling unrelated HTTP requests).
+  // Watermark format (adapter-private): "imsg1:<maxRowId>:<msgCount>:<readMark>".
+
+  private static readonly SCAN_WATERMARK_VERSION = "imsg1";
+
+  async getScanWatermark(): Promise<string> {
+    const w = this.getDb().getScanWatermark();
+    return `${IMessageAdapter.SCAN_WATERMARK_VERSION}:${w.maxRowId}:${w.msgCount}:${w.readMark}`;
+  }
+
+  async collectChangedThreads(
+    sinceWatermark: string
+  ): Promise<{ stubs: ThreadStub[]; fullSweepRequired: boolean }> {
+    const parts = sinceWatermark.split(":");
+    if (parts.length !== 4 || parts[0] !== IMessageAdapter.SCAN_WATERMARK_VERSION) {
+      // Unknown/older format (e.g. after an update changed the shape):
+      // resync everything once, then the new format takes over.
+      return { stubs: [], fullSweepRequired: true };
+    }
+    const sinceMaxRowId = Number(parts[1] ?? "");
+    const sinceMsgCount = Number(parts[2] ?? "");
+    const sinceReadMark = parts[3] ?? "0";
+    if (!Number.isFinite(sinceMaxRowId) || !Number.isFinite(sinceMsgCount)) {
+      return { stubs: [], fullSweepRequired: true };
+    }
+
+    const db = this.getDb();
+    const current = db.getScanWatermark();
+    // Deletion detector: if the row count grew by less than the ROWID
+    // high-water mark did, rows disappeared somewhere (unsend / deletion).
+    // Those can't be attributed to a chat cheaply, and the retraction sweep
+    // runs per synced thread, so fall back to a full sweep. ROWID gaps from
+    // rolled-back inserts can trip this too - rare, and the cost is one
+    // ordinary full scan tick.
+    const insertedUpperBound = current.maxRowId - sinceMaxRowId;
+    const countDelta = current.msgCount - sinceMsgCount;
+    if (countDelta < 0 || countDelta < insertedUpperBound) {
+      return { stubs: [], fullSweepRequired: true };
+    }
+
+    const guids = db.listChangedChatGuids(sinceMaxRowId, sinceReadMark);
+    if (guids.length === 0) {
+      return { stubs: [], fullSweepRequired: false };
+    }
+    const rows = db.listThreadsByGuids(guids);
+    // Same stub flags a changed chat would get from the unread/recent
+    // passes; listThreadsByGuids applies the same automated-sender filter,
+    // so chats the full sweep would never surface stay out here too.
+    return {
+      stubs: rows.map((r) => this.toThreadStub(r, r.unreadCount > 0, true)),
+      fullSweepRequired: false
+    };
+  }
+
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const db = this.getDb();
     const rows = db.listThreads(limit, { unreadOnly: false });
@@ -147,6 +246,7 @@ export class IMessageAdapter implements PlatformAdapter {
     // again at the read paths (scan-queue aggregates, AI context, thread
     // render, inbox preview) so the operator never sees them either way.
     const filteredRows = rows.filter((r) => !isNonContentIMessageSystemEvent(r.text));
+    const resolver = this.resolver();
     return filteredRows.map((r) => {
       // Persist reactions + reply parent on rawJson. Both fields are read
       // back by the dashboard's thread page; absent fields stay omitted so
@@ -162,12 +262,20 @@ export class IMessageAdapter implements PlatformAdapter {
       // raw handle when no match — unknown senders still get *something*
       // human-readable to label by.
       const resolvedSender =
-        r.senderHandle ? this.contactResolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
+        r.senderHandle ? resolver.resolve(r.senderHandle) ?? r.senderHandle : r.senderHandle;
       const text = imessageMessageBodyText(r.text, r.attachments.length);
       return {
         platformMessageKey: r.guid,
         direction: r.direction,
-        timestamp: r.timestamp ?? new Date().toISOString(),
+        // Pass the parsed chat.db timestamp through as-is. When `date` was
+        // NULL/0/non-finite, appleTimeToIso returned undefined; leave it
+        // undefined (timestamp is optional on NormalizedMessage) so
+        // scan-queue's `adapterReportedTimestamp` is false and
+        // buildMessageUpsertPayload preserves the existing row's timestamp
+        // on re-scan instead of re-stamping it to "now" (issue #245 drift).
+        // New inserts still fall back via normalizeMessageTimestamp. Mirrors
+        // the LinkedIn adapter's `timestamp || undefined`.
+        timestamp: r.timestamp,
         text,
         senderName: resolvedSender,
         raw: Object.keys(raw).length > 0 ? raw : undefined,
@@ -220,6 +328,18 @@ export class IMessageAdapter implements PlatformAdapter {
     // is found.
     const initialHandle = chat.participants[0] ?? chat.chatIdentifier;
     const handle = this.pickBestSendHandle(initialHandle);
+    // The receipt lookups below key on a chat guid. When pickBestSendHandle
+    // routes to a sibling handle, Messages.app delivers the message into that
+    // handle's *own* chat (a different chat.ROWID/guid than thread
+    // .platformThreadId), so polling the original thread guid would miss the
+    // sent row entirely — no receipt guid (which lets a later scan re-insert
+    // the message as a duplicate), no delivery confirmation, no attachments.
+    // Re-resolve to the picked handle's chat; fall back to the thread guid
+    // when the handle is unchanged or has no distinct 1:1 chat.
+    const receiptChatGuid =
+      handle === initialHandle
+        ? thread.platformThreadId
+        : db.findChatGuidForHandle(handle) ?? thread.platformThreadId;
     const sendStartedAt = Date.now();
     // Service must follow the *handle* we picked, not chat.service_name.
     // The chat row records whatever service Messages.app last touched it
@@ -274,7 +394,7 @@ export class IMessageAdapter implements PlatformAdapter {
     let isDelivered = false;
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
-      const status = db.findOutboundDeliveryStatus(thread.platformThreadId, sendStartedAt - 1000);
+      const status = db.findOutboundDeliveryStatus(receiptChatGuid, sendStartedAt - 1000);
       if (status) {
         if (status.error && status.error !== 0) {
           const serviceLabel = status.service ?? "?";
@@ -306,14 +426,14 @@ export class IMessageAdapter implements PlatformAdapter {
       // Defensive fallback: the delivery-status row should always carry
       // a timestamp now, but keep the legacy lookup as a safety net for
       // unusual chat.db states (e.g. corrupted date column).
-      const fallback = db.findOutboundSince(thread.platformThreadId, sendStartedAt - 1000);
+      const fallback = db.findOutboundSince(receiptChatGuid, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
     }
 
     // Capture attachments from chat.db for the new outbound message so
     // send.ts can persist them on the Message row (otherwise the dashboard
     // shows only the text bubble for voice notes / photos / videos).
-    const dbAttachments = db.findOutboundAttachments(thread.platformThreadId, sendStartedAt - 1000);
+    const dbAttachments = db.findOutboundAttachments(receiptChatGuid, sendStartedAt - 1000);
     const receiptAttachments: AttachmentPlaceholder[] = dbAttachments.map((a) => ({
       type: a.kind,
       manualReview: a.kind === "unknown",
@@ -353,17 +473,17 @@ export class IMessageAdapter implements PlatformAdapter {
    *      previous session.
    *   3. The original handle, as a last resort.
    *
-   * The siblings come from the operator's vCard via `contactResolver`.
-   * Without this, a contact who has both an iMessage email and a phone
-   * (the phone may or may not currently be iMessage-active) tends to
-   * get routed via SMS — which silently fails on Macs without Text
-   * Message Forwarding from an iPhone.
+   * The siblings come from the operator's contacts (live macOS Contacts +
+   * optional vCard) via the resolver. Without this, a contact who has both
+   * an iMessage email and a phone (the phone may or may not currently be
+   * iMessage-active) tends to get routed via SMS — which silently fails on
+   * Macs without Text Message Forwarding from an iPhone.
    */
   private pickBestSendHandle(handle: string): string {
     const db = this.getDb();
-    // Build the full handle pool (vcard siblings + the original itself,
-    // in case the original isn't in the vcard).
-    const pool = Array.from(new Set([handle, ...this.contactResolver.siblingHandles(handle)]));
+    // Build the full handle pool (contact siblings + the original itself,
+    // in case the original isn't in the address book).
+    const pool = Array.from(new Set([handle, ...this.resolver().siblingHandles(handle)]));
     // Prefer iMessage-registered emails first.
     const iMessageEmails = pool.filter(
       (h) => h.includes("@") && db.findHandleService(h) === "iMessage"

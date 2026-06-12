@@ -9,6 +9,7 @@ import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
 import { birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
+import { prefetchThreadData, prefetchThreadDataNow, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 
 interface ThreadRowProps {
   row: InboxRow;
@@ -69,6 +70,14 @@ export function ThreadRow({ row, onPersonChanged, id }: ThreadRowProps) {
     <Link
       id={id}
       href={`/thread/${row.id}`}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
+      onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
+      // The click is already certain by pointerdown - start the data fetch
+      // ~100ms before the click completes so fast clicks (no hover dwell)
+      // and touch input still open an already-warm thread.
+      onPointerDown={() => prefetchThreadDataNow(row.id)}
       data-demo-target={row.platformThreadId ? `thread-row-${row.platformThreadId}` : undefined}
       className="group grid grid-cols-[32px_1fr_auto] items-center gap-4 border-t border-hairline px-1 py-[18px] transition-colors duration-calm last:border-b last:border-hairline hover:bg-paper-2"
     >

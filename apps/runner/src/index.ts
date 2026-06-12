@@ -1,23 +1,27 @@
-import { createReadStream, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { dirname, join, resolve } from "node:path";
+import { join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
+import compression from "compression";
 import multer from "multer";
 import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
 import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
+import { Prisma } from "@prisma/client";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
 import { resolveConnectTimeoutMs, runnerConfig, projectRoot, dataDir } from "./config";
-import { ensurePathInside } from "./utils/fs";
+import { ensurePathInside, safeUploadFilename, streamFileToResponse } from "./utils/fs";
 import { safeJsonParse } from "./utils/json";
+import { filterDismissedOpenLoops } from "./utils/open-loops";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
+import { getLinkPreview } from "./services/link-preview";
 import {
   createAiService,
   contactSnapshotFingerprint,
@@ -35,26 +39,36 @@ import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
 import { decidePersonFavouriteAction } from "./services/person-favourite-action";
+import {
+  buildReconnectCandidateWhere,
+  isReconnectScorablePlatform
+} from "./services/reconnect-candidate-query";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
 import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
-import { loadContactResolver } from "./services/contact-resolver";
+import { loadBestContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
+import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
+import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
+import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
+import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
+import { readAppVersion, runUpdateCheck, stagePendingUpdate } from "./services/system-update";
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
+  isLinkedInVoiceGuid,
   linkedInVoicePath
 } from "./services/linkedin-voice-store";
 import { resolveActionTargetThreadIds } from "./services/thread-action-targets";
@@ -64,6 +78,7 @@ import {
   createOpenAITranscriptionProvider,
   createTextRefinementService,
   createTranscriptionService,
+  createTransformersWhisperProvider,
   type AttachmentResolver,
   type TranscriptionProvider
 } from "./services/transcription";
@@ -113,6 +128,29 @@ import {
 import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
+// How far back the per-thread receipts lookup scans the audit log. A thread's
+// own scan/send receipts are recent, so 180 days is generous while keeping the
+// query off the full historical telemetry table.
+const RECEIPTS_LOOKBACK_MS = 180 * 24 * 60 * 60 * 1000;
+
+// Gzip JSON responses. The inbox (hundreds of rows of preview/summary text)
+// and thread (up to 120 messages + reply-brief/suggested-reply JSON) payloads
+// are 5-10x compressible, so this cuts transfer + client JSON.parse on every
+// navigation and poll. The SSE stream (/events, text/event-stream) is
+// excluded — compression buffers chunked responses and would break live
+// events — and callers can opt out with an `x-no-compression` header.
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (req.path === "/events") return false;
+      if (req.headers["x-no-compression"]) return false;
+      const type = res.getHeader("Content-Type");
+      if (typeof type === "string" && type.includes("text/event-stream")) return false;
+      return compression.filter(req, res);
+    }
+  })
+);
+
 // Most routes carry tiny JSON. /control/pilot-feedback can carry several
 // base64 screenshots, so it gets a larger limit; everything else stays tight.
 const jsonSmall = express.json({ limit: "1mb" });
@@ -136,8 +174,11 @@ const uploadAttachments = multer({
       cb(null, dir);
     },
     filename: (_req, file, cb) => {
-      // Keep extension so Messages.app can sniff the right file type.
-      cb(null, file.originalname);
+      // Keep extension so Messages.app can sniff the right file type, but never
+      // trust the client name verbatim: multer path.join()s it onto the
+      // per-request dir, so a "../.." originalname would escape it (arbitrary
+      // file write). safeUploadFilename strips separators and ".."/"." names.
+      cb(null, safeUploadFilename(file.originalname, `${uuid()}.bin`));
     }
   }),
   limits: { fileSize: 50 * 1024 * 1024 } // 50MB per file
@@ -166,7 +207,7 @@ const uploadDictation = multer({
       mkdirSync(dir, { recursive: true });
       cb(null, dir);
     },
-    filename: (_req, file, cb) => cb(null, file.originalname || "dictation.webm")
+    filename: (_req, file, cb) => cb(null, safeUploadFilename(file.originalname, "dictation.webm"))
   }),
   limits: { fileSize: 25 * 1024 * 1024 } // ~ several minutes of speech
 }).single("audio");
@@ -187,6 +228,32 @@ const auditService = createAuditService();
 const eventBus = createEventBus();
 const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
+
+// ---------------------------------------------------------------------------
+// Version-gated response cache for the hottest polled endpoint.
+//
+// /data/inbox is polled every 8-10s by the app shell and the list pages, and
+// every poll re-does the full row load + shaping even when nothing changed.
+// The runner is the only writer of its SQLite DB, so it knows when data may
+// have changed: any runner event (scans, sends, reassess) and any mutating
+// HTTP request. Between those moments an identical poll is served from
+// memory. A short hard TTL keeps purely time-derived fields (risk recolour,
+// snooze expiry) honest even if some future write path forgets to signal.
+// ---------------------------------------------------------------------------
+const INBOX_CACHE_TTL_MS = 20_000;
+const inboxResponseCache = new Map<string, { expires: number; body: unknown }>();
+let dataVersion = 0;
+function bumpDataVersion(): void {
+  dataVersion += 1;
+  inboxResponseCache.clear();
+}
+eventBus.subscribe(() => bumpDataVersion());
+app.use((req, res, next) => {
+  if (req.method !== "GET") {
+    res.on("finish", bumpDataVersion);
+  }
+  next();
+});
 
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
@@ -264,12 +331,6 @@ function globalResetLockKey(): string {
   return `${defaultPersonKey}:GLOBAL_RESET`;
 }
 
-function filterDismissedOpenLoops(loops: string[], dismissedJson: string | null): string[] {
-  if (!dismissedJson) return loops;
-  const dismissed = new Set(JSON.parse(dismissedJson) as string[]);
-  return loops.filter((loop) => !dismissed.has(loop));
-}
-
 // Forward reference: the scan-queue's `onNewPerson` hook needs to call
 // the enrichment queue's `enqueue`, but the enrichment queue is built
 // AFTER scan-queue (it depends on sessionManager + lock vocabulary that
@@ -331,14 +392,18 @@ const linkedinAttachmentResolver: AttachmentResolver = {
 
 // Composite resolver dispatched on the guid format. iMessage attachments
 // are UUID-shaped (`3C3CA15E-7C18-...`); LinkedIn voice notes set the
-// URN as the guid (`urn:li:msg_message:...`). Falls back to null when
-// neither resolver recognises the id so the transcription service skips
-// gracefully instead of crashing.
+// message key as the guid. That key is either a real LinkedIn event URN
+// (`urn:li:msg_message:...`) or — when the bubble had no stable DOM id —
+// a content fingerprint (`li-msg-fp:...`) or the raw positional fallback
+// (`li-msg-<index>`); the voice store hashes whichever key we used to
+// write the file, so all three LinkedIn shapes must route to the LinkedIn
+// resolver. Falls back to null when neither resolver recognises the id so
+// the transcription service skips gracefully instead of crashing.
 const compositeAttachmentResolver: AttachmentResolver | null =
   imessageAttachmentResolver || linkedinAttachmentResolver
     ? {
         async resolve(id: string) {
-          if (id.startsWith("urn:li:")) {
+          if (isLinkedInVoiceGuid(id)) {
             return linkedinAttachmentResolver.resolve(id);
           }
           return imessageAttachmentResolver?.resolve(id) ?? null;
@@ -430,6 +495,20 @@ if (runnerConfig.audioTranscription.enabled) {
         }
       });
     }
+  } else if (runnerConfig.audioTranscription.provider === "transformers") {
+    // Local transformers.js + ONNX — the pilot default. Needs no external
+    // binary or build tools; the model is downloaded into data/models on
+    // install. The provider self-skips gracefully (reason
+    // transformers_model_unavailable) until the model is present, so no
+    // missing-config warning is needed here.
+    const tw = runnerConfig.audioTranscription.transformers;
+    transcriptionProvider = createTransformersWhisperProvider({
+      config: {
+        modelId: tw.modelId,
+        modelDir: tw.modelDir,
+        timeoutMs: tw.timeoutMs
+      }
+    });
   } else {
     if (!runnerConfig.openAiApiKey) {
       console.warn(
@@ -629,6 +708,18 @@ scheduledSendPromoter.start();
 // when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
 if (runnerConfig.contacts.birthdaySyncEnabled) {
   createBirthdaySync().start();
+}
+
+// Rewrites existing iMessage rows whose name is still a raw phone/email handle
+// to the real contact name (live macOS Contacts + optional vCard), once at
+// boot and then daily. Repairs threads imported before a contact source was
+// wired in so a pilot stops seeing bare numbers (issue #676). Mac-only;
+// idempotent (steady-state ticks write nothing). Also feeds the dashboard's
+// "this Mac has no saved contacts" hint via getHealth().
+let imessageNameSync: ImessageNameSync | null = null;
+if (process.platform === "darwin") {
+  imessageNameSync = createImessageNameSync();
+  imessageNameSync.start();
 }
 
 const connectInFlight = new Map<PlatformName, Promise<void>>();
@@ -1087,6 +1178,57 @@ async function loadOverdueDigestRows(): Promise<OverdueDigestRowInput[]> {
   });
 }
 
+// Shared Prisma projection for inbox-row shaping. Hoisted so the visible-row
+// query and the canonical-sibling query below select the IDENTICAL field set —
+// shapeThreadRows adopts AI fields from a canonical sibling, so any field it
+// reads must be present on BOTH result sets or the two would silently drift.
+const threadRowSelect = {
+  id: true,
+  platform: true,
+  platformThreadId: true,
+  threadUrl: true,
+  personId: true,
+  isGroup: true,
+  unreadCount: true,
+  needsReply: true,
+  lastMessagePreview: true,
+  lastMessageAt: true,
+  lastInboundAt: true,
+  lastOutboundAt: true,
+  lastMessageDirection: true,
+  lastMessageText: true,
+  riskLevel: true,
+  riskReason: true,
+  slaDueAt: true,
+  snoozedUntil: true,
+  whatTheyWant: true,
+  rollingSummary: true,
+  archivedAt: true,
+  category: true,
+  closedStatus: true,
+  closedStatusReason: true,
+  reconnectScore: true,
+  reconnectScoreReason: true,
+  updatedAt: true,
+  person: {
+    select: {
+      id: true,
+      displayName: true,
+      inferredName: true,
+      platform: true,
+      avatarUrl: true,
+      birthday: true,
+      birthYear: true,
+      favouritedAt: true
+    }
+  },
+  _count: {
+    select: {
+      messages: true
+    }
+  }
+} satisfies Prisma.ThreadSelect;
+
 async function loadVisibleThreadRows(options?: {
   /** When true, return ONLY archived threads. When false/undefined, return ONLY non-archived. */
   archived?: boolean;
@@ -1102,54 +1244,33 @@ async function loadVisibleThreadRows(options?: {
           // within that window once snoozedUntil <= now.
           OR: [{ snoozedUntil: null }, { snoozedUntil: { lte: now } }]
         },
-    select: {
-      id: true,
-      platform: true,
-      platformThreadId: true,
-      threadUrl: true,
-      personId: true,
-      unreadCount: true,
-      needsReply: true,
-      lastMessagePreview: true,
-      lastMessageAt: true,
-      lastInboundAt: true,
-      lastOutboundAt: true,
-      lastMessageDirection: true,
-      lastMessageText: true,
-      riskLevel: true,
-      riskReason: true,
-      slaDueAt: true,
-      snoozedUntil: true,
-      whatTheyWant: true,
-      rollingSummary: true,
-      archivedAt: true,
-      category: true,
-      closedStatus: true,
-      closedStatusReason: true,
-      reconnectScore: true,
-      reconnectScoreReason: true,
-      updatedAt: true,
-      person: {
-        select: {
-          id: true,
-          displayName: true,
-          inferredName: true,
-          platform: true,
-          avatarUrl: true,
-          birthday: true,
-          birthYear: true,
-          favouritedAt: true
-        }
-      },
-      _count: {
-        select: {
-          messages: true
-        }
-      }
-    }
+    select: threadRowSelect
   });
 
-  return shapeThreadRows(threads as ThreadRowSource[]);
+  // shapeThreadRows collapses an iMessage person's sibling handle-chats to one
+  // row and sources its AI fields (whatTheyWant, summary, preview, …) from the
+  // CANONICAL sibling — the most-recent-inbound one, which the thread endpoint
+  // also resolves over ALL siblings. The `threads` query above is visibility-
+  // filtered (active-only, or archived-only), so the live sibling can be absent
+  // from it; load the person's FULL sibling set so the inbox picks canonical
+  // over the same population the rail does and the two can't disagree (#499
+  // follow-up). Only iMessage persons need this; other platforms are 1:1.
+  const imessagePersonIds = [
+    ...new Set(
+      threads
+        .filter((thread) => thread.platform === "IMESSAGE")
+        .map((thread) => thread.personId)
+    )
+  ];
+  const canonicalSiblings =
+    imessagePersonIds.length > 0
+      ? await prisma.thread.findMany({
+          where: { platform: "IMESSAGE", personId: { in: imessagePersonIds } },
+          select: threadRowSelect
+        })
+      : [];
+
+  return shapeThreadRows(threads as ThreadRowSource[], canonicalSiblings as ThreadRowSource[]);
 }
 
 app.post("/admin/reset", asyncRoute(async (req, res) => {
@@ -1390,8 +1511,21 @@ app.get("/events", (req, res) => {
   res.setHeader("Connection", "keep-alive");
   res.flushHeaders();
 
-  const sinceEventId = Number(req.query.sinceEventId ?? req.header("last-event-id") ?? 0);
+  // Prefer the live `Last-Event-ID` header over the mount-time `sinceEventId`
+  // query param: on the browser's native auto-reconnect both arrive, but the
+  // query param is frozen at AppShell mount while the header reflects the last
+  // event actually delivered. Letting the stale param win replayed the whole
+  // buffered window on every reconnect (see resolveSseResumeCursor).
+  const sinceEventId = resolveSseResumeCursor(req.query.sinceEventId, req.header("last-event-id"));
   const oldest = eventBus.oldestEventId();
+
+  // Immediate comment frame: EventSource fires `open` only once response
+  // bytes arrive, and the dashboard's /events-proxy (and `next start`'s
+  // streaming layer) forwards headers only with the first body byte. With a
+  // quiet runner the first byte used to be the 15s keepalive, so a freshly
+  // opened app could sit "connecting" for up to 15s. A comment frame is
+  // ignored by EventSource but opens the pipe instantly.
+  res.write(": connected\n\n");
 
   // Emit every event as the default ("message") SSE type. EventSource
   // only delivers an event to `source.onmessage` when no `event:` field
@@ -1467,7 +1601,7 @@ app.get("/artifacts/:type/:name", (req, res) => {
         : "text/html; charset=utf-8";
 
     res.setHeader("Content-Type", contentType);
-    createReadStream(resolved).pipe(res);
+    streamFileToResponse(resolved, res, 404);
   } catch {
     res.status(400).json({ error: "Invalid artifact name" });
   }
@@ -1550,18 +1684,23 @@ app.post("/control/imessage/import-history", asyncRoute(async (req, res) => {
   // listThreads already drops automated/shortcode senders and decodes
   // lastMessageAt. 5000 comfortably exceeds the total chat count.
   const rows = db.listThreads(5000, { unreadOnly: false });
+  // listThreads materialises its rows; the rest of the handler uses scanQueue,
+  // not db. Close the chat.db handle now so each import-history call doesn't
+  // leak an open SQLite connection.
+  db.close();
   const candidates = rows.filter(
     (r) => r.lastMessageAt !== undefined && Date.parse(r.lastMessageAt) >= cutoffMs
   );
 
-  // Resolve handles to real names via the same vCard the scanner uses.
-  // Without this, `chat.db` only stores the raw phone/email so every
-  // imported person lands as "+447506440284" instead of "Lubosi" and is
-  // unsearchable by name. Mirrors the adapter's resolveDisplayName: an
-  // operator-set chat name wins; 1:1s resolve the chatIdentifier against
-  // the vCard; groups keep chat.db's participant-join name (per-member
-  // vCard resolution happens later in the scanner / backfill).
-  const resolver = loadContactResolver(runnerConfig.imessage.contactsVcfPath);
+  // Resolve handles to real names via the same source the scanner uses
+  // (live macOS Contacts + optional vCard). Without this, `chat.db` only
+  // stores the raw phone/email so every imported person lands as
+  // "+447506440284" instead of "Lubosi" and is unsearchable by name.
+  // Mirrors the adapter's resolveDisplayName: an operator-set chat name
+  // wins; 1:1s resolve the chatIdentifier; groups keep chat.db's
+  // participant-join name (per-member resolution happens later in the
+  // scanner / backfill).
+  const resolver = loadBestContactResolver({ vcfPath: runnerConfig.imessage.contactsVcfPath });
   const resolveName = (r: (typeof rows)[number]): string => {
     if (r.userSetName) return r.userSetName;
     if (r.isGroup) return r.displayName;
@@ -1686,7 +1825,20 @@ app.get("/data/linkedin-voice-message/:urn", asyncRoute(async (req, res) => {
   const rawUrn = req.params.urn;
   const urnParam = typeof rawUrn === "string" ? rawUrn : "";
   const { urn } = z
-    .object({ urn: z.string().min(8).max(400).startsWith("urn:li:") })
+    .object({
+      urn: z
+        .string()
+        .min(8)
+        .max(400)
+        // The voice guid is the message key the adapter persisted under:
+        // a real `urn:li:` event urn, a `li-msg-fp:...` fingerprint for an
+        // id-less bubble (the common case, ~120 chars), or the legacy
+        // positional `li-msg-<index>`. All three are valid; only the
+        // single canonical predicate decides membership.
+        .refine(isLinkedInVoiceGuid, {
+          message: "not a LinkedIn voice-message guid"
+        })
+    })
     .parse({ urn: decodeURIComponent(urnParam) });
   if (!hasLinkedInVoice(urn)) {
     res.status(404).json({ error: "linkedin voice message not yet captured" });
@@ -1695,7 +1847,7 @@ app.get("/data/linkedin-voice-message/:urn", asyncRoute(async (req, res) => {
   const path = linkedInVoicePath(urn);
   res.setHeader("Content-Type", LINKEDIN_VOICE_MIME);
   res.setHeader("Cache-Control", "private, max-age=3600");
-  createReadStream(path).pipe(res);
+  streamFileToResponse(path, res, 404);
 }));
 
 app.get("/data/settings", asyncRoute(async (_req, res) => {
@@ -1729,6 +1881,69 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
     activeModel,
     configuredProviders,
     activeProviderConfigured: configuredProviders.includes(activeProvider)
+  });
+}));
+
+// ---- System / self-update -------------------------------------------------
+// Logic lives in services/system-update.ts (testable in isolation). The
+// running app never replaces its own code: POST /system/update only STAGES a
+// pending-update intent, which scripts/start-student.mjs applies before
+// booting on the next launch.
+
+app.get("/system/version", asyncRoute(async (_req, res) => {
+  res.json(readAppVersion(projectRoot));
+}));
+
+app.get("/system/update-check", asyncRoute(async (_req, res) => {
+  const feedUrl = runnerConfig.updateFeedUrl;
+  if (!feedUrl) {
+    const current = readAppVersion(projectRoot).version;
+    res.json({
+      configured: false,
+      currentVersion: current,
+      latestVersion: current,
+      updateAvailable: false,
+      releaseNotes: []
+    });
+    return;
+  }
+  const result = await runUpdateCheck({ projectRoot, feedUrl });
+  res.json({ configured: true, ...result });
+}));
+
+app.post("/system/update", asyncRoute(async (_req, res) => {
+  // /system/update is NOT a /control/ path, so the dashboard's default-deny
+  // fetch interceptor never sees it — the Settings "Update and relaunch"
+  // button would otherwise stage a real self-update mid-presentation. Gate
+  // it server-side as an external action (blocked live + sandbox).
+  if (await checkPresenterGuard(res, settingsStore, { action: "stage an app update", kind: "external-action" })) return;
+  const feedUrl = runnerConfig.updateFeedUrl;
+  if (!feedUrl) {
+    res.status(409).json({ ok: false, reason: "no_feed_configured" });
+    return;
+  }
+  const check = await runUpdateCheck({ projectRoot, feedUrl });
+  if (check.error) {
+    res.status(502).json({ ok: false, reason: "check_failed", error: check.error });
+    return;
+  }
+  if (!check.updateAvailable) {
+    res.status(409).json({ ok: false, reason: "no_update_available", currentVersion: check.currentVersion });
+    return;
+  }
+  const intent = {
+    requestedAt: new Date().toISOString(),
+    fromVersion: check.currentVersion,
+    toVersion: check.latestVersion,
+    feedUrl
+  };
+  stagePendingUpdate(dataDir, intent);
+  res.json({
+    ok: true,
+    pending: true,
+    fromVersion: intent.fromVersion,
+    toVersion: intent.toVersion,
+    message: "Update staged. Relaunch the app to finish updating."
   });
 }));
 
@@ -1816,6 +2031,7 @@ app.get("/data/overdue-digest/settings", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/overdue-digest/settings", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "change overdue-digest settings", kind: "operator-write" })) return;
   const payload = z
     .object({ cadence: z.enum(["off", "daily", "weekly"]) })
     .parse(req.body ?? {});
@@ -1840,6 +2056,7 @@ app.get("/data/overdue-digest/preview", asyncRoute(async (_req, res) => {
 }));
 
 app.post("/control/overdue-digest/tick", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "run the overdue-digest tick", kind: "operator-write" })) return;
   const payload = z.object({ localDate: localDateSchema }).parse(req.body ?? {});
   const [settings, rows] = await Promise.all([overdueDigestStore.get(), loadOverdueDigestRows()]);
   const result = computeTick({
@@ -1852,6 +2069,7 @@ app.post("/control/overdue-digest/tick", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "acknowledge the overdue digest", kind: "operator-write" })) return;
   const payload = z
     .object({
       included: z
@@ -1862,7 +2080,11 @@ app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
             stateKey: z.string().min(1)
           })
         )
-        .min(1)
+        .min(1),
+      // The dashboard-local date the digest fired on. Persisted so the daily
+      // cadence compares like-for-like local dates (#628). Optional so a stale
+      // dashboard build that omits it still acks (falls back to the UTC prefix).
+      localDate: localDateSchema.optional()
     })
     .parse(req.body ?? {});
   const current = await overdueDigestStore.get();
@@ -1873,7 +2095,7 @@ app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
     return;
   }
   const nowIso = new Date().toISOString();
-  const next = await overdueDigestStore.put(applyAck(current, payload.included, nowIso));
+  const next = await overdueDigestStore.put(applyAck(current, payload.included, nowIso, payload.localDate));
   await auditService.log({
     action: "OVERDUE_DIGEST_FIRED",
     stage: "Notify",
@@ -1884,6 +2106,7 @@ app.post("/control/overdue-digest/ack", asyncRoute(async (req, res) => {
 }));
 
 app.post("/control/overdue-digest/dismiss-today", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "dismiss today's overdue digest", kind: "operator-write" })) return;
   const payload = z.object({ localDate: localDateSchema }).parse(req.body ?? {});
   const current = await overdueDigestStore.get();
   const next = await overdueDigestStore.put(applyDismissToday(current, payload.localDate));
@@ -1891,6 +2114,7 @@ app.post("/control/overdue-digest/dismiss-today", asyncRoute(async (req, res) =>
 }));
 
 app.post("/control/overdue-digest/snooze-person", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "snooze a person in the overdue digest", kind: "operator-write" })) return;
   const payload = z
     .object({
       personId: z.string().min(1),
@@ -1907,6 +2131,7 @@ app.post("/control/overdue-digest/snooze-person", asyncRoute(async (req, res) =>
 }));
 
 app.post("/control/overdue-digest/unsnooze-person", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "unsnooze a person in the overdue digest", kind: "operator-write" })) return;
   const payload = z.object({ personId: z.string().min(1) }).parse(req.body ?? {});
   const current = await overdueDigestStore.get();
   const next = await overdueDigestStore.put(applyUnsnoozePerson(current, payload.personId));
@@ -1991,22 +2216,24 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
 
   const horizonCutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
+  // Mirror the dashboard's isReconnectCandidate predicate
+  // (apps/dashboard/lib/reconnect.ts): a dormant thread with a queued reply
+  // (scheduledSendAt set) drops off the Reconnect page, so the runner must not
+  // spend an AI call scoring - and persist a reconnectScore onto - a row the
+  // dashboard never shows. Fetch the SCHEDULED sendRequest threadIds first
+  // (same source /data/inbox uses) and exclude them from the candidate query.
+  const scheduledSends = await prisma.sendRequest.findMany({
+    where: { status: "SCHEDULED" },
+    select: { threadId: true }
+  });
+  const scheduledThreadIds = [...new Set(scheduledSends.map((s) => s.threadId))];
+
   const candidates = await prisma.thread.findMany({
-    where: {
-      platform: "LINKEDIN",
-      archivedAt: null,
-      // Dormant = last activity older than the 30-day horizon. Threads
-      // whose lastMessageAt is null are out of scope: the scorer needs
-      // at least one timestamp to anchor "days dormant".
-      lastMessageAt: { lt: horizonCutoff },
-      // Skip outreach threads regardless of category - reconnecting
-      // with a cold pitch contact is the opposite of what this page
-      // exists for. Threads without a category yet are still eligible.
-      NOT: { category: "outreach" }
-    },
+    where: buildReconnectCandidateWhere(horizonCutoff, scheduledThreadIds),
     select: {
       id: true,
       platform: true,
+      personId: true,
       lastMessageAt: true,
       lastInboundAt: true,
       rollingSummary: true,
@@ -2034,13 +2261,66 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     take: limit * 4 // overfetch so we can skip cache hits without blocking the limit
   });
 
+  // One iMessage contact can hold several sibling threads (phone + Apple-ID
+  // email). The dashboard collapses those to one row and reads AI fields -
+  // including reconnectScore - from the person's CANONICAL sibling over the
+  // FULL sibling set (#499), so a score persisted onto any other sibling
+  // never surfaces, and a person whose live sibling is still inside the
+  // horizon is not dormant at all. Load the full sibling sets for the
+  // iMessage candidates and keep only the canonical, person-dormant rows.
+  const reconnectImessagePersonIds = [
+    ...new Set(candidates.filter((t) => t.platform === "IMESSAGE").map((t) => t.personId))
+  ];
+  const imessageSiblings =
+    reconnectImessagePersonIds.length > 0
+      ? await prisma.thread.findMany({
+          where: { platform: "IMESSAGE", personId: { in: reconnectImessagePersonIds } },
+          select: {
+            id: true,
+            personId: true,
+            lastInboundAt: true,
+            lastMessageAt: true,
+            _count: { select: { messages: true } }
+          }
+        })
+      : [];
+  const siblingsByPerson = new Map<string, typeof imessageSiblings>();
+  for (const sibling of imessageSiblings) {
+    const list = siblingsByPerson.get(sibling.personId);
+    if (list) list.push(sibling);
+    else siblingsByPerson.set(sibling.personId, [sibling]);
+  }
+  const scoringCandidates = candidates.filter((thread) => {
+    if (thread.platform !== "IMESSAGE") return true;
+    const siblings = siblingsByPerson.get(thread.personId) ?? [];
+    // Person-level dormancy mirrors the collapsed row's display timestamp:
+    // the newest message across ALL siblings must be outside the horizon.
+    const liveSibling = siblings.some(
+      (s) => s.lastMessageAt && s.lastMessageAt.getTime() >= horizonCutoff.getTime()
+    );
+    if (liveSibling) return false;
+    const canonical = pickCanonicalThread(
+      siblings.map((s) => ({
+        id: s.id,
+        lastInboundAt: s.lastInboundAt,
+        messageCount: s._count?.messages ?? 0
+      }))
+    );
+    return canonical === null || canonical.id === thread.id;
+  });
+
   let scored = 0;
   let skipped = 0;
   let failed = 0;
   let unavailable = false;
 
-  for (const thread of candidates) {
+  for (const thread of scoringCandidates) {
     if (scored >= limit) break;
+
+    // Defensive narrow: the candidate where has no platform gate, and core's
+    // PlatformName carries a WHATSAPP placeholder no adapter ever writes.
+    const platform = thread.platform;
+    if (!isReconnectScorablePlatform(platform)) continue;
 
     const outboundCount = thread.messages.filter((m) => m.direction === "OUT").length;
     const totalCount = thread._count?.messages ?? thread.messages.length;
@@ -2051,10 +2331,12 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
 
     // Cache key intentionally narrow: only re-score when the signals
     // the AI was given actually change. A new outbound message would
-    // also un-dormant the thread, so this is mostly defensive.
+    // also un-dormant the thread, so this is mostly defensive. v2 bumps
+    // the version for the platform-aware prompt so scores persisted
+    // under the LinkedIn-only wording refresh on the next run.
     const cacheKey = stableHash(
       [
-        "reconnect-v1",
+        "reconnect-v2",
         thread.lastMessageAt?.toISOString() ?? "no-last",
         String(outboundCount),
         String(totalCount),
@@ -2082,6 +2364,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     const verdict = await aiService
       .scoreReconnectCandidate({
         displayName: thread.person.displayName,
+        platform,
         contactBlurb: blurb,
         daysDormant,
         operatorOutboundCount: outboundCount,
@@ -2115,7 +2398,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     scored,
     skipped,
     failed,
-    candidates_seen: candidates.length,
+    candidates_seen: scoringCandidates.length,
     limit
   });
 }));
@@ -2365,11 +2648,21 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         // (the map is now Partial<Record<PlatformName, PlatformAdapter>>;
         // see services/platform-factory.ts).
         const platformAdapter = requireAdapter(platform);
-        trackedPromise = platformAdapter.ensureConnected().finally(() => {
-          if (connectInFlight.get(platform) === trackedPromise) {
-            connectInFlight.delete(platform);
-          }
-        });
+        // Connect is operator-initiated: a launch it triggers should be
+        // VISIBLE (the operator may need to complete a login / 2FA), unlike
+        // the hidden background launches that scans and sends use. Mark the
+        // visible intent for the launch, and reveal an already-warm-but-hidden
+        // window so manual sign-in is reachable even when no new launch fires.
+        const releaseVisible = sessionManager.markVisibleLaunch(platform);
+        trackedPromise = platformAdapter
+          .ensureConnected()
+          .finally(() => sessionManager.revealWindow(platform).catch(() => undefined))
+          .finally(() => releaseVisible())
+          .finally(() => {
+            if (connectInFlight.get(platform) === trackedPromise) {
+              connectInFlight.delete(platform);
+            }
+          });
         connectInFlight.set(platform, trackedPromise);
         connectPromise = trackedPromise;
       }
@@ -2853,6 +3146,7 @@ app.post("/control/thread/:threadId/retry-send", asyncRoute(async (req, res) => 
 
 app.post("/control/thread/:threadId/open", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "open the thread in the browser", kind: "external-action" })) return;
   const target = await getThreadStub(threadId);
   const adapter = requireAdapter(target.platform);
 
@@ -3153,14 +3447,52 @@ function isStaleSummary(rollingSummary: string | null | undefined, displayName: 
 // there so it is testable without booting Express. `race` opts two AI
 // providers into the cross-provider race; only operator-initiated paths
 // (Reassess) set it — it doubles provider spend per raced call.
-function resummarizeThreadById(
+async function resummarizeThreadById(
   threadId: string,
   options?: { race?: boolean }
 ): Promise<
   | { ok: true; summary: string; whatTheyWant: string; openLoops: string[]; needsReply: boolean }
-  | { ok: false; reason: "not_found" }
+  // `ai_unavailable` joins `not_found` when the AI call returned the fallback
+  // (every provider failed) — resummarizeThread skips the write in that case.
+  // Both the /data/thread self-heal and the Reassess endpoint already branch on
+  // `ok` alone, so this is purely a wider failure tag, not new control flow.
+  | { ok: false; reason: "not_found" | "ai_unavailable" }
 > {
-  return resummarizeThread({ prisma, aiService, siblingThreadIds }, threadId, options);
+  // Redirect the WRITE to the canonical sibling so AI fields land on the row
+  // the readers (/data/thread) source from. Without this, a send-side reassess
+  // (reassess-on-send) or the stale-summary self-heal — both of which fire on
+  // whatever row the caller passed — write the fresh brief/summary onto a
+  // dormant iMessage sibling while the rail reads the live one, so the operator
+  // sees nothing change. runReassessForThread already pre-resolves canonical;
+  // resolving again here is idempotent (canonical-of-canonical is itself).
+  // Non-iMessage / single-sibling threads resolve to `threadId` unchanged.
+  const writeTargetId = await resolveCanonicalWriteTargetId(threadId);
+  return resummarizeThread({ prisma, aiService, siblingThreadIds }, writeTargetId, options);
+}
+
+// Resolve the canonical sibling id an AI-field write should target for a given
+// requested thread, mirroring /data/thread's resolution. Only IMESSAGE Persons
+// with >1 handle-sibling are redirected; everything else short-circuits to the
+// requested id with no extra query.
+async function resolveCanonicalWriteTargetId(threadId: string): Promise<string> {
+  const requested = await prisma.thread.findUnique({
+    where: { id: threadId },
+    select: { id: true, platform: true, personId: true }
+  });
+  if (!requested || requested.platform !== "IMESSAGE") return threadId;
+  const siblingRows = await prisma.thread.findMany({
+    where: { platform: requested.platform, personId: requested.personId },
+    select: { id: true, lastInboundAt: true, _count: { select: { messages: true } } }
+  });
+  return canonicalWriteTargetId(
+    threadId,
+    requested.platform,
+    siblingRows.map((row) => ({
+      id: row.id,
+      lastInboundAt: row.lastInboundAt,
+      messageCount: row._count?.messages ?? 0
+    }))
+  );
 }
 
 app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
@@ -3188,6 +3520,7 @@ app.post("/control/thread/:threadId/transform", asyncRoute(async (req, res) => {
 // twice).
 app.post("/control/message/:messageId/transcribe", asyncRoute(async (req, res) => {
   const { messageId } = z.object({ messageId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { action: "transcribe a voice message", kind: "external-action" })) return;
 
   // Manual clicks always force a fresh attempt. Auto-scan keeps
   // fingerprint dedup; the operator's deliberate "Try again" should
@@ -3288,7 +3621,7 @@ app.post(
     const cleanup = () => {
       if (file) {
         try {
-          rmSync(dirname(file.path), { recursive: true, force: true });
+          rmSync(file.destination, { recursive: true, force: true });
         } catch {
           /* best-effort temp cleanup */
         }
@@ -3457,7 +3790,7 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
       whatTheyWant: t.whatTheyWant ?? null
     })),
     notes: thread.person.notes ?? null,
-    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+    tags: safeJsonParse<string[]>(thread.person.tagsJson, [])
   };
 
   const [composeOperatorProfile, composeContactSnapshot] = await Promise.all([
@@ -3500,7 +3833,7 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
   // race wiring is testable without booting Express (see
   // tests/runner-reassess-thread-race.test.mjs).
   const outcome = await runReassessForThread(
-    { prisma, aiService, resummarize: resummarizeThreadById },
+    { prisma, aiService, resummarize: resummarizeThreadById, siblingThreadIds },
     threadId
   );
   if (outcome.kind === "not_found") {
@@ -3530,6 +3863,13 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
 app.post(
   "/control/threads/mark-all-for-reassess",
   asyncRoute(async (_req, res) => {
+    // No single threadId — this wipes the cached AI brief + predraft on
+    // EVERY active thread. The client interceptor only guards a fresh tab
+    // that loaded it; a recovered tab (localStorage gone) skips it, so the
+    // server is the real boundary. As a thread-mutation with no threadId
+    // this is rejected by presenter-readonly (live) and demo-mode-foreign-
+    // thread (sandbox), and passes through in normal use.
+    if (await checkPresenterGuard(res, settingsStore, { action: "reset all threads for reassessment", kind: "thread-mutation" })) return;
     const { markAllThreadsForReassess } = await import(
       "./services/reassess-all.js"
     );
@@ -3537,6 +3877,21 @@ app.post(
     res.json({ ok: true, ...result });
   })
 );
+
+// Unfurl a URL that appeared inside a message bubble. The dashboard asks
+// lazily per visible link and renders an iMessage-style preview card from
+// the result. All the heavy lifting (SSRF guarding, redirects, Open Graph
+// parse, TikTok oEmbed, caching) lives in services/link-preview.ts. Always
+// answers 200 with a status field - a failed unfurl degrades to a plain
+// link client-side, never an error toast.
+app.get("/data/link-preview", asyncRoute(async (req, res) => {
+  const raw = typeof req.query.url === "string" ? req.query.url : "";
+  if (!raw.trim()) {
+    res.status(400).json({ error: "url query parameter is required" });
+    return;
+  }
+  res.json(await getLinkPreview(raw));
+}));
 
 app.get("/data/inbox", asyncRoute(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
@@ -3552,20 +3907,22 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const view = typeof req.query.view === "string" ? req.query.view : undefined;
   const archivedView = view === "archived";
 
+  // Serve the last computed response while nothing has changed (see
+  // inboxResponseCache above). Polls land every few seconds from multiple
+  // components; between data changes they are byte-identical.
+  const cacheKey = req.originalUrl;
+  const cached = inboxResponseCache.get(cacheKey);
+  if (cached && Date.now() < cached.expires) {
+    res.json(cached.body);
+    return;
+  }
+  const versionAtStart = dataVersion;
+
   const today = new Date();
   const todayStart = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  const sevenDaysAgo = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  const [visibleRows, recentMessages, sentToday, scheduledSends] = await Promise.all([
+  const [visibleRows, sentToday, scheduledSends] = await Promise.all([
     loadVisibleThreadRows(archivedView ? { archived: true } : undefined),
-    // Pull all messages across the last 7 days in one query so we can
-    // compute averageReplyTimeHours from real inbound→outbound deltas
-    // rather than the hardcoded placeholder this used to return.
-    prisma.message.findMany({
-      where: { timestamp: { gte: sevenDaysAgo } },
-      select: { threadId: true, direction: true, timestamp: true },
-      orderBy: { timestamp: "asc" }
-    }),
     prisma.message.count({
       where: {
         direction: "OUT",
@@ -3579,37 +3936,6 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
       select: { threadId: true, scheduledFor: true }
     })
   ]);
-
-  // Walk messages per-thread, in chronological order. Every inbound is a
-  // candidate "ball in our court"; the next outbound after it (still
-  // inside the 7-day window) gives a real reply latency. Average across
-  // all such pairs. Null when nothing replied in the window — better than
-  // pretending with a placeholder.
-  const repliesByThread = new Map<string, { lastInbound: Date | null }>();
-  const replyLatenciesMs: number[] = [];
-  for (const msg of recentMessages) {
-    let state = repliesByThread.get(msg.threadId);
-    if (!state) {
-      state = { lastInbound: null };
-      repliesByThread.set(msg.threadId, state);
-    }
-    if (msg.direction === "IN") {
-      state.lastInbound = msg.timestamp;
-    } else if (msg.direction === "OUT" && state.lastInbound) {
-      const delta = msg.timestamp.getTime() - state.lastInbound.getTime();
-      if (delta >= 0) replyLatenciesMs.push(delta);
-      state.lastInbound = null;
-    }
-  }
-  const averageReplyTimeHours =
-    replyLatenciesMs.length > 0
-      ? Math.round(
-          (replyLatenciesMs.reduce((sum, ms) => sum + ms, 0) /
-            replyLatenciesMs.length /
-            3_600_000) *
-            10
-        ) / 10
-      : null;
 
   // Earliest SCHEDULED scheduledFor per thread — Today uses this to skip
   // threads the operator has already queued a reply for.
@@ -3693,12 +4019,20 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const summary = {
     unreadThreads: rows.filter((row) => row.unreadCount > 0).length,
     atRiskThreads: rows.filter((row) => row.riskLevel !== "GREEN").length,
-    averageReplyTimeHours,
     oldestPendingInboundAt: oldestPending?.lastInboundAt ?? null,
     messagesSentToday: sentToday
   };
 
-  res.json({ rows, summary });
+  const body = { rows, summary };
+  // Only cache if no write/event landed while we were computing — otherwise
+  // this response may already be missing that change.
+  if (dataVersion === versionAtStart) {
+    if (inboxResponseCache.size > 50) {
+      inboxResponseCache.clear();
+    }
+    inboxResponseCache.set(cacheKey, { expires: Date.now() + INBOX_CACHE_TTL_MS, body });
+  }
+  res.json(body);
 }));
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
@@ -3782,10 +4116,57 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // to the same Person — chat.db creates separate chats for the phone
   // and email handle of one human, but the operator wants a single
   // conversation view. LinkedIn keeps thread-scoped messages.
-  const messageThreadFilter =
-    thread.platform === "IMESSAGE"
-      ? { threadId: { in: await siblingThreadIds(thread.platform, thread.personId) } }
-      : { threadId: thread.id };
+  //
+  // The AI analysis (reply brief, predraft, summary, what-they-want, open
+  // loops, remember, category) is persisted per-row, and the FRESH state
+  // lives on the sibling still receiving inbound — NOT necessarily the row
+  // the operator opened. A dormant high-message-count phone thread can be
+  // days behind the email thread the contact now uses, so reading AI fields
+  // off the requested row surfaces a stale brief and a predraft answering the
+  // old state. While messages merge across all siblings, the AI fields are
+  // sourced from the CANONICAL sibling (most-recent inbound, see
+  // pickCanonicalThread). Non-iMessage threads are their own canonical row.
+  type AiSourceThread = {
+    id: string;
+    rollingSummary: string | null;
+    whatTheyWant: string | null;
+    openLoopsJson: string | null;
+    toneNotesJson: string | null;
+    rememberJson: string | null;
+    replyBriefJson: string | null;
+    suggestedRepliesJson: string | null;
+    suggestedRepliesCacheKey: string | null;
+    category: string | null;
+  };
+  let aiThread: AiSourceThread = thread;
+  let siblingIds: string[] = [thread.id];
+  if (thread.platform === "IMESSAGE") {
+    const siblingRows = await prisma.thread.findMany({
+      where: { platform: thread.platform, personId: thread.personId },
+      select: {
+        id: true,
+        lastInboundAt: true,
+        rollingSummary: true,
+        whatTheyWant: true,
+        openLoopsJson: true,
+        toneNotesJson: true,
+        rememberJson: true,
+        replyBriefJson: true,
+        suggestedRepliesJson: true,
+        suggestedRepliesCacheKey: true,
+        category: true,
+        _count: { select: { messages: true } }
+      }
+    });
+    siblingIds = siblingRows.map((row) => row.id);
+    const canonical = pickCanonicalThread(
+      siblingRows.map((row) => ({ ...row, messageCount: row._count?.messages ?? 0 }))
+    );
+    if (canonical) {
+      aiThread = canonical;
+    }
+  }
+  const messageThreadFilter = { threadId: { in: siblingIds } };
   // Style sample (issue #299) — newest messages on the thread for the
   // writing-style analysis. A dedicated fixed-size window so it stays
   // stable regardless of the messagesLimit / beforeMessageId pagination
@@ -4037,9 +4418,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // expansion is fixing. Older rows have null replyBriefJson — the prompt
   // just omits the brief block in that case.
   const briefForReplies: ReturnType<typeof sanitizeReplyBrief> = (() => {
-    if (!thread.replyBriefJson) return null;
+    if (!aiThread.replyBriefJson) return null;
     try {
-      return sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+      return sanitizeReplyBrief(JSON.parse(aiThread.replyBriefJson));
     } catch {
       return null;
     }
@@ -4047,9 +4428,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
   const aiInputs = {
     displayName: thread.person.displayName,
-    summary: thread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
-    whatTheyWant: thread.whatTheyWant ?? "No clear ask yet.",
-    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    summary: aiThread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
+    whatTheyWant: aiThread.whatTheyWant ?? "No clear ask yet.",
+    openLoops: safeJsonParse<string[]>(aiThread.openLoopsJson, []),
     recentMessages,
     needsReply: aiNeedsReply,
     // Drives the voice tier (LinkedIn → formal; everything else → casual)
@@ -4057,7 +4438,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     // the generic SYSTEM_PROMPT.
     platform: thread.platform as PlatformName,
     // Drives the "Polite decline" reply variant when the thread is outreach.
-    category: (thread.category ?? null) as "outreach" | "genuine" | null,
+    category: (aiThread.category ?? null) as "outreach" | "genuine" | null,
     // Late-reply detection: when the last inbound is much older than the
     // most recent outbound (or there's no outbound yet) the prompt asks
     // the model to acknowledge the gap. Day-bucketed ISO is enough for
@@ -4121,9 +4502,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // scrolling up regenerates suggestions from stale context and clobbers the
   // live cache (wasted AI spend + flapping suggestions on the next fetch).
   const servePersistedOnly = Boolean(beforeMessageId);
-  if ((servePersistedOnly || thread.suggestedRepliesCacheKey === cacheKey) && thread.suggestedRepliesJson) {
+  if ((servePersistedOnly || aiThread.suggestedRepliesCacheKey === cacheKey) && aiThread.suggestedRepliesJson) {
     try {
-      suggested = JSON.parse(thread.suggestedRepliesJson);
+      suggested = JSON.parse(aiThread.suggestedRepliesJson);
     } catch {
       // Corrupt cache row — fall through and regenerate.
       suggested = undefined;
@@ -4137,8 +4518,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
         `generateSuggestedReplies(${thread.id})`
       )
         .then(async (generated) => {
+          // Persist to the CANONICAL sibling (aiThread) so the next read —
+          // from any sibling — finds these replies under the same cache key.
+          // The SSE event still carries the REQUESTED thread.id so the view
+          // the operator has open refetches.
           await prisma.thread.update({
-            where: { id: thread.id },
+            where: { id: aiThread.id },
             data: {
               suggestedRepliesJson: JSON.stringify(generated),
               suggestedRepliesCacheKey: cacheKey
@@ -4166,7 +4551,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
           // inbound message arrives or the thread is re-summarised.
           try {
             await prisma.thread.update({
-              where: { id: thread.id },
+              where: { id: aiThread.id },
               data: {
                 suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
                 suggestedRepliesCacheKey: cacheKey
@@ -4197,22 +4582,44 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     suggestedRepliesStatus = "generating";
   }
 
-  const receipts = await prisma.auditLog.findMany({
-    where: {
-      OR: [
-        { detailsJson: { contains: thread.id } },
-        { action: { in: ["SELECTOR_TEST", "SELECTOR_FAIL"] }, platform: thread.platform }
-      ]
-    },
-    orderBy: { timestamp: "desc" },
-    take: 120
-  });
+  // Per-thread receipts via the indexed AuditLog.threadId column (mirrored
+  // from details.threadId at write time). The old `detailsJson LIKE
+  // '%threadId%'` arm had to walk the whole recent audit window per open -
+  // on an active runner that's the entire table (~25k rows/day), so a
+  // thread with sparse receipts cost up to ~800ms PER OPEN while a busy one
+  // cost 10ms. Two separate fully-indexed reads merged in JS: a single
+  // `timestamp >= ? AND (... OR ...)` query defeats SQLite's OR-by-union
+  // optimisation, and ORDER BY+LIMIT biases the planner into an ordered
+  // filter-scan of the whole recent window (measured ~800ms either way).
+  // Rows written before the column existed don't match and quietly age out
+  // of the drawer.
+  const receiptsSince = new Date(Date.now() - RECEIPTS_LOOKBACK_MS);
+  const RECEIPTS_LIMIT = 120;
+  const [threadReceipts, selectorReceipts] = await Promise.all([
+    prisma.auditLog.findMany({
+      where: { threadId: thread.id, timestamp: { gte: receiptsSince } },
+      orderBy: { timestamp: "desc" },
+      take: RECEIPTS_LIMIT
+    }),
+    prisma.auditLog.findMany({
+      where: {
+        action: { in: ["SELECTOR_TEST", "SELECTOR_FAIL"] },
+        platform: thread.platform,
+        timestamp: { gte: receiptsSince }
+      },
+      orderBy: { timestamp: "desc" },
+      take: RECEIPTS_LIMIT
+    })
+  ]);
+  const receipts = [...threadReceipts, ...selectorReceipts]
+    .sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime())
+    .slice(0, RECEIPTS_LIMIT);
 
   // Surfaced so the thread page can render scheduled sends as pinned pills
   // above the timeline without a second fetch. Only SCHEDULED rows leak
   // here — PENDING/SENT/FAILED already drive the live optimistic-UI flow.
   const scheduledSendRows = await prisma.sendRequest.findMany({
-    where: { threadId: thread.id, status: "SCHEDULED" },
+    where: { threadId: { in: siblingIds }, status: "SCHEDULED" },
     orderBy: { scheduledFor: "asc" }
   });
 
@@ -4246,7 +4653,7 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       whatTheyWant: t.whatTheyWant ?? null
     })),
     notes: thread.person.notes ?? null,
-    tags: thread.person.tagsJson ? (JSON.parse(thread.person.tagsJson) as string[]) : []
+    tags: safeJsonParse<string[]>(thread.person.tagsJson, [])
   };
 
   // Reply Brief surface. Persisted as JSON on the Thread row; older rows
@@ -4254,13 +4661,11 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // from the legacy fields so the dashboard rail always has something
   // grounded to render. The real brief regenerates on next scan /
   // Reassess / stale-summary self-heal.
-  const persistedOpenLoops: string[] = thread.openLoopsJson
-    ? (JSON.parse(thread.openLoopsJson) as string[])
-    : [];
+  const persistedOpenLoops: string[] = safeJsonParse<string[]>(aiThread.openLoopsJson, []);
   let parsedReplyBrief: ReturnType<typeof sanitizeReplyBrief> = null;
-  if (thread.replyBriefJson) {
+  if (aiThread.replyBriefJson) {
     try {
-      parsedReplyBrief = sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+      parsedReplyBrief = sanitizeReplyBrief(JSON.parse(aiThread.replyBriefJson));
     } catch {
       parsedReplyBrief = null;
     }
@@ -4268,10 +4673,13 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   const replyBriefResponse =
     parsedReplyBrief ??
     synthesiseFallbackBrief({
-      rollingSummary: thread.rollingSummary ?? "",
-      whatTheyWant: thread.whatTheyWant ?? "",
+      rollingSummary: aiThread.rollingSummary ?? "",
+      whatTheyWant: aiThread.whatTheyWant ?? "",
       openLoops: persistedOpenLoops,
-      needsReply: thread.needsReply,
+      // Derived from the MERGED last inbound/outbound (aiNeedsReply), not the
+      // requested row's stored flag, so a split iMessage thread's fallback
+      // brief reflects the live conversation.
+      needsReply: aiNeedsReply,
       latestInboundText: lastInbound?.text ?? null
     });
 
@@ -4281,8 +4689,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   // is frozen at the last scan).
   const threadRiskSettings = await settingsStore.getSettings();
   const liveThreadRisk = calculateRisk({
-    lastInboundAt: thread.lastInboundAt,
-    lastOutboundAt: thread.lastOutboundAt,
+    // Use the MERGED last inbound/outbound across siblings (the same values
+    // aiNeedsReply and the fallback brief derive from) rather than the
+    // requested row's frozen columns, so the risk pill, the reopen framing,
+    // and the suggested replies all agree on a split iMessage conversation.
+    lastInboundAt: lastInbound?.timestamp ?? thread.lastInboundAt,
+    lastOutboundAt: lastOutbound?.timestamp ?? thread.lastOutboundAt,
     amberHours: threadRiskSettings.amberHours,
     redHours: threadRiskSettings.redHours
   });
@@ -4305,6 +4717,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     personBirthday: thread.person.birthday ?? null,
     personBirthYear: thread.person.birthYear ?? null,
     platform: thread.platform,
+    // Sibling cohort for this Person (iMessage phone + email handle rows; a
+    // single-element [thread.id] for everything else). The thread page matches
+    // SSE THREAD_UPDATED / SUGGESTED_REPLIES_UPDATED / SCAN_THREAD_* events on
+    // this cohort, so a new inbound that lands on the OTHER handle refetches
+    // the open view even though its event carries the sibling's id.
+    siblingIds,
     riskLevel: liveThreadRisk.level,
     riskReason: liveThreadRisk.riskReason,
     snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
@@ -4314,17 +4732,19 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     reminderText: thread.reminderText ?? null,
     unreadCount: thread.unreadCount,
     needsReply: thread.needsReply,
-    summary: thread.rollingSummary,
-    whatTheyWant: thread.whatTheyWant,
+    // AI-analysis fields come from the CANONICAL sibling (aiThread), so a
+    // split iMessage conversation shows the live brief/summary/what-they-want
+    // rather than a dormant sibling's stale state. dismissedOpenLoops stays on
+    // the requested row (it pairs with the per-row dismiss write path).
+    summary: aiThread.rollingSummary,
+    whatTheyWant: aiThread.whatTheyWant,
     openLoops: filterDismissedOpenLoops(
       persistedOpenLoops,
       thread.dismissedOpenLoopsJson
     ),
-    dismissedOpenLoops: thread.dismissedOpenLoopsJson
-      ? (JSON.parse(thread.dismissedOpenLoopsJson) as string[])
-      : [],
-    toneNotes: thread.toneNotesJson ? (JSON.parse(thread.toneNotesJson) as string[]) : [],
-    remember: thread.rememberJson ? (JSON.parse(thread.rememberJson) as RememberItem[]) : [],
+    dismissedOpenLoops: safeJsonParse<string[]>(thread.dismissedOpenLoopsJson, []),
+    toneNotes: safeJsonParse<string[]>(aiThread.toneNotesJson, []),
+    remember: safeJsonParse<RememberItem[]>(aiThread.rememberJson, []),
     replyBrief: replyBriefResponse,
     draft: thread.drafts[0]?.text ?? "",
     contextUpdatedAt: thread.updatedAt.toISOString(),
@@ -4813,6 +5233,13 @@ app.get("/data/birthdays", asyncRoute(async (_req, res) => {
   res.json({ upcoming });
 }));
 
+// Drives the dashboard's "this Mac has no saved contacts" hint. Returns the
+// latest iMessage name-sync health snapshot, or null until the first tick
+// completes / on non-macOS hosts where the sync doesn't run.
+app.get("/data/imessage-contact-health", asyncRoute(async (_req, res) => {
+  res.json(imessageNameSync?.getHealth() ?? null);
+}));
+
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
   const person = await prisma.person.findUnique({ where: { id: personId } });
@@ -5004,15 +5431,30 @@ app.post("/control/person/:personId/profile-url", asyncRoute(async (req, res) =>
     res.status(404).json({ error: "person not found" });
     return;
   }
+  // The stored value is later navigated to in the runner's authenticated
+  // Chrome (open-profile + the enrichment auto-visit), so a bare URL string
+  // isn't safe to persist: file://, view-source:, data:, link-local hosts
+  // and intranet hosts all parse as valid URLs. Pin it to https/http on the
+  // platform's allowlisted host before it ever reaches the database.
+  let safeProfileUrl: string;
+  try {
+    safeProfileUrl = parseAllowedProfileUrl(payload.profileUrl, person.platform);
+  } catch (error) {
+    if (error instanceof ProfileUrlPolicyError) {
+      res.status(400).json({ error: error.message });
+      return;
+    }
+    throw error;
+  }
   await prisma.person.update({
     where: { id: personId },
     data: {
-      profileUrl: payload.profileUrl,
+      profileUrl: safeProfileUrl,
       profileUrlSource: "manual",
       enrichmentFailedReason: null
     }
   });
-  res.json({ status: "ok", profileUrl: payload.profileUrl });
+  res.json({ status: "ok", profileUrl: safeProfileUrl });
 }));
 
 // Bulk-enqueue every person with a known profile URL for re-enrichment.
@@ -5176,7 +5618,38 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
         .enum(["warm", "direct", "casual", "thoughtful", "concise", ""])
         .optional(),
       aiHelpLevel: z.enum(["memory_only", "writing_support", "full_drafts"]).optional(),
-      setupCompletedAt: z.string().max(40).optional()
+      setupCompletedAt: z.string().max(40).optional(),
+      // Focus Reply Buffer state. Each top-level field is sent whole (the
+      // dashboard never sends a partial sub-object), so strict object shapes
+      // are safe; the store still coerces defensively on read.
+      focusWindow: z
+        .object({
+          active: z.boolean(),
+          startedAt: z.string().max(40),
+          endsAt: z.string().max(40),
+          reason: z.string().max(80),
+          note: z.string().max(2000),
+          // Older dashboard builds don't send it; default to "" (= fall
+          // back to the saved professional template).
+          professionalNote: z.string().max(2000).default(""),
+          audience: z.enum(["favourites", "all_personal"]),
+          windowId: z.string().max(80),
+          ackedPersonIds: z.array(z.string().max(120)).max(5000)
+        })
+        .optional(),
+      ackTemplates: z
+        .object({
+          close: z.string().max(2000),
+          professional: z.string().max(2000)
+        })
+        .optional(),
+      focusSettings: z
+        .object({
+          reasonLabel: z.boolean(),
+          oneNotePerPerson: z.boolean(),
+          audience: z.enum(["favourites", "all_personal"])
+        })
+        .optional()
     })
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);
@@ -5190,6 +5663,7 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 // { ok:false, reason } lets the dashboard show a calm message rather than
 // catching an error.
 app.post("/control/operator-profile/analyze-style", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "analyse your writing style", kind: "external-action" })) return;
   const rows = await prisma.message.findMany({
     where: { direction: "OUT" },
     orderBy: [{ timestamp: "desc" }, { id: "desc" }],
@@ -5211,6 +5685,46 @@ app.post("/control/operator-profile/analyze-style", asyncRoute(async (_req, res)
     return;
   }
   res.json({ ok: true, sampleCount: sampleTexts.length, suggestion });
+}));
+
+// "Help me phrase this" for the Focus setup sheet. The operator types what
+// they're about to do; the AI phrases the two note tiers in their voice
+// (tokens [Name]/[until] kept literal), suggests a reason label and, when an
+// explicit end time was stated, the end time. Composes only — nothing is
+// saved or sent here; the sheet shows the result for the operator to edit.
+// Always 200; { ok:false, reason } lets the dashboard show a calm message.
+app.post("/control/focus/compose-note", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "phrase your focus note", kind: "external-action" })) return;
+  const payload = z
+    .object({ activity: z.string().trim().min(1).max(400) })
+    .parse(req.body);
+  // A handful of the operator's own authentic sends calibrates the voice —
+  // same selection rules as reply-style analysis (drops automation sends and
+  // placeholder bubbles), much smaller sample.
+  const rows = await prisma.message.findMany({
+    where: { direction: "OUT" },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: 200,
+    select: { text: true, direction: true, sentVia: true }
+  });
+  const voiceSampleTexts = selectStyleSampleTexts(rows, 8);
+  const operatorProfile = await settingsStore.getOperatorProfile();
+  const composed = await aiService.composeFocusNote({
+    activity: payload.activity,
+    operatorProfile,
+    voiceSampleTexts
+  });
+  if (!composed) {
+    res.json({ ok: false, reason: "ai_unavailable" });
+    return;
+  }
+  res.json({
+    ok: true,
+    close: composed.close,
+    professional: composed.professional,
+    reasonLabel: composed.reason,
+    untilTime: composed.untilTime
+  });
 }));
 
 // Pilot feedback intake. The dashboard posts a tester's bug / feedback
@@ -5322,48 +5836,15 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
     }
   });
 
-  // Fire-and-forget: attach screenshots to the GitHub issue the Apps
-  // Script just created. Doesn't block the response — if it fails,
-  // the Drive-linked Sheet row remains the source of truth. See
-  // services/github-attachments.ts for the rationale.
-  if (result.ok && result.reportId && screenshots.length > 0 && runnerConfig.github.repo) {
-    const reportId = result.reportId;
-    (async () => {
-      // Prefer GITHUB_TOKEN / GH_TOKEN from env; fall back to the
-      // local `gh` CLI's keyring auth so operators don't have to
-      // paste a PAT into .env when they're already signed in via
-      // gh CLI (the common case on dev machines).
-      const { resolveGitHubToken } = await import("./services/gh-cli-token.js");
-      const token = await resolveGitHubToken({ envToken: runnerConfig.github.token });
-      if (!token) {
-        console.warn(
-          `[pilot-feedback] screenshot attach skipped for ${reportId}: no GITHUB_TOKEN in env and gh CLI auth unavailable`
-        );
-        return;
-      }
-      const { attachScreenshotsToIssue } = await import("./services/github-attachments.js");
-      try {
-        const outcome = await attachScreenshotsToIssue({
-          reportId,
-          screenshots,
-          repo: runnerConfig.github.repo,
-          token,
-          branch: runnerConfig.github.attachmentsBranch
-        });
-        if (outcome.ok) {
-          console.log(
-            `[pilot-feedback] attached ${outcome.uploadedUrls?.length ?? 0} screenshot(s) to issue #${outcome.issueNumber} (${outcome.commentUrl})`
-          );
-        } else {
-          console.warn(
-            `[pilot-feedback] screenshot attach skipped for ${reportId}: ${outcome.reason}`
-          );
-        }
-      } catch (error) {
-        console.warn(`[pilot-feedback] screenshot attach errored for ${reportId}:`, error);
-      }
-    })();
-  }
+  // Screenshot-to-GitHub attachment now happens server-side in the Apps
+  // Script (it has a secure token, already creates the issue, and already
+  // holds the screenshot bytes), so it works for every pilot install — not
+  // only machines with a local gh CLI / GITHUB_TOKEN. The old runner-side
+  // attach is intentionally not invoked here: a pilot build has no token, and
+  // a private repo's raw URLs don't render inline anyway. See
+  // docs/pilot/apps-script.md (GITHUB_ATTACH_SCREENSHOTS). The unused
+  // services/github-attachments.ts + gh-cli-token.ts are left for a separate
+  // cleanup PR.
 
   res.json(result);
 }));
@@ -5392,7 +5873,18 @@ app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
     // keep the runtime contract explicit (and to surface a clean error if
     // someone removes an adapter without updating the zod enum).
     const adapter = requireAdapter(payload.platform);
-    await adapter.ensureConnected();
+    // "Open the platform browser" is the operator explicitly asking to SEE the
+    // runner's Chrome (e.g. to log in). Mark the visible intent so a launch
+    // isn't hidden, and reveal a warm-but-hidden window so it surfaces even
+    // when ensureConnected reuses an existing background context (or throws
+    // auth-required - the operator still needs the window).
+    const releaseVisible = sessionManager.markVisibleLaunch(payload.platform);
+    try {
+      await adapter.ensureConnected();
+    } finally {
+      await sessionManager.revealWindow(payload.platform).catch(() => undefined);
+      releaseVisible();
+    }
     res.json({ status: "ok" });
   });
 }));
@@ -5548,17 +6040,59 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     return;
   }
 
+  // iMessage splits one Person across handle-specific sibling threads. /data/thread
+  // sources its AI inputs from the CANONICAL sibling (most-recent inbound) and
+  // builds its recent/style windows over the merged sibling cohort. The predraft
+  // pre-warm MUST resolve the same canonical row and the same cohort, or it
+  // computes a cacheKey the reader can never hit — the warm is wasted and the
+  // operator opens to a "Generating suggestions…" spinner. Non-iMessage /
+  // single-sibling threads are their own canonical row over [thread.id].
+  let aiSource: typeof thread & {
+    rollingSummary: string | null;
+    whatTheyWant: string | null;
+    openLoopsJson: string | null;
+    replyBriefJson: string | null;
+    category: string | null;
+    suggestedRepliesJson: string | null;
+    suggestedRepliesCacheKey: string | null;
+  } = thread;
+  let predraftSiblingIds: string[] = [thread.id];
+  if (thread.platform === "IMESSAGE") {
+    const siblingRows = await prisma.thread.findMany({
+      where: { platform: thread.platform, personId: thread.personId },
+      select: {
+        id: true,
+        lastInboundAt: true,
+        rollingSummary: true,
+        whatTheyWant: true,
+        openLoopsJson: true,
+        replyBriefJson: true,
+        category: true,
+        suggestedRepliesJson: true,
+        suggestedRepliesCacheKey: true,
+        _count: { select: { messages: true } }
+      }
+    });
+    predraftSiblingIds = siblingRows.map((row) => row.id);
+    const canonical = pickCanonicalThread(
+      siblingRows.map((row) => ({ ...row, messageCount: row._count?.messages ?? 0 }))
+    );
+    if (canonical) aiSource = { ...thread, ...canonical };
+  }
+  const messageScope = { threadId: { in: predraftSiblingIds } };
+
   // Fetch the last ~6 turns to mirror the /data/thread call site. Pulling
-  // the full recent window means a predraft pre-warm builds the same
-  // recentSignature, so the cacheKey matches and the operator's next
-  // /data/thread fetch reuses the warmed cache row. The style sample is
-  // fetched on the same fixed window as /data/thread so the style part
-  // of the cacheKey matches too (issue #299).
+  // the full recent window over the SAME sibling cohort means a predraft
+  // pre-warm builds the same recentSignature, so the cacheKey matches and the
+  // operator's next /data/thread fetch reuses the warmed cache row. The style
+  // sample is fetched on the same fixed window as /data/thread so the style
+  // part of the cacheKey matches too (issue #299). last-IN/last-OUT are the
+  // MERGED-cohort values /data/thread folds into the late-reply bucket.
   const RECENT_TURN_WINDOW = 6;
   const STYLE_SAMPLE_LIMIT = 40;
-  const [recentTurnsDesc, operatorProfile, contactSnapshot, styleSampleDesc] = await Promise.all([
+  const [recentTurnsDesc, operatorProfile, contactSnapshot, styleSampleDesc, lastInbound, lastOutbound] = await Promise.all([
     prisma.message.findMany({
-      where: { threadId },
+      where: messageScope,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: RECENT_TURN_WINDOW,
       select: { direction: true, text: true, timestamp: true }
@@ -5566,10 +6100,20 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName),
     prisma.message.findMany({
-      where: { threadId },
+      where: messageScope,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: STYLE_SAMPLE_LIMIT,
       select: { direction: true, text: true }
+    }),
+    prisma.message.findFirst({
+      where: { ...messageScope, direction: "IN" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      select: { timestamp: true }
+    }),
+    prisma.message.findFirst({
+      where: { ...messageScope, direction: "OUT" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      select: { timestamp: true }
     })
   ]);
   const operatorStyle = analyzeStyle(
@@ -5584,17 +6128,16 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     timestamp: m.timestamp.toISOString()
   }));
   const aiNeedsReply = Boolean(
-    thread.lastInboundAt &&
-      (!thread.lastOutboundAt || thread.lastInboundAt > thread.lastOutboundAt)
+    lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
   );
 
-  // Parse the persisted brief the same way /data/thread does so the
-  // predraft prompt and the subsequent /data/thread fetch hit the same
-  // cache row. Older rows with no brief pass null through unchanged.
+  // Parse the persisted brief the same way /data/thread does — from the
+  // CANONICAL sibling — so the predraft prompt and the subsequent /data/thread
+  // fetch hit the same cache row. Older rows with no brief pass null unchanged.
   const briefForReplies: ReturnType<typeof sanitizeReplyBrief> = (() => {
-    if (!thread.replyBriefJson) return null;
+    if (!aiSource.replyBriefJson) return null;
     try {
-      return sanitizeReplyBrief(JSON.parse(thread.replyBriefJson));
+      return sanitizeReplyBrief(JSON.parse(aiSource.replyBriefJson));
     } catch {
       return null;
     }
@@ -5602,15 +6145,15 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
 
   const aiInputs = {
     displayName: thread.person.displayName,
-    summary: thread.rollingSummary ?? "",
-    whatTheyWant: thread.whatTheyWant ?? "",
-    openLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
+    summary: aiSource.rollingSummary ?? "",
+    whatTheyWant: aiSource.whatTheyWant ?? "",
+    openLoops: aiSource.openLoopsJson ? (JSON.parse(aiSource.openLoopsJson) as string[]) : [],
     recentMessages,
     needsReply: aiNeedsReply,
     platform: thread.platform as PlatformName,
-    category: (thread.category as "outreach" | "genuine" | null) ?? null,
-    lastInboundAt: thread.lastInboundAt?.toISOString() ?? null,
-    lastOutboundAt: thread.lastOutboundAt?.toISOString() ?? null,
+    category: (aiSource.category as "outreach" | "genuine" | null) ?? null,
+    lastInboundAt: lastInbound?.timestamp.toISOString() ?? null,
+    lastOutboundAt: lastOutbound?.timestamp.toISOString() ?? null,
     operatorProfile,
     contact: contactSnapshot,
     operatorStyle,
@@ -5642,18 +6185,20 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
     .update(`v5|${aiInputs.summary}|${aiInputs.whatTheyWant}|${aiInputs.openLoops.join("")}|${aiInputs.needsReply ? 1 : 0}|${recentSignature}|${aiInputs.category ?? "_"}|${lateBucket}|${operatorProfileFingerprint(operatorProfile)}|${contactSnapshotFingerprint(contactSnapshot)}|${thread.platform}|${styleFingerprint(operatorStyle, contactStyle)}|${briefSignature}`)
     .digest("hex");
 
-  if (thread.suggestedRepliesCacheKey === cacheKey && thread.suggestedRepliesJson) {
+  if (aiSource.suggestedRepliesCacheKey === cacheKey && aiSource.suggestedRepliesJson) {
     res.json({ status: "cached", cacheKey });
     return;
   }
 
   // Fire and forget — the operator's next /data/thread fetch picks
-  // up the cache once the AI call resolves.
+  // up the cache once the AI call resolves. Persist to the CANONICAL sibling
+  // (aiSource.id) so the reader finds it under the same cache key; the SSE
+  // event keeps the requested threadId so the open view refetches.
   void aiService
     .generateSuggestedReplies(aiInputs)
     .then(async (generated) => {
       await prisma.thread.update({
-        where: { id: threadId },
+        where: { id: aiSource.id },
         data: {
           suggestedRepliesJson: JSON.stringify(generated),
           suggestedRepliesCacheKey: cacheKey
@@ -5677,7 +6222,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       // doesn't loop into another doomed generation.
       try {
         await prisma.thread.update({
-          where: { id: threadId },
+          where: { id: aiSource.id },
           data: {
             suggestedRepliesJson: JSON.stringify(emptySuggestedReplies),
             suggestedRepliesCacheKey: cacheKey
@@ -5917,6 +6462,7 @@ app.post("/control/thread/:threadId/snooze", asyncRoute(async (req, res) => {
 // caller to re-prompt the operator for a clearer time hint.
 app.post("/control/thread/:threadId/remind", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "set a reminder", kind: "thread-mutation" })) return;
   const payload = z.object({ intent: z.string().min(1).max(600) }).parse(req.body);
 
   const thread = await prisma.thread.findUnique({

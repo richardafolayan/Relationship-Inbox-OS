@@ -75,3 +75,20 @@ test("mergeNotes: never drops the duplicate's notes", () => {
   assert.match(both, /dup note/, "both notes retained when both are present");
   assert.equal(mergeNotes("same", "same"), "same", "no re-append when already contained");
 });
+
+test("mergeNotes: appends a note that is only a COINCIDENTAL substring of the canonical (P3-PL12)", () => {
+  // "follow up" is a substring of the canonical but a DISTINCT operator-authored
+  // note on the duplicate. The old `existing.includes(incoming)` no-op'd here and
+  // the dup Person row was then irreversibly deleted, silently losing the note.
+  // It must now be appended under the divider; the canonical text is preserved.
+  const merged = mergeNotes("Met at the conference, follow up re funding", "follow up");
+  assert.match(merged, /Met at the conference, follow up re funding/, "keeps the canonical note");
+  assert.match(merged, /--- merged from duplicate ---\nfollow up$/, "appends the distinct dup note");
+  // A genuine re-run (the note already present as its own merged block) stays a no-op.
+  const alreadyMerged = "canon note\n\n--- merged from duplicate ---\nfollow up";
+  assert.equal(
+    mergeNotes(alreadyMerged, "follow up"),
+    alreadyMerged,
+    "no double-append when the note is already a merged block"
+  );
+});

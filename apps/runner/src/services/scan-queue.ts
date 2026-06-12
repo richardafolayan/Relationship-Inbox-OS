@@ -30,6 +30,11 @@ import {
   type ScanCooldownStatus
 } from "./scan-retry-controller";
 import { isLinkedInInFlight } from "./linkedin-inflight-guard";
+import {
+  adapterSupportsIncrementalScan,
+  resolveIncrementalScanPlan,
+  type IncrementalScanPlan
+} from "./incremental-scan";
 import { inferContactName, looksLikeUnresolvedHandle } from "./name-inference";
 import {
   createRunLogger,
@@ -257,6 +262,27 @@ export type OutboundDedupAction =
   | { kind: "migrate_twin_key"; twinId: string }
   | { kind: "delete_twin"; twinId: string };
 
+/**
+ * The two outbound persistence paths normalize whitespace differently, so the
+ * same physical message lands with slightly different `text`:
+ *   - send.ts stores the operator's text verbatim. A dictation/compose
+ *     artifact commonly leaves a stray leading space on a wrapped line.
+ *   - the scan parser runs the same message (re-read from the platform, e.g.
+ *     iMessage chat.db) through cleanMessageText, which trims each line.
+ *
+ * One stray space then makes the two rows differ by a single character, an
+ * exact-equality twin check misses, and the duplicate survives — the user saw
+ * two identical bubbles on Lanre's iMessage thread, one tagged "sent via
+ * automation" (raw, 1019 chars) and one not (cleaned, 1018 chars). Collapse
+ * whitespace runs to a single space and trim so the comparison ignores these
+ * cosmetic differences. Two genuinely distinct outbound messages that are
+ * identical modulo whitespace inside the 5-minute window is not a real
+ * workflow, so this does not introduce false positives.
+ */
+export function normalizeOutboundTextForDedup(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
 export function decideOutboundDedup(input: {
   newKey: string;
   newTimestamp: Date;
@@ -279,11 +305,12 @@ export function decideOutboundDedup(input: {
   windowMs?: number;
 }): OutboundDedupAction {
   const windowMs = input.windowMs ?? 5 * 60 * 1000;
+  const normalizedNewText = normalizeOutboundTextForDedup(input.newText);
   const twin = input.existingTwins.find((row) => {
     if (row.platformMessageKey === input.newKey) {
       return false;
     }
-    if (row.text !== input.newText) {
+    if (normalizeOutboundTextForDedup(row.text) !== normalizedNewText) {
       return false;
     }
     const dtMs = Math.abs(row.timestamp.getTime() - input.newTimestamp.getTime());
@@ -296,6 +323,55 @@ export function decideOutboundDedup(input: {
     return { kind: "delete_twin", twinId: twin.id };
   }
   return { kind: "migrate_twin_key", twinId: twin.id };
+}
+
+/**
+ * When cross-sibling outbound twins are collapsed onto a surviving row, decide
+ * which metadata to carry forward. The sibling row was almost always the
+ * send-side persistence, so it holds the sentVia=automation tag and the
+ * replyToMessageId linkage that the chat.db scan row lacks. We copy those onto
+ * the survivor — which is the canonical row when one already exists, otherwise
+ * the same-thread twin that decideOutboundDedup migrates the key onto — but
+ * only when the survivor doesn't already carry the value, so we never clobber
+ * good data. Pure so the rule is unit-testable away from Prisma.
+ */
+export function decideOutboundMetadataMerge(input: {
+  survivorSentVia: string | null;
+  survivorReplyToMessageId: string | null;
+  hasAutomationTwin: boolean;
+  twinReplyToMessageId: string | null;
+}): { sentVia?: string; replyToMessageId?: string } {
+  const updates: { sentVia?: string; replyToMessageId?: string } = {};
+  if (input.hasAutomationTwin && input.survivorSentVia !== "automation") {
+    updates.sentVia = "automation";
+  }
+  if (input.twinReplyToMessageId && !input.survivorReplyToMessageId) {
+    updates.replyToMessageId = input.twinReplyToMessageId;
+  }
+  return updates;
+}
+
+/**
+ * Same-thread outbound dedup can also delete a twin: when a canonical row
+ * already holds the scan key, decideOutboundDedup returns `delete_twin` and the
+ * row we drop is usually the send-side persistence — the only one carrying
+ * sentVia=automation + replyToMessageId (send.ts sets both; the scan upsert
+ * sets neither). Mirror the cross-sibling merge and copy that metadata onto the
+ * surviving canonical before deleting, so the dashboard bubble keeps its
+ * automation badge and reply nesting. Thin pure wrapper over
+ * decideOutboundMetadataMerge so the same-thread field mapping is unit-testable
+ * away from Prisma.
+ */
+export function decideSameThreadTwinDeleteMerge(
+  twin: { sentVia: string | null; replyToMessageId: string | null },
+  survivor: { sentVia: string | null; replyToMessageId: string | null }
+): { sentVia?: string; replyToMessageId?: string } {
+  return decideOutboundMetadataMerge({
+    survivorSentVia: survivor.sentVia ?? null,
+    survivorReplyToMessageId: survivor.replyToMessageId ?? null,
+    hasAutomationTwin: twin.sentVia === "automation",
+    twinReplyToMessageId: twin.replyToMessageId ?? null
+  });
 }
 
 export function normalizePositiveScanCap(value: unknown): number | undefined {
@@ -312,6 +388,36 @@ export function sliceByPositiveCap<T>(values: T[], max?: number): T[] {
     return values;
   }
   return values.slice(0, cap);
+}
+
+// Per-platform scan watermark persistence (incremental scan gate). Stored in
+// the generic Setting KV table so no schema change is needed; the value is
+// the adapter-private opaque string from PlatformAdapter.getScanWatermark.
+const SCAN_WATERMARK_SETTING_PREFIX = "scan_watermark:";
+
+async function loadScanWatermark(platform: PlatformName): Promise<string | null> {
+  const row = await prisma.setting.findUnique({
+    where: { key: `${SCAN_WATERMARK_SETTING_PREFIX}${platform}` }
+  });
+  if (!row) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(row.valueJson) as unknown;
+    return typeof parsed === "string" && parsed.length > 0 ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+async function saveScanWatermark(platform: PlatformName, watermark: string): Promise<void> {
+  const key = `${SCAN_WATERMARK_SETTING_PREFIX}${platform}`;
+  const valueJson = JSON.stringify(watermark);
+  await prisma.setting.upsert({
+    where: { key },
+    update: { valueJson },
+    create: { key, valueJson }
+  });
 }
 
 export function resolveEffectiveCount(rawCount: number, max?: number): number {
@@ -407,6 +513,28 @@ export function evaluateLinkedInFallbackDecision(input: {
   };
 }
 
+/**
+ * Per-job cancellation gate. Reads the queue's monotonically-increasing
+ * `abortVersion` EAGERLY at construction and remembers it as the baseline.
+ * `shouldAbort()` then returns true once a later `requestAbort()` has bumped
+ * the version past that baseline.
+ *
+ * The eager read is the whole point: `runJob` must capture its baseline
+ * BEFORE its startup awaits (`ensurePlatformRows()`, `getSettings()`), so a
+ * Cancel/reset fired while the job is parked in those awaits — which has
+ * already incremented `abortVersion` — is reflected in `shouldAbort()`.
+ * Capturing late made `baseline === abortVersion`, permanently disabling the
+ * abort for the whole run.
+ */
+export function createJobAbortGate(readAbortVersion: () => number): {
+  shouldAbort: () => boolean;
+} {
+  const baseline = readAbortVersion();
+  return {
+    shouldAbort: (): boolean => readAbortVersion() !== baseline
+  };
+}
+
 export type EnqueueScanResult =
   | {
       ok: true;
@@ -423,6 +551,22 @@ export type EnqueueScanResult =
       requestId: string;
       platform?: PlatformName;
     };
+
+/**
+ * Decide the status an accepted enqueue should report. The decision MUST be
+ * made from the `processing` flag read BEFORE `triggerProcessNext()` runs:
+ * `triggerProcessNext` calls `void processNext()`, which synchronously shifts
+ * the job and sets `processing = true` before its first `await`. So by the
+ * time `enqueueScan` returns, `processing` is already `true` even for the job
+ * that just started — reading it there would always report "queued" and the
+ * "running" branch would be dead. Pass `processingBeforeEnqueue = !processing`
+ * captured up front instead.
+ */
+export function resolveEnqueueStatus(
+  processingBeforeEnqueue: boolean
+): "queued" | "running" {
+  return processingBeforeEnqueue ? "queued" : "running";
+}
 
 export function createScanQueue(deps: ScanQueueDeps) {
   const runnerRootDir = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -918,13 +1062,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
       fromScheduler: options?.fromScheduler === true
     };
 
+    // Capture whether a job is already in flight BEFORE triggerProcessNext():
+    // processNext() synchronously sets `processing = true` for this very job
+    // before its first await, so reading `processing` after the trigger would
+    // always report "queued". See resolveEnqueueStatus.
+    const processingBeforeEnqueue = processing;
     queue.push(job);
     triggerProcessNext();
 
     return {
       ok: true,
       jobId: job.jobId,
-      status: processing ? "queued" : "running",
+      status: resolveEnqueueStatus(processingBeforeEnqueue),
       requestId: job.jobId,
       platform
     };
@@ -1020,6 +1169,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
   }
 
   async function runJob(job: ScanJob): Promise<ScanJobOutcome> {
+    // Capture the abort baseline BEFORE the SCAN_STARTED emit and the startup
+    // awaits below. requestAbort() does `abortVersion += 1`; if a Cancel/reset
+    // fires while this job is parked in ensurePlatformRows()/getSettings(),
+    // reading the baseline afterwards would capture the already-bumped value
+    // and permanently disable shouldAbort() for the whole run.
+    const abortGate = createJobAbortGate(() => abortVersion);
     deps.eventBus.emit({
       type: "SCAN_STARTED",
       jobId: job.jobId,
@@ -1033,10 +1188,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
       : settings.enabledPlatforms.filter((platform) => allPlatforms.includes(platform));
 
     let updatedThreads = 0;
-    const jobAbortVersion = abortVersion;
     let aborted = false;
 
-    const shouldAbort = (): boolean => abortVersion !== jobAbortVersion;
+    const shouldAbort = abortGate.shouldAbort;
     const resolveAbortReason = (): string => abortReason ?? "session_preempt";
 
     const markAborted = async (
@@ -1160,6 +1314,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
         let fallbackTriggerReason: string | undefined;
         let runSuccess = false;
         let runStopReason: string | undefined;
+        // Incremental scan gate state: the watermark captured BEFORE this
+        // run's sync work (persisted only after a clean completion) and
+        // whether the candidate loop processed everything it was given (a
+        // cap break or thread failure leaves work behind, so advancing the
+        // watermark would silently drop those threads' changes).
+        let capturedScanWatermark: string | null = null;
+        let candidateCapBroke = false;
         let runError: unknown;
 
         runLogger.logEvent({
@@ -1882,76 +2043,135 @@ export function createScanQueue(deps: ScanQueueDeps) {
               runStopReason = "aborted";
               return;
             }
-            const unread = await adapter.scanUnreadThreads();
-            unreadCandidatesCount = unread.length;
-            runLogger.logAction({
-              stage: "collect_threads",
-              action: "scan_unread_threads",
-              result: "ok",
-              counts: {
-                unreadCandidatesCount
-              }
-            });
-            if (await markAborted("after_scan_unread", platform)) {
-              runStopReason = "aborted";
-              return;
-            }
-            if (await markAborted("before_scan_recent", platform)) {
-              runStopReason = "aborted";
-              return;
-            }
-            const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
-            runLogger.logAction({
-              stage: "collect_threads",
-              action: "scan_recent_threads",
-              result: "ok",
-              counts: {
-                recentCandidatesCount: recent.length
-              }
-            });
-            if (await markAborted("after_scan_recent", platform)) {
-              runStopReason = "aborted";
-              return;
+
+            // Incremental scan gate (perf rank 13): platforms with a cheap
+            // upstream change signal (iMessage chat.db) skip candidate
+            // discovery entirely when nothing changed, and sync exactly the
+            // changed conversations otherwise. The full unread+recent sweep
+            // below costs seconds of synchronous SQLite per tick on a real
+            // Messages library and used to run on EVERY watcher tick.
+            let incrementalPlan: IncrementalScanPlan | null = null;
+            if (adapterSupportsIncrementalScan(adapter)) {
+              const storedWatermark = await loadScanWatermark(platform);
+              incrementalPlan = await resolveIncrementalScanPlan(adapter, storedWatermark);
+              capturedScanWatermark = incrementalPlan.watermark;
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Resolved incremental scan plan",
+                details: {
+                  mode: incrementalPlan.mode,
+                  reason: incrementalPlan.mode === "full" ? incrementalPlan.reason : undefined,
+                  changedThreads: incrementalPlan.mode === "delta" ? incrementalPlan.stubs.length : undefined,
+                  hadStoredWatermark: Boolean(storedWatermark)
+                }
+              });
             }
 
-            const merged = new Map<string, ThreadStub>();
-            for (const thread of unread) {
-              merged.set(thread.platformThreadId, thread);
-            }
-            for (const thread of recent) {
-              if (!merged.has(thread.platformThreadId)) {
+            if (incrementalPlan && incrementalPlan.mode === "skip") {
+              // Nothing changed upstream since the last completed scan -
+              // finish the tick with zero candidates. Same flow/events as a
+              // scan that found no work, so consumers see a normal scan.
+              candidatesToSync = [];
+              rawThreadCount = 0;
+              effectiveThreadCount = 0;
+              candidatesBeforeCap = 0;
+              threadsScannedCount = 0;
+              headline("COLLECT_SKIP_UNCHANGED", "upstream store unchanged since last scan - skipping candidate sweep", {
+                watermark: incrementalPlan.watermark
+              });
+            } else if (incrementalPlan && incrementalPlan.mode === "delta") {
+              // Only these conversations changed - sync exactly them. The
+              // usual thread cap still applies (deltas are typically 1-2).
+              const changedStubs = incrementalPlan.stubs;
+              rawThreadCount = changedStubs.length;
+              effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
+              const cappedChanged = sliceByPositiveCap(changedStubs, effectiveMaxThreads);
+              if (cappedChanged.length < changedStubs.length) {
+                // Some changed threads fell off the cap: they stay pending,
+                // so the watermark must not advance past them.
+                candidateCapBroke = true;
+              }
+              candidatesBeforeCap = changedStubs.length;
+              threadsScannedCount = changedStubs.length;
+              unreadCandidatesCount = changedStubs.filter((t) => (t.unreadCount ?? 0) > 0).length;
+              needsReplyCandidatesCount = changedStubs.filter((t) => Boolean(t.needsReplyFromList)).length;
+              candidatesToSync = cappedChanged.map((thread) => ({ thread }));
+              headline("COLLECT_DELTA_OK", "incremental candidate collection complete", {
+                changedThreads: changedStubs.length,
+                cappedCandidatesCount: candidatesToSync.length
+              });
+            } else {
+              const unread = await adapter.scanUnreadThreads();
+              unreadCandidatesCount = unread.length;
+              runLogger.logAction({
+                stage: "collect_threads",
+                action: "scan_unread_threads",
+                result: "ok",
+                counts: {
+                  unreadCandidatesCount
+                }
+              });
+              if (await markAborted("after_scan_unread", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+              if (await markAborted("before_scan_recent", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+              const recent = await adapter.fetchRecentThreads(settings.recentThreadSweepCount);
+              runLogger.logAction({
+                stage: "collect_threads",
+                action: "scan_recent_threads",
+                result: "ok",
+                counts: {
+                  recentCandidatesCount: recent.length
+                }
+              });
+              if (await markAborted("after_scan_recent", platform)) {
+                runStopReason = "aborted";
+                return;
+              }
+
+              const merged = new Map<string, ThreadStub>();
+              for (const thread of unread) {
                 merged.set(thread.platformThreadId, thread);
               }
-            }
-            const mergedCandidates = Array.from(merged.values());
-            rawThreadCount = mergedCandidates.length;
-            effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
-            const cappedCandidates = sliceByPositiveCap(mergedCandidates, effectiveMaxThreads);
-            candidatesBeforeCap = merged.size;
-            threadsScannedCount = merged.size;
-            needsReplyCandidatesCount = mergedCandidates.filter((thread) => Boolean(thread.needsReplyFromList)).length;
-            candidatesToSync = cappedCandidates.map((thread) => ({ thread }));
-            runLogger.logDecision({
-              stage: "collect_threads",
-              decision: "Merged unread and recent candidates",
-              details: {
-                unreadCandidatesCount,
-                recentCandidatesCount: recent.length,
-                rawThreadCount,
-                maxThreads: effectiveMaxThreads ?? null,
-                effectiveThreadCount,
-                mergedCandidatesCount: candidatesBeforeCap,
-                cappedCandidatesCount: candidatesToSync.length
+              for (const thread of recent) {
+                if (!merged.has(thread.platformThreadId)) {
+                  merged.set(thread.platformThreadId, thread);
+                }
               }
-            });
+              const mergedCandidates = Array.from(merged.values());
+              rawThreadCount = mergedCandidates.length;
+              effectiveThreadCount = resolveEffectiveCount(rawThreadCount, effectiveMaxThreads);
+              const cappedCandidates = sliceByPositiveCap(mergedCandidates, effectiveMaxThreads);
+              candidatesBeforeCap = merged.size;
+              threadsScannedCount = merged.size;
+              needsReplyCandidatesCount = mergedCandidates.filter((thread) => Boolean(thread.needsReplyFromList)).length;
+              candidatesToSync = cappedCandidates.map((thread) => ({ thread }));
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Merged unread and recent candidates",
+                details: {
+                  unreadCandidatesCount,
+                  recentCandidatesCount: recent.length,
+                  rawThreadCount,
+                  maxThreads: effectiveMaxThreads ?? null,
+                  effectiveThreadCount,
+                  mergedCandidatesCount: candidatesBeforeCap,
+                  cappedCandidatesCount: candidatesToSync.length
+                }
+              });
 
-            const metricsProvider = adapter as unknown as {
-              getLastCollectionMetrics?: () => Record<string, unknown> | null;
-            };
-            collectionMetrics =
-              typeof metricsProvider.getLastCollectionMetrics === "function"
-                ? metricsProvider.getLastCollectionMetrics()
-                : null;
+              const metricsProvider = adapter as unknown as {
+                getLastCollectionMetrics?: () => Record<string, unknown> | null;
+              };
+              collectionMetrics =
+                typeof metricsProvider.getLastCollectionMetrics === "function"
+                  ? metricsProvider.getLastCollectionMetrics()
+                  : null;
+            }
           }
           candidatesCount = candidatesToSync.length;
           if (threadsScannedCount <= 0) {
@@ -2010,6 +2230,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           for (const candidateToSync of candidatesToSync) {
             const thread = candidateToSync.thread;
             if (openedThreadsCount >= maxOpenCount) {
+              // Remaining candidates stay unsynced this run - the scan
+              // watermark must not advance past them (candidateCapBroke).
+              candidateCapBroke = true;
               break;
             }
             if (await markAborted("before_thread_sync", platform, thread)) {
@@ -2284,6 +2507,16 @@ export function createScanQueue(deps: ScanQueueDeps) {
           retryController.markSuccess(platform);
           runError = undefined;
           runSuccess = true;
+
+          // Advance the incremental-scan watermark ONLY now: clean
+          // completion, every candidate processed, no per-thread failures.
+          // The value is the one captured BEFORE this run's sync work, so
+          // changes that landed mid-scan stay ahead of it and are picked up
+          // next tick. A failed/capped/aborted run leaves the old watermark
+          // in place and the next tick simply re-derives a (cheap) delta.
+          if (capturedScanWatermark && threadFailures === 0 && !candidateCapBroke) {
+            await saveScanWatermark(platform, capturedScanWatermark);
+          }
         } catch (error) {
           runError = error;
           if (await markAborted("platform_error", platform)) {
@@ -2861,6 +3094,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
       // See decideOutboundDedup for why this is needed (different keys for the
       // same physical message). Inbound messages don't have this problem —
       // they're only ever recorded by the scan parser.
+      //
+      // We fetch every OUT row in the ±5min window (NOT filtering on exact
+      // `text` in SQL) because the send-time row stores raw text while this
+      // scan row stores cleanMessageText output — a one-space difference would
+      // make an exact SQL match miss the twin entirely. decideOutboundDedup
+      // then compares with whitespace normalized so the divergent twin is
+      // still recognised. The window keeps the candidate set tiny.
       if (message.direction === "OUT") {
         await flushBatchedMessageWrites();
         const windowMs = 5 * 60 * 1000;
@@ -2890,7 +3130,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
             where: {
               threadId: { in: twinThreadIds },
               direction: "OUT",
-              text: messageText,
               timestamp: {
                 gte: new Date(safeTimestamp.getTime() - windowMs),
                 lte: new Date(safeTimestamp.getTime() + windowMs)
@@ -2922,8 +3161,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
           })
         ]);
 
-        const sameThreadTwins = twins.filter((t) => t.threadId === thread.id);
-        const crossSiblingTwins = twins.filter((t) => t.threadId !== thread.id);
+        // The twin query no longer filters on exact `text` in SQL (so it can
+        // catch a send-side row whose whitespace diverges from this scan row —
+        // see normalizeOutboundTextForDedup). That makes gating on content our
+        // job here: keep only rows whose normalized text matches before the
+        // cross-sibling block acts, otherwise unrelated sibling-thread messages
+        // that merely fall inside the 5-minute window would be wrongly
+        // collapsed. decideOutboundDedup re-checks the same way for the
+        // same-thread set.
+        const normalizedMessageText = normalizeOutboundTextForDedup(messageText);
+        const contentTwins = twins.filter(
+          (t) => normalizeOutboundTextForDedup(t.text) === normalizedMessageText
+        );
+        const sameThreadTwins = contentTwins.filter((t) => t.threadId === thread.id);
+        const crossSiblingTwins = contentTwins.filter((t) => t.threadId !== thread.id);
 
         // Cross-sibling dedup — chat.db says this message belongs to the
         // current thread, so any same-content row in a sibling thread is
@@ -2950,22 +3201,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
             }
           } else {
             // Canonical (or a same-thread twin) already in current thread —
-            // delete all cross-sibling twins, copying useful metadata onto
-            // the canonical first if it doesn't have it yet.
+            // delete all cross-sibling twins, copying useful metadata onto the
+            // surviving row first if it doesn't have it yet. The survivor is the
+            // canonical when present, otherwise the same-thread twin that
+            // decideOutboundDedup migrates the new key onto below — either way it
+            // must inherit the deleted sibling's sentVia=automation tag and
+            // replyToMessageId linkage.
             for (const twin of crossSiblingTwins) {
               await prisma.message.delete({ where: { id: twin.id } });
             }
-            if (canonical) {
-              const updates: { sentVia?: string; replyToMessageId?: string } = {};
-              if (automationTwin && canonical.sentVia !== "automation") {
-                updates.sentVia = "automation";
-              }
-              if (replyToTwin?.replyToMessageId && !canonical.replyToMessageId) {
-                updates.replyToMessageId = replyToTwin.replyToMessageId;
-              }
-              if (Object.keys(updates).length > 0) {
-                await prisma.message.update({ where: { id: canonical.id }, data: updates });
-              }
+            const survivor = canonical ?? sameThreadTwins[0]!;
+            const updates = decideOutboundMetadataMerge({
+              survivorSentVia: survivor.sentVia ?? null,
+              survivorReplyToMessageId: survivor.replyToMessageId ?? null,
+              hasAutomationTwin: Boolean(automationTwin),
+              twinReplyToMessageId: replyToTwin?.replyToMessageId ?? null
+            });
+            if (Object.keys(updates).length > 0) {
+              await prisma.message.update({ where: { id: survivor.id }, data: updates });
             }
           }
         }
@@ -2978,6 +3231,20 @@ export function createScanQueue(deps: ScanQueueDeps) {
           existingCanonical: canonical
         });
         if (decision.kind === "delete_twin") {
+          // The twin we drop is usually the send-side row — the only one
+          // carrying sentVia=automation + replyToMessageId (send.ts sets both;
+          // the scan upsert sets neither). decideOutboundDedup only returns
+          // delete_twin when a canonical already holds the scan key, so the
+          // survivor is that canonical. Merge the twin's metadata onto it
+          // before deleting, mirroring the cross-sibling branch above, so the
+          // bubble keeps its automation badge and reply nesting.
+          const deletedTwin = sameThreadTwins.find((t) => t.id === decision.twinId);
+          if (canonical && deletedTwin) {
+            const updates = decideSameThreadTwinDeleteMerge(deletedTwin, canonical);
+            if (Object.keys(updates).length > 0) {
+              await prisma.message.update({ where: { id: canonical.id }, data: updates });
+            }
+          }
           await prisma.message.delete({ where: { id: decision.twinId } });
         } else if (decision.kind === "migrate_twin_key") {
           await prisma.message.update({

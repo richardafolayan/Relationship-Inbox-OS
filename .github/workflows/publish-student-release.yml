@@ -1,0 +1,124 @@
+# Builds, publishes, and verifies a student release to Dropbox.
+#
+# Publishing happens AUTOMATICALLY on every push to `main` (the default
+# branch): reaching main IS the "ship to pilots" gate. develop/staging/v1 and
+# feature branches never publish. You can also run it manually
+# (workflow_dispatch) to re-publish or to ship with custom release notes.
+#
+# Pilots only SEE a new build when the version in package.json changes, so a
+# release = merge a version bump to main. The run publishes the exact commit
+# that triggered it.
+#
+# Required GitHub Actions secrets (Settings > Secrets and variables > Actions):
+#   Dropbox auth (refresh-token / offline flow — access tokens are short-lived):
+#     DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN
+#   Dropbox file paths that get OVERWRITTEN in place (keeps the share links stable):
+#     RIOS_DROPBOX_ZIP_PATH, RIOS_DROPBOX_MANIFEST_PATH
+#   Stable public share links (created once; reused every release):
+#     RIOS_DROPBOX_ZIP_URL, RIOS_UPDATE_FEED_URL
+# See docs/pilot/automated-release-publishing.md.
+name: Publish Student Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: "Release notes, one per line (optional; manual runs only)."
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+# Serialise publishes so two runs can never overwrite Dropbox at the same time.
+# Do NOT cancel an in-progress publish (that could leave Dropbox half-updated);
+# a newer run waits for the current one to finish.
+concurrency:
+  group: publish-student-release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Publish the EXACT commit that triggered this run (the pushed commit
+          # on main, or the dispatched ref's tip), not a hard-coded branch.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Check required secrets are set
+        env:
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          RIOS_DROPBOX_ZIP_PATH: ${{ secrets.RIOS_DROPBOX_ZIP_PATH }}
+          RIOS_DROPBOX_MANIFEST_PATH: ${{ secrets.RIOS_DROPBOX_MANIFEST_PATH }}
+          RIOS_DROPBOX_ZIP_URL: ${{ secrets.RIOS_DROPBOX_ZIP_URL }}
+          RIOS_UPDATE_FEED_URL: ${{ secrets.RIOS_UPDATE_FEED_URL }}
+        run: |
+          missing=0
+          for v in DROPBOX_APP_KEY DROPBOX_APP_SECRET DROPBOX_REFRESH_TOKEN \
+                   RIOS_DROPBOX_ZIP_PATH RIOS_DROPBOX_MANIFEST_PATH \
+                   RIOS_DROPBOX_ZIP_URL RIOS_UPDATE_FEED_URL; do
+            if [ -z "${!v}" ]; then echo "::error::missing secret $v"; missing=1; fi
+          done
+          [ "$missing" -eq 0 ] || { echo "Set the secrets above before publishing."; exit 1; }
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema packages/core/prisma/schema.prisma
+
+      - name: Release-safety checks (typecheck + full suite)
+        run: |
+          npm run lint
+          npm run test:all
+
+      - name: Build, publish to Dropbox, and verify the live feed
+        env:
+          DROPBOX_APP_KEY: ${{ secrets.DROPBOX_APP_KEY }}
+          DROPBOX_APP_SECRET: ${{ secrets.DROPBOX_APP_SECRET }}
+          DROPBOX_REFRESH_TOKEN: ${{ secrets.DROPBOX_REFRESH_TOKEN }}
+          RIOS_DROPBOX_ZIP_PATH: ${{ secrets.RIOS_DROPBOX_ZIP_PATH }}
+          RIOS_DROPBOX_MANIFEST_PATH: ${{ secrets.RIOS_DROPBOX_MANIFEST_PATH }}
+          RIOS_DROPBOX_ZIP_URL: ${{ secrets.RIOS_DROPBOX_ZIP_URL }}
+          RIOS_UPDATE_FEED_URL: ${{ secrets.RIOS_UPDATE_FEED_URL }}
+          # Pilot-feedback token (low-value, rotatable) baked into the shipped
+          # .env.example so pilots can submit in-app feedback. OPTIONAL: if
+          # unset, the build just ships blank feedback config (in-app feedback
+          # stays off) rather than failing.
+          PILOT_FEEDBACK_WEBHOOK_URL: ${{ secrets.PILOT_FEEDBACK_WEBHOOK_URL }}
+          PILOT_FEEDBACK_SECRET: ${{ secrets.PILOT_FEEDBACK_SECRET }}
+          PILOT_FEEDBACK_STATUS_URL: ${{ secrets.PILOT_FEEDBACK_STATUS_URL }}
+          # Empty on push runs (no inputs) -> the publish script uses its
+          # default notes. Manual runs can supply custom notes.
+          RELEASE_NOTES: ${{ github.event.inputs.release_notes }}
+        run: |
+          ARGS=()
+          if [ -n "$RELEASE_NOTES" ]; then
+            printf '%s\n' "$RELEASE_NOTES" > "$RUNNER_TEMP/notes.txt"
+            ARGS+=(--notes-file "$RUNNER_TEMP/notes.txt")
+          fi
+          node scripts/publish-student-release.mjs "${ARGS[@]}"
+
+      - name: Upload release artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: student-release
+          path: |
+            release-dist/relationship-inbox-os-student-*.zip
+            release-dist/latest.json
+            release-dist/*.sha256
+          if-no-files-found: warn
+          retention-days: 30

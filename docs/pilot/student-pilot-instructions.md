@@ -4,10 +4,10 @@ Thanks for trying this. It's an early build, not a finished product. The
 point of the pilot is to find out whether it actually helps you reply to
 people, so honest reactions are worth far more than polite ones.
 
-**Setting it up** is a separate short call with me. See the
+**Setting it up** is one command. See the
 [install guide](./student-install-guide.md). This page is about what to do
 once it's running. If something looks stuck, see
-[troubleshooting](./troubleshooting.md).
+[troubleshooting](./troubleshooting.md) (or run `node scripts/doctor.mjs`).
 
 ## The short version
 

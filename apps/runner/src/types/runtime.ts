@@ -112,6 +112,73 @@ export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
  * All string fields default to "" meaning "not set" — an empty profile
  * makes the AI fall back to a plain, neutral voice rather than any persona.
  */
+/**
+ * Who a focus window's acknowledgements cover. "favourites" (the safe
+ * default) only ever touches starred contacts; "all_personal" widens to
+ * any saved personal contact but still never to unknown numbers, spam, or
+ * business/outreach threads. Mirrors the dashboard `FocusAudience`.
+ */
+export type FocusAudience = "favourites" | "all_personal";
+
+/**
+ * Focus Reply Buffer state. A single "heads-down" window the operator opens
+ * from Today / the top bar / Settings: while it's active, a covered contact
+ * who messages can get a one-tap acknowledgement ("seen this, I'll reply
+ * properly after") so silence doesn't read as being ignored. No auto-send,
+ * ever — the operator taps every send. The note is the operator's own words
+ * with plain token substitution; "Help me phrase this" can draft it in
+ * their voice on explicit request, and it stays editable before use.
+ * One window at a time; persisted in the operator profile JSON so every
+ * dashboard surface (and a reload) reads the same state.
+ */
+export interface FocusWindowState {
+  /** True while a window is open. The dashboard surfaces read this. */
+  active: boolean;
+  /** ISO timestamp the window started. "" when no window has run. Inbound
+   *  messages newer than this on covered threads are "arrived during focus". */
+  startedAt: string;
+  /** ISO timestamp the operator chose to resurface. "" when unset. Fills
+   *  the [until] token and the "active until …" copy. */
+  endsAt: string;
+  /** Optional short reason ("deep work", "lecture"). "" = none. */
+  reason: string;
+  /** Live note text shown in the setup sheet (close-tier base with tokens). */
+  note: string;
+  /** Per-window professional-tier note override ("Help me phrase this"
+   *  writes one per register). "" = none, professional contacts fall back
+   *  to the saved ackTemplates.professional. Added after the feature
+   *  shipped, so older profile rows parse fine (coerced to ""). */
+  professionalNote: string;
+  /** Who this window covers. */
+  audience: FocusAudience;
+  /** Opaque id stamping this window, so per-window ack dedupe is unambiguous. */
+  windowId: string;
+  /** Person ids already acknowledged in this window (one note per person). */
+  ackedPersonIds: string[];
+}
+
+/**
+ * The operator's two acknowledgement note templates, in their own words.
+ * The app only picks which tier fits a contact and fills [Name]/[until]/
+ * [reason] — it never writes the words.
+ */
+export interface AckTemplates {
+  /** Friends / family — casual. */
+  close: string;
+  /** Professional contacts — calmer, still the operator's voice. */
+  professional: string;
+}
+
+/** Focus Reply Buffer preferences (not the live window). */
+export interface FocusSettings {
+  /** Include a reason word in the note so it reads as a real block. */
+  reasonLabel: boolean;
+  /** If someone messages twice in one window, only acknowledge once. */
+  oneNotePerPerson: boolean;
+  /** Default audience pre-selected when starting a new window. */
+  audience: FocusAudience;
+}
+
 export interface OperatorProfile {
   /** What the operator is called — used for the Today greeting and AI voice. */
   displayName: string;
@@ -129,6 +196,13 @@ export interface OperatorProfile {
   aiHelpLevel: AiHelpLevel;
   /** ISO timestamp the operator finished first-run setup. "" = not done. */
   setupCompletedAt: string;
+  /** Focus Reply Buffer: the live window state. Added after the voice
+   *  fields, so a pre-existing profile row parses fine (defaults below). */
+  focusWindow: FocusWindowState;
+  /** Focus Reply Buffer: the operator's two note templates. */
+  ackTemplates: AckTemplates;
+  /** Focus Reply Buffer: preferences (reason label, one-note-per-person, audience). */
+  focusSettings: FocusSettings;
 }
 
 /**
@@ -295,12 +369,15 @@ export interface AiService {
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
    * plus a one-sentence reason for how worth it would feel to send the
-   * LinkedIn dormant a deliberate "hey, been a while" message today.
-   * Null when the AI provider was unavailable; the dashboard ranks
-   * dormants by deterministic signals alone in that case.
+   * dormant contact a deliberate "hey, been a while" message today.
+   * Platform-aware: professional framing on LinkedIn, personal on
+   * iMessage, casual social on Instagram / TikTok. Null when the AI
+   * provider was unavailable; the dashboard ranks dormants by
+   * deterministic signals alone in that case.
    */
   scoreReconnectCandidate(input: {
     displayName: string;
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
     contactBlurb?: string | null;
     daysDormant: number;
     operatorOutboundCount: number;
@@ -488,6 +565,32 @@ export interface AiService {
   inferReplyStyle(input: {
     sampleTexts: string[];
   }): Promise<{ suggestion: InferredReplyStyle; aiRan: boolean }>;
+  /**
+   * "Help me phrase this" for the Focus setup sheet: turn the operator's
+   * own description of what they're doing ("driving back from London till
+   * 9") into the two focus-note tiers in their voice, plus a short reason
+   * label and, when the activity names an explicit clock time, the end
+   * time. The notes keep [Name] and [until] as literal tokens — they fill
+   * per-person at send time. Null when no provider produced a usable
+   * result. Never sends, never saves — the sheet shows it for editing.
+   */
+  composeFocusNote(input: {
+    activity: string;
+    operatorProfile: OperatorProfile | null;
+    voiceSampleTexts: string[];
+  }): Promise<ComposedFocusNote | null>;
+}
+
+/** Result of AiService.composeFocusNote. */
+export interface ComposedFocusNote {
+  /** Casual note for close contacts, [Name]/[until] tokens literal. */
+  close: string;
+  /** Calmer note for professional contacts, same tokens literal. */
+  professional: string;
+  /** 1-3 word lowercase label for the window's reason chip. "" = none. */
+  reason: string;
+  /** "HH:MM" 24h end time, ONLY when the activity states one. Null else. */
+  untilTime: string | null;
 }
 
 export interface PilotReportTriage {

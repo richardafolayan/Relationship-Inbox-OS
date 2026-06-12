@@ -31,6 +31,12 @@ export interface InboxRow {
   personBirthday?: string | null;
   personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /**
+   * True for group threads (iMessage group chats). Reconnect excludes
+   * groups - a per-person "worth a hello" does not fit a group chat.
+   * Absent on legacy payloads.
+   */
+  isGroup?: boolean;
   preview: string;
   /**
    * "OUT" when the latest message was sent by the operator (preview should
@@ -121,7 +127,6 @@ export interface InboxResponse {
   summary: {
     unreadThreads: number;
     atRiskThreads: number;
-    averageReplyTimeHours: number | null;
     oldestPendingInboundAt: string | null;
     messagesSentToday: number;
   };
@@ -149,6 +154,19 @@ export interface UpcomingBirthday {
 
 export interface BirthdaysResponse {
   upcoming: UpcomingBirthday[];
+}
+
+/**
+ * iMessage contact-name health, read from the runner's name-sync. Drives the
+ * "this Mac has no saved contacts" hint (issue #676). Null until the first
+ * sync tick completes, or on non-macOS hosts.
+ */
+export interface ImessageContactHealth {
+  contactsLoaded: number;
+  addressBookContactCount: number;
+  unresolvedImessageHandleCount: number;
+  shouldHintEmptyContacts: boolean;
+  lastCheckedAt: string;
 }
 
 export interface PeopleRow {
@@ -223,6 +241,70 @@ export type ReplyStyle = "warm" | "direct" | "casual" | "thoughtful" | "concise"
 export type AiHelpLevel = "memory_only" | "writing_support" | "full_drafts";
 
 /**
+ * Who a Focus Reply Buffer window's acknowledgements cover. "favourites" is
+ * the safe default (starred contacts only); "all_personal" widens to saved
+ * personal contacts but never to unknown numbers, spam, or business threads.
+ */
+export type FocusAudience = "favourites" | "all_personal";
+
+/** Note tier chosen per contact: casual "close" vs calmer "professional". */
+export type FocusTier = "close" | "professional";
+
+/**
+ * Focus Reply Buffer state — one "heads-down" window at a time, persisted in
+ * the operator profile JSON so Today, Inbox, Thread and Settings (and a
+ * reload) all read the same window. Mirrors runner-side `FocusWindowState`.
+ */
+export interface FocusWindowState {
+  active: boolean;
+  /** ISO start; covered inbound newer than this is "arrived during focus". */
+  startedAt: string;
+  /** ISO end the operator chose; fills the [until] token. */
+  endsAt: string;
+  reason: string;
+  note: string;
+  /**
+   * Per-window professional-tier note override ("Help me phrase this" writes
+   * one per register). Optional: older runner payloads omit it; ""/absent
+   * means professional contacts read the saved ackTemplates.professional.
+   */
+  professionalNote?: string;
+  audience: FocusAudience;
+  windowId: string;
+  /** Person ids already acknowledged this window (one note per person). */
+  ackedPersonIds: string[];
+}
+
+/**
+ * Response of POST /runner/control/focus/compose-note ("Help me phrase
+ * this"). `reasonLabel` is the suggested reason chip; `untilTime` is a
+ * 24-hour "HH:MM" ONLY when the operator stated an explicit end time —
+ * surfaced as a tappable suggestion, never auto-applied.
+ */
+export interface ComposeFocusNoteResponse {
+  ok: boolean;
+  /** Failure kind when ok is false (e.g. "ai_unavailable"). */
+  reason?: string;
+  close?: string;
+  professional?: string;
+  reasonLabel?: string;
+  untilTime?: string | null;
+}
+
+/** The operator's two acknowledgement note templates (their own words). */
+export interface AckTemplates {
+  close: string;
+  professional: string;
+}
+
+/** Focus Reply Buffer preferences (not the live window). */
+export interface FocusSettings {
+  reasonLabel: boolean;
+  oneNotePerPerson: boolean;
+  audience: FocusAudience;
+}
+
+/**
  * The user's voice + identity profile used by the AI prompts and the Today
  * greeting. Matches runner-side `OperatorProfile`. String fields are stored
  * as plain strings; "" means "not set" (no opinion injected into prompts).
@@ -236,6 +318,14 @@ export interface OperatorProfile {
   preferredStyle: ReplyStyle | "";
   aiHelpLevel: AiHelpLevel;
   setupCompletedAt: string;
+  /**
+   * Focus Reply Buffer fields. Optional on the dashboard mirror so a profile
+   * payload from a runner build that predates the feature still parses; the
+   * focus helpers supply defaults when these are absent.
+   */
+  focusWindow?: FocusWindowState;
+  ackTemplates?: AckTemplates;
+  focusSettings?: FocusSettings;
 }
 
 export interface PlatformCard {
@@ -413,6 +503,16 @@ export interface ThreadResponse {
   /** Birth year if known; lets the rail render "turns 30" when surfacing the birthday pill. */
   personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /**
+   * Thread ids in this Person's sibling cohort. For an iMessage contact split
+   * across handle-specific chats (phone + Apple-ID email) this lists every
+   * sibling row; for every other thread it is just `[id]`. The thread page
+   * matches SSE THREAD_UPDATED / SUGGESTED_REPLIES_UPDATED / SCAN_THREAD_*
+   * events against this cohort so a new inbound on the OTHER handle refetches
+   * the open view. Optional so a dashboard talking to a runner build that
+   * predates the field still parses (the page degrades to exact-id matching).
+   */
+  siblingIds?: string[];
   riskLevel: "GREEN" | "AMBER" | "RED";
   riskReason?: string | null;
   /** ISO timestamp until which this thread is snoozed; null when active. */

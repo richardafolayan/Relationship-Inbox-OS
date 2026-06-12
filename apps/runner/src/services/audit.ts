@@ -14,6 +14,12 @@ interface AuditInput {
 
 export function createAuditService() {
   async function log(input: AuditInput): Promise<string> {
+    // Mirror details.threadId into the indexed column so per-thread receipt
+    // lookups are an index read instead of a detailsJson LIKE-scan.
+    const threadId =
+      input.details && typeof input.details.threadId === "string"
+        ? input.details.threadId
+        : undefined;
     const record = await prisma.auditLog.create({
       data: {
         platform: input.platform,
@@ -22,7 +28,8 @@ export function createAuditService() {
         status: input.status as AuditStatus,
         detailsJson: input.details ? JSON.stringify(input.details) : undefined,
         screenshotFile: input.screenshotFile,
-        domDumpFile: input.domDumpFile
+        domDumpFile: input.domDumpFile,
+        threadId
       }
     });
 

@@ -7,6 +7,9 @@ import type { PeopleRow, PersonDetailResponse } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL, toDisplayRisk, type DisplayRisk } from "@/lib/risk";
 import { cleanContactSummary } from "@/lib/preview";
+import { personHeadlineLine } from "@/lib/people-headline";
+import { shouldAdoptIncomingNotes } from "@/lib/notes-sync";
+import { createLatestRequestGate } from "@/lib/latest-request";
 import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -34,6 +37,14 @@ export default function PeoplePage() {
   const [notesStatus, setNotesStatus] = useState<"idle" | "saving" | "saved" | "error">("idle");
   const notesSaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const savedNotesAtRef = useRef<number>(0);
+  // Which person the current notes draft belongs to, and the server value it
+  // was last synced from. Used to decide whether a background refresh may
+  // overwrite the textarea (only when the user isn't mid-edit).
+  const notesPersonRef = useRef<string | null>(null);
+  const syncedNotesRef = useRef<string>("");
+  // Latest-wins gate: only the most recent detail fetch may write to state,
+  // so fast person switching can't show an older response over a newer one.
+  const detailReqGate = useRef(createLatestRequestGate());
 
   const loadList = useCallback(async (): Promise<PeopleRow[]> => {
     try {
@@ -50,9 +61,13 @@ export default function PeoplePage() {
 
   const loadDetail = useCallback(
     async (personId: string, includeStarters = false) => {
+      const token = detailReqGate.current.next();
       const data = await apiGet<PersonDetailResponse>(
         `/runner/data/person/${personId}${includeStarters ? "?includeStarters=1" : ""}`
       ).catch(() => null);
+      // A newer request started while this one was in flight - drop the stale
+      // response so it can't overwrite the current selection's detail.
+      if (!detailReqGate.current.isLatest(token)) return;
       setDetail(data);
     },
     []
@@ -70,10 +85,10 @@ export default function PeoplePage() {
   }, [loadList]);
 
   useEffect(() => {
-    if (!selectedId) {
-      setDetail(null);
-      return;
-    }
+    // Clear immediately on every selection change (not just deselection) so a
+    // stale prior detail can't show during the new fetch's in-flight window.
+    setDetail(null);
+    if (!selectedId) return;
     void loadDetail(selectedId);
   }, [selectedId, loadDetail]);
 
@@ -88,13 +103,27 @@ export default function PeoplePage() {
   );
 
   useEffect(() => {
+    const incoming = selected?.notes ?? "";
+    const personChanged = notesPersonRef.current !== selectedId;
+    // The draft is dirty (has unsaved keystrokes) when it no longer matches the
+    // server value we last synced into it. Reading notesDraft via the previous
+    // render's value is fine here because we only ever overwrite on adopt.
+    const draftIsDirty = notesDraft !== syncedNotesRef.current;
+    if (!shouldAdoptIncomingNotes({ personChanged, draftIsDirty })) {
+      // Same person, mid-edit: keep the user's keystrokes; just remember the
+      // latest server value so a later clean state can re-sync to it.
+      syncedNotesRef.current = incoming;
+      return;
+    }
     if (notesSaveTimer.current) {
       clearTimeout(notesSaveTimer.current);
       notesSaveTimer.current = null;
     }
-    setNotesDraft(selected?.notes ?? "");
+    notesPersonRef.current = selectedId;
+    syncedNotesRef.current = incoming;
+    setNotesDraft(incoming);
     setNotesStatus("idle");
-  }, [selectedId, selected?.notes]);
+  }, [selectedId, selected?.notes, notesDraft]);
 
   useEffect(() => () => {
     if (notesSaveTimer.current) clearTimeout(notesSaveTimer.current);
@@ -246,10 +275,7 @@ export default function PeoplePage() {
           {people.map((person) => {
             const risk = toDisplayRisk(person.risk);
             const active = person.id === selectedId;
-            const headlineLine =
-              person.headline ??
-              [person.currentRole, person.currentCompany].filter(Boolean).join(" at ") ??
-              "no profile yet";
+            const headlineLine = personHeadlineLine(person);
             const detailId = `person-detail-${person.id}`;
             return (
               <div

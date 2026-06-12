@@ -10,7 +10,7 @@ import type {
 import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
-import { safeTruncate, truncateAtWord, stripUnpairedSurrogates } from "../platforms/utils";
+import { safeTruncate, capAskSummary, stripUnpairedSurrogates } from "../platforms/utils";
 import {
   mirrorRequiredToOpenLoops,
   sanitizeReplyBrief,
@@ -19,6 +19,7 @@ import {
 } from "./reply-brief";
 import type {
   AiService,
+  ComposedFocusNote,
   ContactProfileSnapshot,
   ConversationStartersOutput,
   ConversationStarterCitedField,
@@ -42,6 +43,7 @@ import { describeReactionsForPrompt, parseReactionsFromRawJson } from "./reactio
 import {
   providerRegistry,
   fallbackChain,
+  pickActiveProvider,
   classifyLlmError as classifyLlmErrorImpl,
   type AiErrorClassification
 } from "./ai-providers";
@@ -357,6 +359,66 @@ export const SECOND_PERSON_RESOLUTION = [
   "In a contact (inbound / IN) line, \"you\" and \"your\" mean the OPERATOR, and \"I\"/\"me\"/\"my\" mean the contact. In an operator (OUT) line it is the reverse. Read the speaker label first, then decide who each pronoun points at.",
   "So if the contact writes \"you finished uni\", \"congrats on your new job\", \"well done on the move\", the achievement is the OPERATOR's: the contact is acknowledging the operator. NEVER record it as the contact's own milestone, and NEVER tell the operator to congratulate the contact for it.",
   "When the contact congratulates, thanks, or praises the operator, the obligation is to receive it (thank them, respond warmly), not to mirror it back as though the contact did the thing."
+].join(" ");
+
+/**
+ * Operator-name third-party misresolution (issue #685, the "phone handover"
+ * brief). Contacts often address the very person they are texting BY NAME,
+ * in third person ("<name> come back", "<name> can you send the pics",
+ * "who's on <name>'s phone"). TRANSCRIPT LABELS (#463) teaches that a name
+ * inside a message body is a third party — correct for OTHER names, but it
+ * left the operator's own name with no path back to the operator:
+ * SECOND_PERSON_RESOLUTION above only covers pronouns, and the reassess
+ * prompt never carried the operator's configured name at all. On a thread
+ * where the contact teased "who's on <operator>'s phone… give the brother
+ * his device back", the brief read the operator as a third party whose
+ * device the operator holds and invented a "phone handover" errand across
+ * where_it_stands / required_points / what_they_want.
+ *
+ * This fragment closes the gap: a name the contact uses to address, summon,
+ * or talk about their 1:1 counterpart resolves to the OPERATOR (second
+ * person), and the configured operator name is bound into the rule when one
+ * exists — the same rule-and-name-travel-together shape as
+ * contactNameContext(), so the rule can never ship without the name it
+ * points at when a name is configured.
+ *
+ * Exported so tests can pin the language without snapshotting templates.
+ */
+export function operatorNameResolution(operatorDisplayName?: string | null): string {
+  const parts = [
+    "OPERATOR NAME RESOLUTION (strict — the operator has a name too).",
+    "Contacts often address the very person they are texting BY NAME, in third person: \"<name> come back\", \"<name> can you send the pics\", \"who's on <name>'s phone\". In a 1:1 thread, a name the CONTACT uses to address, summon, tease, or talk ABOUT the person they are texting refers to the OPERATOR. Resolve it exactly like a second-person pronoun: it means \"you\" in every output field.",
+    "The operator's own name must NEVER surface in output text as if it were a third party (\"the <name> device\", \"<name>'s update\", \"handling <name>\", \"the <name> handover\") — write \"you\"/\"your\" instead.",
+    "This does NOT weaken the transcript-label rule: a name used this way is still NEVER the contact's name. And a genuinely different person who happens to share the name — clearly discussed as someone else (\"my cousin <name>\", \"<name> from work\") — stays a third party. When unsure in a 1:1 thread, a name used as direct address resolves to the operator.",
+    "The bracketed placeholders here (<name>, <operator>) are illustrative — NEVER output a bracketed placeholder."
+  ];
+  const trimmed = typeof operatorDisplayName === "string" ? operatorDisplayName.trim() : "";
+  if (trimmed) {
+    parts.push(
+      `The operator's configured name is "${trimmed}". When the contact writes that name in this thread, it refers to the OPERATOR unless the transcript clearly establishes a different person with the same name.`
+    );
+  }
+  return parts.join(" ");
+}
+
+/**
+ * Banter literalism (issue #685, same thread as operatorNameResolution's
+ * doc). The contact spent an evening teasing that someone else must be on
+ * the operator's phone ("I know your method", "give the brother his device
+ * back"). The summariser took the bit literally and promoted it into
+ * logistics: where_it_stands "planning the phone handover", a required
+ * point "Outline next steps for handing <operator>'s phone" — and the
+ * predraft then composed a reply around the invented errand. Casual threads
+ * are full of jokes that pattern-match to tasks; nothing in the prompt said
+ * an obligation must have been meant in earnest.
+ *
+ * Exported so tests can pin the language without snapshotting templates.
+ */
+export const BANTER_DISCIPLINE = [
+  "BANTER IS NOT AN OBLIGATION (strict).",
+  "Casual threads are full of teasing, jokes, playful accusations, hyperbole, and running bits (\"who's on your phone\", \"I'm blocking you\", \"you owe me dinner for this\"). Banter is register and tone — it is NEVER a task, plan, errand, or logistics item.",
+  "Every obligation-bearing field — where_it_stands, what_they_want, on_you, required_points, open_loops, summary, durable_context — must trace to something the transcript states IN EARNEST: a real ask, commitment, plan, decision, or unresolved matter. If the only evidence for a task is a jokey exchange, the task does not exist.",
+  "Self-check each required point and each claim in where_it_stands: could you point at a message where this was meant literally and seriously? If not, drop it. At most, banter can inform tone_steer (\"keep it playful — she's been teasing you\")."
 ].join(" ");
 
 // Voice profile tier — picks between the formal (professional) prompt and
@@ -826,30 +888,37 @@ Reason guidance:
 
 // #287 phase 3.5. Reconnect-worthy scorer. Asked to rate, on a 0-100
 // scale, how much it makes sense for the operator to send a deliberate
-// "hey, been a while" message to this LinkedIn contact right now. The
-// dashboard already ranks dormants by deterministic signals (outbound
-// count, depth, recency); this prompt adds the qualitative read of the
-// arc: did the relationship feel mutual? did the last exchange leave
+// "hey, been a while" message to this contact right now. The dashboard
+// already ranks dormants by deterministic signals (outbound count,
+// depth, recency); this prompt adds the qualitative read of the arc:
+// did the relationship feel mutual? did the last exchange leave
 // something open? does the contact's profile / role suggest a natural
 // hook?
 //
 // The prompt is deliberately conservative: a score of 50 is "neutral,
 // could go either way" and the model is reminded that "low" is fine —
 // it does not have to manufacture reasons to message someone.
-export const RECONNECT_SCORE_PROMPT = `Rate, from 0 to 100, how worth it would feel for the operator to send a deliberate "hey, been a while" message to this LinkedIn contact today.
+//
+// Reconnect covers every platform (it began LinkedIn-only), so the base
+// prompt is platform-neutral and reconnectPlatformContext() appends the
+// per-platform framing: professional ties on LinkedIn, friends and
+// family on iMessage, casual social ties on Instagram / TikTok. The
+// iMessage framing carries the original design caution — lulls between
+// real-life friends are normal and must not be scored as neglect.
+export const RECONNECT_SCORE_PROMPT = `Rate, from 0 to 100, how worth it would feel for the operator to send a deliberate "hey, been a while" message to this contact today.
 
-A higher score means the relationship looks like one where a gentle reconnect is welcome AND there is a natural beat to hang it on (a topic from the prior arc, a role change, an unanswered thread of conversation, an obvious common ground). A lower score means the relationship feels transactional, the contact's last message clearly closed the conversation, or there is no specific reason to surface this one ahead of the rest.
+A higher score means the relationship looks like one where a gentle reconnect is welcome AND there is a natural beat to hang it on (a topic from the prior arc, a life or role change, an unanswered thread of conversation, an obvious common ground). A lower score means the relationship feels transactional, the contact's last message clearly closed the conversation, or there is no specific reason to surface this one ahead of the rest.
 
 Scoring guide:
   90-100 — Strong: real mutual relationship, the last exchange left a natural reopen point, or the contact's profile / topic gives an obvious hook.
   70-89  — Good: warm tie, the operator probably wants to keep this person in their orbit; reasonable to nudge.
-  50-69  — Neutral: ordinary professional acquaintance; reconnecting is fine but no particular reason today.
+  50-69  — Neutral: ordinary acquaintance; reconnecting is fine but no particular reason today.
   20-49  — Weak: thin relationship, transactional history, or the conversation already wrapped fully.
   0-19   — Discourage: cold pitch in disguise, fully one-sided, or the last exchange explicitly ended the relationship.
 
 Decision rules:
   - Be conservative. When uncertain, lean toward the middle (40-60). False high scores nudge the operator into awkward outreach; that is worse than missing one.
-  - Mutual back-and-forth depth is the single best signal. Long one-sided threads from a recruiter or pitch contact should score low.
+  - Mutual back-and-forth depth is the single best signal. Long one-sided threads from a recruiter, brand, or pitch contact should score low.
   - The freshness of the dormancy matters: very long lulls (years) reduce the score unless there is a strong hook.
   - Do not invent details. If the inputs give you nothing specific to point to, the score belongs in the 40-60 band.
 
@@ -859,6 +928,28 @@ Examples of good reasons (style only, not actual outputs):
   "you swapped notes on hiring last year and they just took a new role"
   "deep back-and-forth on the product side, last lull was after they moved jobs"
   "one-sided pitch thread, nothing to hang a hello on"`;
+
+/**
+ * Per-platform framing appended to RECONNECT_SCORE_PROMPT. Each fragment
+ * names the platform and recalibrates what a "natural beat" looks like
+ * there, so one shared rubric scores a LinkedIn acquaintance and a close
+ * friend on iMessage without nudging the operator into guilt-driven or
+ * awkward outreach. Exported for the prompt-structure tests.
+ */
+export function reconnectPlatformContext(
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE"
+): string {
+  switch (platform) {
+    case "LINKEDIN":
+      return `Platform: LinkedIn. This is a professional or extended-network tie, and a deliberate reconnect is exactly what this network is for. Natural hooks: a topic from the prior arc, a role or company change, hiring or job-search news, an unanswered professional question, an obvious shared interest.`;
+    case "IMESSAGE":
+      return `Platform: iMessage (personal texting). This is usually a friend, family member, or close personal tie. Long lulls between real-life friends are completely normal and are NOT by themselves a reason to reconnect — never score as if the operator has neglected someone. Score high only when the history shows genuine mutual warmth AND a concrete beat to pick up: an unanswered question, a life event they mentioned (a move, a new job, an exam, health news), a plan that was left hanging, or something the operator said they would do. Purely logistical threads (deliveries, appointments, one-off coordination, verification codes) belong near the bottom.`;
+    case "INSTAGRAM":
+      return `Platform: Instagram DM. This is a casual social tie. Score high only when there was real mutual back-and-forth (not just story reactions or one-off comments) and something specific to pick back up: a shared interest, a project they mentioned, an unanswered question. Drive-by compliments and emoji-only exchanges belong near the bottom.`;
+    case "TIKTOK":
+      return `Platform: TikTok DM. This is a casual social tie. Score high only when there was real mutual back-and-forth (not just video shares or one-off comments) and something specific to pick back up: a shared interest, a project they mentioned, an unanswered question. Drive-by compliments and emoji-only exchanges belong near the bottom.`;
+  }
+}
 
 // Casual-DM voice profile. Applies on WhatsApp / iMessage / Instagram /
 // TikTok DMs. A GENERIC scaffold: it sets the relaxed register without
@@ -1374,6 +1465,86 @@ export function selectSuggestedReplyMode(input: {
   return "reopen";
 }
 
+/**
+ * Render the recent exchange for generateSuggestedReplies as `speaker: body`
+ * lines, oldest first. Operator turns are labelled `operator:`; contact turns
+ * are labelled with `contactLabel`, which callers derive from
+ * `contactTranscriptLabel(displayName)` so the contact's own messages are
+ * prefixed with their REAL name when it is known.
+ *
+ * This is the anti-leak invariant the injected #463 TRANSCRIPT LABELS
+ * discipline depends on: that block tells the model the contact's turns are
+ * name-prefixed and are the only authority on who the contact is, so any
+ * OTHER proper noun in a body is a third party. Previously this transcript
+ * hardcoded `contact:`, leaving the discipline's claim unbacked and letting
+ * the model address a reply to a body-mentioned third party (Lanre -> Anu,
+ * #463/#399). For a placeholder handle `contactTranscriptLabel` returns
+ * "contact", so nameless threads render exactly as before.
+ *
+ * Note: deliberately NOT `formatMessageForPrompt` — that adds a `(timestamp)`
+ * and would change the prompt the suggested-replies model sees. This keeps
+ * the historical `speaker: body` shape.
+ */
+export function renderSuggestedRepliesExchange(
+  messages: MessageForPrompt[],
+  contactLabel = "contact"
+): string {
+  return messages
+    .map((m) => {
+      const speaker = m.direction === "OUT" ? "operator" : contactLabel;
+      return `${speaker}: ${renderMessageBody(m)}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Validate + post-process a raw model response for composeFocusNote
+ * ("Help me phrase this"). Module-level and pure so the token discipline is
+ * directly testable: both notes MUST keep [Name] and [until] literal — a
+ * baked-in real name or clock time would mis-personalise or go stale at
+ * send time — and a response that drops either token THROWS, which makes
+ * modelJson walk to the next provider instead of accepting a broken note.
+ * untilTime only survives as strict 24-hour "HH:MM"; anything else is null.
+ */
+export function parseComposedFocusNote(value: unknown): ComposedFocusNote {
+  const parsed = z
+    .object({
+      close: z.string().min(1),
+      professional: z.string().min(1),
+      reason: z.string().default(""),
+      untilTime: z.string().nullable().optional()
+    })
+    .parse(value);
+  const requireTokens = (note: string, field: string): string => {
+    const cleaned = enforceSentenceStartCapitals(applyVoiceRules(stripUnpairedSurrogates(note)));
+    if (!cleaned || cleaned.length < 8) {
+      throw new Error(`composeFocusNote: ${field} note too short`);
+    }
+    if (!cleaned.includes("[Name]") || !cleaned.includes("[until]")) {
+      throw new Error(`composeFocusNote: ${field} note dropped a required token`);
+    }
+    return safeTruncate(cleaned, 500);
+  };
+  const reason = parsed.reason
+    .toLowerCase()
+    .replace(/[^a-z0-9' ]+/g, " ")
+    .replace(/\s{2,}/g, " ")
+    .trim()
+    .split(" ")
+    .slice(0, 3)
+    .join(" ");
+  const untilTime =
+    typeof parsed.untilTime === "string" && /^([01]\d|2[0-3]):[0-5]\d$/.test(parsed.untilTime.trim())
+      ? parsed.untilTime.trim()
+      : null;
+  return {
+    close: requireTokens(parsed.close, "close"),
+    professional: requireTokens(parsed.professional, "professional"),
+    reason: safeTruncate(reason, 40),
+    untilTime
+  };
+}
+
 export function createAiService(settingsStore: SettingsStore): AiService {
   // Build one client per provider up front, guarded by API key presence.
   // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
@@ -1385,7 +1556,11 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   // connection would hang a user-visible call ("Drafting…") indefinitely.
   // maxRetries:0 because tryProvider() + the fallback chain already own
   // retries/fallback — the SDK's default 2 retries would multiply that.
-  const AI_CLIENT_OPTIONS = { timeout: 30_000, maxRetries: 0 } as const;
+  // 15s (was 30s): a healthy nano/flash call returns in ~2-5s, so 15s still
+  // clears a slow-but-legit response while halving the worst-case stall a
+  // single wedged provider can add before the fallback chain moves on — the
+  // tail latency behind the "Reassess takes forever" complaint.
+  const AI_CLIENT_OPTIONS = { timeout: 15_000, maxRetries: 0 } as const;
   const openAiClient = runnerConfig.openAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.openAiApiKey, ...AI_CLIENT_OPTIONS })
     : null;
@@ -1435,7 +1610,16 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
-    const providerId: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    const requested: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
+    // Key-presence fallback: if the requested provider has no key but another
+    // is configured, use that one. Lets an operator (e.g. a pilot) set just
+    // ANY one key without also flipping AI_PROVIDER. Only providers with a
+    // built client are considered configured.
+    const configured: AiProvider[] = [];
+    if (openAiClient) configured.push("openai");
+    if (geminiClient) configured.push("gemini");
+    if (glmClient) configured.push("glm");
+    const providerId = pickActiveProvider(requested, configured);
     if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
       return { client: glmClient, model, provider: providerId };
@@ -1690,18 +1874,15 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     const lastInbound = [...input.messages].reverse().find((msg) => msg.direction === "IN");
     const lastMessage = input.messages[input.messages.length - 1];
 
-    const fallbackWhatTheyWant = lastInbound ? truncateAtWord(lastInbound.text, 120) : "No clear ask yet.";
+    const fallbackWhatTheyWant = lastInbound ? capAskSummary(lastInbound.text) : "No clear ask yet.";
     const fallbackNeedsReply = lastMessage?.direction === "IN";
     const fallback: SummaryOutput = {
       summary: input.previousSummary ?? `Conversation with ${input.displayName}.`,
-      // safeTruncate splits on Unicode code points so the cut won't bisect
-      // an emoji's surrogate pair. Without it, a message ending in an
-      // emoji at the boundary corrupts every subsequent prisma.thread
-      // .update — see Sarah Nwisi sync-fail bug.
-      // 120-char cap matches the Today hero headline's 4-line budget
-      // (max-w-22ch, 36px display, ~31 chars/line). Staying within budget
-      // means the operator reads the full fallback rather than an
-      // ellipsis truncation (issue #193).
+      // capAskSummary backs the fallback up to a whole word at the ask-summary
+      // budget (200 code points) and drops any dangling connective, so the cut
+      // never bisects a word or emoji surrogate pair and never stores a
+      // trailing "...and". The Today hero renders this in full via <FitText>,
+      // shrinking the font rather than clipping (issue #193).
       what_they_want: fallbackWhatTheyWant,
       open_loops: input.previousOpenLoops,
       remember: input.previousRemember,
@@ -1719,6 +1900,17 @@ export function createAiService(settingsStore: SettingsStore): AiService {
         latestInboundText: lastInbound?.text ?? null
       })
     };
+
+    // Issue #685: the reassess prompt names the operator so the contact's
+    // habit of addressing them by name in third person ("<name> come back")
+    // resolves to "you" instead of reading as a third party. Read directly
+    // from settings rather than threading through every caller; a failed
+    // settings read must never sink a summary, so fall back to the generic
+    // (nameless) resolution rule.
+    const operatorDisplayName = await settingsStore
+      .getOperatorProfile()
+      .then((profile) => profile.displayName)
+      .catch(() => "");
 
     // Explicit schema in the prompt: gpt-5.4 honours response_format json_object
     // but interprets loose schemas creatively (returning {A,B,C} instead of
@@ -1775,7 +1967,7 @@ MODE DECISION (made by you, the model, after reading the transcript):
   In RECONNECT mode, what_they_want and open_loops reframe as warm callbacks the operator could send to reopen the thread.
 
 what_they_want guidance (ACTIVE REPLY):
-- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
 - Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
 - Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
 - Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
@@ -1792,7 +1984,7 @@ open_loops guidance (ACTIVE REPLY):
 - Phrase each as a short follow-up prompt: "Send the doc they asked about" / "Pick up the thread about their move to Lagos".
 
 what_they_want guidance (RECONNECT — only when the three criteria above all hold):
-- 1-2 short sentences, STRICTLY 120 CHARACTERS OR FEWER, plain prose, British English, no trailing ellipsis.
+- 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
 - Frame as: "what's the warmest, most natural way for the operator to reopen this thread, grounded in something specific the contact has shared." Reference a real detail from the transcript — something they mentioned doing, a thing they were working through, a small life update.
 - Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
 - Examples: "Sultan mentioned exam stress last month, a 'how'd they go?' check-in is natural.", "She was deciding between two job offers, worth asking how that landed.", "He said he'd send the doc but went quiet, a light nudge would land well."
@@ -1833,6 +2025,8 @@ Reminder: lines starting with \`operator:\` are the operator's own words; the co
 
 ${SECOND_PERSON_RESOLUTION}
 
+${operatorNameResolution(operatorDisplayName)}
+
 OPERATOR OUTPUT VOICE: Write user-facing strings (summary, what_they_want, open_loops, remember notes, tone_notes, urgency_hint) in SECOND PERSON. Refer to the operator as "you" (e.g. "Ashley is waiting on you to reply"). NEVER write the literal phrases "the operator" or "operator" in output text — those words exist only as the transcript attribution label.
 
 ${modeBlock}
@@ -1842,6 +2036,8 @@ REPLY BRIEF guidance (both modes). The reply_brief drives the thread right rail.
 ${BRIEF_RECENCY_DISCIPLINE}
 
 ${BRIEF_FIDELITY_REMINDER}
+
+${BANTER_DISCIPLINE}
 
 ${contactNameContext(input.displayName)}
 
@@ -1951,17 +2147,19 @@ ${transcript}`;
     // the call is purely additive — the worst case is identical to
     // today.
     const parseSummary = (value: unknown) => summarySchema.parse(value);
-    const { result } = input.race
+    const { result, source } = input.race
       ? await raceModelJson(prompt, fallback, parseSummary, undefined, "reassess-summary")
       : await modelJson(prompt, fallback, parseSummary);
-    // Hard cap. The prompt asks for ≤ 120 chars but the model occasionally
-    // returns longer prose; this keeps the Today hero headline within its
-    // budget. truncateAtWord trims at the code-point boundary AND backs up to
-    // the last whole word, so a long ask never stores mid-word ("...skills fo")
-    // — it ends cleanly ("...skills"). No ellipsis (issue #193).
-    if (result.what_they_want.length > 120) {
-      result.what_they_want = truncateAtWord(result.what_they_want, 120);
-    }
+    // Safety net. The prompt asks for a complete, self-contained ask within
+    // ~200 chars; this guards a runaway multi-sentence response. capAskSummary
+    // backs up to a whole word at the 200-char budget AND drops a trailing
+    // dangling connective, so an over-long ask ends cleanly ("...come along")
+    // rather than mid-word ("...skills fo") or on a connective ("...and").
+    // A complete ask (the norm) is well under the budget and passes through
+    // untouched, so the cap can no longer amputate a full thought (the old
+    // 120-char cut that stored "...acknowledge the update and gently"). The
+    // Today hero renders the result in full via <FitText> (issue #193).
+    result.what_they_want = capAskSummary(result.what_they_want);
     // Sanitise remember items: strip unpaired surrogates from notes (the
     // same SQLite-write hazard the summary fields guard against), coerce
     // dates to strict ISO-or-null, and drop anything left without a note.
@@ -2007,13 +2205,18 @@ ${transcript}`;
     // what reply_brief fields already get via sanitizeReplyBrief.
     const output: SummaryOutput = {
       summary: stripBannedPhrases(result.summary),
-      what_they_want: truncateAtWord(stripBannedPhrases(result.what_they_want), 120),
+      what_they_want: capAskSummary(stripBannedPhrases(result.what_they_want)),
       open_loops: finalOpenLoops.map((loop) => stripBannedPhrases(loop)).filter((loop) => loop.length > 0),
       remember: result.remember,
       tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
       needs_reply: result.needs_reply,
       urgency_hint: result.urgency_hint,
-      reply_brief: finalBrief
+      reply_brief: finalBrief,
+      // Carry the provider source through so persisting callers can tell a
+      // real summary from the synthesised fallback (source.providerId === null
+      // ⇒ every provider failed). Mirrors generateSuggestedReplies, which
+      // returns `source` for the same reason.
+      source
     };
     return output;
   }
@@ -2153,12 +2356,10 @@ ${transcript}`;
     // turn. The operator's own entries here also serve as per-thread
     // voice calibration — register, vocabulary, length, punctuation
     // habits to mirror.
-    const recentExchange = input.recentMessages
-      .map((m) => {
-        const speaker = m.direction === "OUT" ? "operator" : "contact";
-        return `${speaker}: ${renderMessageBody(m)}`;
-      })
-      .join("\n");
+    const recentExchange = renderSuggestedRepliesExchange(
+      input.recentMessages,
+      contactTranscriptLabel(input.displayName)
+    );
 
     // Mode switches the whole framing. In reply mode the model produces
     // three responses to the contact's pending message. In reopen mode
@@ -3179,6 +3380,74 @@ ${safeTruncate(trimmed, 1_000)}`;
   }
 
   /**
+   * "Help me phrase this" (Focus setup sheet). The operator describes what
+   * they're about to do in their own words; this turns it into the two
+   * focus-note tiers in their voice. Both notes keep [Name] and [until] as
+   * literal tokens — the parser REJECTS a response that drops them (the
+   * provider chain then retries elsewhere), because a note with a baked-in
+   * name or time would go stale or mis-personalise at send time. Returns
+   * null when no provider produced a usable result. Composes only — the
+   * sheet shows the result for editing, and nothing ever auto-sends.
+   */
+  async function composeFocusNote(input: {
+    activity: string;
+    operatorProfile: OperatorProfile | null;
+    voiceSampleTexts: string[];
+  }): Promise<ComposedFocusNote | null> {
+    const activity = input.activity.trim();
+    if (!activity) return null;
+
+    const samples = input.voiceSampleTexts
+      .map((sample) => sample.trim())
+      .filter((sample) => sample.length > 0)
+      .slice(-8);
+
+    // Local wall-clock so "till 9" resolves to the NEXT 9 o'clock rather
+    // than a coin flip between 09:00 and 21:00.
+    const now = new Date();
+    const nowLabel = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
+
+    const systemContent = [
+      "You are helping the operator of a personal relationship inbox write a short \"I'm heads-down\" note in their OWN voice. They are about to protect a block of time (gym, driving, a lecture, deep work) and want anyone who messages meanwhile to get a quick human acknowledgement: seen you, proper reply after.",
+      "",
+      "Strict output rules:",
+      "- Return strict JSON only.",
+      "- Write TWO variants: \"close\" (casual register, friends and family) and \"professional\" (calmer, work contacts). Both in the operator's own voice, guided by the voice profile and samples in the user message. The two variants must differ in register, not just punctuation.",
+      "- Each note MUST contain the literal token [Name] (where the recipient's first name will go) and the literal token [until] (where the end time will go). Never replace these tokens with a real name or a real clock time, and never invent other bracketed tokens.",
+      "- Place the tokens where they read naturally: the note must stay a grammatical sentence when [Name] is swapped for a first name like Sam and [until] for a time like 7:30pm. Never tack tokens onto the end.",
+      "- Never write a literal clock time anywhere in the note text — the [until] token carries it.",
+      "- The voice samples show HOW the operator writes (register, slang, punctuation). NEVER reuse their content: no topics, plans, names, or sentences from the samples may appear in the note.",
+      "- 1-2 short sentences per note. Plain ASCII. No em dashes, no en dashes. No emoji unless the operator's samples use them.",
+      "- It must read like a person dashing off a text, never an autoresponder. Banned: \"I am currently unavailable\", \"out of office\", anything corporate.",
+      "- Ground the note in what the operator said they are doing. Do not invent extra plans, places, or people.",
+      "- \"reason\" is REQUIRED: a 1-3 word lowercase label naming the activity, taken from the operator's description (e.g. \"driving\", \"gym\", \"revision\", \"family time\"). Never leave it empty, never name an activity they did not mention.",
+      "- \"untilTime\": ONLY when the operator states an explicit clock end time (\"till 9\", \"until 6:30pm\"), return it as 24-hour \"HH:MM\". Resolve a bare hour to the NEXT time it occurs after the current time given in the user message: at 19:40, \"till 9\" means 21:00 today; at 23:10, \"till 9\" means 09:00 tomorrow. For durations (\"for 2 hours\") or no stated time, return null — never guess.",
+      "",
+      "Worked example (format only — never copy its wording):",
+      "Operator said: \"driving back from London till 9\" (current time 19:40)",
+      "{\"close\": \"Yo [Name], driving back from London till [until], I'll reply properly after\", \"professional\": \"Hi [Name], I'm on the road till [until], I'll come back to this properly after.\", \"reason\": \"driving\", \"untilTime\": \"21:00\"}"
+    ].join("\n");
+
+    const prompt = `The operator is about to start a focus window and described it, in their words, as:
+"${safeTruncate(activity, 400)}"
+
+It is currently ${nowLabel} (24-hour clock) for the operator.${operatorProfileFragment(input.operatorProfile)}
+
+Recent messages the operator sent (their real voice, oldest first):
+${samples.length > 0 ? samples.map((s, i) => `${i + 1}. ${safeTruncate(s, 240)}`).join("\n") : "(no samples available — write plain, warm, peer-to-peer British English)"}
+
+Return strict JSON: { "close": "string", "professional": "string", "reason": "string", "untilTime": "HH:MM or null" }`;
+
+    const { result, source } = await modelJson<ComposedFocusNote | null>(
+      prompt,
+      null,
+      parseComposedFocusNote,
+      systemContent
+    );
+    return source?.providerId != null ? result : null;
+  }
+
+  /**
    * Optional triage of a pilot bug / feedback report. Operates ONLY on the
    * tester's typed words and safe metadata — never a screenshot, never
    * message content. Returns null when the AI service is unavailable or
@@ -3348,13 +3617,17 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
    * plus a one-sentence reason for how worth it would feel for the
-   * operator to send a deliberate reconnect message to this LinkedIn
-   * dormant contact today. Returns null when the AI provider was
+   * operator to send a deliberate reconnect message to this dormant
+   * contact today. Platform-aware: the prompt framing shifts between
+   * professional (LinkedIn), personal (iMessage), and casual social
+   * (Instagram / TikTok) ties. Returns null when the AI provider was
    * unavailable; the dashboard then ranks dormants by deterministic
    * relationship signals alone (outbound count, depth, recency).
    */
   async function scoreReconnectCandidate(input: {
     displayName: string;
+    /** Which network the thread lives on; picks the prompt framing. */
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
     /** Headline / current role line, or null when no enrichment exists. */
     contactBlurb?: string | null;
     daysDormant: number;
@@ -3386,6 +3659,8 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
       : "Summary so far: (none)";
 
     const prompt = `${RECONNECT_SCORE_PROMPT}
+
+${reconnectPlatformContext(input.platform)}
 
 Person name: ${input.displayName}
 ${blurbLine}
@@ -3560,6 +3835,7 @@ ${safeTruncate(input.draft, 2000)}`;
     askAboutPerson,
     summarisePilotReport,
     checkDraftCoverage,
-    inferReplyStyle
+    inferReplyStyle,
+    composeFocusNote
   };
 }

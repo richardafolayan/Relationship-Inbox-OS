@@ -46,6 +46,13 @@ export interface RunnerConfig {
   geminiApiKey?: string;
   geminiBaseUrl: string;
   geminiModel: string;
+  /**
+   * Update feed for the in-app updater: the URL of the published latest.json
+   * (a Dropbox raw=1 / dl=1 link for the pilot). Read from RIOS_UPDATE_FEED_URL.
+   * Undefined when unset, in which case /system/update-check reports the app as
+   * up to date and the dashboard shows no update banner. Never hard-coded.
+   */
+  updateFeedUrl?: string;
   dbFile: string;
   profileDirs: {
     LINKEDIN: string;
@@ -104,7 +111,7 @@ export interface RunnerConfig {
      * explicitly sets AUDIO_TRANSCRIPTION_PROVIDER=openai. Unknown or
      * mis-spelled values also fall through to local-whisper.
      */
-    provider: "openai" | "local-whisper";
+    provider: "openai" | "local-whisper" | "transformers";
     /**
      * OpenAI provider model. Default `gpt-4o-mini-transcribe`. Override
      * to `gpt-4o-transcribe` for higher accuracy at higher cost. Other
@@ -130,6 +137,19 @@ export interface RunnerConfig {
      * `whisper.cpp` (`-l`). Default `en`.
      */
     language: string;
+    /**
+     * transformers.js + ONNX local provider (the pilot default). Needs no
+     * external binary or build tools; the ONNX model is downloaded into
+     * `modelDir` on install and reused across app updates.
+     */
+    transformers: {
+      /** transformers.js model id, e.g. "Xenova/whisper-base.en". */
+      modelId: string;
+      /** Absolute dir the model is cached in (under data/, survives updates). */
+      modelDir: string;
+      /** Per-call + model-load timeout in ms. */
+      timeoutMs: number;
+    };
     localWhisper: {
       /**
        * Path / name of the whisper.cpp CLI binary. Default `whisper-cli`
@@ -404,6 +424,49 @@ function parseIntOrDefault(value: string | undefined, fallback: number): number 
   return fallback;
 }
 
+/**
+ * Normalise the runner's DATABASE_URL to an absolute SQLite `file:` URL.
+ *
+ * Prisma resolves a *relative* `file:` path in DATABASE_URL against the
+ * schema directory (packages/core/prisma/), NOT the project root — so the
+ * `DATABASE_URL=file:./data/inbox-os.sqlite` shipped in .env.example points
+ * the runner at packages/core/prisma/data/inbox-os.sqlite, a different
+ * (empty) database from the one `npm run db:push` writes to: that script
+ * overrides DATABASE_URL with an absolute `file:$(pwd)/data/...` path. A
+ * student who copies .env.example verbatim then sees an empty inbox even
+ * though the scan wrote rows — the two halves were looking at two files.
+ *
+ * Collapse the ambiguity here, once, before the Prisma client is built:
+ *   - unset / blank  → the absolute dbFile (resolve(dataDir, ...)).
+ *   - relative file: → resolved against the project root.
+ *   - absolute file: → trusted as-is.
+ *   - any non-file:  → trusted as-is (e.g. a remote libsql/turso URL).
+ */
+export function resolveDatabaseUrl(
+  rawUrl: string | undefined,
+  rootDir: string,
+  absoluteDbFile: string
+): string {
+  const trimmed = rawUrl?.trim();
+  if (!trimmed) {
+    return `file:${absoluteDbFile}`;
+  }
+  const filePrefix = "file:";
+  if (!trimmed.startsWith(filePrefix)) {
+    return trimmed;
+  }
+  const path = trimmed.slice(filePrefix.length);
+  // file:/abs, file:///abs — already absolute, trust it.
+  if (path.startsWith("/")) {
+    return trimmed;
+  }
+  // file:./data/... or file:data/... or file:../data/... — relative, and
+  // therefore schema-dir-relative under Prisma. Re-anchor on the project
+  // root so the runner and db:push always agree on a single database file.
+  const normalizedRelative = path.replace(/^\.\//, "");
+  return `file:${resolve(rootDir, normalizedRelative)}`;
+}
+
 export function resolveConnectTimeoutMs(profileMode: BrowserProfileMode, env: NodeJS.ProcessEnv = process.env): number {
   const isolatedTimeoutMs = parseTimeoutOrDefault(env.CONNECT_OPERATION_TIMEOUT_MS, 25_000);
   const personalTimeoutMs = parseTimeoutOrDefault(env.CONNECT_OPERATION_TIMEOUT_MS_PERSONAL, 90_000);
@@ -484,6 +547,9 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     geminiBaseUrl:
       env.GEMINI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
     geminiModel: env.GEMINI_MODEL?.trim() || "gemma-4-31b-it",
+    // Update feed (published latest.json URL). Never hard-coded; the pilot
+    // sets the Dropbox raw=1 link as RIOS_UPDATE_FEED_URL.
+    updateFeedUrl: env.RIOS_UPDATE_FEED_URL?.trim() || undefined,
     linkedInUsername: env.LINKEDIN_USERNAME?.trim() || undefined,
     linkedInPassword: env.LINKEDIN_PASSWORD || undefined,
     linkedInAutoLoginEnabled:
@@ -523,16 +589,22 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // wrong env doesn't crash ingestion.
       enabled:
         (env.AUDIO_TRANSCRIPTION_ENABLED ?? "").trim().toLowerCase() === "true",
-      // Default `local-whisper` so ongoing transcription is cost-safe
-      // by default — the runner never spends OpenAI tokens unless the
-      // operator explicitly opts in by setting
-      // `AUDIO_TRANSCRIPTION_PROVIDER=openai`. Unknown / mis-spelled
-      // values also fall through to local-whisper rather than
-      // silently picking the paid path.
-      provider:
-        env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase() === "openai"
-          ? "openai"
-          : "local-whisper",
+      // Provider options:
+      //   - "transformers": local transformers.js + ONNX (the pilot
+      //     default in .env.example). No external binary or build tools;
+      //     the model is downloaded into data/models on install.
+      //   - "local-whisper": whisper.cpp CLI (advanced — needs a
+      //     separately built binary + ggml model).
+      //   - "openai": /v1/audio/transcriptions (paid; explicit opt-in).
+      // The CODE default stays `local-whisper` so the cost-safe path is
+      // chosen when the var is unset/mis-spelled; pilots get
+      // `transformers` from .env.example.
+      provider: ((): "openai" | "local-whisper" | "transformers" => {
+        const value = env.AUDIO_TRANSCRIPTION_PROVIDER?.trim().toLowerCase();
+        if (value === "openai") return "openai";
+        if (value === "transformers") return "transformers";
+        return "local-whisper";
+      })(),
       // Default to gpt-4o-mini-transcribe: the cheaper, sufficiently
       // accurate OpenAI transcription model. Operators wanting higher
       // quality can set AUDIO_TRANSCRIPTION_MODEL=gpt-4o-transcribe.
@@ -555,6 +627,14 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
           .trim()
           .split(/\s+/)
           .filter((arg) => arg.length > 0)
+      },
+      // transformers.js + ONNX local provider (the pilot default). No
+      // external binary; the model is downloaded into `modelDir` on
+      // install. `modelDir` lives under data/ so it survives app updates.
+      transformers: {
+        modelId: env.AUDIO_TRANSCRIPTION_LOCAL_MODEL?.trim() || "Xenova/whisper-base.en",
+        modelDir: env.TRANSCRIPTION_MODEL_DIR?.trim() || resolve(dataDir, "models"),
+        timeoutMs: parseIntOrDefault(env.AUDIO_TRANSCRIPTION_LOCAL_TIMEOUT_MS, 120_000)
       },
       progressive: (() => {
         // Auto-enable progressive mode when the operator has set at

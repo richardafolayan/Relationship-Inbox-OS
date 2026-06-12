@@ -40,7 +40,9 @@ export function ActionButton({
   className,
   title,
   disabled,
-  doneMs = 2400
+  // Long enough to read the confirmation, short enough that the button is
+  // back to its resting state by the time the operator looks for it again.
+  doneMs = 1400
 }: ActionButtonProps) {
   const [status, setStatus] = useState<Status>("idle");
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);

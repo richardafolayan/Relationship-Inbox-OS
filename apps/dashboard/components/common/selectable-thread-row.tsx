@@ -7,6 +7,7 @@ import { formatRelative } from "@/lib/time";
 import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { NameSuggestionPill } from "@/components/common/name-suggestion-pill";
+import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 
 interface SelectableThreadRowProps {
   row: InboxRow;
@@ -165,6 +166,10 @@ export function SelectableThreadRow({
     <Link
       href={`/thread/${row.id}`}
       className={className}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
+      onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
       onClick={(event) => {
         // Cmd/Ctrl-click enters select mode without losing the inbox.
         // (Shift-click is reserved by the browser for "open in new

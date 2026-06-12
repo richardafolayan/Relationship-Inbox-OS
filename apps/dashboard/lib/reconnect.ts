@@ -1,15 +1,17 @@
-// Issue #287 phase 3: when an old LinkedIn thread drops out of the active
-// inbox (recency horizon, phase 1) it does not just become noise to
-// ignore - some of those people are worth a gentle hello after the lull.
-// The Reconnect page surfaces those candidates without ever auto-sending
+// Issue #287 phase 3: when an old thread drops out of the active inbox
+// (recency horizon, phase 1) it does not just become noise to ignore -
+// some of those people are worth a gentle hello after the lull. The
+// Reconnect page surfaces those candidates without ever auto-sending
 // anything; the operator decides whether to reach out.
 //
-// Platform split is intentional:
-//   - iMessage dormant threads are friends and family; lulls are natural
-//     and a system-prompted "you should message your sister" would feel
-//     wrong, so they are excluded entirely.
-//   - LinkedIn dormant threads are professional or extended-network ties
-//     where a deliberate reconnect is exactly what the network is for.
+// Every platform is a candidate. Reconnect started LinkedIn-only (the
+// original worry: nudging "you should message your sister" about natural
+// friends-and-family lulls would feel wrong) but the operator asked for
+// iMessage and the rest too. The personal-lull caution now lives in the
+// AI scorer instead: the runner's per-platform prompt framing keeps
+// iMessage scores conservative unless there is a real beat to pick up.
+// Group chats stay out - the page's per-person "worth a hello" framing
+// and the 1:1 relationship scorer do not fit a group thread.
 //
 // The heuristic stays conservative: only threads that are clearly dormant
 // AND clearly not auto-pitch outreach are flagged. Operator-archived
@@ -26,6 +28,10 @@ import { isWithinHorizon } from "./horizon";
 export interface ReconnectCandidate {
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
   lastMessageAt: string | null;
+  /** True for group threads (iMessage group chats). Groups are not
+   *  reconnect candidates: the page suggests a 1:1 hello to a person.
+   *  Absent on legacy payloads, which only carried 1:1 rows. */
+  isGroup?: boolean;
   archivedAt?: string | null;
   /** "outreach" | "genuine" | null - see InboxRow.category in types.ts. */
   category?: string | null;
@@ -53,12 +59,12 @@ export interface ReconnectCandidate {
 
 /**
  * Whether the thread is a reconnect candidate under the conservative
- * heuristic above. Returns true only for LinkedIn threads that are
- * outside the recency horizon, not archived, not outreach-tagged, and
- * not already queued for a reply.
+ * heuristic above. Returns true only for 1:1 threads (any platform) that
+ * are outside the recency horizon, not archived, not outreach-tagged,
+ * and not already queued for a reply.
  */
 export function isReconnectCandidate(row: ReconnectCandidate): boolean {
-  if (row.platform !== "LINKEDIN") return false;
+  if (row.isGroup) return false;
   if (row.archivedAt) return false;
   if (row.scheduledSendAt) return false;
   if (row.category === "outreach") return false;
@@ -131,4 +137,34 @@ export function rankReconnectCandidates<T extends ReconnectCandidate>(
     const bTs = b.lastMessageAt ? Date.parse(b.lastMessageAt) : 0;
     return bTs - aTs;
   });
+}
+
+/** Status the runner's POST /control/reconnect/refresh-scores can return. */
+export type RefreshScoresStatus = "ok" | "ai_unavailable" | "disabled_by_settings";
+
+/**
+ * Map a refresh-scores result to the operator-facing summary + tone for the
+ * Reconnect "Refresh AI scores" button. Mirrors the Inbox "Refresh closed
+ * verdicts" handler so the two consumers of the identical runner contract
+ * agree. The runner short-circuits to `disabled_by_settings` (scored 0,
+ * skipped 0) whenever the operator's AI tier is `memory_only`; without this
+ * branch the button fell through to a neutral "Scored 0", implying the scorer
+ * ran and found nothing rather than telling the operator AI is off.
+ */
+export function interpretRefreshScoresResult(result: {
+  status: RefreshScoresStatus;
+  scored: number;
+  skipped: number;
+}): { summary: string; tone: "ok" | "warn" } {
+  const summary =
+    result.status === "disabled_by_settings"
+      ? "AI is off (Settings)"
+      : result.scored === 0 && result.skipped > 0
+        ? "Already up to date"
+        : result.status === "ai_unavailable"
+          ? `Scored ${result.scored}, then AI went quiet`
+          : `Scored ${result.scored}${result.skipped > 0 ? `, skipped ${result.skipped} already done` : ""}`;
+  const tone: "ok" | "warn" =
+    result.status === "ai_unavailable" || result.status === "disabled_by_settings" ? "warn" : "ok";
+  return { summary, tone };
 }
