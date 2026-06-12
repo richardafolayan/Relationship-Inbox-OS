@@ -117,9 +117,17 @@ function ToastCard({
   // click (any release below the swipe threshold) and the keyboard handler.
   const activate = useCallback(() => {
     if (!toast.href) return;
+    toast.onActivate?.();
     onDismiss(toast.id);
     router.push(toast.href);
-  }, [router, onDismiss, toast.href, toast.id]);
+  }, [router, onDismiss, toast]);
+
+  // An explicit clear (X button or swipe), as opposed to auto-expiry: lets
+  // the toast's source react to "the operator saw this and waved it away".
+  const manualDismiss = useCallback(() => {
+    toast.onManualDismiss?.();
+    onDismiss(toast.id);
+  }, [onDismiss, toast]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     // Don't start a swipe from the dismiss button.
@@ -146,7 +154,7 @@ function ToastCard({
     }
     switch (resolveToastGesture(travelled, interactive)) {
       case "dismiss":
-        onDismiss(toast.id);
+        manualDismiss();
         break;
       case "activate":
         // Any release below the swipe threshold on a clickable toast is a
@@ -230,7 +238,7 @@ function ToastCard({
           type="button"
           data-toast-close
           aria-label="Dismiss notification"
-          onClick={() => onDismiss(toast.id)}
+          onClick={manualDismiss}
           className="-mr-1 -mt-1 flex-none rounded-md p-1 text-ink-3 transition-colors hover:bg-hairline/60 hover:text-ink-1"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">

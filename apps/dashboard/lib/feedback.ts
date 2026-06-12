@@ -17,12 +17,22 @@ export interface ToastInput {
   // navigates here (e.g. a new-message toast opens the thread). Action
   // feedback toasts leave this unset and stay non-interactive.
   href?: string;
+  // Optional hooks for callers that mirror the toast elsewhere (the
+  // notification center). The ToastHost fires:
+  //   - onManualDismiss when the operator explicitly clears the toast
+  //     (X button or swipe),
+  //   - onActivate when they click through to `href`.
+  // Auto-expiry fires neither: an unattended toast was never seen.
+  onManualDismiss?: () => void;
+  onActivate?: () => void;
 }
 
 export interface Toast extends Required<Pick<ToastInput, "id" | "kind" | "title" | "durationMs">> {
   description?: string;
   receiptId?: string;
   href?: string;
+  onManualDismiss?: () => void;
+  onActivate?: () => void;
   createdAt: number;
 }
 
@@ -43,6 +53,8 @@ export function showToast(input: ToastInput): void {
     description: input.description,
     receiptId: input.receiptId,
     href: input.href,
+    onManualDismiss: input.onManualDismiss,
+    onActivate: input.onActivate,
     durationMs:
       input.durationMs ??
       (input.kind === "pending" ? 60_000 : input.kind === "error" ? 8000 : 3500),
