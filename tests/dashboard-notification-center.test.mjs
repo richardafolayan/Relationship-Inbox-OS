@@ -21,10 +21,13 @@ const {
   markAllCenterNotificationsSeen,
   onCenterNotificationsChange,
   recordOverdueDigestNotification,
+  selectToastsToRehydrate,
   NOTIFICATION_CENTER_CAP,
   NOTIFICATION_CENTER_STORAGE_KEY,
-  OVERDUE_DIGEST_NOTIFICATION_ID
+  OVERDUE_DIGEST_NOTIFICATION_ID,
+  REHYDRATE_TOAST_CAP
 } = await import("../apps/dashboard/lib/notification-center.ts");
+const { NEW_MESSAGE_TOAST_DURATION_MS } = await import("../apps/dashboard/lib/notifications.ts");
 
 function entry(overrides = {}) {
   return {
@@ -123,6 +126,71 @@ test("parseStoredNotifications survives null, garbage, and wrong shapes", () => 
   const parsed = parseStoredNotifications(mixed);
   assert.equal(parsed.length, 1);
   assert.equal(parsed[0].id, "t-1");
+});
+
+// ---------------------------------------------------------------------------
+// Rehydration: which notices come back as toasts after a full page load.
+// ---------------------------------------------------------------------------
+
+test("selectToastsToRehydrate: only unseen notices inside the window, with the remaining time", () => {
+  const now = 100_000;
+  const win = NEW_MESSAGE_TOAST_DURATION_MS;
+  const picked = selectToastsToRehydrate(
+    [
+      entry({ id: "fresh", at: now - 5_000 }),
+      entry({ id: "seen", at: now - 5_000, seen: true }),
+      entry({ id: "expired", at: now - win - 1 }),
+      entry({ id: "boundary", at: now - win }),
+      entry({ id: "future", at: now + 60_000 })
+    ],
+    now
+  );
+  // Seen, expired (>= window old), and future-dated entries all stay
+  // panel-only; the survivor carries only its remaining time.
+  assert.deepEqual(
+    picked.map((n) => n.entry.id),
+    ["fresh"]
+  );
+  assert.equal(picked[0].remainingMs, win - 5_000);
+});
+
+test("selectToastsToRehydrate: newest first, capped, badge covers the rest", () => {
+  const now = 100_000;
+  const entries = Array.from({ length: REHYDRATE_TOAST_CAP + 2 }, (_, i) =>
+    entry({ id: `t-${i}`, at: now - (i + 1) * 1000 })
+  );
+  const picked = selectToastsToRehydrate(entries, now);
+  assert.equal(picked.length, REHYDRATE_TOAST_CAP);
+  // t-0 is the newest (1s old), then t-1, t-2.
+  assert.deepEqual(
+    picked.map((n) => n.entry.id),
+    ["t-0", "t-1", "t-2"]
+  );
+});
+
+test("selectToastsToRehydrate: bell-first entries (overdue digest) never come back as toasts", () => {
+  // The digest (#696) delivers to the bell and was never toasted live, so a
+  // reload must not invent a toast for it - only /thread/ notices restore.
+  const now = 100_000;
+  const picked = selectToastsToRehydrate(
+    [
+      entry({ id: OVERDUE_DIGEST_NOTIFICATION_ID, href: "/today", at: now - 1_000 }),
+      entry({ id: "t-1", at: now - 2_000 })
+    ],
+    now
+  );
+  assert.deepEqual(
+    picked.map((n) => n.entry.id),
+    ["t-1"]
+  );
+});
+
+test("selectToastsToRehydrate: an explicit window overrides the default", () => {
+  const now = 10_000;
+  const picked = selectToastsToRehydrate([entry({ id: "t-1", at: now - 4_000 })], now, 5_000);
+  assert.equal(picked.length, 1);
+  assert.equal(picked[0].remainingMs, 1_000);
+  assert.equal(selectToastsToRehydrate([entry({ at: now - 6_000 })], now, 5_000).length, 0);
 });
 
 // ---------------------------------------------------------------------------

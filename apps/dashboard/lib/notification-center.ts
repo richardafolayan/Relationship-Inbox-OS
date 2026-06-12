@@ -9,6 +9,7 @@ import {
   buildNewMessageNotice,
   buildOverdueDigestBody,
   buildOverdueDigestTitle,
+  NEW_MESSAGE_TOAST_DURATION_MS,
   type OverdueDigestNotificationPerson
 } from "./notifications";
 
@@ -108,6 +109,41 @@ function isCenterNotification(value: unknown): value is CenterNotification {
     typeof entry.at === "number" &&
     typeof entry.seen === "boolean"
   );
+}
+
+// Toasts live only in React memory, so a full page load wipes every active
+// card at once - a route-tree remount, or the full document navigation the
+// app falls back to right after an update replaces its build. From the
+// operator's chair that read as "I clicked one notification and they all
+// disappeared". The center is the durable copy: on a fresh mount, any
+// notice still unseen and inside its toast window comes back for the
+// REMAINING time only. Capped like the live notice matrix (anything past
+// the cap is what the bell badge is for), newest first.
+export const REHYDRATE_TOAST_CAP = 3;
+
+export interface RehydratableNotice {
+  entry: CenterNotification;
+  remainingMs: number;
+}
+
+export function selectToastsToRehydrate(
+  entries: CenterNotification[],
+  now: number,
+  windowMs: number = NEW_MESSAGE_TOAST_DURATION_MS,
+  cap: number = REHYDRATE_TOAST_CAP
+): RehydratableNotice[] {
+  return entries
+    // Only per-thread message notices ever had a toast to restore. Bell-first
+    // entries like the overdue digest (#696, href /today) were never toasted
+    // live, so a reload must not invent one.
+    .filter((entry) => !entry.seen && entry.href.startsWith("/thread/"))
+    .map((entry) => ({ entry, remainingMs: windowMs - (now - entry.at) }))
+    // Expired notices stay panel-only. A remaining time above the window
+    // means a future-dated entry (clock skew or a tampered store): skip it
+    // rather than show a toast that outlives the 30 second promise.
+    .filter((notice) => notice.remainingMs > 0 && notice.remainingMs <= windowMs)
+    .sort((a, b) => b.entry.at - a.entry.at)
+    .slice(0, cap);
 }
 
 // ---------------------------------------------------------------------------
