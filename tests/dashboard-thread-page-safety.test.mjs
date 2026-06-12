@@ -32,6 +32,31 @@ test("a [threadId]-keyed effect resets the composer cluster, pending sends, and 
   assert.match(reset, /URL\.revokeObjectURL\(a\.previewUrl\)/);
 });
 
+// The timeline must never scroll horizontally. overflow-y-auto alone makes
+// the browser compute overflow-x as auto, so one message holding a long
+// unbroken token (Airbnb links in real pilot data; URL segments get
+// break-all anchors, but plain text had no word-breaking) widened the
+// column and put a horizontal scrollbar under the chat that dragged the
+// sticky header along. Two layers: bubble text breaks long tokens, and
+// the scroller clips the x axis.
+test("the timeline scroller clips horizontal overflow and bubble text wraps anywhere", () => {
+  assert.match(
+    src,
+    /className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"/,
+    "timeline scroller must keep overflow-x-hidden alongside overflow-y-auto"
+  );
+  const preWrapLines = src
+    .split("\n")
+    .filter((line) => line.includes("whitespace-pre-wrap"));
+  assert.ok(preWrapLines.length >= 5, "expected the known pre-wrap text blocks");
+  for (const line of preWrapLines) {
+    assert.ok(
+      line.includes("[overflow-wrap:anywhere]"),
+      `pre-wrap text block must also break long unbroken tokens: ${line.trim()}`
+    );
+  }
+});
+
 // Double-send guard: the only re-entrancy guard was the async `sending` state,
 // which a held Cmd+Enter autorepeat (or click+shortcut in one frame) defeats,
 // enqueueing two distinct clientSendIds. A synchronous ref closes the gap.
