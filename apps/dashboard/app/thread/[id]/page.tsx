@@ -2828,7 +2828,11 @@ export default function ThreadPage() {
         <div
           ref={timelineRef}
           onScroll={onTimelineScroll}
-          className="relative min-h-0 flex-1 overflow-y-auto"
+          // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
+          // the browser compute overflow-x as auto, so any too-wide child
+          // (an unbroken URL, a future embed) turns into a horizontal
+          // scrollbar that drags the sticky header along with it.
+          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
           // overflowAnchor: disable the browser's native scroll anchoring
           // so it doesn't race with the load-older restoration in
           // useLayoutEffect. When both fire on the same prepend, the
@@ -3592,7 +3596,7 @@ export default function ThreadPage() {
                               </div>
                             ) : null}
                             {showText ? (
-                              <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                              <span className="text-balance whitespace-pre-wrap [overflow-wrap:anywhere]">{message.text}</span>
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
@@ -3745,7 +3749,7 @@ export default function ThreadPage() {
                       }}
                     />
                   ) : (
-                    <div className="text-balance whitespace-pre-wrap rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
+                    <div className="text-balance whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
                       {scheduled.text}
                     </div>
                   )}
@@ -3815,7 +3819,7 @@ export default function ThreadPage() {
                 className="flex max-w-[86%] flex-col items-end self-end sm:max-w-[72%]"
               >
                 <div
-                  className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
+                  className={`text-balance whitespace-pre-wrap [overflow-wrap:anywhere] px-4 py-3 text-[14.5px] leading-[1.5] ${
                     pending.failed
                       ? "rounded-2xl rounded-br-[6px] border border-risk-overdue bg-paper text-ink"
                       : "rounded-2xl rounded-br-[6px] bg-ink text-paper opacity-80"
@@ -4709,7 +4713,7 @@ export default function ThreadPage() {
                   composing ? "opacity-40" : "opacity-100"
                 }`}
               >
-                <p className="m-0 whitespace-pre-wrap">{composeDraft}</p>
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{composeDraft}</p>
                 <div className="mt-3 flex items-center gap-3">
                   {composing ? (
                     <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
@@ -4738,7 +4742,7 @@ export default function ThreadPage() {
                 <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
                   Answer
                 </p>
-                <p className="m-0 whitespace-pre-wrap text-ink-2">{askAnswer}</p>
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-2">{askAnswer}</p>
                 <div className="mt-3 flex items-center gap-3">
                   <button
                     type="button"
