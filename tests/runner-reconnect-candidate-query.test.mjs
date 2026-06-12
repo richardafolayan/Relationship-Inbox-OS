@@ -16,11 +16,19 @@ const CUTOFF = new Date("2026-05-01T00:00:00.000Z");
 // array; this helper normalises so assertions stay simple.
 const notList = (where) => (Array.isArray(where.NOT) ? where.NOT : [where.NOT]);
 
-test("mirrors the dashboard's base predicate (LinkedIn, not archived, dormant)", () => {
+test("mirrors the dashboard's base predicate (1:1, not archived, dormant)", () => {
   const where = buildReconnectCandidateWhere(CUTOFF, []);
-  assert.equal(where.platform, "LINKEDIN");
+  assert.equal(where.isGroup, false);
   assert.equal(where.archivedAt, null);
   assert.deepEqual(where.lastMessageAt, { lt: CUTOFF });
+});
+
+test("no platform gate: every platform is a candidate now", () => {
+  // Reconnect began LinkedIn-only; the operator asked for iMessage and the
+  // rest too. A platform condition reappearing here would silently shrink
+  // the page back down - pin its absence.
+  const where = buildReconnectCandidateWhere(CUTOFF, []);
+  assert.equal(where.platform, undefined);
 });
 
 test("still excludes outreach-tagged threads", () => {

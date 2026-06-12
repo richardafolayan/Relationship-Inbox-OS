@@ -31,6 +31,12 @@ export interface InboxRow {
   personBirthday?: string | null;
   personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /**
+   * True for group threads (iMessage group chats). Reconnect excludes
+   * groups - a per-person "worth a hello" does not fit a group chat.
+   * Absent on legacy payloads.
+   */
+  isGroup?: boolean;
   preview: string;
   /**
    * "OUT" when the latest message was sent by the operator (preview should

@@ -369,12 +369,15 @@ export interface AiService {
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
    * plus a one-sentence reason for how worth it would feel to send the
-   * LinkedIn dormant a deliberate "hey, been a while" message today.
-   * Null when the AI provider was unavailable; the dashboard ranks
-   * dormants by deterministic signals alone in that case.
+   * dormant contact a deliberate "hey, been a while" message today.
+   * Platform-aware: professional framing on LinkedIn, personal on
+   * iMessage, casual social on Instagram / TikTok. Null when the AI
+   * provider was unavailable; the dashboard ranks dormants by
+   * deterministic signals alone in that case.
    */
   scoreReconnectCandidate(input: {
     displayName: string;
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
     contactBlurb?: string | null;
     daysDormant: number;
     operatorOutboundCount: number;

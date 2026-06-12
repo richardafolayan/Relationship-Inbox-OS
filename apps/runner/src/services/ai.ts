@@ -888,30 +888,37 @@ Reason guidance:
 
 // #287 phase 3.5. Reconnect-worthy scorer. Asked to rate, on a 0-100
 // scale, how much it makes sense for the operator to send a deliberate
-// "hey, been a while" message to this LinkedIn contact right now. The
-// dashboard already ranks dormants by deterministic signals (outbound
-// count, depth, recency); this prompt adds the qualitative read of the
-// arc: did the relationship feel mutual? did the last exchange leave
+// "hey, been a while" message to this contact right now. The dashboard
+// already ranks dormants by deterministic signals (outbound count,
+// depth, recency); this prompt adds the qualitative read of the arc:
+// did the relationship feel mutual? did the last exchange leave
 // something open? does the contact's profile / role suggest a natural
 // hook?
 //
 // The prompt is deliberately conservative: a score of 50 is "neutral,
 // could go either way" and the model is reminded that "low" is fine —
 // it does not have to manufacture reasons to message someone.
-export const RECONNECT_SCORE_PROMPT = `Rate, from 0 to 100, how worth it would feel for the operator to send a deliberate "hey, been a while" message to this LinkedIn contact today.
+//
+// Reconnect covers every platform (it began LinkedIn-only), so the base
+// prompt is platform-neutral and reconnectPlatformContext() appends the
+// per-platform framing: professional ties on LinkedIn, friends and
+// family on iMessage, casual social ties on Instagram / TikTok. The
+// iMessage framing carries the original design caution — lulls between
+// real-life friends are normal and must not be scored as neglect.
+export const RECONNECT_SCORE_PROMPT = `Rate, from 0 to 100, how worth it would feel for the operator to send a deliberate "hey, been a while" message to this contact today.
 
-A higher score means the relationship looks like one where a gentle reconnect is welcome AND there is a natural beat to hang it on (a topic from the prior arc, a role change, an unanswered thread of conversation, an obvious common ground). A lower score means the relationship feels transactional, the contact's last message clearly closed the conversation, or there is no specific reason to surface this one ahead of the rest.
+A higher score means the relationship looks like one where a gentle reconnect is welcome AND there is a natural beat to hang it on (a topic from the prior arc, a life or role change, an unanswered thread of conversation, an obvious common ground). A lower score means the relationship feels transactional, the contact's last message clearly closed the conversation, or there is no specific reason to surface this one ahead of the rest.
 
 Scoring guide:
   90-100 — Strong: real mutual relationship, the last exchange left a natural reopen point, or the contact's profile / topic gives an obvious hook.
   70-89  — Good: warm tie, the operator probably wants to keep this person in their orbit; reasonable to nudge.
-  50-69  — Neutral: ordinary professional acquaintance; reconnecting is fine but no particular reason today.
+  50-69  — Neutral: ordinary acquaintance; reconnecting is fine but no particular reason today.
   20-49  — Weak: thin relationship, transactional history, or the conversation already wrapped fully.
   0-19   — Discourage: cold pitch in disguise, fully one-sided, or the last exchange explicitly ended the relationship.
 
 Decision rules:
   - Be conservative. When uncertain, lean toward the middle (40-60). False high scores nudge the operator into awkward outreach; that is worse than missing one.
-  - Mutual back-and-forth depth is the single best signal. Long one-sided threads from a recruiter or pitch contact should score low.
+  - Mutual back-and-forth depth is the single best signal. Long one-sided threads from a recruiter, brand, or pitch contact should score low.
   - The freshness of the dormancy matters: very long lulls (years) reduce the score unless there is a strong hook.
   - Do not invent details. If the inputs give you nothing specific to point to, the score belongs in the 40-60 band.
 
@@ -921,6 +928,28 @@ Examples of good reasons (style only, not actual outputs):
   "you swapped notes on hiring last year and they just took a new role"
   "deep back-and-forth on the product side, last lull was after they moved jobs"
   "one-sided pitch thread, nothing to hang a hello on"`;
+
+/**
+ * Per-platform framing appended to RECONNECT_SCORE_PROMPT. Each fragment
+ * names the platform and recalibrates what a "natural beat" looks like
+ * there, so one shared rubric scores a LinkedIn acquaintance and a close
+ * friend on iMessage without nudging the operator into guilt-driven or
+ * awkward outreach. Exported for the prompt-structure tests.
+ */
+export function reconnectPlatformContext(
+  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE"
+): string {
+  switch (platform) {
+    case "LINKEDIN":
+      return `Platform: LinkedIn. This is a professional or extended-network tie, and a deliberate reconnect is exactly what this network is for. Natural hooks: a topic from the prior arc, a role or company change, hiring or job-search news, an unanswered professional question, an obvious shared interest.`;
+    case "IMESSAGE":
+      return `Platform: iMessage (personal texting). This is usually a friend, family member, or close personal tie. Long lulls between real-life friends are completely normal and are NOT by themselves a reason to reconnect — never score as if the operator has neglected someone. Score high only when the history shows genuine mutual warmth AND a concrete beat to pick up: an unanswered question, a life event they mentioned (a move, a new job, an exam, health news), a plan that was left hanging, or something the operator said they would do. Purely logistical threads (deliveries, appointments, one-off coordination, verification codes) belong near the bottom.`;
+    case "INSTAGRAM":
+      return `Platform: Instagram DM. This is a casual social tie. Score high only when there was real mutual back-and-forth (not just story reactions or one-off comments) and something specific to pick back up: a shared interest, a project they mentioned, an unanswered question. Drive-by compliments and emoji-only exchanges belong near the bottom.`;
+    case "TIKTOK":
+      return `Platform: TikTok DM. This is a casual social tie. Score high only when there was real mutual back-and-forth (not just video shares or one-off comments) and something specific to pick back up: a shared interest, a project they mentioned, an unanswered question. Drive-by compliments and emoji-only exchanges belong near the bottom.`;
+  }
+}
 
 // Casual-DM voice profile. Applies on WhatsApp / iMessage / Instagram /
 // TikTok DMs. A GENERIC scaffold: it sets the relaxed register without
@@ -3588,13 +3617,17 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
   /**
    * Reconnect-worthy scorer (#287 phase 3.5). Returns a 0-100 integer
    * plus a one-sentence reason for how worth it would feel for the
-   * operator to send a deliberate reconnect message to this LinkedIn
-   * dormant contact today. Returns null when the AI provider was
+   * operator to send a deliberate reconnect message to this dormant
+   * contact today. Platform-aware: the prompt framing shifts between
+   * professional (LinkedIn), personal (iMessage), and casual social
+   * (Instagram / TikTok) ties. Returns null when the AI provider was
    * unavailable; the dashboard then ranks dormants by deterministic
    * relationship signals alone (outbound count, depth, recency).
    */
   async function scoreReconnectCandidate(input: {
     displayName: string;
+    /** Which network the thread lives on; picks the prompt framing. */
+    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
     /** Headline / current role line, or null when no enrichment exists. */
     contactBlurb?: string | null;
     daysDormant: number;
@@ -3626,6 +3659,8 @@ ${recentTurns.map((m, i) => `${i + 1}. [${m.direction}] ${m.text}`).join("\n")}`
       : "Summary so far: (none)";
 
     const prompt = `${RECONNECT_SCORE_PROMPT}
+
+${reconnectPlatformContext(input.platform)}
 
 Person name: ${input.displayName}
 ${blurbLine}
