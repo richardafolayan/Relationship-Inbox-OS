@@ -9,7 +9,8 @@
 // "focus-window-changed" event so the other mounted surfaces refetch.
 
 import { useCallback, useEffect, useState } from "react";
-import { apiGet, apiPost, peekCache } from "@/lib/api";
+import { apiGet, apiPost } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
 import type { AckTemplates, FocusAudience, FocusSettings, FocusWindowState, OperatorProfile } from "@/lib/types";
 import {
   isFocusActive,
@@ -128,9 +129,15 @@ export interface UseFocusWindow {
 }
 
 export function useFocusWindow(): UseFocusWindow {
-  const [profile, setProfile] = useState<OperatorProfile | null>(
-    () => peekCache<OperatorProfile>(PROFILE_PATH) ?? null
-  );
+  // Seed from the shared client cache so every focus surface paints the
+  // last-known window state immediately. Read via useCacheSeed (NOT a
+  // useState initializer): this hook mounts both in the app shell and in
+  // page bodies, so the shell's profile fetch can warm the cache before a
+  // page boundary hydrates - a useState seed would leak that into the
+  // hydration render and mismatch the server HTML.
+  const profileSeed = useCacheSeed<OperatorProfile>(PROFILE_PATH);
+  const [profileState, setProfile] = useState<OperatorProfile | null>(null);
+  const profile = profileState ?? profileSeed ?? null;
 
   const load = useCallback(() => {
     void apiGet<OperatorProfile>(PROFILE_PATH, { ttlMs: 2000 })

@@ -429,6 +429,17 @@ export default function ThreadPage() {
   // previously-seen thread paints the full conversation on the very first
   // render - no "Loading..." frame. refresh() still runs on mount and
   // revalidates, so this is never more than stale-while-revalidate.
+  //
+  // This page deliberately keeps the useState(peekCache) initializer instead
+  // of lib/use-cache-seed (the hydration-safe form the list pages use):
+  // `thread` is mutated with functional updaters (setThread(current => ...))
+  // which the hook's `state ?? seed` pattern would hand a null `current`
+  // while the seed is on screen. That stays hydration-safe here ONLY because
+  // nothing outside this page fetches /runner/data/thread/<id> - the cache
+  // for this path cannot be warm during a hard load's hydration render, just
+  // on client-side navigations. If the app shell (or anything mounted above
+  // this boundary) ever starts fetching thread paths, switch this seed to
+  // useCacheSeed and rework the functional updaters first.
   const [thread, setThread] = useState<ThreadResponse | null>(
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
   );
