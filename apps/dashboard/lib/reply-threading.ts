@@ -23,8 +23,8 @@
  * Everything is computed over the loaded message window. A reply whose
  * parent lives outside the window still decorates (quote text comes from
  * the server-resolved `replyTo` snippet) but is not navigable and its
- * parent's count only covers in-window replies - accepted v1 trade-off,
- * see PR #695.
+ * parent's count only covers in-window replies - PM-accepted v1 trade-off
+ * (2026-06-12): exact global counts would need a rawJson scan per request.
  */
 
 export interface ReplyThreadingMessage {

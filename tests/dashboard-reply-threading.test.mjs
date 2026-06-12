@@ -209,8 +209,8 @@ test("formatReplyCount pluralises", () => {
 // dismissal: palette, then overlay, then thread. The shell yields via a DOM
 // presence check on the overlay's data attribute; if either side of that
 // contract is renamed, this breaks loudly here instead of silently regressing
-// to "Esc in a focused thread kicks you out to Today" (caught by the
-// Playwright pass for #695).
+// to "Esc in a focused thread kicks you out to Today" (caught live by the
+// Apple-style-threading Playwright pass).
 
 test("app-shell Escape yields to an open focused-thread overlay", () => {
   const shell = readFileSync(
