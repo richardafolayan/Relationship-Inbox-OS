@@ -3,7 +3,6 @@
 import { useCallback, useMemo, useState } from "react";
 import Link from "next/link";
 import { Check, Moon, Send } from "lucide-react";
-import { isQuietHoursActive } from "@/lib/quiet-hours";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { PersonAvatar } from "@/components/common/person-avatar";
@@ -31,11 +30,8 @@ export function FocusInboxGroup({
 
   const candidates = useMemo(() => {
     if (!active) return [];
-    const quiet = isQuietHoursActive();
     return rows.filter(
-      (row) =>
-        sent.has(rowKey(row)) ||
-        isFocusAckCandidate(row, focusWindow, settings, { quietHoursActive: quiet })
+      (row) => sent.has(rowKey(row)) || isFocusAckCandidate(row, focusWindow, settings)
     );
   }, [rows, focusWindow, settings, active, sent]);
 

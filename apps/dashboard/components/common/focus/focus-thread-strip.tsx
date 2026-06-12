@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Check, Moon, Send, X } from "lucide-react";
-import { isQuietHoursActive } from "@/lib/quiet-hours";
 import { isFocusAckCandidate, noteForRow, type FocusRow } from "@/lib/focus";
 import { sendAcknowledgement, useFocusWindow } from "@/lib/use-focus-window";
 import type { ThreadResponse } from "@/lib/types";
@@ -51,8 +50,7 @@ export function FocusThreadStrip({
   const [busy, setBusy] = useState(false);
 
   const row = useMemo(() => focusRowFromThread(thread), [thread]);
-  const candidate =
-    active && isFocusAckCandidate(row, focusWindow, settings, { quietHoursActive: isQuietHoursActive() });
+  const candidate = active && isFocusAckCandidate(row, focusWindow, settings);
 
   useEffect(() => {
     if (candidate && note === null) {

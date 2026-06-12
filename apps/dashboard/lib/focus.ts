@@ -217,13 +217,20 @@ export function arrivedDuringFocus(
   return inbound >= started;
 }
 
-/** The operator has already replied to this contact today, so they've heard
- *  from you and there's nothing to reassure. */
-export function hasRepliedToday(row: FocusRow, now: Date = new Date()): boolean {
-  if (!row.lastOutboundAt) return false;
-  const d = new Date(row.lastOutboundAt);
-  if (Number.isNaN(d.getTime())) return false;
-  return d.toDateString() === now.toDateString();
+/**
+ * The contact has already heard from you SINCE their latest message — your
+ * last outbound is at or after their last inbound, so there is nothing left
+ * to reassure. Replaces the original calendar-day rule ("replied today"),
+ * which wrongly suppressed mid-conversation contacts: reply at 01:58, they
+ * write back at 01:59 while you go heads-down, and they are left hanging
+ * with no note on offer because you had "already replied today".
+ */
+export function alreadyHeardSinceInbound(row: FocusRow): boolean {
+  if (!row.lastOutboundAt || !row.lastInboundAt) return false;
+  const out = Date.parse(row.lastOutboundAt);
+  const inbound = Date.parse(row.lastInboundAt);
+  if (!Number.isFinite(out) || !Number.isFinite(inbound)) return false;
+  return out >= inbound;
 }
 
 /** This person already got their one note this window. */
@@ -232,29 +239,66 @@ export function isAcked(row: FocusRow, window: FocusWindowState): boolean {
 }
 
 /**
+ * Why a during-window thread is (or isn't) offered a one-tap note.
+ * "candidate" is the actionable case; the rest power the review sheet's
+ * honest filtered states, so "people messaged but nothing is on offer"
+ * never silently reads as "nothing came in".
+ *
+ * Deliberately NOT a reason: quiet hours. An explicitly started focus
+ * window IS the operator asking for these offers (a 2am "going to sleep"
+ * window exists precisely to acknowledge night messages), and nothing
+ * sends without a tap — so the window overrides quiet-hours silence here.
+ * Quiet hours still governs the attention dot and background scans.
+ */
+export type FocusAckExclusion =
+  | "candidate"
+  | "not_during" // window inactive/lapsed, or their message predates it
+  | "handled" // needsReply === false: nothing is waiting on the operator
+  | "already_heard" // operator's last reply is at/after their last message
+  | "not_covered" // outside this window's audience (or outreach/business)
+  | "already_acked"; // got their one note this window
+
+/**
  * The single source of truth for "should this thread offer a one-tap
  * acknowledgement right now". Every surface (Today count, Inbox group,
  * Thread strip, Review sheet) funnels through this so they never disagree.
  */
+export function focusAckExclusion(
+  row: FocusRow,
+  window: FocusWindowState,
+  settings: FocusSettings,
+  opts: { now?: Date } = {}
+): FocusAckExclusion {
+  const now = opts.now ?? new Date();
+  // An expired window offers nothing: a note saying "till 8:31pm" sent at
+  // 9pm reads as nonsense, so the gate closes the moment endsAt passes.
+  if (!isFocusActive(window, now)) return "not_during";
+  if (!arrivedDuringFocus(row, window, now)) return "not_during";
+  // Only unanswered inbound threads. needsReply === false means handled.
+  if (row.needsReply === false) return "handled";
+  if (alreadyHeardSinceInbound(row)) return "already_heard";
+  if (!coverageForRow(row, window.audience).covered) return "not_covered";
+  if (settings.oneNotePerPerson && isAcked(row, window)) return "already_acked";
+  return "candidate";
+}
+
 export function isFocusAckCandidate(
   row: FocusRow,
   window: FocusWindowState,
   settings: FocusSettings,
-  opts: { now?: Date; quietHoursActive?: boolean } = {}
+  opts: { now?: Date } = {}
 ): boolean {
-  const now = opts.now ?? new Date();
-  // Respect quiet hours: the app stays silent then, so no notes are offered.
-  if (opts.quietHoursActive) return false;
-  // An expired window offers nothing: a note saying "till 8:31pm" sent at
-  // 9pm reads as nonsense, so the gate closes the moment endsAt passes.
-  if (!isFocusActive(window, now)) return false;
-  if (!arrivedDuringFocus(row, window, now)) return false;
-  // Only unanswered inbound threads. needsReply === false means handled.
-  if (row.needsReply === false) return false;
-  if (!coverageForRow(row, window.audience).covered) return false;
-  if (hasRepliedToday(row, now)) return false;
-  if (settings.oneNotePerPerson && isAcked(row, window)) return false;
-  return true;
+  return focusAckExclusion(row, window, settings, opts) === "candidate";
+}
+
+/** The rail card's line when no notes are waiting. "Everyone who messaged
+ *  knows you've seen them" is only claimed once someone was actually
+ *  acknowledged this window — before that it spoke for messages that may
+ *  have been filtered, which read as the feature lying. */
+export function focusRailIdleLine(window: FocusWindowState): string {
+  return window.ackedPersonIds.length > 0
+    ? "Everyone who messaged knows you've seen them. Their proper replies still wait below."
+    : "No quick notes waiting right now. When a covered contact messages you, it shows here first.";
 }
 
 /** The acknowledgement note for a specific contact, tier-matched and tokens
