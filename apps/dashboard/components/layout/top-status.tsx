@@ -12,6 +12,15 @@ import { onReportSendChange } from "@/lib/pilot-report-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
 import { NotificationBell } from "@/components/common/notification-center";
+import {
+  EMPTY_THREAD_CHECK,
+  isThreadCheckEvent,
+  reduceThreadCheck,
+  selectThreadCheck,
+  threadCheckLabel,
+  type ThreadCheckEventDetail,
+  type ThreadCheckSnapshot
+} from "@/lib/thread-check-status";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Single 44px status row. Mostly read-only in v1:
@@ -121,6 +130,23 @@ type TickerState =
       // state via lib/pilot-report-status.
       kind: "sending_report";
       count: number;
+    }
+  | {
+      // Per-thread "check for new messages" (rescan). Previously rendered
+      // inline in the thread header — pilot feedback moved it here, named
+      // after the contact ("Checking Tola's messages"). State derives from
+      // the SCAN_THREAD_* runner events via lib/thread-check-status.
+      kind: "checking_thread";
+      personName: string | null;
+      count: number;
+    }
+  | {
+      // Transient result line after a per-thread check, same lifetime
+      // shape as send_succeeded: "No new messages from Tola" / "2 new
+      // messages from Tola".
+      kind: "thread_checked";
+      personName: string | null;
+      newMessages: number | null;
     };
 
 function formatRelativeScan(lastScanAt: string | null): string {
@@ -166,6 +192,7 @@ function computeTicker(input: {
   queue: SendQueueResponse | null;
   reassessingCount: number;
   reportSendCount: number;
+  threadCheck: ThreadCheckSnapshot;
 }): TickerState {
   const queueActive = input.queue?.active ?? [];
   const head = queueActive[0];
@@ -201,6 +228,19 @@ function computeTicker(input: {
   if (input.reassessingCount > 0) {
     return { kind: "reassessing", count: input.reassessingCount };
   }
+  // Per-thread checks share the operator-initiated tier with reassess:
+  // the operator just clicked "Check for new messages" on a specific
+  // thread, so the ticker names that work over the background scan
+  // heartbeat. The transient result line sits below sending_report so an
+  // in-flight upload isn't hidden behind an 8s-old result.
+  const threadCheck = selectThreadCheck(input.threadCheck, Date.now());
+  if (threadCheck.kind === "checking") {
+    return {
+      kind: "checking_thread",
+      personName: threadCheck.personName,
+      count: threadCheck.count
+    };
+  }
   // Issue #421. Pilot-feedback uploads sit at the same priority tier as
   // reassess — both are operator-initiated, dashboard-originated
   // actions that would otherwise vanish into a closed modal. Placed
@@ -208,6 +248,13 @@ function computeTicker(input: {
   // shows the reassess copy first; in practice these don't overlap.
   if (input.reportSendCount > 0) {
     return { kind: "sending_report", count: input.reportSendCount };
+  }
+  if (threadCheck.kind === "checked") {
+    return {
+      kind: "thread_checked",
+      personName: threadCheck.personName,
+      newMessages: threadCheck.newMessages
+    };
   }
   if (blockedByScan) {
     const platform = input.health?.currentScanPlatform ?? null;
@@ -289,6 +336,18 @@ function tickerLabel(state: TickerState): string {
       return state.count === 1
         ? "Sending report"
         : `Sending ${state.count} reports`;
+    case "checking_thread":
+      return threadCheckLabel({
+        kind: "checking",
+        personName: state.personName,
+        count: state.count
+      });
+    case "thread_checked":
+      return threadCheckLabel({
+        kind: "checked",
+        personName: state.personName,
+        newMessages: state.newMessages
+      });
     default:
       return "";
   }
@@ -329,6 +388,11 @@ export function TopStatus() {
   // Issue #421. Same pattern for pilot-feedback report uploads —
   // signal originates in the (now-closed) feedback modal.
   const [reportSendCount, setReportSendCount] = useState(0);
+  // Per-thread "check for new messages" state, reduced from the
+  // SCAN_THREAD_* runner events in the listener below. The 1s visible
+  // tick already re-renders this component, which is what ages the
+  // transient result line out of the ticker.
+  const [threadCheck, setThreadCheck] = useState<ThreadCheckSnapshot>(EMPTY_THREAD_CHECK);
   // Issue #435 (R-0057). False until the first poll settles. Until then
   // the bar shows a calm "Connecting…" instead of "0/2 connected · scan
   // never · Scan now", which read as the operator's real status going
@@ -381,8 +445,12 @@ export function TopStatus() {
 
   useEffect(() => {
     const onEvent = (event: Event) => {
-      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      const detail = (event as CustomEvent<ThreadCheckEventDetail>).detail;
       const t = detail?.type;
+      if (isThreadCheckEvent(t)) {
+        setThreadCheck((prev) => reduceThreadCheck(prev, detail, Date.now()));
+        return;
+      }
       if (
         t === "MESSAGE_SENT" ||
         t === "MESSAGE_SEND_FAILED" ||
@@ -445,13 +513,14 @@ export function TopStatus() {
 
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
 
-  const ticker = computeTicker({ health, queue, reassessingCount, reportSendCount });
+  const ticker = computeTicker({ health, queue, reassessingCount, reportSendCount, threadCheck });
   const tickerIsActive =
     ticker.kind === "scanning" ||
     ticker.kind === "sending" ||
     ticker.kind === "enriching" ||
     ticker.kind === "reassessing" ||
-    ticker.kind === "sending_report";
+    ticker.kind === "sending_report" ||
+    ticker.kind === "checking_thread";
 
   // Cancelling a running scan is a legitimate user action — a scan
   // can sit on a single thread for tens of seconds and the operator
@@ -513,7 +582,7 @@ export function TopStatus() {
   const tickerTone =
     ticker.kind === "send_failed"
       ? "text-risk-overdue"
-      : ticker.kind === "send_succeeded"
+      : ticker.kind === "send_succeeded" || ticker.kind === "thread_checked"
         ? "text-risk-fresh"
         : "text-ink-2";
 
@@ -551,10 +620,13 @@ export function TopStatus() {
         </span>
       )}
 
-      {tickerIsActive || ticker.kind === "send_failed" || ticker.kind === "send_succeeded" ? (
+      {tickerIsActive ||
+      ticker.kind === "send_failed" ||
+      ticker.kind === "send_succeeded" ||
+      ticker.kind === "thread_checked" ? (
         <>
           <span className="inline-flex min-w-0 items-center gap-[8px]">
-            {ticker.kind === "send_succeeded" ? (
+            {ticker.kind === "send_succeeded" || ticker.kind === "thread_checked" ? (
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" aria-hidden />
             ) : ticker.kind === "send_failed" ? (
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-overdue" aria-hidden />
