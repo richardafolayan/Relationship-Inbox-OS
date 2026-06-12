@@ -5,7 +5,12 @@ import type { InboxRow } from "./types";
 // repo tests load this file through tsx, which cannot resolve the Next
 // alias for value imports (type-only imports are erased, so types may use
 // either form). Same reason feedback.ts imports "./api".
-import { buildNewMessageNotice } from "./notifications";
+import {
+  buildNewMessageNotice,
+  buildOverdueDigestBody,
+  buildOverdueDigestTitle,
+  type OverdueDigestNotificationPerson
+} from "./notifications";
 
 // The notification center: a small reviewable log of new-message notices.
 // A toast clears itself after a while and a desktop ping is easy to miss;
@@ -156,6 +161,37 @@ export function recordNewMessageNotifications(rows: InboxRow[], now?: number): v
     };
   });
   recordCenterNotifications(additions);
+}
+
+// The overdue-reply digest's bell entry (#360). A fixed id, not a thread id:
+// addNotifications' replace-by-id rule then guarantees the center holds at
+// most ONE digest reminder - a newer digest replaces the previous entry and
+// resets it to unseen instead of piling up day after day.
+export const OVERDUE_DIGEST_NOTIFICATION_ID = "overdue-digest";
+
+// Record the due digest in the center. This is the digest's PRIMARY
+// delivery surface: it happens whether or not desktop permission is granted
+// and whether or not the tab is visible, so the reminder always lands
+// somewhere the operator actually looks. The desktop ping (lib/
+// notifications.ts notifyOverdueReplyDigest) is an optional extra on top.
+export function recordOverdueDigestNotification(
+  people: OverdueDigestNotificationPerson[],
+  now?: number
+): void {
+  if (typeof window === "undefined" || people.length === 0) return;
+  const at = now ?? Date.now();
+  writeCenterNotifications(
+    addNotifications(readCenterNotifications(), [
+      {
+        id: OVERDUE_DIGEST_NOTIFICATION_ID,
+        title: buildOverdueDigestTitle(people.length),
+        body: buildOverdueDigestBody(people),
+        href: "/today",
+        at,
+        seen: false
+      }
+    ])
+  );
 }
 
 export function dismissCenterNotification(id: string): void {
