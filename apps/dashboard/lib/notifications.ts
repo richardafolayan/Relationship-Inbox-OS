@@ -124,6 +124,12 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
   }
 }
 
+// How long a new-message toast stays up before clearing itself. At least 30
+// seconds (operator request): long enough to read and decide without
+// rushing. The notification center keeps the notice after expiry, so the
+// timeout only ends the interruption, never loses the message.
+export const NEW_MESSAGE_TOAST_DURATION_MS = 30_000;
+
 function contextLine(row: InboxRow): string {
   const context = row.whatTheyWant?.trim();
   if (context) return context;

@@ -31,6 +31,12 @@ export interface InboxRow {
   personBirthday?: string | null;
   personBirthYear?: number | null;
   platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  /**
+   * True for group threads (iMessage group chats). Reconnect excludes
+   * groups - a per-person "worth a hello" does not fit a group chat.
+   * Absent on legacy payloads.
+   */
+  isGroup?: boolean;
   preview: string;
   /**
    * "OUT" when the latest message was sent by the operator (preview should
@@ -257,10 +263,32 @@ export interface FocusWindowState {
   endsAt: string;
   reason: string;
   note: string;
+  /**
+   * Per-window professional-tier note override ("Help me phrase this" writes
+   * one per register). Optional: older runner payloads omit it; ""/absent
+   * means professional contacts read the saved ackTemplates.professional.
+   */
+  professionalNote?: string;
   audience: FocusAudience;
   windowId: string;
   /** Person ids already acknowledged this window (one note per person). */
   ackedPersonIds: string[];
+}
+
+/**
+ * Response of POST /runner/control/focus/compose-note ("Help me phrase
+ * this"). `reasonLabel` is the suggested reason chip; `untilTime` is a
+ * 24-hour "HH:MM" ONLY when the operator stated an explicit end time —
+ * surfaced as a tappable suggestion, never auto-applied.
+ */
+export interface ComposeFocusNoteResponse {
+  ok: boolean;
+  /** Failure kind when ok is false (e.g. "ai_unavailable"). */
+  reason?: string;
+  close?: string;
+  professional?: string;
+  reasonLabel?: string;
+  untilTime?: string | null;
 }
 
 /** The operator's two acknowledgement note templates (their own words). */

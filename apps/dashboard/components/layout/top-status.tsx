@@ -11,6 +11,7 @@ import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
+import { NotificationBell } from "@/components/common/notification-center";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Single 44px status row. Mostly read-only in v1:
@@ -520,7 +521,7 @@ export function TopStatus() {
     <div
       role="status"
       aria-live="polite"
-      className="sticky top-0 z-30 flex h-[44px] items-center gap-3 border-b border-hairline bg-paper/95 px-6 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur"
+      className="sticky top-0 z-30 flex h-[44px] items-center gap-2 border-b border-hairline bg-paper/95 px-4 font-mono text-[11px] tracking-[0.02em] text-ink-3 backdrop-blur md:gap-3 md:px-6"
     >
       {!ready ? (
         // #435: cold-mount placeholder. A grey pip + "Connecting…" instead
@@ -593,6 +594,7 @@ export function TopStatus() {
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
+        <NotificationBell />
         <button
           type="button"
           onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}
@@ -609,8 +611,10 @@ export function TopStatus() {
             : "Focus off"}
         </button>
         {/* #435: suppress "scan never" / "Scan now" until the first poll
-            settles so a cold mount doesn't imply the runner has never run. */}
-        {ready ? <span>{scanLabel}</span> : null}
+            settles so a cold mount doesn't imply the runner has never run.
+            The relative timestamp is the first thing to go on phone widths —
+            "Scan now" keeps the actionable part. */}
+        {ready ? <span className="hidden sm:inline">{scanLabel}</span> : null}
         {ready && ticker.kind !== "scanning" ? (
           <>
             <button

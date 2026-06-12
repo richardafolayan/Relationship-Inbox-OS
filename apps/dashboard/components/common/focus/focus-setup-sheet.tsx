@@ -1,12 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { apiPost } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import { FocusSheet } from "@/components/common/focus/focus-sheet";
-import { DEFAULT_FOCUS_REASON, endsAtIsoFromTime, FOCUS_REASONS, fillNote, formatUntil } from "@/lib/focus";
+import {
+  DEFAULT_FOCUS_REASON,
+  endsAtIsoFromTime,
+  FOCUS_REASONS,
+  fillNote,
+  formatUntil,
+  resyncNoteUntilLabel,
+  rollsToTomorrow
+} from "@/lib/focus";
 import type { UseFocusWindow } from "@/lib/use-focus-window";
-import type { FocusAudience } from "@/lib/types";
+import type { ComposeFocusNoteResponse, FocusAudience } from "@/lib/types";
 
 function pad(n: number): string {
   return String(n).padStart(2, "0");
@@ -57,9 +67,20 @@ export function FocusSetupSheet({
   const [audience, setAudience] = useState<FocusAudience>(settings.audience);
   const [note, setNote] = useState(templates.close);
   const [noteEdited, setNoteEdited] = useState(false);
+  // "Help me phrase this": the operator describes what they're doing; the AI
+  // phrases the note pair in their voice. Everything lands in the editable
+  // fields below — nothing is saved or sent from here.
+  const [activity, setActivity] = useState("");
+  const [phrasing, setPhrasing] = useState(false);
+  const [phraseError, setPhraseError] = useState<string | null>(null);
+  const [professionalNote, setProfessionalNote] = useState("");
+  const [suggestedTime, setSuggestedTime] = useState<string | null>(null);
 
   // Seed the form whenever the sheet opens, from the live window (when
-  // editing) or the operator's preferences (when starting fresh).
+  // editing) or the operator's preferences (when starting fresh). A window
+  // counts as "edited" only when its note genuinely differs from what the
+  // template would produce for its own end time + reason — a note that is
+  // just the auto-filled default keeps auto-syncing with the picker.
   useEffect(() => {
     if (!open) return;
     const seedTime = (active ? timeFromIso(focusWindow.endsAt) : null) ?? defaultTime();
@@ -67,8 +88,18 @@ export function FocusSetupSheet({
     setReason(active && focusWindow.reason ? focusWindow.reason : DEFAULT_FOCUS_REASON);
     setAudience(active ? focusWindow.audience : settings.audience);
     setNote(active && focusWindow.note ? focusWindow.note : templates.close);
-    setNoteEdited(active && !!focusWindow.note);
-  }, [open, active, focusWindow.endsAt, focusWindow.reason, focusWindow.audience, focusWindow.note, settings.audience, templates.close]);
+    const derivedNote = fillNote(templates.close, {
+      name: "[Name]",
+      until: formatUntil(focusWindow.endsAt),
+      reason: settings.reasonLabel ? focusWindow.reason : ""
+    });
+    setNoteEdited(active && !!focusWindow.note && focusWindow.note !== derivedNote);
+    setProfessionalNote(active ? focusWindow.professionalNote ?? "" : "");
+    setActivity("");
+    setPhrasing(false);
+    setPhraseError(null);
+    setSuggestedTime(null);
+  }, [open, active, focusWindow.endsAt, focusWindow.reason, focusWindow.audience, focusWindow.note, focusWindow.professionalNote, settings.audience, settings.reasonLabel, templates.close]);
 
   // Keep the note's [until] in step with the picker until the operator edits
   // the note themselves — then leave their words alone.
@@ -78,12 +109,78 @@ export function FocusSetupSheet({
     setNote(fillNote(templates.close, { name: "[Name]", until: untilLabel, reason: settings.reasonLabel ? reason : "" }));
   }, [open, noteEdited, untilLabel, templates.close, reason, settings.reasonLabel]);
 
+  // Once the note IS the operator's own words, a time change still must not
+  // leave a stale "till 8:31pm" inside it — swap just the old label for the
+  // new one and touch nothing else they wrote.
+  const prevUntilRef = useRef(untilLabel);
+  useEffect(() => {
+    const previous = prevUntilRef.current;
+    prevUntilRef.current = untilLabel;
+    if (!open || !noteEdited) return;
+    if (previous && untilLabel && previous !== untilLabel) {
+      setNote((current) => resyncNoteUntilLabel(current, previous, untilLabel));
+    }
+  }, [open, noteEdited, untilLabel]);
+
+  // The picker rolls a time that already passed today to TOMORROW (so "until
+  // 6am" works at night). Say so, instead of silently making a ~24h window.
+  const endsTomorrow = useMemo(() => rollsToTomorrow(time), [time]);
+
+  // Keep the editable professional field visible once it exists, even if the
+  // operator deletes all its text mid-edit (an empty save just falls back to
+  // the saved professional template).
+  const [showProfessional, setShowProfessional] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setShowProfessional((active ? (focusWindow.professionalNote ?? "").trim().length > 0 : false));
+  }, [open, active, focusWindow.professionalNote]);
+
+  // The AI may suggest a reason outside the fixed chips ("driving back");
+  // surface it as a selected extra chip rather than dropping it.
+  const reasonOptions = useMemo(
+    () => (reason && !FOCUS_REASONS.includes(reason) ? [reason, ...FOCUS_REASONS] : FOCUS_REASONS),
+    [reason]
+  );
+
+  // "Help me phrase this". One explicit tap, composes only: the close note
+  // fills the editable textarea below, the professional variant gets its own
+  // editable field, the reason chip follows the activity, and a stated end
+  // time becomes a tappable suggestion (never silently applied — time
+  // mistakes are exactly the class of bug this sheet just got fixed for).
+  const phrase = async () => {
+    const trimmed = activity.trim();
+    if (!trimmed || phrasing) return;
+    setPhrasing(true);
+    setPhraseError(null);
+    try {
+      const result = await apiPost<ComposeFocusNoteResponse>(
+        "/runner/control/focus/compose-note",
+        { activity: trimmed }
+      );
+      if (!result.ok || !result.close || !result.professional) {
+        setPhraseError("Couldn't phrase it just now. Try again, or write it yourself below.");
+        return;
+      }
+      setNote(result.close);
+      setNoteEdited(true);
+      setProfessionalNote(result.professional);
+      setShowProfessional(true);
+      if (result.reasonLabel) setReason(result.reasonLabel);
+      setSuggestedTime(result.untilTime && result.untilTime !== time ? result.untilTime : null);
+    } catch {
+      setPhraseError("Couldn't phrase it just now. Try again, or write it yourself below.");
+    } finally {
+      setPhrasing(false);
+    }
+  };
+
   const submit = async () => {
     const endsAt = endsAtIsoFromTime(time);
     const payload = {
       endsAt,
       reason: settings.reasonLabel ? reason : "",
       note,
+      professionalNote: professionalNote.trim() ? professionalNote : "",
       audience
     };
     try {
@@ -128,6 +225,11 @@ export function FocusSetupSheet({
               onChange={(event) => setTime(event.target.value)}
               className="w-full rounded-[9px] border border-hairline bg-paper px-3 py-[9px] text-[13.5px] text-ink outline-none transition-colors duration-calm focus:border-accent"
             />
+            {endsTomorrow ? (
+              <span className="mt-[6px] block text-[11.5px] leading-[1.4] text-accent-ink">
+                That time has already passed today, so this window runs until {untilLabel} tomorrow.
+              </span>
+            ) : null}
           </label>
           {settings.reasonLabel ? (
             <div className="flex-[1.4]">
@@ -136,7 +238,7 @@ export function FocusSetupSheet({
               </span>
               <span className="mb-2 block text-[12px] text-ink-3">So it reads as a real block.</span>
               <div className="flex flex-wrap gap-[7px]">
-                {FOCUS_REASONS.map((option) => {
+                {reasonOptions.map((option) => {
                   const on = reason === option;
                   return (
                     <button
@@ -160,13 +262,64 @@ export function FocusSetupSheet({
           ) : null}
         </div>
 
+        <div className="rounded-[12px] border border-hairline bg-paper-2/40 px-[14px] py-[12px]">
+          <span className="mb-1 flex items-center gap-[6px] text-[13.5px] font-medium text-ink">
+            <Sparkles className="h-[13px] w-[13px] text-accent" strokeWidth={1.7} />
+            Help me phrase this
+          </span>
+          <span className="mb-2 block text-[12px] leading-[1.5] text-ink-3">
+            Say what you're doing in your own words and it drafts the notes in your voice. You can
+            edit everything before it's used.
+          </span>
+          <div className="flex gap-[8px]">
+            <input
+              type="text"
+              value={activity}
+              onChange={(event) => setActivity(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void phrase();
+                }
+              }}
+              placeholder="e.g. driving back from London till 9"
+              className="min-w-0 flex-1 rounded-[9px] border border-hairline bg-paper px-3 py-[8px] text-[13px] text-ink outline-none transition-colors duration-calm focus:border-accent"
+            />
+            <button
+              type="button"
+              onClick={() => void phrase()}
+              disabled={phrasing || !activity.trim()}
+              className="shrink-0 rounded-pill border border-hairline-strong px-[14px] py-[7px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-accent hover:text-ink disabled:opacity-50"
+            >
+              {phrasing ? "Phrasing…" : "Phrase it"}
+            </button>
+          </div>
+          {phraseError ? (
+            <span className="mt-2 block text-[12px] text-risk-overdue">{phraseError}</span>
+          ) : null}
+          {suggestedTime ? (
+            <button
+              type="button"
+              onClick={() => {
+                setTime(suggestedTime);
+                setSuggestedTime(null);
+              }}
+              className="mt-2 inline-flex items-center gap-[6px] rounded-pill border border-hairline px-[11px] py-[5px] text-[12px] text-accent-ink transition-colors duration-calm hover:border-accent"
+            >
+              Suggested: until {formatUntil(endsAtIsoFromTime(suggestedTime)) || suggestedTime}, tap
+              to set the window
+            </button>
+          ) : null}
+        </div>
+
         <label className="block">
           <span className="mb-1 block text-[13.5px] font-medium text-ink">Your note</span>
           <span className="mb-2 block text-[12px] leading-[1.5] text-ink-3">
             In your own words.{" "}
-            <span className="text-accent-ink">[Name]</span> fills in each person's first name, and
-            close contacts get your casual note while professional ones get the calmer one. Nothing
-            sends without you tapping send.
+            <span className="text-accent-ink">[Name]</span> fills in each person's first name and{" "}
+            <span className="text-accent-ink">[until]</span> the time you're back; close contacts
+            get your casual note while professional ones get the calmer one. Nothing sends without
+            you tapping send.
           </span>
           <textarea
             value={note}
@@ -178,6 +331,24 @@ export function FocusSetupSheet({
             className="w-full resize-y rounded-[9px] border border-hairline bg-paper px-3 py-[10px] text-[13.5px] leading-[1.5] text-ink outline-none transition-colors duration-calm focus:border-accent"
           />
         </label>
+
+        {showProfessional ? (
+          <label className="block">
+            <span className="mb-1 block text-[13.5px] font-medium text-ink">
+              For professional contacts
+            </span>
+            <span className="mb-2 block text-[12px] leading-[1.5] text-ink-3">
+              The calmer version work contacts get this window. Clear it to fall back to your saved
+              professional template.
+            </span>
+            <textarea
+              value={professionalNote}
+              onChange={(event) => setProfessionalNote(event.target.value)}
+              rows={2}
+              className="w-full resize-y rounded-[9px] border border-hairline bg-paper px-3 py-[10px] text-[13.5px] leading-[1.5] text-ink outline-none transition-colors duration-calm focus:border-accent"
+            />
+          </label>
+        ) : null}
 
         <div>
           <span className="mb-2 block font-mono text-[10.5px] uppercase tracking-[0.1em] text-ink-3">

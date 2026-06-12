@@ -89,7 +89,11 @@ export function ToastHost() {
   return (
     <div
       data-testid="toast-host"
-      className="pointer-events-none fixed right-4 top-4 z-50 flex w-[320px] flex-col gap-2"
+      // top-[56px]: just below the 44px TopStatus bar. Toasts used to start
+      // at top-4 and sat on top of the bar's right-hand controls - with the
+      // 30s new-message duration that parked a card over the notification
+      // bell (and Focus / Scan now) for half a minute per arrival.
+      className="pointer-events-none fixed right-4 top-[56px] z-50 flex w-[320px] flex-col gap-2"
     >
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={dismiss} />
@@ -117,16 +121,29 @@ function ToastCard({
   // click (any release below the swipe threshold) and the keyboard handler.
   const activate = useCallback(() => {
     if (!toast.href) return;
+    toast.onActivate?.();
     onDismiss(toast.id);
     router.push(toast.href);
-  }, [router, onDismiss, toast.href, toast.id]);
+  }, [router, onDismiss, toast]);
+
+  // An explicit clear (X button or swipe), as opposed to auto-expiry: lets
+  // the toast's source react to "the operator saw this and waved it away".
+  const manualDismiss = useCallback(() => {
+    toast.onManualDismiss?.();
+    onDismiss(toast.id);
+  }, [onDismiss, toast]);
 
   const onPointerDown = (e: React.PointerEvent) => {
     // Don't start a swipe from the dismiss button.
     if ((e.target as HTMLElement).closest("[data-toast-close]")) return;
     startXRef.current = e.clientX;
     setDragging(true);
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unavailable (synthetic or already-released pointer) - the
+         move/up handlers still work without it */
+    }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
@@ -146,7 +163,7 @@ function ToastCard({
     }
     switch (resolveToastGesture(travelled, interactive)) {
       case "dismiss":
-        onDismiss(toast.id);
+        manualDismiss();
         break;
       case "activate":
         // Any release below the swipe threshold on a clickable toast is a
@@ -230,7 +247,7 @@ function ToastCard({
           type="button"
           data-toast-close
           aria-label="Dismiss notification"
-          onClick={() => onDismiss(toast.id)}
+          onClick={manualDismiss}
           className="-mr-1 -mt-1 flex-none rounded-md p-1 text-ink-3 transition-colors hover:bg-hairline/60 hover:text-ink-1"
         >
           <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">

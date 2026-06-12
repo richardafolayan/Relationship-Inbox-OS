@@ -14,15 +14,41 @@
 // exclusion so producer (runner) and consumer (dashboard) agree on the set.
 //
 // Mirror of the dashboard predicate's conditions:
-//   platform === "LINKEDIN"          -> platform: "LINKEDIN"
+//   !isGroup                         -> isGroup: false
 //   !archivedAt                      -> archivedAt: null
 //   !isWithinHorizon(lastMessageAt)  -> lastMessageAt: { lt: horizonCutoff }
 //   category !== "outreach"          -> NOT category outreach
 //   !scheduledSendAt                 -> NOT id in scheduledThreadIds
 // The dashboard predicate stays authoritative; this only narrows the DB query
 // so the two never disagree.
+//
+// Reconnect was LinkedIn-only until the operator asked for every platform:
+// all platforms are candidates now, so there is deliberately no platform
+// condition here. Group chats stay out - the page's per-person "worth a
+// hello" framing and the 1:1 relationship scorer do not fit a group thread.
 
 import type { Prisma } from "@prisma/client";
+
+/**
+ * Platforms the reconnect scorer knows how to frame. Mirrors the live
+ * adapters; core's PlatformName also carries a WHATSAPP placeholder with
+ * no adapter behind it, which stays out until it actually exists.
+ */
+export const RECONNECT_SCORABLE_PLATFORMS = [
+  "LINKEDIN",
+  "INSTAGRAM",
+  "TIKTOK",
+  "IMESSAGE"
+] as const;
+
+export type ReconnectScorablePlatform = (typeof RECONNECT_SCORABLE_PLATFORMS)[number];
+
+/** Type guard for narrowing a DB platform string to the scorable set. */
+export function isReconnectScorablePlatform(
+  platform: string
+): platform is ReconnectScorablePlatform {
+  return (RECONNECT_SCORABLE_PLATFORMS as readonly string[]).includes(platform);
+}
 
 /**
  * Build the Prisma `where` for the reconnect refresh-scores candidate query.
@@ -38,7 +64,7 @@ export function buildReconnectCandidateWhere(
   scheduledThreadIds: string[]
 ): Prisma.ThreadWhereInput {
   return {
-    platform: "LINKEDIN",
+    isGroup: false,
     archivedAt: null,
     // Dormant = last activity older than the 30-day horizon. Threads whose
     // lastMessageAt is null are out of scope: the scorer needs at least one

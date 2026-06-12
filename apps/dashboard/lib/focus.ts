@@ -7,9 +7,11 @@
 // in lib/use-focus-window.ts — none of that belongs in this file.
 //
 // The feature is deliberately conservative (PM call): one-tap only, never
-// auto-send, never AI-written text. The app only decides whether a contact
-// is COVERED and which note TIER fits, then fills [Name] / [until] / [reason]
-// into the operator's own template. The words stay the operator's.
+// auto-send. The app decides whether a contact is COVERED and which note
+// TIER fits, then fills [Name] / [until] / [reason] into the note. The words
+// are the operator's: their saved templates, their per-window edits, or — on
+// their explicit "Help me phrase this" request — an AI draft in their voice
+// that they review and can rewrite before anything is offered for sending.
 
 import type {
   AckTemplates,
@@ -43,6 +45,7 @@ export const EMPTY_FOCUS_WINDOW: FocusWindowState = {
   endsAt: "",
   reason: "",
   note: "",
+  professionalNote: "",
   audience: "favourites",
   windowId: "",
   ackedPersonIds: []
@@ -90,8 +93,21 @@ export function readFocusSettings(profile: OperatorProfile | null | undefined): 
   return profile?.focusSettings ?? DEFAULT_FOCUS_SETTINGS;
 }
 
-export function isFocusActive(window: FocusWindowState | null | undefined): boolean {
-  return !!window?.active;
+/**
+ * A window is live only while the clock says so: the stored `active` flag
+ * AND `endsAt` still ahead. The flag alone can go stale (the app may not be
+ * open at the moment the window lapses to write it back), so every surface
+ * derives liveness from the clock and treats the flag as intent. A window
+ * with no parseable `endsAt` only ends manually.
+ */
+export function isFocusActive(
+  window: FocusWindowState | null | undefined,
+  now: Date = new Date()
+): boolean {
+  if (!window?.active) return false;
+  const ends = Date.parse(window.endsAt ?? "");
+  if (Number.isFinite(ends) && now.getTime() >= ends) return false;
+  return true;
 }
 
 // ─────────────────────────── formatting ───────────────────────────
@@ -193,23 +209,28 @@ export function arrivedDuringFocus(
   window: FocusWindowState,
   now: Date = new Date()
 ): boolean {
-  if (!isFocusActive(window) || !window.startedAt) return false;
+  if (!isFocusActive(window, now) || !window.startedAt) return false;
   if (!row.lastInboundAt) return false;
   const started = Date.parse(window.startedAt);
   const inbound = Date.parse(row.lastInboundAt);
   if (!Number.isFinite(started) || !Number.isFinite(inbound)) return false;
-  // Guard against a clock that hasn't reached the start yet.
-  void now;
   return inbound >= started;
 }
 
-/** The operator has already replied to this contact today, so they've heard
- *  from you and there's nothing to reassure. */
-export function hasRepliedToday(row: FocusRow, now: Date = new Date()): boolean {
-  if (!row.lastOutboundAt) return false;
-  const d = new Date(row.lastOutboundAt);
-  if (Number.isNaN(d.getTime())) return false;
-  return d.toDateString() === now.toDateString();
+/**
+ * The contact has already heard from you SINCE their latest message — your
+ * last outbound is at or after their last inbound, so there is nothing left
+ * to reassure. Replaces the original calendar-day rule ("replied today"),
+ * which wrongly suppressed mid-conversation contacts: reply at 01:58, they
+ * write back at 01:59 while you go heads-down, and they are left hanging
+ * with no note on offer because you had "already replied today".
+ */
+export function alreadyHeardSinceInbound(row: FocusRow): boolean {
+  if (!row.lastOutboundAt || !row.lastInboundAt) return false;
+  const out = Date.parse(row.lastOutboundAt);
+  const inbound = Date.parse(row.lastInboundAt);
+  if (!Number.isFinite(out) || !Number.isFinite(inbound)) return false;
+  return out >= inbound;
 }
 
 /** This person already got their one note this window. */
@@ -218,40 +239,118 @@ export function isAcked(row: FocusRow, window: FocusWindowState): boolean {
 }
 
 /**
+ * Why a during-window thread is (or isn't) offered a one-tap note.
+ * "candidate" is the actionable case; the rest power the review sheet's
+ * honest filtered states, so "people messaged but nothing is on offer"
+ * never silently reads as "nothing came in".
+ *
+ * Deliberately NOT a reason: quiet hours. An explicitly started focus
+ * window IS the operator asking for these offers (a 2am "going to sleep"
+ * window exists precisely to acknowledge night messages), and nothing
+ * sends without a tap — so the window overrides quiet-hours silence here.
+ * Quiet hours still governs the attention dot and background scans.
+ */
+export type FocusAckExclusion =
+  | "candidate"
+  | "not_during" // window inactive/lapsed, or their message predates it
+  | "handled" // needsReply === false: nothing is waiting on the operator
+  | "already_heard" // operator's last reply is at/after their last message
+  | "not_covered" // outside this window's audience (or outreach/business)
+  | "already_acked"; // got their one note this window
+
+/**
  * The single source of truth for "should this thread offer a one-tap
  * acknowledgement right now". Every surface (Today count, Inbox group,
  * Thread strip, Review sheet) funnels through this so they never disagree.
  */
+export function focusAckExclusion(
+  row: FocusRow,
+  window: FocusWindowState,
+  settings: FocusSettings,
+  opts: { now?: Date } = {}
+): FocusAckExclusion {
+  const now = opts.now ?? new Date();
+  // An expired window offers nothing: a note saying "till 8:31pm" sent at
+  // 9pm reads as nonsense, so the gate closes the moment endsAt passes.
+  if (!isFocusActive(window, now)) return "not_during";
+  if (!arrivedDuringFocus(row, window, now)) return "not_during";
+  // Only unanswered inbound threads. needsReply === false means handled.
+  if (row.needsReply === false) return "handled";
+  if (alreadyHeardSinceInbound(row)) return "already_heard";
+  if (!coverageForRow(row, window.audience).covered) return "not_covered";
+  if (settings.oneNotePerPerson && isAcked(row, window)) return "already_acked";
+  return "candidate";
+}
+
 export function isFocusAckCandidate(
   row: FocusRow,
   window: FocusWindowState,
   settings: FocusSettings,
-  opts: { now?: Date; quietHoursActive?: boolean } = {}
+  opts: { now?: Date } = {}
 ): boolean {
-  // Respect quiet hours: the app stays silent then, so no notes are offered.
-  if (opts.quietHoursActive) return false;
-  if (!isFocusActive(window)) return false;
-  if (!arrivedDuringFocus(row, window, opts.now)) return false;
-  // Only unanswered inbound threads. needsReply === false means handled.
-  if (row.needsReply === false) return false;
-  if (!coverageForRow(row, window.audience).covered) return false;
-  if (hasRepliedToday(row, opts.now)) return false;
-  if (settings.oneNotePerPerson && isAcked(row, window)) return false;
-  return true;
+  return focusAckExclusion(row, window, settings, opts) === "candidate";
+}
+
+/** The rail card's line when no notes are waiting. "Everyone who messaged
+ *  knows you've seen them" is only claimed once someone was actually
+ *  acknowledged this window — before that it spoke for messages that may
+ *  have been filtered, which read as the feature lying. */
+export function focusRailIdleLine(window: FocusWindowState): string {
+  return window.ackedPersonIds.length > 0
+    ? "Everyone who messaged knows you've seen them. Their proper replies still wait below."
+    : "No quick notes waiting right now. When a covered contact messages you, it shows here first.";
 }
 
 /** The acknowledgement note for a specific contact, tier-matched and tokens
- *  filled. Pure: the caller owns sending it (and only on an explicit tap). */
+ *  filled. Each tier prefers the note written for THIS window (the setup
+ *  sheet's "Your note", or the per-register pair "Help me phrase this"
+ *  produced), falling back to the saved template for that tier. Tokens still
+ *  fill at send time, so a window note that keeps [Name]/[until] literal
+ *  stays correct per person. Pure: the caller owns sending it (and only on
+ *  an explicit tap). */
 export function noteForRow(
   row: FocusRow,
   window: FocusWindowState,
   templates: AckTemplates
 ): string {
   const { tier } = coverageForRow(row, window.audience);
-  const base = templates[tier] || DEFAULT_ACK_TEMPLATES[tier];
+  const windowNote = (tier === "close" ? window.note : window.professionalNote) ?? "";
+  const base = windowNote.trim()
+    ? windowNote
+    : templates[tier] || DEFAULT_ACK_TEMPLATES[tier];
   return fillNote(base, {
     name: firstNameOf(row.personName),
     until: formatUntil(window.endsAt),
     reason: window.reason
   });
+}
+
+/**
+ * Swap an embedded until-label (e.g. "8:31pm") for the new one after the
+ * operator changes a live window's end time. Once a note counts as
+ * personally edited the setup sheet stops regenerating it from the template,
+ * so without this surgical swap the note would keep promising the old time.
+ */
+export function resyncNoteUntilLabel(
+  note: string,
+  previousUntil: string,
+  nextUntil: string
+): string {
+  if (!note || !previousUntil || !nextUntil) return note;
+  if (previousUntil === nextUntil || !note.includes(previousUntil)) return note;
+  return note.split(previousUntil).join(nextUntil);
+}
+
+/** True when a "HH:MM" picker value has already passed today, so the window
+ *  would end TOMORROW (endsAtIsoFromTime rolls it forward). The setup sheet
+ *  says so out loud rather than silently creating a near-24h window. */
+export function rollsToTomorrow(time: string, now: Date = new Date()): boolean {
+  const iso = endsAtIsoFromTime(time, now);
+  if (!iso) return false;
+  const d = new Date(iso);
+  return (
+    d.getDate() !== now.getDate() ||
+    d.getMonth() !== now.getMonth() ||
+    d.getFullYear() !== now.getFullYear()
+  );
 }

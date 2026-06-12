@@ -13,6 +13,9 @@ export interface ThreadRowSource {
   platformThreadId: string;
   threadUrl: string | null;
   personId: string;
+  /** True for group threads (iMessage group chats). Optional because
+   *  older fixtures and callers only ever carried 1:1 rows. */
+  isGroup?: boolean;
   unreadCount: number;
   needsReply: boolean;
   lastMessagePreview: string | null;
@@ -99,6 +102,12 @@ export interface ShapedThreadRow {
    */
   personFavourite: boolean;
   platform: PlatformName;
+  /**
+   * True for group threads (iMessage group chats). The Reconnect page
+   * excludes groups - its "worth a hello" framing and the 1:1 AI scorer
+   * only make sense for a single person.
+   */
+  isGroup: boolean;
   preview: string;
   /**
    * "IN" when the latest message is from the other party, "OUT" when from
@@ -502,6 +511,7 @@ export function toInboxRow(
     personBirthYear: source.person.birthYear ?? null,
     personFavourite: source.person.favouritedAt != null,
     platform: source.platform,
+    isGroup: source.isGroup ?? false,
     preview: previewText,
     lastMessageDirection: display.lastMessageDirection ?? null,
     unreadCount: source.unreadCount,

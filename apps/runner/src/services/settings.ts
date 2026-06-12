@@ -46,6 +46,7 @@ const emptyFocusWindow: FocusWindowState = {
   endsAt: "",
   reason: "",
   note: "",
+  professionalNote: "",
   audience: "favourites",
   windowId: "",
   ackedPersonIds: []
@@ -109,6 +110,7 @@ function asFocusWindow(value: unknown): FocusWindowState {
     endsAt: asString(raw.endsAt),
     reason: asString(raw.reason),
     note: asString(raw.note),
+    professionalNote: asString(raw.professionalNote),
     audience: asFocusAudience(raw.audience),
     windowId: asString(raw.windowId),
     ackedPersonIds: asStringArray(raw.ackedPersonIds)

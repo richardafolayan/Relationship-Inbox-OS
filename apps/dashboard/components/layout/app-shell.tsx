@@ -2,9 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
+import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
@@ -19,6 +20,7 @@ import {
   buildNewMessageDigestNotice,
   buildNewMessageNotice,
   detectNewInbound,
+  NEW_MESSAGE_TOAST_DURATION_MS,
   notificationsSupported,
   notifyNewMessage,
   notifyNewMessageDigest,
@@ -27,6 +29,11 @@ import {
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
+import {
+  dismissCenterNotification,
+  markCenterNotificationsSeen,
+  recordNewMessageNotifications
+} from "@/lib/notification-center";
 import { showToast } from "@/lib/feedback";
 import {
   classifyDigestAckError,
@@ -159,6 +166,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         return;
       }
       const fresh = detectNewInbound(previous, rows);
+      // Every fresh inbound lands in the notification center, whatever the
+      // delivery plan turns out to be (toast, desktop ping, or quiet-hours
+      // silence): the bell must answer "what came in while I was away" even
+      // when the alert itself was missed or suppressed.
+      recordNewMessageNotifications(fresh);
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
       const plan = planNewMessageNotice({
@@ -180,25 +192,37 @@ export function AppShell({ children }: { children: ReactNode }) {
         case "toast-single":
           for (const row of fresh) {
             const notice = buildNewMessageNotice(row);
+            const threadId = row.id;
             showToast({
-              id: `new-message:${row.id}`,
+              id: `new-message:${threadId}`,
               kind: "info",
               title: notice.title,
               description: notice.body,
               href: notice.href,
-              durationMs: 6000
+              durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+              // Waving the toast away means "seen it": stop counting it in
+              // the bell badge but keep it listed for review. Clicking
+              // through opens the thread itself, so the entry is done.
+              onManualDismiss: () => markCenterNotificationsSeen([threadId]),
+              onActivate: () => dismissCenterNotification(threadId)
             });
           }
           return;
         case "toast-digest": {
           const notice = buildNewMessageDigestNotice(fresh);
+          const threadIds = fresh.map((row) => row.id);
           showToast({
             id: "new-message:digest",
             kind: "info",
             title: notice.title,
             description: notice.body,
             href: notice.href,
-            durationMs: 6000
+            durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+            // The digest stands in for several threads. Dismissing it, or
+            // opening /today from it, marks them all seen; each entry stays
+            // in the center until handled individually.
+            onManualDismiss: () => markCenterNotificationsSeen(threadIds),
+            onActivate: () => markCenterNotificationsSeen(threadIds)
           });
           return;
         }
@@ -512,10 +536,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className="grid h-screen overflow-hidden bg-paper text-ink"
+      // Single column below md (the sidebar hides; the MobileDock takes
+      // over). The sidebar width lives in a CSS var so the inline style
+      // can't override the phone layout — a plain gridTemplateColumns
+      // style would keep reserving the sidebar track at every width.
+      className="grid h-app-screen grid-cols-1 overflow-hidden bg-paper text-ink md:[grid-template-columns:var(--shell-cols)]"
       style={{
-        gridTemplateColumns: sidebarCollapsed ? "56px 1fr" : "200px 1fr"
-      }}
+        "--shell-cols": sidebarCollapsed ? "56px 1fr" : "200px 1fr"
+      } as CSSProperties}
     >
       <Sidebar
         health={health}
@@ -525,11 +553,12 @@ export function AppShell({ children }: { children: ReactNode }) {
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
       />
-      <div className="flex h-screen min-h-0 flex-col">
+      <div className="flex h-app-screen min-h-0 flex-col">
         <FullDemoBanner />
         <TopStatus />
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
+      <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />

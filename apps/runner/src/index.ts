@@ -38,7 +38,10 @@ import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
 import { decidePersonFavouriteAction } from "./services/person-favourite-action";
-import { buildReconnectCandidateWhere } from "./services/reconnect-candidate-query";
+import {
+  buildReconnectCandidateWhere,
+  isReconnectScorablePlatform
+} from "./services/reconnect-candidate-query";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters } from "./services/platform-factory";
@@ -1184,6 +1187,7 @@ const threadRowSelect = {
   platformThreadId: true,
   threadUrl: true,
   personId: true,
+  isGroup: true,
   unreadCount: true,
   needsReply: true,
   lastMessagePreview: true,
@@ -2228,6 +2232,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     select: {
       id: true,
       platform: true,
+      personId: true,
       lastMessageAt: true,
       lastInboundAt: true,
       rollingSummary: true,
@@ -2255,13 +2260,66 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     take: limit * 4 // overfetch so we can skip cache hits without blocking the limit
   });
 
+  // One iMessage contact can hold several sibling threads (phone + Apple-ID
+  // email). The dashboard collapses those to one row and reads AI fields -
+  // including reconnectScore - from the person's CANONICAL sibling over the
+  // FULL sibling set (#499), so a score persisted onto any other sibling
+  // never surfaces, and a person whose live sibling is still inside the
+  // horizon is not dormant at all. Load the full sibling sets for the
+  // iMessage candidates and keep only the canonical, person-dormant rows.
+  const reconnectImessagePersonIds = [
+    ...new Set(candidates.filter((t) => t.platform === "IMESSAGE").map((t) => t.personId))
+  ];
+  const imessageSiblings =
+    reconnectImessagePersonIds.length > 0
+      ? await prisma.thread.findMany({
+          where: { platform: "IMESSAGE", personId: { in: reconnectImessagePersonIds } },
+          select: {
+            id: true,
+            personId: true,
+            lastInboundAt: true,
+            lastMessageAt: true,
+            _count: { select: { messages: true } }
+          }
+        })
+      : [];
+  const siblingsByPerson = new Map<string, typeof imessageSiblings>();
+  for (const sibling of imessageSiblings) {
+    const list = siblingsByPerson.get(sibling.personId);
+    if (list) list.push(sibling);
+    else siblingsByPerson.set(sibling.personId, [sibling]);
+  }
+  const scoringCandidates = candidates.filter((thread) => {
+    if (thread.platform !== "IMESSAGE") return true;
+    const siblings = siblingsByPerson.get(thread.personId) ?? [];
+    // Person-level dormancy mirrors the collapsed row's display timestamp:
+    // the newest message across ALL siblings must be outside the horizon.
+    const liveSibling = siblings.some(
+      (s) => s.lastMessageAt && s.lastMessageAt.getTime() >= horizonCutoff.getTime()
+    );
+    if (liveSibling) return false;
+    const canonical = pickCanonicalThread(
+      siblings.map((s) => ({
+        id: s.id,
+        lastInboundAt: s.lastInboundAt,
+        messageCount: s._count?.messages ?? 0
+      }))
+    );
+    return canonical === null || canonical.id === thread.id;
+  });
+
   let scored = 0;
   let skipped = 0;
   let failed = 0;
   let unavailable = false;
 
-  for (const thread of candidates) {
+  for (const thread of scoringCandidates) {
     if (scored >= limit) break;
+
+    // Defensive narrow: the candidate where has no platform gate, and core's
+    // PlatformName carries a WHATSAPP placeholder no adapter ever writes.
+    const platform = thread.platform;
+    if (!isReconnectScorablePlatform(platform)) continue;
 
     const outboundCount = thread.messages.filter((m) => m.direction === "OUT").length;
     const totalCount = thread._count?.messages ?? thread.messages.length;
@@ -2272,10 +2330,12 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
 
     // Cache key intentionally narrow: only re-score when the signals
     // the AI was given actually change. A new outbound message would
-    // also un-dormant the thread, so this is mostly defensive.
+    // also un-dormant the thread, so this is mostly defensive. v2 bumps
+    // the version for the platform-aware prompt so scores persisted
+    // under the LinkedIn-only wording refresh on the next run.
     const cacheKey = stableHash(
       [
-        "reconnect-v1",
+        "reconnect-v2",
         thread.lastMessageAt?.toISOString() ?? "no-last",
         String(outboundCount),
         String(totalCount),
@@ -2303,6 +2363,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     const verdict = await aiService
       .scoreReconnectCandidate({
         displayName: thread.person.displayName,
+        platform,
         contactBlurb: blurb,
         daysDormant,
         operatorOutboundCount: outboundCount,
@@ -2336,7 +2397,7 @@ app.post("/control/reconnect/refresh-scores", asyncRoute(async (req, res) => {
     scored,
     skipped,
     failed,
-    candidates_seen: candidates.length,
+    candidates_seen: scoringCandidates.length,
     limit
   });
 }));
@@ -5552,6 +5613,9 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           endsAt: z.string().max(40),
           reason: z.string().max(80),
           note: z.string().max(2000),
+          // Older dashboard builds don't send it; default to "" (= fall
+          // back to the saved professional template).
+          professionalNote: z.string().max(2000).default(""),
           audience: z.enum(["favourites", "all_personal"]),
           windowId: z.string().max(80),
           ackedPersonIds: z.array(z.string().max(120)).max(5000)
@@ -5605,6 +5669,46 @@ app.post("/control/operator-profile/analyze-style", asyncRoute(async (_req, res)
     return;
   }
   res.json({ ok: true, sampleCount: sampleTexts.length, suggestion });
+}));
+
+// "Help me phrase this" for the Focus setup sheet. The operator types what
+// they're about to do; the AI phrases the two note tiers in their voice
+// (tokens [Name]/[until] kept literal), suggests a reason label and, when an
+// explicit end time was stated, the end time. Composes only — nothing is
+// saved or sent here; the sheet shows the result for the operator to edit.
+// Always 200; { ok:false, reason } lets the dashboard show a calm message.
+app.post("/control/focus/compose-note", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "phrase your focus note", kind: "external-action" })) return;
+  const payload = z
+    .object({ activity: z.string().trim().min(1).max(400) })
+    .parse(req.body);
+  // A handful of the operator's own authentic sends calibrates the voice —
+  // same selection rules as reply-style analysis (drops automation sends and
+  // placeholder bubbles), much smaller sample.
+  const rows = await prisma.message.findMany({
+    where: { direction: "OUT" },
+    orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+    take: 200,
+    select: { text: true, direction: true, sentVia: true }
+  });
+  const voiceSampleTexts = selectStyleSampleTexts(rows, 8);
+  const operatorProfile = await settingsStore.getOperatorProfile();
+  const composed = await aiService.composeFocusNote({
+    activity: payload.activity,
+    operatorProfile,
+    voiceSampleTexts
+  });
+  if (!composed) {
+    res.json({ ok: false, reason: "ai_unavailable" });
+    return;
+  }
+  res.json({
+    ok: true,
+    close: composed.close,
+    professional: composed.professional,
+    reasonLabel: composed.reason,
+    untilTime: composed.untilTime
+  });
 }));
 
 // Pilot feedback intake. The dashboard posts a tester's bug / feedback
