@@ -21,6 +21,7 @@ import { filterDismissedOpenLoops } from "./utils/open-loops";
 import { createSettingsStore } from "./services/settings";
 import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
+import { getLinkPreview } from "./services/link-preview";
 import {
   createAiService,
   contactSnapshotFingerprint,
@@ -3815,6 +3816,21 @@ app.post(
     res.json({ ok: true, ...result });
   })
 );
+
+// Unfurl a URL that appeared inside a message bubble. The dashboard asks
+// lazily per visible link and renders an iMessage-style preview card from
+// the result. All the heavy lifting (SSRF guarding, redirects, Open Graph
+// parse, TikTok oEmbed, caching) lives in services/link-preview.ts. Always
+// answers 200 with a status field - a failed unfurl degrades to a plain
+// link client-side, never an error toast.
+app.get("/data/link-preview", asyncRoute(async (req, res) => {
+  const raw = typeof req.query.url === "string" ? req.query.url : "";
+  if (!raw.trim()) {
+    res.status(400).json({ error: "url query parameter is required" });
+    return;
+  }
+  res.json(await getLinkPreview(raw));
+}));
 
 app.get("/data/inbox", asyncRoute(async (req, res) => {
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
