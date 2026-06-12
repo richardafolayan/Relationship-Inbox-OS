@@ -22,10 +22,11 @@ const {
   onCenterNotificationsChange,
   recordOverdueDigestNotification,
   selectToastsToRehydrate,
+  planToastRehydration,
   NOTIFICATION_CENTER_CAP,
   NOTIFICATION_CENTER_STORAGE_KEY,
   OVERDUE_DIGEST_NOTIFICATION_ID,
-  REHYDRATE_TOAST_CAP
+  REHYDRATE_SINGLES_MAX
 } = await import("../apps/dashboard/lib/notification-center.ts");
 const { NEW_MESSAGE_TOAST_DURATION_MS } = await import("../apps/dashboard/lib/notifications.ts");
 
@@ -154,16 +155,63 @@ test("selectToastsToRehydrate: only unseen notices inside the window, with the r
   assert.equal(picked[0].remainingMs, win - 5_000);
 });
 
-test("selectToastsToRehydrate: newest first, capped, badge covers the rest", () => {
+test("selectToastsToRehydrate: newest first, uncapped (the plan splits presentation)", () => {
   const now = 100_000;
-  const entries = Array.from({ length: REHYDRATE_TOAST_CAP + 2 }, (_, i) =>
+  const entries = Array.from({ length: REHYDRATE_SINGLES_MAX + 2 }, (_, i) =>
     entry({ id: `t-${i}`, at: now - (i + 1) * 1000 })
   );
   const picked = selectToastsToRehydrate(entries, now);
-  assert.equal(picked.length, REHYDRATE_TOAST_CAP);
-  // t-0 is the newest (1s old), then t-1, t-2.
+  assert.equal(picked.length, REHYDRATE_SINGLES_MAX + 2);
+  // t-0 is the newest (1s old), then t-1, t-2...
   assert.deepEqual(
-    picked.map((n) => n.entry.id),
+    picked.slice(0, 3).map((n) => n.entry.id),
+    ["t-0", "t-1", "t-2"]
+  );
+});
+
+test("planToastRehydration mirrors the live matrix: none / singles / digest", () => {
+  const now = 100_000;
+  assert.equal(planToastRehydration([], now).kind, "none");
+  assert.equal(planToastRehydration([entry({ seen: true })], now).kind, "none");
+
+  // Up to the singles boundary: individual toasts, newest first.
+  const three = Array.from({ length: REHYDRATE_SINGLES_MAX }, (_, i) =>
+    entry({ id: `t-${i}`, at: now - (i + 1) * 1000 })
+  );
+  const singles = planToastRehydration(three, now);
+  assert.equal(singles.kind, "singles");
+  assert.equal(singles.notices.length, REHYDRATE_SINGLES_MAX);
+
+  // Past it: ONE digest standing in for every qualifying thread, living as
+  // long as the freshest member would have. A reload must never turn the
+  // live "N new messages" roll-up into a storm of per-thread cards.
+  const five = Array.from({ length: 5 }, (_, i) =>
+    entry({ id: `t-${i}`, at: now - (i + 1) * 1000 })
+  );
+  const digest = planToastRehydration(five, now);
+  assert.equal(digest.kind, "digest");
+  assert.equal(digest.count, 5);
+  assert.deepEqual(digest.threadIds, ["t-0", "t-1", "t-2", "t-3", "t-4"]);
+  assert.equal(digest.remainingMs, NEW_MESSAGE_TOAST_DURATION_MS - 1000);
+});
+
+test("planToastRehydration digest counts only qualifying notices", () => {
+  // Seen / expired / bell-first entries neither trigger nor join a digest.
+  const now = 100_000;
+  const plan = planToastRehydration(
+    [
+      entry({ id: "t-0", at: now - 1000 }),
+      entry({ id: "t-1", at: now - 2000 }),
+      entry({ id: "t-2", at: now - 3000 }),
+      entry({ id: "t-3", at: now - 4000, seen: true }),
+      entry({ id: OVERDUE_DIGEST_NOTIFICATION_ID, href: "/today", at: now - 500 }),
+      entry({ id: "t-old", at: now - NEW_MESSAGE_TOAST_DURATION_MS - 1 })
+    ],
+    now
+  );
+  assert.equal(plan.kind, "singles");
+  assert.deepEqual(
+    plan.notices.map((n) => n.entry.id),
     ["t-0", "t-1", "t-2"]
   );
 });

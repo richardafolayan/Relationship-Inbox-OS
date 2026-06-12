@@ -117,20 +117,25 @@ function isCenterNotification(value: unknown): value is CenterNotification {
 // operator's chair that read as "I clicked one notification and they all
 // disappeared". The center is the durable copy: on a fresh mount, any
 // notice still unseen and inside its toast window comes back for the
-// REMAINING time only. Capped like the live notice matrix (anything past
-// the cap is what the bell badge is for), newest first.
-export const REHYDRATE_TOAST_CAP = 3;
+// REMAINING time only.
+
+// The singles/digest boundary, mirroring planNewMessageNotice: up to this
+// many notices re-show individually, more roll up into one digest toast -
+// the same rule the live path applies, so a reload can never turn one calm
+// "N new messages" roll-up into a storm of per-thread cards (or vice versa).
+export const REHYDRATE_SINGLES_MAX = 3;
 
 export interface RehydratableNotice {
   entry: CenterNotification;
   remainingMs: number;
 }
 
+// Every notice that still deserves toast time, newest first, uncapped - the
+// presentation split lives in planToastRehydration.
 export function selectToastsToRehydrate(
   entries: CenterNotification[],
   now: number,
-  windowMs: number = NEW_MESSAGE_TOAST_DURATION_MS,
-  cap: number = REHYDRATE_TOAST_CAP
+  windowMs: number = NEW_MESSAGE_TOAST_DURATION_MS
 ): RehydratableNotice[] {
   return entries
     // Only per-thread message notices ever had a toast to restore. Bell-first
@@ -142,8 +147,39 @@ export function selectToastsToRehydrate(
     // means a future-dated entry (clock skew or a tampered store): skip it
     // rather than show a toast that outlives the 30 second promise.
     .filter((notice) => notice.remainingMs > 0 && notice.remainingMs <= windowMs)
-    .sort((a, b) => b.entry.at - a.entry.at)
-    .slice(0, cap);
+    .sort((a, b) => b.entry.at - a.entry.at);
+}
+
+// What a fresh mount should put back on screen.
+export type ToastRehydrationPlan =
+  | { kind: "none" }
+  | { kind: "singles"; notices: RehydratableNotice[] }
+  | {
+      kind: "digest";
+      // Thread ids the digest stands in for (dismissing it marks them seen,
+      // exactly like the live digest toast).
+      threadIds: string[];
+      count: number;
+      // The newest notice's remaining time: the roll-up lives as long as
+      // its freshest member would have.
+      remainingMs: number;
+    };
+
+export function planToastRehydration(
+  entries: CenterNotification[],
+  now: number,
+  windowMs: number = NEW_MESSAGE_TOAST_DURATION_MS
+): ToastRehydrationPlan {
+  const qualifying = selectToastsToRehydrate(entries, now, windowMs);
+  const [newest] = qualifying;
+  if (!newest) return { kind: "none" };
+  if (qualifying.length <= REHYDRATE_SINGLES_MAX) return { kind: "singles", notices: qualifying };
+  return {
+    kind: "digest",
+    threadIds: qualifying.map((notice) => notice.entry.id),
+    count: qualifying.length,
+    remainingMs: newest.remainingMs
+  };
 }
 
 // ---------------------------------------------------------------------------

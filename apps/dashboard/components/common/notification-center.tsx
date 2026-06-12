@@ -10,8 +10,8 @@ import {
   markAllCenterNotificationsSeen,
   markCenterNotificationsSeen,
   onCenterNotificationsChange,
+  planToastRehydration,
   readCenterNotifications,
-  selectToastsToRehydrate,
   unseenNotificationCount,
   type CenterNotification
 } from "@/lib/notification-center";
@@ -61,23 +61,37 @@ export function NotificationBell() {
     // A toast event dispatched now would be lost unheard - every mount
     // effect has flushed by the time a 0ms timer fires.
     const handle = window.setTimeout(() => {
-      for (const { entry, remainingMs } of selectToastsToRehydrate(
-        readCenterNotifications(),
-        Date.now()
-      )) {
-        const threadId = entry.id;
+      const plan = planToastRehydration(readCenterNotifications(), Date.now());
+      if (plan.kind === "singles") {
+        for (const { entry, remainingMs } of plan.notices) {
+          const threadId = entry.id;
+          showToast({
+            id: `new-message:${threadId}`,
+            kind: "info",
+            title: entry.title,
+            description: entry.body,
+            href: entry.href,
+            durationMs: remainingMs,
+            // Same interplay as the live toast (app-shell maybeNotify):
+            // waving it away keeps the entry listed but seen; opening the
+            // thread completes it.
+            onManualDismiss: () => markCenterNotificationsSeen([threadId]),
+            onActivate: () => dismissCenterNotification(threadId)
+          });
+        }
+      } else if (plan.kind === "digest") {
+        // 4+ notices roll up exactly like the live path: one calm digest
+        // card, never a storm of per-thread toasts after a reload.
+        const { threadIds } = plan;
         showToast({
-          id: `new-message:${threadId}`,
+          id: "new-message:digest",
           kind: "info",
-          title: entry.title,
-          description: entry.body,
-          href: entry.href,
-          durationMs: remainingMs,
-          // Same interplay as the live toast (app-shell maybeNotify):
-          // waving it away keeps the entry listed but seen; opening the
-          // thread completes it.
-          onManualDismiss: () => markCenterNotificationsSeen([threadId]),
-          onActivate: () => dismissCenterNotification(threadId)
+          title: `${plan.count} new messages`,
+          description: "Several conversations are waiting on a reply.",
+          href: "/today",
+          durationMs: plan.remainingMs,
+          onManualDismiss: () => markCenterNotificationsSeen(threadIds),
+          onActivate: () => markCenterNotificationsSeen(threadIds)
         });
       }
     }, 0);
