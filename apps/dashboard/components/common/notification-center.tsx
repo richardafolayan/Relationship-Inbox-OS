@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Bell } from "lucide-react";
 import {
@@ -93,7 +94,16 @@ export function NotificationBell() {
       </button>
 
       {open ? (
-        <div className="fixed inset-0 z-50" role="dialog" aria-modal="true" aria-label="Notifications">
+        // Portalled to <body>: the bell lives inside the TopStatus bar,
+        // whose sticky z-30 container is its own stacking context - a
+        // fixed overlay rendered in place would be capped at z-30 and lose
+        // to the ToastHost (z-50) no matter what z-index it claims.
+        // z-[60]: above the ToastHost. A toast that fires while the panel
+        // is open would otherwise sit on top of the list and intercept row
+        // clicks - the panel shows the same arrival as a live row, so it
+        // wins while open and the toast quietly expires underneath.
+        createPortal(
+        <div className="fixed inset-0 z-[60]" role="dialog" aria-modal="true" aria-label="Notifications">
           <div className="absolute inset-0 bg-ink/40" onClick={closePanel} />
           <div
             data-testid="notification-center-panel"
@@ -156,7 +166,9 @@ export function NotificationBell() {
               </div>
             )}
           </div>
-        </div>
+        </div>,
+        document.body
+        )
       ) : null}
     </>
   );
@@ -182,7 +194,12 @@ function CenterRow({
     if ((e.target as HTMLElement).closest("[data-row-close]")) return;
     startXRef.current = e.clientX;
     setDragging(true);
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unavailable (synthetic or already-released pointer) - the
+         move/up handlers still work without it */
+    }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {

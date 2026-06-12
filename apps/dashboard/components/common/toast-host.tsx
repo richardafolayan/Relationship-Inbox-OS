@@ -89,7 +89,11 @@ export function ToastHost() {
   return (
     <div
       data-testid="toast-host"
-      className="pointer-events-none fixed right-4 top-4 z-50 flex w-[320px] flex-col gap-2"
+      // top-[56px]: just below the 44px TopStatus bar. Toasts used to start
+      // at top-4 and sat on top of the bar's right-hand controls - with the
+      // 30s new-message duration that parked a card over the notification
+      // bell (and Focus / Scan now) for half a minute per arrival.
+      className="pointer-events-none fixed right-4 top-[56px] z-50 flex w-[320px] flex-col gap-2"
     >
       {toasts.map((toast) => (
         <ToastCard key={toast.id} toast={toast} onDismiss={dismiss} />
@@ -134,7 +138,12 @@ function ToastCard({
     if ((e.target as HTMLElement).closest("[data-toast-close]")) return;
     startXRef.current = e.clientX;
     setDragging(true);
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    try {
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+    } catch {
+      /* capture unavailable (synthetic or already-released pointer) - the
+         move/up handlers still work without it */
+    }
   };
 
   const onPointerMove = (e: React.PointerEvent) => {
