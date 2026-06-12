@@ -52,6 +52,30 @@ export default function SettingsPage() {
   // Clearing the dismissed flag brings the welcome card back on Today.
   const [welcomeReset, setWelcomeReset] = useState(false);
 
+  // /settings#app-updates (the update toast / bell entry lands here): scroll
+  // the App updates card into view and flash a short highlight ring so the
+  // eye finds it. Mount covers cross-page navigation; hashchange covers
+  // manual edits and back/forward.
+  const [highlightUpdates, setHighlightUpdates] = useState(false);
+  useEffect(() => {
+    let timer: number | undefined;
+    const maybeHighlight = () => {
+      if (window.location.hash !== "#app-updates") return;
+      document
+        .getElementById("app-updates")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightUpdates(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
+    };
+    maybeHighlight();
+    window.addEventListener("hashchange", maybeHighlight);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("hashchange", maybeHighlight);
+    };
+  }, []);
+
   useEffect(() => {
     setAutoScanDisabled(
       resolveAutoScanDisabled({
@@ -227,11 +251,18 @@ export default function SettingsPage() {
         <FullDemoSettingsCard />
       </section>
 
-      <section className="mt-10">
+      <section id="app-updates" className="mt-10 scroll-mt-24">
         <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
           App updates
         </p>
-        <AppUpdates />
+        <div
+          className={cn(
+            "rounded-row transition-shadow duration-500",
+            highlightUpdates && "ring-2 ring-accent/70"
+          )}
+        >
+          <AppUpdates />
+        </div>
       </section>
 
       <section className="mt-10">
