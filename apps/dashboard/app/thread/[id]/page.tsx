@@ -79,6 +79,9 @@ import {
 } from "@/lib/dictation-retry";
 import { stopRecorderAndStream } from "@/lib/recorder-teardown";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
+import { LinkPreviewCard, type LinkPreviewData } from "@/components/thread/link-preview-card";
+import { InAppBrowser, type InAppBrowserTarget } from "@/components/thread/in-app-browser";
+import { extractUrls, splitTextSegments, urlOnlyMessage } from "@/lib/linkify";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
@@ -352,6 +355,48 @@ function DayDivider({ label, className }: { label: string; className?: string })
   );
 }
 
+function MessageTextWithLinks({
+  text,
+  onOpenLink
+}: {
+  text: string;
+  onOpenLink: (url: string) => void;
+}) {
+  // Bubble text never changes once rendered, so the regex split is memoed
+  // against the timeline's frequent SSE/poll re-renders.
+  const segments = useMemo(() => splitTextSegments(text), [text]);
+  const hasUrl = segments.some((segment) => segment.type === "url");
+  if (!hasUrl) {
+    return <span className="text-balance whitespace-pre-wrap">{text}</span>;
+  }
+  return (
+    <span className="text-balance whitespace-pre-wrap">
+      {segments.map((segment, index) =>
+        segment.type === "url" ? (
+          <a
+            key={index}
+            href={segment.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="break-all underline underline-offset-2"
+            onClick={(event) => {
+              // Cmd/ctrl/shift-click keeps the native new-tab behaviour; a
+              // plain click opens the in-app browser overlay instead.
+              if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+              event.preventDefault();
+              onOpenLink(segment.href);
+            }}
+          >
+            {segment.value}
+          </a>
+        ) : (
+          <span key={index}>{segment.value}</span>
+        )
+      )}
+    </span>
+  );
+}
+
 function ParticipantPopover({
   handle,
   platform,
@@ -527,6 +572,11 @@ export default function ThreadPage() {
   // the optimistic overlay renders the just-applied "OUT" reaction
   // immediately, before the next thread refresh confirms it server-side.
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  // In-app browser overlay for links inside bubbles (null = closed).
+  const [linkBrowserTarget, setLinkBrowserTarget] = useState<InAppBrowserTarget | null>(null);
+  const openLinkInApp = useCallback((url: string, preview: LinkPreviewData | null = null) => {
+    setLinkBrowserTarget({ url, preview });
+  }, []);
   const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
   const [reactionErrorByMessageId, setReactionErrorByMessageId] = useState<Record<string, string>>({});
   const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
@@ -3520,6 +3570,14 @@ export default function ThreadPage() {
                       const hasInlineMedia = playableAttachments.length > 0;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
+                      // A message that is exactly one URL renders as a
+                      // preview card instead of a bare-link bubble (same
+                      // as iMessage). Mixed text keeps its bubble and
+                      // gains one card under the text (first URL only).
+                      const soloLinkUrl =
+                        showText && !hasInlineMedia ? urlOnlyMessage(message.text) : null;
+                      const inlineCardUrl =
+                        showText && !soloLinkUrl ? (extractUrls(message.text)[0] ?? null) : null;
                       const nativeReactions =
                         (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
                       const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
@@ -3543,6 +3601,9 @@ export default function ThreadPage() {
                       return (
                         <>
                         <div className="group relative">
+                          {soloLinkUrl ? (
+                            <LinkPreviewCard url={soloLinkUrl} onOpen={openLinkInApp} />
+                          ) : (
                           <div
                             className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                               message.direction === "OUT"
@@ -3581,9 +3642,13 @@ export default function ThreadPage() {
                               </div>
                             ) : null}
                             {showText ? (
-                              <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                              <MessageTextWithLinks text={message.text} onOpenLink={openLinkInApp} />
+                            ) : null}
+                            {inlineCardUrl ? (
+                              <LinkPreviewCard url={inlineCardUrl} onOpen={openLinkInApp} />
                             ) : null}
                           </div>
+                          )}
                           {reactions.length > 0 ? (
                             <div
                               className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
@@ -4766,6 +4831,8 @@ export default function ThreadPage() {
           onClose={() => setProfileDrawerOpen(false)}
         />
       ) : null}
+
+      <InAppBrowser target={linkBrowserTarget} onClose={() => setLinkBrowserTarget(null)} />
     </div>
   );
 }
