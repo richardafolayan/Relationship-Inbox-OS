@@ -38,20 +38,41 @@ test("LinkedIn dormant genuine threads are reconnect candidates", () => {
   );
 });
 
-test("non-LinkedIn platforms are never reconnect candidates", () => {
+test("every platform is a reconnect candidate when dormant", () => {
+  // Reconnect began LinkedIn-only; the operator asked for iMessage and
+  // the rest too, so the platform gate is gone. Same dormancy rules for
+  // all of them.
+  for (const platform of ["IMESSAGE", "INSTAGRAM", "TIKTOK", "LINKEDIN"]) {
+    assert.equal(
+      isReconnectCandidate({
+        platform,
+        lastMessageAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString()
+      }),
+      true,
+      `${platform} dormant thread should be a candidate`
+    );
+  }
+});
+
+test("group threads are never reconnect candidates", () => {
+  // iMessage group chats are real threads, but a per-person "worth a
+  // hello" and the 1:1 relationship scorer do not fit a group.
   assert.equal(
     isReconnectCandidate({
       platform: "IMESSAGE",
+      isGroup: true,
       lastMessageAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString()
     }),
     false
   );
+  // Absent / false isGroup (legacy payloads, 1:1 rows) stays eligible.
   assert.equal(
     isReconnectCandidate({
-      platform: "INSTAGRAM",
+      platform: "IMESSAGE",
+      isGroup: false,
       lastMessageAt: new Date(Date.now() - 400 * 24 * 60 * 60 * 1000).toISOString()
     }),
-    false
+    true
   );
 });
 

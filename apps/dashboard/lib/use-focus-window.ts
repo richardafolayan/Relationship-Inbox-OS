@@ -50,6 +50,40 @@ function newWindowId(): string {
   return `fw_${Date.now().toString(36)}_${Math.round(Math.random() * 1e9).toString(36)}`;
 }
 
+// ─────────────────────────── expiry reconciliation ───────────────────────────
+// Liveness is derived from the clock (isFocusActive checks endsAt), so the UI
+// flips off the moment a window lapses even if nothing below runs. These two
+// guards exist to also write `active:false` back to the profile exactly once,
+// so Settings, other tabs and the next reload agree without each deriving it.
+
+// One reconciliation per expired window across every mounted hook instance
+// (top bar, rail card, overlays and Settings all run useFocusWindow at once).
+const reconciledWindowIds = new Set<string>();
+// Suppress the reconciler while a user-initiated profile write is in flight,
+// so an "extend window" / "start focus" click racing the expiry timer can't
+// be clobbered by a stale deactivation built from the pre-click snapshot.
+let profileWriteInFlight = false;
+
+async function reconcileExpiredWindow(windowId: string): Promise<void> {
+  if (!windowId || reconciledWindowIds.has(windowId) || profileWriteInFlight) return;
+  reconciledWindowIds.add(windowId);
+  try {
+    // Re-read the freshest profile first: if the operator extended this
+    // window or already started a new one, there is nothing to end.
+    const profile = await apiGet<OperatorProfile>(PROFILE_PATH);
+    const current = profile?.focusWindow;
+    if (!current || current.windowId !== windowId || !current.active) return;
+    if (isFocusActive(current) || profileWriteInFlight) return;
+    await apiPost<OperatorProfile>("/runner/control/operator-profile", {
+      focusWindow: { ...current, active: false }
+    });
+    emitFocusChanged();
+  } catch {
+    // Leave it derivable-only; retry next time a surface observes the expiry.
+    reconciledWindowIds.delete(windowId);
+  }
+}
+
 /**
  * Send an acknowledgement as a NORMAL outbound message through the existing
  * send path — no new send machinery. The runner tags it sentVia:"automation"
@@ -67,9 +101,23 @@ export interface UseFocusWindow {
   settings: FocusSettings;
   active: boolean;
   reload: () => void;
-  startFocus: (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) => Promise<OperatorProfile>;
-  /** Edit a live window's end/reason/note/audience without clearing acks. */
-  updateFocus: (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) => Promise<OperatorProfile>;
+  startFocus: (opts: {
+    endsAt: string;
+    reason: string;
+    note: string;
+    /** Professional-tier note for this window ("" = use the saved template). */
+    professionalNote?: string;
+    audience: FocusAudience;
+  }) => Promise<OperatorProfile>;
+  /** Edit a live window's end/reason/notes/audience without clearing acks. */
+  updateFocus: (opts: {
+    endsAt: string;
+    reason: string;
+    note: string;
+    /** Omitted = keep the window's current professional note. */
+    professionalNote?: string;
+    audience: FocusAudience;
+  }) => Promise<OperatorProfile>;
   endFocus: () => Promise<OperatorProfile>;
   editNote: (note: string) => Promise<OperatorProfile>;
   markAcked: (personId: string | undefined) => Promise<void>;
@@ -106,15 +154,61 @@ export function useFocusWindow(): UseFocusWindow {
   const templates = readAckTemplates(profile);
   const settings = readFocusSettings(profile);
 
+  // Flip the UI off the moment the live window's endsAt passes, without a
+  // reload. isFocusActive() already derives liveness from the clock at every
+  // render; this effect only guarantees a render HAPPENS right after endsAt
+  // (timer while visible, catch-up on tab return) and triggers the one-shot
+  // storage reconciliation once the window has lapsed. Bumping expiryTick
+  // re-runs the effect (it is in the dep list), so long windows re-arm
+  // hourly rather than trusting one giant setTimeout across laptop sleeps.
+  // The lapsed branch never bumps — that would re-render in a loop.
+  const [expiryTick, setExpiryTick] = useState(0);
+  const endsAtMs = Date.parse(focusWindow.endsAt ?? "");
+  useEffect(() => {
+    if (!focusWindow.active || !Number.isFinite(endsAtMs)) return undefined;
+    if (Date.now() >= endsAtMs) {
+      // Already lapsed (timer just fired, a reload after the end, or a stale
+      // profile from before this fix). Derived state is already inactive;
+      // write it back once so storage and other tabs agree.
+      void reconcileExpiredWindow(focusWindow.windowId);
+      return undefined;
+    }
+    const delay = Math.min(endsAtMs - Date.now() + 250, 60 * 60 * 1000);
+    const timer = setTimeout(() => setExpiryTick((n) => n + 1), delay);
+    // Background tabs throttle timers and laptops sleep through them; catch
+    // up the instant the tab is visible again.
+    const onVisibility = () => {
+      if (document.visibilityState === "visible" && Date.now() >= endsAtMs) {
+        setExpiryTick((n) => n + 1);
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [focusWindow.active, endsAtMs, focusWindow.windowId, expiryTick]);
+
   const update = useCallback(async (partial: Partial<OperatorProfile>) => {
-    const next = await apiPost<OperatorProfile>("/runner/control/operator-profile", partial);
-    setProfile(next);
-    emitFocusChanged();
-    return next;
+    profileWriteInFlight = true;
+    try {
+      const next = await apiPost<OperatorProfile>("/runner/control/operator-profile", partial);
+      setProfile(next);
+      emitFocusChanged();
+      return next;
+    } finally {
+      profileWriteInFlight = false;
+    }
   }, []);
 
   const startFocus = useCallback(
-    (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) =>
+    (opts: {
+      endsAt: string;
+      reason: string;
+      note: string;
+      professionalNote?: string;
+      audience: FocusAudience;
+    }) =>
       update({
         focusWindow: {
           active: true,
@@ -122,6 +216,7 @@ export function useFocusWindow(): UseFocusWindow {
           endsAt: opts.endsAt,
           reason: opts.reason,
           note: opts.note,
+          professionalNote: opts.professionalNote ?? "",
           audience: opts.audience,
           windowId: newWindowId(),
           ackedPersonIds: []
@@ -131,7 +226,13 @@ export function useFocusWindow(): UseFocusWindow {
   );
 
   const updateFocus = useCallback(
-    (opts: { endsAt: string; reason: string; note: string; audience: FocusAudience }) =>
+    (opts: {
+      endsAt: string;
+      reason: string;
+      note: string;
+      professionalNote?: string;
+      audience: FocusAudience;
+    }) =>
       update({
         focusWindow: {
           ...readFocusWindow(profile),
@@ -139,6 +240,8 @@ export function useFocusWindow(): UseFocusWindow {
           endsAt: opts.endsAt,
           reason: opts.reason,
           note: opts.note,
+          professionalNote:
+            opts.professionalNote ?? readFocusWindow(profile).professionalNote ?? "",
           audience: opts.audience
         }
       }),

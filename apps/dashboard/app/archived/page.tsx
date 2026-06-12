@@ -382,9 +382,11 @@ export default function ArchivedPage() {
             ) : null}
           </label>
 
-          {/* Outcome tabs + tools cluster */}
-          <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
-            <div className="flex flex-1 flex-wrap gap-[1px]">
+          {/* Outcome tabs + tools cluster. On phone the tools sit above a
+              horizontally-scrollable tab strip (no wrap) so the bar stays
+              two calm rows instead of a tall pile. */}
+          <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
+            <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
               {OUTCOME_TABS.map((entry) => {
                 const active = tab === entry.key;
                 const count = counts[entry.key];
@@ -395,7 +397,7 @@ export default function ArchivedPage() {
                     type="button"
                     onClick={() => setTab(entry.key)}
                     className={cn(
-                      "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                      "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
                       active
                         ? "border-accent font-medium text-ink"
                         : zero
@@ -416,7 +418,7 @@ export default function ArchivedPage() {
                 );
               })}
             </div>
-            <div className="flex items-center gap-[4px] pb-[6px]">
+            <div className="flex items-center justify-end gap-[4px] pb-[6px]">
               <SortMenu value={sortMode} options={ARCH_SORTS} onChange={setSortMode} />
               <PlatformPopover platformFilter={platformFilter} onPlatform={setPlatformFilter} />
               {orderedIds.length > 0 || selectMode ? (

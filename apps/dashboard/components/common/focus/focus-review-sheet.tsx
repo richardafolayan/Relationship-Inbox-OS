@@ -3,21 +3,47 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Check } from "lucide-react";
 import { apiGet } from "@/lib/api";
-import { isQuietHoursActive } from "@/lib/quiet-hours";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { FocusSheet } from "@/components/common/focus/focus-sheet";
-import { coverageForRow, isFocusAckCandidate, noteForRow } from "@/lib/focus";
-import { sendAcknowledgement, type UseFocusWindow } from "@/lib/use-focus-window";
+import {
+  coverageForRow,
+  focusAckExclusion,
+  isFocusAckCandidate,
+  noteForRow,
+  type FocusAckExclusion
+} from "@/lib/focus";
+import { openFocusSetup, sendAcknowledgement, type UseFocusWindow } from "@/lib/use-focus-window";
 import type { InboxResponse, InboxRow } from "@/lib/types";
 
 type RowState = "open" | "sent" | "dismissed";
 
 function rowKey(row: InboxRow): string {
   return row.personId ?? row.id;
+}
+
+// People who messaged during the window but get no note, with the reason. The
+// sheet says so out loud — a filtered contact must never read as "nothing's
+// come in" (pilot report: messages arrived, sheet claimed none had).
+interface FilteredEntry {
+  row: InboxRow;
+  reason: Extract<FocusAckExclusion, "not_covered" | "already_heard" | "already_acked">;
+}
+
+function filteredReasonLine(reason: FilteredEntry["reason"], audience: string): string {
+  switch (reason) {
+    case "not_covered":
+      return audience === "favourites"
+        ? "Outside who this window covers (favourites only)."
+        : "Outside who this window covers.";
+    case "already_heard":
+      return "Already heard from you since their message.";
+    default:
+      return "Already got their one note this window.";
+  }
 }
 
 export function FocusReviewSheet({
@@ -29,8 +55,9 @@ export function FocusReviewSheet({
   onClose: () => void;
   focus: UseFocusWindow;
 }) {
-  const { focusWindow, settings, templates, markAcked, markManyAcked } = focus;
+  const { focusWindow, settings, templates, markAcked, markManyAcked, active } = focus;
   const [candidates, setCandidates] = useState<InboxRow[]>([]);
+  const [filtered, setFiltered] = useState<FilteredEntry[]>([]);
   const [state, setState] = useState<Record<string, RowState>>({});
   const [notes, setNotes] = useState<Record<string, string>>({});
   const [editing, setEditing] = useState<string | null>(null);
@@ -55,10 +82,18 @@ export function FocusReviewSheet({
     void apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 2000 })
       .then((res) => {
         if (cancelled) return;
-        const quiet = isQuietHoursActive();
-        const cands = res.rows.filter((row) =>
-          isFocusAckCandidate(row, fwRef.current, settingsRef.current, { quietHoursActive: quiet })
-        );
+        const cands: InboxRow[] = [];
+        const left: FilteredEntry[] = [];
+        for (const row of res.rows) {
+          const verdict = focusAckExclusion(row, fwRef.current, settingsRef.current);
+          if (verdict === "candidate") cands.push(row);
+          // During-window contacts left alone for a reason worth saying.
+          // "not_during"/"handled" rows stay hidden — nothing arrived, or
+          // nothing is waiting on the operator.
+          else if (verdict === "not_covered" || verdict === "already_heard" || verdict === "already_acked") {
+            left.push({ row, reason: verdict });
+          }
+        }
         const nextState: Record<string, RowState> = {};
         const nextNotes: Record<string, string> = {};
         for (const row of cands) {
@@ -67,12 +102,16 @@ export function FocusReviewSheet({
           nextNotes[key] = noteForRow(row, fwRef.current, templatesRef.current);
         }
         setCandidates(cands);
+        setFiltered(left);
         setState(nextState);
         setNotes(nextNotes);
         setEditing(null);
       })
       .catch(() => {
-        if (!cancelled) setCandidates([]);
+        if (!cancelled) {
+          setCandidates([]);
+          setFiltered([]);
+        }
       });
     return () => {
       cancelled = true;
@@ -84,7 +123,9 @@ export function FocusReviewSheet({
   const sendOne = useCallback(
     async (row: InboxRow) => {
       const key = rowKey(row);
-      if (state[key] !== "open" || busy) return;
+      // The window can lapse while the sheet is open; the notes promise a
+      // "till X" that has passed, so nothing may be sent past the end.
+      if (!active || state[key] !== "open" || busy) return;
       setBusy(true);
       try {
         await sendAcknowledgement(row.id, notes[key] ?? noteForRow(row, focusWindow, templates));
@@ -97,7 +138,7 @@ export function FocusReviewSheet({
         setBusy(false);
       }
     },
-    [state, busy, notes, focusWindow, templates, markAcked]
+    [active, state, busy, notes, focusWindow, templates, markAcked]
   );
 
   const dismissOne = useCallback(
@@ -113,7 +154,7 @@ export function FocusReviewSheet({
   );
 
   const sendAll = useCallback(async () => {
-    if (busy) return;
+    if (!active || busy) return;
     setBusy(true);
     try {
       const open = candidates.filter((row) => state[rowKey(row)] === "open");
@@ -130,11 +171,14 @@ export function FocusReviewSheet({
     } finally {
       setBusy(false);
     }
-  }, [busy, candidates, state, notes, focusWindow, templates, markManyAcked]);
+  }, [active, busy, candidates, state, notes, focusWindow, templates, markManyAcked]);
 
-  const title =
-    candidates.length === 0
-      ? "Nothing's come in yet."
+  const title = !active
+    ? "This focus window has ended."
+    : candidates.length === 0
+      ? filtered.length === 0
+        ? "Nothing's come in yet."
+        : `${filtered.length} ${filtered.length === 1 ? "person" : "people"} messaged, no notes on offer.`
       : openCount === 0
         ? "All acknowledged."
         : `${openCount} ${openCount === 1 ? "person" : "people"} messaged.`;
@@ -146,13 +190,17 @@ export function FocusReviewSheet({
       eyebrow="During your focus block"
       title={title}
       sub={
-        candidates.length === 0
-          ? "When a covered contact messages, you'll be able to send them a quick note here."
-          : "Send a quick note so they know you've seen them. Your proper replies still wait in Today."
+        !active
+          ? "These quick notes only make sense mid-block, so none can be sent now."
+          : candidates.length === 0
+            ? filtered.length === 0
+              ? "When a covered contact messages, you'll be able to send them a quick note here."
+              : "Here's why each one was left alone. Nothing was sent."
+            : "Send a quick note so they know you've seen them. Your proper replies still wait in Today."
       }
       footer={
         <>
-          {openCount > 0 ? (
+          {active && openCount > 0 ? (
             <Button variant="primary" onClick={() => void sendAll()} disabled={busy}>
               Send note to all waiting
             </Button>
@@ -163,7 +211,11 @@ export function FocusReviewSheet({
         </>
       }
     >
-      {candidates.length === 0 ? (
+      {!active ? (
+        <p className="py-4 text-[13.5px] leading-[1.5] text-ink-2">
+          You're back. Anyone still waiting is in Today, ready for their proper reply.
+        </p>
+      ) : candidates.length === 0 && filtered.length === 0 ? (
         <p className="py-4 text-[13.5px] leading-[1.5] text-ink-2">
           No covered contact has messaged since this window started. The buffer only ever offers a
           note for people you'd actually want to reassure.
@@ -252,6 +304,45 @@ export function FocusReviewSheet({
               </div>
             );
           })}
+
+          {filtered.length > 0 ? (
+            <div className={candidates.length > 0 ? "mt-3 border-t border-hairline pt-3" : ""}>
+              <p className="m-0 mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                Left alone on purpose
+              </p>
+              {filtered.map(({ row, reason }) => (
+                <div
+                  key={rowKey(row)}
+                  className="grid grid-cols-[32px_1fr] gap-3 border-t border-hairline py-3 first-of-type:border-t-0 opacity-75"
+                >
+                  <PersonAvatar name={row.personName} avatarUrl={row.personAvatarUrl} size={32} />
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-[13.5px] font-medium text-ink">{row.personName}</span>
+                      <span className="font-mono text-[9.5px] uppercase tracking-[0.04em] text-ink-3">
+                        {row.platform.toLowerCase()} · {formatRelative(row.lastInboundAt)}
+                      </span>
+                    </div>
+                    <p className="m-0 mt-[3px] text-[12.5px] leading-[1.5] text-ink-3">
+                      {filteredReasonLine(reason, focusWindow.audience)}
+                      {reason === "not_covered" ? (
+                        <>
+                          {" "}
+                          <button
+                            type="button"
+                            onClick={() => openFocusSetup()}
+                            className="text-accent-ink underline-offset-2 hover:underline"
+                          >
+                            Edit window
+                          </button>
+                        </>
+                      ) : null}
+                    </p>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       )}
     </FocusSheet>

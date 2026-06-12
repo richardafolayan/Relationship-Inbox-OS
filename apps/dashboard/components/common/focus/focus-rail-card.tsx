@@ -2,8 +2,7 @@
 
 import { useMemo } from "react";
 import { Moon, Info } from "lucide-react";
-import { isQuietHoursActive } from "@/lib/quiet-hours";
-import { formatUntil, isFocusAckCandidate } from "@/lib/focus";
+import { focusRailIdleLine, formatUntil, isFocusAckCandidate } from "@/lib/focus";
 import { openFocusReview, openFocusSetup, useFocusWindow } from "@/lib/use-focus-window";
 import type { InboxRow } from "@/lib/types";
 
@@ -11,15 +10,14 @@ import type { InboxRow } from "@/lib/types";
 // start entry. Focus on: the active banner with a live count of covered
 // contacts who messaged while heads-down, and the review / edit / end actions.
 // `rows` is Today's already-fetched inbox so the count matches the page.
+// Quiet hours deliberately does NOT gate these offers: an explicitly started
+// window is the operator asking for them, and nothing sends without a tap.
 export function FocusRailCard({ rows }: { rows: InboxRow[] }) {
   const { focusWindow, settings, active, endFocus } = useFocusWindow();
 
   const openCount = useMemo(() => {
     if (!active) return 0;
-    const quiet = isQuietHoursActive();
-    return rows.filter((row) =>
-      isFocusAckCandidate(row, focusWindow, settings, { quietHoursActive: quiet })
-    ).length;
+    return rows.filter((row) => isFocusAckCandidate(row, focusWindow, settings)).length;
   }, [rows, focusWindow, settings, active]);
 
   if (!active) {
@@ -77,7 +75,7 @@ export function FocusRailCard({ rows }: { rows: InboxRow[] }) {
             arrived while you’ve been heads-down. They haven’t heard back yet.
           </>
         ) : (
-          "Everyone who messaged knows you’ve seen them. Their proper replies still wait below."
+          focusRailIdleLine(focusWindow)
         )}
       </p>
       <div className="mt-[14px] flex flex-col gap-[8px]">

@@ -61,6 +61,25 @@
 
 * { box-sizing: border-box; }
 html, body { margin: 0; padding: 0; }
+
+/* ───────────── Responsive scale ─────────────
+ * The layout is designed at laptop width with px-based type. Very large
+ * screens (TV / big external monitors) scale the whole UI up via zoom so
+ * a 40" screen gets a genuinely bigger interface rather than a small
+ * strip of content floating in space. --app-zoom mirrors the factor so
+ * full-height shells can compensate (100vh is physical; zoomed children
+ * multiply, so height must divide back down). */
+:root { --app-zoom: 1; }
+@media (min-width: 2200px) {
+  :root { --app-zoom: 1.3; }
+  body { zoom: 1.3; }
+}
+@media (min-width: 3200px) {
+  :root { --app-zoom: 1.8; }
+  body { zoom: 1.8; }
+}
+/* Full-viewport height that stays correct under the zoom layer. */
+.h-app-screen { height: calc(100vh / var(--app-zoom)); }
 body {
   font-family: var(--font-text);
   background: var(--paper);

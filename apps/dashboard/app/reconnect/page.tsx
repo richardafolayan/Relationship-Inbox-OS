@@ -15,14 +15,16 @@ import {
 import type { RefreshScoresStatus } from "@/lib/reconnect";
 import { formatDuration } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
+import { PLATFORM_LABEL } from "@/lib/risk";
 
-// Phase 3 of #287. Old LinkedIn threads do not vanish - they sit here as
-// quiet prompts to reach out. The page deliberately does not draft a
-// message or send anything; opening a thread takes the operator to the
-// usual thread view where they can write the reconnect note themselves.
+// Phase 3 of #287. Old threads do not vanish - they sit here as quiet
+// prompts to reach out. The page deliberately does not draft a message
+// or send anything; opening a thread takes the operator to the usual
+// thread view where they can write the reconnect note themselves.
 //
-// iMessage threads never appear here (see lib/reconnect.ts for the
-// platform-split rationale).
+// Every platform appears here (the page began LinkedIn-only; see
+// lib/reconnect.ts for the history), so each row names its platform in
+// the right-hand meta column.
 
 /** Response shape from POST /control/reconnect/refresh-scores. */
 interface RefreshScoresResponse {
@@ -129,7 +131,7 @@ export default function ReconnectPage() {
       <PageHead
         eyebrow="Worth a hello"
         title="Reconnect"
-        subtitle="LinkedIn threads that have gone quiet but still might be worth a gentle hello. Open one to write the message yourself - nothing here is auto-sent."
+        subtitle="Conversations that have gone quiet but still might be worth a gentle hello. Open one to write the message yourself - nothing here is auto-sent."
         meta={
           loaded ? (
             <span className="flex items-baseline gap-4">
@@ -163,7 +165,7 @@ export default function ReconnectPage() {
       ) : candidates.length === 0 ? (
         <CaughtUp
           title="Nothing to rekindle right now."
-          body="When LinkedIn threads go quiet for more than 30 days they will show up here so you can revisit them on your own terms."
+          body="When conversations go quiet for more than 30 days they will show up here so you can revisit them on your own terms."
         />
       ) : (
         <div className="flex flex-col">
@@ -191,10 +193,11 @@ interface ReconnectRowProps {
 
 // Reconnect row layout deliberately differs from Inbox: there is no risk
 // dot or unread badge to defuse - everything here is, by definition,
-// quiet. The right column shows "quiet for Nm" so the operator can pick
-// the freshest-still-rememberable threads first. When the AI reconnect
-// scorer (phase 3.5) ran for this thread the reason caption sits under
-// the preview as a quiet "why".
+// quiet. The right column names the platform (the list mixes them now)
+// and shows "quiet for Nm" so the operator can pick the freshest-still-
+// rememberable threads first. When the AI reconnect scorer (phase 3.5)
+// ran for this thread the reason caption sits under the preview as a
+// quiet "why".
 function ReconnectRow({ row, suggested }: ReconnectRowProps) {
   const preview = normalizePreview(row.preview);
   const previewBody =
@@ -228,7 +231,10 @@ function ReconnectRow({ row, suggested }: ReconnectRowProps) {
           <span className="block text-[12px] text-ink-3">{reason}</span>
         ) : null}
       </span>
-      <span className="font-mono text-[11px] text-ink-3">quiet for {quietFor}</span>
+      <span className="flex items-baseline gap-[10px] font-mono text-[11px] text-ink-3">
+        <span className="text-ink-4">{PLATFORM_LABEL[row.platform]}</span>
+        <span>quiet for {quietFor}</span>
+      </span>
     </Link>
   );
 }
