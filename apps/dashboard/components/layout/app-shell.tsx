@@ -13,9 +13,18 @@ import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
+import {
+  buildUpdateNotice,
+  planUpdateNotice,
+  readNotifiedUpdateVersion,
+  UPDATE_CHECK_INTERVAL_MS,
+  UPDATE_NOTICE_ID,
+  writeNotifiedUpdateVersion,
+  type UpdateCheckResponse
+} from "@/lib/update-notice";
 import {
   buildNewMessageDigestNotice,
   buildNewMessageNotice,
@@ -32,6 +41,7 @@ import {
 import {
   dismissCenterNotification,
   markCenterNotificationsSeen,
+  recordCenterNotifications,
   recordNewMessageNotifications,
   recordOverdueDigestNotification
 } from "@/lib/notification-center";
@@ -264,6 +274,64 @@ export function AppShell({ children }: { children: ReactNode }) {
   // Poll health + inbox every 8s while visible; pause in background tabs and
   // catch up on return (the hook fires an immediate tick on mount).
   useVisiblePolling(() => void refreshMeta(), 8000);
+
+  // Update-available notice: ask the runner whether a newer pilot build is
+  // on the feed (mount + every 6h while visible - the check spawns a child
+  // process and fetches the network, so it stays far away from the 8s inbox
+  // cadence). A new version surfaces exactly like a new message: a 30s
+  // toast plus a center entry, both landing on Settings > App updates. One
+  // notice per version (see lib/update-notice.ts), quiet hours keep the
+  // record but skip the toast, and the entry clears itself once the app
+  // reports up to date.
+  const checkAppUpdate = useCallback(async () => {
+    const check = await apiGetRaw<UpdateCheckResponse>("/runner/system/update-check").catch(
+      () => null
+    );
+    // Unconfigured installs and failed checks stay silent - the Settings
+    // card is the place that explains those states, not a notification.
+    if (!check || !check.configured || check.error) return;
+    const plan = planUpdateNotice({
+      updateAvailable: check.updateAvailable,
+      latestVersion: check.latestVersion,
+      notifiedVersion: readNotifiedUpdateVersion(),
+      quietHoursActive: isQuietHoursActive()
+    });
+    if (plan === "none") return;
+    if (plan === "clear") {
+      dismissCenterNotification(UPDATE_NOTICE_ID);
+      return;
+    }
+    const notice = buildUpdateNotice(check.latestVersion);
+    recordCenterNotifications([
+      {
+        id: UPDATE_NOTICE_ID,
+        title: notice.title,
+        body: notice.body,
+        href: notice.href,
+        at: Date.now(),
+        seen: false
+      }
+    ]);
+    writeNotifiedUpdateVersion(check.latestVersion);
+    if (plan === "record-and-toast") {
+      showToast({
+        id: UPDATE_NOTICE_ID,
+        kind: "info",
+        title: notice.title,
+        description: notice.body,
+        href: notice.href,
+        durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+        // Waving the toast away means "seen it" - the bell stops counting
+        // it but keeps it reviewable. Clicking through lands on the App
+        // updates card; the entry stays (still seen) as a quiet reminder
+        // until the operator updates (auto-clear above) or dismisses it.
+        onManualDismiss: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID]),
+        onActivate: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID])
+      });
+    }
+  }, []);
+
+  useVisiblePolling(() => void checkAppUpdate(), UPDATE_CHECK_INTERVAL_MS);
 
   useEffect(() => {
     if (autoScanDisabled) {

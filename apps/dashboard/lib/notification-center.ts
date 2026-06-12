@@ -134,6 +134,14 @@ function writeCenterNotifications(items: CenterNotification[]): void {
   window.dispatchEvent(new CustomEvent(CHANGE_EVENT));
 }
 
+// Generic write path: prepend entries (replacing same-id ones) and persist.
+// Used by every notice source - new messages below, app updates in
+// lib/update-notice.ts - so the storage/fan-out rules live in one place.
+export function recordCenterNotifications(additions: CenterNotification[]): void {
+  if (typeof window === "undefined" || additions.length === 0) return;
+  writeCenterNotifications(addNotifications(readCenterNotifications(), additions));
+}
+
 // Record one center entry per fresh thread. Called for every batch that
 // detectNewInbound surfaces, whatever the delivery plan was (toast, desktop
 // ping, or quiet-hours silence) - missing the alert must not mean missing
@@ -152,7 +160,7 @@ export function recordNewMessageNotifications(rows: InboxRow[], now?: number): v
       seen: false
     };
   });
-  writeCenterNotifications(addNotifications(readCenterNotifications(), additions));
+  recordCenterNotifications(additions);
 }
 
 // The overdue-reply digest's bell entry (#360). A fixed id, not a thread id:

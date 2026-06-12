@@ -8,11 +8,13 @@ import {
   clearCenterNotifications,
   dismissCenterNotification,
   markAllCenterNotificationsSeen,
+  markCenterNotificationsSeen,
   onCenterNotificationsChange,
   readCenterNotifications,
   unseenNotificationCount,
   type CenterNotification
 } from "@/lib/notification-center";
+import { UPDATE_NOTICE_ID } from "@/lib/update-notice";
 import { resolveCenterRowGesture } from "@/lib/toast-gesture";
 import { formatRelative } from "@/lib/time";
 
@@ -62,7 +64,14 @@ export function NotificationBell() {
 
   const openThread = useCallback(
     (item: CenterNotification) => {
-      dismissCenterNotification(item.id);
+      // Opening a thread completes a message notice, so the row goes. The
+      // update reminder's completing act is updating (it auto-clears once
+      // the app is current), so clicking through only marks it seen.
+      if (item.id === UPDATE_NOTICE_ID) {
+        markCenterNotificationsSeen([item.id]);
+      } else {
+        dismissCenterNotification(item.id);
+      }
       setOpen(false);
       router.push(item.href);
     },
