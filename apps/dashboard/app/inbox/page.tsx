@@ -6,11 +6,17 @@ import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import { Archive, Search, Star } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
+import { shouldInboxRefreshOnRunnerEvent } from "@/lib/inbox-events";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
 import { favouritesFirst, setFavourite } from "@/lib/favourites";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
+import { FocusInboxGroup } from "@/components/common/focus/focus-inbox-group";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { DegradedBanner } from "@/components/common/degraded-banner";
-import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
+import { MacContactsHint } from "@/components/common/mac-contacts-hint";
+import dynamic from "next/dynamic";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
@@ -18,7 +24,9 @@ import { normalizePreview } from "@/lib/preview";
 import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
+import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
 import { cn } from "@/lib/utils";
+import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 import {
   OXBLOOD_PAGE_VARS,
   TOOL_CLASS,
@@ -35,6 +43,14 @@ type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
 type SortMode = "oldest" | "recent" | "name";
+
+// Lazy-load the receipts drawer so its chunk stays out of the inbox's
+// initial bundle; an "opened-once" latch keeps the existing open-prop
+// behaviour once it has been shown.
+const ReceiptsDrawer = dynamic(
+  () => import("@/components/common/receipts-drawer").then((m) => m.ReceiptsDrawer),
+  { ssr: false }
+);
 
 const TABS: { key: RiskTab; label: string }[] = [
   { key: "all", label: "All" },
@@ -194,12 +210,30 @@ interface SectionGroup {
 // flat list. Older / likely-closed threads are hidden by default
 // (issue #287) and surfaced via the Show all affordance.
 export default function InboxPage() {
-  const [data, setData] = useState<InboxResponse | null>(null);
-  const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
+  // Seed from the shared client cache so returning to the Inbox (e.g. back
+  // from a thread, or Today -> Inbox) paints the last-known list instantly
+  // and then revalidates, instead of flashing an empty skeleton. Read via
+  // useCacheSeed (NOT a useState initializer): the app shell's effects can
+  // warm the cache from the localStorage snapshot before this boundary
+  // hydrates, and a useState seed would leak that into the hydration render
+  // and mismatch the server HTML.
+  const inboxSeed = useCacheSeed<InboxResponse>("/runner/data/inbox");
+  const platformsSeed = useCacheSeed<PlatformCard[]>("/runner/data/platforms");
+  const [dataState, setData] = useState<InboxResponse | null>(null);
+  const data = dataState ?? inboxSeed ?? null;
+  const [platformsState, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const platforms = platformsState ?? platformsSeed ?? [];
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
-  const [loaded, setLoaded] = useState(false);
+  const [receiptsEverOpened, setReceiptsEverOpened] = useState(false);
+  useEffect(() => {
+    if (receiptsOpen) setReceiptsEverOpened(true);
+  }, [receiptsOpen]);
+  const [loadedState, setLoaded] = useState(false);
+  // A cached list (even an empty one) counts as loaded - no skeleton on
+  // top of data we are already painting.
+  const loaded = loadedState || inboxSeed !== undefined;
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<RiskTab>("all");
   const [category, setCategory] = useState<CategoryFilter>("any");
@@ -222,29 +256,40 @@ export default function InboxPage() {
   const [bulkPending, setBulkPending] = useState<string | null>(null);
   const [bulkResult, setBulkResult] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    const [inbox, platformRows, logRows] = await Promise.all([
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => []),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100").catch(() => [])
-    ]);
-    if (inbox) {
-      setData(inbox);
-      const stillPending = new Set(
-        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
-      );
-      setRemovedIds((prev) => {
-        const next = new Set<string>();
-        prev.forEach((id) => {
-          if (stillPending.has(id)) next.add(id);
-        });
-        return next;
+  const applyInbox = useCallback((inbox: InboxResponse) => {
+    setData(inbox);
+    const stillPending = new Set(
+      inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+    );
+    setRemovedIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
       });
-    }
+      return next;
+    });
+  }, []);
+
+  // `force` skips the freshness TTL (still SWR: stale paints immediately,
+  // the network value lands via onFresh). Used by the SSE-driven path - a
+  // runner event means the data DID change, so serving a <4s-old cache and
+  // skipping revalidation would delay the update until the next poll.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
+    const [inbox, platformRows, logRows] = await Promise.all([
+      // SWR: paint the cached list immediately, revalidate in the background.
+      apiGet<InboxResponse>("/runner/data/inbox", {
+        ttlMs: opts?.force ? 0 : 4000,
+        swr: true,
+        onFresh: (d) => applyInbox(d as InboxResponse)
+      }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => []),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100", { ttlMs: 5000 }).catch(() => [])
+    ]);
+    if (inbox) applyInbox(inbox);
     setPlatforms(platformRows ?? []);
     setLogs(logRows ?? []);
     setLoaded(true);
-  }, []);
+  }, [applyInbox]);
 
   // Seed search from a ?q= deep link (the thread participant popover's
   // "Find 1:1 thread" → /inbox?q=<handle>). Runs once on mount; the inbox
@@ -254,16 +299,46 @@ export default function InboxPage() {
     if (q) setQuery(q);
   }, []);
 
+  // Debounced refetch (mirrors Today): a multi-thread scan emits a burst of
+  // runner events, so collapse them into one refresh rather than N.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh({ force: true });
+    }, 450);
+  }, [refresh]);
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    },
+    []
+  );
+
+  // Live updates: the runner streams THREAD_UPDATED / MESSAGE_SENT /
+  // MESSAGE_SEND_FAILED / SCAN_FINISHED to the browser as `runner-event`
+  // window events (the reassess-on-send path included). Today already
+  // refetches on these, so a scan finishing or a send from the thread page /
+  // another tab reflected near-instantly there while the Inbox stayed stale
+  // until its 10s poll (P4L1). Subscribe to the same stream so the Inbox keeps
+  // pace; the 10s poll below stays as a backstop.
   useEffect(() => {
-    void refresh();
-    const onResync = () => void refresh();
+    const onResync = () => scheduleRefresh();
+    const onRunnerEvent = (event: Event) => {
+      const detail = (event as CustomEvent<{ type?: string }>).detail;
+      if (shouldInboxRefreshOnRunnerEvent(detail?.type)) scheduleRefresh();
+    };
     window.addEventListener("runner-resync", onResync);
-    const timer = setInterval(() => void refresh(), 10000);
+    window.addEventListener("runner-event", onRunnerEvent as EventListener);
     return () => {
       window.removeEventListener("runner-resync", onResync);
-      clearInterval(timer);
+      window.removeEventListener("runner-event", onRunnerEvent as EventListener);
     };
-  }, [refresh]);
+  }, [scheduleRefresh]);
+  // Poll every 10s while visible; paused in background tabs (the hook fires an
+  // immediate tick on mount and a catch-up tick on return to foreground).
+  useVisiblePolling(() => void refresh(), 10000);
 
   const { sandboxActive } = useFullDemo();
   // In a sandbox guided flow (pilot tour / presenter sandbox), the Inbox shows
@@ -403,13 +478,13 @@ export default function InboxPage() {
       setClosedRefreshState({ kind: "done", summary, tone });
       window.setTimeout(() => {
         setClosedRefreshState((current) => (current.kind === "done" ? { kind: "idle" } : current));
-      }, 4500);
+      }, 2200);
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "Could not reach the runner.";
       setClosedRefreshState({ kind: "error", message });
       window.setTimeout(() => {
         setClosedRefreshState((current) => (current.kind === "error" ? { kind: "idle" } : current));
-      }, 5000);
+      }, 3200);
     }
   }, [closedRefreshState.kind, refresh]);
   const closedRefreshLabel = (() => {
@@ -516,11 +591,20 @@ export default function InboxPage() {
       if (ids.length === 0) return;
       setBulkPending(label);
       setBulkResult(null);
-      setRemovedIds((prev) => {
-        const next = new Set(prev);
-        ids.forEach((id) => next.add(id));
-        return next;
-      });
+      // Only membership-changing actions (mark-done / snooze) optimistically
+      // hide their rows: applyInbox self-heals removedIds by keeping ids whose
+      // row is gone or whose needsReply flipped to false. Rescan does neither
+      // (it just re-parses messages), so optimistically removing a still-needs-
+      // reply thread would strand it in removedIds until a full reload. For
+      // those actions we skip the add and let refresh() update the row in place.
+      const removesRow = bulkActionRemovesRow(label);
+      if (removesRow) {
+        setRemovedIds((prev) => {
+          const next = new Set(prev);
+          ids.forEach((id) => next.add(id));
+          return next;
+        });
+      }
       const results = await Promise.allSettled(
         ids.map((id) => apiPost(buildPath(id), body))
       );
@@ -532,11 +616,15 @@ export default function InboxPage() {
             r.status === "rejected" && ids[idx] !== undefined ? [ids[idx] as string] : []
           )
         );
-        setRemovedIds((prev) => {
-          const next = new Set(prev);
-          failedIds.forEach((id) => next.delete(id));
-          return next;
-        });
+        // Mirror the optimistic add: only roll the failed ids back out of
+        // removedIds for actions that put them there in the first place.
+        if (removesRow) {
+          setRemovedIds((prev) => {
+            const next = new Set(prev);
+            failedIds.forEach((id) => next.delete(id));
+            return next;
+          });
+        }
         const firstReason = failed
           .map((f) => (f.status === "rejected" ? (f.reason as Error | ApiRequestError) : null))
           .find(Boolean);
@@ -567,6 +655,10 @@ export default function InboxPage() {
           )
         }
       />
+
+      {/* Explains bare phone numbers when this Mac's Contacts app is empty
+          (issue #676). Renders nothing unless the runner confirms it. */}
+      <MacContactsHint />
 
       {/* Ghost search — a subtle field, not a heavy box (the redesign's
           calmer default). The border darkens on hover/focus; a clear
@@ -602,9 +694,11 @@ export default function InboxPage() {
 
       {/* Status tabs (the lens you switch most) + a compact tools cluster.
           Platform + Kind now live behind the Filters popover so this bar
-          stays one calm row instead of the old stack of dropdowns. */}
-      <div className="flex flex-wrap items-end gap-[14px] border-b border-hairline">
-        <div className="flex flex-1 flex-wrap gap-[1px]">
+          stays one calm row instead of the old stack of dropdowns. On
+          phone the tools sit above a horizontally-scrollable tab strip
+          (no wrap) so the bar stays two calm rows instead of a tall pile. */}
+      <div className="flex flex-col-reverse gap-1 border-b border-hairline sm:flex-row sm:flex-wrap sm:items-end sm:gap-[14px]">
+        <div className="flex min-w-0 flex-1 gap-[1px] overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden sm:flex-wrap sm:overflow-x-visible">
           {TABS.map((entry) => {
             const active = tab === entry.key;
             const count = counts[entry.key];
@@ -615,7 +709,7 @@ export default function InboxPage() {
                 type="button"
                 onClick={() => setTab(entry.key)}
                 className={cn(
-                  "relative -mb-px border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
+                  "relative -mb-px shrink-0 whitespace-nowrap border-b-2 border-transparent px-[14px] py-[10px] text-[13px] transition-colors duration-calm",
                   active
                     ? "border-accent font-medium text-ink"
                     : zero
@@ -636,7 +730,7 @@ export default function InboxPage() {
             );
           })}
         </div>
-        <div className="flex items-center gap-[4px] pb-[6px]">
+        <div className="flex items-center justify-end gap-[4px] pb-[6px]">
           <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
           <FiltersPopover
             platformFilter={platformFilter}
@@ -710,8 +804,13 @@ export default function InboxPage() {
         <p className="mb-6 font-mono text-[11px] text-ink-3">{bulkResult}</p>
       ) : null}
 
+      {/* Focus Reply Buffer: covered threads that arrived during the active
+          window sit above the normal list with a one-tap acknowledgement.
+          Renders nothing when no window is active or nothing qualifies. */}
+      <FocusInboxGroup rows={allRows} onChanged={refresh} />
+
       {!loaded ? (
-        <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+        <BrandLoader className="py-1" />
       ) : visible.length === 0 && !showAll && hiddenByHorizon > 0 && !query.trim() ? (
         <div className="flex flex-col items-center justify-center gap-2 py-12 text-center">
           {tab === "all" ? (
@@ -892,12 +991,14 @@ export default function InboxPage() {
         </div>
       ) : null}
 
-      <ReceiptsDrawer
-        open={receiptsOpen}
-        onClose={() => setReceiptsOpen(false)}
-        rows={logs}
-        title="Inbox receipts"
-      />
+      {receiptsEverOpened ? (
+        <ReceiptsDrawer
+          open={receiptsOpen}
+          onClose={() => setReceiptsOpen(false)}
+          rows={logs}
+          title="Inbox receipts"
+        />
+      ) : null}
     </Canvas>
   );
 }
@@ -1090,6 +1191,10 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
     <Link
       href={`/thread/${row.id}`}
       onClick={onClick}
+      onMouseEnter={() => prefetchThreadData(row.id)}
+      onMouseLeave={() => cancelThreadPrefetch(row.id)}
+      onFocus={() => prefetchThreadData(row.id)}
+      onBlur={() => cancelThreadPrefetch(row.id)}
       className={cn(
         "group grid grid-cols-[28px_30px_1fr_auto] items-center gap-[14px] border-b border-hairline px-1 py-[13px] transition-colors duration-calm hover:bg-paper-2",
         selected ? "bg-paper-2" : ""
@@ -1136,8 +1241,11 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
         {PLATFORM_GLYPH[row.platform] ?? PLATFORM_LABEL[row.platform].slice(0, 2)}
       </span>
       <span className="flex min-w-0 flex-col gap-[2px]">
-        <span className="flex min-w-0 items-baseline gap-[10px]">
-          <span className="shrink-0 text-[14px] font-medium tracking-[-0.005em] text-ink">
+        {/* Phone: preview drops to its own line under the name so it gets
+            the full row width instead of the 2 characters left beside the
+            meta column. From sm up the two sit inline as before. */}
+        <span className="flex min-w-0 flex-col gap-[1px] sm:flex-row sm:items-baseline sm:gap-[10px]">
+          <span className="truncate text-[14px] font-medium tracking-[-0.005em] text-ink sm:shrink-0">
             {row.personName}
           </span>
           <span className="min-w-0 truncate text-[13px] text-ink-3">{previewBody}</span>

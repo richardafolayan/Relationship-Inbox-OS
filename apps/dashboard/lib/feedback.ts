@@ -17,12 +17,22 @@ export interface ToastInput {
   // navigates here (e.g. a new-message toast opens the thread). Action
   // feedback toasts leave this unset and stay non-interactive.
   href?: string;
+  // Optional hooks for callers that mirror the toast elsewhere (the
+  // notification center). The ToastHost fires:
+  //   - onManualDismiss when the operator explicitly clears the toast
+  //     (X button or swipe),
+  //   - onActivate when they click through to `href`.
+  // Auto-expiry fires neither: an unattended toast was never seen.
+  onManualDismiss?: () => void;
+  onActivate?: () => void;
 }
 
 export interface Toast extends Required<Pick<ToastInput, "id" | "kind" | "title" | "durationMs">> {
   description?: string;
   receiptId?: string;
   href?: string;
+  onManualDismiss?: () => void;
+  onActivate?: () => void;
   createdAt: number;
 }
 
@@ -43,6 +53,8 @@ export function showToast(input: ToastInput): void {
     description: input.description,
     receiptId: input.receiptId,
     href: input.href,
+    onManualDismiss: input.onManualDismiss,
+    onActivate: input.onActivate,
     durationMs:
       input.durationMs ??
       (input.kind === "pending" ? 60_000 : input.kind === "error" ? 8000 : 3500),
@@ -82,7 +94,18 @@ export function runActionWithFeedback<T>(
       // Replace the pending toast by reusing its id.
       showToast({ id: pendingId, kind: "success", title: successText });
       opts.setError?.(null);
-      if (opts.onDone) await opts.onDone(value);
+      // The action has already SUCCEEDED and we've already shown the success
+      // toast, so a throwing onDone (e.g. a refresh() that explodes) must not
+      // reach the outer .catch - that would overwrite the success toast with a
+      // contradictory error toast and flip setError to a failure. Isolate the
+      // follow-up: log its failure for DevTools only, leave the success UI.
+      if (opts.onDone) {
+        try {
+          await opts.onDone(value);
+        } catch (onDoneErr) {
+          console.warn("[action] onDone failed after success", onDoneErr);
+        }
+      }
     })
     .catch((err: unknown) => {
       const fallback =

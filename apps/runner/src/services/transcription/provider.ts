@@ -37,7 +37,7 @@ export type TranscriptionOutcome =
   | { kind: "skipped"; reason: string }
   | { kind: "failed"; errorMessage: string };
 
-export type TranscriptionProviderId = "openai" | "local-whisper";
+export type TranscriptionProviderId = "openai" | "local-whisper" | "transformers";
 
 export interface TranscriptionProvider {
   readonly id: TranscriptionProviderId;

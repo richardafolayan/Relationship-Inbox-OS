@@ -32,8 +32,8 @@ test("artifact cleanup plan keeps recent-by-age items even if outside keepRecent
   const nowMs = Date.UTC(2026, 1, 19, 10, 0, 0, 0);
   const candidates = [
     { path: "/tmp/newest", mtimeMs: nowMs - DAY_MS, source: "runs" },
-    { path: "/tmp/recent-not-in-top-1", mtimeMs: nowMs - 2 * DAY_MS, source: "screenshots" },
-    { path: "/tmp/old", mtimeMs: nowMs - 30 * DAY_MS, source: "dom_dumps" }
+    { path: "/tmp/recent-not-in-top-1", mtimeMs: nowMs - 2 * DAY_MS, source: "runs" },
+    { path: "/tmp/old", mtimeMs: nowMs - 30 * DAY_MS, source: "runs" }
   ];
 
   const plan = planArtifactCleanup(candidates, {

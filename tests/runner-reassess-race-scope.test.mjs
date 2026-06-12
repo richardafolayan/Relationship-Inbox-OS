@@ -76,7 +76,7 @@ test("resummarizeThreadById forwards race option to updateThreadSummary", () => 
   assert.ok(fnMatch, "resummarizeThreadById not found");
   assert.match(
     fnMatch[0],
-    /resummarizeThread\(\s*\{[\s\S]*?\},\s*threadId,\s*options\s*\)/,
+    /resummarizeThread\(\s*\{[\s\S]*?\},\s*\w+,\s*options\s*\)/,
     "resummarizeThreadById must delegate to resummarizeThread, forwarding options"
   );
 

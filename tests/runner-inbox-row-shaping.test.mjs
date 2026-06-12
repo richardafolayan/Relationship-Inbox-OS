@@ -176,6 +176,47 @@ test("toInboxRow risk reflects the CURRENT thresholds, not the scan-time ones", 
   assert.equal(toInboxRow(rows[0], 1, { amberHours: 8, redHours: 18 }).riskLevel, "GREEN");
 });
 
+test("iMessage siblings collapse to the most-recent-inbound row, not the highest message count", () => {
+  // Serena bug: one Person, two handle-chats. The phone thread is dormant but
+  // enormous; the email thread is small but where the live conversation is.
+  // The representative (preview + whatTheyWant + link target) must be the
+  // LIVE email thread despite the phone thread having far more messages.
+  const stalePhone = buildRow({
+    id: "imsg-phone",
+    platform: "IMESSAGE",
+    platformThreadId: "any;-;+447873519605",
+    personId: "serena",
+    person: { id: "serena", displayName: "Serena", platform: "IMESSAGE" },
+    whatTheyWant: "STALE: weighing whether to push Praise to the ball",
+    lastMessageText: "Tried convince praise to go but she ain't hearing it",
+    lastInboundAt: new Date("2026-06-04T14:50:00.000Z"),
+    lastMessageAt: new Date("2026-06-04T14:50:00.000Z"),
+    lastOutboundAt: new Date("2026-06-04T14:49:00.000Z"),
+    _count: { messages: 7313 }
+  });
+  const liveEmail = buildRow({
+    id: "imsg-email",
+    platform: "IMESSAGE",
+    platformThreadId: "any;-;seandserena@gmail.com",
+    personId: "serena",
+    person: { id: "serena", displayName: "Serena", platform: "IMESSAGE" },
+    whatTheyWant: "FRESH: has a free award ticket and is seeing who else is going",
+    lastMessageText: "So I'm tryna see who's going asw",
+    lastInboundAt: new Date("2026-06-05T13:25:00.000Z"),
+    lastMessageAt: new Date("2026-06-05T13:25:00.000Z"),
+    lastOutboundAt: new Date("2026-06-05T13:22:00.000Z"),
+    _count: { messages: 345 }
+  });
+
+  const rows = shapeThreadRows([stalePhone, liveEmail]);
+  assert.equal(rows.length, 1, "the two handle-chats collapse to one person row");
+  assert.equal(rows[0].source.id, "imsg-email", "representative is the live email thread");
+
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
+  assert.equal(shaped.whatTheyWant, "FRESH: has a free award ticket and is seeing who else is going");
+  assert.equal(shaped.preview, "So I'm tryna see who's going asw");
+});
+
 test("toInboxRow maps a favourited contact's favouritedAt to personFavourite (R-0066)", () => {
   const favourited = shapeThreadRows([
     buildRow({ id: "fav", person: { favouritedAt: new Date("2026-06-05T12:00:00.000Z") } })

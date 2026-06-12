@@ -49,6 +49,69 @@ export function notificationsSupported(): boolean {
   return typeof window !== "undefined" && "Notification" in window;
 }
 
+// The current desktop-notification permission, or "unsupported" when the
+// browser has no Notification API. A thin reader so callers never touch the
+// global directly and stay consistent with notificationsSupported().
+export function readNotificationPermission(): NotificationPermission | "unsupported" {
+  if (!notificationsSupported()) return "unsupported";
+  return Notification.permission;
+}
+
+// Keep a component in sync with the live permission after it mounts.
+//
+// Permission can flip while the page is open - e.g. the operator grants it
+// from a sibling control, or toggles it in the browser's site settings. A
+// component that only read Notification.permission on mount would stay stale
+// until reload (this was the overdue-digest cadence bug: it stayed disabled
+// after a grant). This subscribes to both signals that catch a change without
+// a reload:
+//   - navigator.permissions 'change' - fires whenever the notifications
+//     permission flips, from any source in the same session.
+//   - window 'focus' - a belt-and-braces fallback for browsers where the
+//     Permissions API is missing or its change event lags after the prompt.
+// Each calls onChange with the freshly-read permission. Returns a cleanup
+// that removes every listener. No-op (returns a no-op cleanup) when the
+// browser has no Notification API.
+export function subscribeNotificationPermission(
+  onChange: (permission: NotificationPermission | "unsupported") => void
+): () => void {
+  if (typeof window === "undefined" || !notificationsSupported()) {
+    return () => {};
+  }
+  const handler = () => onChange(readNotificationPermission());
+  window.addEventListener("focus", handler);
+
+  // navigator.permissions may be absent (older Safari) or reject for the
+  // "notifications" name; both are fine - the focus listener still covers us.
+  let permissionStatus: { removeEventListener: (type: string, cb: () => void) => void } | null =
+    null;
+  // permissions.query is async: the caller can run this cleanup BEFORE it
+  // resolves (a fast mount/unmount, or React Strict Mode's mount-unmount-
+  // remount). `cancelled` lets the resolved branch detect that and skip
+  // attaching - otherwise it would add a 'change' listener bound to a stale
+  // onChange that nothing could ever remove (a leaked listener per cycle).
+  let cancelled = false;
+  const permissions = (navigator as Navigator & { permissions?: Permissions }).permissions;
+  if (permissions && typeof permissions.query === "function") {
+    permissions
+      .query({ name: "notifications" as PermissionName })
+      .then((status) => {
+        if (cancelled) return;
+        permissionStatus = status;
+        status.addEventListener("change", handler);
+      })
+      .catch(() => {
+        // Permission name unsupported / blocked - rely on the focus listener.
+      });
+  }
+
+  return () => {
+    cancelled = true;
+    window.removeEventListener("focus", handler);
+    permissionStatus?.removeEventListener("change", handler);
+  };
+}
+
 // Asks for permission once. Browsers no-op the call when permission is
 // already granted or denied, so it is safe to fire on every mount.
 export async function requestNotificationPermission(): Promise<NotificationPermission> {
@@ -60,6 +123,12 @@ export async function requestNotificationPermission(): Promise<NotificationPermi
     return "denied";
   }
 }
+
+// How long a new-message toast stays up before clearing itself. At least 30
+// seconds (operator request): long enough to read and decide without
+// rushing. The notification center keeps the notice after expiry, so the
+// timeout only ends the interruption, never loses the message.
+export const NEW_MESSAGE_TOAST_DURATION_MS = 30_000;
 
 function contextLine(row: InboxRow): string {
   const context = row.whatTheyWant?.trim();

@@ -55,6 +55,7 @@ test("default settings are cadence=off, no memory", () => {
   assert.deepEqual(defaults(), {
     cadence: "off",
     lastDigestAt: null,
+    lastDigestLocalDate: null,
     dismissForLocalDate: null,
     perPerson: {}
   });
@@ -76,6 +77,31 @@ test("isDigestDue: daily — never, yesterday, today", () => {
     isDigestDue("daily", "2026-05-26T00:30:00.000Z", NOW, TODAY_LOCAL_DATE),
     false,
     "already fired earlier today"
+  );
+});
+
+test("isDigestDue: daily compares the persisted LOCAL date, not the UTC prefix (#628)", () => {
+  // US-Pacific (UTC-7) operator: a digest fired at 18:00 local on May 25 acks
+  // with a UTC timestamp that has already rolled to May 26 (01:00Z) but a LOCAL
+  // date of May 25. The next local morning (May 26) it MUST be due. The old code
+  // derived "2026-05-26" from the UTC prefix and wrongly suppressed the day.
+  assert.equal(
+    isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", "2026-05-25"),
+    true,
+    "evening fire west of UTC: the next local day is due (was skipped pre-#628)"
+  );
+  // Same LOCAL date as today => already fired today => not due, even though the
+  // UTC prefix ("2026-05-26") happens to equal today's local date here.
+  assert.equal(
+    isDigestDue("daily", "2026-05-26T01:00:00.000Z", NOW, "2026-05-26", "2026-05-26"),
+    false,
+    "already fired today (local) => not due"
+  );
+  // Legacy row (no persisted local date) falls back to the UTC prefix.
+  assert.equal(
+    isDigestDue("daily", "2026-05-25T08:00:00.000Z", NOW, "2026-05-26", null),
+    true,
+    "legacy fallback: yesterday's UTC prefix still allows today"
   );
 });
 
@@ -349,6 +375,51 @@ test("applyAck writes lastDigestAt and per-person memory only for included peopl
   // Original settings unchanged (immutability check)
   assert.equal(s.lastDigestAt, null);
   assert.deepEqual(s.perPerson, {});
+});
+
+test("applyAck persists the dashboard-local date for the daily cadence (#628)", () => {
+  const next = applyAck(
+    { ...defaults(), cadence: "daily" },
+    [{ personId: "p-1", displayName: "Brandon", stateKey: "sk-1" }],
+    "2026-05-26T01:00:00.000Z",
+    "2026-05-25"
+  );
+  // lastDigestAt is the UTC instant; lastDigestLocalDate is the operator's day.
+  assert.equal(next.lastDigestAt, "2026-05-26T01:00:00.000Z");
+  assert.equal(next.lastDigestLocalDate, "2026-05-25");
+  // A legacy caller that omits localDate leaves it null (daily falls back to UTC prefix).
+  const legacy = applyAck({ ...defaults(), cadence: "daily" }, [{ personId: "p-1", displayName: "B", stateKey: "k" }], NOW);
+  assert.equal(legacy.lastDigestLocalDate, null);
+});
+
+test("computeTick: daily is due the next local morning after an evening fire west of UTC (#628)", () => {
+  // Full path: ack at 18:00 PDT (May 25 local, 01:00Z May 26), then tick the next
+  // local morning (May 26 local, ~08:00 PDT = 15:00Z). Must be due — the pre-#628
+  // code derived the same UTC date for both and reported not_due, skipping the day.
+  const acked = applyAck(
+    { ...defaults(), cadence: "daily" },
+    [{ personId: "p-1", displayName: "Brandon", stateKey: "sk-1" }],
+    "2026-05-26T01:00:00.000Z",
+    "2026-05-25"
+  );
+  const result = computeTick({
+    settings: acked,
+    rows: [row()],
+    nowIso: "2026-05-26T15:00:00.000Z",
+    localDate: "2026-05-26"
+  });
+  assert.equal(result.due, true, "the next local day must be due");
+  assert.equal(result.reason, "due");
+
+  // Ticking again the SAME local day after that fire is not due.
+  const sameDay = computeTick({
+    settings: applyAck(acked, [{ personId: "p-1", displayName: "Brandon", stateKey: "sk-2" }], "2026-05-26T15:00:00.000Z", "2026-05-26"),
+    rows: [row()],
+    nowIso: "2026-05-26T20:00:00.000Z",
+    localDate: "2026-05-26"
+  });
+  assert.equal(sameDay.due, false, "already fired today (local)");
+  assert.equal(sameDay.reason, "not_due");
 });
 
 test("computeTick does NOT mutate memory (only ack does)", () => {

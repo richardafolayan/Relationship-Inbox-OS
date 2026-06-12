@@ -23,3 +23,15 @@ export function paletteItemMatches(item: PaletteSearchable, query: string): bool
   if (!q) return true;
   return (item.search ?? item.label).toLowerCase().includes(q);
 }
+
+// Clamp a selection index back into range for a (possibly resized) list.
+// Used by the palette when its `items` change for a reason *other* than the
+// user typing — e.g. the inbox fetch landing after open, or a background
+// refresh. The old `setActiveIndex(0)` on `[items]` snapped the selection to
+// the top mid-keyboard-navigation; clamping preserves the user's position and
+// only pulls it in when it would otherwise point past the end. Never negative.
+export function clampActiveIndex(current: number, length: number): number {
+  if (length <= 0) return 0;
+  if (current < 0) return 0;
+  return Math.min(current, length - 1);
+}

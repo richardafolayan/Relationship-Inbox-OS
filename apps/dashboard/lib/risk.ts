@@ -38,7 +38,7 @@ export function initials(name: string): string {
   const letterParts = parts.filter((word) => /^\p{L}/u.test(word));
   const chosen = letterParts.length > 0 ? letterParts.slice(0, 2) : parts.slice(0, 1);
   return chosen
-    .map((word) => word[0] ?? "")
+    .map((word) => [...word][0] ?? "")
     .join("")
     .toUpperCase();
 }

@@ -1,124 +1,223 @@
-# Student Pilot: Install Guide
+# Install Relationship Inbox OS on your Mac
 
-This is the setup guide for the Relationship Inbox OS student pilot. It is
-written to be followed **on a short call with me**. You do not need to be
-technical. If a step looks confusing, stop there and we will do it together.
+This guide is for student pilots. **You do not need to know how to code.**
+
+You paste one command into Terminal. It checks your Mac, installs anything
+that's missing, downloads the app, sets it up, and opens it in your browser.
+Then the app walks you through connecting iMessage and LinkedIn.
 
 The app runs entirely on your own Mac. Nothing is uploaded to a server.
 
-## What you need
+## You will need
 
-- A **MacBook**. The first pilot is Mac-only: iMessage support is
-  macOS-only, and I want to keep the first round simple.
-- **Google Chrome**, and you signed into LinkedIn in it as normal.
-- About 20 minutes, and me on a call with you.
+- A **Mac** (a MacBook is fine). iMessage doesn't work on Windows, so the
+  pilot is Mac-only.
+- **Messages working on your Mac.** If you've ever sent an iMessage from this
+  Mac, you're set.
+- A **LinkedIn account**, if you want to test LinkedIn.
+- **At least 10GB free space** (20GB is comfortable).
+- **Stable Wi-Fi.**
+- About **20 to 30 minutes** for the first setup, mostly waiting and clicking
+  "Allow".
 
-I will send you an AI key to paste into one file. You do not need your own.
+## You do **not** need
 
-## Step 1: Get the code
+- GitHub or a GitHub account
+- git
+- Python
+- Xcode
+- Homebrew
+- nvm
+- Any coding experience
 
-On the call I will give you the project folder (a download or a `git clone`
-link). Open the **Terminal** app and move into that folder:
+If you have none of these, that's exactly right. The installer brings its own.
 
-```bash
-cd path/to/relationship-inbox-os
-```
+---
 
-## Step 2: Install it
+## Step 1: Run the install command
 
-Run these four commands one at a time. Each one finishes before you run the
-next. The first two take a few minutes.
+I'll send you the install command privately. There are two shapes it can
+take, and I'll tell you which one you've got.
 
-```bash
-npm install
-npx playwright install
-npm run db:generate
-npm run db:push
-```
+### A) A one-line command
 
-If a command prints a wall of text and ends without the word `error`, it
-worked.
-
-## Step 3: Create your settings file
-
-In the project folder there is a file called `.env.example`. Make a copy of
-it named `.env`:
-
-```bash
-cp .env.example .env
-```
-
-Then open `.env` in a text editor. You only need to touch two things, I
-will give you both on the call:
-
-- `OPENAI_API_KEY=`: paste the key I send you after the `=`.
-- `BROWSER_PROFILE_MODE=personal`: leave this as `personal` (see
-  [Browser modes](#browser-modes) below).
-
-Leave everything else as it is. We will fill in the Chrome profile details
-together on the call. They depend on your Mac.
-
-## Step 4: Start the app
+If I send you a command that looks like this, open **Terminal** (press
+**⌘ + Space**, type `Terminal`, press **Enter**), paste the whole line, and
+press **Enter**:
 
 ```bash
-npm run dev
+/bin/bash -c "$(curl -fsSL <the link I send you>)"
 ```
 
-Leave that Terminal window open. It keeps the app running. When it settles,
-open **Chrome** and go to:
+That's it. Skip to [Step 2](#step-2-follow-the-permission-prompts).
 
+### B) A ZIP file
+
+If I instead send you the app as a **ZIP** (by AirDrop, email, or a download
+link):
+
+1. **Double-click the ZIP** to unzip it. You'll get a folder called
+   `relationship-inbox-os` (extra text on the end is fine). Unzip it
+   anywhere. **Downloads is fine.** This folder is only the source: the
+   installer copies the app to one permanent home at **`~/RelationshipInboxOS`**
+   and runs it from there, so you can delete the unzipped folder afterwards.
+2. Open **Terminal** (⌘ + Space, type `Terminal`, Enter).
+3. Type `bash ` (the word `bash` and a space, don't press Enter yet).
+4. Open **Finder**, go inside the unzipped folder to **scripts**, and drag
+   **install-student-macos.sh** onto the Terminal window. It fills in the
+   path for you.
+5. Press **Enter**.
+
+Either way, the installer takes over from here. While it runs it will:
+
+- check your Mac and free space,
+- install **Node 22** if it's missing, into a folder in your home directory,
+  so **no admin rights or Mac password are needed** (it works on a managed or
+  non-admin Mac too),
+- install the app into **`~/RelationshipInboxOS`** and set up what it needs,
+- set up your local database,
+- download a small voice-transcription model (about 150 MB) so voice notes
+  transcribe automatically,
+- start the app and open it at **http://localhost:3100**.
+
+The long part is "Installing the app", which takes a few minutes. It's normal
+for the Terminal to sit quietly while it works.
+
+> **Keep this Terminal window open.** It's what keeps the app running. To stop
+> the app, click the window and press **Ctrl + C**. To start it again later:
+>
+> ```bash
+> cd ~/RelationshipInboxOS
+> npm run start:student
+> ```
+
+---
+
+## Step 2: Follow the permission prompts
+
+Once the app opens in your browser, it guides you through the rest:
+
+1. **iMessage access**: a one-time macOS permission (see below).
+2. **Connecting LinkedIn**: you log in yourself.
+3. **Your first scan**: pulls your conversations in.
+4. **Your inbox**: opens once the scan finishes.
+
+### Connect iMessage
+
+Relationship Inbox OS reads the messages already stored on your Mac. It never
+logs into anything and never sends anything on its own.
+
+1. Open **Messages** on your Mac and check you can see recent conversations.
+2. Give **Terminal Full Disk Access** so the app can read your local message
+   history: **System Settings → Privacy & Security → Full Disk Access**, find
+   **Terminal**, and turn it **on**. (If Terminal isn't listed, click **+**
+   and add it from Applications → Utilities.)
+3. macOS will say Terminal must quit to use the new permission. **Quit
+   Terminal** (⌘ + Q), then start the app again.
+4. The first time you *send* an iMessage reply, macOS asks "Terminal wants to
+   control Messages". Click **Allow**.
+
+What it does: reads your local iMessage/SMS history, summarises it, and shows
+what needs a reply. What it doesn't do: send anything unless you press send.
+
+### Connect LinkedIn
+
+Relationship Inbox OS uses a normal, signed-in Chrome. **It never asks for or
+stores your LinkedIn password.**
+
+1. In the app, click **Connect LinkedIn**.
+2. Log into LinkedIn yourself, the normal way.
+3. Complete any security check (2FA) if LinkedIn asks.
+4. Come back to Relationship Inbox OS and press **Start LinkedIn scan**.
+
+You only log in once; it remembers the session.
+
+### Add an AI key (for summaries and reply help)
+
+The summaries, action items, and reply suggestions are written by an AI model,
+which needs a key (yours, kept private on your Mac). The free Google Gemini key
+is the easiest. It takes a few minutes and the steps are in
+[getting-ai-keys.md](./getting-ai-keys.md). Without a key the app still shows
+your conversations, but without the summaries and reply help.
+
+### Set up your reply style
+
+The first time you open the app, the **Today** page has a "Set up your reply
+style" card. Fill it in (your name and a sentence on how you usually message
+people). This is what makes the app support *your* words instead of sounding
+generic. You can change it later in Settings.
+
+---
+
+## If something looks wrong
+
+Run the built-in health check from the app folder:
+
+```bash
+cd ~/RelationshipInboxOS
+npm run doctor
 ```
-http://localhost:3100
+
+It prints a plain-English **PASS / WARN / FAIL** for each part of the setup
+and tells you the exact next step for anything that failed.
+
+For specific problems ("inbox is empty", "can't reach the runner", "Node
+version is wrong", and so on), see
+[student-install-troubleshooting.md](./student-install-troubleshooting.md).
+
+When you're up and running, [student-pilot-instructions.md](./student-pilot-instructions.md)
+covers what to actually test.
+
+---
+
+## Updating
+
+When I publish a new build, your app can update itself. Updates work out of
+the box: the update link ships inside the app (builds 0.1.9 and later), so
+there is nothing to configure.
+
+The easy way is in the app itself: **Settings > App updates > Check for
+updates**, then **Update and relaunch** if one is available. It stages the
+update; stop the app with `Ctrl + C` and start it again to finish.
+
+The same thing from the Terminal, in the app folder
+(`cd ~/RelationshipInboxOS`):
+
+```bash
+npm run update:student -- --check-only   # is there a new version?
+npm run update:student -- --apply        # download and install it
 ```
 
-## Step 5: Set up your reply style
+An update only replaces the app's code. It keeps your settings (`.env`), your
+local database, your conversations, and your sign-ins. It also makes a backup
+first and rolls back automatically if anything goes wrong, so it is safe to
+run.
 
-The first time you open it, the **Today** page shows a short welcome card
-and a "Set up your reply style" card. Fill the reply-style card in: your
-name and a sentence on how you usually message people. This is what makes
-the app support *your* words rather than sounding generic. It takes a minute
-and you can change it later in Settings.
+If the app says "Updates aren't set up yet", you are on a build older than
+0.1.9 that never got the update link. One-time fix: ask me for the update
+link and put it in your `.env` as `RIOS_UPDATE_FEED_URL` (or pass it with
+`--url`). Every later update then carries the link automatically.
 
-## Step 6: Pull in your messages
+## Uninstall
 
-The app reads your messages in the background. To pull them in the first
-time, press **⌘K** to open the command bar, type `scan`, and choose
-**Run scan now**. Your conversations appear on **Today** and **Inbox**.
+Everything the app knows lives in one folder, so removing it removes the app:
 
-On a Mac, iMessage is included automatically. macOS may pop up a permission
-request the first time, allow it, or ask me on the call.
+```bash
+bash scripts/uninstall-student-macos.sh
+```
 
-That is the whole setup. From here, see
-[student-pilot-instructions.md](./student-pilot-instructions.md) for what to
-actually test, and [troubleshooting.md](./troubleshooting.md) if something
-looks stuck.
+It asks you to confirm, then deletes the app and its local data. It does
+**not** touch Node, your Messages, your Chrome, or your LinkedIn account.
 
-## Browser modes
+---
 
-The app needs a browser session to read LinkedIn. There are two modes, set
-by `BROWSER_PROFILE_MODE` in your `.env` file.
+## Privacy
 
-- **`personal` (use this for the pilot).** The app reuses your real Chrome
-  profile, so it sees the LinkedIn you are already signed into. Nothing new
-  to log into. This is the gentlest option for LinkedIn: a normal,
-  signed-in Chrome looks far less unusual than a fresh automated browser.
-- **`isolated` (fallback only).** The app opens its own separate browser
-  window and you sign into LinkedIn inside that one. Use this **only** if
-  personal Chrome mode cannot be set up, for example if you do not use
-  Chrome as your main browser.
-
-Two more things, both already set for you:
-
-- **Keep the headless browser off.** There is a toggle in Settings, leave
-  it off. A visible browser (it runs quietly offscreen) looks more like a
-  real person than a hidden one.
-- **Chrome is preferred** for this pilot. If you mainly use Safari or
-  Firefox, tell me, we will use `isolated` mode and you will sign into
-  LinkedIn in the app's own window.
-
-## A note on Windows
-
-The app can technically run on Windows, but the first pilot is **Mac-only**
-on purpose: iMessage is macOS-only, and I want a small, consistent first
-round. If you only have a Windows PC, let me know and we will sort something
-out. Just do not treat Windows as the normal pilot path yet.
+- **Nothing sends automatically.** The app never replies for you.
+- **Your messages stay on your Mac.** There's no server and no tracking.
+- **AI help is optional.** You can ignore it entirely.
+- **Feedback and bug reports never include your message content**, only what
+  you choose to type. A screenshot you attach may show private messages, so
+  check before sending; the app asks you to confirm.
+- **Don't connect any account you're uncomfortable testing** with an early
+  build.

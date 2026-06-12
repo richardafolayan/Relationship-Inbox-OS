@@ -6,6 +6,8 @@ import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
 import { apiGet, apiPost, runAction } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
+import { prefetchThreadDataNow } from "@/lib/thread-prefetch";
 import type {
   HealthResponse,
   InboxResponse,
@@ -23,11 +25,13 @@ import { Button } from "@/components/ui/button";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { FitText } from "@/components/common/fit-text";
 import { ThreadRow } from "@/components/common/thread-row";
+import { BrandLoader } from "@/components/common/brand-loader";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { UpcomingBirthdays } from "@/components/common/upcoming-birthdays";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
+import { FocusRailCard } from "@/components/common/focus/focus-rail-card";
 import { NotificationCta } from "@/components/common/notification-cta";
 import { PilotTourInviteCard } from "@/components/common/PilotTourInviteCard";
 import { PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -108,12 +112,25 @@ const OXBLOOD_TODAY_VARS = {
 
 export default function TodayPage() {
   const router = useRouter();
-  const [data, setData] = useState<InboxResponse | null>(null);
-  const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
+  // Seed from the shared client cache so revisiting Today (e.g. back from a
+  // thread) paints the last-known queue instantly instead of a blank skeleton,
+  // then revalidates in the background. Read via useCacheSeed (NOT a useState
+  // initializer): the app shell's effects can warm the cache from the
+  // localStorage snapshot before this boundary hydrates, and a useState seed
+  // would leak that into the hydration render and mismatch the server HTML.
+  const inboxSeed = useCacheSeed<InboxResponse>("/runner/data/inbox");
+  const platformsSeed = useCacheSeed<PlatformCard[]>("/runner/data/platforms");
+  const [dataState, setData] = useState<InboxResponse | null>(null);
+  const data = dataState ?? inboxSeed ?? null;
+  const [platformsState, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const platforms = platformsState ?? platformsSeed ?? [];
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
+  const [loadedState, setLoaded] = useState(false);
+  // A cached queue (even an empty one) counts as loaded - no skeleton on
+  // top of data we are already painting.
+  const loaded = loadedState || inboxSeed !== undefined;
   // True when the /data/inbox fetch failed outright (runner down /
   // unreachable). Without this the empty "You're caught up" state renders
   // for an unreachable runner — indistinguishable from a genuinely empty
@@ -145,30 +162,61 @@ export default function TodayPage() {
     GREEN: 0
   }));
 
-  const refresh = useCallback(async () => {
+  const applyInbox = useCallback((inbox: InboxResponse) => {
+    setInboxUnavailable(false);
+    setData(inbox);
+    const stillPending = new Set(
+      inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
+    );
+    setRemovedIds((prev) => {
+      const next = new Set<string>();
+      prev.forEach((id) => {
+        if (stillPending.has(id)) next.add(id);
+      });
+      return next;
+    });
+  }, []);
+
+  // `force` skips the freshness TTL (still SWR: stale paints immediately,
+  // the network value lands via onFresh). Used by the SSE-driven path and
+  // post-action refreshes - those fire BECAUSE the data changed, so serving
+  // a <4s-old cache would delay the update until the next poll.
+  const refresh = useCallback(async (opts?: { force?: boolean }) => {
     const [inbox, platformRows, healthData] = await Promise.all([
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => [] as PlatformCard[]),
-      apiGet<HealthResponse>("/runner/health").catch(() => null)
+      // SWR: paint the cached queue immediately, revalidate in the background.
+      apiGet<InboxResponse>("/runner/data/inbox", {
+        ttlMs: opts?.force ? 0 : 4000,
+        swr: true,
+        onFresh: (d) => applyInbox(d as InboxResponse)
+      }).catch(() => null),
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(
+        () => [] as PlatformCard[]
+      ),
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null)
     ]);
     setInboxUnavailable(inbox === null);
-    if (inbox) {
-      setData(inbox);
-      const stillPending = new Set(
-        inbox.rows.filter((row) => row.needsReply !== false).map((row) => row.id)
-      );
-      setRemovedIds((prev) => {
-        const next = new Set<string>();
-        prev.forEach((id) => {
-          if (stillPending.has(id)) next.add(id);
-        });
-        return next;
-      });
-    }
+    if (inbox) applyInbox(inbox);
     setPlatforms(platformRows ?? []);
     if (healthData) setHealth(healthData);
     setLoaded(true);
-  }, []);
+  }, [applyInbox]);
+
+  // Debounce SSE-driven refreshes so a multi-thread scan (one THREAD_UPDATED
+  // per touched thread) collapses into a single inbox refetch instead of N.
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scheduleRefresh = useCallback(() => {
+    if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    refreshTimerRef.current = setTimeout(() => {
+      refreshTimerRef.current = null;
+      void refresh({ force: true });
+    }, 450);
+  }, [refresh]);
+  useEffect(
+    () => () => {
+      if (refreshTimerRef.current) clearTimeout(refreshTimerRef.current);
+    },
+    []
+  );
 
   const loadProfile = useCallback(() => {
     void apiGet<OperatorProfile>("/runner/data/operator-profile")
@@ -204,7 +252,7 @@ export default function TodayPage() {
 
   useEffect(() => {
     void refresh();
-    const onResync = () => void refresh();
+    const onResync = () => scheduleRefresh();
     const onRunnerEvent = (event: Event) => {
       const detail = (event as CustomEvent<{ type?: string }>).detail;
       const type = detail?.type;
@@ -216,7 +264,7 @@ export default function TodayPage() {
         type === "THREAD_UPDATED" ||
         type === "SCAN_FINISHED"
       ) {
-        void refresh();
+        scheduleRefresh();
       }
     };
     window.addEventListener("runner-resync", onResync);
@@ -225,7 +273,7 @@ export default function TodayPage() {
       window.removeEventListener("runner-resync", onResync);
       window.removeEventListener("runner-event", onRunnerEvent as EventListener);
     };
-  }, [refresh]);
+  }, [refresh, scheduleRefresh]);
 
   const advanceHero = useCallback((id: string, label: string, level: "RED" | "AMBER" | "GREEN") => {
     setTransitioning({ id, label });
@@ -235,6 +283,9 @@ export default function TodayPage() {
       return { ...base, [level]: base[level] + 1 };
     });
     if (transitionTimer.current) clearTimeout(transitionTimer.current);
+    // Brief visual ack ("Handled, next up") before the queue advances. Kept
+    // short: the operator is mid-flow and the next thread should be in front
+    // of them as close to instantly as legibility allows.
     transitionTimer.current = setTimeout(() => {
       setRemovedIds((prev) => {
         const next = new Set(prev);
@@ -242,8 +293,8 @@ export default function TodayPage() {
         return next;
       });
       setTransitioning(null);
-      void refresh();
-    }, 700);
+      void refresh({ force: true });
+    }, 400);
   }, [refresh]);
 
   useEffect(() => {
@@ -306,6 +357,13 @@ export default function TodayPage() {
   // hero, but a non-favourite overdue still outranks a fresh favourite.
   const sortedRows = useMemo(() => sortTodayQueue(rows), [rows]);
   const hero = sortedRows[0];
+  // The hero is the single most likely next open (Enter/R open it from the
+  // keyboard, where hover-prefetch never fires). Warm its thread data the
+  // moment it becomes the hero so opening it is instant.
+  const heroId = hero?.id;
+  useEffect(() => {
+    if (heroId) prefetchThreadDataNow(heroId);
+  }, [heroId]);
   const remaining = useMemo(() => sortedRows.slice(1), [sortedRows]);
   // Cap the "Then these, in order" stack; the long tail routes to Inbox.
   // overflowCount drives the "see all" link's label. (issue #291)
@@ -471,17 +529,20 @@ export default function TodayPage() {
   const allDone = rows.length === 0 && clearedTotal > 0;
 
   return (
-    <Canvas className="max-w-[1240px] pb-10" style={OXBLOOD_TODAY_VARS}>
-      <header className="sticky top-0 z-10 -mx-12 mb-6 flex items-baseline justify-between gap-6 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-12 pb-3 pt-6 backdrop-blur-md backdrop-saturate-150">
+    <Canvas
+      className="max-w-[1240px] pb-[calc(96px+env(safe-area-inset-bottom))] md:pb-10 3xl:max-w-[1400px]"
+      style={OXBLOOD_TODAY_VARS}
+    >
+      <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
         <div className="min-w-0">
           <p className="mb-1 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
             {dayLabel}
           </p>
-          <h1 className="m-0 font-display text-[32px] font-semibold leading-[1.1] tracking-[-0.025em]">
+          <h1 className="m-0 font-display text-[26px] font-semibold leading-[1.1] tracking-[-0.025em] sm:text-[32px]">
             {greetingLine}
           </h1>
         </div>
-        <div className="shrink-0 text-right font-mono text-[12px] text-ink-3">
+        <div className="shrink-0 font-mono text-[12px] text-ink-3 sm:text-right">
           <span>
             <strong className="font-medium text-ink">{rows.length}</strong> need you tonight
           </span>
@@ -492,15 +553,9 @@ export default function TodayPage() {
 
       <NotificationCta />
 
-      {welcomeDismissed === false ? (
-        <PilotWelcomeCard
-          onDismiss={() => {
-            window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
-            setWelcomeDismissed(true);
-          }}
-        />
-      ) : null}
-
+      {/* The pilot welcome moved into the right rail (compact) so it sits
+          beside the focus block, per Richard. The first-run tour invite
+          still leads the page once the welcome has been dismissed. */}
       {welcomeDismissed === true && tourSeen === false ? (
         <PilotTourInviteCard
           onStart={() => {
@@ -552,7 +607,7 @@ export default function TodayPage() {
               ref={heroRef}
               data-testid="today-hero"
               data-demo-target="today-hero"
-              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-[30px] pb-[22px] pt-7 transition-opacity duration-500 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
+              className={`relative mb-2 flex cursor-pointer flex-col overflow-hidden rounded-[16px] px-5 pb-[22px] pt-6 transition-opacity duration-300 sm:px-[30px] sm:pt-7 ${heroIsTransitioning ? "opacity-50" : "opacity-100"}`}
               onClick={() => router.push(`/thread/${hero.id}`)}
             >
               {/* The hero is no longer a white card — per the redesign it
@@ -690,7 +745,7 @@ export default function TodayPage() {
           ) : loaded ? (
             <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />
           ) : (
-            <p className="font-mono text-[12px] text-ink-3">Loading…</p>
+            <BrandLoader className="py-1" />
           )}
 
           {remaining.length > 0 ? (
@@ -731,11 +786,26 @@ export default function TodayPage() {
           ) : null}
         </div>
 
-        {/* Right rail: tonight's progress. Per the redesign the rail is no
-            longer a boxed card — it's an open titled section sitting on the
-            page, so the focus column and the rail read as one calm surface. */}
-        <aside className="hidden lg:block">
-          <div className="sticky top-[110px] flex flex-col gap-10">
+        {/* Right rail: the focus block + pilot welcome sit above tonight's
+            progress and upcoming birthdays. Per the redesign the rail's lower
+            sections are open titled groups, not boxed cards, so the focus
+            column and the rail read as one calm surface. The rail stacks below
+            the queue on narrow screens (it used to be desktop-only) so the
+            focus entry stays reachable; birthdays render exactly as before. */}
+        <aside>
+          <div className="flex flex-col gap-10 lg:sticky lg:top-[110px]">
+            <FocusRailCard rows={rows} />
+
+            {welcomeDismissed === false ? (
+              <PilotWelcomeCard
+                compact
+                onDismiss={() => {
+                  window.localStorage.setItem(PILOT_WELCOME_DISMISSED_KEY, "1");
+                  setWelcomeDismissed(true);
+                }}
+              />
+            ) : null}
+
             <section>
               <h5 className="m-0 mb-[18px] font-mono text-[11px] font-semibold uppercase tracking-[0.1em] text-ink-3">
                 Tonight’s progress

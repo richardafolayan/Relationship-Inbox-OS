@@ -160,12 +160,18 @@ export type RunnerEvent =
       type: "SCAN_THREAD_STARTED";
       threadId: string;
       platform: PlatformName;
+      // Contact display name so the dashboard ticker can say whose
+      // messages are being checked ("Checking Tola's messages") without
+      // a /data/thread round-trip. Optional: older runner builds omit it
+      // and the ticker falls back to generic copy.
+      personName?: string;
     })
   | (RunnerEventBase & {
       type: "SCAN_THREAD_PROGRESS";
       threadId: string;
       platform: PlatformName;
       stage: string;
+      personName?: string;
     })
   | (RunnerEventBase & {
       type: "SCAN_THREAD_FINISHED";
@@ -173,6 +179,15 @@ export type RunnerEvent =
       platform: PlatformName;
       updatedThreads: number;
       parsedMessages: number;
+      personName?: string;
+      // Message-count delta across the person's thread cohort, so the
+      // ticker can answer the operator's actual question ("any new
+      // messages?") rather than reporting parse totals. Optional for
+      // the same older-runner reason as personName.
+      newMessages?: number;
+      // True when the check errored. The ticker suppresses its result
+      // line in that case instead of claiming "No new messages".
+      failed?: boolean;
     })
   | (RunnerEventBase & { type: "THREAD_UPDATED"; threadId: string })
   | (RunnerEventBase & { type: "SUGGESTED_REPLIES_UPDATED"; threadId: string })
@@ -240,6 +255,16 @@ export interface SummaryOutput {
    * absent, the dashboard derives a safe brief from the legacy fields.
    */
   reply_brief?: ReplyBrief | null;
+  /**
+   * Which provider actually produced this output. Set on freshly-generated
+   * outputs (mirrors `SuggestedRepliesOutput.source`); absent on legacy cached
+   * rows. `source === null` or `source.providerId === null` means every
+   * provider in the chain failed and the fields below are the synthesised
+   * FALLBACK, not a real summary — callers that PERSIST the result (the
+   * Reassess pipeline, the bulk backfill) MUST NOT overwrite a good stored
+   * summary with a fallback. See resummarizeThread.
+   */
+  source?: AiSource | null;
 }
 
 /**

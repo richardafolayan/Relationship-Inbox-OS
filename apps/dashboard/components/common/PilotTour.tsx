@@ -8,9 +8,13 @@ import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import {
   clearTourActive,
   getPilotTourSteps,
+  isCurrentStartInvocation,
   markTourActive,
   markTourSeen,
   onPilotTourStart,
+  planPilotSkip,
+  shouldStartPilotTour,
+  shouldTearDownDeferredSkip,
   PILOT_TOUR_ACTIVE_KEY
 } from "@/lib/pilot-tour";
 
@@ -43,6 +47,16 @@ export function PilotTour() {
     bootstrapping: false
   });
   const endingRef = useRef(false);
+  // True when the operator pressed Skip while the sandbox was still
+  // bootstrapping. The in-flight startPilotSandbox() will still resolve and
+  // commit flow="pilot"/sandboxActive=true; the resolve path checks this flag
+  // and tears the sandbox down so the real inbox is restored.
+  const skipPendingRef = useRef(false);
+  // Monotonic token per startTour invocation. The post-await branches read
+  // the captured token against this ref's current value; a stale invocation
+  // (an older POST resolving after a newer startTour began) must not mutate
+  // the shared skip ref or the newer tour's state. See isCurrentStartInvocation.
+  const startTokenRef = useRef(0);
 
   const endTour = useCallback(
     async (markSeen: boolean) => {
@@ -72,10 +86,14 @@ export function PilotTour() {
 
   const skipTour = useCallback(() => {
     if (!state.active) return;
-    // If the sandbox is still bootstrapping, just close the card and
-    // mark seen. The provider's exit handler is reentrant; calling it
-    // here on a half-seeded sandbox would race.
-    if (state.bootstrapping) {
+    const plan = planPilotSkip(state.bootstrapping);
+    if (plan.kind === "defer-teardown") {
+      // The sandbox is still seeding. Closing the card and calling exit() now
+      // would race the in-flight startPilotSandbox(), which then resolves and
+      // re-commits flow="pilot"/sandboxActive=true — leaving the real inbox
+      // hidden with no recovery. Instead, close the card now and flag the
+      // skip; the bootstrap-resolve path tears the sandbox down once it lands.
+      skipPendingRef.current = true;
       if (typeof window !== "undefined") {
         markTourSeen(window.localStorage);
         clearTourActive(window.localStorage);
@@ -88,12 +106,29 @@ export function PilotTour() {
 
   const startTour = useCallback(
     async (replay: boolean) => {
+      // Re-entrancy guard. A second `pilot-tour-start` fired mid-tour (the
+      // Settings replay button, or a re-dispatched welcome card) must be
+      // ignored: re-entering here would reset the operator to step 0 and
+      // re-seed the sandbox via startPilotSandbox(). Only start when idle.
+      if (!shouldStartPilotTour(state.active)) return;
+      // Tag this invocation. A mid-bootstrap skip followed by a replay can start
+      // a second startTour while this one's POST is still in flight; the token
+      // lets the post-await branches below detect that they are stale.
+      const invocationToken = ++startTokenRef.current;
       if (typeof window !== "undefined") markTourActive(window.localStorage);
       setState({ active: true, stepIndex: 0, bootstrapping: true });
       endingRef.current = false;
+      skipPendingRef.current = false;
       try {
         await fullDemo.startPilotSandbox();
       } catch {
+        // A newer startTour superseded this one while the POST was in flight;
+        // it owns the shared skip ref and the live tour state now. Bail so this
+        // stale failure does not close the newer tour's card.
+        if (!isCurrentStartInvocation(invocationToken, startTokenRef.current)) return;
+        // Start POST failed, so the runner was never flipped into the sandbox;
+        // nothing to tear down. Clear any pending skip and close the card.
+        skipPendingRef.current = false;
         if (typeof window !== "undefined") {
           markTourSeen(window.localStorage);
           clearTourActive(window.localStorage);
@@ -101,10 +136,23 @@ export function PilotTour() {
         setState({ active: false, stepIndex: 0, bootstrapping: false });
         return;
       }
+      // A newer startTour superseded this one while the POST was in flight (the
+      // operator skipped mid-bootstrap, then replayed). The newer invocation
+      // owns skipPendingRef and the live tour state, so this stale resolve must
+      // not clear its bootstrapping flag nor consume its deferred skip.
+      if (!isCurrentStartInvocation(invocationToken, startTokenRef.current)) return;
+      // The sandbox is now seeded. If the operator skipped mid-bootstrap, honour
+      // it: tear the sandbox down so flow returns to null and the real inbox is
+      // restored. This runs strictly after the start resolved, so no race.
+      if (shouldTearDownDeferredSkip(skipPendingRef.current)) {
+        skipPendingRef.current = false;
+        void endTour(true);
+        return;
+      }
       setState((prev) => (prev.active ? { ...prev, bootstrapping: false } : prev));
       void replay;
     },
-    [fullDemo]
+    [fullDemo, state.active]
   );
 
   useEffect(() => onPilotTourStart((replay) => void startTour(replay)), [startTour]);

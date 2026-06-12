@@ -8,9 +8,11 @@ import { Canvas, PageHead, CaughtUp } from "@/components/common/canvas";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import {
   combinedReconnectScore,
+  interpretRefreshScoresResult,
   isReconnectCandidate,
   rankReconnectCandidates
 } from "@/lib/reconnect";
+import type { RefreshScoresStatus } from "@/lib/reconnect";
 import { formatDuration } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
 
@@ -24,7 +26,7 @@ import { normalizePreview } from "@/lib/preview";
 
 /** Response shape from POST /control/reconnect/refresh-scores. */
 interface RefreshScoresResponse {
-  status: "ok" | "ai_unavailable";
+  status: RefreshScoresStatus;
   scored: number;
   skipped: number;
   failed: number;
@@ -87,13 +89,12 @@ export default function ReconnectPage() {
       // Pull the freshly-persisted scores into the page so the order
       // and captions update without a manual reload.
       await refresh();
-      const tone: "ok" | "warn" = result.status === "ai_unavailable" ? "warn" : "ok";
-      const summary =
-        result.scored === 0 && result.skipped > 0
-          ? "Already up to date"
-          : result.status === "ai_unavailable"
-            ? `Scored ${result.scored}, then AI went quiet`
-            : `Scored ${result.scored}${result.skipped > 0 ? `, skipped ${result.skipped} already done` : ""}`;
+      // Mirror the Inbox "Refresh closed verdicts" handler so both consumers of
+      // the runner's refresh contract agree. In particular this surfaces the
+      // runner's `disabled_by_settings` status as "AI is off (Settings)" in a
+      // warn tone, instead of the old neutral "Scored 0" that implied the
+      // scorer ran and simply found nothing when AI is turned off in Settings.
+      const { summary, tone } = interpretRefreshScoresResult(result);
       setRefreshState({ kind: "done", summary, tone });
       // Settle back to idle after a few seconds so the button is ready
       // for another click without the operator having to click away.

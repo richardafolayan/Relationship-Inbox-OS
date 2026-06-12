@@ -2,21 +2,34 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { resolveAutoScanDisabled, resolveAutoScanInitialEnabled } from "@inbox-os/core/autoscan";
 import { Sidebar } from "@/components/layout/sidebar";
+import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
+import { FocusOverlays } from "@/components/common/focus/focus-overlays";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
+import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
+import {
+  buildUpdateNotice,
+  planUpdateNotice,
+  readNotifiedUpdateVersion,
+  UPDATE_CHECK_INTERVAL_MS,
+  UPDATE_NOTICE_ID,
+  writeNotifiedUpdateVersion,
+  type UpdateCheckResponse
+} from "@/lib/update-notice";
 import {
   buildNewMessageDigestNotice,
   buildNewMessageNotice,
   detectNewInbound,
+  NEW_MESSAGE_TOAST_DURATION_MS,
   notificationsSupported,
   notifyNewMessage,
   notifyNewMessageDigest,
@@ -25,11 +38,26 @@ import {
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
+import {
+  dismissCenterNotification,
+  markCenterNotificationsSeen,
+  recordCenterNotifications,
+  recordNewMessageNotifications,
+  recordOverdueDigestNotification
+} from "@/lib/notification-center";
 import { showToast } from "@/lib/feedback";
 import {
+  classifyDigestAckError,
+  digestFireFingerprint,
+  EMPTY_DIGEST_FIRE_GUARD,
   localDateString,
+  nextDigestFireGuard,
+  planDigestFire,
+  shouldAttemptDesktopDigestPing,
   shouldQueryDigestTick,
   summariseCandidatesForAck,
+  type DigestAckOutcome,
+  type DigestFireGuard,
   type OverdueDigestSettings,
   type OverdueDigestTickResult
 } from "@/lib/overdue-digest";
@@ -150,6 +178,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         return;
       }
       const fresh = detectNewInbound(previous, rows);
+      // Every fresh inbound lands in the notification center, whatever the
+      // delivery plan turns out to be (toast, desktop ping, or quiet-hours
+      // silence): the bell must answer "what came in while I was away" even
+      // when the alert itself was missed or suppressed.
+      recordNewMessageNotifications(fresh);
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
       const plan = planNewMessageNotice({
@@ -171,25 +204,37 @@ export function AppShell({ children }: { children: ReactNode }) {
         case "toast-single":
           for (const row of fresh) {
             const notice = buildNewMessageNotice(row);
+            const threadId = row.id;
             showToast({
-              id: `new-message:${row.id}`,
+              id: `new-message:${threadId}`,
               kind: "info",
               title: notice.title,
               description: notice.body,
               href: notice.href,
-              durationMs: 6000
+              durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+              // Waving the toast away means "seen it": stop counting it in
+              // the bell badge but keep it listed for review. Clicking
+              // through opens the thread itself, so the entry is done.
+              onManualDismiss: () => markCenterNotificationsSeen([threadId]),
+              onActivate: () => dismissCenterNotification(threadId)
             });
           }
           return;
         case "toast-digest": {
           const notice = buildNewMessageDigestNotice(fresh);
+          const threadIds = fresh.map((row) => row.id);
           showToast({
             id: "new-message:digest",
             kind: "info",
             title: notice.title,
             description: notice.body,
             href: notice.href,
-            durationMs: 6000
+            durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+            // The digest stands in for several threads. Dismissing it, or
+            // opening /today from it, marks them all seen; each entry stays
+            // in the center until handled individually.
+            onManualDismiss: () => markCenterNotificationsSeen(threadIds),
+            onActivate: () => markCenterNotificationsSeen(threadIds)
           });
           return;
         }
@@ -205,9 +250,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   // every tick. /health and /data/inbox still fire because the sidebar
   // and attention-count badge depend on them.
   const refreshMeta = useCallback(async () => {
+    // Short TTLs so this 8s background poll de-dupes with the page-level
+    // /data/inbox and /health reads instead of issuing parallel duplicates.
     const [healthData, inboxData] = await Promise.all([
-      apiGet<HealthResponse>("/runner/health").catch(() => null),
-      apiGet<InboxResponse>("/runner/data/inbox").catch(() => null)
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null),
+      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 4000 }).catch(() => null)
     ]);
 
     // healthData ?? prev ?? null: a fresh result wins; a failed poll
@@ -224,13 +271,67 @@ export function AppShell({ children }: { children: ReactNode }) {
     }
   }, [maybeNotify]);
 
-  useEffect(() => {
-    void refreshMeta();
-    const timer = setInterval(() => {
-      void refreshMeta();
-    }, 8000);
-    return () => clearInterval(timer);
-  }, [refreshMeta]);
+  // Poll health + inbox every 8s while visible; pause in background tabs and
+  // catch up on return (the hook fires an immediate tick on mount).
+  useVisiblePolling(() => void refreshMeta(), 8000);
+
+  // Update-available notice: ask the runner whether a newer pilot build is
+  // on the feed (mount + every 6h while visible - the check spawns a child
+  // process and fetches the network, so it stays far away from the 8s inbox
+  // cadence). A new version surfaces exactly like a new message: a 30s
+  // toast plus a center entry, both landing on Settings > App updates. One
+  // notice per version (see lib/update-notice.ts), quiet hours keep the
+  // record but skip the toast, and the entry clears itself once the app
+  // reports up to date.
+  const checkAppUpdate = useCallback(async () => {
+    const check = await apiGetRaw<UpdateCheckResponse>("/runner/system/update-check").catch(
+      () => null
+    );
+    // Unconfigured installs and failed checks stay silent - the Settings
+    // card is the place that explains those states, not a notification.
+    if (!check || !check.configured || check.error) return;
+    const plan = planUpdateNotice({
+      updateAvailable: check.updateAvailable,
+      latestVersion: check.latestVersion,
+      notifiedVersion: readNotifiedUpdateVersion(),
+      quietHoursActive: isQuietHoursActive()
+    });
+    if (plan === "none") return;
+    if (plan === "clear") {
+      dismissCenterNotification(UPDATE_NOTICE_ID);
+      return;
+    }
+    const notice = buildUpdateNotice(check.latestVersion);
+    recordCenterNotifications([
+      {
+        id: UPDATE_NOTICE_ID,
+        title: notice.title,
+        body: notice.body,
+        href: notice.href,
+        at: Date.now(),
+        seen: false
+      }
+    ]);
+    writeNotifiedUpdateVersion(check.latestVersion);
+    if (plan === "record-and-toast") {
+      showToast({
+        id: UPDATE_NOTICE_ID,
+        kind: "info",
+        title: notice.title,
+        description: notice.body,
+        href: notice.href,
+        durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+        // Waving the toast away means "seen it" - the bell stops counting
+        // it but keeps it reviewable. Clicking through lands on the App
+        // updates card; the entry stays (still seen) as a quiet reminder
+        // until the operator updates (auto-clear above) or dismisses it.
+        onManualDismiss: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID]),
+        onActivate: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID])
+      });
+    }
+  }, []);
+
+  useVisiblePolling(() => void checkAppUpdate(), UPDATE_CHECK_INTERVAL_MS);
 
   useEffect(() => {
     if (autoScanDisabled) {
@@ -325,11 +426,18 @@ export function AppShell({ children }: { children: ReactNode }) {
   // however the operator got there, new-message alerts still work.
 
   // #360: calm overdue-reply digest scheduler. Quiet, opt-in, low-frequency.
-  // Self-gated: never asks for permission, never fires while the tab is
-  // visible, never fires during quiet hours, never fires when cadence is
-  // off or when permission is not granted. /ack is only called when the
-  // notification actually fires.
+  // Self-gated: never asks for permission, never fires during quiet hours,
+  // never fires when cadence is off. When a digest is due it always lands
+  // as one persistent bell entry (the notification center is the primary
+  // surface - it works without desktop permission, which used to silently
+  // disable the whole feature), plus a desktop notification when that extra
+  // is available (permission granted, tab hidden). /ack is only called when
+  // the digest actually landed.
   const overdueDigestInFlightRef = useRef(false);
+  // Fire/ack transaction guard (#P4L3): remembers a digest we already fired
+  // whose ack has not yet landed, so a failed ack does not re-fire the
+  // identical notification on the next 5-minute poll.
+  const overdueDigestGuardRef = useRef<DigestFireGuard>(EMPTY_DIGEST_FIRE_GUARD);
   useEffect(() => {
     const check = async () => {
       if (overdueDigestInFlightRef.current) return;
@@ -339,15 +447,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           "/runner/data/overdue-digest/settings"
         ).catch(() => null);
         if (!settings) return;
-        const permission: NotificationPermission | "unsupported" = notificationsSupported()
-          ? Notification.permission
-          : "unsupported";
         const gate = shouldQueryDigestTick({
           cadence: settings.cadence,
-          notificationsSupported: notificationsSupported(),
-          notificationPermission: permission,
-          documentVisibility:
-            typeof document === "undefined" ? "unknown" : document.visibilityState,
           quietHoursActive: isQuietHoursActive()
         });
         if (!gate) return;
@@ -356,14 +457,50 @@ export function AppShell({ children }: { children: ReactNode }) {
           { localDate: localDateString() }
         ).catch(() => null);
         if (!tick || !tick.due || tick.candidates.length === 0) return;
-        const fired = notifyOverdueReplyDigest(
-          tick.candidates.map((c) => ({ personId: c.personId, personName: c.personName })),
-          () => router.push("/today")
-        );
-        if (!fired) return;
-        await apiPost("/runner/control/overdue-digest/ack", {
-          included: summariseCandidatesForAck(tick.candidates)
-        }).catch(() => undefined);
+        // Fire + ack are one transaction: only a successful ack advances the
+        // runner's lastDigestAt. If the ack failed last time, retry it WITHOUT
+        // re-firing the identical notification (#P4L3).
+        const fingerprint = digestFireFingerprint(settings.lastDigestAt, tick.candidates);
+        if (planDigestFire(fingerprint, overdueDigestGuardRef.current) === "fire-then-ack") {
+          const people = tick.candidates.map((c) => ({
+            personId: c.personId,
+            personName: c.personName
+          }));
+          // The bell entry IS the digest: recorded unconditionally so the
+          // reminder lands somewhere the operator actually looks, with or
+          // without desktop permission.
+          recordOverdueDigestNotification(people);
+          // Desktop ping on top, only when it adds anything: permission
+          // granted and the operator not already looking at the app.
+          const permission: NotificationPermission | "unsupported" = notificationsSupported()
+            ? Notification.permission
+            : "unsupported";
+          if (
+            shouldAttemptDesktopDigestPing({
+              notificationsSupported: notificationsSupported(),
+              notificationPermission: permission,
+              documentVisibility:
+                typeof document === "undefined" ? "unknown" : document.visibilityState
+            })
+          ) {
+            notifyOverdueReplyDigest(people, () => router.push("/today"));
+          }
+          // Arm the guard BEFORE awaiting the ack so a re-entrant poll cannot
+          // re-fire while the ack is still in flight.
+          overdueDigestGuardRef.current = { pendingFingerprint: fingerprint };
+        }
+        let outcome: DigestAckOutcome = "ok";
+        try {
+          await apiPost("/runner/control/overdue-digest/ack", {
+            included: summariseCandidatesForAck(tick.candidates),
+            // Same local date used for the tick gate above, persisted so the daily
+            // cadence compares like-for-like local dates next time (#628).
+            localDate: localDateString()
+          });
+        } catch (error) {
+          outcome = classifyDigestAckError(error);
+        }
+        overdueDigestGuardRef.current = nextDigestFireGuard(fingerprint, outcome);
       } finally {
         overdueDigestInFlightRef.current = false;
       }
@@ -380,8 +517,15 @@ export function AppShell({ children }: { children: ReactNode }) {
     };
   }, [router]);
 
-  // SSE event stream - kept untouched. Pages subscribe to `runner-event` /
-  // `runner-resync` window events.
+  // SSE event stream. Pages subscribe to `runner-event` / `runner-resync`
+  // window events. The stream is created ONCE for the shell's lifetime: it
+  // used to list `pathname` (and `refreshMeta`) in its deps, so every route
+  // change tore down the EventSource and reconnected with `sinceEventId`,
+  // making the runner replay its whole buffered window and re-dispatch a
+  // burst of events on the freshly-mounted page. refreshMeta is read through
+  // a ref so its changing identity never re-arms the stream.
+  const refreshMetaRef = useRef(refreshMeta);
+  refreshMetaRef.current = refreshMeta;
   useEffect(() => {
     const previousEventId = Number(window.sessionStorage.getItem("runner_last_event_id") ?? "0");
     const eventUrl = previousEventId > 0 ? `/events?sinceEventId=${previousEventId}` : "/events";
@@ -401,7 +545,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         // promptly - background tabs throttle the 8s poll hard, which is
         // exactly when the notification matters most.
         if (payload.type === "RESYNC_REQUIRED" || payload.type === "SCAN_FINISHED") {
-          void refreshMeta();
+          void refreshMetaRef.current();
         }
       } catch {
         // Ignore malformed event payloads.
@@ -411,7 +555,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       // Let EventSource auto-reconnect.
     };
     return () => source.close();
-  }, [refreshMeta, pathname]);
+  }, []);
 
   // ⌘K toggles the palette. Esc closes the palette and, when there is no
   // palette open, navigates back from a thread to /today (matches the
@@ -476,10 +620,14 @@ export function AppShell({ children }: { children: ReactNode }) {
 
   return (
     <div
-      className="grid h-screen overflow-hidden bg-paper text-ink"
+      // Single column below md (the sidebar hides; the MobileDock takes
+      // over). The sidebar width lives in a CSS var so the inline style
+      // can't override the phone layout — a plain gridTemplateColumns
+      // style would keep reserving the sidebar track at every width.
+      className="grid h-app-screen grid-cols-1 overflow-hidden bg-paper text-ink md:[grid-template-columns:var(--shell-cols)]"
       style={{
-        gridTemplateColumns: sidebarCollapsed ? "56px 1fr" : "200px 1fr"
-      }}
+        "--shell-cols": sidebarCollapsed ? "56px 1fr" : "200px 1fr"
+      } as CSSProperties}
     >
       <Sidebar
         health={health}
@@ -489,15 +637,17 @@ export function AppShell({ children }: { children: ReactNode }) {
         onToggleCollapsed={() => setSidebarCollapsed((prev) => !prev)}
         operatorDisplayName={operatorDisplayName}
       />
-      <div className="flex h-screen min-h-0 flex-col">
+      <div className="flex h-app-screen min-h-0 flex-col">
         <FullDemoBanner />
         <TopStatus />
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
+      <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />
       <CommandPalette open={paletteOpen} onClose={() => setPaletteOpen(false)} />
       <ToastHost />
       <PilotFeedbackModal />
       <PilotTour />
+      <FocusOverlays />
     </div>
   );
 }
