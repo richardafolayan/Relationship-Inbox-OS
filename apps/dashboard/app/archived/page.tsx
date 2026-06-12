@@ -2,7 +2,8 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { apiGet, apiPost, ApiRequestError, peekCache } from "@/lib/api";
+import { apiGet, apiPost, ApiRequestError } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
 import type { InboxRow } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
 import { PLATFORM_LABEL } from "@/lib/risk";
@@ -124,10 +125,12 @@ function applyArchSort(items: InboxRow[], sort: ArchSort): InboxRow[] {
 // deleted automatically.
 export default function ArchivedPage() {
   // Seed from the shared client cache so returning to Archived paints the
-  // last-known list instantly (refresh below revalidates immediately).
-  const [rows, setRows] = useState<InboxRow[] | null>(
-    () => peekCache<ArchivedResponse>("/runner/data/archived")?.rows ?? null
-  );
+  // last-known list instantly (refresh below revalidates immediately). Read
+  // via useCacheSeed (NOT a useState initializer) so a warm cache can never
+  // leak into the hydration render and mismatch the server HTML.
+  const archivedSeed = useCacheSeed<ArchivedResponse>("/runner/data/archived");
+  const [rowsState, setRows] = useState<InboxRow[] | null>(null);
+  const rows = rowsState ?? archivedSeed?.rows ?? null;
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<OutcomeTab>("all");

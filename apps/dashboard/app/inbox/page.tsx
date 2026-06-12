@@ -5,7 +5,8 @@ import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import { Archive, Search, Star } from "lucide-react";
-import { apiGet, apiPost, peekCache, runAction, ApiRequestError } from "@/lib/api";
+import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { shouldInboxRefreshOnRunnerEvent } from "@/lib/inbox-events";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
@@ -211,13 +212,17 @@ interface SectionGroup {
 export default function InboxPage() {
   // Seed from the shared client cache so returning to the Inbox (e.g. back
   // from a thread, or Today -> Inbox) paints the last-known list instantly
-  // and then revalidates, instead of flashing an empty skeleton.
-  const [data, setData] = useState<InboxResponse | null>(
-    () => peekCache<InboxResponse>("/runner/data/inbox") ?? null
-  );
-  const [platforms, setPlatforms] = useState<PlatformCard[]>(
-    () => peekCache<PlatformCard[]>("/runner/data/platforms") ?? []
-  );
+  // and then revalidates, instead of flashing an empty skeleton. Read via
+  // useCacheSeed (NOT a useState initializer): the app shell's effects can
+  // warm the cache from the localStorage snapshot before this boundary
+  // hydrates, and a useState seed would leak that into the hydration render
+  // and mismatch the server HTML.
+  const inboxSeed = useCacheSeed<InboxResponse>("/runner/data/inbox");
+  const platformsSeed = useCacheSeed<PlatformCard[]>("/runner/data/platforms");
+  const [dataState, setData] = useState<InboxResponse | null>(null);
+  const data = dataState ?? inboxSeed ?? null;
+  const [platformsState, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const platforms = platformsState ?? platformsSeed ?? [];
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [receiptsOpen, setReceiptsOpen] = useState(false);
@@ -225,7 +230,10 @@ export default function InboxPage() {
   useEffect(() => {
     if (receiptsOpen) setReceiptsEverOpened(true);
   }, [receiptsOpen]);
-  const [loaded, setLoaded] = useState(() => peekCache<InboxResponse>("/runner/data/inbox") !== undefined);
+  const [loadedState, setLoaded] = useState(false);
+  // A cached list (even an empty one) counts as loaded - no skeleton on
+  // top of data we are already painting.
+  const loaded = loadedState || inboxSeed !== undefined;
   const [query, setQuery] = useState("");
   const [tab, setTab] = useState<RiskTab>("all");
   const [category, setCategory] = useState<CategoryFilter>("any");
