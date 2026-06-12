@@ -10,7 +10,8 @@ const {
   planNewMessageNotice,
   shouldShowNotificationCta,
   notifyNewMessage,
-  notifyNewMessageDigest
+  notifyNewMessageDigest,
+  NEW_MESSAGE_TOAST_DURATION_MS
 } = await import("../apps/dashboard/lib/notifications.ts");
 
 // Minimal InboxRow stand-in: the builders only read these fields.
@@ -63,6 +64,16 @@ test("buildNewMessageDigestNotice: roll-up names the first person and counts the
   assert.equal(four.title, "4 new messages");
   assert.equal(four.body, "Davina and 3 others are waiting on a reply.");
   assert.equal(four.href, "/today");
+});
+
+test("new-message toasts stay up for at least 30 seconds", () => {
+  // Operator request: long enough to read and act on without rushing. The
+  // notification center keeps the notice after expiry, so this timeout only
+  // ends the interruption, never loses the message.
+  assert.ok(
+    NEW_MESSAGE_TOAST_DURATION_MS >= 30_000,
+    `expected >= 30000ms, got ${NEW_MESSAGE_TOAST_DURATION_MS}`
+  );
 });
 
 test("planNewMessageNotice: nothing fresh surfaces nothing", () => {
