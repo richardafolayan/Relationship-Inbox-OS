@@ -11,6 +11,7 @@ import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
 import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
+import { NotificationBell } from "@/components/common/notification-center";
 import type { HealthResponse, PlatformCard } from "@/lib/types";
 
 // Single 44px status row. Mostly read-only in v1:
@@ -593,6 +594,7 @@ export function TopStatus() {
       ) : null}
 
       <div className="ml-auto flex items-center gap-3">
+        <NotificationBell />
         <button
           type="button"
           onClick={() => (focusActive ? openFocusReview() : openFocusSetup())}

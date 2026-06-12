@@ -23,3 +23,15 @@ export function resolveToastGesture(travelledPx: number, interactive: boolean): 
   if (interactive) return "activate";
   return "springback";
 }
+
+// Same decision for a notification-center row. Rows are always clickable
+// (they open the thread) and only a LEFT swipe dismisses: the panel hugs the
+// right edge of the screen, so a right drag reads as "put it back", not
+// "throw it away". A long right drag therefore springs back instead of
+// activating - releasing way off to the right is an abandoned gesture, not
+// a click.
+export function resolveCenterRowGesture(travelledPx: number): ToastGesture {
+  if (travelledPx < -SWIPE_DISMISS_PX) return "dismiss";
+  if (travelledPx > SWIPE_DISMISS_PX) return "springback";
+  return "activate";
+}

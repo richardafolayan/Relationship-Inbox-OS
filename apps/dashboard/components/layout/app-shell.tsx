@@ -20,6 +20,7 @@ import {
   buildNewMessageDigestNotice,
   buildNewMessageNotice,
   detectNewInbound,
+  NEW_MESSAGE_TOAST_DURATION_MS,
   notificationsSupported,
   notifyNewMessage,
   notifyNewMessageDigest,
@@ -28,6 +29,11 @@ import {
   snapshotInbox,
   type InboxSnapshot
 } from "@/lib/notifications";
+import {
+  dismissCenterNotification,
+  markCenterNotificationsSeen,
+  recordNewMessageNotifications
+} from "@/lib/notification-center";
 import { showToast } from "@/lib/feedback";
 import {
   classifyDigestAckError,
@@ -160,6 +166,11 @@ export function AppShell({ children }: { children: ReactNode }) {
         return;
       }
       const fresh = detectNewInbound(previous, rows);
+      // Every fresh inbound lands in the notification center, whatever the
+      // delivery plan turns out to be (toast, desktop ping, or quiet-hours
+      // silence): the bell must answer "what came in while I was away" even
+      // when the alert itself was missed or suppressed.
+      recordNewMessageNotifications(fresh);
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
       const plan = planNewMessageNotice({
@@ -181,25 +192,37 @@ export function AppShell({ children }: { children: ReactNode }) {
         case "toast-single":
           for (const row of fresh) {
             const notice = buildNewMessageNotice(row);
+            const threadId = row.id;
             showToast({
-              id: `new-message:${row.id}`,
+              id: `new-message:${threadId}`,
               kind: "info",
               title: notice.title,
               description: notice.body,
               href: notice.href,
-              durationMs: 6000
+              durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+              // Waving the toast away means "seen it": stop counting it in
+              // the bell badge but keep it listed for review. Clicking
+              // through opens the thread itself, so the entry is done.
+              onManualDismiss: () => markCenterNotificationsSeen([threadId]),
+              onActivate: () => dismissCenterNotification(threadId)
             });
           }
           return;
         case "toast-digest": {
           const notice = buildNewMessageDigestNotice(fresh);
+          const threadIds = fresh.map((row) => row.id);
           showToast({
             id: "new-message:digest",
             kind: "info",
             title: notice.title,
             description: notice.body,
             href: notice.href,
-            durationMs: 6000
+            durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+            // The digest stands in for several threads. Dismissing it, or
+            // opening /today from it, marks them all seen; each entry stays
+            // in the center until handled individually.
+            onManualDismiss: () => markCenterNotificationsSeen(threadIds),
+            onActivate: () => markCenterNotificationsSeen(threadIds)
           });
           return;
         }
