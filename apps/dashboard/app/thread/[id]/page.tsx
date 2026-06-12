@@ -1037,8 +1037,9 @@ export default function ThreadPage() {
     return () => window.removeEventListener("operator-profile-saved", loadProfile);
   }, []);
 
-  // Per-thread rescan progress: shows the active stage inline next to
-  // the Rescan button while the runner is opening + parsing the thread.
+  // Per-thread rescan in-flight flag. Progress copy renders in the
+  // TopStatus ticker ("Checking <name>'s messages"); here it only guards
+  // the menu item against double-clicks and flips its label.
   // Cleared when SCAN_THREAD_FINISHED arrives or after a 30s defensive
   // timeout so a missed event can never strand the UI in "rescanning".
   const [rescanStage, setRescanStage] = useState<string | null>(null);
@@ -3074,11 +3075,10 @@ export default function ThreadPage() {
                   <Button
                     variant="ghost"
                     aria-label="More actions"
-                    title={rescanStage ? `Rescan: ${rescanStage}…` : "More actions"}
+                    title="More actions"
                     className="px-2 py-1.5 text-[12px]"
                   >
                     <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
-                    {rescanStage ? <span className="ml-2">{rescanStage}…</span> : null}
                   </Button>
                 }
                 items={[
@@ -3238,7 +3238,11 @@ export default function ThreadPage() {
                       runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
                   },
                   {
-                    label: rescanStage ? `${rescanStage}…` : "Rescan",
+                    // Progress lives in the TopStatus ticker ("Checking
+                    // <name>'s messages"), not the thread header — the
+                    // menu label only flips while running so a re-click
+                    // reads as already in flight.
+                    label: rescanStage ? "Checking for new messages…" : "Check for new messages",
                     onSelect: () => {
                       if (rescanStage) return;
                       runAction(
