@@ -349,7 +349,7 @@ function DayDivider({ label }: { label: string }) {
   );
 }
 
-// --- Apple-style reply threading (#695) -------------------------------------
+// --- Apple-style reply threading ---------------------------------------------
 // Render decisions (when a quote / curve / count shows) live in
 // lib/reply-threading.ts; these components are the visual half.
 
