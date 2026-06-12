@@ -2069,7 +2069,7 @@ export default function ThreadPage() {
       // Multi-second LLM call; the page does not remount across /thread/A ->
       // /thread/B, so bail if the operator navigated away rather than writing
       // A's draft into B's drawer (a wrong-recipient hazard).
-      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return false;
       setComposeDraft(output.text);
       return true;
     } catch (composeErr) {
@@ -2121,11 +2121,16 @@ export default function ThreadPage() {
     if (!intent || dictationMode === "composing") return;
     setComposeError(null);
     setDictationMode("composing");
+    const startThreadId = threadId;
     try {
       const output = await apiPost<{ text: string }>(
         `/runner/control/thread/${thread.id}/compose`,
         { intent }
       );
+      // Multi-second LLM call; the page does not remount across /thread/A ->
+      // /thread/B, so bail if the operator navigated away rather than writing
+      // A's draft into B's composer (a wrong-recipient hazard).
+      if (!shouldApplyThreadScopedResult(startThreadId, transformRouteIdRef.current)) return;
       setComposer(output.text);
       setComposerSource("user");
       setDictationMode("composed");

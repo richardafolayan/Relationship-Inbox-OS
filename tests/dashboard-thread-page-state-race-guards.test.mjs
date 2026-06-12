@@ -15,7 +15,9 @@ test("compose + ask snapshot the thread id before the await and guard the write"
   // both async handlers must snapshot startThreadId and gate their state write
   const composeBlock = SRC.slice(SRC.indexOf("const composeFromIntent"), SRC.indexOf("const askAi"));
   assert.match(composeBlock, /const startThreadId = threadId;/, "composeFromIntent snapshots startThreadId");
-  assert.match(composeBlock, /shouldApplyThreadScopedResult\(startThreadId, transformRouteIdRef\.current\)\)\s*return;\s*\n\s*setComposeDraft\(output\.text\)/, "compose guards setComposeDraft");
+  // composeFromIntent returns a boolean (the #476 dictation handoff awaits
+  // it), so its bail is `return false` rather than a bare `return`.
+  assert.match(composeBlock, /shouldApplyThreadScopedResult\(startThreadId, transformRouteIdRef\.current\)\)\s*return(?: false)?;\s*\n\s*setComposeDraft\(output\.text\)/, "compose guards setComposeDraft");
 
   const askBlock = SRC.slice(SRC.indexOf("const askAi"), SRC.indexOf("const useDraft"));
   assert.match(askBlock, /const startThreadId = threadId;/, "askAi snapshots startThreadId");
