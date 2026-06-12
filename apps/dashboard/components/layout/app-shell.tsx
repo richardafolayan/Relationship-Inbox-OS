@@ -488,6 +488,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           setPaletteOpen(false);
           return;
         }
+        // The thread page's focused-thread overlay claims Esc to close
+        // itself (its own window listener). Don't ALSO navigate away -
+        // layered dismissal: palette, then overlay, then thread.
+        if (document.querySelector('[data-focused-overlay="true"]')) {
+          return;
+        }
         if (pathname.startsWith("/thread/")) {
           router.push("/today");
         }

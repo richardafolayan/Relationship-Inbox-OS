@@ -36,6 +36,7 @@ import { signalReassessStart } from "@/lib/reassess-status";
 import { readThreadSource } from "@/lib/thread-source";
 import { shouldApplyThreadScopedResult, shouldRefetchForThreadEvent } from "@/lib/thread-identity-guard";
 import { computeRepliesGenerating } from "@/lib/suggestions-spinner";
+import { buildReplyGraph, computeReplyDecor, formatReplyCount } from "@/lib/reply-threading";
 import { composerSourceAfterClear } from "@/lib/composer-source";
 import { ageOnNextBirthday, birthdayCountdownLabel, daysUntilBirthday } from "@inbox-os/core/birthday";
 import { cn } from "@/lib/utils";
@@ -338,16 +339,311 @@ function formatScheduledFor(iso: string | null | undefined): string {
   });
 }
 
-function DayDivider({ label, className }: { label: string; className?: string }) {
-  // Faster collapse on focus enter (150ms) than expand on exit
-  // (300ms) — matches the bubble timing so dividers and bubbles
-  // animate together.
-  const dimmed = className?.includes("opacity-0") ?? false;
+function DayDivider({ label }: { label: string }) {
   return (
-    <div className={`my-3 flex items-center gap-3 self-stretch transition-all ${dimmed ? "duration-150" : "duration-300"} ${className ?? ""}`}>
+    <div className="my-3 flex items-center gap-3 self-stretch">
       <span className="h-px flex-1 bg-hairline" />
       <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-3">{label}</span>
       <span className="h-px flex-1 bg-hairline" />
+    </div>
+  );
+}
+
+// --- Apple-style reply threading (#695) -------------------------------------
+// Render decisions (when a quote / curve / count shows) live in
+// lib/reply-threading.ts; these components are the visual half.
+
+/**
+ * The curved tail tying a reply bubble up toward its quoted parent -
+ * Messages.app's thread connector. Anchored at the reply bubble's leading
+ * corner, arcing toward the conversation centre.
+ */
+function ReplyCurve({ side }: { side: "IN" | "OUT" }) {
+  return (
+    <svg
+      viewBox="0 0 20 16"
+      aria-hidden="true"
+      className={`h-[16px] w-[20px] shrink-0 text-ink-4 ${side === "OUT" ? "-scale-x-100" : ""}`}
+    >
+      <path
+        d="M2 16 C 2 7 8 2.5 18 2.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+/**
+ * Translucent mini copy of the message a reply points at, aligned to the
+ * PARENT sender's side like Messages.app. Clicking it focuses the thread
+ * (when the parent is loaded); the optional count link renders beneath,
+ * mirroring Apple's "N Replies" between quote and reply.
+ */
+function ReplyQuote({
+  side,
+  snippet,
+  navigable,
+  onFocusThread,
+  countLabel
+}: {
+  side: "IN" | "OUT";
+  snippet: string;
+  navigable: boolean;
+  onFocusThread: () => void;
+  countLabel: string | null;
+}) {
+  const bubble = (
+    <span
+      className={`block max-w-full px-[10px] py-[6px] text-[11.5px] leading-[1.4] ${
+        // A washed-out mini of the parent's own bubble: ink-tinted for
+        // outbound parents, paper-tinted for inbound - so a quoted "you"
+        // message never reads as a new incoming bubble.
+        side === "OUT"
+          ? "rounded-2xl rounded-br-[6px] border border-[color-mix(in_oklch,var(--ink)_22%,transparent)] bg-[color-mix(in_oklch,var(--ink)_13%,transparent)] text-ink-2"
+          : "rounded-2xl rounded-bl-[6px] border border-hairline bg-[color-mix(in_oklch,var(--paper-2)_55%,transparent)] text-ink-3"
+      }`}
+    >
+      <span className="line-clamp-2 whitespace-pre-wrap break-words text-left">{snippet}</span>
+    </span>
+  );
+  return (
+    <div
+      className={`flex max-w-[60%] flex-col gap-[4px] sm:max-w-[46%] ${
+        side === "OUT" ? "self-end items-end" : "self-start items-start"
+      }`}
+    >
+      {navigable ? (
+        <button
+          type="button"
+          onClick={onFocusThread}
+          title="View thread"
+          className="block max-w-full text-left transition-opacity duration-calm hover:opacity-75"
+        >
+          {bubble}
+        </button>
+      ) : (
+        bubble
+      )}
+      {countLabel ? (
+        navigable ? (
+          <button
+            type="button"
+            onClick={onFocusThread}
+            title="View thread"
+            className="text-[12px] font-semibold text-accent-ink underline-offset-2 hover:underline"
+          >
+            {countLabel}
+          </button>
+        ) : (
+          <span className="text-[12px] font-semibold text-ink-3">{countLabel}</span>
+        )
+      ) : null}
+    </div>
+  );
+}
+
+/**
+ * One message inside the focused-thread overlay. A deliberately simplified
+ * cousin of the transcript bubble: text, media, transcript and reaction
+ * stickers render; interactive affordances (reaction picker, participant
+ * popover, reply links) stay in the main transcript.
+ */
+function FocusedThreadBubble({
+  message,
+  contactFirstName
+}: {
+  message: ThreadMessage;
+  contactFirstName: string;
+}) {
+  const senderLabel =
+    message.direction === "OUT" ? "You" : (message.senderName ?? contactFirstName);
+  const playableAttachments = (message.attachments ?? []).filter(
+    (a) => a.guid && a.kind && a.kind !== "unknown"
+  );
+  const hasInlineMedia = playableAttachments.length > 0;
+  const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
+  const showText = !(hasInlineMedia && isAttachmentOnlyText);
+  const reactions = (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
+  const transcribableKind = playableAttachments
+    .map((a) => a.kind)
+    .find((k) => k === "voice_note" || k === "audio" || k === "video");
+  return (
+    <div
+      className={`flex max-w-[86%] flex-col sm:max-w-[72%] ${
+        message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
+      }`}
+    >
+      <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
+        {senderLabel}
+      </span>
+      <div className="relative">
+        <div
+          className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] shadow-card ${
+            message.direction === "OUT"
+              ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+              : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+          }`}
+        >
+          {hasInlineMedia ? (
+            <div className="flex flex-col gap-2">
+              {playableAttachments.map((a, attIdx) => (
+                <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+              ))}
+              {transcribableKind ? (
+                <VoiceMessageTranscript
+                  messageId={message.id}
+                  transcription={message.audioTranscription ?? null}
+                  attachmentKind={transcribableKind}
+                />
+              ) : null}
+            </div>
+          ) : null}
+          {showText ? (
+            <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+          ) : null}
+        </div>
+        {reactions.length > 0 ? (
+          <div
+            className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
+              message.direction === "OUT" ? "-left-[10px]" : "-right-[10px]"
+            }`}
+          >
+            {reactions.map((r, i) => (
+              <span
+                key={`${r.kind}-${r.direction}-${i}`}
+                title={`${r.direction === "OUT" ? "You" : senderLabel} reacted ${r.kind}`}
+                className={`flex h-[24px] w-[24px] items-center justify-center rounded-full border-2 border-paper text-[13px] leading-none shadow-sm ${
+                  r.direction === "OUT" ? "bg-ink text-paper" : "bg-paper-2 text-ink"
+                }`}
+              >
+                {r.emoji}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <span className="mt-[6px] flex items-center gap-2 text-[11px] text-ink-3">
+        <span>{formatClock(message.timestamp)}</span>
+        {message.direction === "OUT" && message.sentVia === "automation" ? (
+          <span className="text-ink-4">· sent via automation ✓</span>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * Messages.app's focused-thread view: the transcript blurs in place
+ * underneath (see the timeline wrapper) and this overlay floats the
+ * thread - parent, every loaded reply, and any in-flight replies - as a
+ * sharp, tight stack. Esc, the exit pill, or clicking the dimmed
+ * backdrop leaves; the composer below stays live and sends into the
+ * thread while it is open.
+ */
+function FocusedThreadOverlay({
+  parent,
+  replies,
+  pendingReplies,
+  contactFirstName,
+  onExit,
+  onRetryPending
+}: {
+  parent: ThreadMessage;
+  replies: ThreadMessage[];
+  pendingReplies: Array<{
+    clientSendId: string;
+    text: string;
+    sentAt: string;
+    failed?: boolean;
+    errorMessage?: string;
+  }>;
+  contactFirstName: string;
+  onExit: () => void;
+  onRetryPending: (clientSendId: string) => void;
+}) {
+  const count = replies.length + pendingReplies.length;
+  return (
+    <div
+      data-focused-overlay="true"
+      className="absolute inset-0 z-30 flex flex-col"
+      role="dialog"
+      aria-label="Focused thread"
+    >
+      <div
+        className="absolute inset-0 bg-[color-mix(in_oklch,var(--paper)_38%,transparent)]"
+        onClick={onExit}
+        aria-hidden="true"
+      />
+      <div className="relative min-h-0 flex-1 overflow-y-auto overscroll-contain" onClick={onExit}>
+        <div
+          className="mx-auto flex w-full max-w-[820px] flex-col gap-[14px] px-4 pb-10 pt-[76px] sm:px-8 lg:px-12"
+          onClick={(e) => e.stopPropagation()}
+        >
+          <div
+            data-focused-pill="true"
+            className="flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-[color-mix(in_oklch,var(--paper)_92%,transparent)] px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur"
+          >
+            <span>
+              thread · {count} {count === 1 ? "reply" : "replies"}
+            </span>
+            <button
+              type="button"
+              onClick={onExit}
+              className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+              title="Esc"
+            >
+              exit
+            </button>
+          </div>
+          <div className="self-center text-[11px] font-medium tracking-[-0.005em] text-ink-3">
+            {formatDayLabel(new Date(parent.timestamp))} {formatClock(parent.timestamp)}
+          </div>
+          <FocusedThreadBubble message={parent} contactFirstName={contactFirstName} />
+          {replies.map((m) => (
+            <FocusedThreadBubble key={m.id} message={m} contactFirstName={contactFirstName} />
+          ))}
+          {pendingReplies.map((pending) => (
+            <div
+              key={`pending-${pending.clientSendId}`}
+              className="flex max-w-[86%] flex-col items-end self-end sm:max-w-[72%]"
+            >
+              <div
+                className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
+                  pending.failed
+                    ? "rounded-2xl rounded-br-[6px] border border-risk-overdue bg-paper text-ink"
+                    : "rounded-2xl rounded-br-[6px] bg-ink text-paper opacity-80"
+                }`}
+              >
+                {pending.text}
+              </div>
+              <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
+                <span>{formatClock(pending.sentAt)}</span>
+                {pending.failed ? (
+                  <>
+                    <span className="text-risk-overdue">· failed</span>
+                    <button
+                      type="button"
+                      onClick={() => onRetryPending(pending.clientSendId)}
+                      className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                      title={pending.errorMessage}
+                    >
+                      retry
+                    </button>
+                  </>
+                ) : (
+                  <span className="flex items-center gap-1">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    sending…
+                  </span>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -438,39 +734,13 @@ export default function ThreadPage() {
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   // Focused thread: cuid of the parent message whose thread we're zoomed
   // into. Declared up here because the send callback closes over it.
-  // Cleared on Esc, the chip ×, or when navigating threads (effect below).
+  // Rendered as a true overlay above the (blurred-in-place) transcript -
+  // the timeline never scrolls or reflows while focused, so exiting needs
+  // no scroll restoration. Cleared on Esc, the exit pill, backdrop click,
+  // or when navigating threads (effect below).
   const [focusedThreadParentId, setFocusedThreadParentId] = useState<string | null>(null);
-  // Bumped on every chip / N-Replies click so the focus useLayoutEffect
-  // re-fires its scroll-into-view even when the operator clicks a chip
-  // whose parent is already the current focus (re-centring after the
-  // user scrolled around).
-  const [focusTrigger, setFocusTrigger] = useState(0);
-  // Snapshot of the timeline's scrollTop just before entering focus
-  // mode. Restored on exit so the operator lands back in the same
-  // spot they were before they clicked the chip, regardless of how
-  // they scrolled inside the focused stack.
-  // The exact message the operator was looking at when they entered
-  // focus mode. Restored on exit so layout shifts during focus
-  // (collapsed bubbles re-expanding, late-loaded attachments) don't
-  // leave them at a numerically-equal-but-visually-different scroll
-  // position.
-  const preFocusAnchorRef = useRef<{ anchorEl: HTMLElement; viewportOffset: number } | null>(null);
   const focusOnParent = useCallback((parentId: string) => {
-    const el = timelineRef.current;
-    if (el && preFocusAnchorRef.current === null) {
-      // Only capture once per focus session — repeated chip clicks
-      // (focus swaps) keep the same "where we came from" anchor.
-      const elTop = el.getBoundingClientRect().top;
-      const anchor = pickScrollAnchor(el, elTop);
-      if (anchor) {
-        preFocusAnchorRef.current = {
-          anchorEl: anchor,
-          viewportOffset: anchor.getBoundingClientRect().top - elTop
-        };
-      }
-    }
     setFocusedThreadParentId(parentId);
-    setFocusTrigger((n) => n + 1);
   }, []);
   const [composer, setComposer] = useState("");
   // False from the start when the cache seeded `thread` above - the
@@ -746,6 +1016,10 @@ export default function ThreadPage() {
       clientSendId: string;
       text: string;
       sentAt: string;
+      // Parent cuid when this send left from the focused-thread overlay -
+      // lets the overlay show the in-flight bubble inside the thread
+      // stack instead of behind the blur.
+      replyToMessageId?: string;
       failed?: boolean;
       errorMessage?: string;
       // Coarse classification used to render a one-tap recovery action
@@ -1180,7 +1454,11 @@ export default function ThreadPage() {
     const text = composer;
     const attachmentsToSend = composerAttachments;
     const sentAt = new Date().toISOString();
-    setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
+    // Snapshot the focused-thread parent at send time so the overlay can
+    // claim the optimistic bubble and a later exit-focus doesn't race the
+    // network call and drop the linkage.
+    const replyToMessageId = focusedThreadParentId ?? undefined;
+    setPendingSends((prev) => [...prev, { clientSendId, text, sentAt, replyToMessageId }]);
     setComposer("");
     // Reset the source too: an emptied composer must never keep the AI-predraft
     // accent frame + badge (#350). Without this the badge frames a blank input
@@ -1191,9 +1469,6 @@ export default function ThreadPage() {
     setError(null);
     stickToBottomRef.current = true;
     try {
-      // Snapshot the focused-thread parent at send time so the post-send
-      // exit-focus doesn't race the network call and drop the linkage.
-      const replyToMessageId = focusedThreadParentId ?? undefined;
       if (attachmentsToSend.length > 0) {
         // Multipart upload - needed for binary file payloads.
         const form = new FormData();
@@ -2152,48 +2427,19 @@ export default function ThreadPage() {
   );
   const hasOlder = thread?.messagePage.hasOlder ?? false;
 
-  // Threaded-reply lookups — unifies two sources:
-  //   (1) Apple-native: child carries `raw.replyToGuid` from chat.db's
-  //       `thread_originator_guid`, resolved against another row's
-  //       `platformMessageKey`.
-  //   (2) App-level: child carries `replyToMessageId` (a Message.id cuid)
-  //       set by the dashboard's focused-thread composer.
-  // Either way we end up with a parent cuid → child cuids map plus a
-  // per-child parent pointer the render code consumes uniformly.
-  const { messageById, replyCountByParentId, replyChildIdsByParentId, parentIdOf } = useMemo(() => {
-    const byKey = new Map<string, ThreadMessage>();
+  // Threaded-reply lookups. The graph (parent resolution across the
+  // app-level replyToMessageId pointer and the Apple-native
+  // raw.replyToGuid) and the per-message Apple-Messages render decisions
+  // (quote / curve / count placement) are pure functions in
+  // lib/reply-threading.ts - unit-tested there, just memoized here.
+  const { messageById, replyGraph, replyDecorById } = useMemo(() => {
     const byId = new Map<string, ThreadMessage>();
-    for (const m of visibleMessages) {
-      byId.set(m.id, m);
-      if (m.platformMessageKey) byKey.set(m.platformMessageKey, m);
-    }
-    const parentOf = new Map<string, string>();
-    const counts = new Map<string, number>();
-    const children = new Map<string, string[]>();
-    for (const m of visibleMessages) {
-      let parentId: string | undefined;
-      if (m.replyToMessageId && byId.has(m.replyToMessageId)) {
-        parentId = m.replyToMessageId;
-      } else {
-        const parentGuid = (m.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
-        if (parentGuid) {
-          const parent = byKey.get(parentGuid);
-          if (parent) parentId = parent.id;
-        }
-      }
-      if (parentId) {
-        parentOf.set(m.id, parentId);
-        counts.set(parentId, (counts.get(parentId) ?? 0) + 1);
-        const list = children.get(parentId) ?? [];
-        list.push(m.id);
-        children.set(parentId, list);
-      }
-    }
+    for (const m of visibleMessages) byId.set(m.id, m);
+    const graph = buildReplyGraph(visibleMessages);
     return {
       messageById: byId,
-      replyCountByParentId: counts,
-      replyChildIdsByParentId: children,
-      parentIdOf: parentOf
+      replyGraph: graph,
+      replyDecorById: computeReplyDecor(visibleMessages, graph)
     };
   }, [visibleMessages]);
 
@@ -2204,21 +2450,29 @@ export default function ThreadPage() {
   const focusedParentMessage = focusedThreadParentId
     ? (messageById.get(focusedThreadParentId) ?? null)
     : null;
-  // The set of message ids that are "in focus" — the parent + every
-  // reply linked to it. Used by the render to bright-light those bubbles
-  // and dim/blur everything else, matching Messages.app's focused-thread
-  // overlay. When no focus, the set is null and every bubble renders at
-  // full opacity.
-  const focusedIdSet = useMemo<Set<string> | null>(() => {
-    if (!focusedThreadParentId) return null;
-    const childIds = replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
-    return new Set<string>([focusedThreadParentId, ...childIds]);
-  }, [focusedThreadParentId, replyChildIdsByParentId]);
+  // Replies of the focused parent, chronological (the graph preserves
+  // window order). The overlay renders parent + these + any in-flight
+  // sends pointed at the parent.
+  const focusedReplies = useMemo<ThreadMessage[]>(() => {
+    if (!focusedThreadParentId) return [];
+    const ids = replyGraph.replyChildIdsByParentId.get(focusedThreadParentId) ?? [];
+    return ids
+      .map((id) => messageById.get(id))
+      .filter((m): m is ThreadMessage => Boolean(m));
+  }, [focusedThreadParentId, replyGraph, messageById]);
   useEffect(() => {
     // Clear focused thread when navigating to a different thread so the
     // user doesn't carry stale focus across conversations.
     setFocusedThreadParentId(null);
   }, [thread?.id]);
+  // Safety valve: if a refresh drops the focused parent out of the
+  // loaded window (thread switch race, runner-side pruning), exit
+  // rather than floating an empty overlay.
+  useEffect(() => {
+    if (focusedThreadParentId && !loading && !focusedParentMessage) {
+      setFocusedThreadParentId(null);
+    }
+  }, [focusedThreadParentId, loading, focusedParentMessage]);
   useEffect(() => {
     if (!focusedThreadParentId) return;
     const onKey = (e: KeyboardEvent) => {
@@ -2227,106 +2481,6 @@ export default function ThreadPage() {
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [focusedThreadParentId]);
-  // Click-outside-to-exit. Anything that isn't a focused bubble, the
-  // composer, the sticky "FOCUSED THREAD" pill, or another "Focus
-  // thread" chip (which should swap focus, not dismiss) exits focused
-  // mode — Messages.app's tap-outside model.
-  // We use `click` (not `mousedown`) so the focusOnParent handler that
-  // activates focus has already updated state by the time we arrive,
-  // and we use `setTimeout(..., 0)` to push the listener attachment
-  // past the current click's bubbling phase — otherwise the same
-  // click that activated focus would also dismiss it.
-  useEffect(() => {
-    if (!focusedThreadParentId) return;
-    let cancelled = false;
-    const onClick = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null;
-      if (!target) return;
-      const focusedBubble = target.closest('[data-focused-bubble="true"]');
-      const composer = target.closest('[data-thread-composer="true"]');
-      const pill = target.closest('[data-focused-pill="true"]');
-      const focusSwap = target.closest('button[title^="Focus"]');
-      if (focusedBubble || composer || pill || focusSwap) return;
-      setFocusedThreadParentId(null);
-    };
-    // Delay listener arming so the focusing click itself doesn't
-    // immediately dismiss. 200ms covers test-runner / extension
-    // emulated event sequences that fire a trailing synthetic event
-    // after the React click handler runs.
-    const handle = setTimeout(() => {
-      if (cancelled) return;
-      document.addEventListener("click", onClick);
-    }, 200);
-    return () => {
-      cancelled = true;
-      clearTimeout(handle);
-      document.removeEventListener("click", onClick);
-    };
-  }, [focusedThreadParentId]);
-  // Bring the focused parent into view when the focus changes. Two
-  // pieces of timing care:
-  //   1. Flip `stickToBottomRef` off so the global timeline
-  //      useLayoutEffect doesn't immediately snap scrollTop back to
-  //      scrollHeight after our scroll (it fires on every
-  //      visibleMessages re-creation).
-  //   2. Scroll the timeline container EXPLICITLY rather than relying
-  //      on element.scrollIntoView's "nearest scrollable ancestor"
-  //      heuristic, which picks the wrong context on multi-monitor /
-  //      Retina setups and silently no-ops.
-  // We use a useLayoutEffect so the scroll happens synchronously after
-  // DOM update, before the browser paints — same frame as the dim/blur
-  // class applies, so users see them animate together rather than the
-  // dim happen, pause, then the scroll yank.
-  useLayoutEffect(() => {
-    const container = timelineRef.current;
-    if (!focusedThreadParentId) {
-      // Exit: restore the operator's pre-focus visual position by
-      // re-pinning the message they were looking at. Numeric scrollTop
-      // restoration drifts when the layout has shifted during focus
-      // (collapsed bubbles re-expanding, late-loaded attachments,
-      // reply-context placeholders filling in), so we anchor on the
-      // specific message instead. The settling guard re-pins through
-      // the 300ms collapse-back transition.
-      if (container && preFocusAnchorRef.current) {
-        const { anchorEl, viewportOffset } = preFocusAnchorRef.current;
-        preFocusAnchorRef.current = null;
-        if (container.contains(anchorEl)) {
-          repinAnchor(container, anchorEl, viewportOffset);
-          if (anchorGuardStopRef.current) anchorGuardStopRef.current();
-          anchorGuardStopRef.current = startPostLoadAnchorGuard(container, anchorEl, viewportOffset);
-        }
-      }
-      return;
-    }
-    stickToBottomRef.current = false;
-    const target = container?.querySelector(
-      `[data-message-id="${focusedThreadParentId}"]`
-    ) as HTMLElement | null;
-    if (!container || !target) return;
-    // #465 (pilot R-0064): position the focused message as HIGH as
-    // possible — its top sits just below the sticky header — rather than
-    // centring it, so the message and the replies beneath it read
-    // top-down. scrollTop clamps at the bottom, so a focused message near
-    // the end of the thread still lands as high as the remaining content
-    // allows. Bubbles + dividers collapse over 150ms (see bubble/DayDivider
-    // className), so re-align on every layout change during that window
-    // rather than relying on a one-shot calculation.
-    const realignToTop = () => {
-      const containerRect = container.getBoundingClientRect();
-      const targetRect = target.getBoundingClientRect();
-      // FOCUS_HEADER_OFFSET matches the scroller's scrollPaddingTop so the
-      // message clears the glassy sticky header.
-      const FOCUS_HEADER_OFFSET = 64;
-      const delta = (targetRect.top - containerRect.top) - FOCUS_HEADER_OFFSET;
-      container.scrollTop = container.scrollTop + delta;
-    };
-    realignToTop();
-    if (anchorGuardStopRef.current) anchorGuardStopRef.current();
-    anchorGuardStopRef.current = startScrollSettlingGuard(container, realignToTop);
-    // `focusTrigger` is included so clicking a chip whose parent is
-    // already the current focus re-aligns rather than no-opping.
-  }, [focusedThreadParentId, focusTrigger]);
-
   // Group-chat detection. There is no isGroup flag on ThreadResponse, so
   // we infer it from the inbound message senders: if 2+ distinct names
   // have written into the thread, it is a group. False positives on a
@@ -2451,14 +2605,13 @@ export default function ThreadPage() {
   }, [visibleMessages, pendingSends.length, loading, thread]);
 
   const onTimelineScroll = (event: React.UIEvent<HTMLDivElement>) => {
-    // In focused-thread mode, suppress both the bottom-stickiness
-    // tracking and the load-older trigger. Scroll inside the focused
-    // stack is naturally bounded by the collapsed background, and
-    // pulling in new history would shift the underlying timeline so
-    // exit-focus lands the operator far from where they started.
+    // In focused-thread mode the overlay covers this scroller, so the
+    // only scroll events that can land here are programmatic (the
+    // stick-to-bottom pin on refresh). Suppress the bottom-stickiness
+    // tracking and the load-older trigger: pulling in history would
+    // reshuffle the blurred background under the overlay for no reason.
     if (focusedThreadParentId) {
-      // The jump-to-latest affordance is meaningless inside the bounded
-      // focused stack — keep it hidden there.
+      // The jump-to-latest affordance is hidden while focused too.
       if (showJumpToLatest) setShowJumpToLatest(false);
       return;
     }
@@ -2814,10 +2967,14 @@ export default function ThreadPage() {
           </div>
         ) : null}
 
+        {/* Relative wrapper so the focused-thread overlay can float over
+            the timeline (and only the timeline - the composer below stays
+            sharp and interactive). */}
+        <div className="relative min-h-0 flex-1">
         <div
           ref={timelineRef}
           onScroll={onTimelineScroll}
-          className="relative min-h-0 flex-1 overflow-y-auto"
+          className="relative h-full overflow-y-auto"
           // overflowAnchor: disable the browser's native scroll anchoring
           // so it doesn't race with the load-older restoration in
           // useLayoutEffect. When both fire on the same prepend, the
@@ -3258,7 +3415,15 @@ export default function ThreadPage() {
             ) : null}
           </div>
 
-          <div className="mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-4 py-3 sm:px-8 lg:px-12">
+          <div
+            className={`mx-auto flex w-full max-w-[820px] flex-col gap-[18px] px-4 py-3 transition-[filter,opacity] duration-200 sm:px-8 lg:px-12 ${
+              // Messages.app's focused-thread look: the conversation
+              // stays exactly where it is, blurred + dimmed in place,
+              // while the overlay floats the thread above it. Pointer
+              // events off so nothing behind the blur is clickable.
+              focusedThreadParentId ? "pointer-events-none select-none opacity-60 blur-[5px]" : ""
+            }`}
+          >
             {/* Issue #412. "🎂 birthday in N days" pill. Surfaces when
                 the contact's birthday is within the next 30 days
                 (pilot wanted "in the next month"). Wider than the
@@ -3310,23 +3475,7 @@ export default function ThreadPage() {
                 ) : null}
               </div>
             ) : null}
-            {focusedThreadParentId ? (
-              <div
-                data-focused-pill="true"
-                className="sticky top-2 z-10 flex items-center justify-center gap-3 self-center rounded-full border border-hairline bg-paper/95 px-3 py-[6px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3 shadow-sm backdrop-blur"
-              >
-                <span>focused thread · {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length} {(replyChildIdsByParentId.get(focusedThreadParentId) ?? []).length === 1 ? "reply" : "replies"}</span>
-                <button
-                  type="button"
-                  onClick={() => setFocusedThreadParentId(null)}
-                  className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
-                  title="Esc"
-                >
-                  exit
-                </button>
-              </div>
-            ) : null}
-            {hasOlder && !focusedThreadParentId ? (
+            {hasOlder ? (
               <div className="flex items-center justify-center gap-2 self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
                 {loadingOlderMessages ? (
                   <>
@@ -3357,7 +3506,7 @@ export default function ThreadPage() {
                 )}
               </div>
             ) : (
-              <div className={`self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4 transition-opacity duration-300 ${focusedThreadParentId ? "opacity-30" : ""}`}>
+              <div className="self-center font-mono text-[11px] uppercase tracking-[0.06em] text-ink-4">
                 start of conversation
               </div>
             )}
@@ -3384,135 +3533,82 @@ export default function ThreadPage() {
                 message.direction === "OUT"
                   ? "You"
                   : (message.senderName ?? firstName);
-              const parentMessageId = parentIdOf.get(message.id);
-              const parentMessage = parentMessageId ? messageById.get(parentMessageId) : undefined;
-              const replyCount = replyCountByParentId.get(message.id) ?? 0;
-              // A message can carry a reply pointer (replyToMessageId or
-              // raw.replyToGuid) before its parent is in the loaded
-              // window. We render the reply-context stub anyway so the
-              // bubble's height doesn't change when an older-messages
-              // load brings the parent in — the snippet text just fills
-              // in. Same pattern as iMessage / WhatsApp.
-              const hasReplyIntent =
-                !!message.replyToMessageId ||
-                !!(message.raw as { replyToGuid?: string } | undefined)?.replyToGuid;
-              // In focused mode, bubbles outside the parent+replies set
-              // fade + blur so the focused thread "pops out" like
-              // Messages.app's overlay. Pointer events off prevents
-              // accidental clicks on the dimmed background.
-              const dimmedByFocus = focusedIdSet !== null && !focusedIdSet.has(message.id);
-              // A day divider between two focused messages stays; a divider
-              // between collapsed bubbles needs to collapse too (otherwise
-              // the focused stack gets random "Yesterday" headers from
-              // dates that no focused message even touches).
-              const dividerInFocusedRange =
-                !dimmedByFocus &&
-                (idx === 0 || (prev && focusedIdSet ? focusedIdSet.has(prev.id) : true));
+              // Apple-Messages reply decor: whether this bubble renders a
+              // quoted parent above it, a curved thread tail, and/or an
+              // "N Replies" link beneath. Decisions are pure + unit-tested
+              // in lib/reply-threading.ts.
+              const decor = replyDecorById.get(message.id);
+              const parentMessage = decor?.parentId ? messageById.get(decor.parentId) : undefined;
+              // Prefer the in-window parent text (the quote can navigate
+              // to it) but fall back to the server-resolved replyTo
+              // snippet for parents outside the pagination window or in
+              // a sibling iMessage thread. Last resort: a literal stub.
+              const quoteSnippet = parentMessage
+                ? (parentMessage.text.trim().slice(0, 120) || "(media)")
+                : (message.replyTo?.snippet ?? "Replying to an earlier message");
               return (
                 <div key={message.id} className="contents">
-                  {dayLabel ? (
-                    <DayDivider
-                      label={dayLabel}
-                      className={
-                        focusedIdSet && !dividerInFocusedRange
-                          ? "opacity-0 max-h-0 overflow-hidden my-0 -mt-[18px] pointer-events-none"
-                          : ""
+                  {dayLabel ? <DayDivider label={dayLabel} /> : null}
+                  {decor?.showQuote ? (
+                    <ReplyQuote
+                      side={decor.parentDirection}
+                      snippet={quoteSnippet}
+                      navigable={Boolean(decor.parentId)}
+                      onFocusThread={() => decor.parentId && focusOnParent(decor.parentId)}
+                      countLabel={
+                        decor.showQuoteReplyCount
+                          ? formatReplyCount(decor.parentReplyCount)
+                          : null
                       }
                     />
                   ) : null}
                   <div
                     data-message-id={message.id}
-                    data-focused-bubble={focusedIdSet && focusedIdSet.has(message.id) ? "true" : undefined}
-                    className={`flex max-w-[86%] flex-col ease-out transition-all sm:max-w-[72%] ${
-                      // Focus enter is animated too — same easing as
-                      // exit, just faster (150ms vs 300ms) so the
-                      // focused stack snaps into view without
-                      // dragging out the dim. The post-load anchor
-                      // guard re-centres the focused parent on every
-                      // layout change during the collapse, so the
-                      // operator sees the focused stack slide into
-                      // place rather than the parent drifting.
-                      focusedThreadParentId ? "duration-150" : "duration-300"
-                    } ${
+                    className={`flex max-w-[86%] flex-col sm:max-w-[72%] ${
                       message.direction === "OUT" ? "self-end items-end" : "self-start items-start"
                     } ${
-                      dimmedByFocus
-                        // Collapse non-focused bubbles to zero height so the
-                        // focused thread members visually come together —
-                        // matches Messages.app's overlay where the focused
-                        // bubbles stack tight. Negative margin cancels the
-                        // parent's gap-[18px] so the collapse is total.
-                        // Kept in the DOM (no display:none) so the
-                        // layout-effect-driven scroll-into-view can still
-                        // find adjacent anchors.
-                        ? "max-h-0 opacity-0 overflow-hidden -mt-[18px] pointer-events-none"
-                        : ""
+                      // Pull the bubble up toward its quote/curve so the
+                      // reply group reads as one unit despite the
+                      // timeline's uniform gap-[18px].
+                      decor?.showQuote ? "-mt-[12px]" : ""
                     }`}
                   >
-                    {hasReplyIntent ? (() => {
-                      // Prefer the in-window parent (we already have it
-                      // loaded, so the focus action can navigate to it)
-                      // but fall back to the server-resolved replyTo
-                      // snippet for parents that live outside the
-                      // pagination window or in a sibling iMessage
-                      // thread. Last resort: the generic literal stub.
-                      const localSnippet = parentMessage
-                        ? parentMessage.text.slice(0, 120) || "(media)"
-                        : null;
-                      const serverSnippet = message.replyTo?.snippet ?? null;
-                      const snippet =
-                        localSnippet ??
-                        serverSnippet ??
-                        "Replying to an earlier message";
-                      // The focus button only navigates when the parent
-                      // is loaded in the current window. For server-only
-                      // snippets we still show the text but make the
-                      // button non-interactive (focus would jump
-                      // nowhere).
-                      const navigable = Boolean(parentMessageId);
-                      return (
-                        <button
-                          type="button"
-                          onClick={() => navigable && parentMessageId && focusOnParent(parentMessageId)}
-                          disabled={!navigable}
-                          className={`mb-[6px] flex max-w-[260px] items-start gap-[6px] rounded-[14px] border border-hairline bg-paper-2/60 px-[10px] py-[5px] text-[11px] leading-snug text-ink-3 hover:bg-paper-2 hover:text-ink-2 hover:border-ink-3/40 disabled:cursor-default disabled:hover:bg-paper-2/60 disabled:hover:text-ink-3 disabled:hover:border-hairline ${
-                            message.direction === "OUT" ? "self-end" : "self-start"
-                          }`}
-                          title={`Focus thread: ${snippet}`}
-                        >
-                          <span className="text-ink-4" aria-hidden="true">↳</span>
-                          <span className="line-clamp-2 italic text-left min-h-[30px]">
-                            {snippet}
-                          </span>
-                        </button>
-                      );
-                    })() : null}
-                    {isGroupChat && message.direction === "IN" && message.senderName ? (
-                      <div className="relative mb-[4px]">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setParticipantPopover((prev) =>
-                              prev === message.senderName ? null : (message.senderName ?? null)
-                            )
-                          }
-                          className="text-[11px] font-medium tracking-[-0.005em] text-ink-2 underline-offset-2 hover:text-ink hover:underline"
-                        >
+                    <div
+                      className={`mb-[4px] flex items-end gap-[6px] ${
+                        message.direction === "OUT" ? "flex-row-reverse" : ""
+                      }`}
+                    >
+                      {/* Thread tail hugs the bubble's leading corner,
+                          arcing up toward the quoted parent - sits beside
+                          the sender label since our bubbles carry one. */}
+                      {decor?.showCurve ? <ReplyCurve side={message.direction} /> : null}
+                      {isGroupChat && message.direction === "IN" && message.senderName ? (
+                        <div className="relative">
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setParticipantPopover((prev) =>
+                                prev === message.senderName ? null : (message.senderName ?? null)
+                              )
+                            }
+                            className="text-[11px] font-medium tracking-[-0.005em] text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                          >
+                            {senderLabel}
+                          </button>
+                          {participantPopover === message.senderName ? (
+                            <ParticipantPopover
+                              handle={message.senderName}
+                              platform={thread.platform}
+                              onClose={() => setParticipantPopover(null)}
+                            />
+                          ) : null}
+                        </div>
+                      ) : (
+                        <span className="text-[11px] font-medium tracking-[-0.005em] text-ink-2">
                           {senderLabel}
-                        </button>
-                        {participantPopover === message.senderName ? (
-                          <ParticipantPopover
-                            handle={message.senderName}
-                            platform={thread.platform}
-                            onClose={() => setParticipantPopover(null)}
-                          />
-                        ) : null}
-                      </div>
-                    ) : (
-                      <span className="mb-[4px] text-[11px] font-medium tracking-[-0.005em] text-ink-2">
-                        {senderLabel}
-                      </span>
-                    )}
+                        </span>
+                      )}
+                    </div>
                     {(() => {
                       const playableAttachments = (message.attachments ?? []).filter(
                         (a) => a.guid && a.kind && a.kind !== "unknown"
@@ -3684,17 +3780,20 @@ export default function ThreadPage() {
                       {message.direction === "OUT" && message.sentVia === "automation" ? (
                         <span className="text-ink-4">· sent via automation ✓</span>
                       ) : null}
-                      {replyCount > 0 ? (
-                        <button
-                          type="button"
-                          onClick={() => focusOnParent(message.id)}
-                          className="text-ink-2 hover:text-ink underline-offset-2 hover:underline"
-                          title="Focus this thread"
-                        >
-                          · {replyCount} {replyCount === 1 ? "Reply" : "Replies"}
-                        </button>
-                      ) : null}
                     </span>
+                    {decor && decor.replyCount > 0 ? (
+                      // Apple's "N Replies" affordance: a standalone link
+                      // under any message that has replies. Opens the
+                      // focused-thread overlay.
+                      <button
+                        type="button"
+                        onClick={() => focusOnParent(message.id)}
+                        className="mt-[4px] text-[12px] font-semibold text-accent-ink underline-offset-2 hover:underline"
+                        title="View thread"
+                      >
+                        {formatReplyCount(decor.replyCount)}
+                      </button>
+                    ) : null}
                   </div>
                 </div>
               );
@@ -3862,6 +3961,19 @@ export default function ThreadPage() {
               </div>
             ))}
           </div>
+        </div>
+        {focusedThreadParentId && focusedParentMessage ? (
+          <FocusedThreadOverlay
+            parent={focusedParentMessage}
+            replies={focusedReplies}
+            pendingReplies={pendingSends.filter(
+              (p) => p.replyToMessageId === focusedThreadParentId
+            )}
+            contactFirstName={firstName}
+            onExit={() => setFocusedThreadParentId(null)}
+            onRetryPending={retryPendingSend}
+          />
+        ) : null}
         </div>
 
         <div className="relative flex-shrink-0 border-t border-hairline bg-paper">
