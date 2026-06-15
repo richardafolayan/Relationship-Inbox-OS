@@ -74,6 +74,34 @@ export function parseScreenshotDataUrl(name: string, dataUrl: string): Screensho
 }
 
 /**
+ * Resolve the build identity (version + commit) the runner stamps onto a
+ * report. The dashboard's `meta.appVersion` is only a build-time env fallback
+ * and was arriving as a misleading "0.1.0" with an empty commit (R-0077 /
+ * #709), so reports were un-triageable. The runner reads the real stamp from
+ * release.json (shipped builds) / package.json (dev), which is the source of
+ * truth here. Anything genuinely undetermined becomes "unknown" — never a
+ * fake version. Pure so the fallback precedence can be unit-tested.
+ */
+export function resolveReportBuildIdentity(input: {
+  /** From readAppVersion(projectRoot): release.json then package.json. */
+  build: { version?: string; commit?: string };
+  /** The dashboard-supplied meta.appVersion (lowest-priority fallback). */
+  metaAppVersion?: string;
+  /** Legacy APP_COMMIT env, kept as a fallback below release.json. */
+  envCommit?: string;
+}): { appVersion: string; commit: string } {
+  const buildVersion = input.build.version?.trim();
+  // readAppVersion returns "0.0.0" only when neither file is readable; treat
+  // that as "no real build stamp" and fall through.
+  const appVersion =
+    buildVersion && buildVersion !== "0.0.0"
+      ? buildVersion
+      : input.metaAppVersion?.trim() || "unknown";
+  const commit = input.build.commit?.trim() || input.envCommit?.trim() || "unknown";
+  return { appVersion, commit };
+}
+
+/**
  * The report object the runner forwards to the webhook. The dashboard never
  * sees the secret; it is added here, in the request body, because Google
  * Apps Script `doPost` cannot read request headers.

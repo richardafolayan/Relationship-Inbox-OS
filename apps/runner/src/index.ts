@@ -86,6 +86,7 @@ import {
   parseScreenshotDataUrl,
   forwardPilotReport,
   fetchPilotReportStatus,
+  resolveReportBuildIdentity,
   type PilotScreenshot
 } from "./services/pilot-feedback";
 import {
@@ -5690,7 +5691,8 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
           threadId: z.string().max(120).nullable().default(null),
           appVersion: z.string().max(80).default(""),
           userAgent: z.string().max(500).default(""),
-          timestamp: z.string().max(40).default("")
+          timestamp: z.string().max(40).default(""),
+          lastError: z.string().max(500).nullable().default(null)
         })
         .default({}),
       screenshots: z
@@ -5731,12 +5733,23 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
     platform = thread?.platform ?? null;
   }
   const operatorProfile = await settingsStore.getOperatorProfile();
+  // Authoritative build identity. The dashboard's meta.appVersion is a
+  // build-time env fallback and was arriving as a misleading "0.1.0" with an
+  // empty commit (R-0077 / #709), which made reports un-triageable. The runner
+  // reads the real stamp from release.json (shipped builds) / package.json
+  // (dev), so it owns version + commit here. See resolveReportBuildIdentity.
+  const { appVersion, commit } = resolveReportBuildIdentity({
+    build: readAppVersion(projectRoot),
+    metaAppVersion: payload.meta.appVersion,
+    envCommit: process.env.APP_COMMIT
+  });
   const enrichedMeta = {
     ...payload.meta,
+    appVersion,
     platform,
     browserMode: runnerConfig.browserProfile.mode,
     aiHelpLevel: operatorProfile.aiHelpLevel,
-    commit: process.env.APP_COMMIT?.trim() || "",
+    commit,
     receivedAt: new Date().toISOString()
   };
 
