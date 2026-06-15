@@ -17,6 +17,7 @@ import {
   isFocusActive,
   looksLikePhoneOrEmail,
   noteForRow,
+  needsReplyAfterFocusReminder,
   readAckTemplates,
   readFocusSettings,
   readFocusWindow,
@@ -306,6 +307,40 @@ test("an expired window stops offering acknowledgements entirely", () => {
   // "till 5:30pm" must never be offered at 5:31pm.
   assert.equal(isFocusAckCandidate(row(), baseWindow(), settings(), { now: afterEnd }), false);
   assert.equal(arrivedDuringFocus(row(), baseWindow(), afterEnd), false);
+});
+
+test("post-focus reminder appears only when a during-window reply is still due", () => {
+  const afterEnd = new Date("2026-06-07T17:31:00.000Z");
+  assert.equal(needsReplyAfterFocusReminder(row(), baseWindow(), { now: afterEnd }), true);
+  assert.equal(needsReplyAfterFocusReminder(row(), baseWindow(), { now: NOW }), false);
+  assert.equal(
+    needsReplyAfterFocusReminder(row({ needsReply: false }), baseWindow(), { now: afterEnd }),
+    false
+  );
+  assert.equal(
+    needsReplyAfterFocusReminder(
+      row({ lastOutboundAt: "2026-06-07T10:30:00.000Z" }),
+      baseWindow(),
+      { now: afterEnd }
+    ),
+    false
+  );
+  assert.equal(
+    needsReplyAfterFocusReminder(
+      row({ lastInboundAt: "2026-06-07T08:00:00.000Z" }),
+      baseWindow(),
+      { now: afterEnd }
+    ),
+    false
+  );
+  assert.equal(
+    needsReplyAfterFocusReminder(
+      row({ lastInboundAt: "2026-06-07T18:00:00.000Z" }),
+      baseWindow(),
+      { now: new Date("2026-06-07T18:05:00.000Z") }
+    ),
+    false
+  );
 });
 
 // ─────────────────────────── the operator's window note is what gets sent ───────────────────────────

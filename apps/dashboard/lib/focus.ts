@@ -291,6 +291,27 @@ export function isFocusAckCandidate(
   return focusAckExclusion(row, window, settings, opts) === "candidate";
 }
 
+export function needsReplyAfterFocusReminder(
+  row: FocusRow,
+  window: FocusWindowState,
+  opts: { now?: Date } = {}
+): boolean {
+  const now = opts.now ?? new Date();
+  if (isFocusActive(window, now)) return false;
+  if (!window?.startedAt || !row.lastInboundAt) return false;
+  if (row.needsReply === false) return false;
+  if (alreadyHeardSinceInbound(row)) return false;
+
+  const started = Date.parse(window.startedAt);
+  const inbound = Date.parse(row.lastInboundAt);
+  if (!Number.isFinite(started) || !Number.isFinite(inbound)) return false;
+  if (inbound < started) return false;
+
+  const ended = Date.parse(window.endsAt ?? "");
+  if (Number.isFinite(ended) && inbound > ended && now.getTime() >= ended) return false;
+  return true;
+}
+
 /** The rail card's line when no notes are waiting. "Everyone who messaged
  *  knows you've seen them" is only claimed once someone was actually
  *  acknowledged this window — before that it spoke for messages that may

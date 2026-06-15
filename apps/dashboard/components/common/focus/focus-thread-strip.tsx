@@ -1,8 +1,13 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { Check, Moon, Send, X } from "lucide-react";
-import { isFocusAckCandidate, noteForRow, type FocusRow } from "@/lib/focus";
+import { Bell, Check, Moon, Send, X } from "lucide-react";
+import {
+  isFocusAckCandidate,
+  needsReplyAfterFocusReminder,
+  noteForRow,
+  type FocusRow
+} from "@/lib/focus";
 import { sendAcknowledgement, useFocusWindow } from "@/lib/use-focus-window";
 import type { ThreadResponse } from "@/lib/types";
 
@@ -51,12 +56,72 @@ export function FocusThreadStrip({
 
   const row = useMemo(() => focusRowFromThread(thread), [thread]);
   const candidate = active && isFocusAckCandidate(row, focusWindow, settings);
+  const postFocusReminder = needsReplyAfterFocusReminder(row, focusWindow);
+  const reminderKey = postFocusReminder
+    ? `focus-post-reply:${focusWindow.windowId || focusWindow.startedAt}:${thread.id}:${row.lastInboundAt ?? ""}`
+    : null;
+  const [dismissedReminderKey, setDismissedReminderKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (candidate && note === null) {
       setNote(noteForRow(row, focusWindow, templates));
     }
   }, [candidate, note, row, focusWindow, templates]);
+
+  useEffect(() => {
+    setNote(null);
+    setEditing(false);
+    setStatus("open");
+    setBusy(false);
+  }, [thread.id, focusWindow.windowId]);
+
+  useEffect(() => {
+    if (!reminderKey) {
+      setDismissedReminderKey(null);
+      return;
+    }
+    try {
+      setDismissedReminderKey(
+        window.localStorage.getItem(reminderKey) === "dismissed" ? reminderKey : null
+      );
+    } catch {
+      setDismissedReminderKey(null);
+    }
+  }, [reminderKey]);
+
+  const dismissPostFocusReminder = () => {
+    if (!reminderKey) return;
+    setDismissedReminderKey(reminderKey);
+    try {
+      window.localStorage.setItem(reminderKey, "dismissed");
+    } catch {
+      // Best-effort only; the visible dismiss still applies for this render.
+    }
+  };
+
+  if (postFocusReminder && dismissedReminderKey !== reminderKey) {
+    return (
+      <div className="mb-2 flex items-start gap-[11px] rounded-[12px] border border-hairline bg-paper px-[13px] py-[10px]">
+        <Bell className="mt-[3px] h-[13px] w-[13px] shrink-0 text-accent" strokeWidth={1.8} />
+        <div className="min-w-0 flex-1">
+          <div className="mb-[3px] font-mono text-[9.5px] uppercase tracking-[0.08em] text-accent-ink">
+            Focus block ended
+          </div>
+          <div className="text-[13px] leading-[1.45] text-ink">
+            They still need a proper reply. The composer is ready below.
+          </div>
+        </div>
+        <button
+          type="button"
+          onClick={dismissPostFocusReminder}
+          aria-label="Dismiss reminder"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-[6px] text-ink-4 transition-colors duration-calm hover:bg-black/5 hover:text-ink-2"
+        >
+          <X className="h-[13px] w-[13px]" strokeWidth={1.9} />
+        </button>
+      </div>
+    );
+  }
 
   if (status === "dismissed") return null;
   if (status === "open" && !candidate) return null;
