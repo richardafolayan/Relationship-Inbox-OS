@@ -52,6 +52,30 @@ export default function SettingsPage() {
   // Clearing the dismissed flag brings the welcome card back on Today.
   const [welcomeReset, setWelcomeReset] = useState(false);
 
+  // /settings#app-updates (the update toast / bell entry lands here): scroll
+  // the App updates card into view and flash a short highlight ring so the
+  // eye finds it. Mount covers cross-page navigation; hashchange covers
+  // manual edits and back/forward.
+  const [highlightUpdates, setHighlightUpdates] = useState(false);
+  useEffect(() => {
+    let timer: number | undefined;
+    const maybeHighlight = () => {
+      if (window.location.hash !== "#app-updates") return;
+      document
+        .getElementById("app-updates")
+        ?.scrollIntoView({ behavior: "smooth", block: "center" });
+      setHighlightUpdates(true);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
+    };
+    maybeHighlight();
+    window.addEventListener("hashchange", maybeHighlight);
+    return () => {
+      window.clearTimeout(timer);
+      window.removeEventListener("hashchange", maybeHighlight);
+    };
+  }, []);
+
   useEffect(() => {
     setAutoScanDisabled(
       resolveAutoScanDisabled({
@@ -227,11 +251,18 @@ export default function SettingsPage() {
         <FullDemoSettingsCard />
       </section>
 
-      <section className="mt-10">
+      <section id="app-updates" className="mt-10 scroll-mt-24">
         <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
           App updates
         </p>
-        <AppUpdates />
+        <div
+          className={cn(
+            "rounded-row transition-shadow duration-500",
+            highlightUpdates && "ring-2 ring-accent/70"
+          )}
+        >
+          <AppUpdates />
+        </div>
       </section>
 
       <section className="mt-10">
@@ -501,10 +532,11 @@ function NotificationsPermissionControl() {
   );
 }
 
-// #360: calm overdue-reply digest. Quiet, opt-in, low-frequency. Sits
-// under Notifications because it shares the desktop-notification gate;
-// the cadence selector defaults to Off and the operator can dismiss today
-// or snooze individual people from here without disabling the feature.
+// #360: calm overdue-reply digest. Quiet, opt-in, low-frequency. The digest
+// lands in the notification bell whenever it is due; the desktop ping is an
+// optional extra behind the sibling permission control, so the cadence
+// selector works without it. The operator can dismiss today or snooze
+// individual people from here without disabling the feature.
 function OverdueDigestRow() {
   const [settings, setSettings] = useState<OverdueDigestSettings | null>(null);
   const [candidates, setCandidates] = useState<OverdueDigestCandidate[]>([]);
@@ -617,12 +649,13 @@ function OverdueDigestRow() {
           style={{ textWrap: "pretty" }}
         >
           One calm reminder for overdue replies. Off by default. Choose daily or weekly if you
-          want a single digest. Clicks open Today, so you can work through the queue in your
-          own time.
+          want a single digest. It lands in the bell at the top of the app and clicks open
+          Today, so you can work through the queue in your own time.
         </p>
         {desktopNotEnabled ? (
           <p className="m-0 mt-[8px] font-mono text-[11px] text-ink-3">
-            Enable desktop notifications first.
+            Enable desktop notifications if you also want a ping while the app is in the
+            background.
           </p>
         ) : null}
 
@@ -636,15 +669,13 @@ function OverdueDigestRow() {
           <CadenceOption
             label="Daily"
             selected={cadence === "daily"}
-            disabled={busy || desktopNotEnabled}
-            disabledReason={desktopNotEnabled ? "notifications off" : undefined}
+            disabled={busy}
             onClick={() => void writeCadence("daily")}
           />
           <CadenceOption
             label="Weekly"
             selected={cadence === "weekly"}
-            disabled={busy || desktopNotEnabled}
-            disabledReason={desktopNotEnabled ? "notifications off" : undefined}
+            disabled={busy}
             onClick={() => void writeCadence("weekly")}
           />
           {status === "saved" ? (

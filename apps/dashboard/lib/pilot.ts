@@ -7,6 +7,10 @@
 // never carries message content — that is enforced by construction: message
 // text is simply not an input to buildPilotReportPayload.
 
+// Relative (not "@/lib/...") so the tsx test runner, which imports this .ts
+// directly without the Next.js path-alias plugin, can resolve it.
+import { getRecentClientError } from "./client-error-log";
+
 // localStorage flag: once the first-run welcome card on Today is dismissed,
 // it stays dismissed. Settings can clear this to bring it back.
 export const PILOT_WELCOME_DISMISSED_KEY = "pilot_welcome_dismissed";
@@ -88,6 +92,10 @@ export interface PilotReportMeta {
   appVersion: string;
   userAgent: string;
   timestamp: string;
+  // The most recent uncaught client error (exception message only), if one
+  // fired in the couple of minutes before submitting. Null when none. Lets a
+  // vague report ("Got an error?") still say what the error actually was.
+  lastError: string | null;
 }
 
 export interface PilotReportPayload {
@@ -146,6 +154,7 @@ export function formatReportForCopy(payload: PilotReportPayload): string {
     `Page: ${payload.meta.route}`
   );
   if (payload.meta.threadId) lines.push(`Thread: ${payload.meta.threadId}`);
+  if (payload.meta.lastError) lines.push(`Last client error: ${payload.meta.lastError}`);
   lines.push(`Version: ${payload.meta.appVersion}`, `Time: ${payload.meta.timestamp}`);
   return lines.join("\n");
 }
@@ -175,15 +184,20 @@ export function extractThreadId(pathname: string): string | null {
  * thread's platform — which the dashboard cannot see.
  */
 export function collectPilotMeta(pathname: string): PilotReportMeta {
+  // Honest fallback: "unknown", not a fake "0.1.0" that looks like a real
+  // build (R-0077 / #709 arrived stamped 0.1.0 and was un-triageable). The
+  // runner overrides this with the build identity it reads from release.json,
+  // so this only stands in when the runner can't be reached (copy fallback).
   const appVersion =
-    (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_APP_VERSION?.trim()) || "0.1.0";
+    (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_APP_VERSION?.trim()) || "unknown";
   return {
     route: describeRoute(pathname),
     pathname,
     threadId: extractThreadId(pathname),
     appVersion,
     userAgent: typeof navigator !== "undefined" ? navigator.userAgent : "",
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    lastError: typeof window !== "undefined" ? getRecentClientError(Date.now()) : null
   };
 }
 

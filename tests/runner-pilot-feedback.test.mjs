@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   parseScreenshotDataUrl,
+  resolveReportBuildIdentity,
   MAX_SCREENSHOT_BYTES,
   MAX_SCREENSHOTS,
   PILOT_REPORT_TYPES,
@@ -59,4 +60,45 @@ test("parseScreenshotDataUrl rejects a screenshot over the size limit", () => {
 test("MAX_SCREENSHOTS caps a report at a few images", () => {
   assert.equal(typeof MAX_SCREENSHOTS, "number");
   assert.ok(MAX_SCREENSHOTS >= 2, "a report must allow multiple screenshots");
+});
+
+test("resolveReportBuildIdentity prefers the on-disk build stamp", () => {
+  // Shipped build: release.json gives a real version + commit, overriding the
+  // dashboard's value (which is the R-0077 failure: it sent "0.1.0").
+  assert.deepEqual(
+    resolveReportBuildIdentity({
+      build: { version: "0.1.10", commit: "abc1234" },
+      metaAppVersion: "0.1.0",
+      envCommit: ""
+    }),
+    { appVersion: "0.1.10", commit: "abc1234" }
+  );
+});
+
+test("resolveReportBuildIdentity falls back to APP_COMMIT then 'unknown' for commit", () => {
+  assert.equal(
+    resolveReportBuildIdentity({ build: { version: "0.1.10" }, envCommit: "deadbee" }).commit,
+    "deadbee"
+  );
+  assert.equal(
+    resolveReportBuildIdentity({ build: { version: "0.1.10" } }).commit,
+    "unknown"
+  );
+});
+
+test("resolveReportBuildIdentity never emits a fake version; uses 'unknown'", () => {
+  // readAppVersion returns 0.0.0 only when no file is readable — treated as
+  // "no stamp", so we fall to the dashboard value, then to "unknown".
+  assert.equal(
+    resolveReportBuildIdentity({ build: { version: "0.0.0" }, metaAppVersion: "0.1.0" }).appVersion,
+    "0.1.0"
+  );
+  assert.equal(
+    resolveReportBuildIdentity({ build: { version: "0.0.0" }, metaAppVersion: "" }).appVersion,
+    "unknown"
+  );
+  assert.equal(
+    resolveReportBuildIdentity({ build: {} }).appVersion,
+    "unknown"
+  );
 });
