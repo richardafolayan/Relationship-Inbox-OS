@@ -21,7 +21,7 @@ import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
-import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
@@ -530,7 +530,9 @@ export default function InboxPage() {
     [sections]
   );
 
-  const degraded = platforms.find((p) => p.status === "DEGRADED");
+  // Only platforms the operator actually uses (connected at least once) raise
+  // an error banner; a never-connected platform is "not set up". (issue #708)
+  const degraded = platforms.find(isDegradedAndInUse);
 
   const flatVisibleIds = useMemo(() => orderedRows.map((r) => r.id), [orderedRows]);
   const selectedSet = useMemo(() => new Set(selectedIds), [selectedIds]);

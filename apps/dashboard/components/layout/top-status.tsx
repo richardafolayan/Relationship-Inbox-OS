@@ -9,7 +9,7 @@ import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
-import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
+import { hasEverConnected, IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
 import { NotificationBell } from "@/components/common/notification-center";
 import {
@@ -479,6 +479,10 @@ export function TopStatus() {
   // type /platforms directly for the full diagnostics.)
   const degradedPlatforms = implemented?.filter((p) => p.status !== "CONNECTED") ?? [];
   const hasDegraded = degradedPlatforms.length > 0;
+  // If every listed platform has simply never been connected, the modal is
+  // first-time setup, not an error — soften the header so a non-user isn't
+  // told something is broken. (issue #708)
+  const anyEverConnected = degradedPlatforms.some(hasEverConnected);
 
   // Keep the reconnect modal's open-state honest. `reconnectOpen` is tracked
   // separately from `degradedPlatforms` (derived fresh each render from the
@@ -715,11 +719,12 @@ export function TopStatus() {
           >
             <div>
               <p className="font-display text-[15px] font-medium tracking-[-0.012em] text-ink">
-                Connection issue
+                {anyEverConnected ? "Connection issue" : "Connect a platform"}
               </p>
               <p className="mt-1 font-mono text-[11px] text-ink-3">
-                These platforms aren&apos;t connected. Reconnect, or reset the
-                session if reconnect keeps failing.
+                {anyEverConnected
+                  ? "These platforms aren't connected. Reconnect, or reset the session if reconnect keeps failing."
+                  : "Connect a platform to start pulling in messages. Each one is optional."}
               </p>
             </div>
             <div className="space-y-2">
@@ -735,6 +740,11 @@ export function TopStatus() {
                 // mode is a missing macOS Full Disk Access grant, so
                 // say that instead of offering a session reset.
                 const isImessage = p.platform === "IMESSAGE";
+                // A platform the operator has never connected is "not set up",
+                // not "broken". Present it as an optional first-time setup
+                // (calm ink, "Connect", no scary red status, no reset) so a
+                // non-user isn't told their LinkedIn is failing. (issue #708)
+                const everConnected = hasEverConnected(p);
                 return (
                   <div
                     key={p.platform}
@@ -742,8 +752,10 @@ export function TopStatus() {
                   >
                     <span className="text-[13px] text-ink-2">
                       {label}{" "}
-                      <span className="font-mono text-[11px] text-risk-overdue">
-                        {p.status.toLowerCase().replace(/_/g, " ")}
+                      <span
+                        className={`font-mono text-[11px] ${everConnected ? "text-risk-overdue" : "text-ink-3"}`}
+                      >
+                        {everConnected ? p.status.toLowerCase().replace(/_/g, " ") : "not set up"}
                       </span>
                     </span>
                     {isImessage ? (
@@ -752,6 +764,11 @@ export function TopStatus() {
                         disconnected, grant the runner Full Disk Access
                         in System Settings → Privacy &amp; Security, then
                         retry.
+                      </span>
+                    ) : !everConnected ? (
+                      <span className="font-mono text-[11px] leading-snug text-ink-3">
+                        Optional. Connect it here if you use it. Otherwise
+                        we&apos;ll keep it out of your error banners.
                       </span>
                     ) : null}
                     <span className="flex items-center gap-2">
@@ -762,10 +779,10 @@ export function TopStatus() {
                         className="rounded-pill bg-ink px-3 py-1 font-mono text-[11px] text-paper transition-opacity duration-calm hover:opacity-90 disabled:opacity-50"
                       >
                         {connectBusy
-                          ? (isImessage ? "retrying…" : "reconnecting…")
-                          : (isImessage ? "Retry" : "Reconnect")}
+                          ? (isImessage ? "retrying…" : everConnected ? "reconnecting…" : "connecting…")
+                          : (isImessage ? "Retry" : everConnected ? "Reconnect" : "Connect")}
                       </button>
-                      {isImessage ? null : (
+                      {isImessage || !everConnected ? null : (
                         <button
                           type="button"
                           disabled={!!platformActionBusy}

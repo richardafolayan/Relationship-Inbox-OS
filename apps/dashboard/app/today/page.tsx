@@ -17,7 +17,7 @@ import type {
   ThreadResponse
 } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { isInTodayQueue, sortTodayQueue } from "@/lib/today";
 import { Star } from "lucide-react";
@@ -375,7 +375,10 @@ export default function TodayPage() {
   const queuePeek = useMemo(() => remaining.slice(0, 3), [remaining]);
   const queueRemaining = Math.max(0, remaining.length - queuePeek.length);
   const queueEtaMinutes = remaining.length > 0 ? Math.max(1, remaining.length * 2) : 0;
-  const degraded = platforms.find((p) => p.status === "DEGRADED");
+  // Only platforms the operator actually uses (connected at least once) raise
+  // an error banner. A never-connected platform that failed a default scan is
+  // "not set up", not "broken". (issue #708)
+  const degraded = platforms.find(isDegradedAndInUse);
 
   useEffect(() => {
     if (!hero) {
