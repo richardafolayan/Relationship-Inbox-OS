@@ -1914,7 +1914,7 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
 
 app.post("/system/update", asyncRoute(async (_req, res) => {
   // /system/update is NOT a /control/ path, so the dashboard's default-deny
-  // fetch interceptor never sees it — the Settings "Update and relaunch"
+  // fetch interceptor never sees it — the Settings app update button
   // button would otherwise stage a real self-update mid-presentation. Gate
   // it server-side as an external action (blocked live + sandbox).
   if (await checkPresenterGuard(res, settingsStore, { action: "stage an app update", kind: "external-action" })) return;
@@ -1944,7 +1944,7 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     pending: true,
     fromVersion: intent.fromVersion,
     toVersion: intent.toVersion,
-    message: "Update staged. Relaunch the app to finish updating."
+    message: "Update ready. Reopen the app to finish updating."
   });
 }));
 
