@@ -3,11 +3,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGetRaw, apiPost } from "@/lib/api";
 
-// Calm "App updates" card for the Settings > Pilot area. It is intentionally
-// quiet: the version line is always shown, an update line only appears when
-// one is genuinely available, and nothing here blocks replying. The running
-// app never replaces its own code; "Update and relaunch" only STAGES the
-// update, which the start wrapper applies on the next launch.
+// Calm "App updates" card for the Settings > Pilot area. The running app never
+// replaces its own code; the start wrapper applies the update on the next launch.
 
 interface UpdateCheck {
   configured: boolean;
@@ -29,8 +26,8 @@ export function AppUpdates() {
   const [info, setInfo] = useState<UpdateCheck | null>(null);
   const [checking, setChecking] = useState(false);
   const [checkMsg, setCheckMsg] = useState("");
-  const [staging, setStaging] = useState(false);
-  const [staged, setStaged] = useState<{ from: string; to: string } | null>(null);
+  const [updating, setUpdating] = useState(false);
+  const [prepared, setPrepared] = useState<{ from: string; to: string } | null>(null);
   const [error, setError] = useState("");
 
   const check = useCallback(async (manual: boolean) => {
@@ -60,23 +57,23 @@ export function AppUpdates() {
     void check(false);
   }, [check]);
 
-  const stage = useCallback(async () => {
-    setStaging(true);
+  const prepareUpdate = useCallback(async () => {
+    setUpdating(true);
     setError("");
     try {
       const res = await apiPost<StageResponse>("/runner/system/update", {});
       if (res.ok) {
-        setStaged({
+        setPrepared({
           from: res.fromVersion ?? info?.currentVersion ?? "",
           to: res.toVersion ?? info?.latestVersion ?? ""
         });
       } else {
-        setError("Couldn’t stage the update. Try Check for updates again.");
+        setError("Couldn’t prepare the update. Try Check for updates again.");
       }
     } catch {
-      setError("Couldn’t stage the update. Is the app running?");
+      setError("Couldn’t prepare the update. Is the app running?");
     } finally {
-      setStaging(false);
+      setUpdating(false);
     }
   }, [info]);
 
@@ -109,14 +106,14 @@ export function AppUpdates() {
           >
             {checking ? "Checking…" : "Check for updates"}
           </button>
-          {info?.updateAvailable && !staged ? (
+          {info?.updateAvailable && !prepared ? (
             <button
               type="button"
-              onClick={() => void stage()}
-              disabled={staging}
+              onClick={() => void prepareUpdate()}
+              disabled={updating}
               className="inline-flex items-center rounded-pill border border-hairline-strong px-[14px] py-[8px] text-[12.5px] font-medium text-accent-ink transition-colors duration-calm hover:bg-paper disabled:opacity-60"
             >
-              {staging ? "Staging…" : "Update and relaunch"}
+              {updating ? "Preparing update…" : "Update app"}
             </button>
           ) : null}
         </div>
@@ -130,13 +127,10 @@ export function AppUpdates() {
         </ul>
       ) : null}
 
-      {staged ? (
+      {prepared ? (
         <p className="mt-3 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
-          Update staged (v{staged.from} to v{staged.to}). To finish, stop the app
-          with <span className="font-mono">Ctrl + C</span> in its Terminal, then
-          run <span className="font-mono">node scripts/start-student.mjs</span>{" "}
-          (or <span className="font-mono">npm run start:student</span>). It
-          installs on the next start, and your messages and settings are kept.
+          Update ready (v{prepared.from} to v{prepared.to}). Close Relationship
+          Inbox OS and open it again to finish. Your messages and settings are kept.
         </p>
       ) : null}
 

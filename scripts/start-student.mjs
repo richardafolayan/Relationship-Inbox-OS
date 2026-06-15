@@ -7,8 +7,8 @@
 //
 //   node scripts/start-student.mjs
 //
-// (It's the same as `npm run dev`, but it also opens the browser for you and
-// prints plain-English status. Stop the app with Ctrl+C.)
+// It opens the browser for you and prints plain-English status. Stop the app
+// with Ctrl+C.
 
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -61,8 +61,8 @@ async function openWhenReady() {
   say(`  or run the health check:  ${C.bold}node scripts/doctor.mjs${C.reset}`);
 }
 
-// Apply a staged update (written by the dashboard's "Update and relaunch")
-// BEFORE booting, so the running app never has to replace its own code.
+// Apply a prepared update before booting, so the running app never has to
+// replace its own code.
 function runUpdaterApply(feedUrl) {
   return new Promise((doneResolve) => {
     const child = spawn(
@@ -92,10 +92,10 @@ async function applyPendingUpdate() {
     /* ignore */
   }
   if (!feedUrl) {
-    say(`  A staged update was found but no update link is set; skipping it.`);
+    say(`  A prepared update was found but no update link is set; skipping it.`);
     return;
   }
-  say(`\n${C.bold}Applying a staged update before starting…${C.reset}`);
+  say(`\n${C.bold}Applying a prepared update before starting…${C.reset}`);
   const ok = await runUpdaterApply(feedUrl);
   say(
     ok
@@ -108,7 +108,7 @@ async function applyPendingUpdate() {
 // .env.example (the update feed link, the feedback token, the version stamp)
 // would never reach an already-installed pilot. Heal that on every launch:
 // fill blank/missing distribution keys and keep the version stamp current —
-// never touching values the pilot set themselves. Runs AFTER a staged update
+// never touching values the pilot set themselves. Runs AFTER a prepared update
 // applies so it reads the .env.example that arrived with the new build.
 function reconcileEnvFile() {
   const envPath = join(APP_DIR, ".env");
@@ -146,7 +146,7 @@ const dev = spawn(process.execPath, [resolve(APP_DIR, "scripts/start-app.mjs")],
 
 dev.on("error", (err) => {
   say(`Could not start the app: ${err.message}`);
-  say(`Try running it manually:  cd "${APP_DIR}" && npm run dev`);
+  say(`Try closing this window and starting Relationship Inbox OS again.`);
   process.exit(1);
 });
 dev.on("exit", (code) => process.exit(code ?? 0));
