@@ -115,15 +115,17 @@ function ToastCard({
   const startXRef = useRef<number | null>(null);
   const [dragging, setDragging] = useState(false);
 
-  const interactive = Boolean(toast.href);
+  const interactive = Boolean(toast.href || toast.onActivate);
 
   // Navigate to the toast's route and clear it. Used by both a pointer
   // click (any release below the swipe threshold) and the keyboard handler.
   const activate = useCallback(() => {
-    if (!toast.href) return;
+    if (!toast.href && !toast.onActivate) return;
     toast.onActivate?.();
     onDismiss(toast.id);
-    router.push(toast.href);
+    if (toast.href) {
+      router.push(toast.href);
+    }
   }, [router, onDismiss, toast]);
 
   // An explicit clear (X button or swipe), as opposed to auto-expiry: lets
@@ -190,7 +192,7 @@ function ToastCard({
       tabIndex={interactive ? 0 : undefined}
       aria-label={
         interactive
-          ? `${toast.title}${toast.description ? `. ${toast.description}` : ""}. Open.`
+          ? `${toast.title}${toast.description ? `. ${toast.description}` : ""}. Activate.`
           : undefined
       }
       style={{

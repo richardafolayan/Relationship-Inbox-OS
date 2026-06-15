@@ -49,6 +49,13 @@ interface ScanResult {
   retryAfterSeconds?: number;
 }
 
+interface StartRunnerResponse {
+  ok: boolean;
+  status?: "already_running" | "starting";
+  pid?: number;
+  reason?: string;
+}
+
 // Proper-cased platform labels for the reconnect modal. PLATFORM_LABEL
 // in lib/risk is all-lowercase (used elsewhere for compact captions);
 // the modal wants real product casing.
@@ -378,6 +385,8 @@ export function TopStatus() {
   const [queue, setQueue] = useState<SendQueueResponse | null>(null);
   const [platforms, setPlatforms] = useState<PlatformCard[] | null>(null);
   const [cancellingScan, setCancellingScan] = useState(false);
+  const [runnerReachable, setRunnerReachable] = useState<boolean | null>(null);
+  const [runnerStartState, setRunnerStartState] = useState<"idle" | "starting" | "started">("idle");
   const [reconnectOpen, setReconnectOpen] = useState(false);
   const [platformActionBusy, setPlatformActionBusy] = useState<string | null>(null);
   const [scanTriggering, setScanTriggering] = useState(false);
@@ -413,7 +422,11 @@ export function TopStatus() {
       apiGet<SendQueueResponse>("/runner/data/send-queue", { ttlMs: 3000 }).catch(() => null),
       apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => null)
     ]);
-    if (healthData) setHealth(healthData);
+    setRunnerReachable(Boolean(healthData));
+    if (healthData) {
+      setHealth(healthData);
+      setRunnerStartState("idle");
+    }
     if (queueData) setQueue(queueData);
     if (platformData) setPlatforms(platformData);
     setReady(true);
@@ -516,6 +529,7 @@ export function TopStatus() {
   );
 
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
+  const runnerOffline = ready && runnerReachable === false;
 
   const ticker = computeTicker({ health, queue, reassessingCount, reportSendCount, threadCheck });
   const tickerIsActive =
@@ -581,6 +595,31 @@ export function TopStatus() {
       .finally(() => setScanTriggering(false));
   }, [scanTriggering]);
 
+  const onStartRunner = useCallback(() => {
+    if (runnerStartState === "starting") return;
+    setRunnerStartState("starting");
+    const request = fetch("/api/local-runner/start", { method: "POST" }).then(async (response) => {
+      const payload = (await response.json().catch(() => ({}))) as StartRunnerResponse;
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.reason ?? `Request failed: ${response.status}`);
+      }
+      return payload;
+    });
+    runActionWithFeedback(request, {
+      pending: "Starting runner…",
+      success: (result) =>
+        result.status === "already_running" ? "Runner is already running" : "Runner is starting",
+      failure: "Couldn’t start runner"
+    });
+    request
+      .then(() => {
+        setRunnerStartState("started");
+        window.setTimeout(() => void refreshRef.current(), 2500);
+        window.setTimeout(() => void refreshRef.current(), 6000);
+      })
+      .catch(() => setRunnerStartState("idle"));
+  }, [runnerStartState]);
+
   const tickerHeading = tickerLabel(ticker);
   const tickerSub = tickerDetail(ticker);
   const tickerTone =
@@ -602,6 +641,11 @@ export function TopStatus() {
         <span className="inline-flex items-center gap-[6px]" title="Connecting to runner…">
           <span className="h-[6px] w-[6px] rounded-full bg-ink-3" aria-hidden />
           <span className="text-ink-3">Connecting…</span>
+        </span>
+      ) : runnerOffline ? (
+        <span className="inline-flex items-center gap-[6px]" title="Runner offline">
+          <span className="h-[6px] w-[6px] rounded-full bg-risk-overdue" aria-hidden />
+          <span className="text-risk-overdue">Runner offline</span>
         </span>
       ) : hasDegraded ? (
         <button
@@ -690,8 +734,23 @@ export function TopStatus() {
             settles so a cold mount doesn't imply the runner has never run.
             The relative timestamp is the first thing to go on phone widths —
             "Scan now" keeps the actionable part. */}
-        {ready ? <span className="hidden sm:inline">{scanLabel}</span> : null}
-        {ready && ticker.kind !== "scanning" ? (
+        {runnerOffline ? (
+          <button
+            type="button"
+            onClick={onStartRunner}
+            disabled={runnerStartState === "starting"}
+            title="Start the local runner process."
+            className="font-mono text-[11px] text-ink-2 underline-offset-2 hover:text-ink hover:underline disabled:opacity-50"
+          >
+            {runnerStartState === "starting"
+              ? "starting…"
+              : runnerStartState === "started"
+                ? "runner starting"
+                : "Start runner"}
+          </button>
+        ) : null}
+        {ready && !runnerOffline ? <span className="hidden sm:inline">{scanLabel}</span> : null}
+        {ready && !runnerOffline && ticker.kind !== "scanning" ? (
           <>
             <button
               type="button"

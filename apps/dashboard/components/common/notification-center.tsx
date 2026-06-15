@@ -14,6 +14,7 @@ import {
   unseenNotificationCount,
   type CenterNotification
 } from "@/lib/notification-center";
+import { startAppUpdate } from "@/lib/app-update-action";
 import { UPDATE_NOTICE_ID } from "@/lib/update-notice";
 import { resolveCenterRowGesture } from "@/lib/toast-gesture";
 import { formatRelative } from "@/lib/time";
@@ -62,13 +63,16 @@ export function NotificationBell() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [open]);
 
-  const openThread = useCallback(
+  const openNotice = useCallback(
     (item: CenterNotification) => {
       // Opening a thread completes a message notice, so the row goes. The
-      // update reminder's completing act is updating (it auto-clears once
-      // the app is current), so clicking through only marks it seen.
+      // update reminder's completing act is updating, so clicking it starts
+      // the update instead of routing through Settings.
       if (item.id === UPDATE_NOTICE_ID) {
         markCenterNotificationsSeen([item.id]);
+        setOpen(false);
+        void startAppUpdate();
+        return;
       } else {
         dismissCenterNotification(item.id);
       }
@@ -167,7 +171,7 @@ export function NotificationBell() {
                       key={item.id}
                       item={item}
                       isNew={newAtOpen.has(item.id)}
-                      onOpen={() => openThread(item)}
+                      onOpen={() => openNotice(item)}
                       onDismiss={() => dismissCenterNotification(item.id)}
                     />
                   ))}
