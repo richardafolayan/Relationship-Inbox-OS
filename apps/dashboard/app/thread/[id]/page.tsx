@@ -52,7 +52,7 @@ import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imess
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
 import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { initials, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
 import { ActionButton } from "@/components/ui/action-button";
@@ -2020,7 +2020,10 @@ export default function ThreadPage() {
 
   const degraded = useMemo(() => {
     if (!thread) return undefined;
-    return platforms.find((p) => p.platform === thread.platform && p.status === "DEGRADED");
+    // Only surface the error for a platform the operator actually uses
+    // (connected at least once); a never-connected platform is "not set
+    // up", not "broken". (issue #708)
+    return platforms.find((p) => p.platform === thread.platform && isDegradedAndInUse(p));
   }, [platforms, thread]);
 
   const degradedDomDump = useMemo(() => {

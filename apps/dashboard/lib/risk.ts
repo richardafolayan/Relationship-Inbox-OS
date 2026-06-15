@@ -26,6 +26,26 @@ export const IMPLEMENTED_PLATFORMS: ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TI
   "IMESSAGE"
 ];
 
+// A platform the operator has never connected is "not set up", not "broken".
+// A failed background scan against an unconnected platform (e.g. LinkedIn is
+// enabled by default, so an auth-required scan can mark it DEGRADED) must NOT
+// surface as a scary "something looks off" error to someone who never opted in.
+// `connectedAt` is only ever set by a successful connect, so a null value is a
+// reliable "never set up / doesn't use this" signal. (issue #708)
+export function hasEverConnected(platform: { connectedAt: string | null }): boolean {
+  return Boolean(platform.connectedAt);
+}
+
+// Only surface a degraded/error banner for a platform the operator actually
+// uses — i.e. one they have connected at least once. Keeps the Today, Inbox,
+// and Thread surfaces consistent so a non-user never sees a platform error.
+export function isDegradedAndInUse(platform: {
+  status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
+  connectedAt: string | null;
+}): boolean {
+  return platform.status === "DEGRADED" && hasEverConnected(platform);
+}
+
 export function initials(name: string): string {
   // Only take the first character of name parts that START with a letter.
   // Without this filter, "Cynthia (ACS)" would render as "C(" because the
