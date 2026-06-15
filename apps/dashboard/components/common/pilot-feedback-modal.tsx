@@ -4,6 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { usePathname } from "next/navigation";
 import { ChevronLeft, ImageUp, X } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
+import { installClientErrorCapture } from "@/lib/client-error-log";
 import { showToast } from "@/lib/feedback";
 import { signalReportSendStart } from "@/lib/pilot-report-status";
 import {
@@ -94,6 +95,11 @@ export function PilotFeedbackModal() {
       }),
     []
   );
+
+  // Capture uncaught client errors from app start (this modal is mounted once
+  // in the shell), so a report submitted right after an error can carry what
+  // it was. See R-0077 (#709).
+  useEffect(() => installClientErrorCapture(), []);
 
   // When the last screenshot is removed, the privacy note unmounts; drop the
   // acknowledgement so re-attaching an image asks for it again.

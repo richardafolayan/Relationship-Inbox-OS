@@ -19,7 +19,8 @@ const META = {
   threadId: "abc-123",
   appVersion: "0.1.0",
   userAgent: "test-agent",
-  timestamp: "2026-05-21T10:00:00.000Z"
+  timestamp: "2026-05-21T10:00:00.000Z",
+  lastError: null
 };
 
 test("buildPilotReportPayload assembles only the safe fields", () => {
@@ -45,6 +46,7 @@ test("buildPilotReportPayload assembles only the safe fields", () => {
   ]);
   assert.deepEqual(Object.keys(payload.meta).sort(), [
     "appVersion",
+    "lastError",
     "pathname",
     "route",
     "threadId",
@@ -130,6 +132,30 @@ test("formatReportForCopy renders the report without message content", () => {
   assert.match(text, /The thread never opened/);
   assert.match(text, /no message content/i);
   assert.match(text, /Page: Thread/);
+});
+
+test("formatReportForCopy surfaces a recent client error when present, omits it otherwise", () => {
+  const withError = buildPilotReportPayload({
+    type: "feedback",
+    title: "Got an error?",
+    description: "What's this about?",
+    expected: "",
+    privacyAck: false,
+    meta: { ...META, lastError: "TypeError: x is not a function" },
+    screenshots: []
+  });
+  assert.match(formatReportForCopy(withError), /Last client error: TypeError: x is not a function/);
+
+  const noError = buildPilotReportPayload({
+    type: "feedback",
+    title: "Just a note",
+    description: "Looks good",
+    expected: "",
+    privacyAck: false,
+    meta: { ...META, lastError: null },
+    screenshots: []
+  });
+  assert.doesNotMatch(formatReportForCopy(noError), /Last client error/);
 });
 
 test("validateScreenshotFile accepts a reasonable image", () => {
