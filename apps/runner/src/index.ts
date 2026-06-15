@@ -60,7 +60,12 @@ import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
 import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
-import { readAppVersion, runUpdateCheck, stagePendingUpdate } from "./services/system-update";
+import {
+  launchUpdateApplyAndRestart,
+  readAppVersion,
+  runUpdateCheck,
+  stagePendingUpdate
+} from "./services/system-update";
 import {
   LINKEDIN_VOICE_MIME,
   hasLinkedInVoice,
@@ -1882,9 +1887,9 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
 
 // ---- System / self-update -------------------------------------------------
 // Logic lives in services/system-update.ts (testable in isolation). The
-// running app never replaces its own code: POST /system/update only STAGES a
-// pending-update intent, which scripts/start-student.mjs applies before
-// booting on the next launch.
+// POST /system/update stages a pending intent for the start wrapper fallback,
+// then launches a detached helper that applies the update and starts the app
+// again after this runner and the dashboard shut down.
 
 app.get("/system/version", asyncRoute(async (_req, res) => {
   res.json(readAppVersion(projectRoot));
@@ -1909,13 +1914,21 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
 
 app.post("/system/update", asyncRoute(async (_req, res) => {
   // /system/update is NOT a /control/ path, so the dashboard's default-deny
-  // fetch interceptor never sees it — the Settings "Update and relaunch"
-  // button would otherwise stage a real self-update mid-presentation. Gate
+  // fetch interceptor never sees it — the Settings app update button
+  // would otherwise start a real self-update mid-presentation. Gate
   // it server-side as an external action (blocked live + sandbox).
-  if (await checkPresenterGuard(res, settingsStore, { action: "stage an app update", kind: "external-action" })) return;
+  if (await checkPresenterGuard(res, settingsStore, { action: "update and restart the app", kind: "external-action" })) return;
   const feedUrl = runnerConfig.updateFeedUrl;
   if (!feedUrl) {
     res.status(409).json({ ok: false, reason: "no_feed_configured" });
+    return;
+  }
+  if (existsSync(join(projectRoot, ".git"))) {
+    res.status(409).json({
+      ok: false,
+      reason: "dev_checkout",
+      message: "This checkout is updated with git, not the student updater."
+    });
     return;
   }
   const check = await runUpdateCheck({ projectRoot, feedUrl });
@@ -1934,12 +1947,14 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     feedUrl
   };
   stagePendingUpdate(dataDir, intent);
-  res.json({
+  const restart = launchUpdateApplyAndRestart({ projectRoot, feedUrl });
+  res.status(202).json({
     ok: true,
-    pending: true,
+    updating: true,
     fromVersion: intent.fromVersion,
     toVersion: intent.toVersion,
-    message: "Update staged. Relaunch the app to finish updating."
+    logPath: restart.logPath,
+    message: "Update started. Relationship Inbox OS will reopen when it finishes."
   });
 }));
 

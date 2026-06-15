@@ -1,11 +1,9 @@
 import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, mkdirSync, openSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-// Backs the dashboard's "App updates" card and the start wrapper's relaunch.
-// The running app never replaces its own code: the POST /system/update route
-// only STAGES a pending-update intent, which scripts/start-student.mjs applies
-// before booting on the next launch. /system/update-check delegates to the
+// Backs the dashboard's "App updates" card, the start wrapper's fallback, and
+// the detached apply-and-restart helper. /system/update-check delegates to the
 // updater CLI's own --check-only logic, so version comparison + latest.json
 // validation live in exactly one place (scripts/lib/release-manifest.mjs).
 
@@ -130,4 +128,35 @@ export function stagePendingUpdate(dataDir: string, intent: PendingUpdateIntent)
   const path = pendingUpdatePath(dataDir);
   writeFileSync(path, JSON.stringify(intent, null, 2));
   return path;
+}
+
+export function launchUpdateApplyAndRestart(opts: {
+  projectRoot: string;
+  feedUrl: string;
+  nodeBin?: string;
+}): { pid?: number; logPath: string } {
+  const helperPath = resolve(opts.projectRoot, "scripts/apply-update-and-restart.mjs");
+  const logsDir = resolve(opts.projectRoot, "logs");
+  mkdirSync(logsDir, { recursive: true });
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const logPath = resolve(logsDir, `update-restart-${stamp}.log`);
+  const fd = openSync(logPath, "a");
+  try {
+    const child = spawn(
+      opts.nodeBin ?? process.execPath,
+      [helperPath, "--url", opts.feedUrl, "--dir", opts.projectRoot],
+      {
+        cwd: opts.projectRoot,
+        detached: true,
+        stdio: ["ignore", fd, fd]
+      }
+    );
+    child.on("error", (error) => {
+      console.warn("[system-update] apply-and-restart helper failed to start", error);
+    });
+    child.unref();
+    return { pid: child.pid, logPath };
+  } finally {
+    closeSync(fd);
+  }
 }

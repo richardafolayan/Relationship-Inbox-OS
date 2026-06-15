@@ -2,8 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 // Update-available notices: a newer pilot build surfaces like a new message
-// (one 30s toast + a notification-center entry, both landing on
-// /settings#app-updates) but only ONCE per version, quietly during quiet
+// (one 30s toast + a notification-center entry) but only ONCE per version,
+// quietly during quiet
 // hours, and the center entry clears itself once the app is up to date.
 // The decision logic is pure (planUpdateNotice); the stamp helpers wrap
 // localStorage with the same fail-quiet rules as the rest of the dashboard.
@@ -60,8 +60,9 @@ test("buildUpdateNotice names the version and points at the anchored card", () =
   assert.ok(notice.body.length > 0);
 });
 
-test("the check cadence is hours apart, nowhere near the inbox poll", () => {
-  assert.ok(UPDATE_CHECK_INTERVAL_MS >= 60 * 60 * 1000);
+test("the check cadence is quick but nowhere near the inbox poll", () => {
+  assert.ok(UPDATE_CHECK_INTERVAL_MS >= 60 * 1000);
+  assert.ok(UPDATE_CHECK_INTERVAL_MS <= 5 * 60 * 1000);
 });
 
 // ---------------------------------------------------------------------------
