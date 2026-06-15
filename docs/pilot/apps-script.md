@@ -37,7 +37,7 @@ report number. Everything below is admin side, for whoever runs the pilot.
 
    Columns X to AA are written by the script; you never fill them in. Column
    AB (`lastError`) carries the most recent uncaught client error at submit
-   time, when one fired — it makes vague reports ("Got an error?") actionable.
+   time, when one fired. It makes vague reports ("Got an error?") actionable.
    The header labels are cosmetic (the script uses column positions), but
    adding them keeps the Sheet readable; the next submission auto-expands the
    grid to column AB, so no manual migration is needed beyond redeploying the
