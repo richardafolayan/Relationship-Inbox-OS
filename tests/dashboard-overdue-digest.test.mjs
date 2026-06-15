@@ -11,9 +11,12 @@ const {
   notificationsSupported
 } = await import("../apps/dashboard/lib/notifications.ts");
 
-const { shouldQueryDigestTick, summariseCandidatesForAck, localDateString } = await import(
-  "../apps/dashboard/lib/overdue-digest.ts"
-);
+const {
+  shouldQueryDigestTick,
+  shouldAttemptDesktopDigestPing,
+  summariseCandidatesForAck,
+  localDateString
+} = await import("../apps/dashboard/lib/overdue-digest.ts");
 
 test("title is singular at count=1, plural otherwise", () => {
   assert.equal(buildOverdueDigestTitle(1), "1 person still needs a reply");
@@ -61,21 +64,39 @@ test("body never uses guilt language or em dashes", () => {
   }
 });
 
-test("shouldQueryDigestTick: every gate has to pass", () => {
+test("shouldQueryDigestTick: cadence and quiet hours are the only gates", () => {
+  // The bell entry is the digest's primary surface, so a due digest must be
+  // queried (and delivered) even without desktop permission and even while
+  // the tab is visible. Only cadence-off and quiet hours suppress it.
+  const base = { cadence: "daily", quietHoursActive: false };
+  assert.equal(shouldQueryDigestTick(base), true);
+  assert.equal(shouldQueryDigestTick({ ...base, cadence: "weekly" }), true);
+  assert.equal(shouldQueryDigestTick({ ...base, cadence: "off" }), false);
+  assert.equal(shouldQueryDigestTick({ ...base, quietHoursActive: true }), false);
+});
+
+test("shouldAttemptDesktopDigestPing: optional extra needs support + grant + a hidden tab", () => {
   const base = {
-    cadence: "daily",
     notificationsSupported: true,
     notificationPermission: "granted",
-    documentVisibility: "hidden",
-    quietHoursActive: false
+    documentVisibility: "hidden"
   };
-  assert.equal(shouldQueryDigestTick(base), true);
-  assert.equal(shouldQueryDigestTick({ ...base, cadence: "off" }), false);
-  assert.equal(shouldQueryDigestTick({ ...base, notificationsSupported: false }), false);
-  assert.equal(shouldQueryDigestTick({ ...base, notificationPermission: "default" }), false);
-  assert.equal(shouldQueryDigestTick({ ...base, notificationPermission: "denied" }), false);
-  assert.equal(shouldQueryDigestTick({ ...base, documentVisibility: "visible" }), false);
-  assert.equal(shouldQueryDigestTick({ ...base, quietHoursActive: true }), false);
+  assert.equal(shouldAttemptDesktopDigestPing(base), true);
+  // No desktop permission no longer kills the digest, it only skips the ping.
+  assert.equal(shouldAttemptDesktopDigestPing({ ...base, notificationPermission: "default" }), false);
+  assert.equal(shouldAttemptDesktopDigestPing({ ...base, notificationPermission: "denied" }), false);
+  assert.equal(
+    shouldAttemptDesktopDigestPing({
+      ...base,
+      notificationsSupported: false,
+      notificationPermission: "unsupported"
+    }),
+    false
+  );
+  // Looking at the app already shows the queue; the OS ping would duplicate it.
+  assert.equal(shouldAttemptDesktopDigestPing({ ...base, documentVisibility: "visible" }), false);
+  // No document (SSR-ish edge) counts as not-visible, matching the old gate.
+  assert.equal(shouldAttemptDesktopDigestPing({ ...base, documentVisibility: "unknown" }), true);
 });
 
 test("summariseCandidatesForAck dedupes by personId and keeps order", () => {

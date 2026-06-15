@@ -52,7 +52,7 @@ import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imess
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
 import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
-import { initials, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { initials, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { Button } from "@/components/ui/button";
 import { ActionButton } from "@/components/ui/action-button";
@@ -474,6 +474,17 @@ export default function ThreadPage() {
   // previously-seen thread paints the full conversation on the very first
   // render - no "Loading..." frame. refresh() still runs on mount and
   // revalidates, so this is never more than stale-while-revalidate.
+  //
+  // This page deliberately keeps the useState(peekCache) initializer instead
+  // of lib/use-cache-seed (the hydration-safe form the list pages use):
+  // `thread` is mutated with functional updaters (setThread(current => ...))
+  // which the hook's `state ?? seed` pattern would hand a null `current`
+  // while the seed is on screen. That stays hydration-safe here ONLY because
+  // nothing outside this page fetches /runner/data/thread/<id> - the cache
+  // for this path cannot be warm during a hard load's hydration render, just
+  // on client-side navigations. If the app shell (or anything mounted above
+  // this boundary) ever starts fetching thread paths, switch this seed to
+  // useCacheSeed and rework the functional updaters first.
   const [thread, setThread] = useState<ThreadResponse | null>(
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
   );
@@ -1076,8 +1087,9 @@ export default function ThreadPage() {
     return () => window.removeEventListener("operator-profile-saved", loadProfile);
   }, []);
 
-  // Per-thread rescan progress: shows the active stage inline next to
-  // the Rescan button while the runner is opening + parsing the thread.
+  // Per-thread rescan in-flight flag. Progress copy renders in the
+  // TopStatus ticker ("Checking <name>'s messages"); here it only guards
+  // the menu item against double-clicks and flips its label.
   // Cleared when SCAN_THREAD_FINISHED arrives or after a 30s defensive
   // timeout so a missed event can never strand the UI in "rescanning".
   const [rescanStage, setRescanStage] = useState<string | null>(null);
@@ -2058,7 +2070,10 @@ export default function ThreadPage() {
 
   const degraded = useMemo(() => {
     if (!thread) return undefined;
-    return platforms.find((p) => p.platform === thread.platform && p.status === "DEGRADED");
+    // Only surface the error for a platform the operator actually uses
+    // (connected at least once); a never-connected platform is "not set
+    // up", not "broken". (issue #708)
+    return platforms.find((p) => p.platform === thread.platform && isDegradedAndInUse(p));
   }, [platforms, thread]);
 
   const degradedDomDump = useMemo(() => {
@@ -3117,11 +3132,10 @@ export default function ThreadPage() {
                   <Button
                     variant="ghost"
                     aria-label="More actions"
-                    title={rescanStage ? `Rescan: ${rescanStage}…` : "More actions"}
+                    title="More actions"
                     className="px-2 py-1.5 text-[12px]"
                   >
                     <MoreHorizontal className="h-[14px] w-[14px]" strokeWidth={1.6} />
-                    {rescanStage ? <span className="ml-2">{rescanStage}…</span> : null}
                   </Button>
                 }
                 items={[
@@ -3281,7 +3295,11 @@ export default function ThreadPage() {
                       runAction(apiPost(`/runner/control/thread/${thread.id}/open`, {}), setError)
                   },
                   {
-                    label: rescanStage ? `${rescanStage}…` : "Rescan",
+                    // Progress lives in the TopStatus ticker ("Checking
+                    // <name>'s messages"), not the thread header — the
+                    // menu label only flips while running so a re-click
+                    // reads as already in flight.
+                    label: rescanStage ? "Checking for new messages…" : "Check for new messages",
                     onSelect: () => {
                       if (rescanStage) return;
                       runAction(

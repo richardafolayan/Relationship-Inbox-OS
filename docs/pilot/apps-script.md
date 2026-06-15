@@ -32,14 +32,18 @@ report number. Everything below is admin side, for whoever runs the pilot.
    L browserMode   M aiHelpLevel   N appVersion   O commit   P userAgent
    Q clientTime   R receivedAt   S aiSummary   T aiArea   U aiSeverity
    V aiRepro   W screenshotUrl   X githubIssueUrl   Y githubIssueNumber
-   Z githubSyncStatus   AA githubSyncError
+   Z githubSyncStatus   AA githubSyncError   AB lastError
    ```
 
-   Columns X to AA are written by the script; you never fill them in. The
-   header labels are cosmetic (the script uses column positions), but adding
-   them keeps the Sheet readable. The **first six columns are the only ones
-   the status endpoint reads**, so descriptions, screenshots, and the GitHub
-   columns can never leak into the tester-facing "Recent reports" view.
+   Columns X to AA are written by the script; you never fill them in. Column
+   AB (`lastError`) carries the most recent uncaught client error at submit
+   time, when one fired — it makes vague reports ("Got an error?") actionable.
+   The header labels are cosmetic (the script uses column positions), but
+   adding them keeps the Sheet readable; the next submission auto-expands the
+   grid to column AB, so no manual migration is needed beyond redeploying the
+   script. The **first six columns are the only ones the status endpoint
+   reads**, so descriptions, screenshots, and the GitHub columns can never
+   leak into the tester-facing "Recent reports" view.
 2. **Create a Drive folder** for screenshots. Keep it private to you.
 3. **New Apps Script project** (script.google.com, New project). Paste the
    [script below](#the-script).
@@ -95,9 +99,9 @@ var COL = {
   userAgent: 16, clientTime: 17, receivedAt: 18, aiSummary: 19,
   aiArea: 20, aiSeverity: 21, aiRepro: 22, screenshotUrl: 23,
   githubIssueUrl: 24, githubIssueNumber: 25, githubSyncStatus: 26,
-  githubSyncError: 27
+  githubSyncError: 27, lastError: 28
 };
-var COLUMN_COUNT = 27;
+var COLUMN_COUNT = 28;
 
 // Screenshots are committed into the repo so they are viewable straight from
 // the issue. Drive links are auth-walled, and a PRIVATE repo's
@@ -176,8 +180,14 @@ function doPost(e) {
       ai.area || '',                  // T aiArea
       ai.severity || '',              // U aiSeverity
       (ai.repro || []).join(' | '),   // V aiRepro
-      screenshotUrl                   // W screenshotUrl (one URL per line)
-      // X..AA (GitHub columns) are written by syncGithubForRow_ below.
+      screenshotUrl,                  // W screenshotUrl (one URL per line)
+      // X..AA (GitHub columns) are overwritten by syncGithubForRow_ below;
+      // written blank here only so the appended row reaches column AB.
+      '',                             // X githubIssueUrl
+      '',                             // Y githubIssueNumber
+      '',                             // Z githubSyncStatus
+      '',                             // AA githubSyncError
+      meta.lastError || ''            // AB lastError
     ]);
 
     // The report is stored: from here the submission counts as sent. GitHub
@@ -341,6 +351,7 @@ function buildIssueContent_(props, values, githubScreenshotUrls) {
   if (cell('browserMode')) lines.push('- Browser mode: ' + cell('browserMode'));
   if (cell('aiHelpLevel')) lines.push('- AI help level: ' + cell('aiHelpLevel'));
   if (cell('commit')) lines.push('- Commit: ' + cell('commit'));
+  if (cell('lastError')) lines.push('- Last client error: ' + cell('lastError'));
   if (cell('userAgent')) lines.push('- Browser / device: ' + cell('userAgent'));
   var sheetLink = sheetRowLink_(props);
   if (sheetLink) lines.push('- Sheet: ' + sheetLink + ' (find row ' + reportId + ')');
@@ -391,6 +402,7 @@ function buildIssueContent_(props, values, githubScreenshotUrls) {
     platform: cell('platform'),
     appVersion: cell('appVersion'),
     commit: cell('commit'),
+    lastError: cell('lastError'),
     clientTime: cell('clientTime'),
     receivedAt: cell('receivedAt')
   };

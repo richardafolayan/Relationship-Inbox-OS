@@ -5,7 +5,8 @@ import { useRouter } from "next/navigation";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
 import Link from "next/link";
-import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import { apiGet, apiPost, runAction } from "@/lib/api";
+import { useCacheSeed } from "@/lib/use-cache-seed";
 import { prefetchThreadDataNow } from "@/lib/thread-prefetch";
 import type {
   HealthResponse,
@@ -16,7 +17,7 @@ import type {
   ThreadResponse
 } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { cleanAskSummary, normalizePreview } from "@/lib/preview";
 import { isInTodayQueue, sortTodayQueue } from "@/lib/today";
 import { Star } from "lucide-react";
@@ -113,17 +114,23 @@ export default function TodayPage() {
   const router = useRouter();
   // Seed from the shared client cache so revisiting Today (e.g. back from a
   // thread) paints the last-known queue instantly instead of a blank skeleton,
-  // then revalidates in the background.
-  const [data, setData] = useState<InboxResponse | null>(
-    () => peekCache<InboxResponse>("/runner/data/inbox") ?? null
-  );
-  const [platforms, setPlatforms] = useState<PlatformCard[]>(
-    () => peekCache<PlatformCard[]>("/runner/data/platforms") ?? []
-  );
+  // then revalidates in the background. Read via useCacheSeed (NOT a useState
+  // initializer): the app shell's effects can warm the cache from the
+  // localStorage snapshot before this boundary hydrates, and a useState seed
+  // would leak that into the hydration render and mismatch the server HTML.
+  const inboxSeed = useCacheSeed<InboxResponse>("/runner/data/inbox");
+  const platformsSeed = useCacheSeed<PlatformCard[]>("/runner/data/platforms");
+  const [dataState, setData] = useState<InboxResponse | null>(null);
+  const data = dataState ?? inboxSeed ?? null;
+  const [platformsState, setPlatforms] = useState<PlatformCard[] | null>(null);
+  const platforms = platformsState ?? platformsSeed ?? [];
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [heroSummary, setHeroSummary] = useState<{ id: string; summary: string | null } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(() => peekCache<InboxResponse>("/runner/data/inbox") !== undefined);
+  const [loadedState, setLoaded] = useState(false);
+  // A cached queue (even an empty one) counts as loaded - no skeleton on
+  // top of data we are already painting.
+  const loaded = loadedState || inboxSeed !== undefined;
   // True when the /data/inbox fetch failed outright (runner down /
   // unreachable). Without this the empty "You're caught up" state renders
   // for an unreachable runner — indistinguishable from a genuinely empty
@@ -368,7 +375,10 @@ export default function TodayPage() {
   const queuePeek = useMemo(() => remaining.slice(0, 3), [remaining]);
   const queueRemaining = Math.max(0, remaining.length - queuePeek.length);
   const queueEtaMinutes = remaining.length > 0 ? Math.max(1, remaining.length * 2) : 0;
-  const degraded = platforms.find((p) => p.status === "DEGRADED");
+  // Only platforms the operator actually uses (connected at least once) raise
+  // an error banner. A never-connected platform that failed a default scan is
+  // "not set up", not "broken". (issue #708)
+  const degraded = platforms.find(isDegradedAndInUse);
 
   useEffect(() => {
     if (!hero) {

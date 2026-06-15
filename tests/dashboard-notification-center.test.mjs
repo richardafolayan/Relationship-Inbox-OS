@@ -20,8 +20,10 @@ const {
   markCenterNotificationsSeen,
   markAllCenterNotificationsSeen,
   onCenterNotificationsChange,
+  recordOverdueDigestNotification,
   NOTIFICATION_CENTER_CAP,
-  NOTIFICATION_CENTER_STORAGE_KEY
+  NOTIFICATION_CENTER_STORAGE_KEY,
+  OVERDUE_DIGEST_NOTIFICATION_ID
 } = await import("../apps/dashboard/lib/notification-center.ts");
 
 function entry(overrides = {}) {
@@ -210,6 +212,77 @@ test("a new message in an already-listed thread replaces its entry and resets se
   });
 });
 
+// ---------------------------------------------------------------------------
+// Overdue-reply digest entry (#360). The bell is the digest's primary
+// delivery surface: it must land here whether or not desktop permission was
+// granted, so the regression to pin is "no permission still produces a bell
+// entry" (the old scheduler silently dropped the whole digest instead).
+// ---------------------------------------------------------------------------
+
+const digestPeople = [
+  { personId: "p-1", personName: "Brandon" },
+  { personId: "p-2", personName: "Ayo" }
+];
+
+test("recordOverdueDigestNotification lands one /today entry built from the digest copy", () => {
+  withWindow(({ store, dispatched }) => {
+    recordOverdueDigestNotification(digestPeople, 5000);
+
+    const stored = JSON.parse(store.get(NOTIFICATION_CENTER_STORAGE_KEY));
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].id, OVERDUE_DIGEST_NOTIFICATION_ID);
+    assert.equal(stored[0].title, "2 people still need replies");
+    assert.equal(stored[0].body, "Brandon and Ayo are still open.");
+    assert.equal(stored[0].href, "/today");
+    assert.equal(stored[0].at, 5000);
+    assert.equal(stored[0].seen, false);
+    assert.equal(dispatched.length, 1);
+  });
+});
+
+test("a newer digest replaces the previous bell entry instead of piling up", () => {
+  withWindow(({ store }) => {
+    recordOverdueDigestNotification(digestPeople, 5000);
+    markAllCenterNotificationsSeen();
+    recordOverdueDigestNotification([{ personId: "p-3", personName: "Timi" }], 9000);
+
+    const stored = JSON.parse(store.get(NOTIFICATION_CENTER_STORAGE_KEY));
+    assert.equal(stored.length, 1);
+    assert.equal(stored[0].id, OVERDUE_DIGEST_NOTIFICATION_ID);
+    assert.equal(stored[0].title, "1 person still needs a reply");
+    assert.equal(stored[0].body, "Timi is still open.");
+    assert.equal(stored[0].at, 9000);
+    assert.equal(stored[0].seen, false);
+  });
+});
+
+test("the digest entry coexists with new-message entries without clobbering them", () => {
+  withWindow(() => {
+    recordNewMessageNotifications([row()], 5000);
+    recordOverdueDigestNotification(digestPeople, 6000);
+
+    const items = readCenterNotifications();
+    assert.deepEqual(
+      items.map((n) => n.id),
+      [OVERDUE_DIGEST_NOTIFICATION_ID, "t-1"]
+    );
+    // Dismissing the digest leaves the message notice alone.
+    dismissCenterNotification(OVERDUE_DIGEST_NOTIFICATION_ID);
+    assert.deepEqual(
+      readCenterNotifications().map((n) => n.id),
+      ["t-1"]
+    );
+  });
+});
+
+test("recordOverdueDigestNotification with no people is a complete no-op", () => {
+  withWindow(({ store, dispatched }) => {
+    recordOverdueDigestNotification([], 5000);
+    assert.equal(store.has(NOTIFICATION_CENTER_STORAGE_KEY), false);
+    assert.equal(dispatched.length, 0);
+  });
+});
+
 test("dismiss / clear / mark-seen round-trip through storage", () => {
   withWindow(() => {
     recordNewMessageNotifications([row(), row({ id: "t-2", personName: "Joseph" })], 5000);
@@ -306,6 +379,7 @@ test("without a window (SSR) every entry point is a safe no-op", () => {
   try {
     assert.deepEqual(readCenterNotifications(), []);
     assert.doesNotThrow(() => recordNewMessageNotifications([row()], 5000));
+    assert.doesNotThrow(() => recordOverdueDigestNotification(digestPeople, 5000));
     assert.doesNotThrow(() => dismissCenterNotification("t-1"));
     assert.doesNotThrow(() => clearCenterNotifications());
     assert.doesNotThrow(() => markCenterNotificationsSeen(["t-1"]));

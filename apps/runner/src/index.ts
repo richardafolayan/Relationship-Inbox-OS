@@ -90,6 +90,7 @@ import {
   parseScreenshotDataUrl,
   forwardPilotReport,
   fetchPilotReportStatus,
+  resolveReportBuildIdentity,
   type PilotScreenshot
 } from "./services/pilot-feedback";
 import {
@@ -3326,26 +3327,36 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   // inbox path takes 30-90s on a populated inbox; opening one thread is
   // typically <5s. Wraps in the platform control lock so it serialises
   // against any in-flight scan / send / open-thread operation.
-  // Emit scoped progress events so the dashboard's Rescan button can
-  // surface "opening thread / reading messages / saving" inline rather
-  // than a static spinner. Mirrors SCAN_PROGRESS for full-inbox scans
-  // but keyed on threadId so the thread page can subscribe selectively.
+  // Emit scoped progress events keyed on threadId. The TopStatus ticker
+  // surfaces these as "Checking <name>'s messages" — ongoing work belongs
+  // in the ticker, not the thread header (the thread page only uses the
+  // events to guard against double-clicks and refresh on finish).
+  // personName rides along so the ticker can name the contact without a
+  // /data/thread round-trip.
   eventBus.emit({
     type: "SCAN_THREAD_STARTED",
     jobId: requestId,
     threadId: target.threadId,
-    platform: target.platform
+    platform: target.platform,
+    personName: target.displayName
   });
   try {
     const result = await withPlatformControlLock(target.platform, async () => {
-      const aggregate = { updatedThreads: 0, parsedMessages: 0 };
+      const aggregate = { updatedThreads: 0, parsedMessages: 0, newMessages: 0 };
       eventBus.emit({
         type: "SCAN_THREAD_PROGRESS",
         jobId: requestId,
         threadId: target.threadId,
         platform: target.platform,
-        stage: targets.length > 1 ? "Reading sibling threads" : "Reading messages"
+        stage: targets.length > 1 ? "Reading sibling threads" : "Reading messages",
+        personName: target.displayName
       });
+      // Message-count delta across the whole sibling cohort = "did this
+      // check find anything new". parsedMessages can't answer that — it
+      // counts every message re-parsed, new or not. Counted inside the
+      // lock so a concurrent scan can't skew the baseline.
+      const targetIds = targets.map((t) => t.id);
+      const messagesBefore = await prisma.message.count({ where: { threadId: { in: targetIds } } });
       for (const t of targets) {
         const candidate: ThreadStub = {
           platformThreadId: t.platformThreadId,
@@ -3367,8 +3378,11 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
         jobId: requestId,
         threadId: target.threadId,
         platform: target.platform,
-        stage: "Saving updates"
+        stage: "Saving updates",
+        personName: target.displayName
       });
+      const messagesAfter = await prisma.message.count({ where: { threadId: { in: targetIds } } });
+      aggregate.newMessages = Math.max(0, messagesAfter - messagesBefore);
       return aggregate;
     });
     eventBus.emit({
@@ -3377,7 +3391,9 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       threadId: target.threadId,
       platform: target.platform,
       updatedThreads: result.updatedThreads,
-      parsedMessages: result.parsedMessages
+      parsedMessages: result.parsedMessages,
+      personName: target.displayName,
+      newMessages: result.newMessages
     });
     await auditService.log({
       platform: target.platform,
@@ -3406,7 +3422,11 @@ app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
       threadId: target.threadId,
       platform: target.platform,
       updatedThreads: 0,
-      parsedMessages: 0
+      parsedMessages: 0,
+      personName: target.displayName,
+      // No newMessages and failed:true — the ticker must not render a
+      // confident "No new messages from X" for a check that errored.
+      failed: true
     });
     await auditService.log({
       platform: target.platform,
@@ -5748,7 +5768,8 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
           threadId: z.string().max(120).nullable().default(null),
           appVersion: z.string().max(80).default(""),
           userAgent: z.string().max(500).default(""),
-          timestamp: z.string().max(40).default("")
+          timestamp: z.string().max(40).default(""),
+          lastError: z.string().max(500).nullable().default(null)
         })
         .default({}),
       screenshots: z
@@ -5789,12 +5810,23 @@ app.post("/control/pilot-feedback", asyncRoute(async (req, res) => {
     platform = thread?.platform ?? null;
   }
   const operatorProfile = await settingsStore.getOperatorProfile();
+  // Authoritative build identity. The dashboard's meta.appVersion is a
+  // build-time env fallback and was arriving as a misleading "0.1.0" with an
+  // empty commit (R-0077 / #709), which made reports un-triageable. The runner
+  // reads the real stamp from release.json (shipped builds) / package.json
+  // (dev), so it owns version + commit here. See resolveReportBuildIdentity.
+  const { appVersion, commit } = resolveReportBuildIdentity({
+    build: readAppVersion(projectRoot),
+    metaAppVersion: payload.meta.appVersion,
+    envCommit: process.env.APP_COMMIT
+  });
   const enrichedMeta = {
     ...payload.meta,
+    appVersion,
     platform,
     browserMode: runnerConfig.browserProfile.mode,
     aiHelpLevel: operatorProfile.aiHelpLevel,
-    commit: process.env.APP_COMMIT?.trim() || "",
+    commit,
     receivedAt: new Date().toISOString()
   };
 

@@ -13,9 +13,18 @@ import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
-import { apiGet, apiPost } from "@/lib/api";
+import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
+import {
+  buildUpdateNotice,
+  planUpdateNotice,
+  readNotifiedUpdateVersion,
+  UPDATE_CHECK_INTERVAL_MS,
+  UPDATE_NOTICE_ID,
+  writeNotifiedUpdateVersion,
+  type UpdateCheckResponse
+} from "@/lib/update-notice";
 import {
   buildNewMessageDigestNotice,
   buildNewMessageNotice,
@@ -32,7 +41,9 @@ import {
 import {
   dismissCenterNotification,
   markCenterNotificationsSeen,
-  recordNewMessageNotifications
+  recordCenterNotifications,
+  recordNewMessageNotifications,
+  recordOverdueDigestNotification
 } from "@/lib/notification-center";
 import { showToast } from "@/lib/feedback";
 import {
@@ -42,6 +53,7 @@ import {
   localDateString,
   nextDigestFireGuard,
   planDigestFire,
+  shouldAttemptDesktopDigestPing,
   shouldQueryDigestTick,
   summariseCandidatesForAck,
   type DigestAckOutcome,
@@ -263,6 +275,64 @@ export function AppShell({ children }: { children: ReactNode }) {
   // catch up on return (the hook fires an immediate tick on mount).
   useVisiblePolling(() => void refreshMeta(), 8000);
 
+  // Update-available notice: ask the runner whether a newer pilot build is
+  // on the feed (mount + every 6h while visible - the check spawns a child
+  // process and fetches the network, so it stays far away from the 8s inbox
+  // cadence). A new version surfaces exactly like a new message: a 30s
+  // toast plus a center entry, both landing on Settings > App updates. One
+  // notice per version (see lib/update-notice.ts), quiet hours keep the
+  // record but skip the toast, and the entry clears itself once the app
+  // reports up to date.
+  const checkAppUpdate = useCallback(async () => {
+    const check = await apiGetRaw<UpdateCheckResponse>("/runner/system/update-check").catch(
+      () => null
+    );
+    // Unconfigured installs and failed checks stay silent - the Settings
+    // card is the place that explains those states, not a notification.
+    if (!check || !check.configured || check.error) return;
+    const plan = planUpdateNotice({
+      updateAvailable: check.updateAvailable,
+      latestVersion: check.latestVersion,
+      notifiedVersion: readNotifiedUpdateVersion(),
+      quietHoursActive: isQuietHoursActive()
+    });
+    if (plan === "none") return;
+    if (plan === "clear") {
+      dismissCenterNotification(UPDATE_NOTICE_ID);
+      return;
+    }
+    const notice = buildUpdateNotice(check.latestVersion);
+    recordCenterNotifications([
+      {
+        id: UPDATE_NOTICE_ID,
+        title: notice.title,
+        body: notice.body,
+        href: notice.href,
+        at: Date.now(),
+        seen: false
+      }
+    ]);
+    writeNotifiedUpdateVersion(check.latestVersion);
+    if (plan === "record-and-toast") {
+      showToast({
+        id: UPDATE_NOTICE_ID,
+        kind: "info",
+        title: notice.title,
+        description: notice.body,
+        href: notice.href,
+        durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+        // Waving the toast away means "seen it" - the bell stops counting
+        // it but keeps it reviewable. Clicking through lands on the App
+        // updates card; the entry stays (still seen) as a quiet reminder
+        // until the operator updates (auto-clear above) or dismisses it.
+        onManualDismiss: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID]),
+        onActivate: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID])
+      });
+    }
+  }, []);
+
+  useVisiblePolling(() => void checkAppUpdate(), UPDATE_CHECK_INTERVAL_MS);
+
   useEffect(() => {
     if (autoScanDisabled) {
       setAutoScanEnabled(false);
@@ -356,10 +426,13 @@ export function AppShell({ children }: { children: ReactNode }) {
   // however the operator got there, new-message alerts still work.
 
   // #360: calm overdue-reply digest scheduler. Quiet, opt-in, low-frequency.
-  // Self-gated: never asks for permission, never fires while the tab is
-  // visible, never fires during quiet hours, never fires when cadence is
-  // off or when permission is not granted. /ack is only called when the
-  // notification actually fires.
+  // Self-gated: never asks for permission, never fires during quiet hours,
+  // never fires when cadence is off. When a digest is due it always lands
+  // as one persistent bell entry (the notification center is the primary
+  // surface - it works without desktop permission, which used to silently
+  // disable the whole feature), plus a desktop notification when that extra
+  // is available (permission granted, tab hidden). /ack is only called when
+  // the digest actually landed.
   const overdueDigestInFlightRef = useRef(false);
   // Fire/ack transaction guard (#P4L3): remembers a digest we already fired
   // whose ack has not yet landed, so a failed ack does not re-fire the
@@ -374,15 +447,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           "/runner/data/overdue-digest/settings"
         ).catch(() => null);
         if (!settings) return;
-        const permission: NotificationPermission | "unsupported" = notificationsSupported()
-          ? Notification.permission
-          : "unsupported";
         const gate = shouldQueryDigestTick({
           cadence: settings.cadence,
-          notificationsSupported: notificationsSupported(),
-          notificationPermission: permission,
-          documentVisibility:
-            typeof document === "undefined" ? "unknown" : document.visibilityState,
           quietHoursActive: isQuietHoursActive()
         });
         if (!gate) return;
@@ -396,11 +462,29 @@ export function AppShell({ children }: { children: ReactNode }) {
         // re-firing the identical notification (#P4L3).
         const fingerprint = digestFireFingerprint(settings.lastDigestAt, tick.candidates);
         if (planDigestFire(fingerprint, overdueDigestGuardRef.current) === "fire-then-ack") {
-          const fired = notifyOverdueReplyDigest(
-            tick.candidates.map((c) => ({ personId: c.personId, personName: c.personName })),
-            () => router.push("/today")
-          );
-          if (!fired) return;
+          const people = tick.candidates.map((c) => ({
+            personId: c.personId,
+            personName: c.personName
+          }));
+          // The bell entry IS the digest: recorded unconditionally so the
+          // reminder lands somewhere the operator actually looks, with or
+          // without desktop permission.
+          recordOverdueDigestNotification(people);
+          // Desktop ping on top, only when it adds anything: permission
+          // granted and the operator not already looking at the app.
+          const permission: NotificationPermission | "unsupported" = notificationsSupported()
+            ? Notification.permission
+            : "unsupported";
+          if (
+            shouldAttemptDesktopDigestPing({
+              notificationsSupported: notificationsSupported(),
+              notificationPermission: permission,
+              documentVisibility:
+                typeof document === "undefined" ? "unknown" : document.visibilityState
+            })
+          ) {
+            notifyOverdueReplyDigest(people, () => router.push("/today"));
+          }
           // Arm the guard BEFORE awaiting the ack so a re-entrant poll cannot
           // re-fire while the ack is still in flight.
           overdueDigestGuardRef.current = { pendingFingerprint: fingerprint };
