@@ -47,6 +47,17 @@ test("build metadata is ignored when parsing and comparing versions", () => {
   assert.equal(isNewer("1.3.0+build-42", "1.3.0"), false);
 });
 
+test("prerelease identifiers are ordered by semver precedence", () => {
+  assert.equal(compareVersions("1.0.0-rc.2", "1.0.0-rc.10"), -1);
+  assert.equal(compareVersions("1.0.0-rc.10", "1.0.0-rc.2"), 1);
+  assert.equal(isNewer("1.0.0-rc.2", "1.0.0-rc.10"), false);
+  assert.equal(isNewer("1.0.0-rc.10", "1.0.0-rc.2"), true);
+  assert.equal(compareVersions("1.0.0-alpha.1", "1.0.0-alpha.beta"), -1);
+  assert.equal(compareVersions("1.0.0-alpha.beta", "1.0.0-beta"), -1);
+  assert.equal(compareVersions("1.0.0-beta.11", "1.0.0-rc.1"), -1);
+  assert.equal(compareVersions("1.0.0-alpha", "1.0.0-alpha.1"), -1);
+});
+
 test("unparseable versions sort below parseable ones", () => {
   assert.equal(compareVersions("not-a-version", "0.0.1"), -1);
   assert.equal(parseVersion("nope"), null);
