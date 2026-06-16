@@ -14,6 +14,7 @@ import { PilotTour } from "@/components/common/PilotTour";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
+import { startAppUpdate } from "@/lib/app-update-action";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
@@ -33,6 +34,7 @@ import {
   notificationsSupported,
   notifyNewMessage,
   notifyNewMessageDigest,
+  notifyAppUpdateAvailable,
   notifyOverdueReplyDigest,
   planNewMessageNotice,
   snapshotInbox,
@@ -276,13 +278,10 @@ export function AppShell({ children }: { children: ReactNode }) {
   useVisiblePolling(() => void refreshMeta(), 8000);
 
   // Update-available notice: ask the runner whether a newer pilot build is
-  // on the feed (mount + every 6h while visible - the check spawns a child
-  // process and fetches the network, so it stays far away from the 8s inbox
-  // cadence). A new version surfaces exactly like a new message: a 30s
-  // toast plus a center entry, both landing on Settings > App updates. One
-  // notice per version (see lib/update-notice.ts), quiet hours keep the
-  // record but skip the toast, and the entry clears itself once the app
-  // reports up to date.
+  // on the feed. A new version surfaces like a new message: a 30s toast
+  // while focused, a native notification while hidden, plus a center entry.
+  // Clicking any of them starts the update and relaunch flow. One notice per
+  // version keeps the minute-level check quiet after the first alert.
   const checkAppUpdate = useCallback(async () => {
     const check = await apiGetRaw<UpdateCheckResponse>("/runner/system/update-check").catch(
       () => null
@@ -314,24 +313,37 @@ export function AppShell({ children }: { children: ReactNode }) {
     ]);
     writeNotifiedUpdateVersion(check.latestVersion);
     if (plan === "record-and-toast") {
-      showToast({
-        id: UPDATE_NOTICE_ID,
-        kind: "info",
-        title: notice.title,
-        description: notice.body,
-        href: notice.href,
-        durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
-        // Waving the toast away means "seen it" - the bell stops counting
-        // it but keeps it reviewable. Clicking through lands on the App
-        // updates card; the entry stays (still seen) as a quiet reminder
-        // until the operator updates (auto-clear above) or dismisses it.
-        onManualDismiss: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID]),
-        onActivate: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID])
-      });
+      const activateUpdate = () => {
+        void startAppUpdate(check.latestVersion);
+      };
+      const tabHidden =
+        typeof document !== "undefined" && document.visibilityState === "hidden";
+      if (tabHidden) {
+        notifyAppUpdateAvailable(check.latestVersion, activateUpdate);
+      } else {
+        showToast({
+          id: UPDATE_NOTICE_ID,
+          kind: "info",
+          title: notice.title,
+          description: notice.body,
+          durationMs: NEW_MESSAGE_TOAST_DURATION_MS,
+          onManualDismiss: () => markCenterNotificationsSeen([UPDATE_NOTICE_ID]),
+          onActivate: activateUpdate
+        });
+      }
     }
   }, []);
 
-  useVisiblePolling(() => void checkAppUpdate(), UPDATE_CHECK_INTERVAL_MS);
+  useEffect(() => {
+    void checkAppUpdate();
+    const timer = window.setInterval(() => void checkAppUpdate(), UPDATE_CHECK_INTERVAL_MS);
+    const onFocus = () => void checkAppUpdate();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [checkAppUpdate]);
 
   useEffect(() => {
     if (autoScanDisabled) {

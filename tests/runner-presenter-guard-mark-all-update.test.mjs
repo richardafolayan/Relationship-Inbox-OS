@@ -17,7 +17,7 @@ import { resolve } from "node:path";
 //   2. POST /system/update — NOT a /control/ path, so the dashboard's
 //      default-deny interceptor (shouldInterceptLive only matches
 //      /control/) never sees it even when installed. Reachable from the
-//      Settings "Update and relaunch" button during a live read-only demo.
+//      Settings update button during a live read-only demo.
 //      Gated as an external-action.
 //
 // These pin the call-site at the source level, mirroring the established
