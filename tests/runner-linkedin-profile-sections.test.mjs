@@ -133,3 +133,29 @@ test("collapses grouped sub-roles into a single top-level experience entry", asy
   assert.equal(s.experience.length, 1);
   assert.equal(s.experience[0].title, "Acme Corporation");
 });
+
+test("parses sanitized real DOM fallback sections without aria-hidden row text", async (t) => {
+  const r = await loadSections("profile-real-dom-derived-fallback.html");
+  if (r.skipped) return t.skip(r.reason);
+  const s = r.sections;
+  assert.ok(s);
+
+  assert.equal(s.presence.experience, true);
+  assert.equal(s.experience.length, 2);
+  assert.equal(s.experience[0].title, "Founder");
+  assert.match(s.experience[0].dates, /Jan 2024 - Present/);
+  assert.match(s.experience[1].description, /launch checklist/);
+
+  assert.equal(s.presence.education, true);
+  assert.equal(s.education.length, 2);
+  assert.equal(s.education[0].institution, "Example University");
+  assert.equal(s.education[0].degree, "Bachelor of Science");
+  assert.equal(s.education[0].field, "Computer Science");
+  assert.match(s.education[0].dates, /2021 - 2025/);
+
+  assert.equal(s.presence.licenses, true);
+  assert.equal(s.licenses.length, 1);
+  assert.equal(s.licenses[0].name, "Privacy Certificate");
+  assert.equal(s.licenses[0].issuer, "Example Institute");
+  assert.match(s.licenses[0].dates, /Jan 2024/);
+});

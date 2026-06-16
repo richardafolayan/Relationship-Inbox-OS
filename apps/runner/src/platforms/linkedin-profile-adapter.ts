@@ -679,7 +679,7 @@ export async function extractProfileSections(page: Page): Promise<ProfileSection
       function entryItems(section: HTMLElement): HTMLElement[] {
         const lis = Array.from(section.querySelectorAll("li")) as HTMLElement[];
         return lis.filter((li) => {
-          if (!li.querySelector('span[aria-hidden="true"]')) return false;
+          if (!li.querySelector('span[aria-hidden="true"]') && textLines(li).length === 0) return false;
           const parentLi = li.parentElement ? li.parentElement.closest("li") : null;
           if (parentLi && section.contains(parentLi)) return false;
           return true;
@@ -702,6 +702,11 @@ export async function extractProfileSections(page: Page): Promise<ProfileSection
           if (out.length && out[out.length - 1] === t) continue;
           out.push(t);
         }
+        if (out.length > 0) return out;
+        for (const line of textLines(entry)) {
+          if (out.length && out[out.length - 1] === line) continue;
+          out.push(line);
+        }
         return out;
       }
 
@@ -717,11 +722,28 @@ export async function extractProfileSections(page: Page): Promise<ProfileSection
           if (t.length <= 60 || used.includes(t)) continue;
           if (!best || t.length > best.length) best = t;
         }
+        if (best) return best;
+        for (const t of textLines(entry)) {
+          if (t.length <= 60 || used.includes(t)) continue;
+          if (!best || t.length > best.length) best = t;
+        }
         return best;
       }
 
       function firstDate(lines: string[]): string | null {
         return lines.find((l) => dateRe.test(l)) ?? null;
+      }
+
+      function textLines(element: HTMLElement): string[] {
+        return (element.innerText || "")
+          .split("\n")
+          .map((line) => clean(line))
+          .filter(Boolean);
+      }
+
+      function sectionBodyLines(section: HTMLElement): string[] {
+        const heading = clean((section.querySelector("h2") as HTMLElement | null)?.innerText ?? "");
+        return textLines(section).filter((line) => line !== heading);
       }
 
       // "Acme Corp · Full-time" → "Acme Corp"; "BSc, Computer Science" left
@@ -757,6 +779,99 @@ export async function extractProfileSections(page: Page): Promise<ProfileSection
         return names.filter((n) => (seen.has(n) ? false : (seen.add(n), true)));
       }
 
+      function parseExperienceEntry(entry: HTMLElement): {
+        title: string | null;
+        company: string | null;
+        dates: string | null;
+        description: string | null;
+      } | null {
+        const lines = headerLines(entry);
+        const dates = firstDate(lines);
+        const dateIndex = dates ? lines.indexOf(dates) : lines.length;
+        const companyLine = lines
+          .slice(1, dateIndex)
+          .find((line) => !dateRe.test(line)) ?? null;
+        const used = [lines[0], companyLine, dates].filter(Boolean) as string[];
+        const result = {
+          title: lines[0] || null,
+          company: beforeMiddot(companyLine),
+          dates,
+          description: descriptionOf(entry, used)
+        };
+        return result.title || result.company || result.dates || result.description ? result : null;
+      }
+
+      function parseEducationLines(lines: string[]): Array<{
+        institution: string | null;
+        degree: string | null;
+        field: string | null;
+        dates: string | null;
+      }> {
+        const entries: Array<{ institution: string | null; degree: string | null; field: string | null; dates: string | null }> = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          const dateLine = lines[i] ?? "";
+          if (!dateRe.test(dateLine)) continue;
+          const previous = lines.slice(Math.max(0, i - 3), i).filter((line) => !dateRe.test(line));
+          const institution = previous[0] ?? null;
+          const degreeLine = previous[1] ?? null;
+          let degree: string | null = degreeLine;
+          let field: string | null = null;
+          if (degreeLine && degreeLine.includes(",")) {
+            const idx = degreeLine.indexOf(",");
+            degree = degreeLine.slice(0, idx).trim() || null;
+            field = degreeLine.slice(idx + 1).trim() || null;
+          }
+          entries.push({ institution, degree, field, dates: dateLine });
+        }
+        return entries.filter((entry) => entry.institution || entry.degree || entry.field || entry.dates);
+      }
+
+      function parseLicenseLines(lines: string[]): Array<{ name: string | null; issuer: string | null; dates: string | null }> {
+        const entries: Array<{ name: string | null; issuer: string | null; dates: string | null }> = [];
+        for (let i = 0; i < lines.length; i += 1) {
+          const dateLine = lines[i] ?? "";
+          if (!dateRe.test(dateLine)) continue;
+          const previous = lines.slice(Math.max(0, i - 2), i).filter((line) => !dateRe.test(line));
+          entries.push({
+            name: previous[0] ?? null,
+            issuer: previous[1] ?? null,
+            dates: dateLine
+          });
+        }
+        return entries.filter((entry) => entry.name || entry.issuer || entry.dates);
+      }
+
+      function parseEducationEntry(entry: HTMLElement): {
+        institution: string | null;
+        degree: string | null;
+        field: string | null;
+        dates: string | null;
+      } | null {
+        const lines = headerLines(entry);
+        const dates = firstDate(lines);
+        const degreeLine = lines[1] && !dateRe.test(lines[1]) ? lines[1] : null;
+        let degree: string | null = degreeLine;
+        let field: string | null = null;
+        if (degreeLine && degreeLine.includes(",")) {
+          const idx = degreeLine.indexOf(",");
+          degree = degreeLine.slice(0, idx).trim() || null;
+          field = degreeLine.slice(idx + 1).trim() || null;
+        }
+        const result = { institution: lines[0] || null, degree, field, dates };
+        return result.institution || result.degree || result.field || result.dates ? result : null;
+      }
+
+      function parseLicenseEntry(entry: HTMLElement): { name: string | null; issuer: string | null; dates: string | null } | null {
+        const lines = headerLines(entry);
+        const dates = firstDate(lines);
+        const result = {
+          name: lines[0] || null,
+          issuer: lines[1] && lines[1] !== dates ? lines[1] : null,
+          dates
+        };
+        return result.name || result.issuer || result.dates ? result : null;
+      }
+
       const experienceSection = findSectionByH2("Experience");
       const educationSection = findSectionByH2("Education");
       const skillsSection = findSectionByH2("Skills");
@@ -764,47 +879,25 @@ export async function extractProfileSections(page: Page): Promise<ProfileSection
       const licensesSection = findSectionByH2("Licenses & certifications");
 
       const experience = experienceSection
-        ? entryItems(experienceSection).map((entry) => {
-            const lines = headerLines(entry);
-            const dates = firstDate(lines);
-            const companyLine = lines[1] && !dateRe.test(lines[1]) ? lines[1] : null;
-            const used = [lines[0], lines[1], dates].filter(Boolean) as string[];
-            return {
-              title: lines[0] || null,
-              company: beforeMiddot(companyLine),
-              dates,
-              description: descriptionOf(entry, used)
-            };
-          })
+        ? entryItems(experienceSection)
+            .map((entry) => parseExperienceEntry(entry))
+            .filter((entry): entry is NonNullable<typeof entry> => entry != null)
         : [];
 
       const education = educationSection
-        ? entryItems(educationSection).map((entry) => {
-            const lines = headerLines(entry);
-            const dates = firstDate(lines);
-            // Second line is usually "Degree, Field of study".
-            const degreeLine = lines[1] && !dateRe.test(lines[1]) ? lines[1] : null;
-            let degree: string | null = degreeLine;
-            let field: string | null = null;
-            if (degreeLine && degreeLine.includes(",")) {
-              const idx = degreeLine.indexOf(",");
-              degree = degreeLine.slice(0, idx).trim() || null;
-              field = degreeLine.slice(idx + 1).trim() || null;
-            }
-            return { institution: lines[0] || null, degree, field, dates };
-          })
+        ? entryItems(educationSection).length > 0
+          ? entryItems(educationSection)
+              .map((entry) => parseEducationEntry(entry))
+              .filter((entry): entry is NonNullable<typeof entry> => entry != null)
+          : parseEducationLines(sectionBodyLines(educationSection))
         : [];
 
       const licenses = licensesSection
-        ? entryItems(licensesSection).map((entry) => {
-            const lines = headerLines(entry);
-            const dates = firstDate(lines);
-            return {
-              name: lines[0] || null,
-              issuer: lines[1] && lines[1] !== dates ? lines[1] : null,
-              dates
-            };
-          })
+        ? entryItems(licensesSection).length > 0
+          ? entryItems(licensesSection)
+              .map((entry) => parseLicenseEntry(entry))
+              .filter((entry): entry is NonNullable<typeof entry> => entry != null)
+          : parseLicenseLines(sectionBodyLines(licensesSection))
         : [];
 
       return {
