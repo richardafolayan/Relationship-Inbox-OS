@@ -34,6 +34,30 @@ export function favouritesFirst<T extends { personFavourite?: boolean | null }>(
   return [...favourites, ...rest];
 }
 
+export function contactPriorityRank(row: {
+  personFavourite?: boolean | null;
+  personGroups?: readonly string[] | null;
+}): number {
+  if (row.personFavourite) return 0;
+  return row.personGroups && row.personGroups.length > 0 ? 1 : 2;
+}
+
+export function priorityContactsFirst<T extends {
+  personFavourite?: boolean | null;
+  personGroups?: readonly string[] | null;
+}>(rows: readonly T[]): T[] {
+  const favourites: T[] = [];
+  const grouped: T[] = [];
+  const rest: T[] = [];
+  for (const row of rows) {
+    const rank = contactPriorityRank(row);
+    if (rank === 0) favourites.push(row);
+    else if (rank === 1) grouped.push(row);
+    else rest.push(row);
+  }
+  return [...favourites, ...grouped, ...rest];
+}
+
 /**
  * Toggle / set a contact's favourite state. Centralised so every surface
  * (inbox row, today hero, thread header, profile drawer) hits the same

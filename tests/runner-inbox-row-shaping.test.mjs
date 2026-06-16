@@ -226,3 +226,10 @@ test("toInboxRow maps a favourited contact's favouritedAt to personFavourite (R-
   const notFavourited = shapeThreadRows([buildRow({ id: "plain", person: { favouritedAt: null } })]);
   assert.equal(toInboxRow(notFavourited[0], 1, THRESHOLDS).personFavourite, false);
 });
+
+test("toInboxRow maps contact tags to personGroups", () => {
+  const rows = shapeThreadRows([
+    buildRow({ id: "groups", person: { tagsJson: JSON.stringify(["Close friends", "Society"]) } })
+  ]);
+  assert.deepEqual(toInboxRow(rows[0], 1, THRESHOLDS).personGroups, ["Close friends", "Society"]);
+});
