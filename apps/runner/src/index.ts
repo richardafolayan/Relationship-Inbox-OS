@@ -6818,9 +6818,9 @@ async function start(): Promise<void> {
   }
 
   await new Promise<void>((resolve, reject) => {
-    const server = app.listen(runnerConfig.port, () => {
+    const server = app.listen(runnerConfig.port, runnerConfig.bindHost, () => {
       // eslint-disable-next-line no-console
-      console.log(`Runner listening on http://localhost:${runnerConfig.port}`);
+      console.log(`Runner listening on http://${runnerConfig.bindHost}:${runnerConfig.port}`);
       resolve();
     });
     server.on("error", (error) => reject(error));

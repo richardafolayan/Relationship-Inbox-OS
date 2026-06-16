@@ -37,6 +37,7 @@ export type AiProvider = "openai" | "glm" | "gemini";
 
 export interface RunnerConfig {
   port: number;
+  bindHost: string;
   openAiApiKey?: string;
   openAiModel: string;
   aiProvider: AiProvider;
@@ -510,6 +511,7 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
 export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): RunnerConfig {
   return {
     port: parseIntOrDefault(env.RUNNER_PORT, 4001),
+    bindHost: env.RUNNER_HOST?.trim() || "127.0.0.1",
     openAiApiKey: env.OPENAI_API_KEY,
     // Default to gpt-5-nano: cheapest GPT-5 family member, sufficient for the
     // dashboard's short generations (summary, 3 reply drafts, classifier,
