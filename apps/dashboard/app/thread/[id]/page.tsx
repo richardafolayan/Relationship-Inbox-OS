@@ -1865,7 +1865,6 @@ export default function ThreadPage() {
           description: message,
           durationMs: 9000
         });
-        setError(message);
       })
       .finally(() => {
         stopTickerSignal();

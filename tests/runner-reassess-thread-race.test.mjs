@@ -147,6 +147,15 @@ test("runReassessForThread surfaces a resummarise not_found and skips the write"
   assert.equal(calls.update.length, 0);
 });
 
+test("runReassessForThread surfaces ai_unavailable distinctly and skips the write", async () => {
+  const { deps, calls } = makeDeps({
+    resummariseResult: { ok: false, reason: "ai_unavailable" }
+  });
+  const outcome = await runReassessForThread(deps, "thread-1");
+  assert.equal(outcome.kind, "ai_unavailable");
+  assert.equal(calls.update.length, 0);
+});
+
 test("runReassessForThread surfaces a missing thread as not_found (prisma findUnique returns null)", async () => {
   const { deps, calls } = makeDeps({ threadRow: null });
   // Inject the null override on the findUnique stub directly so the
