@@ -102,6 +102,7 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
   let pendingKick: NodeJS.Timeout | null = null;
   let periodicTimer: NodeJS.Timeout | null = null;
   let lastVisitAt = 0;
+  const nonManualEnqueueLocks = new Map<string, Promise<void>>();
   // In-memory ring of visit timestamps used to enforce the daily cap.
   // Pruned of entries older than 24h on every read. Resets on restart —
   // the LinkedIn-side rate limit is the authoritative one; this is a
@@ -134,7 +135,7 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
     }
   }
 
-  async function enqueue(personId: string, trigger: EnrichmentTrigger): Promise<void> {
+  async function enqueueUnlocked(personId: string, trigger: EnrichmentTrigger): Promise<void> {
     // Coalesce: if a PENDING job already exists for this person, don't
     // pile another one on. The picker will pick it up regardless of
     // trigger. Manual refreshes always create a fresh row so the user
@@ -149,6 +150,24 @@ export function createEnrichmentQueue(deps: EnrichmentQueueDeps): EnrichmentQueu
       data: { personId, trigger, status: "PENDING" }
     });
     kick();
+  }
+
+  async function enqueue(personId: string, trigger: EnrichmentTrigger): Promise<void> {
+    if (trigger === "manual") {
+      await enqueueUnlocked(personId, trigger);
+      return;
+    }
+    const prior = nonManualEnqueueLocks.get(personId) ?? Promise.resolve();
+    const next = prior.then(() => enqueueUnlocked(personId, trigger));
+    const stored = next.catch(() => {});
+    nonManualEnqueueLocks.set(personId, stored);
+    try {
+      await next;
+    } finally {
+      if (nonManualEnqueueLocks.get(personId) === stored) {
+        nonManualEnqueueLocks.delete(personId);
+      }
+    }
   }
 
   function kick(): void {
