@@ -10101,6 +10101,136 @@ export class LinkedInAdapter implements PlatformAdapter {
     });
   }
 
+  async editMessage(thread: ThreadStub, platformMessageKey: string, text: string): Promise<void> {
+    const nextText = typeof text === "string" ? text.trim() : "";
+    if (!nextText) {
+      throw new AdapterFailure("Message edit text is required", {
+        kind: "THREAD_FETCH_FAILED",
+        platform: this.platform,
+        stage: "persist",
+        details: { platformThreadId: thread.platformThreadId }
+      });
+    }
+    const rowSelector = messageRowSelector(platformMessageKey);
+    const tag = `[edit-message:${thread.displayName}]`;
+    return this.runWithPlatformLease(async () => {
+      const selectors = await this.deps.resolveSelectors();
+      const page = await this.getPage();
+      try {
+        await this.openThreadAndWaitForActivation(page, selectors, thread);
+
+        const row = page.locator(rowSelector).first();
+        if ((await row.count()) === 0) {
+          throw new AdapterFailure("Message not found in thread for edit", {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        await row.scrollIntoViewIfNeeded().catch(() => undefined);
+        await humanHover(page, row);
+
+        const options = row.locator(REACTION_SELECTORS.optionsTrigger).first();
+        try {
+          await options.waitFor({ state: "visible", timeout: 4_000 });
+        } catch {
+          throw new AdapterFailure("LinkedIn did not expose message edit options", {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        await humanClick(page, options, { timeout: 8_000, reading: null });
+
+        const editItem = page
+          .locator(REACTION_SELECTORS.editMenuItem)
+          .filter({ hasText: /^Edit$/ })
+          .first();
+        try {
+          await editItem.waitFor({ state: "visible", timeout: 6_000 });
+        } catch {
+          throw new AdapterFailure("LinkedIn does not offer Edit for this message", {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        await humanClick(page, editItem, { timeout: 8_000, reading: null });
+
+        const editor = row.locator(REACTION_SELECTORS.editComposer).first();
+        try {
+          await editor.waitFor({ state: "visible", timeout: 6_000 });
+        } catch {
+          throw new AdapterFailure("LinkedIn edit composer did not open", {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+
+        await humanClick(page, editor, { timeout: 8_000, reading: null });
+        try {
+          await editor.fill(nextText);
+        } catch {
+          await page.keyboard.press("Meta+A").catch(() => undefined);
+          await humanType(page, editor, nextText, { alreadyFocused: true, reading: null });
+        }
+
+        const saveByLabel = page.locator(REACTION_SELECTORS.saveEditButton).first();
+        const saveButton =
+          (await saveByLabel.count()) > 0
+            ? saveByLabel
+            : page
+                .locator("button")
+                .filter({ hasText: /^Save$/ })
+                .first();
+        try {
+          await saveButton.waitFor({ state: "visible", timeout: 6_000 });
+        } catch {
+          throw new AdapterFailure("LinkedIn edit save button was not available", {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        await humanClick(page, saveButton, { timeout: 8_000, reading: null });
+
+        const detected = await row
+          .evaluate((el, expected) => (el.textContent || "").includes(expected), nextText)
+          .catch(() => false);
+        if (!detected) {
+          throw new AdapterFailure("LinkedIn edit was submitted but the updated row text was not detected", {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "parse",
+            details: { platformThreadId: thread.platformThreadId }
+          });
+        }
+        console.warn(`${tag} edit saved (updatedTextDetected=${detected})`);
+      } catch (error) {
+        if (error instanceof AdapterFailure) throw error;
+        throw await toStageFailure({
+          platform: this.platform,
+          stage: "persist",
+          message: `Failed to edit LinkedIn message for ${thread.displayName}`,
+          action: "edit_message",
+          error,
+          kind: "THREAD_FETCH_FAILED",
+          page,
+          screenshotDir: this.deps.screenshotDir,
+          domDumpDir: this.deps.domDumpDir,
+          platformThreadId: thread.platformThreadId,
+          details: { threadDisplayName: thread.displayName }
+        });
+      }
+    });
+  }
+
   async closeSession(_reason?: string): Promise<void> {
     await this.deps.sessionManager.closePlatformPage({
       platform: this.platform,

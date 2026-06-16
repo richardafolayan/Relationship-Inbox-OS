@@ -14,8 +14,8 @@ import {
 test("messageRowSelector targets the row by its data-event-urn", () => {
   const key = "urn:li:msg_message:(urn:li:fsd_profile:ABC123,2-xyz==)";
   const sel = messageRowSelector(key);
-  assert.equal(sel, `li.msg-s-event-listitem[data-event-urn="${key}"]`);
-  assert.match(sel, /^li\.msg-s-event-listitem\[/);
+  assert.equal(sel, `[data-event-urn="${key}"]`);
+  assert.match(sel, /^\[data-event-urn=/);
 });
 
 test("messageRowSelector rejects an empty key", () => {
@@ -75,7 +75,9 @@ test("appendOutboundReaction treats malformed rawJson as empty rather than throw
 });
 
 test("REACTION_SELECTORS exposes the captured live selectors", () => {
-  assert.equal(REACTION_SELECTORS.messageRow, "li.msg-s-event-listitem");
+  assert.equal(REACTION_SELECTORS.messageRow, "[data-event-urn]");
   assert.match(REACTION_SELECTORS.reactionEntryPoint, /msg-reactions__entry-point/);
   assert.match(REACTION_SELECTORS.popularReactionItem, /emoji-popular-list__item/);
+  assert.match(REACTION_SELECTORS.optionsTrigger, /options-trigger/);
+  assert.match(REACTION_SELECTORS.editMenuItem, /menuitem/);
 });

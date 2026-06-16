@@ -19,6 +19,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   Paperclip,
+  Pencil,
   Save,
   Send,
   Sparkles,
@@ -543,6 +544,20 @@ export default function ThreadPage() {
   const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
     Record<string, MessageReaction[]>
   >({});
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editDraft, setEditDraft] = useState("");
+  const [savingEditMessageId, setSavingEditMessageId] = useState<string | null>(null);
+  const [savedEditMessageId, setSavedEditMessageId] = useState<string | null>(null);
+  const [editErrorByMessageId, setEditErrorByMessageId] = useState<Record<string, string>>({});
+  const [optimisticTextByMessageId, setOptimisticTextByMessageId] = useState<Record<string, string>>({});
+  useEffect(() => {
+    setEditingMessageId(null);
+    setEditDraft("");
+    setSavingEditMessageId(null);
+    setSavedEditMessageId(null);
+    setEditErrorByMessageId({});
+    setOptimisticTextByMessageId({});
+  }, [threadId]);
   // Optimistic favourite override (R-0066 / #483). null = follow the server
   // value (thread.personFavourite); a boolean wins until the request settles,
   // so the header star flips instantly and reverts if the toggle fails.
@@ -1959,6 +1974,66 @@ export default function ThreadPage() {
       setReactionErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
     } finally {
       setReactingMessageId(null);
+    }
+  };
+
+  const startMessageEdit = (message: ThreadMessage) => {
+    const currentText = optimisticTextByMessageId[message.id] ?? message.text;
+    setReactionPickerMessageId(null);
+    setEditingMessageId(message.id);
+    setEditDraft(currentText);
+    setSavedEditMessageId(null);
+    setEditErrorByMessageId((prev) => {
+      if (!(message.id in prev)) return prev;
+      const next = { ...prev };
+      delete next[message.id];
+      return next;
+    });
+  };
+
+  const cancelMessageEdit = () => {
+    setEditingMessageId(null);
+    setEditDraft("");
+    setSavedEditMessageId(null);
+  };
+
+  const saveMessageEdit = async (messageId: string) => {
+    if (!thread || savingEditMessageId) return;
+    const nextText = editDraft.trim();
+    if (!nextText) {
+      setEditErrorByMessageId((prev) => ({ ...prev, [messageId]: "Message cannot be empty" }));
+      return;
+    }
+    setSavingEditMessageId(messageId);
+    setSavedEditMessageId(null);
+    setEditErrorByMessageId((prev) => {
+      if (!(messageId in prev)) return prev;
+      const next = { ...prev };
+      delete next[messageId];
+      return next;
+    });
+    try {
+      const output = await apiPost<{ status: string; text: string }>(
+        `/runner/control/thread/${thread.id}/message/${messageId}/edit`,
+        { text: nextText }
+      );
+      const confirmedText = output.text || nextText;
+      setOptimisticTextByMessageId((prev) => ({ ...prev, [messageId]: confirmedText }));
+      setEditDraft(confirmedText);
+      setSavedEditMessageId(messageId);
+      setError(null);
+      await refresh();
+      window.setTimeout(() => {
+        setEditingMessageId((current) => (current === messageId ? null : current));
+      }, 700);
+      window.setTimeout(() => {
+        setSavedEditMessageId((current) => (current === messageId ? null : current));
+      }, 1800);
+    } catch (editError) {
+      const message = editError instanceof Error ? editError.message : "Edit failed";
+      setEditErrorByMessageId((prev) => ({ ...prev, [messageId]: message }));
+    } finally {
+      setSavingEditMessageId(null);
     }
   };
 
@@ -3535,7 +3610,8 @@ export default function ThreadPage() {
                         (a) => a.guid && a.kind && a.kind !== "unknown"
                       );
                       const hasInlineMedia = playableAttachments.length > 0;
-                      const isAttachmentOnlyText = /^\[.+\]$/.test(message.text.trim());
+                      const displayText = optimisticTextByMessageId[message.id] ?? message.text;
+                      const isAttachmentOnlyText = /^\[.+\]$/.test(displayText.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
                       const nativeReactions =
                         (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
@@ -3554,9 +3630,15 @@ export default function ThreadPage() {
                       // app, surfaced via synthesised stickers), so we never show
                       // the picker for them.
                       const canReact = thread.platform === "LINKEDIN";
+                      const canEdit =
+                        thread.platform === "LINKEDIN" && message.direction === "OUT" && showText;
                       const pickerOpen = reactionPickerMessageId === message.id;
                       const isReacting = reactingMessageId === message.id;
                       const reactionError = reactionErrorByMessageId[message.id];
+                      const isEditingMessage = editingMessageId === message.id;
+                      const isSavingEdit = savingEditMessageId === message.id;
+                      const isSavedEdit = savedEditMessageId === message.id;
+                      const editError = editErrorByMessageId[message.id];
                       return (
                         <>
                         <div className="group relative">
@@ -3598,7 +3680,57 @@ export default function ThreadPage() {
                               </div>
                             ) : null}
                             {showText ? (
-                              <span className="text-balance whitespace-pre-wrap">{message.text}</span>
+                              isEditingMessage ? (
+                                <div className="flex min-w-[min(72vw,340px)] flex-col gap-2">
+                                  <textarea
+                                    value={editDraft}
+                                    onChange={(event) => {
+                                      setEditDraft(event.target.value);
+                                      setSavedEditMessageId(null);
+                                    }}
+                                    autoFocus
+                                    rows={Math.max(2, Math.min(8, editDraft.split("\n").length))}
+                                    className="w-full resize-y rounded-[8px] border border-hairline bg-paper px-3 py-2 text-[14px] leading-[1.5] text-ink outline-none focus:border-hairline-strong"
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                                        event.preventDefault();
+                                        void saveMessageEdit(message.id);
+                                      } else if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        cancelMessageEdit();
+                                      }
+                                    }}
+                                  />
+                                  <div className="flex items-center justify-end gap-2">
+                                    <button
+                                      type="button"
+                                      onClick={cancelMessageEdit}
+                                      disabled={isSavingEdit}
+                                      className="inline-flex h-[30px] items-center gap-1 rounded-[6px] px-2 text-[12px] text-paper/75 transition-colors duration-calm hover:bg-paper/10 hover:text-paper disabled:cursor-not-allowed disabled:opacity-50"
+                                    >
+                                      <X className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                                      Cancel
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => void saveMessageEdit(message.id)}
+                                      disabled={isSavingEdit || isSavedEdit || editDraft.trim().length === 0}
+                                      className="inline-flex h-[30px] items-center gap-1 rounded-[6px] bg-paper px-2.5 text-[12px] font-medium text-ink transition-colors duration-calm hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-70"
+                                    >
+                                      {isSavingEdit ? (
+                                        <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                                      ) : isSavedEdit ? (
+                                        <Check className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                                      ) : (
+                                        <Save className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                                      )}
+                                      {isSavingEdit ? "Saving" : isSavedEdit ? "Saved" : "Save"}
+                                    </button>
+                                  </div>
+                                </div>
+                              ) : (
+                                <span className="text-balance whitespace-pre-wrap">{displayText}</span>
+                              )
                             ) : null}
                           </div>
                           {reactions.length > 0 ? (
@@ -3622,9 +3754,9 @@ export default function ThreadPage() {
                               ))}
                             </div>
                           ) : null}
-                          {canReact ? (
+                          {canReact || canEdit ? (
                             <div
-                              className={`absolute top-1/2 -translate-y-1/2 ${
+                              className={`absolute top-1/2 flex -translate-y-1/2 flex-col gap-1 ${
                                 message.direction === "OUT"
                                   ? "right-[calc(100%+8px)]"
                                   : "left-[calc(100%+8px)]"
@@ -3656,6 +3788,28 @@ export default function ThreadPage() {
                                   <span className="text-[13px] leading-none">☺</span>
                                 )}
                               </button>
+                              {canEdit ? (
+                                <button
+                                  type="button"
+                                  disabled={isSavingEdit}
+                                  onClick={() => startMessageEdit(message)}
+                                  aria-label="Edit message"
+                                  title="Edit"
+                                  className={`inline-flex h-[26px] w-[26px] items-center justify-center rounded-full border border-hairline bg-paper text-ink-2 shadow-sm transition-opacity duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50 ${
+                                    isEditingMessage || isSavingEdit || isSavedEdit
+                                      ? "opacity-100"
+                                      : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                                  }`}
+                                >
+                                  {isSavingEdit ? (
+                                    <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} />
+                                  ) : isSavedEdit ? (
+                                    <Check className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                                  ) : (
+                                    <Pencil className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                                  )}
+                                </button>
+                              ) : null}
                               {pickerOpen ? (
                                 <div
                                   className={`absolute bottom-[calc(100%+6px)] z-20 flex items-center gap-[2px] rounded-full border border-hairline bg-paper p-[4px] shadow-pop ${
@@ -3687,6 +3841,25 @@ export default function ThreadPage() {
                             }`}
                           >
                             {reactionError}
+                          </span>
+                        ) : null}
+                        {editError ? (
+                          <span
+                            className={`mt-[6px] font-mono text-[11px] text-risk-overdue ${
+                              message.direction === "OUT" ? "self-end" : "self-start"
+                            }`}
+                          >
+                            {editError}
+                          </span>
+                        ) : null}
+                        {isSavedEdit && !isEditingMessage ? (
+                          <span
+                            className={`mt-[6px] inline-flex items-center gap-1 font-mono text-[11px] text-ink-3 ${
+                              message.direction === "OUT" ? "self-end" : "self-start"
+                            }`}
+                          >
+                            <Check className="h-[12px] w-[12px]" strokeWidth={1.8} />
+                            Saved
                           </span>
                         ) : null}
                         </>

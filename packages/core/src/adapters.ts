@@ -47,6 +47,12 @@ export interface PlatformAdapter {
    */
   reactToMessage?(thread: ThreadStub, platformMessageKey: string, emoji: string): Promise<void>;
   /**
+   * Optional. Edits an outbound message identified by its platform-side
+   * message key. Callers must treat this as an external write and keep it
+   * user-triggered.
+   */
+  editMessage?(thread: ThreadStub, platformMessageKey: string, text: string): Promise<void>;
+  /**
    * Optional. Returns a cheap, opaque change watermark for the platform's
    * upstream message store (e.g. iMessage chat.db's max message ROWID, row
    * count and read mark). The scan loop persists the value captured BEFORE

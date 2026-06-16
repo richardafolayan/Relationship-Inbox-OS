@@ -48,6 +48,7 @@ export const LIVE_INTERCEPTED_PATHS: Array<[RegExp, string]> = [
   [/\/control\/thread\/[^/]+\/open$/, "open the thread in the browser"],
   [/\/control\/thread\/[^/]+\/remind$/, "set a reminder"],
   [/\/control\/thread\/[^/]+\/message\/[^/]+\/react$/, "react to a message"],
+  [/\/control\/thread\/[^/]+\/message\/[^/]+\/edit$/, "edit a message"],
   [/\/control\/message\/[^/]+\/transcribe$/, "transcribe a voice message"],
   [/\/control\/person\/[^/]+\/rename$/, "rename the contact"],
   [/\/control\/person\/[^/]+\/notes$/, "save contact notes"],
