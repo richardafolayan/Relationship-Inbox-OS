@@ -38,6 +38,7 @@ import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
 import { decidePersonFavouriteAction } from "./services/person-favourite-action";
+import { normalizePersonGroups } from "./services/person-groups";
 import { buildReconnectCandidateWhere } from "./services/reconnect-candidate-query";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
@@ -1220,6 +1221,7 @@ const threadRowSelect = {
       avatarUrl: true,
       birthday: true,
       birthYear: true,
+      tagsJson: true,
       favouritedAt: true
     }
   },
@@ -5319,6 +5321,23 @@ app.post("/control/person/:personId/favourite", asyncRoute(async (req, res) => {
     await prisma.person.update({ where: { id: personId }, data: decision.write });
   }
   res.status(decision.status).json(decision.body);
+}));
+
+app.post("/control/person/:personId/groups", asyncRoute(async (req, res) => {
+  const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { personId, action: "save contact groups", kind: "thread-mutation" })) return;
+  const payload = z.object({ groups: z.array(z.string()).optional() }).parse(req.body ?? {});
+  const person = await prisma.person.findUnique({ where: { id: personId }, select: { id: true } });
+  if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  const groups = normalizePersonGroups(payload.groups ?? []);
+  await prisma.person.update({
+    where: { id: personId },
+    data: { tagsJson: groups.length > 0 ? JSON.stringify(groups) : null }
+  });
+  res.json({ status: "ok", groups });
 }));
 
 app.post("/control/person/:personId/notes", asyncRoute(async (req, res) => {

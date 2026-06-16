@@ -114,6 +114,7 @@ export interface InboxRow {
    * prioritises them within their risk bucket. Absent on legacy payloads.
    */
   personFavourite?: boolean;
+  personGroups?: string[];
 }
 
 export interface InboxResponse {
@@ -678,4 +679,3 @@ export interface AppSettings {
   glmModel?: string;
   geminiModel?: string;
 }
-

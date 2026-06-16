@@ -55,6 +55,7 @@ export interface ThreadRowSource {
     // optional four-digit year. Both null when no contact matched.
     birthday: string | null;
     birthYear: number | null;
+    tagsJson?: string | null;
     // Operator-pinned favourite (R-0066 / #483). Non-null timestamp = the
     // operator marked this contact a favourite, so their threads float to the
     // top of the Inbox section / Today bucket they already sit in. Null when
@@ -98,6 +99,7 @@ export interface ShapedThreadRow {
    * across risk levels) and can filter the Inbox to favourites only.
    */
   personFavourite: boolean;
+  personGroups: string[];
   platform: PlatformName;
   preview: string;
   /**
@@ -501,6 +503,7 @@ export function toInboxRow(
     personBirthday: source.person.birthday ?? null,
     personBirthYear: source.person.birthYear ?? null,
     personFavourite: source.person.favouritedAt != null,
+    personGroups: parseStringArray(source.person.tagsJson),
     platform: source.platform,
     preview: previewText,
     lastMessageDirection: display.lastMessageDirection ?? null,
@@ -528,6 +531,17 @@ export function toInboxRow(
     snoozedUntil: source.snoozedUntil?.toISOString() ?? null,
     personThreadCount
   };
+}
+
+function parseStringArray(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0);
+  } catch {
+    return [];
+  }
 }
 
 // Count surviving rows per person+platform so the dashboard can flag

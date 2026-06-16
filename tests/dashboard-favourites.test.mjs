@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 
 // favourites.ts + today.ts are framework-free, so the tsx loader resolves these
 // .ts imports directly (matches the dashboard-today-queue.test.mjs pattern).
-const { favouritesFirst, isFavouriteRow } = await import("../apps/dashboard/lib/favourites.ts");
+const { favouritesFirst, isFavouriteRow, priorityContactsFirst } = await import("../apps/dashboard/lib/favourites.ts");
+const { normalizePriorityGroups, rowMatchesPriorityGroup } = await import("../apps/dashboard/lib/priority-groups.ts");
 const { sortTodayQueue } = await import("../apps/dashboard/lib/today.ts");
 
 // R-0066 / #483: favourited contacts float to the top of the list they already
@@ -37,6 +38,24 @@ test("isFavouriteRow is true only for personFavourite === true", () => {
   assert.equal(isFavouriteRow({}), false);
 });
 
+test("priorityContactsFirst lifts favourites, then grouped contacts, preserving order within each tier", () => {
+  const rows = [
+    { id: "a", personFavourite: false, personGroups: [] },
+    { id: "b", personFavourite: false, personGroups: ["Course"] },
+    { id: "c", personFavourite: true, personGroups: [] },
+    { id: "d", personFavourite: false, personGroups: ["Family"] },
+    { id: "e", personFavourite: false, personGroups: [] }
+  ];
+  assert.deepEqual(priorityContactsFirst(rows).map((r) => r.id), ["c", "b", "d", "a", "e"]);
+});
+
+test("priority groups normalise and match inbox rows case-insensitively", () => {
+  assert.deepEqual(normalizePriorityGroups([" Close friends ", "close friends", "Course"]), ["Close friends", "Course"]);
+  assert.equal(rowMatchesPriorityGroup({ personGroups: ["Course"] }, "course"), true);
+  assert.equal(rowMatchesPriorityGroup({ personGroups: ["Course"] }, "Family"), false);
+  assert.equal(rowMatchesPriorityGroup({ personGroups: ["Course"] }, "all"), true);
+});
+
 const row = (over) => ({
   id: "x",
   riskLevel: "GREEN",
@@ -58,6 +77,15 @@ test("sortTodayQueue: risk bucket first, favourites within a bucket, oldest with
     sortTodayQueue(rows).map((r) => r.id),
     ["red-fav", "red-old", "amber-fav", "green-fav"]
   );
+});
+
+test("sortTodayQueue: grouped contacts sit after favourites and before ungrouped rows in a bucket", () => {
+  const rows = [
+    row({ id: "plain-old", riskLevel: "AMBER", lastInboundAt: "2026-06-01T00:00:00.000Z" }),
+    row({ id: "group-new", riskLevel: "AMBER", lastInboundAt: "2026-06-04T00:00:00.000Z", personGroups: ["Course"] }),
+    row({ id: "fav-newer", riskLevel: "AMBER", lastInboundAt: "2026-06-05T00:00:00.000Z", personFavourite: true })
+  ];
+  assert.deepEqual(sortTodayQueue(rows).map((r) => r.id), ["fav-newer", "group-new", "plain-old"]);
 });
 
 test("sortTodayQueue: a fresh favourite never outranks an overdue non-favourite", () => {
