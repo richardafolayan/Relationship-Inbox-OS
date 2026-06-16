@@ -56,6 +56,7 @@ export const LIVE_INTERCEPTED_PATHS: Array<[RegExp, string]> = [
   [/\/control\/person\/[^/]+\/friendship-summary$/, "summarise the friendship"],
   [/\/control\/person\/[^/]+\/ask$/, "ask about the contact"],
   [/\/control\/person\/[^/]+\/favourite$/, "favourite the contact"],
+  [/\/control\/person\/[^/]+\/groups$/, "save contact groups"],
   [/\/control\/person\/[^/]+\/open-profile$/, "open the contact profile"],
   [/\/control\/closed-status\/refresh-stale$/, "refresh closed verdicts"],
   [/\/control\/reconnect\/refresh-scores$/, "refresh reconnect scores"],

@@ -4,13 +4,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
-import { Archive, Search, Star } from "lucide-react";
+import { Archive, Search, Star, Tags } from "lucide-react";
 import { apiGet, apiPost, runAction, ApiRequestError } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { shouldInboxRefreshOnRunnerEvent } from "@/lib/inbox-events";
 import type { AuditLogRow, InboxResponse, InboxRow, PlatformCard } from "@/lib/types";
-import { favouritesFirst, setFavourite } from "@/lib/favourites";
+import { priorityContactsFirst, setFavourite } from "@/lib/favourites";
+import { rowMatchesPriorityGroup } from "@/lib/priority-groups";
 import { Canvas, PageHead, SectionDivider, CaughtUp } from "@/components/common/canvas";
 import { FocusInboxGroup } from "@/components/common/focus/focus-inbox-group";
 import { BrandLoader } from "@/components/common/brand-loader";
@@ -42,6 +43,7 @@ import {
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
 type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
+type PriorityGroupFilter = "all" | string;
 type SortMode = "oldest" | "recent" | "name";
 
 // Lazy-load the receipts drawer so its chunk stays out of the inbox's
@@ -121,6 +123,10 @@ function applyPlatform(row: InboxRow, platform: PlatformFilter): boolean {
 // full list.
 function applyFavourite(row: InboxRow, favouritesOnly: boolean): boolean {
   return favouritesOnly ? row.personFavourite === true : true;
+}
+
+function applyPriorityGroup(row: InboxRow, group: PriorityGroupFilter): boolean {
+  return rowMatchesPriorityGroup(row, group);
 }
 
 function applySort(items: InboxRow[], sort: SortMode): InboxRow[] {
@@ -239,6 +245,7 @@ export default function InboxPage() {
   const [category, setCategory] = useState<CategoryFilter>("any");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [favouritesOnly, setFavouritesOnly] = useState(false);
+  const [priorityGroup, setPriorityGroup] = useState<PriorityGroupFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("oldest");
   // Optimistic favourite state keyed by personId, so tapping a row's star
   // re-sorts and re-marks instantly without waiting for the 10s poll. Merged
@@ -356,6 +363,20 @@ export default function InboxPage() {
     [data, sandboxActive, favOverrides]
   );
 
+  const priorityGroups = useMemo(() => {
+    const groups = new Set<string>();
+    for (const row of allRows) {
+      for (const group of row.personGroups ?? []) groups.add(group);
+    }
+    return Array.from(groups).sort((a, b) => a.localeCompare(b));
+  }, [allRows]);
+
+  useEffect(() => {
+    if (priorityGroup === "all") return;
+    if (priorityGroups.includes(priorityGroup)) return;
+    setPriorityGroup("all");
+  }, [priorityGroup, priorityGroups]);
+
   // Optimistically flip a contact's favourite, then persist. Reverts the
   // local override if the request fails so the star never lies. Keyed by
   // personId so every row of a multi-thread contact updates together.
@@ -380,7 +401,8 @@ export default function InboxPage() {
       (row) =>
         applyCategory(row, category) &&
         applyPlatform(row, platformFilter) &&
-        applyFavourite(row, favouritesOnly)
+        applyFavourite(row, favouritesOnly) &&
+        applyPriorityGroup(row, priorityGroup)
     );
     const live = scoped.filter((row) => !row.scheduledSendAt);
     return {
@@ -390,7 +412,7 @@ export default function InboxPage() {
       fresh: live.filter((r) => r.riskLevel === "GREEN").length,
       scheduled: scoped.filter((r) => !!r.scheduledSendAt).length
     };
-  }, [allRows, category, platformFilter, favouritesOnly]);
+  }, [allRows, category, platformFilter, favouritesOnly, priorityGroup]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -407,6 +429,7 @@ export default function InboxPage() {
       if (!applyCategory(row, category)) return false;
       if (!applyPlatform(row, platformFilter)) return false;
       if (!applyFavourite(row, favouritesOnly)) return false;
+      if (!applyPriorityGroup(row, priorityGroup)) return false;
       if (applyActiveOnly && !isWithinHorizon(row.lastMessageAt)) return false;
       if (applyActiveOnly && isLikelyClosed(row)) return false;
       if (!q) return true;
@@ -415,7 +438,7 @@ export default function InboxPage() {
         (row.preview ?? "").toLowerCase().includes(q)
       );
     });
-  }, [allRows, query, tab, category, platformFilter, favouritesOnly, showAll]);
+  }, [allRows, query, tab, category, platformFilter, favouritesOnly, priorityGroup, showAll]);
 
   // How many threads the active-only filter is currently hiding, broken
   // down by reason. Only counts threads that would otherwise be visible
@@ -430,6 +453,7 @@ export default function InboxPage() {
       if (!applyCategory(row, category)) continue;
       if (!applyPlatform(row, platformFilter)) continue;
       if (!applyFavourite(row, favouritesOnly)) continue;
+      if (!applyPriorityGroup(row, priorityGroup)) continue;
       const dormant = !isWithinHorizon(row.lastMessageAt);
       const ended = isLikelyClosed(row);
       if (!dormant && !ended) continue;
@@ -440,7 +464,7 @@ export default function InboxPage() {
       else closed += 1;
     }
     return { total: older + closed, older, closed };
-  }, [allRows, showAll, query, tab, category, platformFilter, favouritesOnly]);
+  }, [allRows, showAll, query, tab, category, platformFilter, favouritesOnly, priorityGroup]);
   const hiddenByHorizon = hiddenBreakdown.total;
 
   // #287 F1: "Refresh closed verdicts" button state. Same idle/running/
@@ -510,7 +534,7 @@ export default function InboxPage() {
     // preserving the chosen sort order within the favourite / non-favourite
     // split (R-0066 / #483). Applied per-section so a favourite never jumps
     // its risk bucket.
-    const ordered = (rows: InboxRow[]) => favouritesFirst(applySort(rows, sortMode));
+    const ordered = (rows: InboxRow[]) => priorityContactsFirst(applySort(rows, sortMode));
     if (!grouped) {
       return [{ key: tab, label: null, items: ordered(live) }];
     }
@@ -738,13 +762,17 @@ export default function InboxPage() {
             platformFilter={platformFilter}
             category={category}
             favouritesOnly={favouritesOnly}
+            priorityGroup={priorityGroup}
+            priorityGroups={priorityGroups}
             onPlatform={setPlatformFilter}
             onCategory={setCategory}
             onFavouritesOnly={setFavouritesOnly}
+            onPriorityGroup={setPriorityGroup}
             onClear={() => {
               setPlatformFilter("all");
               setCategory("any");
               setFavouritesOnly(false);
+              setPriorityGroup("all");
             }}
           />
           {orderedRows.length > 0 || selectMode ? (
@@ -765,13 +793,16 @@ export default function InboxPage() {
         platformFilter={platformFilter}
         category={category}
         favouritesOnly={favouritesOnly}
+        priorityGroup={priorityGroup}
         onClearPlatform={() => setPlatformFilter("all")}
         onClearCategory={() => setCategory("any")}
         onClearFavourites={() => setFavouritesOnly(false)}
+        onClearPriorityGroup={() => setPriorityGroup("all")}
         onClearAll={() => {
           setPlatformFilter("all");
           setCategory("any");
           setFavouritesOnly(false);
+          setPriorityGroup("all");
         }}
       />
 
@@ -851,8 +882,16 @@ export default function InboxPage() {
         </div>
       ) : visible.length === 0 ? (
         <CaughtUp
-          title={query || tab !== "all" || category !== "any" || favouritesOnly ? "Nothing matches that filter." : "You’re caught up."}
-          body={query || tab !== "all" || category !== "any" || favouritesOnly ? "Clear the filter or try a different search." : "No conversations need you right now."}
+          title={
+            query || tab !== "all" || category !== "any" || favouritesOnly || priorityGroup !== "all"
+              ? "Nothing matches that filter."
+              : "You’re caught up."
+          }
+          body={
+            query || tab !== "all" || category !== "any" || favouritesOnly || priorityGroup !== "all"
+              ? "Clear the filter or try a different search."
+              : "No conversations need you right now."
+          }
         />
       ) : (
         <>
@@ -1012,23 +1051,32 @@ function FiltersPopover({
   platformFilter,
   category,
   favouritesOnly,
+  priorityGroup,
+  priorityGroups,
   onPlatform,
   onCategory,
   onFavouritesOnly,
+  onPriorityGroup,
   onClear
 }: {
   platformFilter: PlatformFilter;
   category: CategoryFilter;
   favouritesOnly: boolean;
+  priorityGroup: PriorityGroupFilter;
+  priorityGroups: string[];
   onPlatform: (value: PlatformFilter) => void;
   onCategory: (value: CategoryFilter) => void;
   onFavouritesOnly: (value: boolean) => void;
+  onPriorityGroup: (value: PriorityGroupFilter) => void;
   onClear: () => void;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useDismiss(open, () => setOpen(false));
   const activeCount =
-    (platformFilter !== "all" ? 1 : 0) + (category !== "any" ? 1 : 0) + (favouritesOnly ? 1 : 0);
+    (platformFilter !== "all" ? 1 : 0) +
+    (category !== "any" ? 1 : 0) +
+    (favouritesOnly ? 1 : 0) +
+    (priorityGroup !== "all" ? 1 : 0);
   return (
     <div ref={ref} className="relative">
       <button
@@ -1076,6 +1124,23 @@ function FiltersPopover({
               </PopOpt>
             </PopSection>
           </div>
+          {priorityGroups.length > 0 ? (
+            <div className="mt-4">
+              <PopSection label="Group">
+                <PopOpt selected={priorityGroup === "all"} onClick={() => onPriorityGroup("all")}>
+                  All groups
+                </PopOpt>
+                {priorityGroups.map((group) => (
+                  <PopOpt key={group} selected={priorityGroup === group} onClick={() => onPriorityGroup(group)}>
+                    <span className="inline-flex items-center gap-[6px]">
+                      <Tags className="h-[12px] w-[12px]" strokeWidth={1.6} />
+                      {group}
+                    </span>
+                  </PopOpt>
+                ))}
+              </PopSection>
+            </div>
+          ) : null}
           <div className="mt-4 flex justify-end border-t border-hairline pt-3">
             <button
               type="button"
@@ -1097,17 +1162,21 @@ function ChipsRow({
   platformFilter,
   category,
   favouritesOnly,
+  priorityGroup,
   onClearPlatform,
   onClearCategory,
   onClearFavourites,
+  onClearPriorityGroup,
   onClearAll
 }: {
   platformFilter: PlatformFilter;
   category: CategoryFilter;
   favouritesOnly: boolean;
+  priorityGroup: PriorityGroupFilter;
   onClearPlatform: () => void;
   onClearCategory: () => void;
   onClearFavourites: () => void;
+  onClearPriorityGroup: () => void;
   onClearAll: () => void;
 }) {
   const chips: { key: string; label: string; value: string; onRemove: () => void }[] = [];
@@ -1133,6 +1202,14 @@ function ChipsRow({
       label: "Show",
       value: "Favourites",
       onRemove: onClearFavourites
+    });
+  }
+  if (priorityGroup !== "all") {
+    chips.push({
+      key: "group",
+      label: "Group",
+      value: priorityGroup,
+      onRemove: onClearPriorityGroup
     });
   }
   if (chips.length === 0) return null;
@@ -1260,6 +1337,19 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
             sees it at all. */}
         {row.closedStatus === "closed" && row.closedStatusReason ? (
           <span className="block text-[12px] text-ink-3">{row.closedStatusReason}</span>
+        ) : null}
+        {row.personGroups && row.personGroups.length > 0 ? (
+          <span className="flex flex-wrap gap-1 pt-[2px]">
+            {row.personGroups.slice(0, 2).map((group) => (
+              <span
+                key={group}
+                className="inline-flex w-fit items-center gap-[4px] rounded-pill border border-hairline bg-paper px-[7px] py-[2px] font-mono text-[10.5px] text-ink-3"
+              >
+                <Tags className="h-[10px] w-[10px]" strokeWidth={1.7} />
+                {group}
+              </span>
+            ))}
+          </span>
         ) : null}
       </span>
       <span className="flex items-center gap-[10px] font-mono text-[11px] text-ink-3">

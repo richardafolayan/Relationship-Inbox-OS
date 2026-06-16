@@ -1,6 +1,7 @@
 import type { InboxRow } from "./types";
 import { isWithinHorizon } from "./horizon";
 import { isLikelyClosed } from "./closed-conversation";
+import { contactPriorityRank } from "./favourites";
 
 // The Today queue is "tonight's work": the runner's needs-reply set minus
 // threads that aren't actually due tonight. A thread belongs in the queue
@@ -49,10 +50,10 @@ export function sortTodayQueue(rows: readonly InboxRow[]): InboxRow[] {
     if (riskRank(a.riskLevel) !== riskRank(b.riskLevel)) {
       return riskRank(a.riskLevel) - riskRank(b.riskLevel);
     }
-    const aFav = a.personFavourite ? 0 : 1;
-    const bFav = b.personFavourite ? 0 : 1;
-    if (aFav !== bFav) {
-      return aFav - bFav;
+    const aPriority = contactPriorityRank(a);
+    const bPriority = contactPriorityRank(b);
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
     }
     const aIn = inboundSortKey(a.lastInboundAt);
     const bIn = inboundSortKey(b.lastInboundAt);

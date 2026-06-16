@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, RefreshCw, Star, X } from "lucide-react";
+import { Loader2, Plus, RefreshCw, Star, X } from "lucide-react";
 import { apiGet, apiPost, runAction } from "@/lib/api";
 import { isCurrentDrawerRequest } from "@/lib/drawer-request-guard";
 import { setFavourite } from "@/lib/favourites";
+import { normalizePriorityGroups, setPriorityGroups } from "@/lib/priority-groups";
 import type { PersonDetailResponse } from "@/lib/types";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -39,6 +40,8 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   // detail; a boolean wins until the toggle settles, reverting on failure.
   const [favOverride, setFavOverride] = useState<boolean | null>(null);
   const [favSaving, setFavSaving] = useState(false);
+  const [groupInput, setGroupInput] = useState("");
+  const [groupSaving, setGroupSaving] = useState(false);
   // Per-open-session request token (mirrors the thread page's route-id guard).
   // Advanced on every open and every personId change so a slow Ask-AI /
   // friendship-summary response that resolves after the drawer closed (or
@@ -90,6 +93,7 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       setAskQuestion("");
       setAskAnswer(null);
       setFavOverride(null);
+      setGroupInput("");
     }
   }, [open]);
 
@@ -108,6 +112,32 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
     } finally {
       setFavSaving(false);
     }
+  };
+
+  const saveGroups = async (nextGroups: string[]) => {
+    if (!personId || !detail) return;
+    const groups = normalizePriorityGroups(nextGroups);
+    setGroupSaving(true);
+    setError(null);
+    const previous = detail.person.tags;
+    setDetail({ ...detail, person: { ...detail.person, tags: groups } });
+    try {
+      const saved = await setPriorityGroups(personId, groups);
+      setDetail((current) => current ? { ...current, person: { ...current.person, tags: saved } } : current);
+    } catch (err) {
+      setDetail((current) => current ? { ...current, person: { ...current.person, tags: previous } } : current);
+      setError(err instanceof Error ? err.message : "Failed to save groups");
+    } finally {
+      setGroupSaving(false);
+    }
+  };
+
+  const addGroup = async () => {
+    if (!detail) return;
+    const group = groupInput.trim();
+    if (!group) return;
+    setGroupInput("");
+    await saveGroups([...detail.person.tags, group]);
   };
 
   const askAboutPerson = async () => {
@@ -242,6 +272,63 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
           ) : detail ? (
             <>
               <ProfileSections detail={detail} />
+              <section className="mt-6 border-t border-hairline pt-5">
+                <div className="mb-3 flex items-center justify-between gap-3">
+                  <p className="m-0 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
+                    Groups
+                  </p>
+                  {groupSaving ? (
+                    <span className="inline-flex items-center gap-1 font-mono text-[11px] text-ink-3">
+                      <Loader2 className="h-[12px] w-[12px] animate-spin" />
+                      Saving
+                    </span>
+                  ) : null}
+                </div>
+                {detail.person.tags.length > 0 ? (
+                  <div className="mb-3 flex flex-wrap gap-2">
+                    {detail.person.tags.map((group) => (
+                      <span
+                        key={group}
+                        className="inline-flex items-center gap-[6px] rounded-pill border border-hairline bg-paper-2 px-[9px] py-[4px] text-[12px] text-ink-2"
+                      >
+                        {group}
+                        <button
+                          type="button"
+                          disabled={groupSaving}
+                          aria-label={`Remove ${group}`}
+                          className="rounded p-[1px] text-ink-3 hover:text-ink"
+                          onClick={() => void saveGroups(detail.person.tags.filter((item) => item !== group))}
+                        >
+                          <X className="h-[12px] w-[12px]" />
+                        </button>
+                      </span>
+                    ))}
+                  </div>
+                ) : null}
+                <div className="flex flex-wrap items-center gap-2">
+                  <input
+                    type="text"
+                    value={groupInput}
+                    onChange={(event) => setGroupInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.preventDefault();
+                        void addGroup();
+                      }
+                    }}
+                    placeholder="Close friends"
+                    className="w-[240px] max-w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
+                  />
+                  <Button
+                    variant="quiet"
+                    disabled={!groupInput.trim() || groupSaving}
+                    onClick={() => void addGroup()}
+                  >
+                    <Plus className="h-[14px] w-[14px]" />
+                    Add group
+                  </Button>
+                </div>
+              </section>
               {profileUrlMissing ? (
                 <div className="mt-6 flex flex-wrap items-center gap-2">
                   <input
