@@ -73,6 +73,12 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
       res.writeHead(200, { "content-type": "application/json" });
       return res.end(manifest(`http://localhost:${PORT}/app.zip`, sha, "0.1.0"));
     }
+    if (req.url.startsWith("/requires-new-installer.json")) {
+      const incompatible = JSON.parse(manifest(`http://localhost:${PORT}/app.zip`));
+      incompatible.minimumInstallerVersion = "9.9.9";
+      res.writeHead(200, { "content-type": "application/json" });
+      return res.end(JSON.stringify(incompatible));
+    }
     if (req.url.startsWith("/app.zip")) {
       res.writeHead(200, { "content-type": "application/zip" });
       return res.end(zipBuf);
@@ -132,6 +138,19 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
       assert.match(stdout, /up to date|Nothing to do/i);
       const after = readdirSync(work).filter((n) => n.startsWith(".rios-backup-")).length;
       assert.equal(after, before, "a no-op update should not create a backup");
+    });
+
+    await t.test("an update requiring a newer installer is refused before touching files", async () => {
+      const before = readdirSync(work).filter((n) => n.startsWith(".rios-backup-")).length;
+      const { code, stderr } = await runUpdater([
+        "--apply", "--no-deps", "--dir", appDir, "--url", url("/requires-new-installer.json")
+      ]);
+      assert.notEqual(code, 0, "updater should exit non-zero when installer is too old");
+      assert.match(stderr, /requires installer 9\.9\.9 or newer/i);
+      assert.equal(JSON.parse(readFileSync(join(appDir, "package.json"), "utf8")).version, "0.1.0");
+      assert.ok(!existsSync(join(appDir, "NEWCODE.txt")), "install was modified despite incompatible installer");
+      const after = readdirSync(work).filter((n) => n.startsWith(".rios-backup-")).length;
+      assert.equal(after, before, "refused update should not create a backup");
     });
 
     await t.test("apply refuses to touch a git checkout", async () => {

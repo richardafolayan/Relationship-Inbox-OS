@@ -160,6 +160,14 @@ function report(current, manifest) {
   return available;
 }
 
+function enforceMinimumInstallerVersion(current, manifest) {
+  if (compareVersions(current, manifest.minimumInstallerVersion) >= 0) return;
+  die(
+    `This update requires installer ${manifest.minimumInstallerVersion} or newer, but this install is ${current}.\n` +
+    `  Ask Richard for the latest installer before applying ${manifest.version}.`
+  );
+}
+
 function stopAppProcesses(dir) {
   // Best-effort: stop a dev server still serving THIS install so files aren't
   // held open during the swap. Only kills processes whose cwd is under `dir`.
@@ -336,6 +344,7 @@ async function main() {
   }
   const current = currentVersion(APP_DIR);
   const manifest = await loadManifest(FEED_URL);
+  enforceMinimumInstallerVersion(current, manifest);
   const available = report(current, manifest);
 
   if (args.apply) {
