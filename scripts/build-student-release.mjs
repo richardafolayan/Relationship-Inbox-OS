@@ -135,6 +135,11 @@ function git(...a) {
 function pkgVersion() {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
 }
+function pkgVersionFromRef(ref) {
+  const pkg = JSON.parse(git("show", `${ref}:package.json`));
+  if (!pkg.version) die(`package.json at ${ref} does not have a version.`);
+  return pkg.version;
+}
 function die(msg) {
   process.stderr.write(`\n  ✗ ${msg}\n`);
   process.exit(1);
@@ -213,7 +218,7 @@ async function manifestOnly() {
 
 // ---- full build ----------------------------------------------------------
 async function build() {
-  const version = pkgVersion();
+  const version = pkgVersionFromRef(REF);
   const build = new Date().toISOString();
   const commit = git("rev-parse", "--short", REF);
   const fullCommit = git("rev-parse", REF);
