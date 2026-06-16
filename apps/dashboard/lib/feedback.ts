@@ -14,14 +14,13 @@ export interface ToastInput {
   receiptId?: string;
   durationMs?: number;
   // Optional in-app route. When set, the toast becomes clickable and
-  // navigates here (e.g. a new-message toast opens the thread). Action
-  // feedback toasts leave this unset and stay non-interactive.
+  // navigates here (e.g. a new-message toast opens the thread).
   href?: string;
   // Optional hooks for callers that mirror the toast elsewhere (the
   // notification center). The ToastHost fires:
   //   - onManualDismiss when the operator explicitly clears the toast
   //     (X button or swipe),
-  //   - onActivate when they click through to `href`.
+  //   - onActivate when they click the toast.
   // Auto-expiry fires neither: an unattended toast was never seen.
   onManualDismiss?: () => void;
   onActivate?: () => void;

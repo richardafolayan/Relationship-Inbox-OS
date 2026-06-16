@@ -212,8 +212,8 @@ export function shouldShowNotificationCta(input: {
   return input.supported && input.permission === "default" && !input.dismissed;
 }
 
-function show(title: string, body: string, tag: string, onClick: () => void): void {
-  if (!notificationsSupported() || Notification.permission !== "granted") return;
+function show(title: string, body: string, tag: string, onClick: () => void): boolean {
+  if (!notificationsSupported() || Notification.permission !== "granted") return false;
   try {
     const notification = new Notification(title, { body, tag });
     notification.onclick = () => {
@@ -221,9 +221,11 @@ function show(title: string, body: string, tag: string, onClick: () => void): vo
       onClick();
       notification.close();
     };
+    return true;
   } catch {
     // Some contexts expose Notification but block the constructor (e.g.
     // notifications only allowed from a service worker). Nothing to do.
+    return false;
   }
 }
 
@@ -239,6 +241,15 @@ export function notifyNewMessage(row: InboxRow, onOpen: (threadId: string) => vo
 export function notifyNewMessageDigest(rows: InboxRow[], onOpen: () => void): void {
   const notice = buildNewMessageDigestNotice(rows);
   show(notice.title, notice.body, "inbox-os:digest", onOpen);
+}
+
+export function notifyAppUpdateAvailable(latestVersion: string, onUpdate: () => void): boolean {
+  return show(
+    `Update available v${latestVersion}`,
+    "Click to update and reopen Relationship Inbox OS.",
+    `inbox-os:update:${latestVersion}`,
+    onUpdate
+  );
 }
 
 // The calm overdue-reply digest (#360). One notification per cadence tick,
