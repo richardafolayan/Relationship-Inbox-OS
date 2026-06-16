@@ -37,6 +37,16 @@ test("a release ranks above the same core with a prerelease", () => {
   assert.equal(compareVersions("1.0.0-alpha", "1.0.0-beta"), -1);
 });
 
+test("build metadata is ignored when parsing and comparing versions", () => {
+  assert.deepEqual(
+    { ...parseVersion("1.0.0+build-123") },
+    { major: 1, minor: 0, patch: 0, prerelease: "", raw: "1.0.0+build-123" }
+  );
+  assert.equal(compareVersions("1.0.0+build-123", "1.0.0"), 0);
+  assert.equal(isNewer("1.3.0", "1.3.0+build-42"), false);
+  assert.equal(isNewer("1.3.0+build-42", "1.3.0"), false);
+});
+
 test("unparseable versions sort below parseable ones", () => {
   assert.equal(compareVersions("not-a-version", "0.0.1"), -1);
   assert.equal(parseVersion("nope"), null);
