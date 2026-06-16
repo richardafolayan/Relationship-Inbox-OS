@@ -71,12 +71,37 @@ export function compareVersions(a, b) {
   if (pa.prerelease === pb.prerelease) return 0;
   if (!pa.prerelease) return 1;
   if (!pb.prerelease) return -1;
-  return pa.prerelease < pb.prerelease ? -1 : 1;
+  return comparePrerelease(pa.prerelease, pb.prerelease);
 }
 
 /** True when `latest` is a strictly newer version than `current`. */
 export function isNewer(latest, current) {
   return compareVersions(latest, current) > 0;
+}
+
+function comparePrerelease(a, b) {
+  const aParts = a.split(".");
+  const bParts = b.split(".");
+  const max = Math.max(aParts.length, bParts.length);
+  for (let i = 0; i < max; i++) {
+    const av = aParts[i];
+    const bv = bParts[i];
+    if (av === undefined) return -1;
+    if (bv === undefined) return 1;
+    if (av === bv) continue;
+    const aNum = /^\d+$/.test(av);
+    const bNum = /^\d+$/.test(bv);
+    if (aNum && bNum) {
+      const ai = BigInt(av);
+      const bi = BigInt(bv);
+      if (ai !== bi) return ai < bi ? -1 : 1;
+      continue;
+    }
+    if (aNum) return -1;
+    if (bNum) return 1;
+    return av < bv ? -1 : 1;
+  }
+  return 0;
 }
 
 /**
