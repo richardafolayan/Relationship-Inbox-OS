@@ -3253,6 +3253,61 @@ app.post("/control/thread/:threadId/message/:messageId/react", asyncRoute(async 
   });
 }));
 
+app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (req, res) => {
+  const { threadId, messageId } = z
+    .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
+    .parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "edit a message", kind: "thread-mutation" })) return;
+  const payload = z.object({ text: z.string().trim().min(1).max(8_000) }).parse(req.body ?? {});
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.threadId !== threadId) {
+    res.status(404).json({ error: "message not found in thread" });
+    return;
+  }
+  if (message.direction !== "OUT") {
+    res.status(400).json({ error: "only outbound messages can be edited" });
+    return;
+  }
+
+  const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
+  if (!adapter.editMessage) {
+    res.status(400).json({ error: `${target.platform} adapter does not support message edits` });
+    return;
+  }
+  const threadStub: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+
+  await withPlatformControlLock(target.platform, async () => {
+    try {
+      await adapter.editMessage!(threadStub, message.platformMessageKey, payload.text);
+      await prisma.message.update({ where: { id: message.id }, data: { text: payload.text } });
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "MESSAGE_EDIT",
+        status: "OK",
+        details: { threadId, messageId }
+      });
+      res.json({ status: "ok", text: payload.text });
+    } catch (error) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "MESSAGE_EDIT_FAIL",
+        status: "FAIL",
+        details: { threadId, messageId, ...summarizeError(error) }
+      });
+      throw error;
+    }
+  });
+}));
+
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "rescan the thread", kind: "external-action" })) return;

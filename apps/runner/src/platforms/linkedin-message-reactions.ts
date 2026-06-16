@@ -7,10 +7,10 @@
 /**
  * Live-captured DOM contract for reacting to a LinkedIn message.
  *
- *  - A message row is `li.msg-s-event-listitem` carrying its stable id on
- *    `data-event-urn` (e.g. `urn:li:msg_message:(...)`). The runner already
- *    stores that exact value as `platformMessageKey` (linkedin-adapter.ts
- *    ~1622), so a message is targetable by `[data-event-urn="<key>"]`.
+ *  - A message row carries its stable id on `data-event-urn` (e.g.
+ *    `urn:li:msg_message:(...)`). The runner already stores that exact value
+ *    as `platformMessageKey`, so a message is targetable by
+ *    `[data-event-urn="<key>"]`.
  *  - Hovering the row renders `.msg-s-event-listitem__actions-container`
  *    holding three controls: the reaction entry point
  *    (`button.msg-reactions__entry-point`, aria-label "Open Emoji Keyboard"),
@@ -25,11 +25,15 @@
  *    fallback for glyphs absent from the popular list.
  */
 export const REACTION_SELECTORS = {
-  messageRow: "li.msg-s-event-listitem",
+  messageRow: "[data-event-urn]",
   actionsContainer: ".msg-s-event-listitem__actions-container",
   reactionEntryPoint: 'button.msg-reactions__entry-point, button[aria-label="Open Emoji Keyboard"]',
   popularReactionItem: '.emoji-popular-list__item[role="menuitem"]',
-  optionsTrigger: "button.msg-s-event-listitem__options-trigger"
+  optionsTrigger: "button.msg-s-event-listitem__options-trigger",
+  editMenuItem:
+    'button[role="menuitem"], div[role="menuitem"], li[role="menuitem"], .artdeco-dropdown__item[role="menuitem"]',
+  editComposer: 'div[contenteditable="true"], textarea',
+  saveEditButton: 'button[aria-label="Save"]'
 } as const;
 
 /**
@@ -47,7 +51,7 @@ export function messageRowSelector(platformMessageKey: string): string {
   if (platformMessageKey.includes('"')) {
     throw new Error("platformMessageKey contains an unexpected double-quote");
   }
-  return `${REACTION_SELECTORS.messageRow}[data-event-urn="${platformMessageKey}"]`;
+  return `[data-event-urn="${platformMessageKey}"]`;
 }
 
 /**
