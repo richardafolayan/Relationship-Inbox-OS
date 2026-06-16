@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 const {
   isReconnectCandidate,
@@ -53,6 +54,15 @@ test("non-LinkedIn platforms are never reconnect candidates", () => {
     }),
     false
   );
+});
+
+test("Reconnect page copy explains where iMessage follow-ups live", () => {
+  const source = readFileSync(
+    new URL("../apps/dashboard/app/reconnect/page.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /LinkedIn catch-ups only\./);
+  assert.match(source, /iMessage replies stay in Today and Inbox/);
 });
 
 test("threads still inside the recency horizon are not candidates", () => {
