@@ -31,7 +31,7 @@ export const LATEST_JSON_REQUIRED = [
   "minimumInstallerVersion"
 ];
 
-const SEMVER_CORE = /^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/;
+const SEMVER_CORE = /^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/;
 const SHA256_HEX = /^[a-f0-9]{64}$/i;
 
 /**
@@ -40,15 +40,16 @@ const SHA256_HEX = /^[a-f0-9]{64}$/i;
  */
 export function parseVersion(value) {
   if (typeof value !== "string") return null;
-  const m = value.trim().match(SEMVER_CORE);
+  const raw = value.trim();
+  const withoutBuild = raw.split("+", 1)[0];
+  const m = withoutBuild.match(SEMVER_CORE);
   if (!m) return null;
-  const prerelease = /-(.+?)(?:\+|$)/.exec(value.trim());
   return {
     major: Number(m[1]),
     minor: Number(m[2]),
     patch: Number(m[3]),
-    prerelease: prerelease ? prerelease[1] : "",
-    raw: value.trim()
+    prerelease: m[4] || "",
+    raw
   };
 }
 
