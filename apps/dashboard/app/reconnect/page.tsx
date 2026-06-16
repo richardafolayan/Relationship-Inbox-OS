@@ -129,7 +129,7 @@ export default function ReconnectPage() {
       <PageHead
         eyebrow="Worth a hello"
         title="Reconnect"
-        subtitle="LinkedIn threads that have gone quiet but still might be worth a gentle hello. Open one to write the message yourself - nothing here is auto-sent."
+        subtitle="LinkedIn catch-ups only. iMessage replies stay in Today and Inbox, where they are treated as active conversations. Open one to write the message yourself, nothing here is auto-sent."
         meta={
           loaded ? (
             <span className="flex items-baseline gap-4">
@@ -163,7 +163,7 @@ export default function ReconnectPage() {
       ) : candidates.length === 0 ? (
         <CaughtUp
           title="Nothing to rekindle right now."
-          body="When LinkedIn threads go quiet for more than 30 days they will show up here so you can revisit them on your own terms."
+          body="When LinkedIn threads go quiet for more than 30 days they will show up here. iMessage replies stay in Today and Inbox."
         />
       ) : (
         <div className="flex flex-col">
