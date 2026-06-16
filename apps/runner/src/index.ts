@@ -3860,6 +3860,12 @@ app.post("/control/thread/:threadId/reassess", asyncRoute(async (req, res) => {
     res.status(404).json({ error: "Thread not found" });
     return;
   }
+  if (outcome.kind === "ai_unavailable") {
+    res.status(503).json({
+      error: "AI is temporarily unavailable. Nothing was changed."
+    });
+    return;
+  }
   res.json({
     ok: true,
     threadId: outcome.threadId,
