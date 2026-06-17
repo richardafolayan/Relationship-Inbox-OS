@@ -253,7 +253,7 @@ export function PilotFeedbackModal() {
         className="flex max-h-[80vh] w-[min(560px,92vw)] flex-col overflow-hidden rounded-[18px] border border-hairline bg-paper shadow-pop"
         onClick={(event) => event.stopPropagation()}
       >
-        <header className="flex items-center gap-3 border-b border-hairline px-5 py-[14px]">
+        <header className="flex shrink-0 items-center gap-3 border-b border-hairline px-5 py-[14px]">
           {view === "reports" ? (
             <button
               type="button"
@@ -287,7 +287,7 @@ export function PilotFeedbackModal() {
         </header>
 
         {view === "reports" ? (
-          <div className="overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
             <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
               Your recent reports and where they stand. Screenshots and message content are never
               shown here.
@@ -325,7 +325,7 @@ export function PilotFeedbackModal() {
             )}
           </div>
         ) : (
-          <div className="overflow-y-auto px-5 py-4">
+          <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
             {/* Issue #383 / R-0030: the inline error block was removed —
                 submit now closes the modal immediately and surfaces the
                 outcome via toast. The fallback form URL is still
