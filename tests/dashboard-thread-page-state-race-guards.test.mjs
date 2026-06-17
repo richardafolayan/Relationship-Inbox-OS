@@ -26,6 +26,12 @@ test("transform guards the composer write against a thread switch", () => {
   assert.match(SRC, /!shouldApplyThreadScopedResult\(startThreadId, transformRouteIdRef\.current\)\)\s*return;\s*\n\s*setComposer\(output\.text\)/, "transform guards setComposer");
 });
 
+test("reassess failures stay out of the inline thread error surface", () => {
+  const reassessBlock = SRC.slice(SRC.indexOf("const reassessThread"), SRC.indexOf("const transform = async"));
+  assert.match(reassessBlock, /showToast\(\{\s*kind: "error",\s*title: "Reassess failed"/, "reassess failure uses the toast surface");
+  assert.doesNotMatch(reassessBlock, /setError\(message\)/, "reassess failure must not render as inline thread error");
+});
+
 test("a dismissed AI predraft is not re-injected on the next refresh", () => {
   assert.match(SRC, /const predraftDismissedRef = useRef<Set<string>>\(new Set\(\)\)/, "predraftDismissedRef declared");
   // dismissed in both Discard and Delete-draft

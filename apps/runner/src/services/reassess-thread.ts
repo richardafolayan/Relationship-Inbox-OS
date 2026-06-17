@@ -45,6 +45,7 @@ export interface ReassessThreadDeps {
 
 export type ReassessThreadResult =
   | { kind: "not_found" }
+  | { kind: "ai_unavailable" }
   | {
       kind: "ok";
       threadId: string;
@@ -176,11 +177,11 @@ export async function runReassessForThread(
       .catch(() => null)
   ]);
 
-  // resummarise only reports not_found when the thread vanished mid-flight;
-  // treat it as not_found and skip the write (the parallel category result is
-  // simply discarded).
+  // Skip the write when resummarise could not produce a durable AI result. A
+  // real missing thread and an exhausted provider chain need different API
+  // responses so the dashboard does not tell the operator the thread vanished.
   if (!resummarised.ok) {
-    return { kind: "not_found" };
+    return { kind: resummarised.reason === "ai_unavailable" ? "ai_unavailable" : "not_found" };
   }
 
   await deps.prisma.thread.update({
