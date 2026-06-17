@@ -302,6 +302,27 @@ export function contactNameContext(displayName: string): string {
   return `${CONTACT_NAME_DISCIPLINE}\n\n${recipientLine}`;
 }
 
+export function currentTimeContext(now: Date = new Date()): string {
+  const iso = now.toISOString();
+  const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "system local time";
+  const localLabel = new Intl.DateTimeFormat("en-GB", {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    timeZoneName: "short"
+  }).format(now);
+  return [
+    "CURRENT TIME CONTEXT.",
+    `Current date and time for the operator: ${localLabel}.`,
+    `Current ISO timestamp: ${iso}.`,
+    `System time zone: ${timeZone}.`,
+    "Use this to resolve relative dates and clock times, and to judge whether a mentioned date or event has already passed. Keep the actual reply grounded in the transcript, do not invent timing that is not stated."
+  ].join("\n");
+}
+
 export const BRIEF_FIDELITY_REMINDER = [
   "FIDELITY (applies to every visible brief field — where_it_stands, they_said, on_you).",
   "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation the contact did not express.",
@@ -1990,7 +2011,7 @@ open_loops guidance (RECONNECT):
   }
 }
 
-Today's date is ${new Date().toISOString().slice(0, 10)}. Use it to resolve relative dates and to judge whether a remembered event has already passed.
+${currentTimeContext()}
 
 Reminder: lines starting with \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 
@@ -2455,6 +2476,8 @@ it's formal.
 ${PREDRAFT_FIDELITY_REMINDER}
 
 ${contactNameContext(input.displayName)}
+
+${currentTimeContext()}
 
 ${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
@@ -2936,6 +2959,8 @@ ${PREDRAFT_FIDELITY_REMINDER}
 
 ${contactNameContext(input.displayName)}
 
+${currentTimeContext()}
+
 Operator's intent: ${safeTruncate(trimmed, 600)}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
@@ -3312,6 +3337,8 @@ HARD RULES (strict):
 - Lines prefixed \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 - Write the answer in SECOND PERSON — refer to the operator as "you". NEVER write "the operator" or "operator" in the answer text; that label only exists for transcript attribution.
 - Do not fabricate names, dates, jobs, locations, or any facts not in the context.
+
+${currentTimeContext()}
 
 Contact: ${input.displayName}
 
