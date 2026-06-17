@@ -33,9 +33,6 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   const [savingProfileUrl, setSavingProfileUrl] = useState(false);
   const [friendshipSummary, setFriendshipSummary] = useState<FriendshipSummary | null>(null);
   const [generatingFriendship, setGeneratingFriendship] = useState(false);
-  const [askQuestion, setAskQuestion] = useState("");
-  const [askAnswer, setAskAnswer] = useState<string | null>(null);
-  const [asking, setAsking] = useState(false);
   // Optimistic favourite override (R-0066 / #483). null = follow the loaded
   // detail; a boolean wins until the toggle settles, reverting on failure.
   const [favOverride, setFavOverride] = useState<boolean | null>(null);
@@ -43,18 +40,17 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
   const [groupInput, setGroupInput] = useState("");
   const [groupSaving, setGroupSaving] = useState(false);
   // Per-open-session request token (mirrors the thread page's route-id guard).
-  // Advanced on every open and every personId change so a slow Ask-AI /
-  // friendship-summary response that resolves after the drawer closed (or
-  // switched contact) can be discarded instead of resurfacing on the next open.
+  // Advanced on every open and every personId change so a slow friendship-summary
+  // response that resolves after the drawer closed (or switched contact) can be
+  // discarded instead of resurfacing on the next open.
   const drawerRequestTokenRef = useRef(0);
 
   useEffect(() => {
     if (!open || !personId) return;
-    // Start a new request session: bump the token so any in-flight AI writeback
-    // from the previous open/person is ignored, and clear last session's AI
-    // output so a post-close response can't survive into this open.
+    // Start a new request session: bump the token so any in-flight summary
+    // writeback from the previous open/person is ignored, and clear last
+    // session's output so a post-close response can't survive into this open.
     drawerRequestTokenRef.current += 1;
-    setAskAnswer(null);
     setFriendshipSummary(null);
     // Drop the response if the drawer is closed (or switched to a
     // different person) before the fetch resolves — otherwise a slow
@@ -90,8 +86,6 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
       setProfileUrlInput("");
       setError(null);
       setFriendshipSummary(null);
-      setAskQuestion("");
-      setAskAnswer(null);
       setFavOverride(null);
       setGroupInput("");
     }
@@ -138,28 +132,6 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
     if (!group) return;
     setGroupInput("");
     await saveGroups([...detail.person.tags, group]);
-  };
-
-  const askAboutPerson = async () => {
-    if (!personId) return;
-    const trimmed = askQuestion.trim();
-    if (!trimmed) return;
-    setAsking(true);
-    setAskAnswer(null);
-    setError(null);
-    const startToken = drawerRequestTokenRef.current;
-    try {
-      const result = await apiPost<{ answer: string }>(
-        `/runner/control/person/${personId}/ask`,
-        { question: trimmed }
-      );
-      if (!isCurrentDrawerRequest(startToken, drawerRequestTokenRef.current)) return;
-      setAskAnswer(result.answer);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to ask the AI");
-    } finally {
-      setAsking(false);
-    }
   };
 
   const generateFriendshipSummary = async () => {
@@ -354,13 +326,6 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
                   onGenerate={generateFriendshipSummary}
                 />
               ) : null}
-              <AskAISection
-                question={askQuestion}
-                onQuestionChange={setAskQuestion}
-                answer={askAnswer}
-                asking={asking}
-                onAsk={askAboutPerson}
-              />
             </>
           ) : null}
         </div>
@@ -439,54 +404,5 @@ function FriendshipList({ title, items }: { title: string; items: string[] }) {
         ))}
       </ul>
     </div>
-  );
-}
-
-function AskAISection({
-  question,
-  onQuestionChange,
-  answer,
-  asking,
-  onAsk
-}: {
-  question: string;
-  onQuestionChange: (value: string) => void;
-  answer: string | null;
-  asking: boolean;
-  onAsk: () => void | Promise<void>;
-}) {
-  return (
-    <section className="mt-8 border-t border-hairline pt-6">
-      <p className="m-0 mb-2 font-mono text-[11px] uppercase tracking-[0.08em] text-ink-3">
-        Ask the AI about them
-      </p>
-      <p className="m-0 mb-3 text-[12.5px] leading-[1.55] text-ink-3">
-        Free-form questions grounded in your message history, their enrichment, and your notes. The AI can cite specific dates from your conversations and will say so when something hasn't come up.
-      </p>
-      <textarea
-        value={question}
-        onChange={(event) => onQuestionChange(event.target.value)}
-        placeholder="e.g. what does she think about consulting? when did they last mention Lagos?"
-        rows={3}
-        className="w-full resize-none rounded-row border border-hairline bg-paper px-3 py-2 text-[13.5px] leading-[1.55] text-ink outline-none transition-[border-color] duration-calm placeholder:text-ink-4 focus:border-hairline-strong"
-      />
-      <div className="mt-2 flex items-center gap-2">
-        <Button
-          variant="primary"
-          disabled={asking || !question.trim()}
-          onClick={() => void onAsk()}
-        >
-          {asking ? (
-            <Loader2 className="h-[14px] w-[14px] animate-spin" />
-          ) : null}
-          {asking ? "Asking…" : "Ask"}
-        </Button>
-      </div>
-      {answer ? (
-        <div className="mt-3 rounded-row border border-hairline bg-paper p-3 text-[13.5px] leading-[1.55] text-ink">
-          <p className="m-0 whitespace-pre-wrap">{answer}</p>
-        </div>
-      ) : null}
-    </section>
   );
 }
