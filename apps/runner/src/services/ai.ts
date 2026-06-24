@@ -52,7 +52,9 @@ import { raceAiProviders } from "./ai-race";
 // Re-exported so existing tests + callers continue to import from ai.ts.
 export const classifyLlmError = classifyLlmErrorImpl;
 
-const summarySchema = z.object({
+// Exported so a regression test can pin the field nullability contract
+// (notably `urgency_hint`, which models return as null rather than omitting).
+export const summarySchema = z.object({
   summary: z.string(),
   what_they_want: z.string(),
   open_loops: z.array(z.string()),
@@ -69,7 +71,12 @@ const summarySchema = z.object({
     .default([]),
   tone_notes: z.array(z.string()).default([]),
   needs_reply: z.boolean(),
-  urgency_hint: z.string().optional(),
+  // `.nullish()` (not `.optional()`): the prompt says "string or omit if none",
+  // but models routinely return `urgency_hint: null` instead of omitting it.
+  // `.optional()` rejects null ("Expected string, received null"), which threw
+  // the WHOLE summary parse, so a provider that answered correctly was logged
+  // as a failure and the fallback chain exhausted. Mirrors `remember.date`.
+  urgency_hint: z.string().nullish(),
   // The compressed Reply Brief that drives the thread right rail. Validated
   // loosely here (the model occasionally returns malformed point objects)
   // and re-sanitised by `sanitizeReplyBrief` post-parse, which enforces the
@@ -2202,7 +2209,7 @@ ${transcript}`;
       remember: result.remember,
       tone_notes: result.tone_notes.map((note) => stripBannedPhrases(note)).filter((note) => note.length > 0),
       needs_reply: result.needs_reply,
-      urgency_hint: result.urgency_hint,
+      urgency_hint: result.urgency_hint ?? undefined,
       reply_brief: finalBrief,
       // Carry the provider source through so persisting callers can tell a
       // real summary from the synthesised fallback (source.providerId === null
