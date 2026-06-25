@@ -48,6 +48,11 @@ import { groupStubFields } from "./platforms/imessage-group-name";
 import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
 import { loadBestContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
+import {
+  imessageVoiceSnapshotMeta,
+  imessageVoiceSnapshotPath,
+  snapshotImessageVoice
+} from "./services/imessage-voice-store";
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
@@ -352,6 +357,12 @@ let enqueueEnrichmentForScan:
 const imessageAttachmentResolver: AttachmentResolver | null = runnerConfig.imessage.enabled
   ? {
       async resolve(guid: string) {
+        // Prefer our own snapshot: Apple may have expired the original
+        // (chat.db row + attachment file deleted) since we captured it, in
+        // which case findAttachmentByGuid returns null. The snapshot keeps
+        // transcription and playback working after expiry.
+        const snapshot = imessageVoiceSnapshotMeta(guid);
+        if (snapshot) return snapshot;
         let db: IMessageDb;
         try {
           db = new IMessageDb(runnerConfig.imessage.dbPath);
@@ -413,6 +424,70 @@ const compositeAttachmentResolver: AttachmentResolver | null =
         }
       }
     : null;
+
+// True when a resolved iMessage attachment is a voice note / audio clip
+// worth snapshotting. Mirrors the transcription service's caf/audio
+// detection so we only ever copy audio, never photos or PDFs.
+function isVoiceNoteAttachment(meta: {
+  mimeType: string | null;
+  filename: string | null;
+  transferName: string | null;
+}): boolean {
+  const mime = (meta.mimeType ?? "").toLowerCase();
+  if (mime.includes("audio") || mime.includes("caf") || mime.includes("coreaudio")) return true;
+  const name = (meta.transferName ?? meta.filename ?? "").toLowerCase();
+  return /\.(caf|m4a|amr|aac|wav|mp3)$/.test(name) || name.includes("audio message");
+}
+
+// Snapshot a freshly-scanned voice note's audio bytes into our own store
+// before iMessage's "Audio Messages -> Expire: After 2 Minutes" can delete
+// them. Runs from the scan-time audio hook, synchronously copying the file
+// while it still exists, so the transcript (and replay) survive Apple's
+// expiry window. Gated on the transcription feature flag (the snapshot only
+// matters when we also transcribe). Best-effort; never throws into the scan.
+async function snapshotMessageVoiceNotes(messageId: string): Promise<void> {
+  if (!runnerConfig.imessage.enabled || !runnerConfig.audioTranscription.enabled) return;
+  let attachmentsJson: string | null;
+  try {
+    const row = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: { attachmentsJson: true }
+    });
+    attachmentsJson = row?.attachmentsJson ?? null;
+  } catch {
+    return;
+  }
+  if (!attachmentsJson) return;
+  let guids: string[];
+  try {
+    const parsed = JSON.parse(attachmentsJson) as Array<{ guid?: string | null }>;
+    guids = parsed
+      .map((a) => a?.guid)
+      .filter((g): g is string => typeof g === "string" && g.length > 0);
+  } catch {
+    return;
+  }
+  if (guids.length === 0) return;
+  let db: IMessageDb;
+  try {
+    db = new IMessageDb(runnerConfig.imessage.dbPath);
+  } catch {
+    return;
+  }
+  try {
+    for (const guid of guids) {
+      if (imessageVoiceSnapshotPath(guid)) continue; // already captured
+      const meta = db.findAttachmentByGuid(guid);
+      if (!meta?.absolutePath) continue;
+      if (!isVoiceNoteAttachment(meta)) continue;
+      snapshotImessageVoice(guid, meta.absolutePath);
+    }
+  } catch {
+    // best-effort; a snapshot failure must not break the scan
+  } finally {
+    db.close();
+  }
+}
 
 // Provider selection. With audio transcription off, the service stays
 // disabled and no provider is constructed. With it on, we pick exactly
@@ -646,7 +721,15 @@ const scanQueue = createScanQueue({
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
   onNewPerson: (input) => enqueueEnrichmentForScan?.(input),
-  onAudioMessage: (input) => transcriptionService.enqueueMessage(input.messageId)
+  onAudioMessage: (input) => {
+    // Snapshot the audio bytes first (sync copy, while Apple's file still
+    // exists), then enqueue transcription — which reads back from the
+    // snapshot via the resolver, so it can't lose the race to Apple's
+    // 2-minute expiry.
+    void snapshotMessageVoiceNotes(input.messageId).finally(() =>
+      transcriptionService.enqueueMessage(input.messageId)
+    );
+  }
 }) as ScanQueueWithSmokeIngest;
 
 const sendService = createSendService({
@@ -1788,6 +1871,20 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
     return;
   }
   const { guid } = z.object({ guid: z.string().min(8).max(100) }).parse(req.params);
+  // Prefer our snapshot: once Apple expires a voice note, chat.db has no row
+  // for it, so findAttachmentByGuid would 404. The snapshot keeps replay
+  // working after expiry (and avoids opening chat.db at all).
+  const snapshot = imessageVoiceSnapshotMeta(guid);
+  if (snapshot) {
+    await streamIMessageAttachment({
+      absolutePath: snapshot.absolutePath,
+      mimeType: snapshot.mimeType,
+      transferName: snapshot.transferName,
+      filename: snapshot.filename,
+      res
+    });
+    return;
+  }
   let db: IMessageDb;
   try {
     db = new IMessageDb(runnerConfig.imessage.dbPath);

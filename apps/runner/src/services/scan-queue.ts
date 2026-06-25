@@ -24,6 +24,7 @@ import type { LinkedInStreamPreOpenDecision } from "../platforms/linkedin-adapte
 import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failure-routing";
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
+import { deleteImessageVoiceSnapshot } from "./imessage-voice-store";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
   ScanRetryController,
@@ -281,6 +282,28 @@ export type OutboundDedupAction =
  */
 export function normalizeOutboundTextForDedup(value: string): string {
   return value.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Extract iMessage attachment guids from persisted `attachmentsJson` blobs.
+ * Used to drop voice-note snapshots when their owning messages are removed
+ * (retracted / failed delivery), so we never preserve audio for a message the
+ * recipient never kept. Tolerant of malformed JSON — returns what it can.
+ */
+export function attachmentGuidsFromRows(rows: Array<{ attachmentsJson: string | null }>): string[] {
+  const guids: string[] = [];
+  for (const row of rows) {
+    if (!row.attachmentsJson) continue;
+    try {
+      const parsed = JSON.parse(row.attachmentsJson) as Array<{ guid?: string | null }>;
+      for (const att of parsed) {
+        if (typeof att?.guid === "string" && att.guid.length > 0) guids.push(att.guid);
+      }
+    } catch {
+      // skip malformed blob
+    }
+  }
+  return guids;
 }
 
 export function decideOutboundDedup(input: {
@@ -3300,6 +3323,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
       try {
         const retractedKeys = await adapter.collectRetractedOutboundKeys(candidate);
         if (retractedKeys.length > 0) {
+          // Honour the removal for any voice notes too: a retracted/failed
+          // outbound message the recipient never kept must not leave a
+          // preserved audio snapshot behind. Collect the attachment guids
+          // before the rows are deleted, then drop their snapshots after.
+          const removedRows = await prisma.message.findMany({
+            where: {
+              threadId: thread.id,
+              direction: "OUT",
+              platformMessageKey: { in: retractedKeys }
+            },
+            select: { attachmentsJson: true }
+          });
           const removed = await prisma.message.deleteMany({
             where: {
               threadId: thread.id,
@@ -3307,6 +3342,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
               platformMessageKey: { in: retractedKeys }
             }
           });
+          for (const guid of attachmentGuidsFromRows(removedRows)) {
+            deleteImessageVoiceSnapshot(guid);
+          }
           if (removed.count > 0) {
             console.log(
               `[scan] removed ${removed.count} failed outbound message(s) from thread ${thread.id}`
