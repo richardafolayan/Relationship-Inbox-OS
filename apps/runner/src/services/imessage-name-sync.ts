@@ -33,8 +33,13 @@ interface ImessageNameSyncDeps {
   intervalMs?: number;
   /** Override the prisma client. Defaults to the runner's singleton; tests inject a fake. */
   prisma?: PrismaClient;
-  /** vCard path. Defaults to the runner's iMessage config. */
-  vcfPath?: string;
+  /**
+   * vCard path. Defaults to the runner's iMessage config. Pass null to skip
+   * the vCard read entirely — tests use this so the machine's real
+   * data/contacts.vcf (a live-Contacts export) can never leak into a fixture
+   * run.
+   */
+  vcfPath?: string | null;
   /** AddressBook DB paths. Defaults to auto-discovery under $HOME. */
   addressBookDbPaths?: string[];
   /** Force-enable/disable the live macOS Contacts read. Defaults to macOS-only. */
@@ -106,7 +111,10 @@ export function createImessageNameSync(deps: ImessageNameSyncDeps = {}): Imessag
         dbPaths: deps.addressBookDbPaths,
         enabled: deps.useAddressBook
       });
-      const vcardEntries = loadVcardEntries(deps.vcfPath ?? runnerConfig.imessage.contactsVcfPath);
+      const vcardEntries =
+        deps.vcfPath === null
+          ? []
+          : loadVcardEntries(deps.vcfPath ?? runnerConfig.imessage.contactsVcfPath);
       const resolver = buildContactResolver([...addressBookEntries, ...vcardEntries]);
       const addressBookContactCount = addressBookEntries.length;
       const contactsLoaded = resolver.size();
