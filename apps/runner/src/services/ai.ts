@@ -2875,10 +2875,6 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
   }): Promise<string> {
     const trimmed = input.intent.trim();
     if (!trimmed) return "";
-    const { client, model, provider } = await resolveActive();
-    if (!client) {
-      return trimmed;
-    }
 
     const cleanedSamples = input.voiceSamples
       .map((sample) => sample.trim())
@@ -2981,31 +2977,32 @@ ${lastInbound ? `\nLast message from recipient: ${safeTruncate(renderMessageBody
 
 Return strict JSON: { "text": "string" }`;
 
-    try {
-      const response = await client.chat.completions.create({
-        model,
-        ...(shouldUseJsonResponseFormat(provider, model)
-          ? { response_format: { type: "json_object" as const } }
-          : {}),
-        messages: [
-          { role: "system", content: selectVoicePrompt(input.platform) },
-          { role: "user", content: reinforceJsonPrompt(prompt, model) }
-        ],
-        ...providerOptions(provider, model),
-        ...geminiExtraBody(provider, model)
-      });
-      const content = response.choices[0]?.message?.content;
-      if (!content) return trimmed;
-      const parsed = z.object({ text: z.string().min(1) }).parse(parseAiJson(content, model));
-      let cleaned = applyVoiceRules(stripUnpairedSurrogates(parsed.text));
-      cleaned = enforceSentenceStartCapitals(cleaned);
-      return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
-    } catch (error) {
+    const fallback = { text: trimmed };
+    const { result, source } = await modelJson(
+      prompt,
+      fallback,
+      (value) => z.object({ text: z.string().min(1) }).parse(value),
+      selectVoicePrompt(input.platform)
+    );
+
+    if (!source?.providerId) {
       console.warn(
-        `[ai] composeInVoice failed (provider=${provider}, model=${model}); returning raw intent. ${classifyLlmError(error, provider)}`
+        `[ai] composeInVoice failed for every configured provider; returning raw intent. ` +
+          `Active provider's last failure: ${source?.fellBackMessage ?? "unknown"}`
       );
       return trimmed;
     }
+
+    if (source.fellBackFromProviderId) {
+      console.warn(
+        `[ai] composeInVoice fell back from ${source.fellBackFromProviderDisplayName ?? source.fellBackFromProviderId} ` +
+          `to ${source.providerDisplayName ?? source.providerId}. Reason: ${source.fellBackMessage ?? "unknown"}`
+      );
+    }
+
+    let cleaned = applyVoiceRules(stripUnpairedSurrogates(result.text));
+    cleaned = enforceSentenceStartCapitals(cleaned);
+    return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
   }
 
   /**

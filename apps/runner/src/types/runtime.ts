@@ -413,8 +413,8 @@ export interface AiService {
    * week", "decline politely", "say I'm interested") and rewrite it as
    * a sendable message in the operator's voice — calibrated against the
    * outbound history of THIS thread so register and warmth match how
-   * they've previously written to this person. The fallback returns the
-   * intent unchanged so the composer never goes empty.
+   * they've previously written to this person. Runtime provider failures walk
+   * the configured fallback chain before returning the intent unchanged.
    */
   composeInVoice(input: {
     intent: string;
