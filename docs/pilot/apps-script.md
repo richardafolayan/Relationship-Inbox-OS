@@ -104,13 +104,11 @@ var COL = {
 var COLUMN_COUNT = 28;
 
 // Screenshots are committed into the repo so they are viewable straight from
-// the issue. Drive links are auth-walled, and a PRIVATE repo's
-// raw.githubusercontent.com URLs do not render inline (GitHub's image proxy
-// fetches them without the viewer's credentials and gets a 404), so the issue
-// links to each committed file's GitHub page instead. Files live on a
-// dedicated branch under this folder, one per screenshot.
+// the issue body. The script embeds the in-GitHub raw file URL and also keeps
+// a normal GitHub file link below it as a fallback. Files live on a dedicated
+// branch under this folder, one per screenshot.
 var ATTACHMENTS_DIR = 'pilot-feedback-attachments';
-// Marker in auto-posted screenshot comments so backfill stays idempotent.
+// Marker in issue bodies so screenshot backfill stays idempotent.
 var AUTO_SCREENSHOT_MARKER = '<!-- inbox-os:pilot-screenshot -->';
 
 function doPost(e) {
@@ -276,23 +274,23 @@ function syncGithubForRow_(props, sheet, rowNumber) {
   }
 
   try {
-    // Commit any screenshots into the repo first, so the issue body can link
-    // to them (viewable in GitHub). Best effort: if embedding is off, the
+    // Commit any screenshots into the repo first, so the issue body can embed
+    // them. Best effort: if embedding is off, the
     // token lacks Contents access, or an upload fails, this stays empty and
     // the body falls back to the Sheet/Drive note; the issue is still created.
-    var githubScreenshotUrls = [];
+    var githubScreenshots = [];
     if (screenshotEmbedEnabled_(props)) {
       try {
-        githubScreenshotUrls = uploadRowScreenshotsToGithub_(
+        githubScreenshots = uploadRowScreenshotsToGithub_(
           props, owner, repo, token,
           String(values[COL.reportId - 1] || '').trim(),
           values[COL.screenshotUrl - 1]
         );
       } catch (shotErr) {
-        githubScreenshotUrls = [];
+        githubScreenshots = [];
       }
     }
-    var issue = buildIssueContent_(props, values, githubScreenshotUrls);
+    var issue = buildIssueContent_(props, values, githubScreenshots);
     var result = createGithubIssue_(props, owner, repo, token, issue);
     if (result.ok) {
       writeGithubColumns_(sheet, rowNumber, result.url, result.number, 'created', '');
@@ -314,11 +312,11 @@ function writeGithubColumns_(sheet, rowNumber, url, number, status, error) {
 /**
  * Build the issue title and body from a Sheet row. No message thread content
  * and no secrets, ever. When screenshots were committed into the (private)
- * repo, the body links to each one so it is viewable straight from the issue;
+ * repo, the body embeds each one so it is viewable straight from the issue;
  * otherwise it falls back to the Sheet/Drive note (Drive links are only
  * spelled out when GITHUB_INCLUDE_SCREENSHOT_LINK is 'true').
  */
-function buildIssueContent_(props, values, githubScreenshotUrls) {
+function buildIssueContent_(props, values, githubScreenshots) {
   function cell(name) { return String(values[COL[name] - 1] || '').trim(); }
 
   var reportId = cell('reportId');
@@ -368,16 +366,9 @@ function buildIssueContent_(props, values, githubScreenshotUrls) {
   var screenshotUrls = cell('screenshotUrl');
   if (screenshotUrls) {
     lines.push('');
-    var ghShots = githubScreenshotUrls || [];
+    var ghShots = githubScreenshots || [];
     if (ghShots.length) {
-      // Committed into this private repo; click to view the image in GitHub
-      // (authenticated), no Drive and no Sheet hop.
-      lines.push('### Screenshots');
-      for (var si = 0; si < ghShots.length; si++) {
-        lines.push('- 📎 [View screenshot ' + (si + 1) + ' in GitHub](' + ghShots[si] + ')');
-      }
-      lines.push('');
-      lines.push('_Also saved to the feedback Sheet (column W, Google Drive)._');
+      lines.push(buildScreenshotMarkdown_(reportId, ghShots));
     } else {
       var allowLink = String(props.getProperty('GITHUB_INCLUDE_SCREENSHOT_LINK') || '')
         .trim().toLowerCase() === 'true';
@@ -512,7 +503,7 @@ function syncMissingGitHubIssues() {
 }
 
 /* ------------------------------------------------------------------ *
- * Screenshot embedding. Commit screenshots into the repo and link them
+ * Screenshot embedding. Commit screenshots into the repo and embed them
  * from the issue so they are viewable straight from GitHub. The bytes
  * come from Drive (the canonical store), so this works for a freshly
  * appended row and for older rows on backfill. Everything here is best
@@ -623,10 +614,49 @@ function blobViewUrl_(owner, repo, branch, path) {
     '/blob/' + encodeURIComponent(branch) + '/' + encodePath_(path);
 }
 
+/** In-GitHub raw file URL used for Markdown image embeds. */
+function rawFileUrl_(owner, repo, branch, path) {
+  return 'https://github.com/' + owner + '/' + repo +
+    '/raw/' + encodeURIComponent(branch) + '/' + encodePath_(path);
+}
+
+function buildScreenshotMarkdown_(reportId, screenshots) {
+  var lines = [AUTO_SCREENSHOT_MARKER, '### Screenshots'];
+  for (var i = 0; i < screenshots.length; i++) {
+    var shot = screenshots[i];
+    var imageUrl = typeof shot === 'string' ? shot : shot.imageUrl;
+    var viewUrl = typeof shot === 'string' ? shot : shot.viewUrl;
+    lines.push('![Screenshot ' + (i + 1) + '](' + imageUrl + ')');
+    lines.push('');
+    lines.push('[Open screenshot ' + (i + 1) + ' in GitHub](' + viewUrl + ')');
+    if (i < screenshots.length - 1) lines.push('');
+  }
+  lines.push('');
+  lines.push('_Also saved to the feedback Sheet (column W, Google Drive)._');
+  return lines.join('\n');
+}
+
+function appendScreenshotEmbedsToIssueBody_(body, reportId, screenshots) {
+  var current = String(body || '');
+  if (current.indexOf(AUTO_SCREENSHOT_MARKER) !== -1) return current;
+
+  var block = buildScreenshotMarkdown_(reportId, screenshots);
+  var fallbackPattern = /(?:A screenshot was attached\.|[0-9]+ screenshots were attached\.)(?: Drive links \(access controlled\):\n(?:https?:\/\/[^\n]+\n?)+| See column W of the feedback Sheet\.)/;
+  var replaced = current.replace(fallbackPattern, block);
+  if (replaced !== current) return replaced;
+
+  var metadataStart = current.lastIndexOf('\n```json');
+  if (metadataStart !== -1) {
+    return current.slice(0, metadataStart) + '\n\n' + block + current.slice(metadataStart);
+  }
+  return current + '\n\n' + block;
+}
+
 /**
- * Commit every screenshot for a row into the repo and return the blob-view
- * URLs (one per screenshot). Reads the bytes from Drive using the URLs in
- * column W, so it works for new and old rows alike. Best effort.
+ * Commit every screenshot for a row into the repo and return the Markdown
+ * image URL plus a normal GitHub file URL for each screenshot. Reads the bytes
+ * from Drive using the URLs in column W, so it works for new and old rows
+ * alike. Best effort.
  */
 function uploadRowScreenshotsToGithub_(props, owner, repo, token, reportId, screenshotCell) {
   var driveUrls = String(screenshotCell || '').split('\n')
@@ -636,7 +666,7 @@ function uploadRowScreenshotsToGithub_(props, owner, repo, token, reportId, scre
   var branch = attachmentsBranch_(props);
   if (!ensureGithubBranch_(owner, repo, token, branch)) return [];
 
-  var urls = [];
+  var screenshots = [];
   for (var i = 0; i < driveUrls.length; i++) {
     try {
       var fileId = driveFileIdFromUrl_(driveUrls[i]);
@@ -649,42 +679,62 @@ function uploadRowScreenshotsToGithub_(props, owner, repo, token, reportId, scre
         Utilities.base64Encode(blob.getBytes()),
         'chore(pilot-feedback): attach screenshot for ' + reportId
       );
-      if (ok) urls.push(blobViewUrl_(owner, repo, branch, path));
+      if (ok) {
+        screenshots.push({
+          imageUrl: rawFileUrl_(owner, repo, branch, path),
+          viewUrl: blobViewUrl_(owner, repo, branch, path)
+        });
+      }
     } catch (err) {
       // Skip this one; the Drive link in the Sheet remains the fallback.
     }
   }
-  return urls;
+  return screenshots;
 }
 
-/** Post a comment on an issue. Returns true on success (201). */
-function postIssueComment_(owner, repo, token, issueNumber, body) {
+/** Fetch one issue so backfill can patch its existing body. */
+function getGithubIssue_(owner, repo, token, issueNumber) {
   var url = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' +
-    encodeURIComponent(repo) + '/issues/' + encodeURIComponent(issueNumber) + '/comments';
-  return githubFetch_(token, url, 'post', { body: body }).getResponseCode() === 201;
+    encodeURIComponent(repo) + '/issues/' + encodeURIComponent(issueNumber);
+  var resp = githubFetch_(token, url, 'get');
+  if (resp.getResponseCode() !== 200) return null;
+  return JSON.parse(resp.getContentText());
 }
 
-/** True if the issue already carries an auto-posted screenshot comment. */
-function issueHasScreenshotComment_(owner, repo, token, issueNumber) {
+/** Patch the existing issue body. Returns true on success. */
+function updateGithubIssueBody_(owner, repo, token, issueNumber, body) {
+  var url = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' +
+    encodeURIComponent(repo) + '/issues/' + encodeURIComponent(issueNumber);
+  return githubFetch_(token, url, 'patch', { body: body }).getResponseCode() === 200;
+}
+
+function deleteAutoScreenshotComments_(owner, repo, token, issueNumber) {
   var url = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' +
     encodeURIComponent(repo) + '/issues/' + encodeURIComponent(issueNumber) +
     '/comments?per_page=100';
   var resp = githubFetch_(token, url, 'get');
-  if (resp.getResponseCode() !== 200) return false;
+  if (resp.getResponseCode() !== 200) return 0;
   var comments = JSON.parse(resp.getContentText());
+  var deleted = 0;
   for (var i = 0; i < comments.length; i++) {
-    if (String(comments[i].body || '').indexOf(AUTO_SCREENSHOT_MARKER) !== -1) return true;
+    var comment = comments[i];
+    if (String(comment.body || '').indexOf(AUTO_SCREENSHOT_MARKER) === -1) continue;
+    var deleteUrl = 'https://api.github.com/repos/' + encodeURIComponent(owner) + '/' +
+      encodeURIComponent(repo) + '/issues/comments/' + encodeURIComponent(comment.id);
+    var code = githubFetch_(token, deleteUrl, 'delete').getResponseCode();
+    if (code === 204) deleted++;
   }
-  return false;
+  return deleted;
 }
 
 /**
  * Backfill. For every row that has a screenshot AND an existing GitHub issue,
- * commit the screenshot(s) into the repo and post one comment on the issue
- * with "view in GitHub" links. Idempotent: a row whose issue already has the
- * auto-posted comment is skipped, so re-runs never double-post. Run it from
- * the editor (pick backfillScreenshotComments, press Run) to catch up reports
- * filed before screenshot embedding was on.
+ * commit the screenshot(s) into the repo and patch the issue body with inline
+ * image embeds. Idempotent: a row whose issue body already has the marker is
+ * skipped, so re-runs never duplicate the screenshot block. Old detached
+ * auto-comments carrying the marker are removed best-effort after the body is
+ * fixed. Run it from the editor (pick backfillScreenshotComments, press Run)
+ * to catch up reports filed before screenshot embedding was on.
  */
 function backfillScreenshotComments() {
   var props = PropertiesService.getScriptProperties();
@@ -699,7 +749,7 @@ function backfillScreenshotComments() {
   var last = sheet.getLastRow();
   if (last < 2) { Logger.log('No reports yet.'); return; }
 
-  var posted = 0, skipped = 0, failed = 0;
+  var updated = 0, skipped = 0, failed = 0;
   for (var row = 2; row <= last; row++) {
     var values = sheet.getRange(row, 1, 1, COLUMN_COUNT).getValues()[0];
     var reportId = String(values[COL.reportId - 1] || '').trim();
@@ -707,22 +757,28 @@ function backfillScreenshotComments() {
     var screenshotCell = String(values[COL.screenshotUrl - 1] || '').trim();
     if (!issueNumber || !screenshotCell) { skipped++; continue; }
     try {
-      if (issueHasScreenshotComment_(owner, repo, token, issueNumber)) { skipped++; continue; }
-      var urls = uploadRowScreenshotsToGithub_(props, owner, repo, token, reportId, screenshotCell);
-      if (!urls.length) { failed++; continue; }
-      var body = AUTO_SCREENSHOT_MARKER + '\n' +
-        '**Screenshots** (auto-attached for ' + reportId + ', viewable in GitHub):\n' +
-        urls.map(function (u, i) {
-          return '- 📎 [View screenshot ' + (i + 1) + ' in GitHub](' + u + ')';
-        }).join('\n');
-      if (postIssueComment_(owner, repo, token, issueNumber, body)) posted++;
-      else failed++;
+      var issue = getGithubIssue_(owner, repo, token, issueNumber);
+      if (!issue) { failed++; continue; }
+      if (String(issue.body || '').indexOf(AUTO_SCREENSHOT_MARKER) !== -1) {
+        deleteAutoScreenshotComments_(owner, repo, token, issueNumber);
+        skipped++;
+        continue;
+      }
+      var screenshots = uploadRowScreenshotsToGithub_(props, owner, repo, token, reportId, screenshotCell);
+      if (!screenshots.length) { failed++; continue; }
+      var body = appendScreenshotEmbedsToIssueBody_(issue.body, reportId, screenshots);
+      if (updateGithubIssueBody_(owner, repo, token, issueNumber, body)) {
+        deleteAutoScreenshotComments_(owner, repo, token, issueNumber);
+        updated++;
+      } else {
+        failed++;
+      }
     } catch (err) {
       failed++;
     }
     Utilities.sleep(400);
   }
-  Logger.log('Screenshot backfill complete. posted=' + posted +
+  Logger.log('Screenshot backfill complete. updated=' + updated +
     ', skipped=' + skipped + ', failed=' + failed + '.');
 }
 
@@ -759,14 +815,12 @@ they attach can show real private messages**.
   (search engines and caches).
 - **Screenshots are committed into the repo so they are viewable in GitHub.**
   With `GITHUB_ATTACH_SCREENSHOTS` on (the default), the script commits each
-  screenshot to the attachments branch and the issue links to it, so anyone
-  who can read the repo sees the image straight from the issue. This is the
-  point, but it means **the repo must be private**, because the image bytes
-  now live in it. (A private repo's `raw.githubusercontent.com` URLs do not
-  render inline anyway, because GitHub's image proxy can't read them, so the issue
-  links to the file's GitHub page, where a repo member sees it rendered.) Set
-  `GITHUB_ATTACH_SCREENSHOTS` to `false` to keep screenshots out of the repo
-  entirely (Drive only), the old behaviour.
+  screenshot to the attachments branch and embeds it in the issue body, so
+  anyone who can read the repo sees the image straight from the issue. This is
+  the point, but it means **the repo must be private**, because the image bytes
+  now live in it. The issue also includes an "Open screenshot" link under each
+  image as a fallback. Set `GITHUB_ATTACH_SCREENSHOTS` to `false` to keep
+  screenshots out of the repo entirely (Drive only), the old behaviour.
 - The issue body carries metadata, the page, app version, timestamp,
   browser/device, AI triage, and the tester's own words. It never carries
   secrets, auth values, cookies, message thread content, or file paths.
@@ -789,7 +843,7 @@ repo, with the **minimum** permission needed to create issues.
    ("Metadata" switches to "Read-only" on its own; that is required and fine.)
    Contents access lets the script commit each screenshot into the repo (and
    create the attachments branch) so the image is viewable straight from the
-   issue. Without it, issues are still created, just without screenshot links.
+   issue. Without it, issues are still created, just without screenshot embeds.
 7. **Generate token**, then copy it once. GitHub will not show it again.
 8. Paste it into the Apps Script Script Property `GITHUB_TOKEN` (next section).
    Do not paste it anywhere else: not into the repo, not into `.env`, not into
@@ -819,8 +873,8 @@ Optional:
 | `GITHUB_LABELS` | comma separated, for example `pilot-feedback,needs-triage`. Each label must already exist in the repo. |
 | `GITHUB_ASSIGNEES` | comma separated GitHub logins. Each must have access to the repo. |
 | `GITHUB_MILESTONE_NUMBER` | a milestone number that already exists in the repo |
-| `GITHUB_INCLUDE_SCREENSHOT_LINK` | `true` to include the screenshot Drive link in the issue body. Default off. Read the privacy note above before turning this on. Ignored once screenshots are committed into the repo (below), since the issue then links to the in-GitHub copies. |
-| `GITHUB_ATTACH_SCREENSHOTS` | `true` (default) commits each screenshot into the repo and links it from the issue, so it is viewable in GitHub. Set `false` to keep screenshots out of the repo (Drive only). Needs the token's **Contents: Read and write**. |
+| `GITHUB_INCLUDE_SCREENSHOT_LINK` | `true` to include the screenshot Drive link in the issue body. Default off. Read the privacy note above before turning this on. Ignored once screenshots are committed into the repo (below), since the issue then embeds the in-GitHub copies. |
+| `GITHUB_ATTACH_SCREENSHOTS` | `true` (default) commits each screenshot into the repo and embeds it in the issue body, so it is viewable in GitHub. Set `false` to keep screenshots out of the repo (Drive only). Needs the token's **Contents: Read and write**. |
 | `GITHUB_ATTACHMENTS_BRANCH` | Branch the screenshots are committed to. Default `pilot-feedback-attachments`, auto-created from the repo's default branch if missing. Keeps screenshot blobs off your main branch. |
 
 With `GITHUB_ISSUES_ENABLED` unset or not `true`, the script never calls
@@ -894,10 +948,13 @@ and `failed` is rows the GitHub call did not create (reason in column AA).
 To attach screenshots to issues that **already exist** (filed before screenshot
 embedding was on, like the early pilot reports), pick `backfillScreenshotComments`
 instead and **Run** it. For every row that has a screenshot and an issue, it
-commits the screenshot into the repo and posts one comment on the issue with
-"view in GitHub" links. It is idempotent: an issue that already has the
-auto-posted comment is skipped, so it is safe to re-run. It logs
-`Screenshot backfill complete. posted=…, skipped=…, failed=….`
+commits the screenshot into the repo and patches the existing issue body with
+the same inline screenshot block used for new reports. It is idempotent: an
+issue body that already has the screenshot marker is skipped, so it is safe to
+re-run. If an earlier backfill posted a detached auto-comment, the function
+deletes that marker-bearing comment after the issue body is fixed. It logs a
+summary like
+`Screenshot backfill complete. updated=6, skipped=2, failed=0.`
 
 ### Duplicate protection and its limit
 
@@ -924,7 +981,7 @@ issues) and you can close one issue by hand.
 - **Screenshots** are user-attached and optional. They are always stored in
   your private Drive folder; the status endpoint never returns those URLs.
   With `GITHUB_ATTACH_SCREENSHOTS` on (the default), each screenshot is also
-  committed into the repo on the attachments branch and linked from the issue,
+  committed into the repo on the attachments branch and embedded in the issue,
   so it is viewable straight from GitHub. To attach screenshots to issues
   filed before this was on, run `backfillScreenshotComments` from the editor.
 - **`status` and `note`** (columns C and D) are yours to edit in the Sheet.
@@ -953,7 +1010,7 @@ issues) and you can close one issue by hand.
     the repo.
   - `422`: usually a label, assignee, or milestone that does not exist in the
     repo. Create it first, or clear that optional property.
-- **Issue created but no screenshot links** (the body still says "See column W
+- **Issue created but no screenshot embeds** (the body still says "See column W
   of the feedback Sheet" even though a screenshot was attached): the token is
   missing **Contents: Read and write**, or `GITHUB_ATTACH_SCREENSHOTS` is
   `false`. Add the permission (regenerate the token if needed), re-deploy, then
