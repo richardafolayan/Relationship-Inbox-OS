@@ -48,6 +48,11 @@ import { groupStubFields } from "./platforms/imessage-group-name";
 import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
 import { loadBestContactResolver } from "./services/contact-resolver";
 import { streamIMessageAttachment } from "./services/imessage-attachment-server";
+import {
+  imessageVoiceSnapshotMeta,
+  imessageVoiceSnapshotPath,
+  snapshotImessageVoice
+} from "./services/imessage-voice-store";
 import { createScanQueue } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
@@ -352,24 +357,56 @@ let enqueueEnrichmentForScan:
 const imessageAttachmentResolver: AttachmentResolver | null = runnerConfig.imessage.enabled
   ? {
       async resolve(guid: string) {
-        let db: IMessageDb;
+        // Live chat.db metadata is authoritative (Apple's real mime type and
+        // names); the snapshot's mime is only derived from its file
+        // extension. Prefer live while the row AND file survive, and fall
+        // back to our snapshot once "Expire After 2 Minutes" has deleted
+        // them — that's what keeps transcription working after expiry.
+        let live: {
+          absolutePath: string | null;
+          mimeType: string | null;
+          filename: string | null;
+          transferName: string | null;
+        } | null = null;
         try {
-          db = new IMessageDb(runnerConfig.imessage.dbPath);
+          const db = new IMessageDb(runnerConfig.imessage.dbPath);
+          try {
+            live = db.findAttachmentByGuid(guid) ?? null;
+          } finally {
+            db.close();
+          }
         } catch {
-          return null;
+          // chat.db unreadable (Full Disk Access?); the snapshot can still serve.
         }
-        try {
-          const meta = db.findAttachmentByGuid(guid);
-          if (!meta || !meta.absolutePath) return null;
+        if (live?.absolutePath && existsSync(live.absolutePath)) {
           return {
-            absolutePath: meta.absolutePath,
-            mimeType: meta.mimeType,
-            filename: meta.filename,
-            transferName: meta.transferName
+            absolutePath: live.absolutePath,
+            mimeType: live.mimeType,
+            filename: live.filename,
+            transferName: live.transferName
           };
-        } finally {
-          db.close();
         }
+        const snapshot = imessageVoiceSnapshotMeta(guid);
+        if (snapshot) {
+          // The row can outlive the file (expiry deletes the file first):
+          // keep chat.db's mime/names over the extension-derived ones.
+          return {
+            absolutePath: snapshot.absolutePath,
+            mimeType: live?.mimeType ?? snapshot.mimeType,
+            filename: live?.filename ?? snapshot.filename,
+            transferName: live?.transferName ?? snapshot.transferName
+          };
+        }
+        if (!live?.absolutePath) return null;
+        // Row exists, file gone, no snapshot: surface the (missing) live
+        // path so the service records its missing_file skip + retention
+        // warning, exactly as before snapshots existed.
+        return {
+          absolutePath: live.absolutePath,
+          mimeType: live.mimeType,
+          filename: live.filename,
+          transferName: live.transferName
+        };
       }
     }
   : null;
@@ -413,6 +450,70 @@ const compositeAttachmentResolver: AttachmentResolver | null =
         }
       }
     : null;
+
+// True when a resolved iMessage attachment is a voice note / audio clip
+// worth snapshotting. Mirrors the transcription service's caf/audio
+// detection so we only ever copy audio, never photos or PDFs.
+function isVoiceNoteAttachment(meta: {
+  mimeType: string | null;
+  filename: string | null;
+  transferName: string | null;
+}): boolean {
+  const mime = (meta.mimeType ?? "").toLowerCase();
+  if (mime.includes("audio") || mime.includes("caf") || mime.includes("coreaudio")) return true;
+  const name = (meta.transferName ?? meta.filename ?? "").toLowerCase();
+  return /\.(caf|m4a|amr|aac|wav|mp3)$/.test(name) || name.includes("audio message");
+}
+
+// Snapshot a freshly-scanned voice note's audio bytes into our own store
+// before iMessage's "Audio Messages -> Expire: After 2 Minutes" can delete
+// them. Runs from the scan-time audio hook, synchronously copying the file
+// while it still exists, so the transcript (and replay) survive Apple's
+// expiry window. Gated on the transcription feature flag (the snapshot only
+// matters when we also transcribe). Best-effort; never throws into the scan.
+async function snapshotMessageVoiceNotes(messageId: string): Promise<void> {
+  if (!runnerConfig.imessage.enabled || !runnerConfig.audioTranscription.enabled) return;
+  let attachmentsJson: string | null;
+  try {
+    const row = await prisma.message.findUnique({
+      where: { id: messageId },
+      select: { attachmentsJson: true }
+    });
+    attachmentsJson = row?.attachmentsJson ?? null;
+  } catch {
+    return;
+  }
+  if (!attachmentsJson) return;
+  let guids: string[];
+  try {
+    const parsed = JSON.parse(attachmentsJson) as Array<{ guid?: string | null }>;
+    guids = parsed
+      .map((a) => a?.guid)
+      .filter((g): g is string => typeof g === "string" && g.length > 0);
+  } catch {
+    return;
+  }
+  if (guids.length === 0) return;
+  let db: IMessageDb;
+  try {
+    db = new IMessageDb(runnerConfig.imessage.dbPath);
+  } catch {
+    return;
+  }
+  try {
+    for (const guid of guids) {
+      if (imessageVoiceSnapshotPath(guid)) continue; // already captured
+      const meta = db.findAttachmentByGuid(guid);
+      if (!meta?.absolutePath) continue;
+      if (!isVoiceNoteAttachment(meta)) continue;
+      snapshotImessageVoice(guid, meta.absolutePath);
+    }
+  } catch {
+    // best-effort; a snapshot failure must not break the scan
+  } finally {
+    db.close();
+  }
+}
 
 // Provider selection. With audio transcription off, the service stays
 // disabled and no provider is constructed. With it on, we pick exactly
@@ -646,7 +747,15 @@ const scanQueue = createScanQueue({
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
   onNewPerson: (input) => enqueueEnrichmentForScan?.(input),
-  onAudioMessage: (input) => transcriptionService.enqueueMessage(input.messageId)
+  onAudioMessage: (input) => {
+    // Snapshot the audio bytes first (sync copy, while Apple's file still
+    // exists), then enqueue transcription — which reads back from the
+    // snapshot via the resolver, so it can't lose the race to Apple's
+    // 2-minute expiry.
+    void snapshotMessageVoiceNotes(input.messageId).finally(() =>
+      transcriptionService.enqueueMessage(input.messageId)
+    );
+  }
 }) as ScanQueueWithSmokeIngest;
 
 const sendService = createSendService({
@@ -1788,33 +1897,67 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
     return;
   }
   const { guid } = z.object({ guid: z.string().min(8).max(100) }).parse(req.params);
-  let db: IMessageDb;
+  // Live chat.db metadata is authoritative (Apple's real mime type and
+  // names); the snapshot's mime is only derived from its file extension.
+  // Serve the live file while the row AND file survive, and fall back to
+  // our snapshot once Apple's "Expire After 2 Minutes" has deleted them —
+  // that's what keeps replay working after expiry.
+  let live: ReturnType<IMessageDb["findAttachmentByGuid"]> | null = null;
+  let dbOpenFailed = false;
   try {
-    db = new IMessageDb(runnerConfig.imessage.dbPath);
+    const db = new IMessageDb(runnerConfig.imessage.dbPath);
+    try {
+      live = db.findAttachmentByGuid(guid) ?? null;
+    } finally {
+      db.close();
+    }
   } catch {
+    dbOpenFailed = true;
+  }
+  if (live?.absolutePath && existsSync(live.absolutePath)) {
+    await streamIMessageAttachment({
+      absolutePath: live.absolutePath,
+      mimeType: live.mimeType,
+      transferName: live.transferName,
+      filename: live.filename,
+      res
+    });
+    return;
+  }
+  const snapshot = imessageVoiceSnapshotMeta(guid);
+  if (snapshot) {
+    // The row can outlive the file (expiry deletes the file first): keep
+    // chat.db's mime/names over the extension-derived ones.
+    await streamIMessageAttachment({
+      absolutePath: snapshot.absolutePath,
+      mimeType: live?.mimeType ?? snapshot.mimeType,
+      transferName: live?.transferName ?? snapshot.transferName,
+      filename: live?.filename ?? snapshot.filename,
+      res
+    });
+    return;
+  }
+  if (dbOpenFailed) {
     res.status(503).json({ error: "cannot open chat.db (Full Disk Access?)" });
     return;
   }
-  try {
-    const meta = db.findAttachmentByGuid(guid);
-    if (!meta) {
-      res.status(404).json({ error: "attachment not found in chat.db" });
-      return;
-    }
-    if (!meta.absolutePath) {
-      res.status(404).json({ error: "attachment file path unresolved" });
-      return;
-    }
-    await streamIMessageAttachment({
-      absolutePath: meta.absolutePath,
-      mimeType: meta.mimeType,
-      transferName: meta.transferName,
-      filename: meta.filename,
-      res
-    });
-  } finally {
-    db.close();
+  if (!live) {
+    res.status(404).json({ error: "attachment not found in chat.db" });
+    return;
   }
+  if (!live.absolutePath) {
+    res.status(404).json({ error: "attachment file path unresolved" });
+    return;
+  }
+  // Row exists, file gone, no snapshot: let the streamer report the missing
+  // file exactly as it did before snapshots existed.
+  await streamIMessageAttachment({
+    absolutePath: live.absolutePath,
+    mimeType: live.mimeType,
+    transferName: live.transferName,
+    filename: live.filename,
+    res
+  });
 }));
 
 // Stream a LinkedIn voice-message audio file to the dashboard. Mirror
