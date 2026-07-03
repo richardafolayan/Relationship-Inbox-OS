@@ -10,7 +10,10 @@ import { createImessageNameSync } from "../apps/runner/dist/services/imessage-na
 // in kept raw phone/email handles in Person.displayName and Message.senderName.
 // The boot/daily name-sync repairs them from the live macOS Contacts. These
 // tests use a fake Prisma + an AddressBook fixture so no real DB/Contacts are
-// touched.
+// touched. Every createImessageNameSync call passes vcfPath:null — without it
+// the sync falls back to the machine's real data/contacts.vcf (a live-Contacts
+// export), whose entries win over the fixture and break these tests on any Mac
+// that has the fixture phone number saved.
 
 function buildAddressBookFixture(path, contacts) {
   const db = new Database(path);
@@ -86,7 +89,8 @@ test("name-sync rewrites raw-handle rows to AddressBook names and leaves real na
     const sync = createImessageNameSync({
       prisma: fake.prisma,
       addressBookDbPaths: [abPath],
-      useAddressBook: true
+      useAddressBook: true,
+      vcfPath: null
     });
 
     const result = await sync.tick();
@@ -124,10 +128,12 @@ test("name-sync flags an empty Mac address book when handles remain unresolved",
     ],
     []
   );
-  // useAddressBook:false + no vCard simulates a Mac with an empty Contacts app.
+  // useAddressBook:false + vcfPath:null simulates a Mac with an empty Contacts
+  // app and no vCard export.
   const sync = createImessageNameSync({
     prisma: fake.prisma,
-    useAddressBook: false
+    useAddressBook: false,
+    vcfPath: null
   });
 
   const result = await sync.tick();
@@ -148,7 +154,11 @@ test("name-sync does not hint when there are no unresolved handles", async () =>
   // Empty contacts, but every person already has a real name -> nothing wrong,
   // so no hint even though the address book is empty.
   const fake = makeFakePrisma([{ id: "p1", displayName: "Adaeze Nwosu" }], []);
-  const sync = createImessageNameSync({ prisma: fake.prisma, useAddressBook: false });
+  const sync = createImessageNameSync({
+    prisma: fake.prisma,
+    useAddressBook: false,
+    vcfPath: null
+  });
 
   await sync.tick();
 
