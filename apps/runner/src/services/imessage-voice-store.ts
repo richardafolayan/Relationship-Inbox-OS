@@ -25,6 +25,26 @@ const VOICE_DIR = resolve(dataDir, "imessage-voice-snapshots");
  * column.
  */
 
+// Snapshot mime types are derived from the stored file extension (safeName
+// keeps the source extension). Cover every audio kind the scan hook's
+// isVoiceNoteAttachment accepts — not just Apple's .caf — so a snapshot of a
+// regular audio clip (.wav, .mp3, ...) keeps the mime type the transcription
+// SUPPORTED_MIME_TYPES gate and inline playback expect. An unmapped
+// extension degrades to application/octet-stream, which downstream treats
+// as unsupported — the same outcome as pre-snapshot expiry, never worse.
+const EXT_MIME_TYPES: Record<string, string> = {
+  ".caf": "audio/x-caf",
+  ".m4a": "audio/mp4",
+  ".mp3": "audio/mpeg",
+  ".wav": "audio/wav",
+  ".aac": "audio/aac",
+  ".flac": "audio/flac",
+  ".ogg": "audio/ogg",
+  ".opus": "audio/ogg",
+  ".webm": "audio/webm",
+  ".amr": "audio/amr"
+};
+
 // iMessage attachment guids are UUID-shaped, but sanitise defensively so a
 // hostile/odd guid can never escape the snapshot directory.
 function safeName(guid: string, ext: string): string {
@@ -76,8 +96,7 @@ export function imessageVoiceSnapshotMeta(guid: string): {
   const path = imessageVoiceSnapshotPath(guid);
   if (!path) return null;
   const ext = extname(path).toLowerCase();
-  const mimeType =
-    ext === ".m4a" ? "audio/mp4" : ext === ".caf" ? "audio/x-caf" : "application/octet-stream";
+  const mimeType = EXT_MIME_TYPES[ext] ?? "application/octet-stream";
   return {
     absolutePath: path,
     mimeType,

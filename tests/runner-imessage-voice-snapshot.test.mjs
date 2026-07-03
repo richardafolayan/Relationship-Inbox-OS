@@ -97,3 +97,33 @@ test("attachmentGuidsFromRows extracts guids and tolerates malformed blobs", () 
   ]);
   assert.deepEqual(guids, ["g1", "g2", "g3"]);
 });
+
+// Codex P2 regression (PR #738): non-CAF audio clips (.wav, .mp3, .aac...)
+// are snapshotted too, and the snapshot's mime type must stay one the
+// transcription SUPPORTED_MIME_TYPES gate and inline playback accept —
+// application/octet-stream here regressed both for audio that worked
+// before snapshots existed.
+test("non-CAF snapshots keep a real audio mime type, not octet-stream", () => {
+  const cases = [
+    ["clip.wav", "audio/wav"],
+    ["song.mp3", "audio/mpeg"],
+    ["note.aac", "audio/aac"],
+    ["chat.m4a", "audio/mp4"],
+    ["Audio Message.caf", "audio/x-caf"]
+  ];
+  for (const [sourceName, expectedMime] of cases) {
+    const guid = uniqueGuid();
+    const dir = mkdtempSync(join(tmpdir(), "vn-src-"));
+    const src = join(dir, sourceName);
+    writeFileSync(src, Buffer.from(`fake-bytes-${sourceName}`));
+    try {
+      assert.ok(snapshotImessageVoice(guid, src), `snapshot should store ${sourceName}`);
+      const meta = imessageVoiceSnapshotMeta(guid);
+      assert.ok(meta, `meta should resolve for ${sourceName}`);
+      assert.equal(meta.mimeType, expectedMime, `mime for ${sourceName}`);
+    } finally {
+      deleteImessageVoiceSnapshot(guid);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+});
