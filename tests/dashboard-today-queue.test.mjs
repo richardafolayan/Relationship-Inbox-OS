@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
 // today.ts is framework-free, so the tsx loader resolves this .ts import
 // directly (matches the dashboard-horizon.test.mjs pattern).
@@ -50,4 +52,50 @@ test("a thread that wrapped on a closing 'thanks!' is off-queue", () => {
     isInTodayQueue(baseRow({ lastMessageDirection: "IN", preview: "thanks!" }), none),
     false
   );
+});
+
+test("a thread that wrapped on short gratitude is off-queue", () => {
+  assert.equal(
+    isInTodayQueue(
+      baseRow({ lastMessageDirection: "IN", preview: "Thanks for lending it to me that night" }),
+      none
+    ),
+    false
+  );
+});
+
+test("AppShell sidebar badge uses the Today queue predicate, not raw risk buckets", () => {
+  const appShellPath = fileURLToPath(
+    new URL("../apps/dashboard/components/layout/app-shell.tsx", import.meta.url)
+  );
+  const source = readFileSync(appShellPath, "utf8");
+  assert.match(source, /isInTodayQueue\(row, new Set\(\)\)/);
+  assert.doesNotMatch(
+    source,
+    /row\.riskLevel === "RED" \|\| row\.riskLevel === "AMBER"/
+  );
+});
+
+test("sidebar and dock show a single warm dot, never a counter", () => {
+  // PRODUCT.md: "urgency is communicated through quiet rank and a single
+  // warm dot, not red badges, counters, or alarm". The Today count lives on
+  // the Today page itself ("N need you tonight"); nav surfaces only signal
+  // presence. Regression: the sidebar once rendered a capped "99+" pill.
+  for (const rel of [
+    "../apps/dashboard/components/layout/sidebar.tsx",
+    "../apps/dashboard/components/layout/mobile-dock.tsx"
+  ]) {
+    const source = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
+    assert.doesNotMatch(source, /99\+/, `${rel} must not cap-render a counter`);
+    assert.doesNotMatch(
+      source,
+      /\{\s*(attentionCount|badge)\s*\}/,
+      `${rel} must not render the attention count as text`
+    );
+    assert.match(
+      source,
+      /rounded-full bg-accent/,
+      `${rel} should render the warm presence dot`
+    );
+  }
 });

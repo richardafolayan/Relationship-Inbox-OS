@@ -86,12 +86,13 @@ function DockTab({
       <span className="relative">
         <Icon className="h-[21px] w-[21px]" strokeWidth={active ? 2 : 1.6} />
         {badge > 0 ? (
+          // A single warm dot, never a counter — same rule as the
+          // sidebar (PRODUCT.md calm-software ethos). The number lives
+          // on the Today page itself.
           <span
-            className="absolute -right-[10px] -top-[2px] rounded-full bg-accent px-[5px] py-[1px] font-mono text-[9px] font-medium leading-none text-white"
-            aria-label={`${badge} need attention`}
-          >
-            {badge > 99 ? "99+" : badge}
-          </span>
+            className="absolute -right-[6px] -top-[2px] h-[6px] w-[6px] rounded-full bg-accent"
+            aria-label="Threads waiting in today's queue"
+          />
         ) : null}
       </span>
       <span className="font-mono text-[10px] tracking-[0.04em]">{label}</span>

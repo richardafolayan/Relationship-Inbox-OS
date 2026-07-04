@@ -16,6 +16,7 @@ test("bare thanks reads as closed", () => {
   assert.equal(closed("Thanks!"), true);
   assert.equal(closed("thank you so much"), true);
   assert.equal(closed("Thanks so much 🙏"), true);
+  assert.equal(closed("Thanks for lending it to me that night"), true);
 });
 
 test("brief affirmatives read as closed", () => {
@@ -91,7 +92,7 @@ test("AI verdict 'closed' overrides the heuristic even when preview looks open",
   );
 });
 
-test("AI verdict 'open' overrides the heuristic even when preview looks closed", () => {
+test("AI verdict 'open' overrides bare thanks heuristic", () => {
   // Heuristic alone would mark this closed; AI saw the next-step plan
   // the cropped preview missed and decided the operator should reply.
   assert.equal(
@@ -101,6 +102,17 @@ test("AI verdict 'open' overrides the heuristic even when preview looks closed",
       closedStatus: "open"
     }),
     false
+  );
+});
+
+test("strong closure preview beats stale AI open verdict", () => {
+  assert.equal(
+    isLikelyClosed({
+      preview: "Thanks for lending it to me that night",
+      lastMessageDirection: IN,
+      closedStatus: "open"
+    }),
+    true
   );
 });
 
