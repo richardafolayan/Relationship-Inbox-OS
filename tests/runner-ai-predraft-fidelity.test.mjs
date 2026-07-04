@@ -328,3 +328,9 @@ test("PREDRAFT_FIDELITY_REMINDER bans fabricated rationales when the operator st
   assert.match(PREDRAFT_FIDELITY_REMINDER, /stay honestly vague/);
   assert.match(PREDRAFT_FIDELITY_REMINDER, /A vague true line beats a specific invented one/);
 });
+
+test("BRIEF_FIDELITY_REMINDER teaches that the asker is not the owner", () => {
+  assert.match(BRIEF_FIDELITY_REMINDER, /OWNERSHIP TEST: the person ASKING about a thing is not its owner/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /the MVP belongs to the CONTACT/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /never "you asked her why the change happened"/);
+});
