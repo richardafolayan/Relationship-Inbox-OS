@@ -3524,7 +3524,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // Existing v5 summaries regenerate on next scan so the rail surfaces
     // the new brief shape and clean prose rather than the stripped
     // fallback derived from the older summary.
-    const SUMMARY_VERSION = "v6-reply-brief";
+    // v7 makes direct latest-inbound questions lead the ask summary and treats
+    // later acknowledgements as closing settled logistics, so stale rows like
+    // "still waiting for jacket confirmation" regenerate on the next scan.
+    // v8 (quality audit vs real transcripts): bans the reconnect meta-question
+    // leaking into what_they_want, makes "nothing pending" first-class instead
+    // of resurrecting old arcs as manufactured jobs, quotes the contact's
+    // actual question (proper nouns verbatim), and bans invented times/places/
+    // plans in the ask and the brief's required points.
+    // v9 adds the IDENTITY discipline after a predraft claimed the contact's
+    // circumstances (her visa, her MVP) as the operator's own; briefs
+    // regenerate so on_you stops directing the operator to justify the
+    // contact's situation. Also the era of Gemini as default provider.
+    const SUMMARY_VERSION = "v9-identity";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
@@ -3612,7 +3624,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
     if (!skipAi && lastInboundMessage && allowClassification) {
       const closedKey = stableHash(
-        `closed-v2|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+        `closed-v3|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
       );
       if (closedKey !== thread.closedStatusCacheKey) {
         // Hide deleted-inbound placeholders from the classifier so the
