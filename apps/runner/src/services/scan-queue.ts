@@ -3527,7 +3527,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // v7 makes direct latest-inbound questions lead the ask summary and treats
     // later acknowledgements as closing settled logistics, so stale rows like
     // "still waiting for jacket confirmation" regenerate on the next scan.
-    const SUMMARY_VERSION = "v7-time-aware-brief";
+    // v8 (quality audit vs real transcripts): bans the reconnect meta-question
+    // leaking into what_they_want, makes "nothing pending" first-class instead
+    // of resurrecting old arcs as manufactured jobs, quotes the contact's
+    // actual question (proper nouns verbatim), and bans invented times/places/
+    // plans in the ask and the brief's required points.
+    const SUMMARY_VERSION = "v8-grounded-ask";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
