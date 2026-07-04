@@ -553,11 +553,15 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     geminiApiKey: env.GEMINI_API_KEY?.trim() || undefined,
     geminiBaseUrl:
       env.GEMINI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
-    // gemini-3-flash-preview (not the older gemma-4-31b-it default): the
-    // Gemma default quietly served a much weaker model to anyone who chose
-    // the "gemini" provider, which is exactly the quality gap Richard hit.
-    // Both are smoke-confirmed via apps/runner/src/scripts/gemini-smoke.ts.
-    geminiModel: env.GEMINI_MODEL?.trim() || "gemini-3-flash-preview",
+    // gemini-3.5-flash: the GA flash generation (smoke-confirmed via
+    // apps/runner/src/scripts/gemini-smoke.ts). Earlier defaults were traps:
+    // gemma-4-31b-it quietly served a much weaker model, and
+    // gemini-3-flash-preview sits in a tiny free-tier quota bucket (20
+    // requests) that silently pushes every call to the OpenAI fallback.
+    // NOTE: any Gemini model on a FREE-tier API key is quota-capped enough
+    // that sustained app traffic runs on the fallback — real Gemini quality
+    // at volume needs billing enabled on the key.
+    geminiModel: env.GEMINI_MODEL?.trim() || "gemini-3.5-flash",
     // Update feed (published latest.json URL). Never hard-coded; the pilot
     // sets the Dropbox raw=1 link as RIOS_UPDATE_FEED_URL.
     updateFeedUrl: env.RIOS_UPDATE_FEED_URL?.trim() || undefined,
