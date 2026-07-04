@@ -1945,6 +1945,27 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     // reply debt. Short threads render exactly as before.
     const transcript = buildReassessTranscript(input.messages, contactLabel);
 
+    // The 2026-07-04 quality audit showed prompt discipline alone doesn't
+    // reliably steer the model to the RIGHT messages inside a 120-message
+    // transcript: resolved asks from weeks back kept resurfacing as the
+    // headline while the contact's actual latest question went unquoted.
+    // So the CODE derives the one thing that can't be argued with — the
+    // contact's messages since the operator's last reply — and hands it to
+    // the model as the authoritative grounding for what_they_want.
+    const lastOutIndex = input.messages.reduce(
+      (acc, m, idx) => (m.direction === "OUT" ? idx : acc),
+      -1
+    );
+    const unansweredRun = input.messages
+      .slice(lastOutIndex + 1)
+      .filter((m) => m.direction === "IN")
+      .slice(-12);
+    const unansweredRunBlock = unansweredRun.length
+      ? `LATEST UNANSWERED INBOUND RUN (code-derived — authoritative):
+These are the contact's messages since the operator's last reply. what_they_want MUST be grounded here first: quote or near-quote any question in this run. Only if this run carries no ask and nothing worth acknowledging may what_they_want say "Nothing pending" — and never reach further back in the transcript to manufacture a job instead.
+${unansweredRun.map((m) => formatMessageForPrompt(m, contactLabel)).join("\n")}`
+      : `LATEST UNANSWERED INBOUND RUN: none — the operator replied most recently. Points the operator's reply left uncovered may still drive the brief, but never present a question that was already answered as a live ask.`;
+
     // Summaries refer to the operator in second person ("you") regardless
     // of whether they've configured a displayName. The transcript label
     // stays `operator:` for attribution discipline, but output text uses
@@ -1977,10 +1998,13 @@ MODE DECISION (made by you, the model, after reading the transcript):
 what_they_want guidance (ACTIVE REPLY):
 - 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
 - If the latest unanswered inbound contains a direct question from the contact, lead with that question. Do NOT lead with the operator's earlier question or plan just because it set up the topic.
-- Before writing what_they_want, silently sort the live exchange into two buckets: (1) questions/asks FROM the contact still waiting on the operator, and (2) the operator's own outbound questions or plans. The headline is built ONLY from bucket 1. Bucket 2 is context for where_it_stands — an operator question the contact already answered is never "what they want".
+- Before writing what_they_want, silently sort the live exchange into two buckets: (1) questions/asks FROM the contact still waiting on the operator, and (2) the operator's own outbound questions or plans. The headline is built ONLY from bucket 1. Bucket 2 is context for where_it_stands — an operator question the contact already answered is never "what they want". Worked inversion check: if the OPERATOR asked the contact "why did you switch careers?", that question is bucket 2 — never turn it into a job telling the operator to explain their own switch.
+- CARRY THE CONTACT'S ACTUAL WORDS. When the latest inbound asks a question, quote or near-quote it ("asked why your plans changed: 'Ooh why this change?'"). Never blur a concrete question into an abstraction ("asked a direct question about your plans" is a failure). Preserve names, places, titles and quoted phrases EXACTLY as written — a phrase like "Power Must Change Hands" (an event title) must never be reworded into "change hands power".
+- NEVER INVENT SPECIFICS. Do not add a time, place, date, or commitment that is not in the messages: no "tonight"/"tomorrow"/"next Sunday" unless a message says so, and no meetups, calls, or plans nobody proposed.
+- "NOTHING PENDING" IS A FIRST-CLASS ANSWER. If every ask in the live exchange has been resolved, say so plainly ("Nothing pending — she answered your questions and the thread wrapped warmly"). Do NOT go digging in the older background to manufacture a job: an arc from weeks ago (an old project, an old invitation, an old training offer) is NOT the headline unless the contact re-raised it inside the live window. Manufactured homework is worse than an honest nothing-pending.
 - Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
 - Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
-- Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
+- Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner.", "Nothing pending — Toni returned the jacket and the thread closed on thanks."
 
 open_loops guidance (ACTIVE REPLY):
 - Work through the recent inbound messages ONE AT A TIME. For each unanswered inbound message, pull out every distinct thing the operator still needs to respond to: a question, a request, a decision they were asked to weigh in on, a piece of news that deserves a reaction. A single message often holds two or three separate loops — surface each one, never collapse a multi-part message into one vague loop.
@@ -1995,8 +2019,10 @@ open_loops guidance (ACTIVE REPLY):
 
 what_they_want guidance (RECONNECT — only when the three criteria above all hold):
 - 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
-- Frame as: "what's the warmest, most natural way for the operator to reopen this thread, grounded in something specific the contact has shared." Reference a real detail from the transcript — something they mentioned doing, a thing they were working through, a small life update.
+- Answer the question "what would naturally reopen this thread?" with a CONCRETE, grounded callback — a real detail from the transcript: something they mentioned doing, a thing they were working through, a small life update.
+- BANNED OUTPUT: never write the meta-question itself into what_they_want. "What's the warmest, most natural way to reopen this thread..." (or any variant asking HOW to phrase a reply) is planning language, not a summary — state the callback fact instead, exactly like the examples below.
 - Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
+- RECONNECT is for genuinely dormant threads only: if the contact's most recent message is days old (not weeks), the thread is not dormant — stay in ACTIVE REPLY and, if nothing is pending, say "Nothing pending" there instead.
 - Examples: "Sultan mentioned exam stress last month, a 'how'd they go?' check-in is natural.", "She was deciding between two job offers, worth asking how that landed.", "He said he'd send the doc but went quiet, a light nudge would land well."
 
 open_loops guidance (RECONNECT):
@@ -2072,6 +2098,7 @@ they_said (SUBSTANCE — the most important field):
 on_you (THE OBLIGATION READ):
 - Plainly state whether the contact has actually asked the operator for anything.
 - If the latest unanswered inbound asks a direct question, that question is the obligation read. Answering it outranks older setup context from the operator.
+- The obligation must exist in the LIVE exchange. Never state an obligation built from older background, and never attach a time/place/plan no message proposed.
 - If the contact has NOT asked anything explicit, say so directly. Example wording: "Nothing asked — a light acknowledgement is enough."
 - If the contact has asked ONE thing, name it. Example: "She asked whether Friday works."
 - If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
@@ -2081,6 +2108,7 @@ on_you (THE OBLIGATION READ):
 
 required_points (status = "required") — the reply checklist:
 - BE CONSERVATIVE. Required points are the small set of things the operator MUST address. If a point is borderline, send it to optional_followups instead — the rail's job is to prevent invented homework, not to manufacture it. The substance the operator should read is already in they_said; required is only for "you owe a response on this".
+- TRACEABILITY: every required point must trace to a specific message in the LIVE exchange that created the obligation. If you cannot point at the message, the point does not exist. Never carry a specific (a time, a place, a "next Sunday", an amount) into a point unless a message states it — resolving "confirm the meetup" against a meetup nobody proposed is fabrication.
 - If the latest unanswered inbound is a direct question, include a required point to answer that question unless a later message already answers or withdraws it.
 - Always belongs in required: direct questions to the operator, requests, decisions the contact asked the operator to make, things asked to send / confirm / check / arrange. A question the operator acknowledged but never actually answered counts as required.
 - Acknowledgement-worthy news: when the contact has NOT asked anything explicit but has shared a single substantive beat the operator would feel rude ignoring (a paused offer, a decision they made, a life event they named), surface AT MOST ONE required point. Phrase the point in grounded terms naming the beat in the contact's own words ("Acknowledge the paused offer", "Acknowledge the move to Lagos") — do NOT characterise the beat itself ("Acknowledge the big news", "Acknowledge the major decision"). Any further acknowledgements go in optional_followups. The high bar is: "would the contact feel actively unheard, not just under-engaged, if the reply ignored this?" A piece of explanation or background context they shared does NOT meet that bar — that's substance for they_said to surface, not a task.
@@ -2148,6 +2176,9 @@ General rules (both modes):
 Previous summary: ${input.previousSummary ?? "None"}
 Previous open loops: ${JSON.stringify(input.previousOpenLoops)}
 Previous remember items: ${JSON.stringify(input.previousRemember)}
+
+${unansweredRunBlock}
+
 Transcript:
 ${transcript}`;
 
@@ -2172,6 +2203,12 @@ ${transcript}`;
     // 120-char cut that stored "...acknowledge the update and gently"). The
     // Today hero renders the result in full via <FitText> (issue #193).
     result.what_they_want = capAskSummary(result.what_they_want);
+    // A rare model response returns an empty/whitespace ask (seen 2026-07-04
+    // on a live thread). An empty hero is worse than the raw latest inbound —
+    // fall back to the same capped text the whole-call fallback uses.
+    if (!result.what_they_want.trim()) {
+      result.what_they_want = fallbackWhatTheyWant;
+    }
     // Sanitise remember items: strip unpaired surrogates from notes (the
     // same SQLite-write hazard the summary fields guard against), coerce
     // dates to strict ISO-or-null, and drop anything left without a note.
