@@ -2589,7 +2589,7 @@ app.post("/control/closed-status/refresh-stale", asyncRoute(async (req, res) => 
     }
 
     const cacheKey = stableHash(
-      `closed-v2|${lastInbound.timestamp}|${cleanText(lastInbound.text)}`
+      `closed-v3|${lastInbound.timestamp}|${cleanText(lastInbound.text)}`
     );
 
     if (thread.closedStatusCacheKey === cacheKey) {

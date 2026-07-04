@@ -22,6 +22,8 @@ import { normalizePreview } from "./preview";
 const CLOSED_PATTERNS: RegExp[] = [
   // Bare acknowledgements / thanks (allow trailing punctuation + emoji)
   /^(thanks|thank you|thank you so much|thanks so much|thanks a lot|thx|ty|ta|cheers|cool|nice|great|perfect|amazing|awesome|good stuff|sounds good|noted|got it|gotcha|understood)[!.\s🙏👍❤️✨🔥]*$/i,
+  // Short gratitude that names the thing already settled.
+  /^(?!.*\bbut\b)(thanks|thank you|thank you so much|thanks so much|ta|cheers)\s+for\b.{1,120}[!.\s🙏👍❤️✨🔥]*$/i,
   // Brief affirmatives
   /^(ok|okay|kk|k|sure|yes|yeah|yep|yup|alright|right|will do|sweet)[!.\s🙏👍]*$/i,
   // Farewells
@@ -30,6 +32,18 @@ const CLOSED_PATTERNS: RegExp[] = [
   /^[\s]*[👍❤️🙏✨🔥💯🎉🙌👏😂😄😊]+[\s]*$/u,
   // LinkedIn-style "X liked your message" placeholders
   /^liked( your message)?$/i
+];
+
+/**
+ * Closure patterns specific enough to beat a stale AI "open" verdict when
+ * the cropped preview already shows the arc wrapped (e.g. "thanks for
+ * lending it to me that night" after pickup). Bare "thanks" alone is
+ * intentionally excluded — that stays AI-authoritative.
+ */
+const STRONG_CLOSURE_PATTERNS: RegExp[] = [
+  /^(?!.*\bbut\b)(thanks|thank you|thank you so much|thanks so much|ta|cheers)\s+for\b.{1,120}[!.\s🙏👍❤️✨🔥]*$/i,
+  /^(talk soon|speak soon|chat soon|catch up soon|see you|see ya|tty[sl]|night|goodnight|take care|have a (good|great|nice) (one|day|night|week|weekend|evening))[!.\s🙏👍❤️]*$/i,
+  /^[\s]*[👍❤️🙏✨🔥💯🎉🙌👏😂😄😊]+[\s]*$/u
 ];
 
 /**
@@ -74,7 +88,6 @@ export interface ClosedCandidate {
 export function isLikelyClosed(row: ClosedCandidate): boolean {
   // Trust the AI verdict whenever it is available. "open" wins over
   // every heuristic; "closed" wins even when the heuristic stays silent.
-  if (row.closedStatus === "open") return false;
   if (row.closedStatus === "closed") return true;
 
   // Only the inbound side can close a conversation from our perspective.
@@ -91,5 +104,14 @@ export function isLikelyClosed(row: ClosedCandidate): boolean {
   // present ("thanks, can you also send me the link?").
   if (OPEN_TOKENS.some((re) => re.test(text))) return false;
 
-  return CLOSED_PATTERNS.some((re) => re.test(text));
+  const heuristicClosed = CLOSED_PATTERNS.some((re) => re.test(text));
+  const strongClosure = STRONG_CLOSURE_PATTERNS.some((re) => re.test(text));
+
+  // Stale AI "open" on a logistics-wrap preview (thanks-for-X after pickup)
+  // should not keep the thread on Today when the preview already reads closed.
+  if (row.closedStatus === "open") {
+    return strongClosure;
+  }
+
+  return heuristicClosed;
 }

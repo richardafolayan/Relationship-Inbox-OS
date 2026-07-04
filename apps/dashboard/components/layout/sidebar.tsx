@@ -198,31 +198,23 @@ export function Sidebar({
                 <>
                   <span className="flex-1 truncate">{item.label}</span>
                   {showDot ? (
+                    // A single warm dot, never a counter (PRODUCT.md:
+                    // "urgency is communicated through quiet rank and a
+                    // single warm dot, not red badges, counters, or
+                    // alarm"). Even the curated Today count read as
+                    // volume pressure, so the number stays on the Today
+                    // page itself ("N need you tonight") and the sidebar
+                    // only says "there is work for you today".
                     <span
-                      className={cn(
-                        "ml-auto inline-flex min-w-[18px] justify-center rounded-full px-[6px] py-[1px] font-mono text-[10px] font-medium",
-                        // Muted styling on purpose (#352). The bright
-                        // accent on a 3-digit count read as "your life
-                        // is on fire" rather than "today's queue".
-                        // Today is the calm-pile, not an alert. Active
-                        // state still inverts so the count remains
-                        // visible against the dark Today background.
-                        active ? "bg-paper text-ink" : "bg-paper-2 text-ink-3"
-                      )}
-                      aria-label={`${attentionCount} need attention`}
-                    >
-                      {/* Cap the displayed number — the operator isn't
-                          actioning 220 items in a day, so past ~99 the
-                          exact figure stops being useful and starts
-                          being noise. */}
-                      {attentionCount > 99 ? "99+" : attentionCount}
-                    </span>
+                      className="ml-auto h-[6px] w-[6px] shrink-0 rounded-full bg-accent"
+                      aria-label="Threads waiting in today's queue"
+                    />
                   ) : null}
                 </>
               ) : showDot ? (
                 <span
                   className="absolute right-[2px] top-[2px] h-[6px] w-[6px] rounded-full bg-accent"
-                  aria-label={`${attentionCount} need attention`}
+                  aria-label="Threads waiting in today's queue"
                 />
               ) : null}
             </Link>

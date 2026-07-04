@@ -3524,7 +3524,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // Existing v5 summaries regenerate on next scan so the rail surfaces
     // the new brief shape and clean prose rather than the stripped
     // fallback derived from the older summary.
-    const SUMMARY_VERSION = "v6-reply-brief";
+    // v7 makes direct latest-inbound questions lead the ask summary and treats
+    // later acknowledgements as closing settled logistics, so stale rows like
+    // "still waiting for jacket confirmation" regenerate on the next scan.
+    const SUMMARY_VERSION = "v7-time-aware-brief";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
@@ -3612,7 +3615,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const allowClassification = operatorProfile.aiHelpLevel !== "memory_only";
     if (!skipAi && lastInboundMessage && allowClassification) {
       const closedKey = stableHash(
-        `closed-v2|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
+        `closed-v3|${lastInboundMessage.timestamp.toISOString()}|${cleanText(lastInboundMessage.text)}`
       );
       if (closedKey !== thread.closedStatusCacheKey) {
         // Hide deleted-inbound placeholders from the classifier so the
