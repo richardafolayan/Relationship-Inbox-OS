@@ -210,6 +210,13 @@ function classifyGeminiError(error: unknown): AiErrorClassification {
       retriable: false
     };
   }
+  if (/request timed out|timed out|timeout/i.test(message)) {
+    return {
+      kind: "service_overloaded",
+      message: "Gemini API request timed out. Failing over to OpenAI fallback.",
+      retriable: false
+    };
+  }
   if (typeof status === "number" && status >= 500 && status <= 504) {
     return {
       kind: "service_overloaded",
