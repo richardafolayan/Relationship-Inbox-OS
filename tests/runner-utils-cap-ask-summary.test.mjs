@@ -114,3 +114,21 @@ test("does not bisect an emoji when capping (code-point safe)", () => {
   assert.equal(unpaired, false);
   assert.ok(Array.from(out).length <= 200);
 });
+
+test("an over-budget summary is cut at the last complete sentence, not mid-thought", () => {
+  // Kwame regression: the word-safe cap stored "...acknowledge his latest
+  // internship start and check" — word-whole but sentence-broken.
+  const first =
+    "Kwame has not asked for a specific action in the latest inbound; the thread is drifting with updates and occasional invites.";
+  const overBudget = `${first} Your next move is to acknowledge his latest internship start and check in on how the first week has gone for him.`;
+  const out = capAskSummary(overBudget);
+  assert.equal(out, first, "should end exactly at the last full sentence inside the cap");
+});
+
+test("an over-budget single sentence still falls back to the dangling-word trim", () => {
+  const oneLongSentence =
+    "She wants you to look through the full plan she sent across yesterday evening and share your honest thoughts on the venue, the guest list, the budget breakdown, the catering options she shortlisted and";
+  const out = capAskSummary(`${oneLongSentence} more`);
+  assert.ok(out.length > 60, "keeps substance");
+  assert.doesNotMatch(out, /\b(and|or|to|the|with)$/i, "never ends on a dangling connective");
+});

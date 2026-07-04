@@ -328,12 +328,26 @@ export function capAskSummary(text: string | null | undefined): string {
     return trimmed;
   }
   let capped = truncateAtWord(trimmed, ASK_SUMMARY_MAX_CODE_POINTS);
-  // The cap fired. Drop a trailing run of closed-class connectives it exposed
-  // so the stored ask never ends on "...and" or "...waiting on you". Bounded by
-  // an iteration cap AND a substance floor so we never gut the summary chasing
-  // function words — once dropping the next word would leave too little, stop
-  // and keep it. Only ever runs on an already-truncated (over-budget) string.
   const SUBSTANCE_FLOOR = 60;
+  // The cap fired. Prefer ending on a COMPLETE sentence: a word-safe cut can
+  // still strand a half-thought ("...acknowledge his internship start and
+  // check"). If the capped text has a sentence end past the substance floor,
+  // cut there so the stored ask reads whole.
+  let lastSentenceEnd = -1;
+  for (const m of capped.matchAll(/[.?!](?=["')\]]?(\s|$))/gu)) {
+    if (m.index !== undefined && m.index + 1 >= SUBSTANCE_FLOOR) {
+      lastSentenceEnd = m.index;
+    }
+  }
+  if (lastSentenceEnd >= 0 && lastSentenceEnd + 1 < capped.length) {
+    return capped.slice(0, lastSentenceEnd + 1);
+  }
+  // No usable sentence boundary. Drop a trailing run of closed-class
+  // connectives the cut exposed so the stored ask never ends on "...and" or
+  // "...waiting on you". Bounded by an iteration cap AND a substance floor so
+  // we never gut the summary chasing function words — once dropping the next
+  // word would leave too little, stop and keep it. Only ever runs on an
+  // already-truncated (over-budget) string.
   for (let pass = 0; pass < 4; pass += 1) {
     const lastWord = capped.match(/(\p{L}+)\s*$/u)?.[1]?.toLowerCase();
     if (!lastWord || !DANGLING_TAIL_WORDS.has(lastWord)) break;
