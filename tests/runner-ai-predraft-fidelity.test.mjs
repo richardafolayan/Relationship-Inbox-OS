@@ -305,3 +305,26 @@ test("updateThreadSummary's required_points guidance no longer leans on 'weighty
     /do NOT characterise the beat itself \("Acknowledge the big news", "Acknowledge the major decision"\)/
   );
 });
+
+// Identity flip (2026-07-04, Rolanda thread): the predraft claimed the
+// CONTACT's circumstances as the operator's own ("while i'm on a student
+// visa" about HER visa; "what i can commit to for the MVP" about HER MVP),
+// and the brief's on_you directed the operator to rationalise the contact's
+// situation as if it were his. Both reminders now carry an IDENTITY clause.
+test("PREDRAFT_FIDELITY_REMINDER forbids borrowing the contact's circumstances as the operator's", () => {
+  assert.match(PREDRAFT_FIDELITY_REMINDER, /IDENTITY \(strict\)/);
+  assert.match(PREDRAFT_FIDELITY_REMINDER, /NEVER borrow the contact's circumstances/);
+  assert.match(PREDRAFT_FIDELITY_REMINDER, /never "my MVP", "while I'm on a student visa"/);
+});
+
+test("BRIEF_FIDELITY_REMINDER keeps facts attached to their owner", () => {
+  assert.match(BRIEF_FIDELITY_REMINDER, /IDENTITY \(strict\)/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /never be presented as the OPERATOR's own/);
+  assert.match(BRIEF_FIDELITY_REMINDER, /explanation must come from the operator's OWN messages/);
+});
+
+test("PREDRAFT_FIDELITY_REMINDER bans fabricated rationales when the operator stated none", () => {
+  assert.match(PREDRAFT_FIDELITY_REMINDER, /NO FABRICATED REASONS \(strict\)/);
+  assert.match(PREDRAFT_FIDELITY_REMINDER, /stay honestly vague/);
+  assert.match(PREDRAFT_FIDELITY_REMINDER, /A vague true line beats a specific invented one/);
+});

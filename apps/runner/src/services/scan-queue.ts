@@ -3532,7 +3532,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // of resurrecting old arcs as manufactured jobs, quotes the contact's
     // actual question (proper nouns verbatim), and bans invented times/places/
     // plans in the ask and the brief's required points.
-    const SUMMARY_VERSION = "v8-grounded-ask";
+    // v9 adds the IDENTITY discipline after a predraft claimed the contact's
+    // circumstances (her visa, her MVP) as the operator's own; briefs
+    // regenerate so on_you stops directing the operator to justify the
+    // contact's situation. Also the era of Gemini as default provider.
+    const SUMMARY_VERSION = "v9-identity";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
