@@ -80,6 +80,13 @@ test("gemini: 5xx classification stays retriable (transient hiccup, not a sustai
   assert.equal(cls.retriable, true);
 });
 
+test("gemini: request timeout falls through to OpenAI instead of retrying Gemini", () => {
+  const cls = providerRegistry.gemini.classifyError({ message: "Request timed out." });
+  assert.equal(cls.kind, "service_overloaded");
+  assert.equal(cls.retriable, false);
+  assert.match(cls.message, /OpenAI fallback/i);
+});
+
 test("gemini: nested googleStatus RESOURCE_EXHAUSTED maps to rate_limit", () => {
   // Google REST shape with no top-level `status` — only the nested string.
   const result = classifyLlmError(
