@@ -1572,6 +1572,14 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   // single wedged provider can add before the fallback chain moves on — the
   // tail latency behind the "Reassess takes forever" complaint.
   const AI_CLIENT_OPTIONS = { timeout: 15_000, maxRetries: 0 } as const;
+  // The Gemini client gets a bigger budget: the free-tier Gemma models
+  // (gemma-4-31b-it, the default since Richard's free-models-only call)
+  // legitimately take 15-40s to generate a full reply-brief JSON, so the
+  // shared 15s cap made them "time out" into the OpenAI fallback on most
+  // real calls — the operator believed they were on Gemma and silently got
+  // nano output. 45s clears a slow-but-legit Gemma response; the fallback
+  // chain still catches genuine hangs.
+  const GEMINI_CLIENT_OPTIONS = { timeout: 45_000, maxRetries: 0 } as const;
   const openAiClient = runnerConfig.openAiApiKey
     ? new OpenAI({ apiKey: runnerConfig.openAiApiKey, ...AI_CLIENT_OPTIONS })
     : null;
@@ -1579,7 +1587,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl, ...AI_CLIENT_OPTIONS })
     : null;
   const geminiClient = runnerConfig.geminiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.geminiApiKey, baseURL: runnerConfig.geminiBaseUrl, ...AI_CLIENT_OPTIONS })
+    ? new OpenAI({ apiKey: runnerConfig.geminiApiKey, baseURL: runnerConfig.geminiBaseUrl, ...GEMINI_CLIENT_OPTIONS })
     : null;
 
   // Per-provider client + model resolution. The set of clients is built
