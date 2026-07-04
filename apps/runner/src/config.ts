@@ -525,12 +525,17 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     // can override per-call without a restart (read from SettingsStore in
     // services/ai.ts -> resolveActive). "glm" routes through Z.AI's
     // OpenAI-compatible endpoint; "gemini" routes through Google's.
+    // Gemini is the cold-start default (2026-07-04, PM-confirmed): its
+    // summaries read clearly better than gpt-5-nano's in side-by-side use,
+    // and pilots should get that quality out of the box. Runtime failures
+    // still fall back to OpenAI, and pickActiveProvider falls back by key
+    // presence, so an install with only an OPENAI_API_KEY keeps working.
     aiProvider:
       env.AI_PROVIDER?.toLowerCase() === "glm"
         ? "glm"
-        : env.AI_PROVIDER?.toLowerCase() === "gemini"
-          ? "gemini"
-          : "openai",
+        : env.AI_PROVIDER?.toLowerCase() === "openai"
+          ? "openai"
+          : "gemini",
     zAiApiKey: env.Z_AI_API_KEY?.trim() || undefined,
     // Z.AI free-tier flash models are not listed in /v4/models but are
     // accessible at chat/completions. Default to glm-4.7-flash; override
@@ -548,7 +553,11 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
     geminiApiKey: env.GEMINI_API_KEY?.trim() || undefined,
     geminiBaseUrl:
       env.GEMINI_BASE_URL?.trim() || "https://generativelanguage.googleapis.com/v1beta/openai/",
-    geminiModel: env.GEMINI_MODEL?.trim() || "gemma-4-31b-it",
+    // gemini-3-flash-preview (not the older gemma-4-31b-it default): the
+    // Gemma default quietly served a much weaker model to anyone who chose
+    // the "gemini" provider, which is exactly the quality gap Richard hit.
+    // Both are smoke-confirmed via apps/runner/src/scripts/gemini-smoke.ts.
+    geminiModel: env.GEMINI_MODEL?.trim() || "gemini-3-flash-preview",
     // Update feed (published latest.json URL). Never hard-coded; the pilot
     // sets the Dropbox raw=1 link as RIOS_UPDATE_FEED_URL.
     updateFeedUrl: env.RIOS_UPDATE_FEED_URL?.trim() || undefined,
