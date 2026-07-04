@@ -91,3 +91,8 @@ test("CLOSED_STATUS_PROMPT shows worked examples for the deleted-placeholder cas
     /OPEN\s+— IN: "This message has been deleted\."/
   );
 });
+
+test("CLOSED_STATUS_PROMPT closes settled logistics when thanks follow fulfilment", () => {
+  assert.match(CLOSED_STATUS_PROMPT, /fulfilled a logistics[\s\S]*request/i);
+  assert.match(CLOSED_STATUS_PROMPT, /Thanks for lending it to me that night/i);
+});

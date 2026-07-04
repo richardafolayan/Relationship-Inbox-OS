@@ -65,6 +65,7 @@ import {
 } from "@/lib/overdue-digest";
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
 import { recordThreadSource } from "@/lib/thread-source";
+import { isInTodayQueue } from "@/lib/today";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised between 8 and 13 minutes per
@@ -265,9 +266,7 @@ export function AppShell({ children }: { children: ReactNode }) {
     // the sidebar can stop saying "Connecting…" and tell the truth.
     setHealth((prev) => healthData ?? prev ?? null);
     if (inboxData) {
-      const count = inboxData.rows.filter(
-        (row) => row.riskLevel === "RED" || row.riskLevel === "AMBER"
-      ).length;
+      const count = inboxData.rows.filter((row) => isInTodayQueue(row, new Set())).length;
       setAttentionCount(count);
       maybeNotify(inboxData.rows);
     }

@@ -55,6 +55,11 @@ test("BRIEF_RECENCY_DISCIPLINE is exported and teaches the live-exchange recency
   assert.match(BRIEF_RECENCY_DISCIPLINE, /remember or durable_context/);
   // Must keep the "this week" framing of a long-past event out.
   assert.match(BRIEF_RECENCY_DISCIPLINE, /this week/);
+  // Must close settled logistics when later messages show the item/detail was
+  // already provided and acknowledged.
+  assert.match(BRIEF_RECENCY_DISCIPLINE, /Time can resolve logistics/);
+  assert.match(BRIEF_RECENCY_DISCIPLINE, /already provided the requested item/);
+  assert.match(BRIEF_RECENCY_DISCIPLINE, /still waiting for confirmation/);
   // No copyable persona / example names leaked into the prompt text.
   assert.doesNotMatch(BRIEF_RECENCY_DISCIPLINE, /Annalise|Richard/);
 });
@@ -170,5 +175,37 @@ test("the recency + attribution fragments are wired into the reassess prompt, an
   assert.ok(
     source.includes("buildReassessTranscript(input.messages"),
     "the reassess transcript must be built via buildReassessTranscript"
+  );
+  assert.match(
+    source,
+    /latest unanswered inbound contains a direct question[\s\S]*lead with that question/,
+    "direct latest-inbound questions must lead what_they_want"
+  );
+  assert.match(
+    source,
+    /latest unanswered inbound asks a direct question[\s\S]*obligation read/,
+    "direct latest-inbound questions must drive on_you"
+  );
+});
+
+test("what_they_want is built from the contact's bucket, not the operator's outbound", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../apps/runner/dist/services/ai.js", import.meta.url)),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /silently sort the live exchange into two buckets/,
+    "the prompt must separate contact asks from operator outbound before the headline"
+  );
+  assert.match(
+    source,
+    /headline is built ONLY from bucket 1/,
+    "the headline must come from the contact's side"
+  );
+  assert.match(
+    source,
+    /the contact already answered is never "what they want"/,
+    "an answered operator question must not become the ask"
   );
 });

@@ -364,7 +364,8 @@ export const BRIEF_RECENCY_DISCIPLINE = [
   "where_it_stands, they_said, on_you and required_points describe ONLY the live exchange. NEVER lift a beat out of the OLDER BACKGROUND into these fields as if it were current. A topic the contact raised once weeks or months ago and never returned to is NOT live reply debt.",
   "Use the per-message timestamps and today's date to judge age. A beat far older than the most recent inbound is stale (an internship mentioned ~10 months ago, an exam that was 3 weeks ago): keep it out of they_said / on_you / required_points, and never describe a long-past event as if it were happening \"this week\".",
   "A stale-but-durable fact (a job, a course, a house move) belongs in remember or durable_context, never the live brief. A stale loop that was genuinely never answered can go in handled_points with a reason, it does not become a required action.",
-  "If the live exchange itself is old (the contact went quiet weeks or months ago) that is RECONNECT mode: set they_said to [] and do not mine the older background for substance."
+  "If the live exchange itself is old (the contact went quiet weeks or months ago) that is RECONNECT mode: set they_said to [] and do not mine the older background for substance.",
+  "Time can resolve logistics. If the transcript shows the operator already provided the requested item, location, answer, or pickup detail, and the contact later acknowledges or thanks them, the request is CLOSED. Put it in handled_points if useful; do not say the contact is still waiting for confirmation."
 ].join(" ");
 
 /**
@@ -890,7 +891,13 @@ Decision rules (apply in order):
      genuinely asks for something → OPEN; otherwise → CLOSED. Do not
      treat the placeholder itself as either a fresh ask or a closing
      beat.
-  7. When in doubt → OPEN. False "closed" hides threads that might
+  7. If recent messages show the operator already fulfilled a logistics
+     request (gave the location, confirmed pickup, sent the item or answer)
+     and the latest inbound is gratitude or a brief wrap ("thanks for
+     lending it", "got it, see you there", "perfect, picked it up"),
+     → CLOSED. Trust the recent message turns over an older summary that
+     still describes the request as pending.
+  8. When in doubt → OPEN. False "closed" hides threads that might
      need the operator; false "open" just leaves them visible.
 
 Examples:
@@ -899,6 +906,8 @@ Examples:
   CLOSED — IN: "👍"
   CLOSED — IN: "This message has been deleted." (and the prior real
             inbound did not leave a live question on the table)
+  CLOSED — IN: "Thanks for lending it to me that night" (after OUT:
+            "Outside" / pickup already happened in the recent turns)
   OPEN   — IN: "thanks - and one more thing, did the invoice clear?"
   OPEN   — IN: "hey, been ages! how have you been?"
   OPEN   — IN: "I'll send the doc later today, sound good?"
@@ -1967,6 +1976,8 @@ MODE DECISION (made by you, the model, after reading the transcript):
 
 what_they_want guidance (ACTIVE REPLY):
 - 1-2 short sentences, plain prose, British English, no trailing ellipsis. Keep it tight — aim for roughly 120 characters and never exceed 200. It MUST be a COMPLETE, self-contained thought: finish the sentence, and never trail off on a dangling word or connective (do not end on "and", "to", "with", "gently", or "...the update and gently"). If the whole thought will not fit, write a SHORTER sentence that still resolves — never a half-finished one.
+- If the latest unanswered inbound contains a direct question from the contact, lead with that question. Do NOT lead with the operator's earlier question or plan just because it set up the topic.
+- Before writing what_they_want, silently sort the live exchange into two buckets: (1) questions/asks FROM the contact still waiting on the operator, and (2) the operator's own outbound questions or plans. The headline is built ONLY from bucket 1. Bucket 2 is context for where_it_stands — an operator question the contact already answered is never "what they want".
 - Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
 - Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
 - Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner."
@@ -2060,6 +2071,7 @@ they_said (SUBSTANCE — the most important field):
 
 on_you (THE OBLIGATION READ):
 - Plainly state whether the contact has actually asked the operator for anything.
+- If the latest unanswered inbound asks a direct question, that question is the obligation read. Answering it outranks older setup context from the operator.
 - If the contact has NOT asked anything explicit, say so directly. Example wording: "Nothing asked — a light acknowledgement is enough."
 - If the contact has asked ONE thing, name it. Example: "She asked whether Friday works."
 - If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
@@ -2069,6 +2081,7 @@ on_you (THE OBLIGATION READ):
 
 required_points (status = "required") — the reply checklist:
 - BE CONSERVATIVE. Required points are the small set of things the operator MUST address. If a point is borderline, send it to optional_followups instead — the rail's job is to prevent invented homework, not to manufacture it. The substance the operator should read is already in they_said; required is only for "you owe a response on this".
+- If the latest unanswered inbound is a direct question, include a required point to answer that question unless a later message already answers or withdraws it.
 - Always belongs in required: direct questions to the operator, requests, decisions the contact asked the operator to make, things asked to send / confirm / check / arrange. A question the operator acknowledged but never actually answered counts as required.
 - Acknowledgement-worthy news: when the contact has NOT asked anything explicit but has shared a single substantive beat the operator would feel rude ignoring (a paused offer, a decision they made, a life event they named), surface AT MOST ONE required point. Phrase the point in grounded terms naming the beat in the contact's own words ("Acknowledge the paused offer", "Acknowledge the move to Lagos") — do NOT characterise the beat itself ("Acknowledge the big news", "Acknowledge the major decision"). Any further acknowledgements go in optional_followups. The high bar is: "would the contact feel actively unheard, not just under-engaged, if the reply ignored this?" A piece of explanation or background context they shared does NOT meet that bar — that's substance for they_said to surface, not a task.
 - For a multi-part inbound where the contact DID ask several distinct things, surface each ask as its own required point. Asks > acknowledgements.
@@ -3552,10 +3565,12 @@ Safe metadata: ${safeTruncate(JSON.stringify(input.meta), 1200)}`;
       return null;
     }
 
-    // Send the last 3 turns oldest-first so the model sees the closing
-    // beat plus the operator's preceding message for context.
+    // Send the last 6 turns oldest-first so logistics arcs (pickup,
+    // location, thanks) stay visible; 3 turns was too short for Toni-style
+    // handovers where the closing thanks is IN but the fulfilment is OUT
+    // a few beats earlier.
     const recentTurns = input.messages
-      .slice(-3)
+      .slice(-6)
       .map((m) => ({
         direction: m.direction,
         text: safeTruncate(renderMessageBody(m), 600)
