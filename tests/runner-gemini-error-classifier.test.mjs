@@ -180,3 +180,18 @@ test("gemini: empty / undefined error doesn't crash", () => {
   const result = classifyLlmError(undefined, "gemini");
   assert.match(result, /^Reason:/);
 });
+
+test("the gemini client gets a bigger timeout budget than the shared 15s", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const source = readFileSync(
+    fileURLToPath(new URL("../apps/runner/dist/services/ai.js", import.meta.url)),
+    "utf8"
+  );
+  // Free-tier Gemma legitimately takes 15-40s on a full reply-brief JSON;
+  // the shared 15s cap silently pushed most Gemma calls onto the OpenAI
+  // fallback ("timed out" -> nano output while the operator believes
+  // they're on Gemma).
+  assert.match(source, /GEMINI_CLIENT_OPTIONS = \{ timeout: 45_?000, maxRetries: 0 \}/);
+  assert.match(source, /baseURL: runnerConfig\.geminiBaseUrl, \.\.\.GEMINI_CLIENT_OPTIONS/);
+});
