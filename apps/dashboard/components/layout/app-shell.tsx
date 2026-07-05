@@ -18,6 +18,13 @@ import { startAppUpdate } from "@/lib/app-update-action";
 import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { isQuietHoursActive } from "@/lib/quiet-hours";
 import {
+  DEFAULT_SCAN_INTERVAL,
+  nextScanDelayMs,
+  onScanIntervalChange,
+  readScanInterval,
+  type ScanIntervalId
+} from "@/lib/scan-interval";
+import {
   buildUpdateNotice,
   planUpdateNotice,
   readNotifiedUpdateVersion,
@@ -68,17 +75,13 @@ import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
-// Auto-scan cadence is randomised between 8 and 13 minutes per
-// firing rather than the old hard 10-min loop. A perfect 10-minute
-// cadence is one of the strongest behavioural fingerprints we
-// produce — anyone watching the LinkedIn account would see a
-// scrape land like clockwork. Jittering still averages a similar
-// rate but kills the periodicity.
-const LINKEDIN_AUTO_SCAN_MIN_MS = 8 * 60 * 1000;
-const LINKEDIN_AUTO_SCAN_MAX_MS = 13 * 60 * 1000;
-function nextAutoScanDelayMs(): number {
-  return Math.floor(Math.random() * (LINKEDIN_AUTO_SCAN_MAX_MS - LINKEDIN_AUTO_SCAN_MIN_MS + 1)) + LINKEDIN_AUTO_SCAN_MIN_MS;
-}
+// Auto-scan cadence is randomised per firing rather than a hard loop: a
+// perfectly periodic scan is one of the strongest behavioural fingerprints
+// we produce — anyone watching the LinkedIn account would see a scrape land
+// like clockwork. The base interval is operator-adjustable now (pilot
+// R-0087 / #754, Settings > Capture), and lib/scan-interval.ts keeps every
+// cadence on the same proportional jitter the historical 8-13 min window
+// gave the 10-minute default.
 
 // Active-hours gate: only auto-scan during plausible working hours
 // for a real person on this account. Skipping nights and weekends
@@ -389,6 +392,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     window.localStorage.setItem(linkedInAutoScanStorageKey, autoScanEnabled ? "true" : "false");
   }, [autoScanDisabled, autoScanEnabled]);
 
+  // Operator-chosen scan cadence (pilot R-0087 / #754). Changing it in
+  // Settings re-arms the loop immediately - the effect below depends on it.
+  const [scanInterval, setScanInterval] = useState<ScanIntervalId>(DEFAULT_SCAN_INTERVAL);
+  useEffect(() => {
+    setScanInterval(readScanInterval());
+    return onScanIntervalChange(() => setScanInterval(readScanInterval()));
+  }, []);
+
   useEffect(() => {
     if (autoScanDisabled || !autoScanEnabled) return undefined;
     let cancelled = false;
@@ -417,14 +428,17 @@ export function AppShell({ children }: { children: ReactNode }) {
       }
       // Re-schedule with a fresh jitter on every firing so we don't
       // settle into a predictable cadence even with quiet-hours skips.
-      timer = setTimeout(tick, nextAutoScanDelayMs());
+      // A skipped tick retries on the short window whatever the cadence:
+      // the gates above still decide whether the retry scans, so a daily
+      // interval can't starve just because its timer landed at night.
+      timer = setTimeout(tick, nextScanDelayMs(scanInterval, { skipped: skip }));
     };
-    timer = setTimeout(tick, nextAutoScanDelayMs());
+    timer = setTimeout(tick, nextScanDelayMs(scanInterval));
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
-  }, [autoScanDisabled, autoScanEnabled]);
+  }, [autoScanDisabled, autoScanEnabled, scanInterval]);
 
   // #359: notification permission is no longer requested on mount.
   // Asking pre-intent (i.e. on every page load before the operator has
