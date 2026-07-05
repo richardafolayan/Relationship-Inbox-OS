@@ -4728,7 +4728,7 @@ export default function ThreadPage() {
             <p className="mb-3 text-[12.5px] leading-[1.55] text-ink-3">
               {effectiveComposeMode === "write"
                 ? composeHelper
-                : "Ask a question about this thread or person. The AI answers from the transcript and what's on record. It won't make anything up."}
+                : "Ask about this thread or person, or something general. Facts about the person come only from the transcript and what's on record; general questions get a general answer, clearly labelled."}
             </p>
             {!showFullDrafts ? (
               <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
