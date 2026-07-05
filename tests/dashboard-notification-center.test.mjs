@@ -390,3 +390,83 @@ test("without a window (SSR) every entry point is a safe no-op", () => {
     globalThis.window = prevWindow;
   }
 });
+
+// ---------------------------------------------------------------------------
+// Pilot R-0091 (#758): replying to a thread resolves its notice.
+// ---------------------------------------------------------------------------
+
+const { pruneRepliedNotifications, pruneRepliedCenterNotifications } = await import(
+  "../apps/dashboard/lib/notification-center.ts"
+);
+
+test("pruneRepliedNotifications drops entries whose thread now shows a reply", () => {
+  const existing = [
+    entry({ id: "t-1" }),
+    entry({ id: "t-2" }),
+    entry({ id: "t-3" })
+  ];
+  const next = pruneRepliedNotifications(existing, [
+    { id: "t-1", needsReply: false, lastMessageDirection: "OUT" },
+    { id: "t-2", needsReply: true, lastMessageDirection: "IN" },
+    { id: "t-3", needsReply: true, lastMessageDirection: "OUT" }
+  ]);
+  // t-1 replied (both signals), t-3's newest message is outbound, t-2 still
+  // waits on the operator.
+  assert.deepEqual(next.map((n) => n.id), ["t-2"]);
+});
+
+test("pruneRepliedNotifications leaves non-thread entries and missing threads alone", () => {
+  const existing = [
+    entry({ id: OVERDUE_DIGEST_NOTIFICATION_ID, href: "/today" }),
+    entry({ id: "t-gone" }),
+    entry({ id: "t-1" })
+  ];
+  // t-gone is absent from rows (archived / fetch hiccup): stays. The digest
+  // id never matches a row: stays.
+  const next = pruneRepliedNotifications(existing, [
+    { id: "t-1", needsReply: false, lastMessageDirection: "OUT" }
+  ]);
+  assert.deepEqual(next.map((n) => n.id), [OVERDUE_DIGEST_NOTIFICATION_ID, "t-gone"]);
+});
+
+test("pruneRepliedNotifications with no replied rows returns the same list", () => {
+  const existing = [entry({ id: "t-1" })];
+  const next = pruneRepliedNotifications(existing, [
+    { id: "t-1", needsReply: true, lastMessageDirection: "IN" }
+  ]);
+  assert.equal(next, existing);
+});
+
+test("pruneRepliedCenterNotifications writes only when something was removed", () => {
+  withWindow(({ store, dispatched }) => {
+    recordNewMessageNotifications([row({ id: "t-1" }), row({ id: "t-2" })], 5000);
+    const writesBefore = dispatched.length;
+    // Nothing replied: no write, no fan-out.
+    pruneRepliedCenterNotifications([
+      { id: "t-1", needsReply: true, lastMessageDirection: "IN" }
+    ]);
+    assert.equal(dispatched.length, writesBefore);
+    // t-1 replied: entry removed, change announced.
+    pruneRepliedCenterNotifications([
+      { id: "t-1", needsReply: false, lastMessageDirection: "OUT" }
+    ]);
+    assert.equal(dispatched.length, writesBefore + 1);
+    const kept = parseStoredNotifications(store.get(NOTIFICATION_CENTER_STORAGE_KEY));
+    assert.deepEqual(kept.map((n) => n.id), ["t-2"]);
+  });
+});
+
+test("pruneRepliedCenterNotifications without a window is a safe no-op", () => {
+  const prevWindow = globalThis.window;
+  // eslint-disable-next-line no-undefined
+  globalThis.window = undefined;
+  try {
+    assert.doesNotThrow(() =>
+      pruneRepliedCenterNotifications([
+        { id: "t-1", needsReply: false, lastMessageDirection: "OUT" }
+      ])
+    );
+  } finally {
+    globalThis.window = prevWindow;
+  }
+});
