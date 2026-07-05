@@ -260,3 +260,20 @@ test("the code derives the latest unanswered inbound run and feeds it as authori
   // capped latest inbound rather than storing an empty hero.
   assert.match(source, /result\.what_they_want\.trim\(\)/);
 });
+
+// ── just-replied discipline (2026-07-05): a fresh reply must not wipe the rail
+test("the just-replied check feeds the inbound run plus the reply and bans blanking they_said", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("../apps/runner/dist/services/ai.js", import.meta.url)),
+    "utf8"
+  );
+  // Code-derived: the contact's latest inbound run and the trailing reply are
+  // both handed to the model when the operator just replied.
+  assert.match(source, /JUST-REPLIED CHECK \(code-derived/);
+  assert.match(source, /latestInboundRun/);
+  assert.match(source, /trailingReplies/);
+  assert.match(source, /Check the reply text against EACH inbound beat/);
+  assert.match(source, /Do NOT return an empty they_said just because a reply exists/);
+  // they_said guidance mirrors it: blanking is reserved for genuine dormancy.
+  assert.match(source, /never merely because the operator just sent a reply/);
+});
