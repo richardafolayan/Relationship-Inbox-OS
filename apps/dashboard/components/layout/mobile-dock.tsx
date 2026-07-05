@@ -92,7 +92,7 @@ function DockTab({
           // tonight".
           <span
             className="absolute -right-[10px] -top-[4px] rounded-full bg-accent px-[4px] py-[1px] font-mono text-[9px] leading-[12px] text-white"
-            aria-label={`${badge} threads waiting in today's queue`}
+            aria-label={`${badge} ${badge === 1 ? "thread" : "threads"} waiting in today's queue`}
           >
             {formatAttentionBadge(badge)}
           </span>

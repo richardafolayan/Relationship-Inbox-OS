@@ -209,7 +209,7 @@ export function Sidebar({
                         "ml-auto shrink-0 rounded-full px-[6px] py-[1px] font-mono text-[10px] leading-[14px] tracking-[0.02em]",
                         active ? "bg-paper/20 text-paper" : "bg-accent text-white"
                       )}
-                      aria-label={`${attentionCount} threads waiting in today's queue`}
+                      aria-label={`${attentionCount} ${attentionCount === 1 ? "thread" : "threads"} waiting in today's queue`}
                     >
                       {badge}
                     </span>
@@ -218,7 +218,7 @@ export function Sidebar({
               ) : badge ? (
                 <span
                   className="absolute -right-[3px] -top-[3px] rounded-full bg-accent px-[4px] py-[1px] font-mono text-[9px] leading-[12px] text-white"
-                  aria-label={`${attentionCount} threads waiting in today's queue`}
+                  aria-label={`${attentionCount} ${attentionCount === 1 ? "thread" : "threads"} waiting in today's queue`}
                 >
                   {badge}
                 </span>
