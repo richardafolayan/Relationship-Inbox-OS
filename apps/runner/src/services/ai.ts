@@ -353,7 +353,7 @@ export const BRIEF_FIDELITY_REMINDER = [
   "FIDELITY (applies to every visible brief field — where_it_stands, they_said, on_you).",
   "Paraphrase the contact's stated facts in their register. Do NOT add emotional weight, stakes, significance, or characterisation the contact did not express.",
   "If they paused a decision for a stated reason, name the reason — don't characterise it as a \"big thing\", \"big move\", \"hard call\", \"huge step\", \"weighty\", \"the main thing\", or anything else they didn't say.",
-  "Worked example. Bad on_you: \"He's paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging\" (you invented \"big thing\"). Good on_you: \"He's paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough.\"",
+  "Worked example. Bad on_you: \"They've paused a job offer because the clients are in the Middle East — that's the big thing worth acknowledging\" (you invented \"big thing\"). Good on_you: \"They've paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough.\"",
   "Self-check: every substantive phrase in the brief should be traceable to something the contact actually said in the transcript.",
   "IDENTITY (strict). Keep each fact attached to the person it belongs to. The CONTACT's circumstances (their visa status, their project/MVP, their job, their plans) must never be presented as the OPERATOR's own, and on_you must never direct the operator to explain or justify the contact's circumstances as if they were the operator's. OWNERSHIP TEST: the person ASKING about a thing is not its owner — when the operator asks \"How's the MVP coming along?\", the MVP belongs to the CONTACT, so never direct the operator to \"state the updated MVP timeline\" or report progress on it. And keep question direction straight: if the transcript shows the CONTACT asking \"why this change?\", where_it_stands must say SHE asked YOU — never \"you asked her why the change happened\". When suggesting the operator explain a change of plan, the explanation must come from the operator's OWN messages — if the operator never stated a reason, say \"give your reason\" without supplying one.",
   "NO INVENTED CADENCE (strict, #464). This applies to EVERY field including summary and what_they_want, not just the brief. Do NOT characterise the FORMAT, FREQUENCY, or TIMING of the messages themselves. Claims like \"single-word replies\", \"one-word messages\", \"you keep saying X\", \"rapid back-and-forth\", or \"for the last few minutes\" must be plainly and literally true of the recent transcript or be left out. Describe what was said, not how tersely, how often, or how recently it was said. A word that recurs in the messages (a topic, a name, a game like chess) is NOT evidence that the messages are one-word or repetitive."
@@ -938,8 +938,8 @@ Examples:
 Return strict JSON: { "status": "closed" | "open", "reason": "<one short sentence, plain English, no more than 18 words>" }
 
 Reason guidance:
-  - Quote or paraphrase the actual closing beat ("she said cool see you Wednesday").
-  - For OPEN, name the question or ask ("he asked when you're back from leave").
+  - Quote or paraphrase the actual closing beat ("they said cool see you Wednesday").
+  - For OPEN, name the question or ask ("they asked when you're back from leave").
   - No greetings, no recommendations, no second-guessing the operator.
   - Lowercase fine. No em dashes, en dashes, semicolons, or colons.`;
 
@@ -2059,10 +2059,10 @@ what_they_want guidance (ACTIVE REPLY):
 - Before writing what_they_want, silently sort the live exchange into two buckets: (1) questions/asks FROM the contact still waiting on the operator, and (2) the operator's own outbound questions or plans. The headline is built ONLY from bucket 1. Bucket 2 is context for where_it_stands — an operator question the contact already answered is never "what they want". Worked inversion check: if the OPERATOR asked the contact "why did you switch careers?", that question is bucket 2 — never turn it into a job telling the operator to explain their own switch.
 - CARRY THE CONTACT'S ACTUAL WORDS. When the latest inbound asks a question, quote or near-quote it ("asked why your plans changed: 'Ooh why this change?'"). Never blur a concrete question into an abstraction ("asked a direct question about your plans" is a failure). Preserve names, places, titles and quoted phrases EXACTLY as written — a phrase like "Power Must Change Hands" (an event title) must never be reworded into "change hands power".
 - NEVER INVENT SPECIFICS. Do not add a time, place, date, or commitment that is not in the messages: no "tonight"/"tomorrow"/"next Sunday" unless a message says so, and no meetups, calls, or plans nobody proposed.
-- "NOTHING PENDING" IS A FIRST-CLASS ANSWER. If every ask in the live exchange has been resolved, say so plainly ("Nothing pending — she answered your questions and the thread wrapped warmly"). Do NOT go digging in the older background to manufacture a job: an arc from weeks ago (an old project, an old invitation, an old training offer) is NOT the headline unless the contact re-raised it inside the live window. Manufactured homework is worse than an honest nothing-pending.
+- "NOTHING PENDING" IS A FIRST-CLASS ANSWER. If every ask in the live exchange has been resolved, say so plainly ("Nothing pending — they answered your questions and the thread wrapped warmly"). Do NOT go digging in the older background to manufacture a job: an arc from weeks ago (an old project, an old invitation, an old training offer) is NOT the headline unless the contact re-raised it inside the live window. Manufactured homework is worse than an honest nothing-pending.
 - Recap what the last 2-3 messages have actually said — name the topic and what the contact is waiting on the operator to do or answer next.
-- Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; he's deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
-- Examples: "Sultan asked if you've watched the MJ movie, he's deciding whether to go with Timi.", "Carlos confirmed Friday lunch, he's waiting on you to pick a time.", "She shared photos from Lagos and asked when you're free for dinner.", "Nothing pending — Toni returned the jacket and the thread closed on thanks."
+- Ground in real content from the recent messages. Do not paraphrase into vague abstractions ("a quick coordination on location") when the messages have specifics ("asked if you've watched the MJ movie; they're deciding whether to go with Timi"). If you can't ground it in named content, fall back to literally quoting the gist.
+- Examples: "Sultan asked if you've watched the MJ movie, and is deciding whether to go with Timi.", "Carlos confirmed Friday lunch and is waiting on you to pick a time.", "They shared photos from Lagos and asked when you're free for dinner.", "Nothing pending — Toni returned the jacket and the thread closed on thanks."
 
 open_loops guidance (ACTIVE REPLY):
 - Work through the recent inbound messages ONE AT A TIME. For each unanswered inbound message, pull out every distinct thing the operator still needs to respond to: a question, a request, a decision they were asked to weigh in on, a piece of news that deserves a reaction. A single message often holds two or three separate loops — surface each one, never collapse a multi-part message into one vague loop.
@@ -2081,7 +2081,7 @@ what_they_want guidance (RECONNECT — only when the three criteria above all ho
 - BANNED OUTPUT: never write the meta-question itself into what_they_want. "What's the warmest, most natural way to reopen this thread..." (or any variant asking HOW to phrase a reply) is planning language, not a summary — state the callback fact instead, exactly like the examples below.
 - Do NOT phrase as a task the operator owes. This is reconnect mode — the operator is choosing to reach out, not responding to a pending ask.
 - RECONNECT is for genuinely dormant threads only: if the contact's most recent message is days old (not weeks), the thread is not dormant — stay in ACTIVE REPLY and, if nothing is pending, say "Nothing pending" there instead.
-- Examples: "Sultan mentioned exam stress last month, a 'how'd they go?' check-in is natural.", "She was deciding between two job offers, worth asking how that landed.", "He said he'd send the doc but went quiet, a light nudge would land well."
+- Examples: "Sultan mentioned exam stress last month, a 'how'd they go?' check-in is natural.", "They were deciding between two job offers, worth asking how that landed.", "They said they'd send the doc but went quiet, a light nudge would land well."
 
 open_loops guidance (RECONNECT):
 - These become "warm callbacks" — small specific things from the transcript that would feel good to bring up. Things the contact shared, mentioned, or said they'd do. Things the operator could genuinely remember and ask about.
@@ -2139,8 +2139,8 @@ ${PRONOUN_DISCIPLINE}
 
 where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - 1-2 short sentences. Plain British English. ≤ 280 chars total.
-- Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether he'd started exploring executive search opportunities, or was still figuring out his next steps.", "You sent the slides and asked what she thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
-- If the operator has not asked anything specific in the recent exchange, describe what the contact has now opened with — one sentence, neutral. Example: "Brandon has sent through a long update on where he's landed since you last spoke."
+- Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether they'd started exploring executive search opportunities, or were still figuring out their next steps.", "You sent the slides and asked what they thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
+- If the operator has not asked anything specific in the recent exchange, describe what the contact has now opened with — one sentence, neutral. Example: "Brandon has sent through a long update on where they've landed since you last spoke."
 - DO NOT cram the contact's reply substance into where_it_stands. The substance goes in they_said. This field is just the setup.
 - No abstract coaching ("deepen the connection", "grounded question", "helpful nudge"). No marketing register.
 - DO NOT attribute operator words to the contact, or vice versa. The transcript speaker labels (\`operator:\` and the contact's own name) are authoritative — a name appearing INSIDE a message body is a third party being discussed, not the speaker, and never the contact's own name.
@@ -2149,8 +2149,8 @@ they_said (SUBSTANCE — the most important field):
 - A bulleted list of every reply-relevant detail from the LATEST UNANSWERED INBOUND from the contact — that inbound sits below the LIVE EXCHANGE marker. NEVER pull substance from the older background above the marker, even if it reads as more interesting; a beat from weeks or months ago is not what the operator is replying to now.
 - The test for each bullet: "would the operator need this detail to write a thoughtful reply?" If yes, include it.
 - Capture each of these when present in the inbound: direct answers to the operator's question(s), decisions, constraints, reasons / explanations, news, updates, plans, anything implying emotional weight or significance, and follow-up opportunities the contact opened.
-- One detail per bullet — do NOT merge ("recruiters pitch your CV and he has interviews and one offer" must split into three bullets). The whole point is to lay the substance out so the operator can scan it.
-- Each bullet is plain prose, one short sentence (≤ 200 chars), grounded in real words from the inbound. Use third person ("He explained that...", "She mentioned...", "They said..."). Quote concrete details ("paused the offer because the clients are based in the Middle East"), never abstractions.
+- One detail per bullet — do NOT merge ("recruiters pitch your CV and they have interviews and one offer" must split into three bullets). The whole point is to lay the substance out so the operator can scan it.
+- Each bullet is plain prose, one short sentence (≤ 200 chars), grounded in real words from the inbound. Use third person, name or they/them ("Lanre explained that...", "They mentioned...", "They said..."). Quote concrete details ("paused the offer because the clients are based in the Middle East"), never abstractions.
 - 0-6 bullets. Match the texture of the inbound: a multi-part answer needs 3-5 bullets, a short message needs 1-2 or even none. Do NOT pad with invented detail to hit a number.
 - JUST-REPLIED: when the operator's own reply is the newest message, they_said does NOT blank. Run the beat-by-beat check from the JUST-REPLIED CHECK block: beats the reply addressed move to handled_points (with the covering words as the reason); beats it did not address stay right here. A one-line reply rarely covers a multi-beat inbound.
 - Empty array [] only in genuine reconnect dormancy (the thread has been quiet for weeks), when the latest inbound is a bare acknowledgement ("thanks", "👍"), or when the inbound is genuinely thin — never merely because the operator just sent a reply.
@@ -2161,9 +2161,9 @@ on_you (THE OBLIGATION READ):
 - If the latest unanswered inbound asks a direct question, that question is the obligation read. Answering it outranks older setup context from the operator.
 - The obligation must exist in the LIVE exchange. Never state an obligation built from older background, and never attach a time/place/plan no message proposed.
 - If the contact has NOT asked anything explicit, say so directly. Example wording: "Nothing asked — a light acknowledgement is enough."
-- If the contact has asked ONE thing, name it. Example: "She asked whether Friday works."
-- If the contact has asked MULTIPLE things, list them tightly. Example: "She asked for the document, your availability, and whether you can invite Tolu."
-- For a message that's a multi-part personal update (decisions, constraints, news) without explicit asks, point at the single beat that most calls for acknowledgement — but state it in the contact's own terms. Name the fact, do NOT characterise it as "big", "weighty", "main", "huge", or "the thing". Example (grounded): "He's paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough." NOT: "He paused the offer — that's the big thing worth acknowledging" (you invented "big thing").
+- If the contact has asked ONE thing, name it. Example: "They asked whether Friday works."
+- If the contact has asked MULTIPLE things, list them tightly. Example: "They asked for the document, your availability, and whether you can invite Tolu."
+- For a message that's a multi-part personal update (decisions, constraints, news) without explicit asks, point at the single beat that most calls for acknowledgement — but state it in the contact's own terms. Name the fact, do NOT characterise it as "big", "weighty", "main", "huge", or "the thing". Example (grounded): "They've paused a job offer because the clients were based in the Middle East. A short acknowledgement is enough." NOT: "They paused the offer — that's the big thing worth acknowledging" (you invented "big thing").
 - Never invent obligations. If the contact is simply updating the operator, say a light social reply is enough.
 - ONE sentence, ~140 characters max. The on_you block is the obligation read, not a paragraph. Resist stacking guidance ("acknowledge X; follow up on Y; keep the door open") — that pattern reliably blows past the budget and the dashboard truncates it mid-word. Pick the single most important obligation. Anything else goes in required_points or optional_followups.
 
@@ -2196,7 +2196,7 @@ handled_points (status = "handled"):
 - Older topics where the conversation clearly moved on to something else.
 - Rhetorical questions.
 - Stale requests that would feel awkward to resurrect unless the operator explicitly chooses to.
-- The "reason" field MUST carry the actual answer / substance in compact form, not just "topic moved on" or "you covered this". The operator should be able to read the reason and know what was settled without scrolling back. Examples: "she answered Friday at 11 works herself two messages later", "you replied that Tuesday won't work because of the school run", "he said the deck looked great and moved on to ask about the trip dates". Lowercase fine, ≤ 160 chars.
+- The "reason" field MUST carry the actual answer / substance in compact form, not just "topic moved on" or "you covered this". The operator should be able to read the reason and know what was settled without scrolling back. Examples: "they answered Friday at 11 works themselves two messages later", "you replied that Tuesday won't work because of the school run", "they said the deck looked great and moved on to ask about the trip dates". Lowercase fine, ≤ 160 chars.
 - 0-6 points. Omit the field entirely if nothing was dropped.
 
 fuller_context:
@@ -2207,7 +2207,7 @@ durable_context:
 - Optional one-line "who they are / how the operator knows them" — what would help if the operator hadn't spoken to this person in months. Null when unknown.
 
 tone_steer:
-- Optional one short line on how to approach the reply ("warm and brief, matches her tone", "stay direct — he's busy"). Null when nothing specific is worth saying.
+- Optional one short line on how to approach the reply ("warm and brief, matches their tone", "stay direct — they're busy"). Null when nothing specific is worth saying.
 
 enough_to_reply_without_scrolling:
 - Boolean self-check: would the where_it_stands + on_you blocks let the operator write a reply WITHOUT having to scroll back into the message history? Be honest; this is a signal, not a gate.
