@@ -274,6 +274,23 @@ export const CONTACT_NAME_DISCIPLINE = [
 ].join(" ");
 
 /**
+ * Pilot R-0090 (#757): a female contact was summarised as "he". A pronoun
+ * rule already existed (#416) but sat buried mid-paragraph inside
+ * CONTACT_NAME_DISCIPLINE, where the smaller default models (free Gemma
+ * tiers since #748) reliably skim past it. This standalone block states the
+ * default plainly — they/them unless the transcript gives categorical
+ * evidence — and travels next to the output-format instructions in every
+ * prompt that writes user-facing prose. Kept separate from the name rules
+ * so neither dilutes the other; exported so tests can pin its presence.
+ */
+export const PRONOUN_DISCIPLINE = [
+  "PRONOUNS (strict). Default to \"they\"/\"them\" for the contact and for any third party.",
+  "You may use \"he\" or \"she\" ONLY with categorical evidence in this prompt or the transcript: the person self-references with a gendered word (\"as her mum\", \"I'm his brother\"), the operator consistently used a specific pronoun for them in recent messages, or an explicit label like \"my sister Lanre\" appears.",
+  "A NAME IS NEVER EVIDENCE. Do not infer gender from any name, however strongly it reads to you — names cross cultures and misfire, and one wrong \"he\" for a woman reads as careless to the operator who knows her.",
+  "When unsure, prefer the contact's name over any pronoun (\"Lanre asked...\" not \"He asked...\"), or use they/them. Self-check before output: every \"he\"/\"she\"/\"him\"/\"her\"/\"his\"/\"hers\" you wrote must be traceable to categorical evidence, not to a name."
+].join(" ");
+
+/**
  * CONTACT_NAME_DISCIPLINE tells the model the contact's name is "the value
  * passed as `Recipient: <name>` / `displayName` in this prompt", and its
  * worked example uses the name "Seyi" ("if the recipient's displayName is
@@ -2118,6 +2135,8 @@ ${BANTER_DISCIPLINE}
 
 ${contactNameContext(input.displayName)}
 
+${PRONOUN_DISCIPLINE}
+
 where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - 1-2 short sentences. Plain British English. ≤ 280 chars total.
 - Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether he'd started exploring executive search opportunities, or was still figuring out his next steps.", "You sent the slides and asked what she thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
@@ -2575,6 +2594,8 @@ it's formal.
 ${PREDRAFT_FIDELITY_REMINDER}
 
 ${contactNameContext(input.displayName)}
+
+${PRONOUN_DISCIPLINE}
 
 ${currentTimeContext()}
 
@@ -3053,6 +3074,8 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
 ${PREDRAFT_FIDELITY_REMINDER}
 
 ${contactNameContext(input.displayName)}
+
+${PRONOUN_DISCIPLINE}
 
 ${currentTimeContext()}
 
