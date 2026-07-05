@@ -76,26 +76,27 @@ test("AppShell sidebar badge uses the Today queue predicate, not raw risk bucket
   );
 });
 
-test("sidebar and dock show a single warm dot, never a counter", () => {
-  // PRODUCT.md: "urgency is communicated through quiet rank and a single
-  // warm dot, not red badges, counters, or alarm". The Today count lives on
-  // the Today page itself ("N need you tonight"); nav surfaces only signal
-  // presence. Regression: the sidebar once rendered a capped "99+" pill.
+test("sidebar and dock show the needs-reply count as a small warm pill", () => {
+  // Pilot R-0089 (#756) reversed the earlier dot-only rule on Richard's
+  // direct word: the Today marker shows how many threads still need a
+  // reply, capped at 99+ (PRODUCT.md's calm-urgency line records the
+  // decision). It stays a quiet accent pill - never a red alarm badge.
+  // The formatter behaviour itself is pinned in
+  // dashboard-attention-badge.test.mjs; this guards the wiring.
   for (const rel of [
     "../apps/dashboard/components/layout/sidebar.tsx",
     "../apps/dashboard/components/layout/mobile-dock.tsx"
   ]) {
     const source = readFileSync(fileURLToPath(new URL(rel, import.meta.url)), "utf8");
-    assert.doesNotMatch(source, /99\+/, `${rel} must not cap-render a counter`);
-    assert.doesNotMatch(
-      source,
-      /\{\s*(attentionCount|badge)\s*\}/,
-      `${rel} must not render the attention count as text`
-    );
     assert.match(
       source,
-      /rounded-full bg-accent/,
-      `${rel} should render the warm presence dot`
+      /formatAttentionBadge/,
+      `${rel} must render the capped needs-reply count`
+    );
+    assert.doesNotMatch(
+      source,
+      /bg-risk-overdue[^\n]*(badge|attention)/,
+      `${rel} must not style the count as a red alarm badge`
     );
   }
 });
