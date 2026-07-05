@@ -181,12 +181,56 @@ export interface SendIMessageOptions {
   timeoutMs?: number;
 }
 
+export interface SendIMessageToChatOptions {
+  /**
+   * The chat.db chat guid, verbatim — e.g. "iMessage;+;chat812634..." for a
+   * group. AppleScript's `chat id "<guid>"` accepts exactly this string.
+   */
+  chatGuid: string;
+  text: string;
+  timeoutMs?: number;
+}
+
+/**
+ * Build the AppleScript for a group (chat-guid-addressed) text send.
+ * Exported for tests — the guid and text must arrive escaped and the verb
+ * must be `chat id`, not `buddy` (pilot #753 unlocked group sends).
+ */
+export function buildChatSendScript(input: { chatGuid: string; text: string }): string {
+  const chatGuid = escapeAppleScript(input.chatGuid);
+  const text = escapeAppleScript(input.text);
+  return [
+    `tell application "Messages"`,
+    `  set targetChat to a reference to chat id "${chatGuid}"`,
+    `  send "${text}" to targetChat`,
+    `end tell`
+  ].join("\n");
+}
+
+/**
+ * Send a text into an existing chat by its chat.db guid. This is the group
+ * path (pilot R-0086 / #753): groups have no single buddy handle, but
+ * Messages.app's `chat id` verb addresses the conversation itself. Only
+ * text — file attachments still need the 1:1 UI-scripting path, which is
+ * keyed on a buddy handle and has no group equivalent yet.
+ *
+ * Throws when osascript exits non-zero: unknown guid (chat was deleted on
+ * this Mac), Automation permission missing, etc. Delivery confirmation is
+ * the caller's job — same chat.db receipt polling as 1:1 sends, keyed on
+ * this guid.
+ */
+export async function sendIMessageToChat(opts: SendIMessageToChatOptions): Promise<void> {
+  if (opts.text.trim().length === 0) return;
+  const timeout = opts.timeoutMs ?? 30_000;
+  const script = buildChatSendScript({ chatGuid: opts.chatGuid, text: opts.text });
+  await execFileAsync("osascript", ["-e", script], { timeout });
+}
+
 /**
  * Send a 1:1 message via Messages.app. Throws if osascript exits non-zero
  * (the user hasn't granted Automation permission, or the handle is not a
- * known buddy on this Mac). Group sends are out of scope for v1; the chat
- * GUID path requires `tell application "Messages" to send "..." to chat id "..."`
- * which has more failure modes.
+ * known buddy on this Mac). Group sends go through sendIMessageToChat —
+ * groups have no single buddy handle.
  */
 export async function sendIMessage(opts: SendIMessageOptions): Promise<void> {
   const service = opts.service && opts.service.toLowerCase().includes("sms") ? "SMS" : "iMessage";

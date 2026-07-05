@@ -15,7 +15,7 @@ import { AdapterFailure } from "./utils";
 import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { groupStubFields } from "./imessage-group-name";
 import { imessageMessageBodyText } from "./imessage-message-text";
-import { sendIMessage } from "./imessage-send";
+import { sendIMessage, sendIMessageToChat } from "./imessage-send";
 import { loadBestContactResolver, type ContactResolver } from "../services/contact-resolver";
 
 const execFileAsync = promisify(execFile);
@@ -46,8 +46,10 @@ const CONTACT_RESOLVER_TTL_MS = 5 * 60_000;
  * Sending: shells out to `osascript`, which requires Automation permission
  * for Messages.app.
  *
- * Group chats are read but not sendable in v1 — sendMessage throws an
- * AdapterFailure with a "GROUP_SEND_UNSUPPORTED" detail.
+ * Group chats: read like any other chat; text sends address the chat guid
+ * via AppleScript's `chat id` verb (#753). Attachments to groups throw a
+ * "GROUP_ATTACHMENT_UNSUPPORTED" AdapterFailure - the file path is keyed
+ * on a buddy handle and has no group equivalent yet.
  */
 export class IMessageAdapter implements PlatformAdapter {
   readonly platform: PlatformName = "IMESSAGE";
@@ -311,13 +313,24 @@ export class IMessageAdapter implements PlatformAdapter {
       });
     }
     if (chat.isGroup) {
-      throw new AdapterFailure("Group iMessage send is not supported in v1", {
-        kind: "THREAD_FETCH_FAILED",
-        platform: this.platform,
-        stage: "persist",
-        platformThreadId: thread.platformThreadId,
-        details: { reason: "GROUP_SEND_UNSUPPORTED" }
-      });
+      // Group sends (pilot R-0086 / #753). Groups have no single buddy
+      // handle; the chat guid addresses the conversation itself. Text
+      // only — the 1:1 attachment path (UI scripting) is keyed on a buddy
+      // handle and has no group equivalent, so attachments stay blocked
+      // with a specific reason the dashboard can explain.
+      if ((attachments ?? []).length > 0) {
+        throw new AdapterFailure(
+          "Attachments can't be sent to group chats yet - send the text first, then share the file from Messages.app.",
+          {
+            kind: "THREAD_FETCH_FAILED",
+            platform: this.platform,
+            stage: "persist",
+            platformThreadId: thread.platformThreadId,
+            details: { reason: "GROUP_ATTACHMENT_UNSUPPORTED" }
+          }
+        );
+      }
+      return this.sendToGroupChat(chat.guid, thread, text);
     }
     // Pick the best handle to send to. The chat row we picked above is keyed
     // by *one* of the contact's handles (e.g. their phone). If that handle
@@ -457,6 +470,88 @@ export class IMessageAdapter implements PlatformAdapter {
       // acked yet (offline, slow, etc.).
       verifiedBy: isDelivered ? "bubble_detected" : "best_effort",
       attachments: receiptAttachments.length > 0 ? receiptAttachments : undefined
+    };
+  }
+
+  /**
+   * Group text send (pilot R-0086 / #753). Addresses the conversation by
+   * its chat.db guid via AppleScript's `chat id` verb, then polls the SAME
+   * guid for the outbound row - groups have exactly one chat row, so none
+   * of the 1:1 sibling-handle/receipt-rerouting logic applies.
+   */
+  private async sendToGroupChat(
+    chatGuid: string,
+    thread: ThreadStub,
+    text: string
+  ): Promise<SendReceipt> {
+    const db = this.getDb();
+    const sendStartedAt = Date.now();
+    try {
+      await sendIMessageToChat({ chatGuid, text });
+    } catch (error) {
+      const stderr = (error as { stderr?: string }).stderr ?? "";
+      const message = (error as Error).message ?? "";
+      const isAutomation = /not authorized|errAEEventNotPermitted|-1743|-600/.test(stderr + message);
+      // AppleScript can't get `chat id "..."` when the chat was deleted /
+      // never synced on this Mac - surface that plainly instead of a raw
+      // osascript error.
+      const isUnknownChat = /Can.t get chat id|-1728/.test(stderr + message);
+      throw new AdapterFailure(
+        isAutomation
+          ? "Messages.app rejected automation - grant Automation permission to the runner's terminal."
+          : isUnknownChat
+            ? "Messages.app doesn't know this group chat on this Mac - open it in Messages once, then retry."
+            : `iMessage group send failed: ${message}`,
+        {
+          kind: isAutomation ? "AUTH_REQUIRED" : "THREAD_FETCH_FAILED",
+          platform: this.platform,
+          stage: "persist",
+          platformThreadId: thread.platformThreadId,
+          cause: error,
+          details: { stderr: stderr.slice(0, 500), chatGuid }
+        }
+      );
+    }
+
+    // Same receipt polling as the 1:1 path: guid + delivery state from
+    // chat.db so send.ts can dedup against the scan and report honestly.
+    let receiptGuid: string | undefined;
+    let receiptTs: string | undefined;
+    let isDelivered = false;
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const status = db.findOutboundDeliveryStatus(chatGuid, sendStartedAt - 1000);
+      if (status) {
+        if (status.error && status.error !== 0) {
+          throw new AdapterFailure(
+            `Messages.app reports group send failed (chat.db error=${status.error}, service=${status.service ?? "?"})`,
+            {
+              kind: "THREAD_FETCH_FAILED",
+              platform: this.platform,
+              stage: "persist",
+              platformThreadId: thread.platformThreadId,
+              details: { messagesError: status.error, service: status.service, chatGuid }
+            }
+          );
+        }
+        receiptGuid = status.guid;
+        receiptTs = status.timestamp;
+        if (status.isDelivered) {
+          isDelivered = true;
+          break;
+        }
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+    if (!receiptTs && receiptGuid) {
+      const fallback = db.findOutboundSince(chatGuid, sendStartedAt - 1000);
+      receiptTs = fallback?.timestamp;
+    }
+
+    return {
+      sentAt: receiptTs ?? new Date().toISOString(),
+      platformMessageKey: receiptGuid,
+      verifiedBy: isDelivered ? "bubble_detected" : "best_effort"
     };
   }
 

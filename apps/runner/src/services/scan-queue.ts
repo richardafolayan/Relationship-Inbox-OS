@@ -3575,6 +3575,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     if (shouldRefreshSummary) {
       const aiSummary = await deps.aiService.updateThreadSummary({
         displayName: person.displayName,
+        // #753: group framing + per-sender transcript labels.
+        isGroup: thread.isGroup,
+        groupName: thread.groupName ?? null,
         previousSummary: thread.rollingSummary ?? undefined,
         previousOpenLoops: thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [],
         previousRemember: thread.rememberJson
