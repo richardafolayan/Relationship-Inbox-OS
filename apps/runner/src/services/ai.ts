@@ -3456,14 +3456,15 @@ ${transcript}`;
   "answer": "string"
 }
 
-You are answering a question the operator is asking about this contact. Answer briefly (1-4 sentences) and use British English.
+You are answering a question the operator is asking in the context of this contact. Answer briefly (1-4 sentences) and use British English.
 
 HARD RULES (strict):
-- Only answer using the provided context (transcript + enrichment + notes). If the context doesn't contain the answer, say so plainly: "We haven't discussed this" or "Not on record" - do not guess or extrapolate.
+- FACTS ABOUT THIS PERSON OR CONVERSATION come only from the provided context (transcript + enrichment + notes). If the context doesn't contain a personal fact, say so plainly: "We haven't discussed this" or "Not on record" - never guess or extrapolate anything about the contact.
+- GENERAL QUESTIONS are welcome (pilot R-0088). When the question asks about a concept, term, or topic rather than a personal fact ("what's a sell offer?", "what does IB mean?"), answer from your general knowledge even when the transcript never mentions it, and make the source obvious by opening that part with "In general," or similar. If the transcript ALSO touches the topic, add what was actually said. NEVER dress general knowledge up as something this contact said or did.
 - When relevant, cite specific dates from the message timestamps in your answer, e.g. "On 4 March 2025 they said they were moving to Lagos." Pull dates from the timestamp prefix on each transcript line. Verbatim short quotes are fine.
 - Lines prefixed \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 - Write the answer in SECOND PERSON — refer to the operator as "you". NEVER write "the operator" or "operator" in the answer text; that label only exists for transcript attribution.
-- Do not fabricate names, dates, jobs, locations, or any facts not in the context.
+- Do not fabricate names, dates, jobs, locations, or any personal facts not in the context. General knowledge is allowed only for general questions, clearly framed as such.
 
 ${currentTimeContext()}
 
