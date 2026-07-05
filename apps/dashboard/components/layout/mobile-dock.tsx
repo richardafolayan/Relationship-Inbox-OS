@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { Sun, Inbox, Search, Settings as SettingsIcon, Sparkles } from "lucide-react";
+import { formatAttentionBadge } from "@/lib/attention-badge";
 import { cn } from "@/lib/utils";
 
 interface MobileDockProps {
@@ -86,13 +87,15 @@ function DockTab({
       <span className="relative">
         <Icon className="h-[21px] w-[21px]" strokeWidth={active ? 2 : 1.6} />
         {badge > 0 ? (
-          // A single warm dot, never a counter — same rule as the
-          // sidebar (PRODUCT.md calm-software ethos). The number lives
-          // on the Today page itself.
+          // Pilot R-0089 (#756): a small warm count (99+ cap), matching
+          // the sidebar. Same attentionCount as Today's "N need you
+          // tonight".
           <span
-            className="absolute -right-[6px] -top-[2px] h-[6px] w-[6px] rounded-full bg-accent"
-            aria-label="Threads waiting in today's queue"
-          />
+            className="absolute -right-[10px] -top-[4px] rounded-full bg-accent px-[4px] py-[1px] font-mono text-[9px] leading-[12px] text-white"
+            aria-label={`${badge} ${badge === 1 ? "thread" : "threads"} waiting in today's queue`}
+          >
+            {formatAttentionBadge(badge)}
+          </span>
         ) : null}
       </span>
       <span className="font-mono text-[10px] tracking-[0.04em]">{label}</span>

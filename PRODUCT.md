@@ -46,9 +46,10 @@ tool, or AI ghostwriter.
 
 **Calm, warm, attentive.**
 
-- **Calm.** It never shouts. Urgency is communicated through quiet rank and a single
-  warm dot, not red badges, counters, or alarm. The operator should feel settled, not
-  chased.
+- **Calm.** It never shouts. Urgency is communicated through quiet rank and one small
+  warm count next to Today (how many still need a reply, capped at 99+; pilot R-0089
+  asked for the number back), never red badges or alarm. The operator should feel
+  settled, not chased.
 - **Warm.** These are relationships, not tickets. The voice is plain and human ("Reply
   to Maya", "You're caught up", "Nothing else needs you tonight"), never corporate
   ("0 items in queue", "Task completed").
