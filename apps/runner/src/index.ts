@@ -89,6 +89,7 @@ import {
   type AttachmentResolver,
   type TranscriptionProvider
 } from "./services/transcription";
+import { propagateTranscriptToThreadPreview } from "./services/transcript-preview";
 import { createSelfProfileService } from "./services/self-profile";
 import { createConversationStartersService } from "./services/conversation-starters";
 import {
@@ -733,6 +734,22 @@ const transcriptionService = createTranscriptionService({
     language: runnerConfig.audioTranscription.language,
     maxBytes: runnerConfig.audioTranscription.maxBytes,
     maxSeconds: runnerConfig.audioTranscription.maxSeconds
+  },
+  // #760: a finished transcript replaces the "[Voice note]" placeholder in
+  // the thread's inbox/Today preview. THREAD_UPDATED bumps the version-gated
+  // /data/inbox cache and nudges the dashboard over SSE.
+  onTranscriptSelected: (messageId) => {
+    void propagateTranscriptToThreadPreview(prisma, messageId)
+      .then((result) => {
+        if (result.updated && result.threadId) {
+          eventBus.emit({ type: "THREAD_UPDATED", jobId: uuid(), threadId: result.threadId });
+        }
+      })
+      .catch((error) => {
+        console.warn(
+          `[transcription] preview propagation failed for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
+        );
+      });
   }
 });
 

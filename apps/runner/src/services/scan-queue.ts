@@ -25,6 +25,7 @@ import { resolveAdapterFailureKind, shouldStopScanForFailureKind } from "./failu
 import { isAiVisibleMessage, prismaMessageToPrompt } from "./ai";
 import { buildMessageUpsertPayload } from "./message-upsert-payload";
 import { deleteImessageVoiceSnapshot } from "./imessage-voice-store";
+import { isVoicePlaceholderText, previewFromTranscript } from "./transcript-preview";
 import type { KeyedMutex } from "./keyed-mutex";
 import {
   ScanRetryController,
@@ -3493,9 +3494,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // fallback so threads with only system events leave the existing
     // thread.lastMessage* fields unchanged.
     const lastMessage = latestRealMessage;
-    const resolvedLastMessagePreview = cleanText(
+    let resolvedLastMessagePreview = cleanText(
       candidate.lastMessagePreview ?? lastMessage?.text ?? thread.lastMessagePreview ?? ""
     );
+    // #760: an audio-only newest message resolves to a "[Voice note]"-style
+    // placeholder from both the list candidate and the message text. When its
+    // transcript already exists, the transcript IS the preview — otherwise a
+    // re-scan would clobber the transcript that transcript-preview.ts wrote
+    // through when transcription finished. latestMessagesDesc carries the
+    // audioTranscription include, so this costs no extra query.
+    if (isVoicePlaceholderText(resolvedLastMessagePreview) && lastMessage) {
+      const transcription = latestMessagesDesc.find((m) => m.id === lastMessage.id)?.audioTranscription;
+      const transcript = transcription?.transcript?.trim() ?? "";
+      if (transcription?.status === "transcribed" && transcript.length > 0) {
+        resolvedLastMessagePreview = previewFromTranscript(transcript);
+      }
+    }
 
     const settings = await deps.settingsStore.getSettings();
     const risk = calculateRisk({

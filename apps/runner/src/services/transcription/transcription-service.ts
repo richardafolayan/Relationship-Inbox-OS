@@ -139,6 +139,14 @@ interface TranscriptionServiceDeps {
   convertCafToM4a?: (absolutePath: string) => Promise<string | null>;
   convertVideoToAudioM4a?: (absolutePath: string) => Promise<string | null>;
   warn?: (message: string) => void;
+  /**
+   * Fired after a transcript is written as the message's selected
+   * transcript (first single-model write, a progressive tier win, or a
+   * refinement). index.ts uses this to propagate the transcript into
+   * Thread.lastMessagePreview (#760) and bump the dashboard. Must not
+   * throw; called fire-and-forget.
+   */
+  onTranscriptSelected?: (messageId: string) => void;
 }
 
 export interface TranscribeMessageOptions {
@@ -198,6 +206,15 @@ interface QueueItem {
 
 export function createTranscriptionService(deps: TranscriptionServiceDeps): TranscriptionService {
   const warn = deps.warn ?? ((message) => console.warn(message));
+  const notifyTranscriptSelected = (messageId: string): void => {
+    try {
+      deps.onTranscriptSelected?.(messageId);
+    } catch (error) {
+      warn(
+        `[transcription] onTranscriptSelected hook failed for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  };
   const cafConverter = deps.convertCafToM4a ?? convertCafToM4a;
   const videoAudioExtractor = deps.convertVideoToAudioM4a ?? convertVideoToAudioM4a;
   const RETENTION_WARNING_COOLDOWN_MS = 6 * 60 * 60 * 1000;
@@ -507,6 +524,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
             selectedProvider: deps.provider!.id
           }
         });
+        notifyTranscriptSelected(message.id);
         ok += 1;
       } else if (outcome.kind === "skipped") {
         await deps.prisma.messageAudioTranscription.create({
@@ -776,6 +794,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
             needsAiRefresh: currentSelection !== null
           }
         });
+        notifyTranscriptSelected(messageId);
       }
       return "ok";
     } else if (outcome.kind === "skipped") {
@@ -872,6 +891,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
           needsAiRefresh: parent?.selectedTier !== null && parent?.selectedTier !== undefined
         }
       });
+      notifyTranscriptSelected(input.message.id);
     } else if (outcome.kind === "skipped") {
       await deps.prisma.messageAudioTranscriptionAttempt.create({
         data: {
