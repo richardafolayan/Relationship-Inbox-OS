@@ -1971,11 +1971,41 @@ export function createAiService(settingsStore: SettingsStore): AiService {
       .slice(lastOutIndex + 1)
       .filter((m) => m.direction === "IN")
       .slice(-12);
+    // When the operator has JUST replied (reassess-on-send fires after every
+    // dashboard send), the unanswered run is empty — but the brief must not
+    // be blanked as if one reply covered everything the contact said. Hand
+    // the model the contact's latest inbound run AND the reply that followed,
+    // and demand a beat-by-beat coverage check (a one-line "we'll both be
+    // locked in for the fast" reply used to wipe a four-beat they_said list).
+    const lastInIndex = input.messages.reduce(
+      (acc, m, idx) => (m.direction === "IN" ? idx : acc),
+      -1
+    );
+    let inboundRunStart = lastInIndex;
+    while (inboundRunStart > 0 && input.messages[inboundRunStart - 1]?.direction === "IN") {
+      inboundRunStart -= 1;
+    }
+    const latestInboundRun =
+      lastInIndex >= 0 ? input.messages.slice(inboundRunStart, lastInIndex + 1).slice(-12) : [];
+    const trailingReplies =
+      lastInIndex >= 0 && lastOutIndex > lastInIndex
+        ? input.messages
+            .slice(lastInIndex + 1)
+            .filter((m) => m.direction === "OUT")
+            .slice(-6)
+        : [];
     const unansweredRunBlock = unansweredRun.length
       ? `LATEST UNANSWERED INBOUND RUN (code-derived — authoritative):
 These are the contact's messages since the operator's last reply. what_they_want MUST be grounded here first: quote or near-quote any question in this run. Only if this run carries no ask and nothing worth acknowledging may what_they_want say "Nothing pending" — and never reach further back in the transcript to manufacture a job instead.
 ${unansweredRun.map((m) => formatMessageForPrompt(m, contactLabel)).join("\n")}`
-      : `LATEST UNANSWERED INBOUND RUN: none — the operator replied most recently. Points the operator's reply left uncovered may still drive the brief, but never present a question that was already answered as a live ask.`;
+      : latestInboundRun.length
+        ? `JUST-REPLIED CHECK (code-derived — authoritative):
+The operator has replied since the contact's last message, but a reply only covers what it actually says. Below are the contact's latest inbound run and the operator's reply that followed. Check the reply text against EACH inbound beat, one at a time: a beat the reply actually addressed goes to handled_points with a reason quoting how it was covered; a beat the reply did NOT address STAYS in they_said (and in required_points if it was a genuine ask). Do NOT return an empty they_said just because a reply exists — one short reply rarely covers several distinct beats. Optional follow-ups that are still natural to send remain valid. Never present a question the reply answered as a live ask.
+Contact's latest inbound run:
+${latestInboundRun.map((m) => formatMessageForPrompt(m, contactLabel)).join("\n")}
+Operator's reply that followed:
+${trailingReplies.map((m) => formatMessageForPrompt(m, contactLabel)).join("\n")}`
+        : `LATEST UNANSWERED INBOUND RUN: none — there is no recent inbound from the contact in this window. Do not manufacture reply debt.`;
 
     // Summaries refer to the operator in second person ("you") regardless
     // of whether they've configured a displayName. The transcript label
@@ -2103,7 +2133,8 @@ they_said (SUBSTANCE — the most important field):
 - One detail per bullet — do NOT merge ("recruiters pitch your CV and he has interviews and one offer" must split into three bullets). The whole point is to lay the substance out so the operator can scan it.
 - Each bullet is plain prose, one short sentence (≤ 200 chars), grounded in real words from the inbound. Use third person ("He explained that...", "She mentioned...", "They said..."). Quote concrete details ("paused the offer because the clients are based in the Middle East"), never abstractions.
 - 0-6 bullets. Match the texture of the inbound: a multi-part answer needs 3-5 bullets, a short message needs 1-2 or even none. Do NOT pad with invented detail to hit a number.
-- Empty array [] when there is no recent unanswered inbound (reconnect mode), when the latest inbound is a bare acknowledgement ("thanks", "👍"), or when the inbound is genuinely thin.
+- JUST-REPLIED: when the operator's own reply is the newest message, they_said does NOT blank. Run the beat-by-beat check from the JUST-REPLIED CHECK block: beats the reply addressed move to handled_points (with the covering words as the reason); beats it did not address stay right here. A one-line reply rarely covers a multi-beat inbound.
+- Empty array [] only in genuine reconnect dormancy (the thread has been quiet for weeks), when the latest inbound is a bare acknowledgement ("thanks", "👍"), or when the inbound is genuinely thin — never merely because the operator just sent a reply.
 - NEVER include the operator's words here. NEVER include reply tasks here — those belong in required_points.
 
 on_you (THE OBLIGATION READ):
