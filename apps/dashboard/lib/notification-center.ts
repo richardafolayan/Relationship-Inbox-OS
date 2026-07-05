@@ -79,6 +79,26 @@ export function markAllNotificationsSeen(existing: CenterNotification[]): Center
   return existing.map((entry) => (entry.seen ? entry : { ...entry, seen: true }));
 }
 
+// Pilot R-0091 (#758): replying to a thread resolves its new-message notice.
+// Given the latest inbox rows, drop any entry whose thread now shows a reply
+// (needsReply flipped false, or the newest message is outbound). Matching is
+// by row id, so non-thread entries (the overdue digest, app updates) are
+// never touched; threads MISSING from `rows` are also left alone - a partial
+// or failed fetch must not wipe the center.
+export function pruneRepliedNotifications(
+  existing: CenterNotification[],
+  rows: Array<Pick<InboxRow, "id" | "needsReply" | "lastMessageDirection">>
+): CenterNotification[] {
+  if (existing.length === 0 || rows.length === 0) return existing;
+  const replied = new Set(
+    rows
+      .filter((row) => row.needsReply === false || row.lastMessageDirection === "OUT")
+      .map((row) => row.id)
+  );
+  if (replied.size === 0) return existing;
+  return existing.filter((entry) => !replied.has(entry.id));
+}
+
 export function unseenNotificationCount(items: CenterNotification[]): number {
   return items.reduce((count, entry) => (entry.seen ? count : count + 1), 0);
 }
@@ -197,6 +217,18 @@ export function recordOverdueDigestNotification(
 export function dismissCenterNotification(id: string): void {
   if (typeof window === "undefined") return;
   writeCenterNotifications(removeNotification(readCenterNotifications(), id));
+}
+
+// Storage wrapper for pruneRepliedNotifications (#758). Called on every
+// inbox poll; writes (and fans out a re-render) only when something was
+// actually removed, so the 8s poll doesn't thrash localStorage.
+export function pruneRepliedCenterNotifications(
+  rows: Array<Pick<InboxRow, "id" | "needsReply" | "lastMessageDirection">>
+): void {
+  if (typeof window === "undefined" || rows.length === 0) return;
+  const existing = readCenterNotifications();
+  const pruned = pruneRepliedNotifications(existing, rows);
+  if (pruned.length !== existing.length) writeCenterNotifications(pruned);
 }
 
 export function clearCenterNotifications(): void {
