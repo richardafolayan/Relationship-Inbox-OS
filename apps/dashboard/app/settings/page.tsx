@@ -188,7 +188,7 @@ export default function SettingsPage() {
         />
         <SettingRow
           name="Scan cadence"
-          desc="How often auto-scan checks for new messages. Timing stays slightly randomised around your choice, and quiet hours and active hours still apply. A daily scan runs at the first quiet moment after the interval passes."
+          desc="How often auto-scan checks for new messages. Timing stays slightly randomised around your choice, and quiet hours and active hours still apply. A daily scan runs at the first opportunity after the interval passes."
           disabled={autoScanDisabled}
           trailing={
             <div className="flex flex-wrap items-center justify-end gap-[8px]">
