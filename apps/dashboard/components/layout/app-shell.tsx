@@ -43,11 +43,12 @@ import {
 import {
   dismissCenterNotification,
   markCenterNotificationsSeen,
+  pruneRepliedCenterNotifications,
   recordCenterNotifications,
   recordNewMessageNotifications,
   recordOverdueDigestNotification
 } from "@/lib/notification-center";
-import { showToast } from "@/lib/feedback";
+import { dismissToast, showToast } from "@/lib/feedback";
 import {
   classifyDigestAckError,
   digestFireFingerprint,
@@ -174,6 +175,11 @@ export function AppShell({ children }: { children: ReactNode }) {
   //     visible without having to open the thread to discover it.
   const maybeNotify = useCallback(
     (rows: InboxRow[]) => {
+      // #758 (R-0091): threads the operator has since replied to (from the
+      // dashboard, the phone, anywhere a scan can see) drop out of the
+      // notification center on every poll. Runs before the priming check so
+      // even the first poll after a reload clears stale notices.
+      pruneRepliedCenterNotifications(rows);
       const previous = inboxSnapshotRef.current;
       inboxSnapshotRef.current = snapshotInbox(rows);
       if (!notificationsPrimedRef.current || !previous) {
@@ -543,11 +549,23 @@ export function AppShell({ children }: { children: ReactNode }) {
     const source = new EventSource(eventUrl);
     source.onmessage = (event) => {
       try {
-        const payload = JSON.parse(event.data) as { type?: string; eventId?: number };
+        const payload = JSON.parse(event.data) as {
+          type?: string;
+          eventId?: number;
+          threadId?: string;
+        };
         if (payload.eventId) {
           window.sessionStorage.setItem("runner_last_event_id", String(payload.eventId));
         }
         window.dispatchEvent(new CustomEvent("runner-event", { detail: payload }));
+        // #758 (R-0091): replying resolves that thread's new-message notice
+        // instantly - the center entry goes, and so does a still-showing
+        // 30s toast. The poll-driven prune below covers phone-side replies;
+        // this covers the dashboard send the operator just made.
+        if (payload.type === "MESSAGE_SENT" && payload.threadId) {
+          dismissCenterNotification(payload.threadId);
+          dismissToast(`new-message:${payload.threadId}`);
+        }
         if (payload.type === "RESYNC_REQUIRED") {
           window.dispatchEvent(new CustomEvent("runner-resync"));
         }

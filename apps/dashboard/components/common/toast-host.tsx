@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { ChevronRight, Loader2 } from "lucide-react";
-import { onToast, type Toast } from "@/lib/feedback";
+import { onToast, onToastDismiss, type Toast } from "@/lib/feedback";
 import { resolveToastGesture } from "@/lib/toast-gesture";
 
 const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: string }> = {
@@ -72,6 +72,14 @@ export function ToastHost() {
     const off = onToast((toast) => pushToast(toast));
     return off;
   }, [pushToast]);
+
+  // Programmatic dismissals (#758): app state made the toast moot (e.g. the
+  // operator replied to the thread a new-message toast points at). Plain
+  // removal - operator-intent hooks (onManualDismiss/onActivate) don't fire.
+  useEffect(() => {
+    const off = onToastDismiss((id) => dismiss(id));
+    return off;
+  }, [dismiss]);
 
   // Clear every pending timer on unmount.
   useEffect(() => {

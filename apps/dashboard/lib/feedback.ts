@@ -72,6 +72,27 @@ export function onToast(handler: (toast: Toast) => void): () => void {
   return () => window.removeEventListener(TOAST_EVENT, wrapped);
 }
 
+// Programmatic removal by id, for toasts made moot by app state rather than
+// by the operator (#758: a new-message toast disappears once that thread is
+// replied to). Removal only - deliberately does NOT fire onManualDismiss /
+// onActivate, which encode operator intent ("seen it" / "open it").
+const TOAST_DISMISS_EVENT = "inbox-toast-dismiss";
+
+export function dismissToast(id: string): void {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(new CustomEvent<string>(TOAST_DISMISS_EVENT, { detail: id }));
+}
+
+export function onToastDismiss(handler: (id: string) => void): () => void {
+  if (typeof window === "undefined") return () => undefined;
+  const wrapped = (event: Event) => {
+    const detail = (event as CustomEvent<string>).detail;
+    if (detail) handler(detail);
+  };
+  window.addEventListener(TOAST_DISMISS_EVENT, wrapped);
+  return () => window.removeEventListener(TOAST_DISMISS_EVENT, wrapped);
+}
+
 // Wraps a fire-and-forget action with optimistic + result toasts.
 // Mirrors `runAction` (api.ts) but adds user-visible feedback.
 export function runActionWithFeedback<T>(
