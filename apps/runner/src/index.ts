@@ -5694,20 +5694,35 @@ app.post("/control/person/:personId/friendship-summary", asyncRoute(async (req, 
     res.status(404).json({ error: "person not found" });
     return;
   }
-  // Pull up to ~600 messages across all threads with this person, oldest
-  // first - enough to surface earliest-message context for the
-  // how-you-know-each-other section without blowing the prompt.
-  const messages = await prisma.message.findMany({
-    where: { thread: { personId } },
-    orderBy: { timestamp: "asc" },
-    take: 600,
-    select: {
-      direction: true,
-      text: true,
-      timestamp: true,
-      audioTranscription: { select: { status: true, transcript: true } }
-    }
-  });
+  // Up to ~600 messages across all threads with this person. The summary
+  // needs BOTH ends of a long history: the earliest messages (the
+  // how-you-know-each-other section) and the latest (recent-topics). A
+  // plain oldest-first take starved recent-topics on 600+ message
+  // relationships (same window bug as pilot R-0084/R-0092 on the ask
+  // endpoint), so pull the oldest 150 and newest 450 and stitch them.
+  const messageSelect = {
+    id: true,
+    direction: true,
+    text: true,
+    timestamp: true,
+    audioTranscription: { select: { status: true, transcript: true } }
+  } as const;
+  const [oldest, newestDesc] = await Promise.all([
+    prisma.message.findMany({
+      where: { thread: { personId } },
+      orderBy: { timestamp: "asc" as const },
+      take: 150,
+      select: messageSelect
+    }),
+    prisma.message.findMany({
+      where: { thread: { personId } },
+      orderBy: { timestamp: "desc" as const },
+      take: 450,
+      select: messageSelect
+    })
+  ]);
+  const seen = new Set(oldest.map((m) => m.id));
+  const messages = [...oldest, ...newestDesc.reverse().filter((m) => !seen.has(m.id))];
   const result = await aiService.summarisePersonForFriendship({
     displayName: person.displayName,
     messages: messages.map(prismaMessageToPrompt).filter(isAiVisibleMessage)
@@ -5733,9 +5748,16 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
     res.status(404).json({ error: "person not found" });
     return;
   }
-  const messages = await prisma.message.findMany({
+  // The NEWEST 600 messages, restored to chronological order for the
+  // prompt. This used to be `orderBy: asc` + take, which returns the OLDEST
+  // 600 - so on a long-running relationship (pilot R-0084/R-0092: 681 and
+  // 1627 messages on record) the ask never saw the recent conversation and
+  // answered from years-old context ("the last thing said was ... 3
+  // February 2024" while June 2026 messages sat on screen, and a padel
+  // plan from this week came back "not recorded").
+  const messagesDesc = await prisma.message.findMany({
     where: { thread: { personId } },
-    orderBy: { timestamp: "asc" },
+    orderBy: { timestamp: "desc" },
     take: 600,
     select: {
       direction: true,
@@ -5744,6 +5766,8 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
       audioTranscription: { select: { status: true, transcript: true } }
     }
   });
+  const messages = messagesDesc.reverse();
+  const transcriptTruncated = messagesDesc.length === 600;
   const tags = person.tagsJson ? (JSON.parse(person.tagsJson) as string[]) : [];
   const contactSnapshot = person.enrichment
     ? {
@@ -5775,7 +5799,8 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
     messages: messages.map(prismaMessageToPrompt).filter(isAiVisibleMessage),
     contact: contactSnapshot,
     notes: person.notes,
-    tags
+    tags,
+    transcriptTruncated
   });
   res.json(result);
 }));

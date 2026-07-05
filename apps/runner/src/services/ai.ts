@@ -3395,6 +3395,14 @@ ${transcript}`;
     contact?: ContactProfileSnapshot | null;
     notes?: string | null;
     tags?: string[];
+    /**
+     * True when the transcript window hit its cap and older history was cut
+     * off (pilot R-0084/R-0092). The prompt then tells the model the window
+     * shows only the most recent messages, so "not on record" claims about
+     * things that may predate the window soften to "not in the recent
+     * messages I can see".
+     */
+    transcriptTruncated?: boolean;
   }): Promise<{ answer: string }> {
     const fallback = { answer: "AI service is unavailable - try again in a moment." };
     const trimmed = input.question.trim();
@@ -3442,7 +3450,7 @@ ${contactBlock}
 ${notesLine}
 ${tagsLine}
 
-Transcript (oldest first):
+Transcript (oldest first${input.transcriptTruncated ? "; this window holds only the MOST RECENT messages - older history exists but is not shown, so if the question concerns something older than this window, say it may be in older messages rather than claiming it was never discussed" : ""}):
 ${transcript}
 
 Question:

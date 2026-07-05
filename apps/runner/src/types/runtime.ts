@@ -520,6 +520,8 @@ export interface AiService {
     contact?: ContactProfileSnapshot | null;
     notes?: string | null;
     tags?: string[];
+    /** True when the message window hit its cap and older history was cut. */
+    transcriptTruncated?: boolean;
   }): Promise<{ answer: string }>;
   /**
    * Optional triage of a pilot bug / feedback report. Turns the tester's
