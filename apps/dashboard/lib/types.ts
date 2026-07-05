@@ -485,6 +485,15 @@ export interface ThreadResponse {
   personId: string;
   personName: string;
   personAvatarUrl?: string | null;
+  /**
+   * Group chat flag straight from the Thread row (#753). Optional so the
+   * dashboard keeps working against an older runner - when absent, the
+   * page falls back to inferring group-ness from distinct inbound sender
+   * names.
+   */
+  isGroup?: boolean;
+  /** Operator-visible group name when set (chat.db display name). */
+  groupName?: string | null;
   /** True when the operator has favourited this contact (R-0066 / #483).
    *  Drives the favourite star toggle in the thread header. */
   personFavourite?: boolean;

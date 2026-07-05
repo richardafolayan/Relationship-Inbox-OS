@@ -328,6 +328,33 @@ export function contactNameContext(displayName: string): string {
   return `${CONTACT_NAME_DISCIPLINE}\n\n${recipientLine}`;
 }
 
+/**
+ * Group-chat context block (pilot R-0086 / #753). Injected into the
+ * summary/brief, suggested-replies, and compose prompts when the thread is
+ * a group. Without it, the single-recipient framing of
+ * CONTACT_NAME_DISCIPLINE ("the contact") misleads the model into merging
+ * every participant into one person. Empty string on 1:1 threads so
+ * existing prompts are byte-identical.
+ */
+export function groupChatContext(input: {
+  isGroup?: boolean;
+  groupName?: string | null;
+  displayName?: string | null;
+}): string {
+  if (!input.isGroup) return "";
+  const label = (input.groupName ?? "").trim() || (input.displayName ?? "").trim();
+  const nameLine = label
+    ? `This thread is a GROUP CHAT (${label}).`
+    : "This thread is a GROUP CHAT.";
+  return [
+    "GROUP CHAT (strict).",
+    nameLine,
+    "Inbound lines are labelled with the name of the participant who wrote them; treat each labelled speaker as a distinct person and NEVER attribute one participant's words to another or merge them into a single \"contact\".",
+    "\"Recipient\" here means the whole group, not one person. Anything the operator sends is seen by every participant, so drafts and reply suggestions must read naturally to the whole group (no singular \"you two\"-style assumptions, no addressing one member as if the chat were private with them unless the operator's intent clearly targets that member by name).",
+    "Summaries and briefs should say who asked what when it matters (\"Tobi asked..., Ada suggested...\"), and what is on the operator for the GROUP."
+  ].join(" ");
+}
+
 export function currentTimeContext(now: Date = new Date()): string {
   const iso = now.toISOString();
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "system local time";
@@ -537,7 +564,22 @@ export function formatMessageForPrompt(
   message: MessageForPrompt,
   contactLabel = "contact"
 ): string {
-  const speaker = message.direction === "OUT" ? "operator" : contactLabel;
+  // Group chats (#753): a per-message senderName wins over the thread-level
+  // contact label, so each group turn is attributed to the person who
+  // actually wrote it. Runs through the same guards as
+  // contactTranscriptLabel so raw handles / placeholder names never become
+  // speaker labels; 1:1 threads (senderName absent or matching) behave
+  // exactly as before.
+  const senderLabel =
+    message.direction === "IN" && message.senderName
+      ? contactTranscriptLabel(message.senderName)
+      : "contact";
+  const speaker =
+    message.direction === "OUT"
+      ? "operator"
+      : senderLabel !== "contact"
+        ? senderLabel
+        : contactLabel;
   return `${speaker} (${message.timestamp}): ${renderMessageBody(message)}`;
 }
 
@@ -693,6 +735,7 @@ export function prismaMessageToPrompt<
     timestamp: Date | string;
     audioTranscription?: { status: string; transcript: string | null } | null;
     rawJson?: string | null;
+    senderName?: string | null;
   }
 >(message: T): MessageForPrompt {
   const direction = message.direction === "OUT" ? "OUT" : "IN";
@@ -707,6 +750,7 @@ export function prismaMessageToPrompt<
     direction,
     text: message.text,
     timestamp,
+    senderName: message.senderName ?? null,
     audioTranscription: message.audioTranscription ?? null,
     reactions: reactions.length > 0 ? reactions : undefined
   };
@@ -1885,6 +1929,9 @@ export function createAiService(settingsStore: SettingsStore): AiService {
   async function updateThreadSummary(input: {
     /** Contact's name — used as fallback summary text "Conversation with {name}." */
     displayName: string;
+    /** Group chat flags (#753) — switch the prompts into group framing. */
+    isGroup?: boolean;
+    groupName?: string | null;
     previousSummary?: string;
     previousOpenLoops: string[];
     /** Last persisted remember items — kept as the fallback if the AI call fails. */
@@ -2137,6 +2184,8 @@ ${contactNameContext(input.displayName)}
 
 ${PRONOUN_DISCIPLINE}
 
+${groupChatContext(input)}
+
 where_it_stands (CONTEXT ONLY — KEEP TIGHT):
 - 1-2 short sentences. Plain British English. ≤ 280 chars total.
 - Open with what the OPERATOR last asked or last shared on the active topic, in second person. Examples: "You asked Brandon whether they'd started exploring executive search opportunities, or were still figuring out their next steps.", "You sent the slides and asked what they thought.", "You haven't asked anything yet — Marianne sent a thread of updates."
@@ -2339,6 +2388,9 @@ ${transcript}`;
      * example name ("Seyi") and mislabels the contact.
      */
     displayName: string;
+    /** Group chat flags (#753) — replies address the whole group. */
+    isGroup?: boolean;
+    groupName?: string | null;
     summary: string;
     whatTheyWant: string;
     openLoops: string[];
@@ -2596,6 +2648,8 @@ ${PREDRAFT_FIDELITY_REMINDER}
 ${contactNameContext(input.displayName)}
 
 ${PRONOUN_DISCIPLINE}
+
+${groupChatContext(input)}
 
 ${currentTimeContext()}
 
@@ -2965,6 +3019,9 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
     intent: string;
     platform: PlatformName;
     displayName: string;
+    /** Group chat flags (#753) — the draft reads naturally to everyone. */
+    isGroup?: boolean;
+    groupName?: string | null;
     voiceSamples: string[];
     threadMessages: MessageForPrompt[];
     relationshipContext?: {
@@ -3076,6 +3133,8 @@ ${PREDRAFT_FIDELITY_REMINDER}
 ${contactNameContext(input.displayName)}
 
 ${PRONOUN_DISCIPLINE}
+
+${groupChatContext(input)}
 
 ${currentTimeContext()}
 

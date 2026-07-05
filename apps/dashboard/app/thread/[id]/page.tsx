@@ -2416,19 +2416,20 @@ export default function ThreadPage() {
     // already the current focus re-aligns rather than no-opping.
   }, [focusedThreadParentId, focusTrigger]);
 
-  // Group-chat detection. There is no isGroup flag on ThreadResponse, so
-  // we infer it from the inbound message senders: if 2+ distinct names
-  // have written into the thread, it is a group. False positives on a
-  // 1:1 where the contact's display name changed mid-thread are
-  // tolerable - the popover still shows useful info either way.
+  // Group-chat detection (#753). The runner now sends the authoritative
+  // Thread.isGroup flag; the sender-count heuristic stays as a fallback
+  // for older runners (2+ distinct inbound sender names = group). False
+  // positives on a 1:1 whose contact display name changed mid-thread are
+  // tolerable in the fallback - the popover still shows useful info.
   const isGroupChat = useMemo(() => {
+    if (typeof thread?.isGroup === "boolean") return thread.isGroup;
     const senders = new Set<string>();
     for (const m of visibleMessages) {
       if (m.direction === "IN" && m.senderName) senders.add(m.senderName);
       if (senders.size > 1) return true;
     }
     return false;
-  }, [visibleMessages]);
+  }, [thread?.isGroup, visibleMessages]);
   const [participantPopover, setParticipantPopover] = useState<string | null>(null);
 
   // Annotate each message with a date-divider flag/label so consecutive

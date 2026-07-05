@@ -110,6 +110,9 @@ export async function resummarizeThread(
   const fromScratch = options?.fromScratch ?? false;
   const summary = await deps.aiService.updateThreadSummary({
     displayName: thread.person.displayName,
+    // #753: group framing + per-sender transcript labels.
+    isGroup: thread.isGroup,
+    groupName: thread.groupName ?? null,
     previousSummary: fromScratch ? undefined : (thread.rollingSummary ?? undefined),
     previousOpenLoops:
       fromScratch || !thread.openLoopsJson ? [] : (JSON.parse(thread.openLoopsJson) as string[]),

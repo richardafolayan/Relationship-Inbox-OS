@@ -3992,6 +3992,9 @@ app.post("/control/thread/:threadId/compose", asyncRoute(async (req, res) => {
     intent: payload.intent,
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
+    // #753: group framing - the draft reads naturally to the whole group.
+    isGroup: thread.isGroup,
+    groupName: thread.groupName ?? null,
     voiceSamples,
     threadMessages: orderedMessages.map(prismaMessageToPrompt),
     relationshipContext,
@@ -4568,6 +4571,8 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
       direction: m.direction as "IN" | "OUT",
       text: m.text,
       timestamp: m.timestamp.toISOString(),
+      // #753: group turns keep their sender's name in the prompt.
+      senderName: m.senderName ?? null,
       audioTranscription: m.audioTranscription
         ? { status: m.audioTranscription.status, transcript: m.audioTranscription.transcript }
         : null
@@ -4609,6 +4614,9 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
   const aiInputs = {
     displayName: thread.person.displayName,
+    // #753: group framing for reply suggestions.
+    isGroup: thread.isGroup,
+    groupName: thread.groupName ?? null,
     summary: aiThread.rollingSummary ?? `Conversation with ${thread.person.displayName}.`,
     whatTheyWant: aiThread.whatTheyWant ?? "No clear ask yet.",
     openLoops: safeJsonParse<string[]>(aiThread.openLoopsJson, []),
@@ -4900,6 +4908,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     // anything birthday-relevant in the next month is worth surfacing.
     personBirthday: thread.person.birthday ?? null,
     personBirthYear: thread.person.birthYear ?? null,
+    // #753: authoritative group flag + name from the Thread row, so the
+    // dashboard stops inferring group-ness from distinct sender names.
+    isGroup: thread.isGroup,
+    groupName: thread.groupName ?? null,
     platform: thread.platform,
     // Sibling cohort for this Person (iMessage phone + email handle rows; a
     // single-element [thread.id] for everything else). The thread page matches
@@ -5780,6 +5792,8 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
       direction: true,
       text: true,
       timestamp: true,
+      // #753: group turns keep their sender's name in the ask transcript.
+      senderName: true,
       audioTranscription: { select: { status: true, transcript: true } }
     }
   });
@@ -6333,7 +6347,7 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
       where: messageScope,
       orderBy: [{ timestamp: "desc" }, { id: "desc" }],
       take: RECENT_TURN_WINDOW,
-      select: { direction: true, text: true, timestamp: true }
+      select: { direction: true, text: true, timestamp: true, senderName: true }
     }),
     settingsStore.getOperatorProfile(),
     conversationStartersService.toContactSnapshot(thread.personId, thread.person.displayName),
@@ -6363,7 +6377,9 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
   const recentMessages = [...recentTurnsDesc].reverse().map((m) => ({
     direction: m.direction as "IN" | "OUT",
     text: m.text,
-    timestamp: m.timestamp.toISOString()
+    timestamp: m.timestamp.toISOString(),
+    // #753: group turns keep their sender's name in the prompt.
+    senderName: m.senderName ?? null
   }));
   const aiNeedsReply = Boolean(
     lastInbound && (!lastOutbound || lastInbound.timestamp > lastOutbound.timestamp)
@@ -6383,6 +6399,9 @@ app.post("/control/thread/:threadId/predraft", asyncRoute(async (req, res) => {
 
   const aiInputs = {
     displayName: thread.person.displayName,
+    // #753: group framing for reply suggestions.
+    isGroup: thread.isGroup,
+    groupName: thread.groupName ?? null,
     summary: aiSource.rollingSummary ?? "",
     whatTheyWant: aiSource.whatTheyWant ?? "",
     openLoops: aiSource.openLoopsJson ? (JSON.parse(aiSource.openLoopsJson) as string[]) : [],
@@ -6537,6 +6556,9 @@ app.post("/control/thread/:threadId/voice-rewrite", asyncRoute(async (req, res) 
     intent: `Rewrite the message below in my voice, preserving the meaning. Keep it about the same length. Message: ${payload.draft}`,
     platform: thread.platform as PlatformName,
     displayName: thread.person.displayName,
+    // #753: group framing for the rewrite register.
+    isGroup: thread.isGroup,
+    groupName: thread.groupName ?? null,
     voiceSamples,
     threadMessages: orderedMessages.map(prismaMessageToPrompt),
     operatorProfile: rewriteOperatorProfile,

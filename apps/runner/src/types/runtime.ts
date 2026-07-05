@@ -47,6 +47,13 @@ export interface MessageForPrompt {
   direction: "IN" | "OUT";
   text: string;
   timestamp: string;
+  /**
+   * Group chats (#753): the resolved name of the specific sender of an IN
+   * message, so prompt transcripts can attribute each group turn to the
+   * right person instead of one generic contact label. Absent/null on 1:1
+   * threads and on historical rows.
+   */
+  senderName?: string | null;
   audioTranscription?: {
     status: string;
     transcript: string | null;
@@ -242,6 +249,9 @@ export interface StyleProfile {
 
 export interface AiService {
   updateThreadSummary(input: {
+    /** Group chat flags (#753). */
+    isGroup?: boolean;
+    groupName?: string | null;
     /** Contact's name (used in fallback summary text). */
     displayName: string;
     previousSummary?: string;
@@ -259,6 +269,9 @@ export interface AiService {
     race?: boolean;
   }): Promise<SummaryOutput>;
   generateSuggestedReplies(input: {
+    /** Group chat flags (#753). */
+    isGroup?: boolean;
+    groupName?: string | null;
     /** Contact's name — injected as the prompt's authoritative `Recipient:`
      *  line so the model names the contact instead of falling back to the
      *  CONTACT_NAME_DISCIPLINE example name. */
@@ -417,6 +430,9 @@ export interface AiService {
    * the configured fallback chain before returning the intent unchanged.
    */
   composeInVoice(input: {
+    /** Group chat flags (#753). */
+    isGroup?: boolean;
+    groupName?: string | null;
     intent: string;
     /** Drives the voice tier (LinkedIn → formal; everything else → casual-DM). */
     platform: PlatformName;
