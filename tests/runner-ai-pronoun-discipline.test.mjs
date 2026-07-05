@@ -58,3 +58,21 @@ test("SUMMARY_VERSION was bumped so cached summaries regenerate", () => {
   assert.doesNotMatch(scanQueue, /SUMMARY_VERSION = "v9-identity"/);
   assert.match(scanQueue, /SUMMARY_VERSION = "v1[0-9]-/);
 });
+
+// #767: the prompts' own few-shot examples must not model unevidenced
+// gendered pronouns (example-poisoning, same mechanism as the Seyi name
+// leak). The permitted evidenced-case illustrations live inside
+// PRONOUN_DISCIPLINE itself ("as her mum", "my sister Lanre").
+test("few-shot example lines carry no unevidenced gendered pronouns", () => {
+  const exampleLines = aiSource
+    .split("\n")
+    .filter((line) => /Examples?[ :(]/.test(line) && /"/.test(line));
+  assert.ok(exampleLines.length >= 8, `expected example lines, got ${exampleLines.length}`);
+  for (const line of exampleLines) {
+    assert.doesNotMatch(
+      line,
+      /"(He|She)['\s]|,\s(he|she)['\s]|\b(he|she)'(s|d)\s/,
+      `gendered example: ${line.trim().slice(0, 120)}`
+    );
+  }
+});
