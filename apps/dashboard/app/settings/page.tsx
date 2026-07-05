@@ -26,6 +26,14 @@ import type {
   OverdueDigestSettings
 } from "@/lib/overdue-digest";
 import { clearTourSeen, startPilotTour } from "@/lib/pilot-tour";
+import {
+  DEFAULT_SCAN_INTERVAL,
+  readScanInterval,
+  SCAN_INTERVAL_OPTIONS,
+  scanIntervalCaption,
+  writeScanInterval,
+  type ScanIntervalId
+} from "@/lib/scan-interval";
 import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
@@ -40,6 +48,8 @@ export default function SettingsPage() {
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
+  // Pilot R-0087 (#754): the scan cadence is a choice, not a constant.
+  const [scanInterval, setScanInterval] = useState<ScanIntervalId>(DEFAULT_SCAN_INTERVAL);
   const [savedAt, setSavedAt] = useState<number | null>(null);
 
   // Headless lives in the runner's persisted settings (the runner reads
@@ -85,6 +95,7 @@ export default function SettingsPage() {
       })
     );
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
+    setScanInterval(readScanInterval());
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
     void apiGet<{ headless?: boolean }>("/runner/data/settings")
       .then((data) => {
@@ -106,6 +117,15 @@ export default function SettingsPage() {
     const next = !autoScan;
     setAutoScan(next);
     window.localStorage.setItem(AUTO_SCAN_KEY, next ? "true" : "false");
+    setSavedAt(Date.now());
+  };
+
+  const chooseScanInterval = (next: ScanIntervalId) => {
+    if (autoScanDisabled) return;
+    setScanInterval(next);
+    // writeScanInterval also fans out the change event, so the app shell's
+    // running scan loop re-arms with the new cadence immediately.
+    writeScanInterval(next);
     setSavedAt(Date.now());
   };
 
@@ -141,7 +161,7 @@ export default function SettingsPage() {
       <SettingsGroup head="Capture">
         <SettingRow
           name="Auto-scan"
-          desc="Pull new messages from every connected platform on a fixed cadence."
+          desc="Pull new messages from every connected platform on the cadence you choose below."
           onActivate={toggleAutoScan}
           disabled={autoScanDisabled}
           trailing={
@@ -154,8 +174,8 @@ export default function SettingsPage() {
                 {autoScanDisabled
                   ? "off (disabled in this build)"
                   : autoScan
-                    ? "On · every 10 min"
-                    : "Off · every 10 min when on"}
+                    ? `On · ${scanIntervalCaption(scanInterval)}`
+                    : `Off · ${scanIntervalCaption(scanInterval)} when on`}
               </span>
               <Toggle
                 on={autoScan && !autoScanDisabled}
@@ -163,6 +183,24 @@ export default function SettingsPage() {
                 onChange={toggleAutoScan}
                 label="Auto-scan"
               />
+            </div>
+          }
+        />
+        <SettingRow
+          name="Scan cadence"
+          desc="How often auto-scan checks for new messages. Timing stays slightly randomised around your choice, and quiet hours and active hours still apply. A daily scan runs at the first opportunity after the interval passes."
+          disabled={autoScanDisabled}
+          trailing={
+            <div className="flex flex-wrap items-center justify-end gap-[8px]">
+              {SCAN_INTERVAL_OPTIONS.map((option) => (
+                <CadenceOption
+                  key={option.id}
+                  label={option.label}
+                  selected={scanInterval === option.id}
+                  disabled={autoScanDisabled}
+                  onClick={() => chooseScanInterval(option.id)}
+                />
+              ))}
             </div>
           }
         />
