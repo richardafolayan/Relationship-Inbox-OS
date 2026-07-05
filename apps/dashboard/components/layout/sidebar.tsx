@@ -14,6 +14,7 @@ import {
   User
 } from "lucide-react";
 import type { HealthResponse } from "@/lib/types";
+import { formatAttentionBadge } from "@/lib/attention-badge";
 import { cn } from "@/lib/utils";
 import { openPilotFeedback } from "@/lib/pilot";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
@@ -173,7 +174,12 @@ export function Sidebar({
         {nav.map((item) => {
           const Icon = item.icon;
           const active = pathname === item.href || pathname.startsWith(`${item.href}/`);
-          const showDot = item.attention && attentionCount > 0;
+          // Pilot R-0089 (#756): the marker is a count again — how many
+          // threads still need a reply in today's queue, capped at 99+.
+          // Same number as Today's "N need you tonight", so the sidebar
+          // and the page never disagree. Stays a small warm pill, not a
+          // red alarm badge (PRODUCT.md).
+          const badge = item.attention ? formatAttentionBadge(attentionCount) : "";
           return (
             <Link
               key={item.href}
@@ -197,25 +203,25 @@ export function Sidebar({
               {!collapsed ? (
                 <>
                   <span className="flex-1 truncate">{item.label}</span>
-                  {showDot ? (
-                    // A single warm dot, never a counter (PRODUCT.md:
-                    // "urgency is communicated through quiet rank and a
-                    // single warm dot, not red badges, counters, or
-                    // alarm"). Even the curated Today count read as
-                    // volume pressure, so the number stays on the Today
-                    // page itself ("N need you tonight") and the sidebar
-                    // only says "there is work for you today".
+                  {badge ? (
                     <span
-                      className="ml-auto h-[6px] w-[6px] shrink-0 rounded-full bg-accent"
-                      aria-label="Threads waiting in today's queue"
-                    />
+                      className={cn(
+                        "ml-auto shrink-0 rounded-full px-[6px] py-[1px] font-mono text-[10px] leading-[14px] tracking-[0.02em]",
+                        active ? "bg-paper/20 text-paper" : "bg-accent text-white"
+                      )}
+                      aria-label={`${attentionCount} ${attentionCount === 1 ? "thread" : "threads"} waiting in today's queue`}
+                    >
+                      {badge}
+                    </span>
                   ) : null}
                 </>
-              ) : showDot ? (
+              ) : badge ? (
                 <span
-                  className="absolute right-[2px] top-[2px] h-[6px] w-[6px] rounded-full bg-accent"
-                  aria-label="Threads waiting in today's queue"
-                />
+                  className="absolute -right-[3px] -top-[3px] rounded-full bg-accent px-[4px] py-[1px] font-mono text-[9px] leading-[12px] text-white"
+                  aria-label={`${attentionCount} ${attentionCount === 1 ? "thread" : "threads"} waiting in today's queue`}
+                >
+                  {badge}
+                </span>
               ) : null}
             </Link>
           );
