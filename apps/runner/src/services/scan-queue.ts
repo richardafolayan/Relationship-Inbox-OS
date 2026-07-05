@@ -3536,7 +3536,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // circumstances (her visa, her MVP) as the operator's own; briefs
     // regenerate so on_you stops directing the operator to justify the
     // contact's situation. Also the era of Gemini as default provider.
-    const SUMMARY_VERSION = "v9-identity";
+    // v10 pulls the pronoun rule into its own PRONOUN_DISCIPLINE block next
+    // to the output instructions (pilot R-0090 / #757 - a female contact
+    // summarised as "he"): they/them unless categorically evidenced. Cached
+    // summaries regenerate against the new prompt on next scan.
+    const SUMMARY_VERSION = "v10-pronouns";
     const needsReplyToken = resolvedNeedsReply ? "needs:1" : "needs:0";
     const lastInboundHash = lastInboundMessage
       ? stableHash(
