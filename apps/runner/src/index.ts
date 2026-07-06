@@ -43,7 +43,8 @@ import { normalizePersonGroups } from "./services/person-groups";
 import { buildReconnectCandidateWhere } from "./services/reconnect-candidate-query";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
-import { createAdapters } from "./services/platform-factory";
+import { createAdapters, type WhatsAppConnectState } from "./services/platform-factory";
+import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
 import { appendOutboundReaction } from "./platforms/linkedin-message-reactions";
@@ -265,8 +266,46 @@ app.use((req, res, next) => {
   next();
 });
 
+// Render a whatsapp-web.js QR string to a data-URL PNG (#774).
+async function qrcodeToDataUrl(qr: string): Promise<string> {
+  return QRCode.toDataURL(qr, { margin: 1, width: 264 });
+}
+
+// WhatsApp connect state (#774). whatsapp-web.js emits a QR string when a
+// scan is needed; we render it to a data-URL PNG so the dashboard can show a
+// scannable image without shipping a QR library to the browser. Latest QR +
+// state live here and are read by /data/whatsapp/status.
+const whatsappConnect: {
+  state: WhatsAppConnectState;
+  qr: string | null;
+  qrDataUrl: string | null;
+  updatedAt: string;
+} = { state: "disconnected", qr: null, qrDataUrl: null, updatedAt: new Date().toISOString() };
+
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
+  whatsappPrisma: prisma,
+  onWhatsAppStateChange: (state) => {
+    whatsappConnect.state = state;
+    whatsappConnect.updatedAt = new Date().toISOString();
+    if (state === "connected" || state === "disconnected") {
+      whatsappConnect.qr = null;
+      whatsappConnect.qrDataUrl = null;
+    }
+    eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state });
+  },
+  onWhatsAppQr: (qr) => {
+    whatsappConnect.qr = qr;
+    whatsappConnect.updatedAt = new Date().toISOString();
+    void qrcodeToDataUrl(qr)
+      .then((dataUrl) => {
+        whatsappConnect.qrDataUrl = dataUrl;
+        eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state: "qr_ready" });
+      })
+      .catch((error) => {
+        console.warn(`[whatsapp] QR render failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
+  },
   onConnectStep: async (input) => {
     await auditService.log({
       platform: input.platform,
@@ -2654,13 +2693,23 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "run a scan", kind: "external-action" })) return;
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional(),
       scope: z.enum(["update", "full"]).optional()
     })
     .parse(req.body ?? {});
+
+  // #774: never let a WhatsApp scan run before the operator has linked a
+  // device. The scan path calls ensureConnected(), which for a disconnected
+  // WhatsApp would launch a fresh whatsapp-web.js session and pop a QR - so
+  // a routine autoscan tick must no-op instead of hijacking the connect
+  // flow. Manual + post-link scans (state === "connected") pass through.
+  if (payload.platform === "WHATSAPP" && whatsappConnect.state !== "connected") {
+    res.status(409).json({ ok: false, reason: "whatsapp_not_connected" });
+    return;
+  }
 
   const maxThreads = normalizeOptionalPositiveNumber(payload.maxThreads);
   const maxOpens = normalizeOptionalPositiveNumber(payload.maxOpens);
@@ -5848,6 +5897,39 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
 app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
   const profile = await settingsStore.getOperatorProfile();
   res.json(profile);
+}));
+
+// WhatsApp connect (#774). Off unless WHATSAPP_ENABLED=true. `/connect`
+// kicks the whatsapp-web.js session; the QR arrives asynchronously via the
+// adapter's onQr callback and is polled from `/status` as a data-URL PNG the
+// operator scans in WhatsApp > Linked Devices. `/status` never blocks.
+app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
+  if (!runnerConfig.whatsapp.enabled) {
+    res.status(409).json({ ok: false, reason: "disabled", message: "Set WHATSAPP_ENABLED=true and restart to use WhatsApp." });
+    return;
+  }
+  const adapter = adapters.WHATSAPP;
+  if (!adapter) {
+    res.status(500).json({ ok: false, reason: "no_adapter" });
+    return;
+  }
+  // ensureConnected resolves on "ready"; don't await it (first connect waits
+  // on the human scanning the QR). Kick it and return immediately.
+  void adapter.ensureConnected().catch((error) => {
+    console.warn(`[whatsapp] connect failed: ${error instanceof Error ? error.message : String(error)}`);
+    whatsappConnect.state = "disconnected";
+  });
+  whatsappConnect.state = "connecting";
+  res.status(202).json({ ok: true, state: whatsappConnect.state });
+}));
+
+app.get("/data/whatsapp/status", asyncRoute(async (_req, res) => {
+  res.json({
+    enabled: runnerConfig.whatsapp.enabled,
+    state: whatsappConnect.state,
+    qrDataUrl: whatsappConnect.qrDataUrl,
+    updatedAt: whatsappConnect.updatedAt
+  });
 }));
 
 // #703 link previews. Unfurl a URL into title/description/image server-side

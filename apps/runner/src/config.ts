@@ -64,6 +64,12 @@ export interface RunnerConfig {
      * profiles above — WhatsApp uses its own Puppeteer instance. */
     WHATSAPP: string;
   };
+  /** WhatsApp Web adapter config (#774). Off by default. */
+  whatsapp: {
+    enabled: boolean;
+    mediaDir: string;
+    send: { dailyCap: number; minIntervalMs: number };
+  };
   imessage: {
     enabled: boolean;
     dbPath: string;
@@ -579,6 +585,21 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       TIKTOK: resolve(dataDir, "profiles", "tiktok"),
       IMESSAGE: resolve(dataDir, "profiles", "imessage"),
       WHATSAPP: resolve(dataDir, "profiles", "whatsapp")
+    },
+    whatsapp: {
+      // WhatsApp Web adapter via whatsapp-web.js (#774). OFF by default: it
+      // spins up its own headless Chromium and needs a one-time QR scan, so
+      // it must never boot for pilots who haven't opted in. Set
+      // WHATSAPP_ENABLED=true to turn it on, then connect via Settings.
+      enabled: (env.WHATSAPP_ENABLED ?? "").trim().toLowerCase() === "true",
+      mediaDir: resolve(dataDir, "whatsapp-media"),
+      // Send guard: cap outbound volume + minimum spacing so an automation
+      // bug can't blast a WhatsApp number (ban-sensitive). Conservative
+      // defaults, overridable via env.
+      send: {
+        dailyCap: parseIntOrDefault(env.WHATSAPP_MAX_PER_DAY, 40),
+        minIntervalMs: parseIntOrDefault(env.WHATSAPP_MIN_INTERVAL_MS, 15_000)
+      }
     },
     imessage: {
       // Mac-only adapter. Default off so Linux/CI runners don't try to open

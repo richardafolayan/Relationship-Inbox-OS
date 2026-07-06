@@ -6,8 +6,13 @@ import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
 import { BetaAdapter } from "../platforms/beta-adapter";
 import { IMessageAdapter } from "../platforms/imessage-adapter";
+import { WhatsAppAdapter } from "../platforms/whatsapp-adapter";
+import type { SendGuardPrisma } from "../platforms/whatsapp/sendGuard";
 import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "../platforms/browser-launch";
 import { createSessionManager } from "./session-manager";
+
+/** WhatsApp connect-state machine (#774), surfaced to the dashboard QR flow. */
+export type WhatsAppConnectState = "qr_ready" | "connecting" | "connected" | "disconnected";
 
 /**
  * Lazy-throwing adapter shell used while a platform is in scaffolding.
@@ -36,6 +41,12 @@ export function createAdapters(input: {
   settingsStore: SettingsStore;
   onConnectStep?: (info: ConnectStepInfo) => Promise<void> | void;
   onPersonalProfileFallback?: (info: PersonalProfileFallbackInfo) => Promise<void> | void;
+  /** Prisma client for the WhatsApp send guard (#774). Omit to keep the stub. */
+  whatsappPrisma?: SendGuardPrisma;
+  /** Fired with the whatsapp-web.js QR string when a scan is needed. */
+  onWhatsAppQr?: (qr: string) => void;
+  /** WhatsApp connect-state transitions, for the dashboard QR flow. */
+  onWhatsAppStateChange?: (state: WhatsAppConnectState) => void;
 }): {
   // `Partial` because not every PlatformName has an adapter on main today.
   // IMESSAGE was added to PlatformName so prisma can read existing iMessage
@@ -116,13 +127,22 @@ export function createAdapters(input: {
       dbPath: runnerConfig.imessage.dbPath,
       contactsVcfPath: runnerConfig.imessage.contactsVcfPath
     }),
-    // WhatsApp is wired in Phase B (whatsapp-web.js adapter). Phase A only
-    // adds the platform value + schema columns + plumbing. The stub
-    // implements the PlatformAdapter contract without doing any DOM /
-    // network work, so the runner boots cleanly with WHATSAPP enabled but
-    // any operator-triggered scan / send / open against it surfaces a
-    // clear error instead of silently launching Chrome at the wrong target.
-    WHATSAPP: createNotImplementedAdapter("WHATSAPP")
+    // WhatsApp (#774): the real whatsapp-web.js adapter, but ONLY when the
+    // operator has opted in (WHATSAPP_ENABLED=true) AND a prisma client was
+    // threaded through for the send guard. Otherwise the not-implemented
+    // stub keeps the runner booting cleanly with a clear error on any
+    // WhatsApp op - the calm "not connected" state, never a crash.
+    WHATSAPP:
+      runnerConfig.whatsapp.enabled && input.whatsappPrisma
+        ? new WhatsAppAdapter({
+            authDir: runnerConfig.profileDirs.WHATSAPP,
+            mediaDir: runnerConfig.whatsapp.mediaDir,
+            sendGuardConfig: runnerConfig.whatsapp.send,
+            prisma: input.whatsappPrisma,
+            onQr: input.onWhatsAppQr,
+            onStateChange: input.onWhatsAppStateChange
+          })
+        : createNotImplementedAdapter("WHATSAPP")
   };
 
   return {
