@@ -7,13 +7,19 @@
 // operator's phone (Settings → Linked Devices → Link a Device). The whole
 // dir is gitignored under /data/.
 
-// whatsapp-web.js is a CommonJS package — under the runner's ESM build
-// the named imports `{ Client, LocalAuth }` resolve to undefined. Pull the
-// default export and destructure the constructors off it instead. Type-only
-// imports still work because TypeScript reads the .d.ts directly.
-import wweb from "whatsapp-web.js";
+// whatsapp-web.js (and its bundled Puppeteer/Chromium) loads LAZILY - only
+// when a client is actually constructed, i.e. WHATSAPP_ENABLED is on and the
+// operator hits Connect. A top-level import would drag Puppeteer into every
+// runner boot and CRASH the runner on startup for anyone who hasn't installed
+// the dep, breaking the off-by-default promise (the platform stub must let the
+// runner boot with the package absent). createRequire keeps this a synchronous
+// factory while deferring the module load. whatsapp-web.js is CommonJS, so
+// `require` gives the default export; the named exports (`Client`,
+// `LocalAuth`) hang off it. Type-only imports read the .d.ts and are erased.
+import { createRequire } from "node:module";
 import type { Client as ClientType } from "whatsapp-web.js";
-const { Client, LocalAuth } = wweb;
+
+const lazyRequire = createRequire(import.meta.url);
 
 export interface WhatsAppClientOptions {
   /** Filesystem root for the LocalAuth session. Must match runnerConfig.profileDirs.WHATSAPP. */
@@ -23,6 +29,7 @@ export interface WhatsAppClientOptions {
 }
 
 export function createWhatsAppClient(opts: WhatsAppClientOptions): ClientType {
+  const { Client, LocalAuth } = lazyRequire("whatsapp-web.js");
   return new Client({
     authStrategy: new LocalAuth({
       clientId: opts.clientId ?? "inbox-os",
