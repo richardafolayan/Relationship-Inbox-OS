@@ -522,6 +522,12 @@ export interface ThreadResponse {
   /** ISO timestamp until which this thread is snoozed; null when active. */
   snoozedUntil?: string | null;
   /**
+   * #776. ISO timestamp the thread was archived; null when active. Drives the
+   * header's Archive / Unarchive toggle so an already-archived thread offers
+   * to come back instead of re-archiving.
+   */
+  archivedAt?: string | null;
+  /**
    * Issue #392. Operator-supplied "remind me to…" text attached to a
    * snooze. The thread page surfaces it as a "Reminder: <text>" banner
    * when present, so the operator remembers WHY the thread was snoozed

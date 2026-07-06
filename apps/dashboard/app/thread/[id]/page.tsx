@@ -8,6 +8,7 @@ import { useParams, useRouter } from "next/navigation";
 import { v4 as uuid } from "uuid";
 import {
   Archive,
+  ArchiveRestore,
   Check,
   ChevronDown,
   ChevronLeft,
@@ -498,6 +499,7 @@ export default function ThreadPage() {
   const sendingRef = useRef(false);
   const [reassessing, setReassessing] = useState(false);
   const [archiving, setArchiving] = useState(false);
+  const [unarchiving, setUnarchiving] = useState(false);
   const [transforming, setTransforming] = useState<"SHORTEN" | "MAKE_WARMER" | null>(null);
   // Mirrors the live route thread id so an in-flight transform that resolves
   // AFTER the operator navigates to another thread can detect the switch and
@@ -966,6 +968,38 @@ export default function ThreadPage() {
     await refreshThread();
     void refreshSiblings();
   }, [refreshThread, refreshSiblings]);
+
+  // #776. Archive and unarchive share the header slot: an archived thread
+  // offers "Unarchive" (bring it back to the active inbox, stay on the page),
+  // an active one offers "Archive" (hide it, return to whichever list the
+  // operator came from). Unarchive updates local state so the button flips
+  // back to "Archive" without a full refetch.
+  const unarchiveThread = useCallback(() => {
+    if (unarchiving) return;
+    setUnarchiving(true);
+    runAction(
+      apiPost(`/runner/control/thread/${threadId}/unarchive`, {}),
+      (message) => {
+        setError(message);
+        setUnarchiving(false);
+      },
+      () => setThread((current) => (current ? { ...current, archivedAt: null } : current))
+    );
+  }, [threadId, unarchiving]);
+
+  const archiveThread = useCallback(() => {
+    if (archiving) return;
+    setArchiving(true);
+    const returnTo = readThreadSource();
+    runAction(
+      apiPost(`/runner/control/thread/${threadId}/archive`, {}),
+      (message) => {
+        setError(message);
+        if (message) setArchiving(false);
+      },
+      () => router.push(returnTo)
+    );
+  }, [threadId, archiving, router]);
 
   useEffect(() => {
     refresh().catch((err) => {
@@ -3109,32 +3143,30 @@ export default function ThreadPage() {
               </ActionButton>
               <Button
                 variant="ghost"
-                disabled={archiving}
-                onClick={() => {
-                  if (archiving) return;
-                  setArchiving(true);
-                  // Issue #336. Return to whichever list the operator
-                  // came from (Inbox, Reconnect, Archived, At risk…)
-                  // rather than always /today; falls back to /today
-                  // when no source was recorded (deep link, fresh tab).
-                  const returnTo = readThreadSource();
-                  runAction(
-                    apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
-                    (message) => {
-                      setError(message);
-                      if (message) setArchiving(false);
-                    },
-                    () => router.push(returnTo)
-                  );
-                }}
-                title="Move this thread out of the active inbox (you can find it in Archived)"
+                disabled={archiving || unarchiving}
+                onClick={() => (thread.archivedAt ? unarchiveThread() : archiveThread())}
+                title={
+                  thread.archivedAt
+                    ? "Bring this thread back into the active inbox"
+                    : "Move this thread out of the active inbox (you can find it in Archived)"
+                }
                 className="hidden px-2 py-1.5 text-[12px] sm:inline-flex 2xl:px-3"
               >
-                <Archive className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                {thread.archivedAt ? (
+                  <ArchiveRestore className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                ) : (
+                  <Archive className="h-[14px] w-[14px] 2xl:hidden" strokeWidth={1.6} aria-hidden />
+                )}
                 {/* In-flight label stays visible at icon-only widths — the
                     button must show its own running state inline. */}
-                <span className={archiving ? "inline" : "hidden 2xl:inline"}>
-                  {archiving ? "Archiving…" : "Archive"}
+                <span className={archiving || unarchiving ? "inline" : "hidden 2xl:inline"}>
+                  {thread.archivedAt
+                    ? unarchiving
+                      ? "Unarchiving…"
+                      : "Unarchive"
+                    : archiving
+                      ? "Archiving…"
+                      : "Archive"}
                 </span>
               </Button>
               </div>
@@ -3228,20 +3260,14 @@ export default function ThreadPage() {
                               }
                             },
                         {
-                          label: archiving ? "Archiving…" : "Archive",
-                          onSelect: () => {
-                            if (archiving) return;
-                            setArchiving(true);
-                            const returnTo = readThreadSource();
-                            runAction(
-                              apiPost(`/runner/control/thread/${thread.id}/archive`, {}),
-                              (message) => {
-                                setError(message);
-                                if (message) setArchiving(false);
-                              },
-                              () => router.push(returnTo)
-                            );
-                          }
+                          label: thread.archivedAt
+                            ? unarchiving
+                              ? "Unarchiving…"
+                              : "Unarchive"
+                            : archiving
+                              ? "Archiving…"
+                              : "Archive",
+                          onSelect: () => (thread.archivedAt ? unarchiveThread() : archiveThread())
                         }
                       ]
                     : []),

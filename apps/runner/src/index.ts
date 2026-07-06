@@ -4922,6 +4922,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
     riskLevel: liveThreadRisk.level,
     riskReason: liveThreadRisk.riskReason,
     snoozedUntil: thread.snoozedUntil?.toISOString() ?? null,
+    // #776: whether this thread is archived, so the header can offer
+    // Unarchive instead of Archive when the operator opens an archived
+    // conversation.
+    archivedAt: thread.archivedAt?.toISOString() ?? null,
     // Issue #392. Operator-supplied "remind me to…" text. Surfaces as
     // a "Reminder: <text>" banner on the thread page so the operator
     // remembers WHY the thread was snoozed when it returns.
