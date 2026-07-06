@@ -41,3 +41,21 @@ test("onSend has a synchronous sendingRef re-entrancy guard", () => {
   assert.match(src, /sendingRef\.current = true;/);
   assert.match(src, /sendingRef\.current = false;/);
 });
+
+// Pilot R-0094 (#761): an uncaptioned image must render WITHOUT the coloured
+// message bubble. A future thread-page refactor could silently re-wrap it
+// (the chrome logic is dense), so pin the rule: isImageOnly is derived from
+// media-only photo/sticker messages, and the bubble background classes are
+// gated behind NOT being image-only.
+test("uncaptioned images drop the message bubble chrome (isImageOnly gate)", () => {
+  // isImageOnly is media-only, no text, photos/stickers only.
+  assert.match(src, /const isImageOnly\s*=/);
+  assert.match(src, /a\.kind === "photo" \|\| a\.kind === "sticker"/);
+  // The bubble background/padding must be conditional on !isImageOnly: the
+  // image-only branch renders bare "flex flex-col gap-2" with no bg-ink /
+  // bg-paper-2 / px-4 py-3.
+  // The bubble wrapper className is a ternary on isImageOnly: the truthy
+  // branch is the bare wrapper, the falsy branch carries the bubble bg.
+  assert.match(src, /isImageOnly\s*\?\s*"flex flex-col gap-2"/);
+  assert.match(src, /bg-ink text-paper/); // bubble bg still exists for the non-image branch
+});

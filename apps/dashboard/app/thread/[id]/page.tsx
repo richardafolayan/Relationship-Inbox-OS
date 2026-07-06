@@ -3614,6 +3614,19 @@ export default function ThreadPage() {
                       const displayText = optimisticTextByMessageId[message.id] ?? message.text;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(displayText.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText);
+                      // Pilot R-0094: an image sent with no caption shouldn't
+                      // sit in the coloured message bubble - the operator wants
+                      // just the picture. When the message is nothing but
+                      // photos/stickers, drop the bubble chrome (background,
+                      // padding, tail) so the image floats on the thread. Video
+                      // and audio keep the bubble: video carries its own frame
+                      // and both surface a transcript line that needs it.
+                      const isImageOnly =
+                        hasInlineMedia &&
+                        !showText &&
+                        playableAttachments.every(
+                          (a) => a.kind === "photo" || a.kind === "sticker"
+                        );
                       const nativeReactions =
                         (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
                       const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
@@ -3644,11 +3657,15 @@ export default function ThreadPage() {
                         <>
                         <div className="group relative">
                           <div
-                            className={`flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
-                              message.direction === "OUT"
-                                ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
-                                : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
-                            }`}
+                            className={
+                              isImageOnly
+                                ? "flex flex-col gap-2"
+                                : `flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
+                                    message.direction === "OUT"
+                                      ? "rounded-2xl rounded-br-[6px] bg-ink text-paper"
+                                      : "rounded-2xl rounded-bl-[6px] bg-paper-2 text-ink"
+                                  }`
+                            }
                           >
                             {hasInlineMedia ? (
                               <div className="flex flex-col gap-2">
