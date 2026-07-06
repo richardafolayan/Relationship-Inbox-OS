@@ -190,6 +190,10 @@ export type RunnerEvent =
       failed?: boolean;
     })
   | (RunnerEventBase & { type: "THREAD_UPDATED"; threadId: string })
+  | (RunnerEventBase & {
+      type: "WHATSAPP_STATE";
+      state: "qr_ready" | "connecting" | "connected" | "disconnected";
+    })
   | (RunnerEventBase & { type: "SUGGESTED_REPLIES_UPDATED"; threadId: string })
   | (RunnerEventBase & {
       type: "MESSAGE_SENT";

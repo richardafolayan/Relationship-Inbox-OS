@@ -7,6 +7,7 @@ import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
+import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
 import { FullDemoSettingsCard } from "@/components/full-demo/FullDemoSettingsCard";
 import { openPilotFeedback, PILOT_WELCOME_DISMISSED_KEY } from "@/lib/pilot";
@@ -277,6 +278,10 @@ export default function SettingsPage() {
           trailing={<ReassessAllControl />}
         />
       </SettingsGroup>
+
+      {/* Renders only when the runner reports WhatsApp enabled (#774); a
+          calm opt-in connect row, hidden for pilots who haven't turned it on. */}
+      <WhatsAppConnect />
 
       <div data-demo-target="settings-user-voice">
         <UserVoiceProfile variant="settings" />
