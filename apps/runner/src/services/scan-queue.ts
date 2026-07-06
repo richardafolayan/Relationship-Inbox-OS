@@ -398,6 +398,37 @@ export function decideSameThreadTwinDeleteMerge(
   });
 }
 
+/**
+ * A new inbound on an ARCHIVED thread should bring it back to the active
+ * inbox — the same reasoning as the snooze-clear in the thread upsert:
+ * archiving means "done for now", not "hide this person's future replies
+ * forever". Without this a contact who messages after being archived is
+ * silently lost from the active inbox (Richard, 2026-07-05: "Tim" was
+ * archived, messaged again twice, and never resurfaced — the operator had
+ * to hunt for him in Archived).
+ *
+ * Resurface only when BOTH hold:
+ *   - the newest inbound is newer than the archive decision — a genuinely
+ *     new message arrived AFTER archiving. A rescan of the same history, or
+ *     an old unreplied inbound the operator archived on purpose, must NOT
+ *     un-archive.
+ *   - the thread now needs a reply — a bare reaction / acknowledgement that
+ *     doesn't flip needsReply shouldn't drag a handled thread back.
+ *
+ * Compares against archivedAt (not the last-seen inbound) so it also
+ * self-heals threads already stuck in this state from before the fix.
+ */
+export function decideArchivedResurface(input: {
+  archivedAt: Date | null;
+  needsReply: boolean;
+  lastInboundAt: Date | null;
+}): boolean {
+  if (!input.archivedAt) return false;
+  if (!input.needsReply) return false;
+  if (!input.lastInboundAt) return false;
+  return input.lastInboundAt.getTime() > input.archivedAt.getTime();
+}
+
 export function normalizePositiveScanCap(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
@@ -3730,6 +3761,18 @@ export function createScanQueue(deps: ScanQueueDeps) {
         resolvedLastInboundAt &&
         (!thread.lastInboundAt || resolvedLastInboundAt.getTime() > thread.lastInboundAt.getTime())
           ? { snoozedUntil: null }
+          : {}),
+        // Resurface an archived thread when the contact sends a NEW message
+        // that needs a reply. Twin of the snooze-clear above: archiving is
+        // "done for now", not "hide their future replies forever", so a
+        // reply arriving after the archive must return the thread to the
+        // active inbox instead of silently disappearing into Archived.
+        ...(decideArchivedResurface({
+          archivedAt: thread.archivedAt,
+          needsReply: resolvedNeedsReply,
+          lastInboundAt: resolvedLastInboundAt
+        })
+          ? { archivedAt: null }
           : {}),
         riskLevel: risk.level,
         slaDueAt: risk.slaDueAt,
