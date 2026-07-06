@@ -288,6 +288,24 @@ const whatsappConnect: {
 // boot, but createAdapters runs before the scan queue exists. Same settable-
 // holder pattern as enqueueEnrichmentForScan.
 let enqueueWhatsAppInitialScan: (() => void) | null = null;
+// Debounced "an inbound WhatsApp message arrived → scan" nudge. Late-bound to
+// the scan queue for the same reason.
+let onWhatsAppMessageArrived: (() => void) | null = null;
+
+// Ensure WHATSAPP is in the operator's enabledPlatforms once they link a
+// device, so the scheduled scan loop keeps pulling WhatsApp on the normal
+// cadence (the real-time message watcher covers the gaps between ticks). The
+// scan gate still no-ops WhatsApp whenever it isn't connected, so enabling it
+// is safe across disconnects. Idempotent — a no-op once WHATSAPP is present.
+async function ensureWhatsAppEnabledInSettings(): Promise<void> {
+  const settings = await settingsStore.getSettings();
+  if (settings.enabledPlatforms.includes("WHATSAPP")) {
+    return;
+  }
+  await settingsStore.updateSettings({
+    enabledPlatforms: [...settings.enabledPlatforms, "WHATSAPP"]
+  });
+}
 
 // Mirror the whatsapp-web.js connect state onto the WHATSAPP platforms row so
 // the dashboard's "X/N connected" count, reconnect modal, and hasEverConnected
@@ -328,14 +346,22 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
       );
     });
     if (state === "connected") {
-      // Kick an initial scan the moment the operator links the account, so
-      // WhatsApp threads appear in the inbox right away instead of waiting
-      // for the next scheduled tick. Goes through the normal scan queue, so
-      // it shows in the TopStatus ticker like any other scan.
+      // Turn WhatsApp on for scheduled scans the moment a device links, then
+      // kick an initial scan so threads appear right away instead of waiting
+      // for the next tick. Both go through the normal paths, so the scan
+      // shows in the TopStatus ticker like any other.
+      void ensureWhatsAppEnabledInSettings().catch((error) => {
+        console.warn(
+          `[whatsapp] could not enable in settings: ${
+            error instanceof Error ? error.message : String(error)
+          }`
+        );
+      });
       enqueueWhatsAppInitialScan?.();
     }
     eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state });
   },
+  onWhatsAppIncomingMessage: () => onWhatsAppMessageArrived?.(),
   onWhatsAppQr: (qr) => {
     whatsappConnect.qr = qr;
     whatsappConnect.updatedAt = new Date().toISOString();
@@ -881,6 +907,37 @@ enqueueWhatsAppInitialScan = () => {
       ? { jobId: result.jobId, status: result.status }
       : { blocked: result.blocked, blockReason: result.reason }
   });
+};
+
+// Real-time WhatsApp inbound → debounced scan. whatsapp-web.js fires a
+// "message" event per inbound message; a busy group could fire many in a
+// burst, so we coalesce them into one scan on a trailing timer (the WhatsApp
+// analogue of the iMessage chat.db watcher's debounce). The scan itself is
+// serialised by the queue, so overlapping nudges can't produce parallel
+// WhatsApp scans. Only enqueues while connected — a nudge that lands
+// mid-disconnect is dropped by the scan gate anyway.
+const WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS = 4000;
+let whatsappMessageScanTimer: ReturnType<typeof setTimeout> | null = null;
+onWhatsAppMessageArrived = () => {
+  if (whatsappMessageScanTimer) {
+    return;
+  }
+  whatsappMessageScanTimer = setTimeout(() => {
+    whatsappMessageScanTimer = null;
+    if (whatsappConnect.state !== "connected") {
+      return;
+    }
+    const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+    void auditService.log({
+      platform: "WHATSAPP",
+      stage: "Scan",
+      action: "WHATSAPP_MESSAGE_WATCH_TRIGGER",
+      status: result.ok ? "OK" : "FAIL",
+      details: result.ok
+        ? { jobId: result.jobId, status: result.status }
+        : { blocked: result.blocked, blockReason: result.reason }
+    });
+  }, WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS);
 };
 
 // Boot-time WhatsApp resume. The connect state machine lives in memory, so a

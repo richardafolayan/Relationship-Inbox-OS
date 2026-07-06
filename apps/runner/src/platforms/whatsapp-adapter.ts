@@ -51,6 +51,15 @@ export interface WhatsAppAdapterDeps {
   /** Hook for transitioning the connect-state machine. Phase C uses this
    *  to drive the /platforms UI (disconnected / qr_ready / connected). */
   onStateChange?: (state: "qr_ready" | "connecting" | "connected" | "disconnected") => void;
+  /**
+   * Fired (fire-and-forget) when whatsapp-web.js reports a new inbound
+   * message. The runner debounces these into a WhatsApp scan so new chats
+   * flow into the inbox in near-real-time — the WhatsApp equivalent of the
+   * iMessage chat.db watcher. Own (fromMe) messages are ignored; the runner
+   * still picks those up on the next scheduled pass. Must never throw or
+   * block the wweb.js event loop.
+   */
+  onIncomingMessage?: () => void;
   /** Client factory override, for tests. */
   createClient?: (authDir: string) => Client;
 }
@@ -107,6 +116,24 @@ export class WhatsAppAdapter implements PlatformAdapter {
       client.on("ready", onReady);
       client.on("auth_failure", onAuthFailure);
       client.on("disconnected", onDisconnected);
+
+      // Near-real-time inbound. wweb.js emits "message" for messages from
+      // others (not fromMe). We don't read the payload here — the hook just
+      // nudges the runner to enqueue a debounced WhatsApp scan, which does
+      // the real collect/persist/AI work through the same path as a
+      // scheduled scan. Guarded so a listener error can never bubble into
+      // the library's event loop.
+      if (this.deps.onIncomingMessage) {
+        const notify = this.deps.onIncomingMessage;
+        client.on("message", () => {
+          try {
+            notify();
+          } catch {
+            // Fire-and-forget: never let a scan-enqueue hiccup crash the
+            // wweb.js message pipeline.
+          }
+        });
+      }
 
       // initialize() drives the auth flow; it won't resolve on its own —
       // we wait for the "ready" event above. Errors from initialize()
