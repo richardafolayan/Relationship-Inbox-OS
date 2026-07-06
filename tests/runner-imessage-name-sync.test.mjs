@@ -71,15 +71,15 @@ function withFixture(contacts, fn) {
 }
 
 test("name-sync rewrites raw-handle rows to AddressBook names and leaves real names alone", async () => {
-  await withFixture([{ firstName: "Marianne", lastName: "Okafor", phones: ["+447538705144"] }], async (abPath) => {
+  await withFixture([{ firstName: "Marianne", lastName: "Okafor", phones: ["+447700900123"] }], async (abPath) => {
     const fake = makeFakePrisma(
       [
-        { id: "p-handle", displayName: "+447538705144" }, // resolves -> rewrite
+        { id: "p-handle", displayName: "+447700900123" }, // resolves -> rewrite
         { id: "p-realname", displayName: "Tunde Bello" }, // already a name -> skip
         { id: "p-unmatched", displayName: "+449999999999" } // handle, no contact -> skip+count
       ],
       [
-        { id: "m-handle", senderName: "+447538705144" }, // resolves -> rewrite
+        { id: "m-handle", senderName: "+447700900123" }, // resolves -> rewrite
         { id: "m-realname", senderName: "Tunde Bello" } // already a name -> skip
       ]
     );
@@ -119,7 +119,7 @@ test("name-sync rewrites raw-handle rows to AddressBook names and leaves real na
 test("name-sync flags an empty Mac address book when handles remain unresolved", async () => {
   const fake = makeFakePrisma(
     [
-      { id: "p1", displayName: "+447538705144" },
+      { id: "p1", displayName: "+447700900123" },
       { id: "p2", displayName: "+15551234567" }
     ],
     []

@@ -61,9 +61,9 @@ test("contactNameContext: placeholder displayNames (phone/email/number-group) ge
   // model copy the example name. These must route to the unknown-recipient
   // instruction instead — and must NOT present the raw handle as the name.
   const cases = [
-    "+447484670086, +447491133433", // number-only group chat (the real leak)
-    "+447860020301", // bare phone
-    "yafolayan@yahoo.com", // bare email
+    "+447700900001, +447700900002", // number-only group chat
+    "+447700900003", // bare phone
+    "someone@example.com", // bare email
     "", // blank
     "   " // whitespace-only
   ];

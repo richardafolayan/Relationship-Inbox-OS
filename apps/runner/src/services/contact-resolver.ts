@@ -18,7 +18,7 @@ import { readAllAddressBookContacts } from "../platforms/addressbook-db";
  *
  * Matching strategy:
  *   - Phone numbers are reduced to their last 10 digits (UK mobile length)
- *     so "+447538705144" / "07538705144" / "07538 705144" all match.
+ *     so "+447700900123" / "07700900123" / "07700 900123" all match.
  *   - Emails are lowercased.
  *
  * If two contacts share a phone number, the last one parsed wins. The

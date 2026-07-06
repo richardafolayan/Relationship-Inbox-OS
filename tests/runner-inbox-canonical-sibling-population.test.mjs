@@ -86,7 +86,7 @@ const stalePhoneActive = buildRow({
 
 const liveEmailArchived = buildRow({
   id: "imsg-email",
-  platformThreadId: "any;-;seandserena@gmail.com",
+  platformThreadId: "any;-;shared@example.com",
   whatTheyWant: "FRESH: has a free award ticket and is seeing who else is going",
   rollingSummary: "Fresh email-thread summary",
   lastMessageText: "So I'm tryna see who's going asw",
@@ -144,7 +144,7 @@ test("with the full sibling set, a snoozed canonical sibling is still adopted fo
   // Same divergence via snooze rather than archive.
   const liveEmailSnoozed = buildRow({
     id: "imsg-email",
-    platformThreadId: "any;-;seandserena@gmail.com",
+    platformThreadId: "any;-;shared@example.com",
     whatTheyWant: "FRESH: has a free award ticket and is seeing who else is going",
     lastMessageText: "So I'm tryna see who's going asw",
     lastMessagePreview: "So I'm tryna see who's going asw",
@@ -168,7 +168,7 @@ test("when the canonical sibling is itself visible, the representative is unchan
   // live email row, and passing the full set must not alter that result.
   const liveEmailActive = buildRow({
     id: "imsg-email",
-    platformThreadId: "any;-;seandserena@gmail.com",
+    platformThreadId: "any;-;shared@example.com",
     whatTheyWant: "FRESH: has a free award ticket and is seeing who else is going",
     lastMessageText: "So I'm tryna see who's going asw",
     lastMessagePreview: "So I'm tryna see who's going asw",

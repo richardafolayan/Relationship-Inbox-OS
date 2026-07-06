@@ -81,7 +81,7 @@ const SAMPLE = [
   {
     firstName: "Marianne",
     lastName: "Okafor",
-    phones: ["+447538705144"],
+    phones: ["+447700900123"],
     emails: ["marianne@example.com"]
   },
   // Organization-only card (no first/last/nickname) still yields a name.
@@ -104,9 +104,9 @@ test("buildContactResolver resolves AddressBook handles to names", () => {
   withFixture(SAMPLE, (path) => {
     const resolver = buildContactResolver(readAllAddressBookContacts([path]));
     // Phone matches on the trailing 10 digits, in any format.
-    assert.equal(resolver.resolve("+447538705144"), "Marianne Okafor");
-    assert.equal(resolver.resolve("07538705144"), "Marianne Okafor");
-    assert.equal(resolver.resolve("07538 705144"), "Marianne Okafor");
+    assert.equal(resolver.resolve("+447700900123"), "Marianne Okafor");
+    assert.equal(resolver.resolve("07700900123"), "Marianne Okafor");
+    assert.equal(resolver.resolve("07700 900123"), "Marianne Okafor");
     // Email matches case-insensitively.
     assert.equal(resolver.resolve("Marianne@Example.com"), "Marianne Okafor");
     // Org-only card resolves to the org name.
@@ -119,7 +119,7 @@ test("buildContactResolver resolves AddressBook handles to names", () => {
 
 test("buildContactResolver([]) is the null resolver", () => {
   const resolver = buildContactResolver([]);
-  assert.equal(resolver.resolve("+447538705144"), null);
+  assert.equal(resolver.resolve("+447700900123"), null);
   assert.equal(resolver.size(), 0);
 });
 
@@ -130,7 +130,7 @@ test("loadBestContactResolver resolves a fresh install from the AddressBook (no 
       useAddressBook: true
       // no vcfPath — the fresh-pilot case
     });
-    assert.equal(resolver.resolve("+447538705144"), "Marianne Okafor");
+    assert.equal(resolver.resolve("+447700900123"), "Marianne Okafor");
   });
 });
 
@@ -143,7 +143,7 @@ test("loadBestContactResolver: a manual vCard wins on a handle collision", () =>
         "BEGIN:VCARD",
         "VERSION:3.0",
         "FN:Mari (work mobile)",
-        "TEL:+447538705144",
+        "TEL:+447700900123",
         "END:VCARD",
         ""
       ].join("\n"),
@@ -155,7 +155,7 @@ test("loadBestContactResolver: a manual vCard wins on a handle collision", () =>
       vcfPath: vcf
     });
     // vCard override wins for the shared handle...
-    assert.equal(resolver.resolve("+447538705144"), "Mari (work mobile)");
+    assert.equal(resolver.resolve("+447700900123"), "Mari (work mobile)");
     // ...but AddressBook-only contacts still resolve.
     assert.equal(resolver.resolve("+15551234567"), "Acme Ltd");
   });
@@ -164,5 +164,5 @@ test("loadBestContactResolver: a manual vCard wins on a handle collision", () =>
 test("loadBestContactResolver with no sources is empty (off-Mac / no contacts)", () => {
   const resolver = loadBestContactResolver({ useAddressBook: false });
   assert.equal(resolver.size(), 0);
-  assert.equal(resolver.resolve("+447538705144"), null);
+  assert.equal(resolver.resolve("+447700900123"), null);
 });

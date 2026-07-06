@@ -197,7 +197,7 @@ test("iMessage siblings collapse to the most-recent-inbound row, not the highest
   const liveEmail = buildRow({
     id: "imsg-email",
     platform: "IMESSAGE",
-    platformThreadId: "any;-;seandserena@gmail.com",
+    platformThreadId: "any;-;shared@example.com",
     personId: "serena",
     person: { id: "serena", displayName: "Serena", platform: "IMESSAGE" },
     whatTheyWant: "FRESH: has a free award ticket and is seeing who else is going",

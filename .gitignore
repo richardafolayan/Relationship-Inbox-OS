@@ -48,3 +48,6 @@ apps/runner/scripts/_*.mjs
 # Personal operator-profile seed (local voice data; never committed).
 # See apps/runner/operator-profile.seed.example.json for the shape.
 /apps/runner/operator-profile.seed.json
+
+# PM bridge runtime log (contains conversation content) - never commit
+pm_browser_log.jsonl
