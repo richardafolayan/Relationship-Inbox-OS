@@ -4,10 +4,10 @@
 //
 //   1. Recipient must be a saved contact on the operator's phone (rules
 //      out cold outreach, accidental fuzz tests, and most spam patterns).
-//   2. Per-recipient minimum interval (default 30s) — derived from the
+//   2. Per-recipient minimum interval (default 15s, WHATSAPP_MIN_INTERVAL_MS) — derived from the
 //      most recent outbound Message stored on the thread, so the limit
 //      survives process restarts.
-//   3. Rolling-24h cap across ALL WhatsApp threads (default 30) — protects
+//   3. Rolling-24h cap across ALL WhatsApp threads (default 40, WHATSAPP_MAX_PER_DAY) — protects
 //      against a runaway loop firing dozens of messages.
 //
 // All three are queries / lookups, not background timers, so the guard is

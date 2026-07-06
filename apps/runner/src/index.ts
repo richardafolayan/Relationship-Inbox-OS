@@ -2693,13 +2693,23 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "run a scan", kind: "external-action" })) return;
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional(),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional(),
       scope: z.enum(["update", "full"]).optional()
     })
     .parse(req.body ?? {});
+
+  // #774: never let a WhatsApp scan run before the operator has linked a
+  // device. The scan path calls ensureConnected(), which for a disconnected
+  // WhatsApp would launch a fresh whatsapp-web.js session and pop a QR - so
+  // a routine autoscan tick must no-op instead of hijacking the connect
+  // flow. Manual + post-link scans (state === "connected") pass through.
+  if (payload.platform === "WHATSAPP" && whatsappConnect.state !== "connected") {
+    res.status(409).json({ ok: false, reason: "whatsapp_not_connected" });
+    return;
+  }
 
   const maxThreads = normalizeOptionalPositiveNumber(payload.maxThreads);
   const maxOpens = normalizeOptionalPositiveNumber(payload.maxOpens);

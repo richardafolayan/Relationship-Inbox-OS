@@ -1328,9 +1328,10 @@ export function createScanQueue(deps: ScanQueueDeps) {
         if (!adapter) {
           // Adapter map is Partial: a platform appearing in enabledPlatforms
           // without a registered adapter is a config drift, not a fatal
-          // runtime state. Log and skip this iteration. (At time of writing
-          // only IMESSAGE has no adapter; settings.enabledPlatforms doesn't
-          // include it, so this path is purely defensive.)
+          // runtime state. Log and skip this iteration. Every enabled
+          // platform now has a registered adapter or the calm not-implemented
+          // stub (WHATSAPP when WHATSAPP_ENABLED is off), so this skip is a
+          // belt-and-braces guard against future drift.
           await deps.auditLog({
             platform,
             stage: "Scan",
