@@ -9,7 +9,7 @@ import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
-import { hasEverConnected, IMPLEMENTED_PLATFORMS } from "@/lib/risk";
+import { hasEverConnected, visibleImplementedPlatforms } from "@/lib/risk";
 import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
 import { NotificationBell } from "@/components/common/notification-center";
 import {
@@ -63,7 +63,8 @@ const PLATFORM_DISPLAY: Record<string, string> = {
   LINKEDIN: "LinkedIn",
   IMESSAGE: "iMessage",
   INSTAGRAM: "Instagram",
-  TIKTOK: "TikTok"
+  TIKTOK: "TikTok",
+  WHATSAPP: "WhatsApp"
 };
 
 interface SendQueueItem {
@@ -189,6 +190,8 @@ function platformDisplay(platform: string): string {
       return "instagram";
     case "TIKTOK":
       return "tiktok";
+    case "WHATSAPP":
+      return "whatsapp";
     default:
       return platform.toLowerCase();
   }
@@ -478,8 +481,9 @@ export function TopStatus() {
     return () => window.removeEventListener("runner-event", onEvent as EventListener);
   }, []);
 
-  const implemented = platforms?.filter((p) => IMPLEMENTED_PLATFORMS.includes(p.platform)) ?? null;
-  const total = implemented?.length ?? IMPLEMENTED_PLATFORMS.length;
+  const visiblePlatforms = visibleImplementedPlatforms(platforms);
+  const implemented = platforms?.filter((p) => visiblePlatforms.includes(p.platform)) ?? null;
+  const total = implemented?.length ?? visiblePlatforms.length;
   const connected =
     implemented?.filter((p) => p.status === "CONNECTED").length ??
     health?.connectedPlatforms ??

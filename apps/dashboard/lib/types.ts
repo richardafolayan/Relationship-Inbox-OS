@@ -3,6 +3,12 @@ import type { RememberItem } from "./thread-remember";
 
 export type { ReplyBrief, ReplyBriefPoint, ReplyBriefPointStatus } from "@inbox-os/core";
 
+// Single source of truth for the platform union on the dashboard side.
+// Mirrors the runner's PlatformName prisma enum — extend BOTH when a new
+// platform lands (WhatsApp was missed everywhere because this union used to
+// be repeated inline per interface).
+export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
+
 export interface InboxRow {
   id: string;
   /**
@@ -30,7 +36,7 @@ export interface InboxRow {
    */
   personBirthday?: string | null;
   personBirthYear?: number | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   preview: string;
   /**
    * "OUT" when the latest message was sent by the operator (preview should
@@ -136,7 +142,7 @@ export interface UpcomingBirthday {
   personId: string;
   personName: string;
   personAvatarUrl?: string | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   /** Most-recent thread for this person, for one-click open. Null when none. */
   threadId: string | null;
   /** Birthday month/day as "MM-DD". */
@@ -167,7 +173,7 @@ export interface ImessageContactHealth {
 export interface PeopleRow {
   id: string;
   name: string;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   avatarUrl?: string | null;
   notes?: string | null;
   tags: string[];
@@ -188,7 +194,7 @@ export interface PersonDetailResponse {
   person: {
     id: string;
     name: string;
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+    platform: PlatformName;
     profileUrl: string | null;
     profileUrlSource: "auto" | "manual" | null;
     enrichedAt: string | null;
@@ -324,7 +330,7 @@ export interface OperatorProfile {
 }
 
 export interface PlatformCard {
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   status: "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
   lastScanAt: string | null;
   connectedAt: string | null;
@@ -349,7 +355,7 @@ export interface PlatformCard {
     | null;
   latestSelectorReport?: {
     reportId: string;
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+    platform: PlatformName;
     startedAt: string;
     completedAt: string;
     results: Array<{
@@ -374,7 +380,7 @@ export interface PlatformCard {
 export interface AuditLogRow {
   id: string;
   timestamp: string;
-  platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform?: PlatformName;
   stage?: string;
   action: string;
   status: "OK" | "FAIL";
@@ -506,7 +512,7 @@ export interface ThreadResponse {
   personBirthday?: string | null;
   /** Birth year if known; lets the rail render "turns 30" when surfacing the birthday pill. */
   personBirthYear?: number | null;
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  platform: PlatformName;
   /**
    * Thread ids in this Person's sibling cohort. For an iMessage contact split
    * across handle-specific chats (phone + Apple-ID email) this lists every
@@ -608,7 +614,7 @@ export interface ThreadResponse {
     otherThreadCount: number;
     recentExchanges: Array<{
       threadId: string;
-      platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+      platform: PlatformName;
       lastMessageAt: string | null;
       preview: string | null;
       whatTheyWant: string | null;
@@ -630,7 +636,7 @@ export interface HealthResponse {
    * instead of always claiming linkedin. Optional so older runner builds
    * still parse cleanly.
    */
-  currentScanPlatform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | null;
+  currentScanPlatform?: PlatformName | null;
   /**
    * Background enrichment queue depth. Drives the status bar's
    * "Enriching N profiles" indicator while a Scan-all bulk run drains.
@@ -651,7 +657,7 @@ export interface HealthResponse {
    * Optional so older runner builds still parse cleanly.
    */
   scanProgress?: {
-    platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK";
+    platform: PlatformName;
     /**
      * #338/#362: scan scope drives the progress copy. "update" mode reads
      * "Checking <platform> · N checked · M updated" (no denominator —
@@ -685,7 +691,7 @@ export interface AppSettings {
   redHours: number;
   headless: boolean;
   maxMessagesPerThread: number;
-  enabledPlatforms: Array<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE">;
+  enabledPlatforms: Array<PlatformName>;
   demoMode: boolean;
   presenterDemoMode?: PresenterDemoMode;
   presenterReadOnly?: boolean;

@@ -28,7 +28,7 @@ interface ArchivedResponse {
 
 type Outcome = "handled" | "snoozed" | "ghosted";
 type OutcomeTab = "all" | Outcome;
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
 type ArchSort = "recent" | "oldest" | "name";
 
 const OUTCOME_TABS: { key: OutcomeTab; label: string }[] = [
@@ -44,10 +44,14 @@ const OUTCOME_GROUPS: { key: Outcome; label: string }[] = [
   { key: "ghosted", label: "Ghosted" }
 ];
 
+// WhatsApp is opt-in: the archived view only surfaces its chip when there
+// are actually archived WhatsApp threads to filter to (see platformOptions
+// in the page component). ChipsRow still reads labels from the full list.
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "IMESSAGE", label: "iMessage" },
-  { key: "LINKEDIN", label: "LinkedIn" }
+  { key: "LINKEDIN", label: "LinkedIn" },
+  { key: "WHATSAPP", label: "WhatsApp" }
 ];
 
 const ARCH_SORTS: { key: ArchSort; label: string }[] = [
@@ -136,6 +140,14 @@ export default function ArchivedPage() {
   const [tab, setTab] = useState<OutcomeTab>("all");
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<ArchSort>("recent");
+
+  // WhatsApp is opt-in, so its chip only appears once there are archived
+  // WhatsApp threads to filter to. Keeps the popover at two platforms for
+  // pilots who never linked it.
+  const platformOptions = useMemo(() => {
+    const showWhatsApp = (rows ?? []).some((row) => row.platform === "WHATSAPP");
+    return PLATFORM_FILTERS.filter((option) => option.key !== "WHATSAPP" || showWhatsApp);
+  }, [rows]);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [forceSelectMode, setForceSelectMode] = useState(false);
@@ -423,7 +435,11 @@ export default function ArchivedPage() {
             </div>
             <div className="flex items-center justify-end gap-[4px] pb-[6px]">
               <SortMenu value={sortMode} options={ARCH_SORTS} onChange={setSortMode} />
-              <PlatformPopover platformFilter={platformFilter} onPlatform={setPlatformFilter} />
+              <PlatformPopover
+                platformOptions={platformOptions}
+                platformFilter={platformFilter}
+                onPlatform={setPlatformFilter}
+              />
               {orderedIds.length > 0 || selectMode ? (
                 <button
                   type="button"
@@ -527,9 +543,11 @@ export default function ArchivedPage() {
 
 // Filters popover — Platform only (Kind isn't meaningful for an archive).
 function PlatformPopover({
+  platformOptions,
   platformFilter,
   onPlatform
 }: {
+  platformOptions: { key: PlatformFilter; label: string }[];
   platformFilter: PlatformFilter;
   onPlatform: (value: PlatformFilter) => void;
 }) {
@@ -555,7 +573,7 @@ function PlatformPopover({
       {open ? (
         <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-[248px] rounded-[12px] border border-hairline bg-paper p-4 shadow-pop">
           <PopSection label="Platform">
-            {PLATFORM_FILTERS.map((o) => (
+            {platformOptions.map((o) => (
               <PopOpt key={o.key} selected={platformFilter === o.key} onClick={() => onPlatform(o.key)}>
                 {o.label}
               </PopOpt>

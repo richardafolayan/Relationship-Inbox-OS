@@ -44,6 +44,8 @@ import { buildReconnectCandidateWhere } from "./services/reconnect-candidate-que
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters, type WhatsAppConnectState } from "./services/platform-factory";
+import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
+import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
@@ -282,6 +284,32 @@ const whatsappConnect: {
   updatedAt: string;
 } = { state: "disconnected", qr: null, qrDataUrl: null, updatedAt: new Date().toISOString() };
 
+// Forward reference: the WhatsApp state-change hook below fires long after
+// boot, but createAdapters runs before the scan queue exists. Same settable-
+// holder pattern as enqueueEnrichmentForScan.
+let enqueueWhatsAppInitialScan: (() => void) | null = null;
+
+// Mirror the whatsapp-web.js connect state onto the WHATSAPP platforms row so
+// the dashboard's "X/N connected" count, reconnect modal, and hasEverConnected
+// gating (#708/#710) see WhatsApp like any other platform. connectedAt is only
+// ever SET (never cleared) here — it is the durable "operator uses WhatsApp"
+// signal, so a drop to disconnected keeps it and just flips status.
+async function syncWhatsAppPlatformRow(state: WhatsAppConnectState): Promise<void> {
+  // "qr_ready" counts as not-connected: the library is explicitly asking for
+  // a re-link, so a stale CONNECTED row (e.g. operator logged out from the
+  // phone) must not keep the dashboard showing WhatsApp as healthy.
+  if (state !== "connected" && state !== "disconnected" && state !== "qr_ready") {
+    return;
+  }
+  const status = state === "connected" ? "CONNECTED" : "NOT_CONNECTED";
+  const connectedAt = state === "connected" ? new Date() : undefined;
+  await prisma.platform.upsert({
+    where: { name: "WHATSAPP" },
+    update: { status, ...(connectedAt ? { connectedAt, lastError: null } : {}) },
+    create: { name: "WHATSAPP", status, ...(connectedAt ? { connectedAt } : {}) }
+  });
+}
+
 const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters({
   settingsStore,
   whatsappPrisma: prisma,
@@ -291,6 +319,20 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
     if (state === "connected" || state === "disconnected") {
       whatsappConnect.qr = null;
       whatsappConnect.qrDataUrl = null;
+    }
+    void syncWhatsAppPlatformRow(state).catch((error) => {
+      console.warn(
+        `[whatsapp] platform row sync failed for state=${state}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    });
+    if (state === "connected") {
+      // Kick an initial scan the moment the operator links the account, so
+      // WhatsApp threads appear in the inbox right away instead of waiting
+      // for the next scheduled tick. Goes through the normal scan queue, so
+      // it shows in the TopStatus ticker like any other scan.
+      enqueueWhatsAppInitialScan?.();
     }
     eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state });
   },
@@ -351,7 +393,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -804,6 +846,17 @@ const scanQueue = createScanQueue({
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
   onNewPerson: (input) => enqueueEnrichmentForScan?.(input),
+  // WhatsApp only scans while the operator has linked a device: an unlinked
+  // scan would launch a headless whatsapp-web.js Puppeteer and park it on a
+  // QR nobody sees. WHATSAPP_ENABLED stays the master switch. A skip here is
+  // not a failure — no platform-row status or lastError is written. Rule
+  // extracted to a pure helper so it's unit-tested (whatsapp/scannable.ts).
+  isPlatformScannable: (platform) =>
+    platform !== "WHATSAPP" ||
+    isWhatsAppScannable({
+      enabled: runnerConfig.whatsapp.enabled,
+      state: whatsappConnect.state
+    }),
   onAudioMessage: (input) => {
     // Snapshot the audio bytes first (sync copy, while Apple's file still
     // exists), then enqueue transcription — which reads back from the
@@ -814,6 +867,53 @@ const scanQueue = createScanQueue({
     );
   }
 }) as ScanQueueWithSmokeIngest;
+
+// Late-bind the initial-scan kick now that the scan queue exists (the
+// WhatsApp state-change hook above was wired before this point).
+enqueueWhatsAppInitialScan = () => {
+  const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+  void auditService.log({
+    platform: "WHATSAPP",
+    stage: "Scan",
+    action: "WHATSAPP_CONNECT_INITIAL_SCAN",
+    status: result.ok ? "OK" : "FAIL",
+    details: result.ok
+      ? { jobId: result.jobId, status: result.status }
+      : { blocked: result.blocked, blockReason: result.reason }
+  });
+};
+
+// Boot-time WhatsApp resume. The connect state machine lives in memory, so a
+// runner restart forgets a linked session even though whatsapp-web.js's
+// LocalAuth persists on disk. Re-initialise the client when the operator has
+// EITHER a persisted on-disk session OR a platforms row with connectedAt —
+// both mean "this operator uses WhatsApp". The disk session is the older
+// ground truth and covers the migration case (linked before this wiring, so
+// no platforms row exists yet). On resume LocalAuth restores without a QR and
+// the "ready" event marks the row CONNECTED and kicks the initial scan. If the
+// phone unlinked us meanwhile, the client emits "qr" and the row flips
+// NOT_CONNECTED via the qr_ready sync, surfacing the reconnect path. Never
+// runs for operators who never linked — no surprise Puppeteer.
+if (runnerConfig.whatsapp.enabled && adapters.WHATSAPP) {
+  void (async () => {
+    const row = await prisma.platform.findUnique({ where: { name: "WHATSAPP" } });
+    const shouldResume =
+      Boolean(row?.connectedAt) ||
+      hasPersistedWhatsAppSession(runnerConfig.profileDirs.WHATSAPP);
+    if (!shouldResume) {
+      return;
+    }
+    whatsappConnect.state = "connecting";
+    whatsappConnect.updatedAt = new Date().toISOString();
+    await adapters.WHATSAPP!.ensureConnected();
+  })().catch((error) => {
+    console.warn(
+      `[whatsapp] boot resume failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+    whatsappConnect.state = "disconnected";
+    whatsappConnect.updatedAt = new Date().toISOString();
+  });
+}
 
 const sendService = createSendService({
   adapters,
@@ -1445,7 +1545,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).default("LINKEDIN"),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -2168,7 +2268,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"])).optional(),
+      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"])).optional(),
       demoMode: z.boolean().optional(),
       presenterDemoMode: z.enum(["off", "sandbox", "live"]).optional(),
       presenterReadOnly: z.boolean().optional(),
@@ -5093,7 +5193,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"] as PlatformName[]).map(async (platform) => {
+    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
@@ -6927,6 +7027,14 @@ app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
     });
 
     for (const platform of allPlatforms) {
+      // WHATSAPP is excluded: this reset clears the shared Playwright
+      // profile, but WhatsApp runs its own whatsapp-web.js session with a
+      // separate LocalAuth dir. Wiping its row (and connectedAt) here would
+      // make the dashboard hide a still-linked WhatsApp. Use
+      // /control/whatsapp/disconnect for that session instead.
+      if (platform === "WHATSAPP") {
+        continue;
+      }
       await prisma.platform.upsert({
         where: { name: platform },
         update: {

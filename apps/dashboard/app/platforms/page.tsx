@@ -18,14 +18,16 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "LinkedIn",
   INSTAGRAM: "Instagram",
   TIKTOK: "TikTok",
-  IMESSAGE: "iMessage"
+  IMESSAGE: "iMessage",
+  WHATSAPP: "WhatsApp"
 };
 
 const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "in",
   IMESSAGE: "iM",
   INSTAGRAM: "ig",
-  TIKTOK: "tt"
+  TIKTOK: "tt",
+  WHATSAPP: "wa"
 };
 
 const VISIBLE_PLATFORMS = IMPLEMENTED_PLATFORMS;
