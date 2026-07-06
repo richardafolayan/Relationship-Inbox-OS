@@ -38,6 +38,7 @@ import { analyzeStyle, styleFingerprint } from "./services/style";
 import { createSelectorTestStore } from "./services/selector-report-store";
 import { decidePersonNameAction } from "./services/person-name-action";
 import { decidePersonFavouriteAction } from "./services/person-favourite-action";
+import { getLinkPreview } from "./services/link-preview";
 import { normalizePersonGroups } from "./services/person-groups";
 import { buildReconnectCandidateWhere } from "./services/reconnect-candidate-query";
 import { createSelectorTestService, isSelectorTestServiceError } from "./services/selector-tests";
@@ -5847,6 +5848,18 @@ app.post("/control/person/:personId/ask", asyncRoute(async (req, res) => {
 app.get("/data/operator-profile", asyncRoute(async (_req, res) => {
   const profile = await settingsStore.getOperatorProfile();
   res.json(profile);
+}));
+
+// #703 link previews. Unfurl a URL into title/description/image server-side
+// (SSRF guard, HTML parse, TikTok oEmbed, caching) lives in
+// services/link-preview.ts. Always returns a safe object.
+app.get("/data/link-preview", asyncRoute(async (req, res) => {
+  const raw = typeof req.query.url === "string" ? req.query.url : "";
+  if (!raw.trim()) {
+    res.status(400).json({ error: "url query parameter is required" });
+    return;
+  }
+  res.json(await getLinkPreview(raw));
 }));
 
 app.post("/control/operator-profile", asyncRoute(async (req, res) => {

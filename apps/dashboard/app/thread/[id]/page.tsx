@@ -81,6 +81,9 @@ import {
 } from "@/lib/dictation-retry";
 import { stopRecorderAndStream } from "@/lib/recorder-teardown";
 import { ThingsToRemember } from "@/components/thread/ThingsToRemember";
+import { LinkPreviewCard, type LinkPreviewData } from "@/components/thread/link-preview-card";
+import { InAppBrowser, type InAppBrowserTarget } from "@/components/thread/in-app-browser";
+import { extractUrls, splitTextSegments, urlOnlyMessage } from "@/lib/linkify";
 import { ReplyBriefPanel } from "@/components/thread/ReplyBriefPanel";
 import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
@@ -354,6 +357,48 @@ function DayDivider({ label, className }: { label: string; className?: string })
   );
 }
 
+function MessageTextWithLinks({
+  text,
+  onOpenLink
+}: {
+  text: string;
+  onOpenLink: (url: string) => void;
+}) {
+  // Bubble text never changes once rendered, so the regex split is memoed
+  // against the timeline's frequent SSE/poll re-renders.
+  const segments = useMemo(() => splitTextSegments(text), [text]);
+  const hasUrl = segments.some((segment) => segment.type === "url");
+  if (!hasUrl) {
+    return <span className="text-balance whitespace-pre-wrap [overflow-wrap:anywhere]">{text}</span>;
+  }
+  return (
+    <span className="text-balance whitespace-pre-wrap [overflow-wrap:anywhere]">
+      {segments.map((segment, index) =>
+        segment.type === "url" ? (
+          <a
+            key={index}
+            href={segment.href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="break-all underline underline-offset-2"
+            onClick={(event) => {
+              // Cmd/ctrl/shift-click keeps the native new-tab behaviour; a
+              // plain click opens the in-app browser overlay instead.
+              if (event.metaKey || event.ctrlKey || event.shiftKey) return;
+              event.preventDefault();
+              onOpenLink(segment.href);
+            }}
+          >
+            {segment.value}
+          </a>
+        ) : (
+          <span key={index}>{segment.value}</span>
+        )
+      )}
+    </span>
+  );
+}
+
 function ParticipantPopover({
   handle,
   platform,
@@ -541,6 +586,11 @@ export default function ThreadPage() {
   // the optimistic overlay renders the just-applied "OUT" reaction
   // immediately, before the next thread refresh confirms it server-side.
   const [reactionPickerMessageId, setReactionPickerMessageId] = useState<string | null>(null);
+  // In-app browser overlay for links inside bubbles (null = closed).
+  const [linkBrowserTarget, setLinkBrowserTarget] = useState<InAppBrowserTarget | null>(null);
+  const openLinkInApp = useCallback((url: string, preview: LinkPreviewData | null = null) => {
+    setLinkBrowserTarget({ url, preview });
+  }, []);
   const [reactingMessageId, setReactingMessageId] = useState<string | null>(null);
   const [reactionErrorByMessageId, setReactionErrorByMessageId] = useState<Record<string, string>>({});
   const [optimisticReactionsByMessageId, setOptimisticReactionsByMessageId] = useState<
@@ -2941,7 +2991,11 @@ export default function ThreadPage() {
         <div
           ref={timelineRef}
           onScroll={onTimelineScroll}
-          className="relative min-h-0 flex-1 overflow-y-auto"
+          // overflow-x-hidden is load-bearing: overflow-y-auto alone makes
+          // the browser compute overflow-x as auto, so any too-wide child
+          // (an unbroken URL, a future embed) turns into a horizontal
+          // scrollbar that drags the sticky header along with it.
+          className="relative min-h-0 flex-1 overflow-y-auto overflow-x-hidden"
           // overflowAnchor: disable the browser's native scroll anchoring
           // so it doesn't race with the load-older restoration in
           // useLayoutEffect. When both fire on the same prepend, the
@@ -3653,6 +3707,14 @@ export default function ThreadPage() {
                         playableAttachments.every(
                           (a) => a.kind === "photo" || a.kind === "sticker"
                         );
+                      // #703. A message that is exactly one URL renders as a
+                      // preview card instead of a bare-link bubble (same
+                      // as iMessage). Mixed text keeps its bubble and
+                      // gains one card under the text (first URL only).
+                      const soloLinkUrl =
+                        showText && !hasInlineMedia ? urlOnlyMessage(message.text) : null;
+                      const inlineCardUrl =
+                        showText && !soloLinkUrl ? (extractUrls(message.text)[0] ?? null) : null;
                       const nativeReactions =
                         (message.raw?.reactions as MessageReaction[] | undefined) ?? [];
                       const synthesizedReactions = synthesizedReactionsByParentId.get(message.id) ?? [];
@@ -3682,6 +3744,9 @@ export default function ThreadPage() {
                       return (
                         <>
                         <div className="group relative">
+                          {soloLinkUrl ? (
+                            <LinkPreviewCard url={soloLinkUrl} onOpen={openLinkInApp} />
+                          ) : (
                           <div
                             className={
                               isImageOnly
@@ -3773,10 +3838,17 @@ export default function ThreadPage() {
                                   </div>
                                 </div>
                               ) : (
-                                <span className="text-balance whitespace-pre-wrap">{displayText}</span>
+                                // #703: link-ified text (URLs open in the in-app
+                                // browser) replaces the plain span; #703's inline
+                                // preview card renders as a sibling below.
+                                <MessageTextWithLinks text={displayText} onOpenLink={openLinkInApp} />
                               )
                             ) : null}
+                            {inlineCardUrl ? (
+                              <LinkPreviewCard url={inlineCardUrl} onOpen={openLinkInApp} />
+                            ) : null}
                           </div>
+                          )}
                           {reactions.length > 0 ? (
                             <div
                               className={`pointer-events-none absolute -top-[14px] flex -space-x-[6px] ${
@@ -3968,7 +4040,7 @@ export default function ThreadPage() {
                       }}
                     />
                   ) : (
-                    <div className="text-balance whitespace-pre-wrap rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
+                    <div className="text-balance whitespace-pre-wrap [overflow-wrap:anywhere] rounded-2xl rounded-br-[6px] border border-dashed border-hairline-strong bg-paper px-4 py-3 text-[14.5px] leading-[1.5] text-ink">
                       {scheduled.text}
                     </div>
                   )}
@@ -4038,7 +4110,7 @@ export default function ThreadPage() {
                 className="flex max-w-[86%] flex-col items-end self-end sm:max-w-[72%]"
               >
                 <div
-                  className={`text-balance whitespace-pre-wrap px-4 py-3 text-[14.5px] leading-[1.5] ${
+                  className={`text-balance whitespace-pre-wrap [overflow-wrap:anywhere] px-4 py-3 text-[14.5px] leading-[1.5] ${
                     pending.failed
                       ? "rounded-2xl rounded-br-[6px] border border-risk-overdue bg-paper text-ink"
                       : "rounded-2xl rounded-br-[6px] bg-ink text-paper opacity-80"
@@ -4932,7 +5004,7 @@ export default function ThreadPage() {
                   composing ? "opacity-40" : "opacity-100"
                 }`}
               >
-                <p className="m-0 whitespace-pre-wrap">{composeDraft}</p>
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{composeDraft}</p>
                 <div className="mt-3 flex items-center gap-3">
                   {composing ? (
                     <span className="inline-flex items-center gap-2 font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
@@ -4961,7 +5033,7 @@ export default function ThreadPage() {
                 <p className="mb-2 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
                   Answer
                 </p>
-                <p className="m-0 whitespace-pre-wrap text-ink-2">{askAnswer}</p>
+                <p className="m-0 whitespace-pre-wrap [overflow-wrap:anywhere] text-ink-2">{askAnswer}</p>
                 <div className="mt-3 flex items-center gap-3">
                   <button
                     type="button"
@@ -5000,6 +5072,8 @@ export default function ThreadPage() {
           onClose={() => setProfileDrawerOpen(false)}
         />
       ) : null}
+
+      <InAppBrowser target={linkBrowserTarget} onClose={() => setLinkBrowserTarget(null)} />
     </div>
   );
 }

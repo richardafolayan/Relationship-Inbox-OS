@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -24,6 +25,17 @@ function goodManifest(overrides = {}) {
 }
 
 // ---- version comparison --------------------------------------------------
+
+test("app version stamps stay in sync", () => {
+  const pkg = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8"));
+  const lock = JSON.parse(readFileSync(join(ROOT, "package-lock.json"), "utf8"));
+  const envExample = readFileSync(join(ROOT, ".env.example"), "utf8");
+  const envVersion = /^NEXT_PUBLIC_APP_VERSION=(.+)$/m.exec(envExample)?.[1];
+
+  assert.equal(lock.version, pkg.version);
+  assert.equal(lock.packages[""].version, pkg.version);
+  assert.equal(envVersion, pkg.version);
+});
 
 test("compareVersions orders numeric segments, not lexically", () => {
   assert.equal(compareVersions("0.1.0", "0.1.10"), -1);
