@@ -42,6 +42,41 @@ export function isContactJid(jid: string | null | undefined): boolean {
 }
 
 /**
+ * True if this JID is one of WhatsApp's reserved NON-conversation pseudo-chats
+ * that must never become an inbox thread:
+ *   - `0@c.us`      the official "WhatsApp" system/notifications account. Its
+ *                   messages carry base64 image payloads as their body, which
+ *                   is what leaked into the inbox as an unreadable preview. The
+ *                   reserved id is a local part of all zeros (with an optional
+ *                   device suffix like `0:12`), distinct from a real E.164
+ *                   number which always has country + subscriber digits.
+ *   - `status@broadcast` and any `@broadcast` JID — status updates and
+ *                   broadcast lists, not a two-way thread.
+ *
+ * This is a strict DENYLIST: it returns true ONLY for JIDs we can positively
+ * identify as system/broadcast. Everything else — 1:1 contacts (`@c.us`,
+ * `@s.whatsapp.net`), groups (`@g.us`), and any domain we don't recognise yet
+ * (e.g. `@lid` linked-identity contacts, `@newsletter` channels) — is treated
+ * as a real conversation and kept. Being conservative here matters: this gates
+ * both the scan filter and the boot cleanup that DELETES threads, so a
+ * false positive would drop a real conversation.
+ */
+export function isWhatsAppSystemJid(jid: string | null | undefined): boolean {
+  const parsed = parseJid(jid);
+  if (!parsed) return false;
+  // Status updates / broadcast lists — one-way, never a thread.
+  if (parsed.kind === "broadcast") return true;
+  // The reserved `0@c.us` notifications account: an all-zero numeric local
+  // part. A real contact always has a non-zero E.164 number.
+  if (parsed.kind === "contact") {
+    const localDigits = (parsed.local.split(":")[0] ?? parsed.local).replace(/\D/g, "");
+    return localDigits.length > 0 && localDigits.replace(/^0+/, "").length === 0;
+  }
+  // Groups and any unrecognised domain (@lid, @newsletter, …) are kept.
+  return false;
+}
+
+/**
  * Extract the phone number from a contact JID. Returns null for groups,
  * broadcasts, or malformed JIDs. The number is digits-only with no
  * country-code prefix punctuation — useful for display ("+44 7111…")

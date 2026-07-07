@@ -30,7 +30,7 @@ import { createWhatsAppClient } from "./whatsapp/client";
 import { chatToThreadStub } from "./whatsapp/groupResolver";
 import { checkSendGuard, type SendGuardConfig, type SendGuardPrisma } from "./whatsapp/sendGuard";
 import { epochSecondsToIso } from "./whatsapp/whatsappTime";
-import { isGroupJid } from "./whatsapp/whatsappIdentity";
+import { isGroupJid, isWhatsAppSystemJid } from "./whatsapp/whatsappIdentity";
 import { mapWhatsAppKind, persistWhatsAppMedia, safeIdForFilename, type WhatsAppMessageMedia } from "./whatsapp/media";
 import { copyFile, mkdir } from "node:fs/promises";
 import { extname, resolve, join } from "node:path";
@@ -146,13 +146,22 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
     const chats = await this.requireClient().getChats();
-    return chats.filter((c) => (c.unreadCount ?? 0) > 0).map(chatToThreadStub);
+    return chats
+      .filter((c) => !isWhatsAppSystemJid(c.id?._serialized))
+      .filter((c) => (c.unreadCount ?? 0) > 0)
+      .map(chatToThreadStub);
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const chats = await this.requireClient().getChats();
-    // Chats arrive ordered by most-recent activity from wweb.js.
-    return chats.slice(0, limit).map(chatToThreadStub);
+    // Chats arrive ordered by most-recent activity from wweb.js. Drop the
+    // WhatsApp system account (0@c.us) and broadcast pseudo-chats BEFORE the
+    // limit slice so they never crowd out a real conversation or leak their
+    // base64-body "messages" into the inbox.
+    return chats
+      .filter((c) => !isWhatsAppSystemJid(c.id?._serialized))
+      .slice(0, limit)
+      .map(chatToThreadStub);
   }
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
@@ -429,7 +438,31 @@ export function renderMessageText(msg: WaTextMessageLike): string {
     const body = question.length > 0 ? `${header}: ${question}` : header;
     return options.length > 0 ? `${body}\n${options}` : body;
   }
-  if (msg.body && msg.body.length > 0) return msg.body;
+  if (msg.body && msg.body.length > 0) {
+    // Defense-in-depth: some WhatsApp messages (notably the system account's
+    // notifications) put a raw base64 image payload in `body` instead of
+    // readable text. Rendering that verbatim dumps thousands of characters of
+    // "/9j/4AAQSkZJRg…" into the inbox. Detect it and show a placeholder. Real
+    // messages never look like this — a long, whitespace-free base64 blob,
+    // often with a known image magic prefix (/9j/ = JPEG, iVBOR = PNG,
+    // R0lGOD = GIF).
+    if (looksLikeBase64Media(msg.body)) return "[image]";
+    return msg.body;
+  }
   if (msg.hasMedia) return "[media]";
   return "";
+}
+
+/**
+ * Heuristic for "this body is a base64 media blob, not text". Conservative so
+ * it never trips on ordinary long messages: requires a long, single-token
+ * string (no whitespace) that is almost entirely the base64 alphabet, OR a
+ * known image magic prefix.
+ */
+export function looksLikeBase64Media(body: string): boolean {
+  const trimmed = body.trim();
+  if (trimmed.length < 200) return false;
+  if (/\s/.test(trimmed)) return false;
+  if (/^(\/9j\/|iVBOR|R0lGOD|UklGR)/.test(trimmed)) return true;
+  return /^[A-Za-z0-9+/=]+$/.test(trimmed);
 }

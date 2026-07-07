@@ -1,7 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { WhatsAppAdapter, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
+import {
+  WhatsAppAdapter,
+  renderMessageText,
+  looksLikeBase64Media
+} from "../apps/runner/dist/platforms/whatsapp-adapter.js";
 
 /**
  * Minimal whatsapp-web.js Client stub. Wweb.js Client extends EventEmitter
@@ -122,9 +126,9 @@ test("ensureConnected is idempotent — second call returns the same in-flight p
 
 test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   const chats = [
-    { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },
-    { id: { _serialized: "b@c.us" }, name: "B", unreadCount: 3, isGroup: false },
-    { id: { _serialized: "g@g.us" }, name: "Group", unreadCount: 1, isGroup: true }
+    { id: { _serialized: "447000000001@c.us" }, name: "A", unreadCount: 0, isGroup: false },
+    { id: { _serialized: "447000000002@c.us" }, name: "B", unreadCount: 3, isGroup: false },
+    { id: { _serialized: "12345-67890@g.us" }, name: "Group", unreadCount: 1, isGroup: true }
   ];
   const client = createFakeClient({ getChats: async () => chats });
   const adapter = new WhatsAppAdapter({
@@ -138,14 +142,14 @@ test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   assert.equal(stubs.length, 2);
   assert.deepEqual(
     stubs.map((s) => s.platformThreadId),
-    ["b@c.us", "g@g.us"]
+    ["447000000002@c.us", "12345-67890@g.us"]
   );
   assert.equal(stubs[1].isGroup, true);
 });
 
 test("fetchRecentThreads slices to the requested limit", async () => {
   const chats = Array.from({ length: 10 }, (_, i) => ({
-    id: { _serialized: `c${i}@c.us` },
+    id: { _serialized: `44700000${String(i).padStart(4, "0")}@c.us` },
     name: `C${i}`,
     isGroup: false,
     unreadCount: 0
@@ -326,6 +330,24 @@ test("renderMessageText falls through to media / body / empty for non-poll types
   assert.equal(renderMessageText({}), "");
   // body wins over hasMedia
   assert.equal(renderMessageText({ body: "caption", hasMedia: true }), "caption");
+});
+
+test("renderMessageText replaces a base64 image body with a placeholder", () => {
+  // The WhatsApp system account (0@c.us) puts a raw base64 JPEG in body.
+  const jpeg = "/9j/4AAQSkZJRgABAQEAYABgAAD" + "A".repeat(400);
+  assert.equal(renderMessageText({ body: jpeg }), "[image]");
+  const png = "iVBORw0KGgoAAAANSUhEUg" + "B".repeat(400);
+  assert.equal(renderMessageText({ body: png }), "[image]");
+});
+
+test("looksLikeBase64Media is conservative — never trips on real text", () => {
+  assert.equal(looksLikeBase64Media("hey, are we still on for 8pm?"), false);
+  // A long ordinary message has spaces, so it's never mistaken for base64.
+  assert.equal(looksLikeBase64Media("thanks so much ".repeat(40)), false);
+  // A short token that happens to be base64-ish is left alone.
+  assert.equal(looksLikeBase64Media("Y2F0"), false);
+  // A genuine long base64 blob is caught.
+  assert.equal(looksLikeBase64Media("QUJD".repeat(80)), true);
 });
 
 test("fetchThreadMessages renders a poll_creation message via renderMessageText", async () => {
@@ -523,4 +545,43 @@ test("no 'message' listener is attached when onIncomingMessage is omitted", asyn
   setImmediate(() => client.emit("ready"));
   await connecting;
   assert.equal(client.listenerCount("message"), 0);
+});
+
+test("scanUnreadThreads drops ONLY the system account and broadcasts", async () => {
+  const chats = [
+    { id: { _serialized: "447111222333@c.us" }, name: "Real Person", unreadCount: 2 },
+    { id: { _serialized: "998877@lid" }, name: "LID Contact", unreadCount: 4 },
+    { id: { _serialized: "0@c.us" }, name: "WhatsApp", unreadCount: 5 },
+    { id: { _serialized: "status@broadcast" }, name: "Status", unreadCount: 3 },
+    { id: { _serialized: "12345-67890@g.us" }, name: "A Group", isGroup: true, unreadCount: 1 }
+  ];
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({ ...baseDeps(), createClient: () => client });
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+  const stubs = await adapter.scanUnreadThreads();
+  const ids = stubs.map((s) => s.platformThreadId).sort();
+  // @lid contact is kept (unrecognised domain != system); only 0@c.us and
+  // status@broadcast are dropped.
+  assert.deepEqual(ids, ["12345-67890@g.us", "447111222333@c.us", "998877@lid"]);
+});
+
+test("fetchRecentThreads filters only system/broadcast before applying the limit", async () => {
+  const chats = [
+    { id: { _serialized: "0@c.us" }, name: "WhatsApp" },
+    { id: { _serialized: "status@broadcast" }, name: "Status" },
+    { id: { _serialized: "447111222333@c.us" }, name: "Real Person" },
+    { id: { _serialized: "998877@lid" }, name: "LID Contact" }
+  ];
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({ ...baseDeps(), createClient: () => client });
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+  // limit 2 must return the two REAL chats, not be consumed by the two
+  // filtered-out system/broadcast entries that sort first.
+  const stubs = await adapter.fetchRecentThreads(2);
+  const ids = stubs.map((s) => s.platformThreadId).sort();
+  assert.deepEqual(ids, ["447111222333@c.us", "998877@lid"]);
 });

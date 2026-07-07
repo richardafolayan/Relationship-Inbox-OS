@@ -46,6 +46,7 @@ import { extractFailureUrl, resolveConnectFailureResponse } from "./services/fai
 import { createAdapters, type WhatsAppConnectState } from "./services/platform-factory";
 import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
 import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
+import { isWhatsAppSystemJid } from "./platforms/whatsapp/whatsappIdentity";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
@@ -951,6 +952,42 @@ onWhatsAppMessageArrived = () => {
 // phone unlinked us meanwhile, the client emits "qr" and the row flips
 // NOT_CONNECTED via the qr_ready sync, surfacing the reconnect path. Never
 // runs for operators who never linked — no surprise Puppeteer.
+// One-shot cleanup: remove any WhatsApp threads that should never have been
+// persisted — the reserved system account (0@c.us) and broadcast/status
+// pseudo-chats. Their "messages" carry base64 image bodies that leaked into
+// the inbox as unreadable previews before scans learned to skip them. Runs at
+// boot so a pilot who already synced one self-heals without manual DB surgery.
+// Message rows cascade on Thread delete (schema onDelete: Cascade). Idempotent
+// — a clean DB deletes nothing.
+if (runnerConfig.whatsapp.enabled) {
+  void (async () => {
+    const whatsappThreads = await prisma.thread.findMany({
+      where: { platform: "WHATSAPP" },
+      select: { id: true, platformThreadId: true }
+    });
+    const orphanIds = whatsappThreads
+      .filter((t) => isWhatsAppSystemJid(t.platformThreadId))
+      .map((t) => t.id);
+    if (orphanIds.length === 0) {
+      return;
+    }
+    const removed = await prisma.thread.deleteMany({ where: { id: { in: orphanIds } } });
+    await auditService.log({
+      platform: "WHATSAPP",
+      stage: "System",
+      action: "WHATSAPP_SYSTEM_THREAD_CLEANUP",
+      status: "OK",
+      details: { removedThreads: removed.count, threadIds: orphanIds }
+    });
+  })().catch((error) => {
+    console.warn(
+      `[whatsapp] system-thread cleanup failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`
+    );
+  });
+}
+
 if (runnerConfig.whatsapp.enabled && adapters.WHATSAPP) {
   void (async () => {
     const row = await prisma.platform.findUnique({ where: { name: "WHATSAPP" } });
