@@ -15,6 +15,10 @@ interface UpdateCheck {
   error?: string;
 }
 
+interface AppVersion {
+  version: string;
+}
+
 interface StageResponse {
   ok: boolean;
   updating?: boolean;
@@ -29,19 +33,27 @@ export function AppUpdates() {
   const [checking, setChecking] = useState(false);
   const [checkMsg, setCheckMsg] = useState("");
   const [updating, setUpdating] = useState(false);
+  const [runnerStarting, setRunnerStarting] = useState(false);
+  const [runnerOffline, setRunnerOffline] = useState(false);
   const [started, setStarted] = useState<{ from: string; to: string; message?: string } | null>(null);
   const [error, setError] = useState("");
 
   const check = useCallback(async (manual: boolean) => {
     setChecking(true);
     setError("");
+    setRunnerOffline(false);
     if (manual) setCheckMsg("Checking…");
     try {
       const res = await apiGetRaw<UpdateCheck>("/runner/system/update-check");
       setInfo(res);
+      if (res.error) {
+        setError("Couldn’t check the update feed. Try again in a moment.");
+      }
       if (manual) {
         setCheckMsg(
-          res.updateAvailable
+          res.error
+            ? ""
+            : res.updateAvailable
             ? ""
             : res.configured
               ? "You’re up to date."
@@ -49,7 +61,21 @@ export function AppUpdates() {
         );
       }
     } catch {
-      setError("Couldn’t check for updates. Is the app running?");
+      try {
+        const version = await apiGetRaw<AppVersion>("/runner/system/version");
+        setInfo({
+          configured: false,
+          currentVersion: version.version,
+          latestVersion: version.version,
+          updateAvailable: false,
+          releaseNotes: []
+        });
+        setError("Couldn’t check for updates. Restart Relationship Inbox OS, then try again.");
+      } catch {
+        setRunnerOffline(true);
+        setInfo(null);
+        setError("Couldn’t reach the local runner. Use Start runner, then try again.");
+      }
     } finally {
       setChecking(false);
     }
@@ -71,14 +97,35 @@ export function AppUpdates() {
           message: res.message
         });
       } else {
-        setError("Couldn’t start the update. Try Check for updates again.");
+        setError(res.message ?? "Couldn’t start the update. Try Check for updates again.");
       }
-    } catch {
-      setError("Couldn’t start the update. Is the app running?");
+    } catch (err) {
+      const message = err instanceof Error && err.message ? err.message : "";
+      setError(message || "Couldn’t start the update. Try again in a moment.");
     } finally {
       setUpdating(false);
     }
   }, [info]);
+
+  const startRunner = useCallback(async () => {
+    setRunnerStarting(true);
+    setError("");
+    try {
+      const response = await fetch("/api/local-runner/start", { method: "POST" });
+      const payload = (await response.json().catch(() => ({}))) as { ok?: boolean; reason?: string };
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.reason ?? `Request failed: ${response.status}`);
+      }
+      setCheckMsg("Runner is starting. Checking again…");
+      window.setTimeout(() => void check(true), 2500);
+      window.setTimeout(() => void check(true), 6000);
+    } catch (err) {
+      const message = err instanceof Error && err.message ? err.message : "";
+      setError(message || "Couldn’t start the runner. Try reopening Relationship Inbox OS.");
+    } finally {
+      setRunnerStarting(false);
+    }
+  }, [check]);
 
   const version = info?.currentVersion ?? "…";
 
@@ -109,6 +156,16 @@ export function AppUpdates() {
           >
             {checking ? "Checking…" : "Check for updates"}
           </button>
+          {runnerOffline ? (
+            <button
+              type="button"
+              onClick={() => void startRunner()}
+              disabled={runnerStarting}
+              className="inline-flex items-center rounded-pill border border-hairline-strong px-[14px] py-[8px] text-[12.5px] font-medium text-ink-2 transition-colors duration-calm hover:bg-paper disabled:opacity-60"
+            >
+              {runnerStarting ? "Starting runner…" : "Start runner"}
+            </button>
+          ) : null}
           {info?.updateAvailable && !started ? (
             <button
               type="button"

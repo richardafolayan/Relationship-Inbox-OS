@@ -14,9 +14,11 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadAppEnv } from "./lib/env-file.mjs";
 import { reconcileEnvWithExample } from "./lib/release-manifest.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+loadAppEnv(APP_DIR);
 const DASHBOARD_PORT = process.env.DASHBOARD_PORT || "3100";
 const DASHBOARD_URL = `http://localhost:${DASHBOARD_PORT}`;
 const START_TIMEOUT_MS = 180_000;

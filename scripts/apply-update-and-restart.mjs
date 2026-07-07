@@ -4,9 +4,11 @@ import { spawn } from "node:child_process";
 import { closeSync, existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadAppEnv } from "./lib/env-file.mjs";
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_APP_DIR = resolve(SCRIPT_DIR, "..");
+loadAppEnv(DEFAULT_APP_DIR);
 const DASHBOARD_PORT = process.env.DASHBOARD_PORT || "3100";
 const RUNNER_PORT = process.env.RUNNER_PORT || "4001";
 const DASHBOARD_URL = `http://localhost:${DASHBOARD_PORT}`;

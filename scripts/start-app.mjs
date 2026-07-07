@@ -33,8 +33,10 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSy
 import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { loadAppEnv } from "./lib/env-file.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+loadAppEnv(APP_DIR);
 const STAMPS_PATH = join(APP_DIR, "data", "app-prepare-stamps.json");
 const args = new Set(process.argv.slice(2));
 const PREPARE_ONLY = args.has("--prepare-only");
