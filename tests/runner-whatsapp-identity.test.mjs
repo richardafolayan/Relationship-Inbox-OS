@@ -4,6 +4,7 @@ import {
   parseJid,
   isGroupJid,
   isContactJid,
+  isBroadcastJid,
   jidToPhoneNumber,
   phoneNumberToContactJid
 } from "../apps/runner/dist/platforms/whatsapp/whatsappIdentity.js";
@@ -44,6 +45,14 @@ test("isContactJid is true for both @c.us and @s.whatsapp.net", () => {
   assert.equal(isContactJid("447111222333@c.us"), true);
   assert.equal(isContactJid("447111222333@s.whatsapp.net"), true);
   assert.equal(isContactJid("12345@g.us"), false);
+});
+
+test("isBroadcastJid is true only for the @broadcast suffix", () => {
+  assert.equal(isBroadcastJid("status@broadcast"), true);
+  assert.equal(isBroadcastJid("12345678@broadcast"), true);
+  assert.equal(isBroadcastJid("447111222333@c.us"), false);
+  assert.equal(isBroadcastJid("12345-67890@g.us"), false);
+  assert.equal(isBroadcastJid(null), false);
 });
 
 test("jidToPhoneNumber extracts digits from a contact JID", () => {

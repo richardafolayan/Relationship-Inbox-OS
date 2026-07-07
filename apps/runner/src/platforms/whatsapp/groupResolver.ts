@@ -10,6 +10,7 @@
 // scan-queue handles the upsert based on the returned stub.
 
 import type { ThreadStub } from "@inbox-os/core";
+import { renderMessageText } from "./messageText";
 
 /** Subset of the whatsapp-web.js Chat shape this resolver consumes. */
 export interface WhatsAppChatLike {
@@ -20,7 +21,19 @@ export interface WhatsAppChatLike {
   /** Epoch SECONDS — wweb.js convention. Optional because brand-new chats
    *  have no message yet. */
   timestamp?: number;
-  lastMessage?: { body?: string } | null;
+  /** Last message on the chat. We read `type`/`hasMedia` too so the preview
+   *  goes through the same renderer as the timeline: a base64 media payload
+   *  becomes a "[image]"/"[media]" placeholder rather than dumping the encoded
+   *  bytes into the inbox row. (Poll option details are intentionally omitted
+   *  here — wweb.js's Chat type declares them as `string[]` which conflicts
+   *  with the runtime shape; a poll last-message still previews as "📊 Poll".) */
+  lastMessage?:
+    | {
+        body?: string;
+        type?: string;
+        hasMedia?: boolean;
+      }
+    | null;
 }
 
 /**
@@ -37,7 +50,9 @@ export function chatToThreadStub(chat: WhatsAppChatLike): ThreadStub {
   const lastMessageAt = chat.timestamp
     ? new Date(chat.timestamp * 1000).toISOString()
     : undefined;
-  const lastMessagePreview = (chat.lastMessage?.body ?? "").slice(0, 280);
+  const lastMessagePreview = (
+    chat.lastMessage ? renderMessageText(chat.lastMessage) : ""
+  ).slice(0, 280);
 
   return {
     platformThreadId: jid,

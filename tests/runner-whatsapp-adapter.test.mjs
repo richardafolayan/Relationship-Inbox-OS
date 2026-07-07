@@ -328,6 +328,110 @@ test("renderMessageText falls through to media / body / empty for non-poll types
   assert.equal(renderMessageText({ body: "caption", hasMedia: true }), "caption");
 });
 
+test("renderMessageText substitutes a placeholder when body is a raw base64 media payload", () => {
+  // Regression (#780 adapter): status/broadcast + some media-without-caption
+  // messages put the encoded image bytes in msg.body. It must never be dumped
+  // into the timeline or the inbox preview.
+  const jpegBase64 = "/9j/4AAQSkZJRgABAgAAAAQABAAD" + "AbCd0123XyZ9".repeat(40);
+  // image type → "[image]" even though .body carries the base64
+  assert.equal(renderMessageText({ type: "image", body: jpegBase64 }), "[image]");
+  // sticker type → "[sticker]"
+  assert.equal(renderMessageText({ type: "sticker", body: jpegBase64 }), "[sticker]");
+  // unknown type with base64 body still gets the generic "[media]"
+  assert.equal(renderMessageText({ body: jpegBase64 }), "[media]");
+  // base64 body alongside hasMedia still resolves to the placeholder, not bytes
+  assert.equal(renderMessageText({ type: "video", body: jpegBase64, hasMedia: true }), "[video]");
+});
+
+test("renderMessageText handles a data: base64 URI body", () => {
+  assert.equal(
+    renderMessageText({ type: "image", body: "data:image/png;base64,iVBORw0KGgoAAAANS" }),
+    "[image]"
+  );
+});
+
+test("renderMessageText does not mistake long ordinary text for base64", () => {
+  // Contains spaces → clearly prose, must pass through verbatim.
+  const longProse = "hey ".repeat(200).trim();
+  assert.equal(renderMessageText({ body: longProse }), longProse);
+  // A long homogeneous token (no mixed char classes) is not treated as media.
+  const homogeneous = "x".repeat(400);
+  assert.equal(renderMessageText({ body: homogeneous }), homogeneous);
+  // Short strings that happen to be base64-shaped pass through unchanged.
+  assert.equal(renderMessageText({ body: "Ab1Cd2" }), "Ab1Cd2");
+});
+
+test("fetchThreadMessages substitutes a placeholder for a base64-body media message", async () => {
+  const jpegBase64 = "/9j/4AAQSkZJRgABAgAAAAQABAAD" + "AbCd0123XyZ9".repeat(40);
+  const fakeChat = {
+    fetchMessages: async () => [
+      {
+        id: { _serialized: "m1" },
+        body: jpegBase64,
+        timestamp: 1700000000,
+        fromMe: false,
+        hasMedia: true,
+        type: "image"
+      }
+    ]
+  };
+  const client = createFakeClient({ getChatById: async () => fakeChat });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  const msgs = await adapter.fetchThreadMessages(
+    { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+    1
+  );
+  assert.equal(msgs[0].text, "[image]");
+});
+
+test("scanUnreadThreads drops status@broadcast / broadcast chats", async () => {
+  const chats = [
+    { id: { _serialized: "b@c.us" }, name: "B", unreadCount: 3, isGroup: false },
+    { id: { _serialized: "status@broadcast" }, name: "WhatsApp", unreadCount: 5 },
+    { id: { _serialized: "12345@broadcast" }, name: "My broadcast list", unreadCount: 2 }
+  ];
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  const stubs = await adapter.scanUnreadThreads();
+  assert.deepEqual(
+    stubs.map((s) => s.platformThreadId),
+    ["b@c.us"]
+  );
+});
+
+test("fetchRecentThreads drops broadcast chats before applying the limit", async () => {
+  const chats = [
+    { id: { _serialized: "status@broadcast" }, name: "WhatsApp", unreadCount: 0 },
+    { id: { _serialized: "a@c.us" }, name: "A", isGroup: false, unreadCount: 0 },
+    { id: { _serialized: "b@c.us" }, name: "B", isGroup: false, unreadCount: 0 }
+  ];
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  const stubs = await adapter.fetchRecentThreads(2);
+  assert.deepEqual(
+    stubs.map((s) => s.platformThreadId),
+    ["a@c.us", "b@c.us"]
+  );
+});
+
 test("fetchThreadMessages renders a poll_creation message via renderMessageText", async () => {
   const fakeChat = {
     fetchMessages: async () => [

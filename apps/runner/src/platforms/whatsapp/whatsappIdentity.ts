@@ -42,6 +42,15 @@ export function isContactJid(jid: string | null | undefined): boolean {
 }
 
 /**
+ * True if this JID is a broadcast / status identifier (ends with `@broadcast`,
+ * e.g. the `status@broadcast` Status feed or a user broadcast list). These are
+ * not conversations the operator replies to, so the scan drops them.
+ */
+export function isBroadcastJid(jid: string | null | undefined): boolean {
+  return parseJid(jid)?.kind === "broadcast";
+}
+
+/**
  * Extract the phone number from a contact JID. Returns null for groups,
  * broadcasts, or malformed JIDs. The number is digits-only with no
  * country-code prefix punctuation — useful for display ("+44 7111…")
