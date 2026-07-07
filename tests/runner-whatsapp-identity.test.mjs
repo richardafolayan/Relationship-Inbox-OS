@@ -4,6 +4,7 @@ import {
   parseJid,
   isGroupJid,
   isContactJid,
+  isWhatsAppSystemJid,
   jidToPhoneNumber,
   phoneNumberToContactJid
 } from "../apps/runner/dist/platforms/whatsapp/whatsappIdentity.js";
@@ -61,4 +62,40 @@ test("jidToPhoneNumber returns null for group JIDs", () => {
 test("phoneNumberToContactJid produces the canonical @c.us form", () => {
   assert.equal(phoneNumberToContactJid("+44 7111 222333"), "447111222333@c.us");
   assert.equal(phoneNumberToContactJid("447111222333"), "447111222333@c.us");
+});
+
+test("isWhatsAppSystemJid flags the WhatsApp system account (0@c.us)", () => {
+  // 0@c.us is WhatsApp's official notifications account — its messages carry
+  // base64 image bodies and must never become an inbox thread.
+  assert.equal(isWhatsAppSystemJid("0@c.us"), true);
+  assert.equal(isWhatsAppSystemJid("0:12@c.us"), true);
+  assert.equal(isWhatsAppSystemJid("00@c.us"), true);
+});
+
+test("isWhatsAppSystemJid flags broadcast / status pseudo-chats", () => {
+  assert.equal(isWhatsAppSystemJid("status@broadcast"), true);
+  assert.equal(isWhatsAppSystemJid("1234567890@broadcast"), true);
+});
+
+test("isWhatsAppSystemJid does NOT flag real contacts or groups", () => {
+  assert.equal(isWhatsAppSystemJid("447111222333@c.us"), false);
+  assert.equal(isWhatsAppSystemJid("447111222333:42@c.us"), false);
+  assert.equal(isWhatsAppSystemJid("447111222333@s.whatsapp.net"), false);
+  assert.equal(isWhatsAppSystemJid("12345-67890@g.us"), false);
+});
+
+test("isWhatsAppSystemJid keeps unrecognised domains (@lid, @newsletter)", () => {
+  // Strict denylist: only positively-identified system/broadcast JIDs are
+  // flagged. A domain we don't parse yet (e.g. @lid linked-identity contacts,
+  // @newsletter channels) is a real conversation and must be kept — this
+  // gates the boot cleanup that DELETES threads.
+  assert.equal(isWhatsAppSystemJid("123456789@lid"), false);
+  assert.equal(isWhatsAppSystemJid("123456789@newsletter"), false);
+  assert.equal(isWhatsAppSystemJid("anything@unknown.domain"), false);
+});
+
+test("isWhatsAppSystemJid does NOT flag null / malformed input (keep, don't delete)", () => {
+  assert.equal(isWhatsAppSystemJid(null), false);
+  assert.equal(isWhatsAppSystemJid(""), false);
+  assert.equal(isWhatsAppSystemJid("not-a-jid"), false);
 });
