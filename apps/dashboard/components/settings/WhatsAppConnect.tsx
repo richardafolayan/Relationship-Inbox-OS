@@ -66,13 +66,11 @@ export function WhatsAppConnect() {
   const connected = state === "connected";
 
   return (
-    <div className="grid grid-cols-1 gap-3 border-t border-hairline px-1 py-[16px] sm:grid-cols-[1fr_auto] sm:items-start sm:gap-6">
+    <div className="grid grid-cols-1 gap-4">
       <div>
-        <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">WhatsApp</p>
-        <p className="m-0 max-w-[54ch] text-[12.5px] leading-[1.5] text-ink-3" style={{ textWrap: "pretty" }}>
-          Connect your WhatsApp so its chats join your inbox alongside iMessage and LinkedIn. You
-          stay in control - nothing is ever sent without you. Connecting opens a private WhatsApp Web
-          session on this machine; scan the code below in WhatsApp under Settings then Linked Devices.
+        <p className="m-0 mb-[4px] text-[16px] font-semibold text-ink">WhatsApp</p>
+        <p className="m-0 text-[13.5px] leading-[1.45] text-ink-3" style={{ textWrap: "pretty" }}>
+          Link WhatsApp from your phone. The app reads chats into your inbox. You still press send.
         </p>
         {state === "qr_ready" && status?.qrDataUrl ? (
           <div className="mt-[14px]">
@@ -85,14 +83,13 @@ export function WhatsAppConnect() {
               className="rounded-[10px] border border-hairline bg-white p-2"
             />
             <p className="m-0 mt-[8px] font-mono text-[11px] text-ink-3">
-              Waiting for you to scan. Open WhatsApp on your phone, then Linked Devices, then Link a
-              device.
+              Open WhatsApp, Linked Devices, Link a device.
             </p>
           </div>
         ) : null}
         {error ? <p className="m-0 mt-[8px] font-mono text-[11px] text-risk-overdue">{error}</p> : null}
       </div>
-      <div className="flex items-center gap-[10px]">
+      <div className="flex flex-wrap items-center gap-[10px]">
         <span className="font-mono text-[11px] text-ink-3">
           {connected
             ? "Connected"

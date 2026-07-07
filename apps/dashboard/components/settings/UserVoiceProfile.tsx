@@ -81,10 +81,12 @@ type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 export function UserVoiceProfile({
   variant = "settings",
-  onCompleted
+  onCompleted,
+  className
 }: {
   variant?: "settings" | "onboarding";
   onCompleted?: () => void;
+  className?: string;
 }) {
   const [profile, setProfile] = useState<OperatorProfile>(EMPTY_PROFILE);
   const [loaded, setLoaded] = useState(false);
@@ -275,7 +277,8 @@ export function UserVoiceProfile({
       data-testid="user-voice-profile"
       className={cn(
         "rounded-card border border-hairline bg-paper p-5",
-        variant === "settings" && "mt-10"
+        variant === "settings" && "mt-10",
+        className
       )}
     >
       <div className="flex items-baseline justify-between gap-4">

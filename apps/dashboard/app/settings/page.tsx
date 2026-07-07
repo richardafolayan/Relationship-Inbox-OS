@@ -2,6 +2,18 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { resolveAutoScanDisabled } from "@inbox-os/core/autoscan";
+import {
+  Bell,
+  ChevronDown,
+  CircleHelp,
+  MessageSquareText,
+  MonitorCog,
+  Plug,
+  Send,
+  SlidersHorizontal,
+  Sparkles,
+  type LucideIcon
+} from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
@@ -26,6 +38,7 @@ import type {
   OverdueDigestPreview,
   OverdueDigestSettings
 } from "@/lib/overdue-digest";
+import type { PlatformCard } from "@/lib/types";
 import { clearTourSeen, startPilotTour } from "@/lib/pilot-tour";
 import {
   DEFAULT_SCAN_INTERVAL,
@@ -39,6 +52,104 @@ import { cn } from "@/lib/utils";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
+const UI_SCALE_KEY = "inbox_os_ui_scale";
+const DEFAULT_SETTINGS_TAB: SettingsTabId = "setup";
+
+type SettingsTabId =
+  | "setup"
+  | "platforms"
+  | "capture"
+  | "notifications"
+  | "writing"
+  | "focus"
+  | "app"
+  | "pilot";
+
+interface SettingsTab {
+  id: SettingsTabId;
+  label: string;
+  description: string;
+  icon: LucideIcon;
+}
+
+const SETTINGS_TABS: SettingsTab[] = [
+  {
+    id: "setup",
+    label: "Setup",
+    description: "Install, contact names, and platform connection steps.",
+    icon: CircleHelp
+  },
+  {
+    id: "platforms",
+    label: "Platforms",
+    description: "Connect iMessage, LinkedIn, and WhatsApp.",
+    icon: Plug
+  },
+  {
+    id: "capture",
+    label: "Capture",
+    description: "Scanning, browser behavior, and platform connection controls.",
+    icon: SlidersHorizontal
+  },
+  {
+    id: "notifications",
+    label: "Notifications",
+    description: "Quiet hours, desktop alerts, and overdue reply reminders.",
+    icon: Bell
+  },
+  {
+    id: "writing",
+    label: "Reply style",
+    description: "Your voice, AI help level, and reply-support cache controls.",
+    icon: MessageSquareText
+  },
+  {
+    id: "focus",
+    label: "Focus",
+    description: "Focus Reply Buffer defaults and acknowledgement notes.",
+    icon: Send
+  },
+  {
+    id: "app",
+    label: "App",
+    description: "Updates, demo mode, and local app controls.",
+    icon: MonitorCog
+  },
+  {
+    id: "pilot",
+    label: "Pilot",
+    description: "Welcome guide, feedback, bug reports, and walkthrough reset.",
+    icon: Sparkles
+  }
+];
+
+type UiScale = "normal" | "large" | "extra";
+
+const UI_SCALE_OPTIONS: Array<{ id: UiScale; label: string }> = [
+  { id: "normal", label: "Normal" },
+  { id: "large", label: "Large" },
+  { id: "extra", label: "Extra" }
+];
+
+const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
+  LINKEDIN: "LinkedIn",
+  INSTAGRAM: "Instagram",
+  TIKTOK: "TikTok",
+  IMESSAGE: "iMessage",
+  WHATSAPP: "WhatsApp"
+};
+
+function isSettingsTabId(value: string): value is SettingsTabId {
+  return SETTINGS_TABS.some((tab) => tab.id === value);
+}
+
+function tabFromHash(hash: string): SettingsTabId | null {
+  const clean = hash.replace(/^#/, "");
+  if (isSettingsTabId(clean)) return clean;
+  if (clean === "app-updates") return "app";
+  if (clean === "reply-style") return "writing";
+  return null;
+}
 
 // v1 user surface: auto-scan, quiet hours, headless browser, and the user
 // voice / reply-style profile the AI prompts read (UserVoiceProfile). Other
@@ -46,6 +157,7 @@ const QUIET_HOURS_KEY = "inbox_quiet_hours";
 // platforms, danger-zone wipe, runner restart) were stripped in PR1;
 // restore from archive/pre-v1-stripback if they're needed back.
 export default function SettingsPage() {
+  const [activeTab, setActiveTab] = useState<SettingsTabId>(DEFAULT_SETTINGS_TAB);
   const [autoScan, setAutoScan] = useState(false);
   const [quietHours, setQuietHours] = useState(false);
   const [autoScanDisabled, setAutoScanDisabled] = useState(false);
@@ -62,6 +174,10 @@ export default function SettingsPage() {
 
   // Clearing the dismissed flag brings the welcome card back on Today.
   const [welcomeReset, setWelcomeReset] = useState(false);
+  const [uiScale, setUiScale] = useState<UiScale>("normal");
+  const [platformRows, setPlatformRows] = useState<PlatformCard[]>([]);
+  const [platformBusy, setPlatformBusy] = useState<PlatformCard["platform"] | null>(null);
+  const [platformError, setPlatformError] = useState("");
 
   // /settings#app-updates (the update toast / bell entry lands here): scroll
   // the App updates card into view and flash a short highlight ring so the
@@ -71,11 +187,16 @@ export default function SettingsPage() {
   useEffect(() => {
     let timer: number | undefined;
     const maybeHighlight = () => {
-      if (window.location.hash !== "#app-updates") return;
-      document
-        .getElementById("app-updates")
-        ?.scrollIntoView({ behavior: "smooth", block: "center" });
-      setHighlightUpdates(true);
+      const tab = tabFromHash(window.location.hash);
+      if (tab) setActiveTab(tab);
+      if (window.location.hash === "#app-updates") {
+        window.setTimeout(() => {
+          document
+            .getElementById("app-updates")
+            ?.scrollIntoView({ behavior: "smooth", block: "center" });
+        }, 0);
+        setHighlightUpdates(true);
+      }
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setHighlightUpdates(false), 2400);
     };
@@ -98,6 +219,8 @@ export default function SettingsPage() {
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setScanInterval(readScanInterval());
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
+    const storedScale = window.localStorage.getItem(UI_SCALE_KEY);
+    setUiScale(storedScale === "large" || storedScale === "extra" ? storedScale : "normal");
     void apiGet<{ headless?: boolean }>("/runner/data/settings")
       .then((data) => {
         if (data && typeof data.headless === "boolean") setHeadless(data.headless);
@@ -105,6 +228,18 @@ export default function SettingsPage() {
       })
       .catch(() => setHeadlessReady(true));
   }, []);
+
+  const refreshPlatforms = useCallback(async () => {
+    const rows = await apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => []);
+    setPlatformRows(rows ?? []);
+  }, []);
+
+  useEffect(() => {
+    void refreshPlatforms();
+    const onResync = () => void refreshPlatforms();
+    window.addEventListener("runner-resync", onResync);
+    return () => window.removeEventListener("runner-resync", onResync);
+  }, [refreshPlatforms]);
 
   const toggleQuietHours = () => {
     const next = !quietHours;
@@ -145,8 +280,49 @@ export default function SettingsPage() {
     }
   };
 
+  const chooseUiScale = (next: UiScale) => {
+    setUiScale(next);
+    if (next === "normal") {
+      window.localStorage.removeItem(UI_SCALE_KEY);
+      document.documentElement.removeAttribute("data-ui-scale");
+    } else {
+      window.localStorage.setItem(UI_SCALE_KEY, next);
+      document.documentElement.setAttribute("data-ui-scale", next);
+    }
+    setSavedAt(Date.now());
+  };
+
+  const platformAction = async (
+    platform: PlatformCard["platform"],
+    endpoint: "open-browser" | "connect" | "scan"
+  ) => {
+    if (platformBusy) return;
+    setPlatformBusy(platform);
+    setPlatformError("");
+    try {
+      const path =
+        endpoint === "scan" ? "/runner/control/scan" : `/runner/control/platform/${endpoint}`;
+      await apiPost(path, { platform });
+      await refreshPlatforms();
+      setSavedAt(Date.now());
+    } catch {
+      setPlatformError(`Couldn't update ${PLATFORM_DISPLAY[platform]}. Is the runner online?`);
+    } finally {
+      setPlatformBusy(null);
+    }
+  };
+
+  const activeTabInfo = SETTINGS_TABS.find((tab) => tab.id === activeTab) ?? SETTINGS_TABS[0]!;
+
+  const chooseTab = (tab: SettingsTabId) => {
+    setActiveTab(tab);
+    const url = new URL(window.location.href);
+    url.hash = tab;
+    window.history.replaceState(null, "", url);
+  };
+
   return (
-    <Canvas>
+    <Canvas className="max-w-[1480px] 3xl:max-w-[1680px]">
       <PageHead
         eyebrow="Preferences"
         title="Settings"
@@ -159,189 +335,504 @@ export default function SettingsPage() {
         }
       />
 
-      <SettingsGroup head="Capture">
-        <SettingRow
-          name="Auto-scan"
-          desc="Pull new messages from every connected platform on the cadence you choose below."
-          onActivate={toggleAutoScan}
-          disabled={autoScanDisabled}
-          trailing={
-            <div className="flex items-center gap-[10px]">
-              {/* Issue #394. Explicit On/Off state next to the saved
-                  cadence so the toggle's intent is unambiguous even
-                  when the visual switch is the same colour as the page
-                  background. */}
-              <span className="font-mono text-[11px] text-ink-3">
-                {autoScanDisabled
-                  ? "off (disabled in this build)"
-                  : autoScan
-                    ? `On · ${scanIntervalCaption(scanInterval)}`
-                    : `Off · ${scanIntervalCaption(scanInterval)} when on`}
-              </span>
-              <Toggle
-                on={autoScan && !autoScanDisabled}
-                disabled={autoScanDisabled}
-                onChange={toggleAutoScan}
-                label="Auto-scan"
-              />
-            </div>
-          }
-        />
-        <SettingRow
-          name="Scan cadence"
-          desc="How often auto-scan checks for new messages. Timing stays slightly randomised around your choice, and quiet hours and active hours still apply. A daily scan runs at the first opportunity after the interval passes."
-          disabled={autoScanDisabled}
-          trailing={
-            <div className="flex flex-wrap items-center justify-end gap-[8px]">
-              {SCAN_INTERVAL_OPTIONS.map((option) => (
-                <CadenceOption
-                  key={option.id}
-                  label={option.label}
-                  selected={scanInterval === option.id}
+      <div className="grid gap-7 md:grid-cols-[230px_minmax(0,1fr)] xl:grid-cols-[260px_minmax(0,1fr)] md:items-start">
+        <SettingsTabs activeTab={activeTab} onChoose={chooseTab} />
+        <section
+          aria-labelledby={`settings-tab-${activeTab}`}
+          className="min-w-0"
+        >
+          <div className="mb-7 border-b border-hairline pb-5">
+            <h2
+              id={`settings-tab-${activeTab}`}
+              className="m-0 text-[25px] font-semibold tracking-[-0.015em] text-ink"
+            >
+              {activeTabInfo.label}
+            </h2>
+            <p className="m-0 mt-1 max-w-[68ch] text-[13px] leading-[1.5] text-ink-3">
+              {activeTabInfo.description}
+            </p>
+          </div>
+
+          {activeTab === "setup" ? <SetupGuideSection /> : null}
+
+          {activeTab === "platforms" ? (
+            <PlatformSettingsSection
+              rows={platformRows}
+              busy={platformBusy}
+              error={platformError}
+              onAction={platformAction}
+            />
+          ) : null}
+
+          {activeTab === "capture" ? (
+            <>
+              <SettingsGroup head="Auto-scan">
+                <SettingRow
+                  name="Auto-scan"
+                  desc="Pull new messages from every connected platform on the cadence you choose below."
+                  onActivate={toggleAutoScan}
                   disabled={autoScanDisabled}
-                  onClick={() => chooseScanInterval(option.id)}
+                  trailing={
+                    <div className="flex items-center gap-[10px]">
+                      <span className="font-mono text-[11px] text-ink-3">
+                        {autoScanDisabled
+                          ? "off (disabled in this build)"
+                          : autoScan
+                            ? `On · ${scanIntervalCaption(scanInterval)}`
+                            : `Off · ${scanIntervalCaption(scanInterval)} when on`}
+                      </span>
+                      <Toggle
+                        on={autoScan && !autoScanDisabled}
+                        disabled={autoScanDisabled}
+                        onChange={toggleAutoScan}
+                        label="Auto-scan"
+                      />
+                    </div>
+                  }
                 />
-              ))}
-            </div>
-          }
-        />
-      </SettingsGroup>
+                <SettingRow
+                  name="Scan cadence"
+                  desc="How often auto-scan checks for new messages. Timing stays slightly randomised around your choice, and quiet hours and active hours still apply. A daily scan runs at the first opportunity after the interval passes."
+                  disabled={autoScanDisabled}
+                  trailing={
+                    <div className="flex flex-wrap items-center justify-end gap-[8px]">
+                      {SCAN_INTERVAL_OPTIONS.map((option) => (
+                        <CadenceOption
+                          key={option.id}
+                          label={option.label}
+                          selected={scanInterval === option.id}
+                          disabled={autoScanDisabled}
+                          onClick={() => chooseScanInterval(option.id)}
+                        />
+                      ))}
+                    </div>
+                  }
+                />
+              </SettingsGroup>
 
-      <SettingsGroup head="Privacy">
-        <SettingRow
-          name="Quiet hours"
-          desc="After 22:00, mute the attention dot and pause auto-scan."
-          onActivate={toggleQuietHours}
-          trailing={
-            <div className="flex items-center gap-[10px]">
-              {/* Issue #394 / R-0034 root cause: this caption used to
-                  read "22:00-06:00" alone, with the toggle showing
-                  off. Pilot read that as "broken" because the saved
-                  schedule was visible while the switch said off.
-                  Explicit "On"/"Off" + "saved schedule" wording makes
-                  the relationship clear. */}
-              <span className="font-mono text-[11px] text-ink-3">
-                {quietHours ? "On · 22:00-06:00" : "Off · 22:00-06:00 saved"}
-              </span>
-              <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
-            </div>
-          }
-        />
-      </SettingsGroup>
+              <SettingsGroup head="Browser">
+                <SettingRow
+                  name="Headless browser"
+                  desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you and keep a full human fingerprint. Turn on only for CI or speed. Headless is one of the strongest bot signals and is far more detectable for LinkedIn."
+                  onActivate={toggleHeadless}
+                  disabled={!headlessReady || headlessStatus === "saving"}
+                  trailing={
+                    <div className="flex items-center gap-[10px]">
+                      <span className="font-mono text-[11px] text-ink-3">
+                        {headlessStatus === "saving" ? (
+                          "saving…"
+                        ) : headlessStatus === "error" ? (
+                          <span className="text-risk-overdue">failed</span>
+                        ) : headless ? (
+                          "On · headless"
+                        ) : (
+                          "Off · visible"
+                        )}
+                      </span>
+                      <Toggle
+                        on={headless}
+                        disabled={!headlessReady || headlessStatus === "saving"}
+                        onChange={toggleHeadless}
+                        label="Headless browser"
+                      />
+                    </div>
+                  }
+                />
+              </SettingsGroup>
+            </>
+          ) : null}
 
-      <SettingsGroup head="Notifications">
-        <SettingRow
-          name="Desktop notifications"
-          desc="Show a system notification when a new message arrives. Clicking it jumps you to the thread. Quiet hours still apply, and nothing fires while this tab is in focus."
-          trailing={<NotificationsPermissionControl />}
-        />
-        <OverdueDigestRow />
-      </SettingsGroup>
+          {activeTab === "notifications" ? (
+            <>
+              <SettingsGroup head="Quiet hours">
+                <SettingRow
+                  name="Quiet hours"
+                  desc="After 22:00, mute the attention dot and pause auto-scan."
+                  onActivate={toggleQuietHours}
+                  trailing={
+                    <div className="flex items-center gap-[10px]">
+                      <span className="font-mono text-[11px] text-ink-3">
+                        {quietHours ? "On · 22:00-06:00" : "Off · 22:00-06:00 saved"}
+                      </span>
+                      <Toggle on={quietHours} onChange={toggleQuietHours} label="Quiet hours" />
+                    </div>
+                  }
+                />
+              </SettingsGroup>
 
-      <SettingsGroup head="Browser">
-        <SettingRow
-          name="Headless browser"
-          desc="Off by default: the real Chrome runs headful but offscreen, so scans never disrupt you AND keep a full human fingerprint. Turn on only for CI/speed. Headless is one of the strongest bot signals and is far more detectable for LinkedIn."
-          onActivate={toggleHeadless}
-          disabled={!headlessReady || headlessStatus === "saving"}
-          trailing={
-            <div className="flex items-center gap-[10px]">
-              {/* Issue #394. Same clarity treatment as the other
-                  toggles: lead with the explicit state, then any
-                  saving/error context. */}
-              <span className="font-mono text-[11px] text-ink-3">
-                {headlessStatus === "saving" ? (
-                  "saving…"
-                ) : headlessStatus === "error" ? (
-                  <span className="text-risk-overdue">failed</span>
-                ) : headless ? (
-                  "On · headless"
-                ) : (
-                  "Off · visible"
-                )}
-              </span>
-              <Toggle
-                on={headless}
-                disabled={!headlessReady || headlessStatus === "saving"}
-                onChange={toggleHeadless}
-                label="Headless browser"
-              />
-            </div>
-          }
-        />
-      </SettingsGroup>
+              <SettingsGroup head="Notifications">
+                <SettingRow
+                  name="Desktop notifications"
+                  desc="Show a system notification when a new message arrives. Clicking it jumps you to the thread. Quiet hours still apply, and nothing fires while this tab is in focus."
+                  trailing={<NotificationsPermissionControl />}
+                />
+                <OverdueDigestRow />
+              </SettingsGroup>
+            </>
+          ) : null}
 
-      <SettingsGroup head="AI">
-        <SettingRow
-          name="Reassess all threads"
-          desc="Clear cached briefs and suggested replies on every active thread so they regenerate against the latest AI prompts. Each thread refreshes lazily when next viewed or scanned. Use after a prompt change ships."
-          trailing={<ReassessAllControl />}
-        />
-      </SettingsGroup>
+          {activeTab === "writing" ? (
+            <>
+              <SettingsGroup head="AI">
+                <SettingRow
+                  name="Reassess all threads"
+                  desc="Clear cached briefs and suggested replies on every active thread so they regenerate against the latest AI prompts. Each thread refreshes lazily when next viewed or scanned. Use after a prompt change ships."
+                  trailing={<ReassessAllControl />}
+                />
+              </SettingsGroup>
+              <div data-demo-target="settings-user-voice">
+                <UserVoiceProfile variant="settings" className="mt-0" />
+              </div>
+            </>
+          ) : null}
 
-      {/* Renders only when the runner reports WhatsApp enabled (#774); a
-          calm opt-in connect row, hidden for pilots who haven't turned it on. */}
-      <WhatsAppConnect />
+          {activeTab === "focus" ? <FocusSettingsSection /> : null}
 
-      <div data-demo-target="settings-user-voice">
-        <UserVoiceProfile variant="settings" />
+          {activeTab === "app" ? (
+            <>
+              <SettingsGroup head="Display">
+                <SettingRow
+                  name="Text size"
+                  desc="Scale the whole interface on this Mac."
+                  trailing={
+                    <SegmentedControl
+                      options={UI_SCALE_OPTIONS}
+                      value={uiScale}
+                      onChange={chooseUiScale}
+                    />
+                  }
+                />
+              </SettingsGroup>
+
+              <section className="mb-9">
+                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                  Demo
+                </p>
+                <FullDemoSettingsCard />
+              </section>
+
+              <section id="app-updates" className="scroll-mt-24">
+                <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+                  App updates
+                </p>
+                <div
+                  className={cn(
+                    "rounded-row transition-shadow duration-500",
+                    highlightUpdates && "ring-2 ring-accent/70"
+                  )}
+                >
+                  <AppUpdates />
+                </div>
+              </section>
+            </>
+          ) : null}
+
+          {activeTab === "pilot" ? (
+            <section>
+              <PilotWelcomeCard />
+              <div className="mt-5 flex flex-wrap items-center gap-[10px]">
+                <PilotActionButton onClick={() => openPilotFeedback("feedback")}>
+                  Share feedback
+                </PilotActionButton>
+                <PilotActionButton onClick={() => openPilotFeedback("bug")}>
+                  Report a bug
+                </PilotActionButton>
+                <PilotActionButton
+                  onClick={() => {
+                    window.localStorage.removeItem(PILOT_WELCOME_DISMISSED_KEY);
+                    setWelcomeReset(true);
+                  }}
+                >
+                  Show welcome on Today
+                </PilotActionButton>
+                <PilotActionButton
+                  onClick={() => {
+                    clearTourSeen(window.localStorage);
+                    startPilotTour({ replay: true });
+                  }}
+                >
+                  Replay walkthrough
+                </PilotActionButton>
+                {welcomeReset ? (
+                  <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
+                    it’ll show next time you open Today
+                  </span>
+                ) : null}
+              </div>
+            </section>
+          ) : null}
+        </section>
       </div>
+    </Canvas>
+  );
+}
 
-      <FocusSettingsSection />
+function SettingsTabs({
+  activeTab,
+  onChoose
+}: {
+  activeTab: SettingsTabId;
+  onChoose: (tab: SettingsTabId) => void;
+}) {
+  return (
+    <nav
+      aria-label="Settings sections"
+      className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:sticky md:top-[92px] md:grid-cols-1"
+    >
+      {SETTINGS_TABS.map((tab) => {
+        const Icon = tab.icon;
+        const active = activeTab === tab.id;
+        return (
+          <button
+            key={tab.id}
+            type="button"
+            onClick={() => onChoose(tab.id)}
+            aria-current={active ? "page" : undefined}
+            className={cn(
+              "flex min-w-0 items-start gap-3 rounded-[8px] border px-3 py-[11px] text-left transition-colors duration-calm",
+              active
+                ? "border-hairline-strong bg-ink text-paper"
+                : "border-transparent bg-transparent text-ink-2 hover:border-hairline hover:bg-paper-2 hover:text-ink"
+            )}
+          >
+            <Icon
+              className={cn("mt-[1px] h-[17px] w-[17px] shrink-0", active ? "text-paper" : "text-ink-3")}
+              strokeWidth={1.8}
+              aria-hidden
+            />
+            <span className="min-w-0">
+              <span className="block truncate text-[15px] font-medium">{tab.label}</span>
+              <span
+                className={cn(
+                  "mt-[3px] hidden text-[12.5px] leading-[1.35] md:block",
+                  active ? "text-paper/70" : "text-ink-3"
+                )}
+              >
+                {tab.description}
+              </span>
+            </span>
+          </button>
+        );
+      })}
+    </nav>
+  );
+}
 
-      <section className="mt-10">
-        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Demo</p>
-        <FullDemoSettingsCard />
-      </section>
+function PlatformSettingsSection({
+  rows,
+  busy,
+  error,
+  onAction
+}: {
+  rows: PlatformCard[];
+  busy: PlatformCard["platform"] | null;
+  error: string;
+  onAction: (
+    platform: PlatformCard["platform"],
+    endpoint: "open-browser" | "connect" | "scan"
+  ) => void;
+}) {
+  const findRow = (platform: PlatformCard["platform"]) =>
+    rows.find((row) => row.platform === platform);
 
-      <section id="app-updates" className="mt-10 scroll-mt-24">
-        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
-          App updates
-        </p>
-        <div
+  return (
+    <section className="mb-9">
+      <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+        Connected platforms
+      </p>
+      {error ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-overdue">{error}</p> : null}
+      <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
+        <PlatformSetupCard
+          row={findRow("IMESSAGE")}
+          fallbackPlatform="IMESSAGE"
+          title="iMessage"
+          body="Reads Messages on this Mac. If names show as numbers, sync Contacts."
+          actionLabel="Scan iMessage"
+          busy={busy === "IMESSAGE"}
+          onPrimary={() => onAction("IMESSAGE", "scan")}
+        />
+        <PlatformSetupCard
+          row={findRow("LINKEDIN")}
+          fallbackPlatform="LINKEDIN"
+          title="LinkedIn"
+          body="Uses your normal Chrome session. Sign in there first."
+          actionLabel={findRow("LINKEDIN")?.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}
+          busy={busy === "LINKEDIN"}
+          onPrimary={() =>
+            onAction(
+              "LINKEDIN",
+              findRow("LINKEDIN")?.status === "CONNECTED" ? "open-browser" : "connect"
+            )
+          }
+        />
+        <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
+          <WhatsAppConnect />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PlatformSetupCard({
+  row,
+  fallbackPlatform,
+  title,
+  body,
+  actionLabel,
+  busy,
+  onPrimary
+}: {
+  row?: PlatformCard;
+  fallbackPlatform: PlatformCard["platform"];
+  title: string;
+  body: string;
+  actionLabel: string;
+  busy: boolean;
+  onPrimary: () => void;
+}) {
+  const status = row?.status ?? "NOT_CONNECTED";
+  const connected = status === "CONNECTED";
+  const enabled = row?.enabled ?? true;
+  const statusLabel = !enabled
+    ? "Off"
+    : connected
+      ? "Connected"
+      : status === "DEGRADED"
+        ? "Needs a look"
+        : status === "ERROR"
+          ? "Error"
+          : "Not connected";
+
+  return (
+    <article className="rounded-[8px] bg-paper-2/45 px-4 py-4">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h3 className="m-0 text-[16px] font-semibold text-ink">{title}</h3>
+          <p className="m-0 mt-1 text-[13.5px] leading-[1.45] text-ink-3">{body}</p>
+        </div>
+        <span
           className={cn(
-            "rounded-row transition-shadow duration-500",
-            highlightUpdates && "ring-2 ring-accent/70"
+            "shrink-0 rounded-pill px-2 py-[3px] font-mono text-[10.5px]",
+            connected ? "bg-risk-fresh/15 text-risk-fresh" : "bg-paper-3 text-ink-3"
           )}
         >
-          <AppUpdates />
-        </div>
-      </section>
+          {statusLabel}
+        </span>
+      </div>
+      {row?.lastError ? (
+        <p className="m-0 mt-3 text-[12.5px] leading-[1.45] text-risk-overdue">{row.lastError}</p>
+      ) : null}
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={onPrimary}
+          disabled={busy || !enabled}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? "Working..." : actionLabel}
+        </button>
+        {connected ? (
+          <span className="font-mono text-[11px] text-ink-3">
+            {row?.lastScanAt ? "Scan ready" : PLATFORM_DISPLAY[fallbackPlatform]}
+          </span>
+        ) : null}
+      </div>
+    </article>
+  );
+}
 
-      <section className="mt-10">
-        <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">Pilot</p>
-        <PilotWelcomeCard />
-        <div className="flex flex-wrap items-center gap-[10px]">
-          <PilotActionButton onClick={() => openPilotFeedback("feedback")}>
-            Share feedback
-          </PilotActionButton>
-          <PilotActionButton onClick={() => openPilotFeedback("bug")}>
-            Report a bug
-          </PilotActionButton>
-          <PilotActionButton
-            onClick={() => {
-              window.localStorage.removeItem(PILOT_WELCOME_DISMISSED_KEY);
-              setWelcomeReset(true);
-            }}
-          >
-            Show welcome on Today
-          </PilotActionButton>
-          <PilotActionButton
-            onClick={() => {
-              clearTourSeen(window.localStorage);
-              startPilotTour({ replay: true });
-            }}
-          >
-            Replay walkthrough
-          </PilotActionButton>
-          {welcomeReset ? (
-            <span className="font-mono text-[11px] text-ink-3" aria-live="polite">
-              it’ll show next time you open Today
-            </span>
-          ) : null}
-        </div>
-      </section>
-    </Canvas>
+function SetupGuideSection() {
+  return (
+    <section className="mb-9">
+      <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
+        Setup guide
+      </p>
+      <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
+        <SetupGuideDrawer
+          name="Keep the app running"
+          desc="The launcher keeps the app in the background."
+          steps={[
+            "Start it from Terminal with npm run start:student in the app folder.",
+            "Stop it from Terminal with npm run stop:student in the app folder.",
+            "If the runner is offline, start it again and reload the browser."
+          ]}
+          defaultOpen
+        />
+        <SetupGuideDrawer
+          name="iMessage shows phone numbers"
+          desc="Sync or import contacts on this Mac."
+          steps={[
+            "Open Contacts on Mac and check if your people are there.",
+            "Best fix: turn on iCloud Contacts on iPhone and Mac.",
+            "No iCloud: AirDrop a .vcf file to the Mac, then import it into Contacts.",
+            "Run a scan after names appear."
+          ]}
+        />
+        <SetupGuideDrawer
+          name="Connect LinkedIn"
+          desc="Use a normal Chrome session. The app never asks for your password."
+          steps={[
+            "Install Chrome if needed.",
+            "Sign into LinkedIn in a normal Chrome window.",
+            "Use Connect LinkedIn, complete security checks yourself, then run a scan."
+          ]}
+        />
+        <SetupGuideDrawer
+          name="Connect WhatsApp"
+          desc="Link this Mac from WhatsApp on your phone."
+          steps={[
+            "Open Platforms, then Connect WhatsApp.",
+            "On your phone, open WhatsApp Settings, Linked Devices, Link a device.",
+            "Scan the QR code shown in the app."
+          ]}
+        />
+        <SetupGuideDrawer
+          name="Space and first setup"
+          desc="The first install downloads the app, browser, dependencies, and local voice model."
+          steps={[
+            "You need at least 10GB free. 20GB is more comfortable.",
+            "First setup usually takes 20 to 30 minutes.",
+            "The health check is npm run doctor from the app folder."
+          ]}
+        />
+      </div>
+    </section>
+  );
+}
+
+function SetupGuideDrawer({
+  name,
+  desc,
+  steps,
+  defaultOpen
+}: {
+  name: string;
+  desc: string;
+  steps: string[];
+  defaultOpen?: boolean;
+}) {
+  return (
+    <details
+      className="group rounded-[8px] bg-paper-2/45 px-4 py-3 open:bg-paper-2"
+      open={defaultOpen}
+    >
+      <summary className="grid cursor-pointer list-none grid-cols-[1fr_auto] items-start gap-4 [&::-webkit-details-marker]:hidden">
+        <span>
+          <span className="block text-[15.5px] font-medium text-ink">{name}</span>
+          <span className="mt-[3px] block text-[13.5px] leading-[1.45] text-ink-3">{desc}</span>
+        </span>
+        <ChevronDown
+          className="mt-[2px] h-[17px] w-[17px] text-ink-3 transition-transform duration-calm group-open:rotate-180"
+          strokeWidth={1.8}
+          aria-hidden
+        />
+      </summary>
+      <ol className="m-0 mt-4 flex list-decimal flex-col gap-[7px] break-words pl-[18px] text-[13.5px] leading-[1.5] text-ink-2 [overflow-wrap:anywhere]">
+        {steps.map((step) => (
+          <li key={step}>{step}</li>
+        ))}
+      </ol>
+    </details>
   );
 }
 
@@ -435,7 +926,7 @@ function SettingsGroup({ head, children }: { head: string; children: React.React
   return (
     <section className="mb-9">
       <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">{head}</p>
-      <div className="border-b border-hairline">{children}</div>
+      <div className="space-y-1">{children}</div>
     </section>
   );
 }
@@ -484,16 +975,16 @@ function SettingRow({
         // Phone: control drops under the description (the trailing column
         // otherwise squeezes the copy to a word per line); sm+ keeps the
         // two-column row.
-        "grid grid-cols-1 gap-3 border-t border-hairline px-1 py-[16px] sm:grid-cols-[1fr_auto] sm:items-center sm:gap-6",
+        "grid grid-cols-1 gap-3 rounded-[8px] px-1 py-[15px] sm:grid-cols-[1fr_auto] sm:items-center sm:gap-6",
         interactive
           ? "cursor-pointer rounded-[6px] transition-colors duration-calm hover:bg-paper-2/60 focus:bg-paper-2/60 focus:outline-none"
           : null
       )}
     >
       <div>
-        <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">{name}</p>
+        <p className="m-0 mb-[4px] text-[16px] font-medium text-ink">{name}</p>
         {desc ? (
-          <p className="m-0 max-w-[54ch] text-[12.5px] leading-[1.5] text-ink-3" style={{ textWrap: "pretty" }}>
+          <p className="m-0 max-w-[58ch] text-[13.5px] leading-[1.5] text-ink-3" style={{ textWrap: "pretty" }}>
             {desc}
           </p>
         ) : null}
@@ -684,16 +1175,14 @@ function OverdueDigestRow() {
   const desktopNotEnabled = permission !== "granted";
 
   return (
-    <div className="grid grid-cols-1 gap-3 border-t border-hairline px-1 py-[16px] sm:grid-cols-[1fr_auto] sm:items-start sm:gap-6">
+    <div className="grid grid-cols-1 gap-3 rounded-[8px] px-1 py-[15px] sm:grid-cols-[1fr_auto] sm:items-start sm:gap-6">
       <div>
-        <p className="m-0 mb-[4px] text-[14.5px] font-medium text-ink">Overdue reply digest</p>
+        <p className="m-0 mb-[4px] text-[16px] font-medium text-ink">Overdue reply digest</p>
         <p
-          className="m-0 max-w-[54ch] text-[12.5px] leading-[1.5] text-ink-3"
+          className="m-0 max-w-[58ch] text-[13.5px] leading-[1.5] text-ink-3"
           style={{ textWrap: "pretty" }}
         >
-          One calm reminder for overdue replies. Off by default. Choose daily or weekly if you
-          want a single digest. It lands in the bell at the top of the app and clicks open
-          Today, so you can work through the queue in your own time.
+          One calm reminder for overdue replies. Choose daily or weekly.
         </p>
         {desktopNotEnabled ? (
           <p className="m-0 mt-[8px] font-mono text-[11px] text-ink-3">
@@ -862,6 +1351,38 @@ function CadenceOption({
         <span className="ml-1 text-ink-3">({disabledReason})</span>
       ) : null}
     </button>
+  );
+}
+
+function SegmentedControl<T extends string>({
+  options,
+  value,
+  onChange
+}: {
+  options: Array<{ id: T; label: string }>;
+  value: T;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-pill bg-paper-2 p-[3px]">
+      {options.map((option) => {
+        const selected = option.id === value;
+        return (
+          <button
+            key={option.id}
+            type="button"
+            aria-pressed={selected}
+            onClick={() => onChange(option.id)}
+            className={cn(
+              "rounded-pill px-3 py-[6px] text-[12.5px] font-medium transition-colors duration-calm",
+              selected ? "bg-ink text-paper" : "text-ink-3 hover:text-ink"
+            )}
+          >
+            {option.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 
