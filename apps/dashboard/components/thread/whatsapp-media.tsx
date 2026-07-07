@@ -53,7 +53,20 @@ export function WhatsAppMedia({ attachment }: WhatsAppMediaProps) {
     );
   }
 
-  if (attachment.kind === "video") {
+  if (attachment.kind === "gif" && attachment.type?.startsWith("image/")) {
+    return (
+      <a href={url} target="_blank" rel="noreferrer" className="block">
+        <img
+          src={url}
+          alt={attachment.rawLabel ?? "WhatsApp GIF"}
+          className="max-h-[320px] max-w-full rounded-[12px] object-contain"
+          loading="lazy"
+        />
+      </a>
+    );
+  }
+
+  if (attachment.kind === "video" || attachment.kind === "gif") {
     return (
       <video
         src={url}
@@ -100,6 +113,7 @@ function labelFor(kind: ThreadMessage["attachments"][number]["kind"]): string {
     case "voice_note": return "Voice note";
     case "photo": return "Photo";
     case "video": return "Video";
+    case "gif": return "GIF";
     case "audio": return "Audio";
     case "pdf": return "PDF";
     case "sticker": return "Sticker";

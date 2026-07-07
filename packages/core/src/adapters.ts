@@ -1,4 +1,4 @@
-import type { NormalizedMessage, OutboundAttachment, PlatformName, SendReceipt, ThreadStub } from "./types";
+import type { NormalizedMessage, OutboundAttachment, OutboundPoll, PlatformName, SendReceipt, ThreadStub } from "./types";
 
 export interface PlatformAdapter {
   platform: PlatformName;
@@ -17,6 +17,7 @@ export interface PlatformAdapter {
     text: string,
     attachments?: OutboundAttachment[]
   ): Promise<SendReceipt>;
+  sendPoll?(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt>;
   openThread(thread: ThreadStub): Promise<void>;
   /**
    * Optional. Navigates the runner-controlled browser session to an

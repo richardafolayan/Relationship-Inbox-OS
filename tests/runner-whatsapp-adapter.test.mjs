@@ -244,6 +244,60 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
   assert.equal(receipt.sentAt, "2023-11-14T22:15:00.000Z");
 });
 
+test("sendPoll sends a native WhatsApp poll and returns structured metadata", async () => {
+  let sentJid = null;
+  let sentPoll = null;
+  const client = createFakeClient({
+    sendMessage: async (jid, content) => {
+      sentJid = jid;
+      sentPoll = content;
+      return { timestamp: 1700000100, id: { _serialized: "poll-msg-1" } };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendPoll(
+    { platformThreadId: "447111222333@c.us", displayName: "Alice", lastMessagePreview: "" },
+    {
+      question: "Dinner?",
+      options: ["Yes", "No"],
+      allowMultipleAnswers: true
+    }
+  );
+
+  assert.equal(sentJid, "447111222333@c.us");
+  assert.equal(sentPoll.pollName, "Dinner?");
+  assert.deepEqual(sentPoll.pollOptions, [
+    { name: "Yes", localId: 0 },
+    { name: "No", localId: 1 }
+  ]);
+  assert.equal(sentPoll.options.allowMultipleAnswers, true);
+  assert.equal(receipt.platformMessageKey, "poll-msg-1");
+  assert.deepEqual(receipt.attachments, [
+    {
+      type: "poll",
+      manualReview: false,
+      rawLabel: "Dinner?",
+      kind: "poll"
+    }
+  ]);
+  assert.deepEqual(receipt.raw, {
+    whatsapp: {
+      poll: {
+        question: "Dinner?",
+        options: [{ name: "Yes" }, { name: "No" }],
+        allowMultipleAnswers: true
+      }
+    }
+  });
+});
+
 test("fetchThreadMessages normalises wweb.js Message shapes (1:1)", async () => {
   const fakeChat = {
     fetchMessages: async () => [
