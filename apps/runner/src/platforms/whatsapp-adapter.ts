@@ -30,7 +30,8 @@ import { createWhatsAppClient } from "./whatsapp/client";
 import { chatToThreadStub } from "./whatsapp/groupResolver";
 import { checkSendGuard, type SendGuardConfig, type SendGuardPrisma } from "./whatsapp/sendGuard";
 import { epochSecondsToIso } from "./whatsapp/whatsappTime";
-import { isGroupJid } from "./whatsapp/whatsappIdentity";
+import { isGroupJid, isBroadcastJid } from "./whatsapp/whatsappIdentity";
+import { renderMessageText, type WaTextMessageLike } from "./whatsapp/messageText";
 import { mapWhatsAppKind, persistWhatsAppMedia, safeIdForFilename, type WhatsAppMessageMedia } from "./whatsapp/media";
 import { copyFile, mkdir } from "node:fs/promises";
 import { extname, resolve, join } from "node:path";
@@ -146,13 +147,21 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
     const chats = await this.requireClient().getChats();
-    return chats.filter((c) => (c.unreadCount ?? 0) > 0).map(chatToThreadStub);
+    return chats
+      .filter((c) => (c.unreadCount ?? 0) > 0 && !isBroadcastChat(c))
+      .map(chatToThreadStub);
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const chats = await this.requireClient().getChats();
     // Chats arrive ordered by most-recent activity from wweb.js.
-    return chats.slice(0, limit).map(chatToThreadStub);
+    // Broadcast / status@broadcast chats (the "WhatsApp" status feed) are
+    // dropped: they aren't a conversation the operator replies to, and their
+    // last message is usually a raw media payload rather than readable text.
+    return chats
+      .filter((c) => !isBroadcastChat(c))
+      .slice(0, limit)
+      .map(chatToThreadStub);
   }
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
@@ -396,40 +405,22 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 }
 
-/**
- * Subset of the wweb.js Message shape we read for text rendering.
- * Defined narrowly so the helper is unit-testable without dragging in
- * the full Message class (which carries the Puppeteer client reference).
- */
-interface WaTextMessageLike {
-  body?: string;
-  hasMedia?: boolean;
-  type?: string;
-  pollName?: string;
-  pollOptions?: ReadonlyArray<{ name?: string }>;
-  allowMultipleAnswers?: boolean;
-}
+// renderMessageText / WaTextMessageLike now live in ./whatsapp/messageText so
+// the group-chat preview path (groupResolver) shares the exact same base64
+// media guard. Re-exported here for existing importers / tests.
+export { renderMessageText };
+export type { WaTextMessageLike };
 
 /**
- * Flatten any wweb.js Message into the single text string we persist on
- * Message.text. Polls become a readable question + bullet list so the
- * thread timeline shows what was asked rather than an empty bubble; media
- * messages become a "[media]" placeholder. Plain text passes through
- * unchanged.
+ * True when a wweb.js Chat is a broadcast / status feed rather than a real
+ * conversation. Checks both the library's own `isBroadcast`/`broadcast` flags
+ * and the JID domain (`@broadcast`) so we drop it however wweb.js reports it.
  */
-export function renderMessageText(msg: WaTextMessageLike): string {
-  if (msg.type === "poll_creation") {
-    const question = (msg.pollName ?? "").trim();
-    const options = (msg.pollOptions ?? [])
-      .map((o) => (o?.name ?? "").trim())
-      .filter((name) => name.length > 0)
-      .map((name) => `• ${name}`)
-      .join("\n");
-    const header = msg.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
-    const body = question.length > 0 ? `${header}: ${question}` : header;
-    return options.length > 0 ? `${body}\n${options}` : body;
-  }
-  if (msg.body && msg.body.length > 0) return msg.body;
-  if (msg.hasMedia) return "[media]";
-  return "";
+function isBroadcastChat(chat: {
+  id?: { _serialized?: string };
+  isBroadcast?: boolean;
+  broadcast?: boolean;
+}): boolean {
+  if (chat.isBroadcast === true || chat.broadcast === true) return true;
+  return isBroadcastJid(chat.id?._serialized);
 }

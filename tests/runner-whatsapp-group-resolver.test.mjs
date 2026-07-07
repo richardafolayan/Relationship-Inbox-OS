@@ -78,3 +78,14 @@ test("chatToThreadStub truncates the lastMessage preview at 280 chars", () => {
   });
   assert.equal(stub.lastMessagePreview.length, 280);
 });
+
+test("chatToThreadStub never dumps a base64 media body into the preview", () => {
+  // Regression (#780 adapter): a media/status message whose body is raw base64
+  // was leaking the encoded bytes into the inbox row's preview.
+  const jpegBase64 = "/9j/4AAQSkZJRgABAgAAAAQABAAD" + "AbCd0123XyZ9".repeat(40);
+  const stub = chatToThreadStub({
+    id: { _serialized: "x@c.us" },
+    lastMessage: { body: jpegBase64, type: "image", hasMedia: true }
+  });
+  assert.equal(stub.lastMessagePreview, "[image]");
+});
