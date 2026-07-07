@@ -22,7 +22,7 @@ import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
-import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { hasEverConnected, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
@@ -42,7 +42,7 @@ import {
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
 type PriorityGroupFilter = "all" | string;
 type SortMode = "oldest" | "recent" | "name";
 
@@ -70,10 +70,15 @@ const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
   { key: "outreach", label: "Outreach" }
 ];
 
+// Full label list, including opt-in platforms. The popover renders a
+// filtered view (see platformFilterOptions in the page component) so a
+// pilot who never linked WhatsApp doesn't see its chip; ChipsRow keeps
+// reading labels from the full list.
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
-  { key: "IMESSAGE", label: "iMessage" }
+  { key: "IMESSAGE", label: "iMessage" },
+  { key: "WHATSAPP", label: "WhatsApp" }
 ];
 
 const SORT_MODES: { key: SortMode; label: string }[] = [
@@ -86,7 +91,8 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
   LINKEDIN: "in",
   IMESSAGE: "iM",
   INSTAGRAM: "ig",
-  TIKTOK: "tt"
+  TIKTOK: "tt",
+  WHATSAPP: "wa"
 };
 
 function applyTab(row: InboxRow, tab: RiskTab): boolean {
@@ -370,6 +376,16 @@ export default function InboxPage() {
     }
     return Array.from(groups).sort((a, b) => a.localeCompare(b));
   }, [allRows]);
+
+  // WhatsApp is opt-in: its filter chip only shows for an operator who has
+  // linked it at least once (or still has WhatsApp threads from before a
+  // disconnect). Everyone else keeps the two-platform popover.
+  const platformFilterOptions = useMemo(() => {
+    const showWhatsApp =
+      platforms.some((p) => p.platform === "WHATSAPP" && hasEverConnected(p)) ||
+      allRows.some((row) => row.platform === "WHATSAPP");
+    return PLATFORM_FILTERS.filter((option) => option.key !== "WHATSAPP" || showWhatsApp);
+  }, [platforms, allRows]);
 
   useEffect(() => {
     if (priorityGroup === "all") return;
@@ -759,6 +775,7 @@ export default function InboxPage() {
         <div className="flex items-center justify-end gap-[4px] pb-[6px]">
           <SortMenu value={sortMode} options={SORT_MODES} onChange={setSortMode} />
           <FiltersPopover
+            platformOptions={platformFilterOptions}
             platformFilter={platformFilter}
             category={category}
             favouritesOnly={favouritesOnly}
@@ -1048,6 +1065,7 @@ export default function InboxPage() {
 // badge — replacing the old stack of inline <select>s (the "convoluted"
 // part Richard flagged).
 function FiltersPopover({
+  platformOptions,
   platformFilter,
   category,
   favouritesOnly,
@@ -1059,6 +1077,7 @@ function FiltersPopover({
   onPriorityGroup,
   onClear
 }: {
+  platformOptions: { key: PlatformFilter; label: string }[];
   platformFilter: PlatformFilter;
   category: CategoryFilter;
   favouritesOnly: boolean;
@@ -1096,7 +1115,7 @@ function FiltersPopover({
       {open ? (
         <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-[248px] rounded-[12px] border border-hairline bg-paper p-4 shadow-pop">
           <PopSection label="Platform">
-            {PLATFORM_FILTERS.map((o) => (
+            {platformOptions.map((o) => (
               <PopOpt key={o.key} selected={platformFilter === o.key} onClick={() => onPlatform(o.key)}>
                 {o.label}
               </PopOpt>

@@ -17,6 +17,7 @@
 // the Reconnect page should respect that.
 
 import { isWithinHorizon } from "./horizon";
+import type { PlatformName } from "./types";
 
 /**
  * The minimum shape of an inbox row needed to decide whether it belongs
@@ -24,7 +25,10 @@ import { isWithinHorizon } from "./horizon";
  * the helper only reads these few fields, which keeps it easy to test.
  */
 export interface ReconnectCandidate {
-  platform: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE";
+  // WhatsApp threads are friends/family like iMessage — isReconnectCandidate
+  // excludes every non-LinkedIn platform, so widening the type here is purely
+  // to accept the shared PlatformName union; the behaviour is unchanged.
+  platform: PlatformName;
   lastMessageAt: string | null;
   archivedAt?: string | null;
   /** "outreach" | "genuine" | null - see InboxRow.category in types.ts. */

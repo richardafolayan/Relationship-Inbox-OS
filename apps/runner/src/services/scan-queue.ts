@@ -92,6 +92,16 @@ interface ScanQueueDeps {
    * Scans must not block on transcription.
    */
   onAudioMessage?: (input: { messageId: string }) => void;
+  /**
+   * Optional gate consulted by the scheduler tick and the ALL-scan platform
+   * expansion. Return false to skip a platform this pass without recording a
+   * failure. Used for WhatsApp: scanning an unlinked account would silently
+   * launch a whatsapp-web.js Puppeteer instance and park it on a QR nobody
+   * sees, so the runner only scans WHATSAPP while the connect-state machine
+   * reports "connected". Explicit single-platform scan requests bypass this
+   * (the /control/scan route already 409s an unlinked WhatsApp scan).
+   */
+  isPlatformScannable?: (platform: PlatformName) => boolean;
 }
 
 /**
@@ -204,7 +214,7 @@ interface LinkedInScanAdapter extends PlatformAdapter {
   }): Promise<ThreadStub[]>;
 }
 
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"];
+const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
 
 type EnqueueScanOptions = {
   respectCooldown?: boolean;
@@ -1169,6 +1179,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
           allPlatforms.includes(platform)
         );
         for (const platform of enabledPlatforms) {
+          if (deps.isPlatformScannable && !deps.isPlatformScannable(platform)) {
+            continue;
+          }
           if (!isPlatformDueForScheduledScan(platform, intervalMs, now)) {
             continue;
           }
@@ -1240,7 +1253,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const settings = await deps.settingsStore.getSettings();
     const scanPlatforms = job.platform
       ? [job.platform]
-      : settings.enabledPlatforms.filter((platform) => allPlatforms.includes(platform));
+      : settings.enabledPlatforms.filter(
+          (platform) =>
+            allPlatforms.includes(platform) &&
+            (!deps.isPlatformScannable || deps.isPlatformScannable(platform))
+        );
 
     let updatedThreads = 0;
     let aborted = false;

@@ -476,3 +476,51 @@ test("scanUnreadThreads throws a clear error when called before ensureConnected"
   });
   await assert.rejects(adapter.scanUnreadThreads(), /not connected/);
 });
+
+test("onIncomingMessage fires when the client emits a 'message' event", async () => {
+  const client = createFakeClient();
+  let hits = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onIncomingMessage: () => {
+      hits += 1;
+    }
+  });
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+  // wweb.js emits "message" only for inbound (non-fromMe) messages; each one
+  // nudges the runner to enqueue a debounced scan.
+  client.emit("message", {});
+  client.emit("message", {});
+  assert.equal(hits, 2);
+});
+
+test("a throwing onIncomingMessage never bubbles into the wweb.js event loop", async () => {
+  const client = createFakeClient();
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onIncomingMessage: () => {
+      throw new Error("scan enqueue blew up");
+    }
+  });
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+  // Must not throw — the adapter swallows listener errors.
+  assert.doesNotThrow(() => client.emit("message", {}));
+});
+
+test("no 'message' listener is attached when onIncomingMessage is omitted", async () => {
+  const client = createFakeClient();
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+  assert.equal(client.listenerCount("message"), 0);
+});

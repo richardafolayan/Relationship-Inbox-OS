@@ -47,6 +47,9 @@ export function createAdapters(input: {
   onWhatsAppQr?: (qr: string) => void;
   /** WhatsApp connect-state transitions, for the dashboard QR flow. */
   onWhatsAppStateChange?: (state: WhatsAppConnectState) => void;
+  /** Fired when whatsapp-web.js reports an inbound message; the runner
+   *  debounces it into a WhatsApp scan (real-time inbox flow). */
+  onWhatsAppIncomingMessage?: () => void;
 }): {
   // `Partial` because not every PlatformName has an adapter on main today.
   // IMESSAGE was added to PlatformName so prisma can read existing iMessage
@@ -140,7 +143,8 @@ export function createAdapters(input: {
             sendGuardConfig: runnerConfig.whatsapp.send,
             prisma: input.whatsappPrisma,
             onQr: input.onWhatsAppQr,
-            onStateChange: input.onWhatsAppStateChange
+            onStateChange: input.onWhatsAppStateChange,
+            onIncomingMessage: input.onWhatsAppIncomingMessage
           })
         : createNotImplementedAdapter("WHATSAPP")
   };
