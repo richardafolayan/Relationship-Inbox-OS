@@ -46,6 +46,7 @@ import { extractFailureUrl, resolveConnectFailureResponse } from "./services/fai
 import { createAdapters, type WhatsAppConnectState } from "./services/platform-factory";
 import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
 import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
+import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
@@ -2174,6 +2175,16 @@ app.get("/data/imessage-attachment/:guid", asyncRoute(async (req, res) => {
   });
 }));
 
+app.get("/data/whatsapp-attachment/:guid", asyncRoute(async (req, res) => {
+  const { guid } = z.object({ guid: z.string().min(1).max(220) }).parse(req.params);
+  const media = await findWhatsAppMediaByGuid(guid, runnerConfig.whatsapp.mediaDir);
+  if (!media) {
+    res.status(404).json({ error: "whatsapp attachment not found" });
+    return;
+  }
+  await streamWhatsAppMedia({ ...media, res });
+}));
+
 // Stream a LinkedIn voice-message audio file to the dashboard. Mirror
 // of /data/imessage-attachment but for the bytes captured by the
 // LinkedIn adapter during scan (`captureLinkedInVoiceMessage`). The
@@ -3669,6 +3680,62 @@ app.post("/control/thread/:threadId/message/:messageId/edit", asyncRoute(async (
         action: "MESSAGE_EDIT_FAIL",
         status: "FAIL",
         details: { threadId, messageId, ...summarizeError(error) }
+      });
+      throw error;
+    }
+  });
+}));
+
+app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(async (req, res) => {
+  const { threadId, messageId } = z
+    .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
+    .parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "vote on a poll", kind: "thread-mutation" })) return;
+  const payload = z.object({
+    selectedOptions: z.array(z.string().trim().min(1).max(280)).min(1).max(12)
+  }).parse(req.body ?? {});
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.threadId !== threadId) {
+    res.status(404).json({ error: "message not found in thread" });
+    return;
+  }
+  if (!message.platformMessageKey) {
+    res.status(400).json({ error: "message has no platform key" });
+    return;
+  }
+
+  const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
+  if (!adapter.voteOnPoll) {
+    res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
+    return;
+  }
+  const threadStub: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+
+  await withPlatformControlLock(target.platform, async () => {
+    try {
+      await adapter.voteOnPoll!(threadStub, message.platformMessageKey!, payload.selectedOptions);
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "POLL_VOTE",
+        status: "OK",
+        details: { threadId, messageId, optionCount: payload.selectedOptions.length }
+      });
+      res.json({ status: "ok", selectedOptions: payload.selectedOptions });
+    } catch (error) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "POLL_VOTE_FAIL",
+        status: "FAIL",
+        details: { threadId, messageId, optionCount: payload.selectedOptions.length, ...summarizeError(error) }
       });
       throw error;
     }
