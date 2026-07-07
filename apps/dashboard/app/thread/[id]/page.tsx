@@ -9,11 +9,17 @@ import { v4 as uuid } from "uuid";
 import {
   Archive,
   ArchiveRestore,
+  BarChart3,
+  Bold,
   Check,
   ChevronDown,
   ChevronLeft,
   Clock,
+  Code2,
+  Italic,
   Loader2,
+  List,
+  ListOrdered,
   Mic,
   Moon,
   MoreHorizontal,
@@ -21,10 +27,12 @@ import {
   PanelLeftOpen,
   Paperclip,
   Pencil,
+  Quote,
   Save,
   Send,
   Sparkles,
   Star,
+  Strikethrough,
   Sun,
   Trash2,
   X
@@ -535,6 +543,13 @@ export default function ThreadPage() {
     setFocusTrigger((n) => n + 1);
   }, []);
   const [composer, setComposer] = useState("");
+  const composerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const [whatsAppPollOpen, setWhatsAppPollOpen] = useState(false);
+  const [whatsAppPollQuestion, setWhatsAppPollQuestion] = useState("");
+  const [whatsAppPollOptions, setWhatsAppPollOptions] = useState(["", ""]);
+  const [whatsAppPollAllowMultiple, setWhatsAppPollAllowMultiple] = useState(true);
+  const [whatsAppPollSending, setWhatsAppPollSending] = useState(false);
+  const [whatsAppPollSent, setWhatsAppPollSent] = useState(false);
   // False from the start when the cache seeded `thread` above - the
   // conversation is already on screen, the mount fetch is a revalidation.
   const [loading, setLoading] = useState(
@@ -634,7 +649,7 @@ export default function ThreadPage() {
     id: string;
     file: File;
     previewUrl: string;
-    kind: "photo" | "voice_note" | "video" | "audio" | "pdf" | "unknown";
+    kind: "photo" | "voice_note" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown";
   }>>([]);
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -1116,6 +1131,12 @@ export default function ThreadPage() {
     // spinner is replaced by static fallback chips.
     setSuggestionsTimedOut(false);
     setPendingSends([]);
+    setWhatsAppPollOpen(false);
+    setWhatsAppPollQuestion("");
+    setWhatsAppPollOptions(["", ""]);
+    setWhatsAppPollAllowMultiple(true);
+    setWhatsAppPollSending(false);
+    setWhatsAppPollSent(false);
     setComposerAttachments((prev) => {
       for (const a of prev) {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
@@ -1277,9 +1298,11 @@ export default function ThreadPage() {
     return () => clearTimeout(timer);
   }, [generatingActive]);
 
-  const kindFromMime = (mime: string | undefined, filename: string | undefined): string => {
+  const kindFromMime = (mime: string | undefined, filename: string | undefined): "photo" | "voice_note" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" => {
     const m = (mime ?? "").toLowerCase();
     const n = (filename ?? "").toLowerCase();
+    if (m === "image/gif" || n.endsWith(".gif")) return "gif";
+    if (m === "image/webp" && /sticker/i.test(n)) return "sticker";
     if (m.startsWith("image/")) return "photo";
     if (m.startsWith("video/")) return "video";
     if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
@@ -1368,7 +1391,7 @@ export default function ThreadPage() {
         id: uuid(),
         file,
         previewUrl: file.type.startsWith("image/") ? URL.createObjectURL(file) : "",
-        kind: kindFromMime(file.type, file.name) as "photo" | "voice_note" | "video" | "audio" | "pdf" | "unknown"
+        kind: kindFromMime(file.type, file.name)
       }))
     ]);
   }, []);
@@ -1381,6 +1404,94 @@ export default function ThreadPage() {
       return next;
     });
   }, []);
+
+  const replaceComposerRange = useCallback(
+    (build: (selected: string) => { text: string; selectStart: number; selectEnd: number }) => {
+      const input = composerInputRef.current;
+      const start = input?.selectionStart ?? composer.length;
+      const end = input?.selectionEnd ?? composer.length;
+      const selected = composer.slice(start, end);
+      const replacement = build(selected);
+      const next = composer.slice(0, start) + replacement.text + composer.slice(end);
+      setComposer(next);
+      if (composerSource === "predraft" || composerSource === "empty") {
+        setComposerSource("user");
+      }
+      requestAnimationFrame(() => {
+        const liveInput = composerInputRef.current;
+        if (!liveInput) return;
+        liveInput.focus();
+        const nextStart = start + replacement.selectStart;
+        const nextEnd = start + replacement.selectEnd;
+        liveInput.setSelectionRange(nextStart, nextEnd);
+      });
+    },
+    [composer, composerSource]
+  );
+
+  const wrapComposerSelection = useCallback(
+    (before: string, after = before, placeholder = "text") => {
+      replaceComposerRange((selected) => {
+        const body = selected || placeholder;
+        return {
+          text: `${before}${body}${after}`,
+          selectStart: before.length,
+          selectEnd: before.length + body.length
+        };
+      });
+    },
+    [replaceComposerRange]
+  );
+
+  const prefixComposerLines = useCallback(
+    (prefixForLine: (index: number) => string) => {
+      replaceComposerRange((selected) => {
+        const body = selected || "text";
+        const lines = body.split("\n");
+        const text = lines.map((line, index) => `${prefixForLine(index)}${line}`).join("\n");
+        return { text, selectStart: 0, selectEnd: text.length };
+      });
+    },
+    [replaceComposerRange]
+  );
+
+  const sendWhatsAppPoll = useCallback(async () => {
+    if (!thread || whatsAppPollSending) return;
+    const question = whatsAppPollQuestion.trim();
+    const options = whatsAppPollOptions.map((option) => option.trim()).filter(Boolean);
+    if (!question) {
+      setError("Add a poll question.");
+      return;
+    }
+    if (options.length < 2) {
+      setError("Add at least two poll options.");
+      return;
+    }
+
+    setWhatsAppPollSending(true);
+    setWhatsAppPollSent(false);
+    setError(null);
+    try {
+      await apiPost(`/runner/control/thread/${thread.id}/send-poll`, {
+        question,
+        options,
+        allowMultipleAnswers: whatsAppPollAllowMultiple,
+        clientSendId: uuid()
+      });
+      setWhatsAppPollQuestion("");
+      setWhatsAppPollOptions(["", ""]);
+      setWhatsAppPollAllowMultiple(true);
+      setWhatsAppPollOpen(false);
+      setWhatsAppPollSent(true);
+      stickToBottomRef.current = true;
+      await refresh();
+      window.setTimeout(() => setWhatsAppPollSent(false), 1800);
+    } catch (pollError) {
+      setError(pollError instanceof Error ? pollError.message : "Failed to send poll");
+    } finally {
+      setWhatsAppPollSending(false);
+    }
+  }, [refresh, thread, whatsAppPollAllowMultiple, whatsAppPollOptions, whatsAppPollQuestion, whatsAppPollSending]);
 
   // Revoke any outstanding image preview object URLs when the thread view
   // unmounts (e.g. navigating away mid-compose) so they don't leak.
@@ -4315,6 +4426,184 @@ export default function ThreadPage() {
                   </button>
                 </div>
               ) : null}
+              {thread.platform === "WHATSAPP" ? (
+                <div className="mb-2 flex flex-wrap items-center gap-1.5">
+                  <span className="mr-1 font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                    WhatsApp
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => wrapComposerSelection("*")}
+                    title="Bold"
+                    aria-label="Bold"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Bold className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => wrapComposerSelection("_")}
+                    title="Italic"
+                    aria-label="Italic"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Italic className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => wrapComposerSelection("~")}
+                    title="Strikethrough"
+                    aria-label="Strikethrough"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Strikethrough className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => wrapComposerSelection("```", "```", "code")}
+                    title="Monospace"
+                    aria-label="Monospace"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Code2 className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => prefixComposerLines(() => "- ")}
+                    title="Bullet list"
+                    aria-label="Bullet list"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <List className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => prefixComposerLines((index) => `${index + 1}. `)}
+                    title="Numbered list"
+                    aria-label="Numbered list"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <ListOrdered className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => prefixComposerLines(() => "> ")}
+                    title="Quote"
+                    aria-label="Quote"
+                    className="grid h-[28px] w-[28px] place-items-center rounded-full border border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                  >
+                    <Quote className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setWhatsAppPollOpen((prev) => !prev);
+                      setWhatsAppPollSent(false);
+                    }}
+                    title="Create poll"
+                    aria-label="Create poll"
+                    className={`inline-flex h-[28px] items-center gap-1.5 rounded-full border px-2.5 text-[11px] transition-colors duration-calm ${
+                      whatsAppPollOpen
+                        ? "border-hairline-strong bg-paper-2 text-ink"
+                        : "border-hairline text-ink-2 hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
+                    }`}
+                  >
+                    <BarChart3 className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    Poll
+                  </button>
+                  {whatsAppPollSent ? (
+                    <span className="ml-1 font-mono text-[10px] uppercase tracking-[0.06em] text-accent-ink">
+                      Poll sent
+                    </span>
+                  ) : null}
+                </div>
+              ) : null}
+              {thread.platform === "WHATSAPP" && whatsAppPollOpen ? (
+                <div className="mb-2 rounded-row border border-hairline bg-paper-2 p-3">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3">
+                      Create poll
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => setWhatsAppPollOpen(false)}
+                      className="text-ink-3 hover:text-ink"
+                      aria-label="Close poll"
+                    >
+                      <X className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                    </button>
+                  </div>
+                  <input
+                    value={whatsAppPollQuestion}
+                    onChange={(event) => setWhatsAppPollQuestion(event.target.value)}
+                    placeholder="Question"
+                    className="mb-2 w-full rounded-row border border-hairline bg-paper px-3 py-2 text-[13px] text-ink outline-none focus:border-hairline-strong"
+                  />
+                  <div className="space-y-1.5">
+                    {whatsAppPollOptions.map((option, index) => (
+                      <div key={index} className="flex items-center gap-2">
+                        <input
+                          value={option}
+                          onChange={(event) =>
+                            setWhatsAppPollOptions((prev) =>
+                              prev.map((value, optionIndex) =>
+                                optionIndex === index ? event.target.value : value
+                              )
+                            )
+                          }
+                          placeholder={`Option ${index + 1}`}
+                          className="min-w-0 flex-1 rounded-row border border-hairline bg-paper px-3 py-2 text-[13px] text-ink outline-none focus:border-hairline-strong"
+                        />
+                        {whatsAppPollOptions.length > 2 ? (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setWhatsAppPollOptions((prev) =>
+                                prev.filter((_, optionIndex) => optionIndex !== index)
+                              )
+                            }
+                            className="grid h-[30px] w-[30px] place-items-center rounded-full text-ink-3 hover:bg-paper hover:text-risk-overdue"
+                            aria-label={`Remove option ${index + 1}`}
+                          >
+                            <X className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                          </button>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center justify-between gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setWhatsAppPollOptions((prev) => [...prev, ""])}
+                      disabled={whatsAppPollOptions.length >= 12}
+                      className="rounded-pill border border-hairline px-2.5 py-1 text-[11px] text-ink-2 hover:border-hairline-strong hover:bg-paper disabled:opacity-40"
+                    >
+                      Add option
+                    </button>
+                    <label className="inline-flex items-center gap-2 text-[12px] text-ink-2">
+                      <input
+                        type="checkbox"
+                        checked={whatsAppPollAllowMultiple}
+                        onChange={(event) => setWhatsAppPollAllowMultiple(event.target.checked)}
+                      />
+                      Allow multiple answers
+                    </label>
+                    <Button
+                      variant="primary"
+                      onClick={() => void sendWhatsAppPoll()}
+                      disabled={whatsAppPollSending}
+                      className="px-3 py-1.5 text-[12px]"
+                    >
+                      {whatsAppPollSending ? (
+                        <Loader2 className="h-[13px] w-[13px] animate-spin" />
+                      ) : (
+                        <BarChart3 className="h-[13px] w-[13px]" strokeWidth={1.8} />
+                      )}
+                      {whatsAppPollSending ? "Sending poll..." : "Send poll"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
               <textarea
                 placeholder={`Reply to ${firstName}…`}
                 value={composer}
@@ -4376,6 +4665,7 @@ export default function ThreadPage() {
                 }}
                 rows={2}
                 ref={(el) => {
+                  composerInputRef.current = el;
                   if (!el) return;
                   // Autosize: grow with content from 2 rows up to ~7 rows
                   // before capping so the composer doesn't eat the chat
@@ -4637,12 +4927,12 @@ export default function ThreadPage() {
                       </div>
                     ) : null}
                   </div>
-                  {thread.platform === "IMESSAGE" ? (
+                  {thread.platform === "IMESSAGE" || thread.platform === "WHATSAPP" ? (
                     <>
                       <input
                         type="file"
                         multiple
-                        accept="image/*,video/*,audio/*,application/pdf"
+                        accept={thread.platform === "WHATSAPP" ? "image/*,video/*,audio/*,application/pdf,.gif" : "image/*,video/*,audio/*,application/pdf"}
                         className="hidden"
                         id="composer-file-input"
                         onChange={(e) => {
@@ -4654,7 +4944,7 @@ export default function ThreadPage() {
                         type="button"
                         onClick={() => document.getElementById("composer-file-input")?.click()}
                         className="grid h-[30px] w-[30px] place-items-center rounded-full border border-hairline bg-paper text-ink-2 hover:text-ink"
-                        title="Attach photos / files"
+                        title={thread.platform === "WHATSAPP" ? "Attach photos, GIFs, videos or files" : "Attach photos / files"}
                         aria-label="Attach files"
                       >
                         <Paperclip className="h-[13px] w-[13px]" strokeWidth={1.8} />
@@ -4715,7 +5005,7 @@ export default function ThreadPage() {
                         <img src={a.previewUrl} alt="" className="h-6 w-6 rounded object-cover" />
                       ) : (
                         <span className="text-ink-3">
-                          {a.kind === "voice_note" ? "🎤" : a.kind === "video" ? "🎥" : a.kind === "pdf" ? "📄" : "📎"}
+                          {a.kind === "voice_note" ? "🎤" : a.kind === "video" ? "🎥" : a.kind === "gif" ? "GIF" : a.kind === "sticker" ? "Sticker" : a.kind === "pdf" ? "📄" : "📎"}
                         </span>
                       )}
                       <span className="max-w-[140px] truncate text-ink">{a.file.name}</span>

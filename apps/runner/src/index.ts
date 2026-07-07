@@ -226,14 +226,23 @@ const uploadDictation = multer({
   limits: { fileSize: 25 * 1024 * 1024 } // ~ several minutes of speech
 }).single("audio");
 
-function kindFromMime(mime: string | undefined, filename: string | undefined): "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" {
+function kindFromMime(mime: string | undefined, filename: string | undefined): "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" {
   const m = (mime ?? "").toLowerCase();
   const n = (filename ?? "").toLowerCase();
+  if (m === "image/gif" || n.endsWith(".gif")) return "gif";
+  if (m === "image/webp" && /sticker/i.test(n)) return "sticker";
   if (m.startsWith("image/")) return "photo";
   if (m.startsWith("video/")) return "video";
   if (m === "application/pdf" || n.endsWith(".pdf")) return "pdf";
   if (m.startsWith("audio/")) return /webm|opus|m4a|aac|caf/.test(m) || /audio.message/.test(n) ? "voice_note" : "audio";
   return "unknown";
+}
+
+function renderWhatsAppPollText(input: { question: string; options: string[]; allowMultipleAnswers?: boolean }): string {
+  const header = input.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
+  const body = input.question.trim() ? `${header}: ${input.question.trim()}` : header;
+  const options = input.options.map((option) => `• ${option.trim()}`).join("\n");
+  return options ? `${body}\n${options}` : body;
 }
 
 const settingsStore = createSettingsStore();
@@ -3342,6 +3351,156 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     });
     throw error;
   }
+}));
+
+app.post("/control/thread/:threadId/send-poll", asyncRoute(async (req, res) => {
+  const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
+  if (await checkPresenterGuard(res, settingsStore, { threadId, action: "send a poll", kind: "thread-mutation" })) return;
+  const payload = z
+    .object({
+      question: z.string().trim().min(1).max(280),
+      options: z
+        .array(z.string().trim().min(1).max(280))
+        .min(2)
+        .max(12)
+        .transform((options) => Array.from(new Set(options))),
+      allowMultipleAnswers: z.boolean().optional().default(false),
+      clientSendId: z.string().uuid().optional()
+    })
+    .parse(req.body ?? {});
+  if (payload.options.length < 2) {
+    res.status(400).json({ error: "poll must have at least two different options" });
+    return;
+  }
+
+  const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
+  if (!adapter.sendPoll) {
+    res.status(400).json({ error: `${target.platform} adapter does not support sending polls` });
+    return;
+  }
+  const threadRow = await prisma.thread.findUnique({
+    where: { id: threadId },
+    include: { person: true }
+  });
+  if (!threadRow) {
+    res.status(404).json({ error: "thread not found" });
+    return;
+  }
+
+  const threadStub: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+  const clientSendId = payload.clientSendId ?? uuid();
+  const text = renderWhatsAppPollText(payload);
+
+  await withPlatformControlLock(target.platform, async () => {
+    try {
+      const receipt = await adapter.sendPoll!(threadStub, {
+        question: payload.question,
+        options: payload.options,
+        allowMultipleAnswers: payload.allowMultipleAnswers
+      });
+      const sentAt = new Date(receipt.sentAt);
+      const settings = await settingsStore.getSettings();
+      const platformMessageKey =
+        receipt.platformMessageKey ??
+        stableHash(`${threadId}|${receipt.sentAt}|OUT|${text}|poll`);
+      const attachmentsJson =
+        receipt.attachments && receipt.attachments.length > 0
+          ? JSON.stringify(receipt.attachments)
+          : null;
+      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
+
+      const message = await prisma.message.upsert({
+        where: {
+          threadId_platformMessageKey: {
+            threadId,
+            platformMessageKey
+          }
+        },
+        update: {
+          text,
+          direction: "OUT",
+          timestamp: sentAt,
+          sentVia: "automation",
+          attachmentsJson,
+          rawJson
+        },
+        create: {
+          threadId,
+          platformMessageKey,
+          direction: "OUT",
+          timestamp: sentAt,
+          text,
+          sentVia: "automation",
+          attachmentsJson,
+          rawJson
+        }
+      });
+
+      const risk = calculateRisk({
+        lastInboundAt: threadRow.lastInboundAt,
+        lastOutboundAt: sentAt,
+        amberHours: settings.amberHours,
+        redHours: settings.redHours
+      });
+      await prisma.thread.update({
+        where: { id: threadId },
+        data: {
+          needsReply: risk.needsReply,
+          riskLevel: risk.level,
+          riskReason: risk.riskReason,
+          slaDueAt: risk.slaDueAt,
+          snoozedUntil: null,
+          lastOutboundAt: sentAt,
+          lastMessageAt: sentAt,
+          unreadCount: 0,
+          lastMessageDirection: "OUT",
+          lastMessageText: text
+        }
+      });
+
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "POLL_SEND",
+        status: "OK",
+        details: {
+          threadId,
+          clientSendId,
+          optionCount: payload.options.length,
+          allowMultipleAnswers: payload.allowMultipleAnswers
+        }
+      });
+      eventBus.emit({
+        type: "MESSAGE_SENT",
+        jobId: "poll-send",
+        threadId,
+        platform: target.platform,
+        clientSendId
+      });
+      res.json({
+        status: "ok",
+        clientSendId,
+        messageId: message.id,
+        platformMessageKey,
+        sentAt: sentAt.toISOString()
+      });
+    } catch (error) {
+      await auditService.log({
+        platform: target.platform,
+        stage: "Send",
+        action: "POLL_SEND_FAIL",
+        status: "FAIL",
+        details: { threadId, clientSendId, ...summarizeError(error) }
+      });
+      throw error;
+    }
+  });
 }));
 
 app.post("/control/thread/:threadId/update-send", asyncRoute(async (req, res) => {

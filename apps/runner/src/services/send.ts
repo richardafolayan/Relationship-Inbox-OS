@@ -349,7 +349,7 @@ export function createSendService(deps: SendServiceDeps) {
               absolutePath: a.absolutePath,
               displayName: a.displayName,
               mimeType: a.mimeType,
-              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown" | undefined) ?? undefined
+              kind: (a.kind as "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown" | undefined) ?? undefined
             }))
           )
         );
@@ -364,6 +364,7 @@ export function createSendService(deps: SendServiceDeps) {
         receipt.attachments && receipt.attachments.length > 0
           ? JSON.stringify(receipt.attachments)
           : null;
+      const rawJson = receipt.raw ? JSON.stringify(receipt.raw) : null;
       // App-level threading: when the operator hit "Reply" in the
       // focused-thread view, the SendRequest row carries the parent
       // Message.id. Copy it onto the resulting outbound row so the
@@ -394,6 +395,7 @@ export function createSendService(deps: SendServiceDeps) {
           timestamp: new Date(receipt.sentAt),
           sentVia: "automation",
           attachmentsJson,
+          rawJson,
           replyToMessageId
         },
         create: {
@@ -404,6 +406,7 @@ export function createSendService(deps: SendServiceDeps) {
           text: input.text,
           sentVia: "automation",
           attachmentsJson,
+          rawJson,
           replyToMessageId
         }
       });

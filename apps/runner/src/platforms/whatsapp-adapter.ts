@@ -20,6 +20,7 @@ import type {
   AttachmentPlaceholder,
   NormalizedMessage,
   OutboundAttachment,
+  OutboundPoll,
   PlatformAdapter,
   PlatformName,
   SendReceipt,
@@ -208,11 +209,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
         // MessageMedia.fromFilePath is a static factory on the wweb.js
         // export. The dynamic require here avoids importing fs at the
         // top of the file (the helper itself does fs.readFileSync).
-        const { MessageMedia: MM } = (await import("whatsapp-web.js")) as unknown as {
-          MessageMedia: {
-            fromFilePath: (path: string) => unknown;
-          };
+        const wa = (await import("whatsapp-web.js")) as unknown as {
+          MessageMedia?: { fromFilePath: (path: string) => unknown };
+          default?: { MessageMedia?: { fromFilePath: (path: string) => unknown } };
         };
+        const MM = wa.MessageMedia ?? wa.default?.MessageMedia;
+        if (!MM) throw new Error("MessageMedia export unavailable");
         payload = MM.fromFilePath(a.absolutePath);
       } catch (err) {
         throw new Error(
@@ -225,6 +227,8 @@ export class WhatsAppAdapter implements PlatformAdapter {
       const opts: Record<string, unknown> = {};
       if (i === 0 && text && text.length > 0) opts.caption = text;
       if (a.kind === "voice_note") opts.sendAudioAsVoice = true;
+      if (a.kind === "gif") opts.sendVideoAsGif = true;
+      if (a.kind === "sticker") opts.sendMediaAsSticker = true;
       const sent = await (client as unknown as {
         sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<{ timestamp: number; id: { _serialized: string } }>;
       }).sendMessage(thread.platformThreadId, payload, opts);
@@ -271,6 +275,69 @@ export class WhatsAppAdapter implements PlatformAdapter {
         new Date().toISOString(),
       verifiedBy: "best_effort",
       attachments: sentAttachments
+    };
+  }
+
+  async sendPoll(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt> {
+    const client = this.requireClient();
+    const guard = await checkSendGuard(
+      {
+        client,
+        prisma: this.deps.prisma,
+        config: this.deps.sendGuardConfig
+      },
+      thread.platformThreadId
+    );
+    if (!guard.allowed) {
+      throw new Error(`WhatsApp send blocked: ${guard.reason}`);
+    }
+
+    const question = poll.question.trim();
+    const options = poll.options.map((option) => option.trim()).filter(Boolean);
+    if (!question || options.length < 2) {
+      throw new Error("WhatsApp poll needs a question and at least two options");
+    }
+
+    const wa = (await import("whatsapp-web.js")) as unknown as {
+      Poll?: new (
+        pollName: string,
+        pollOptions: string[],
+        options?: { allowMultipleAnswers?: boolean }
+      ) => unknown;
+      default?: {
+        Poll?: new (
+          pollName: string,
+          pollOptions: string[],
+          options?: { allowMultipleAnswers?: boolean }
+        ) => unknown;
+      };
+    };
+    const Poll = wa.Poll ?? wa.default?.Poll;
+    if (!Poll) throw new Error("Poll export unavailable");
+    const payload = new Poll(question, options, {
+      allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
+    });
+    const sent = await (client as unknown as {
+      sendMessage: (jid: string, content: unknown) => Promise<{ timestamp: number; id?: { _serialized?: string } }>;
+    }).sendMessage(thread.platformThreadId, payload);
+    const structuredPoll: WhatsAppPollPayload = {
+      question,
+      options: options.map((name) => ({ name })),
+      allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
+    };
+    return {
+      sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
+      platformMessageKey: sent.id?._serialized,
+      verifiedBy: "best_effort",
+      attachments: [
+        {
+          type: "poll",
+          manualReview: false,
+          rawLabel: question,
+          kind: "poll"
+        }
+      ],
+      raw: { whatsapp: { poll: structuredPoll } }
     };
   }
 
@@ -464,15 +531,19 @@ export function extractPollPayload(msg: WaTextMessageLike): WhatsAppPollPayload 
 export function renderMessageText(msg: WaTextMessageLike): string {
   const poll = extractPollPayload(msg);
   if (poll) {
-    const options = poll.options
-      .map((o) => o.name)
-      .map((name) => `• ${name}`)
-      .join("\n");
-    const header = poll.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
-    const body = poll.question.length > 0 ? `${header}: ${poll.question}` : header;
-    return options.length > 0 ? `${body}\n${options}` : body;
+    return renderPollText(poll);
   }
   if (msg.body && msg.body.length > 0) return msg.body;
   if (msg.hasMedia) return "[media]";
   return "";
+}
+
+export function renderPollText(poll: WhatsAppPollPayload): string {
+  const options = poll.options
+    .map((o) => o.name)
+    .map((name) => `• ${name}`)
+    .join("\n");
+  const header = poll.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
+  const body = poll.question.length > 0 ? `${header}: ${poll.question}` : header;
+  return options.length > 0 ? `${body}\n${options}` : body;
 }

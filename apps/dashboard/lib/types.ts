@@ -427,7 +427,7 @@ export interface ThreadMessage {
     /** Stable platform-side id used to fetch the binary (iMessage). */
     guid?: string;
     /** Coarse media kind so the dashboard knows which element to render. */
-    kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "poll" | "unknown";
+    kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "poll" | "unknown";
     byteSize?: number;
   }>;
   /**

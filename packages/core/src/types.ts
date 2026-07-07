@@ -56,7 +56,7 @@ export interface AttachmentPlaceholder {
    */
   guid?: string;
   /** Coarse media kind, when known. iMessage adapter populates this. */
-  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "poll" | "unknown";
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "poll" | "unknown";
   /** byte size, when known. Used by the dashboard to skip huge files. */
   byteSize?: number;
 }
@@ -87,7 +87,13 @@ export interface OutboundAttachment {
   absolutePath: string;
   displayName: string;
   mimeType?: string;
-  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "unknown";
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown";
+}
+
+export interface OutboundPoll {
+  question: string;
+  options: string[];
+  allowMultipleAnswers?: boolean;
 }
 
 export interface SendReceipt {
@@ -115,6 +121,7 @@ export interface SendReceipt {
    * platforms (LinkedIn) leave this unset.
    */
   attachments?: AttachmentPlaceholder[];
+  raw?: Record<string, unknown>;
 }
 
 export interface SelectorRegistry {

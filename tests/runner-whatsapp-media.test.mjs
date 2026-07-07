@@ -26,7 +26,7 @@ test("mapWhatsAppKind maps wweb.js message types", () => {
   assert.equal(mapWhatsAppKind("image"), "photo");
   assert.equal(mapWhatsAppKind("sticker"), "sticker");
   assert.equal(mapWhatsAppKind("video"), "video");
-  assert.equal(mapWhatsAppKind("video", { isGif: true }), "video");
+  assert.equal(mapWhatsAppKind("video", { isGif: true }), "gif");
   assert.equal(mapWhatsAppKind("ptt"), "voice_note");
   assert.equal(mapWhatsAppKind("audio"), "audio");
   assert.equal(mapWhatsAppKind("document"), "pdf");

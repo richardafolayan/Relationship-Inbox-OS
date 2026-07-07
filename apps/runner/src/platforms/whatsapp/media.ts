@@ -42,11 +42,8 @@ export function mapWhatsAppKind(
       return "sticker";
     case "video":
       // wweb.js represents GIFs as videos with isGif=true. We mark them
-      // as "video" still — the renderer keys off the mime extension to
-      // play them inline, just like a regular MP4. (We could add a
-      // dedicated "gif" kind but every browser plays an MP4 GIF the same
-      // way, so the extra type only adds churn.)
-      return flags.isGif ? "video" : "video";
+      // explicitly now that the dashboard has a GIF renderer path.
+      return flags.isGif ? "gif" : "video";
     case "ptt":
       return "voice_note";
     case "audio":
