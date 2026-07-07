@@ -2,8 +2,8 @@
 // automated bulk sending harshly — accounts can be banned for patterns
 // that look like spam. Three layered checks before any sendMessage call:
 //
-//   1. Recipient must be a saved contact on the operator's phone (rules
-//      out cold outreach, accidental fuzz tests, and most spam patterns).
+//   1. Direct-chat recipients must be saved contacts on the operator's phone
+//      (rules out cold outreach, accidental fuzz tests, and most spam patterns).
 //   2. Per-recipient minimum interval (default 15s, WHATSAPP_MIN_INTERVAL_MS) — derived from the
 //      most recent outbound Message stored on the thread, so the limit
 //      survives process restarts.
@@ -13,6 +13,8 @@
 // All three are queries / lookups, not background timers, so the guard is
 // stateless from the caller's perspective and trivial to unit-test by
 // stubbing the two narrow dependency interfaces below.
+
+import { isGroupJid } from "./whatsappIdentity";
 
 /** Narrow slice of the whatsapp-web.js Client surface we actually need. */
 export interface WhatsAppContactLookup {
@@ -66,13 +68,17 @@ export async function checkSendGuard(
 ): Promise<SendGuardResult> {
   const now = deps.now ?? Date.now;
 
-  // 1. Saved-contact check.
-  const contact = await deps.client.getContactById(recipientJid);
-  if (!contact.isMyContact) {
-    return {
-      allowed: false,
-      reason: "Recipient is not in your WhatsApp saved contacts"
-    };
+  // 1. Saved-contact check for direct chats. WhatsApp groups are not phone
+  // contacts, so getContactById(...).isMyContact can be false for groups the
+  // operator is already allowed to message.
+  if (!isGroupJid(recipientJid)) {
+    const contact = await deps.client.getContactById(recipientJid);
+    if (!contact.isMyContact) {
+      return {
+        allowed: false,
+        reason: "Recipient is not in your WhatsApp saved contacts"
+      };
+    }
   }
 
   // 2. Per-recipient interval. We look at the most recent OUT Message on

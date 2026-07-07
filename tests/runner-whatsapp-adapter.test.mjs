@@ -182,6 +182,42 @@ test("sendMessage refuses to send when the guard blocks (non-saved contact)", as
   );
 });
 
+test("sendMessage allows WhatsApp group sends even when the group is not a saved contact", async () => {
+  let sentJid = null;
+  let contactLookups = 0;
+  const client = createFakeClient({
+    getContactById: async () => {
+      contactLookups += 1;
+      return { isMyContact: false };
+    },
+    sendMessage: async (jid) => {
+      sentJid = jid;
+      return { timestamp: 1700000100, id: { _serialized: "group-msg-1" } };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendMessage(
+    {
+      platformThreadId: "120363123456789@g.us",
+      displayName: "Family group",
+      lastMessagePreview: "",
+      isGroup: true
+    },
+    "hello everyone"
+  );
+
+  assert.equal(sentJid, "120363123456789@g.us");
+  assert.equal(contactLookups, 0);
+  assert.equal(receipt.verifiedBy, "best_effort");
+});
+
 test("sendMessage delegates to client.sendMessage when the guard allows", async () => {
   let sentText = null;
   const client = createFakeClient({

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { checkSendGuard } from "../apps/runner/dist/platforms/whatsapp/sendGuard.js";
 
 const RECIPIENT = "447111222333@c.us";
+const GROUP_RECIPIENT = "120363123456789@g.us";
 const NOW = 1_700_000_000_000; // fixed clock for deterministic interval / cap maths
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -12,12 +13,13 @@ function buildDeps(overrides = {}) {
     recentOutbound = null, // pass a Date to simulate a prior recent send to this recipient
     dailyOutboundCount = 0,
     minIntervalMs = 30_000,
-    dailyCap = 30
+    dailyCap = 30,
+    expectedRecipient = RECIPIENT
   } = overrides;
   return {
     client: {
       async getContactById(jid) {
-        assert.equal(jid, RECIPIENT);
+        assert.equal(jid, expectedRecipient);
         return { isMyContact };
       }
     },
@@ -26,7 +28,7 @@ function buildDeps(overrides = {}) {
         async findFirst(args) {
           assert.equal(args.where.thread.platform, "WHATSAPP");
           assert.equal(args.where.direction, "OUT");
-          assert.equal(args.where.thread.platformThreadId, RECIPIENT);
+          assert.equal(args.where.thread.platformThreadId, expectedRecipient);
           if (recentOutbound) {
             return { timestamp: recentOutbound };
           }
@@ -56,6 +58,20 @@ test("checkSendGuard rejects when the recipient is not a saved contact", async (
   const result = await checkSendGuard(buildDeps({ isMyContact: false }), RECIPIENT);
   assert.equal(result.allowed, false);
   assert.match(result.reason, /not in your WhatsApp saved contacts/);
+});
+
+test("checkSendGuard allows WhatsApp groups without requiring saved-contact status", async () => {
+  let contactLookups = 0;
+  const deps = buildDeps({ isMyContact: false, expectedRecipient: GROUP_RECIPIENT });
+  deps.client.getContactById = async () => {
+    contactLookups += 1;
+    return { isMyContact: false };
+  };
+
+  const result = await checkSendGuard(deps, GROUP_RECIPIENT);
+
+  assert.deepEqual(result, { allowed: true });
+  assert.equal(contactLookups, 0);
 });
 
 test("checkSendGuard rejects when a send to the same recipient is within the interval window", async () => {
