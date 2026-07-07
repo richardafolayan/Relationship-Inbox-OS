@@ -13,8 +13,8 @@
 //   library's "ready" event; first connection requires the operator to
 //   scan a QR. Phase C wires the QR data through SSE so the dashboard
 //   can render it.
-// - Sends are gated by checkSendGuard — saved-contact only, per-recipient
-//   rate limit, rolling 24h cap.
+// - Sends are gated by checkSendGuard — saved-contact direct chats,
+//   per-recipient rate limit, rolling 24h cap.
 
 import type {
   AttachmentPlaceholder,
