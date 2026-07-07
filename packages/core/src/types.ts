@@ -56,7 +56,7 @@ export interface AttachmentPlaceholder {
    */
   guid?: string;
   /** Coarse media kind, when known. iMessage adapter populates this. */
-  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "unknown";
+  kind?: "voice_note" | "photo" | "video" | "audio" | "pdf" | "sticker" | "poll" | "unknown";
   /** byte size, when known. Used by the dashboard to skip huge files. */
   byteSize?: number;
 }

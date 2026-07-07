@@ -283,6 +283,21 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return;
   }
 
+  async voteOnPoll(
+    _thread: ThreadStub,
+    platformMessageKey: string,
+    selectedOptions: string[]
+  ): Promise<void> {
+    const client = this.requireClient();
+    const message = await (client as unknown as {
+      getMessageById: (messageId: string) => Promise<{ type?: string; vote?: (selectedOptions: string[]) => Promise<void> } | null>;
+    }).getMessageById(platformMessageKey);
+    if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
+      throw new Error("WhatsApp poll vote failed: poll message not found");
+    }
+    await message.vote(selectedOptions);
+  }
+
   async closeSession(_reason?: string): Promise<void> {
     // Always clear in-memory state and emit the disconnected transition,
     // even when this.client is null. The previous guard meant a "stuck"
@@ -329,6 +344,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // Cast: wweb.js's .d.ts declares pollOptions: string[] but at runtime
     // each option is { name, localId } (see Message.js:329-331 in the
     // installed library). Our renderer needs the runtime shape.
+    const poll = extractPollPayload(msg as unknown as WaTextMessageLike);
     const text = renderMessageText(msg as unknown as WaTextMessageLike);
     let senderName: string | undefined;
     if (isGroup && !msg.fromMe && msg.author && this.client) {
@@ -385,12 +401,22 @@ export class WhatsAppAdapter implements PlatformAdapter {
       }
     }
 
+    if (poll) {
+      attachments.push({
+        type: "poll",
+        manualReview: false,
+        rawLabel: poll.question || "Poll",
+        kind: "poll"
+      });
+    }
+
     return {
       platformMessageKey: msg.id?._serialized,
       direction: msg.fromMe ? "OUT" : "IN",
       timestamp: epochSecondsToIso(msg.timestamp) ?? new Date().toISOString(),
       text,
       senderName,
+      raw: poll ? { whatsapp: { poll } } : undefined,
       attachments
     };
   }
@@ -410,6 +436,24 @@ interface WaTextMessageLike {
   allowMultipleAnswers?: boolean;
 }
 
+export interface WhatsAppPollPayload {
+  question: string;
+  options: Array<{ name: string }>;
+  allowMultipleAnswers: boolean;
+}
+
+export function extractPollPayload(msg: WaTextMessageLike): WhatsAppPollPayload | null {
+  if (msg.type !== "poll_creation") return null;
+  const options = (msg.pollOptions ?? [])
+    .map((option) => ({ name: (option?.name ?? "").trim() }))
+    .filter((option) => option.name.length > 0);
+  return {
+    question: (msg.pollName ?? "").trim(),
+    options,
+    allowMultipleAnswers: Boolean(msg.allowMultipleAnswers)
+  };
+}
+
 /**
  * Flatten any wweb.js Message into the single text string we persist on
  * Message.text. Polls become a readable question + bullet list so the
@@ -418,15 +462,14 @@ interface WaTextMessageLike {
  * unchanged.
  */
 export function renderMessageText(msg: WaTextMessageLike): string {
-  if (msg.type === "poll_creation") {
-    const question = (msg.pollName ?? "").trim();
-    const options = (msg.pollOptions ?? [])
-      .map((o) => (o?.name ?? "").trim())
-      .filter((name) => name.length > 0)
+  const poll = extractPollPayload(msg);
+  if (poll) {
+    const options = poll.options
+      .map((o) => o.name)
       .map((name) => `• ${name}`)
       .join("\n");
-    const header = msg.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
-    const body = question.length > 0 ? `${header}: ${question}` : header;
+    const header = poll.allowMultipleAnswers ? "📊 Poll (multi-select)" : "📊 Poll";
+    const body = poll.question.length > 0 ? `${header}: ${poll.question}` : header;
     return options.length > 0 ? `${body}\n${options}` : body;
   }
   if (msg.body && msg.body.length > 0) return msg.body;

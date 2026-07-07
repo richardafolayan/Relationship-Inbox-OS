@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { WhatsAppAdapter, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
+import { WhatsAppAdapter, extractPollPayload, renderMessageText } from "../apps/runner/dist/platforms/whatsapp-adapter.js";
 
 /**
  * Minimal whatsapp-web.js Client stub. Wweb.js Client extends EventEmitter
@@ -17,6 +17,7 @@ function createFakeClient(overrides = {}) {
     getChatById: overrides.getChatById ?? (async () => null),
     sendMessage:
       overrides.sendMessage ?? (async () => ({ timestamp: 1700000100, id: { _serialized: "x" } })),
+    getMessageById: overrides.getMessageById ?? (async () => null),
     getContactById:
       overrides.getContactById ??
       (async () => ({ isMyContact: true, pushname: "Alice", name: "Alice" }))
@@ -338,6 +339,22 @@ test("renderMessageText flattens a poll_creation message into question + bullet 
   assert.match(text, /• Maybe/);
 });
 
+test("extractPollPayload returns structured poll metadata", () => {
+  assert.deepEqual(
+    extractPollPayload({
+      type: "poll_creation",
+      pollName: "Are you coming Friday?",
+      pollOptions: [{ name: "Yes" }, { name: "No" }, { name: "" }],
+      allowMultipleAnswers: true
+    }),
+    {
+      question: "Are you coming Friday?",
+      options: [{ name: "Yes" }, { name: "No" }],
+      allowMultipleAnswers: true
+    }
+  );
+});
+
 test("renderMessageText marks multi-select polls", () => {
   const text = renderMessageText({
     type: "poll_creation",
@@ -394,6 +411,51 @@ test("fetchThreadMessages renders a poll_creation message via renderMessageText"
   assert.match(msgs[0].text, /When are we meeting\?/);
   assert.match(msgs[0].text, /• Tuesday/);
   assert.match(msgs[0].text, /• Wednesday/);
+  assert.deepEqual(msgs[0].raw, {
+    whatsapp: {
+      poll: {
+        question: "When are we meeting?",
+        options: [{ name: "Tuesday" }, { name: "Wednesday" }],
+        allowMultipleAnswers: false
+      }
+    }
+  });
+  assert.deepEqual(msgs[0].attachments, [
+    {
+      type: "poll",
+      manualReview: false,
+      rawLabel: "When are we meeting?",
+      kind: "poll"
+    }
+  ]);
+});
+
+test("voteOnPoll delegates to the wweb.js poll message vote API", async () => {
+  let votedOptions = null;
+  const client = createFakeClient({
+    getMessageById: async (messageId) => {
+      assert.equal(messageId, "m-poll");
+      return {
+        type: "poll_creation",
+        vote: async (options) => {
+          votedOptions = options;
+        }
+      };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  await adapter.voteOnPoll(
+    { platformThreadId: "x@c.us", displayName: "x", lastMessagePreview: "" },
+    "m-poll",
+    ["Tuesday"]
+  );
+  assert.deepEqual(votedOptions, ["Tuesday"]);
 });
 
 test("fetchThreadMessages substitutes [media] placeholder for messages with hasMedia and no body", async () => {

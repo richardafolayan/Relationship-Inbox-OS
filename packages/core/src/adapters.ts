@@ -52,6 +52,7 @@ export interface PlatformAdapter {
    * user-triggered.
    */
   editMessage?(thread: ThreadStub, platformMessageKey: string, text: string): Promise<void>;
+  voteOnPoll?(thread: ThreadStub, platformMessageKey: string, selectedOptions: string[]): Promise<void>;
   /**
    * Optional. Returns a cheap, opaque change watermark for the platform's
    * upstream message store (e.g. iMessage chat.db's max message ROWID, row

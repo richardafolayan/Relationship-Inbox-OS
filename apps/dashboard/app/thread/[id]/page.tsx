@@ -51,6 +51,10 @@ import type {
   ThreadResponse
 } from "@/lib/types";
 import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
+import { WhatsAppMedia } from "@/components/thread/whatsapp-media";
+import { WhatsAppPoll } from "@/components/thread/whatsapp-poll";
+import { WhatsAppText } from "@/components/thread/whatsapp-text";
+import { getWhatsAppPoll } from "@/lib/whatsapp-poll";
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
 import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
@@ -2061,6 +2065,15 @@ export default function ThreadPage() {
     }
   };
 
+  const voteOnPoll = async (messageId: string, selectedOptions: string[]) => {
+    if (!thread) return;
+    await apiPost<{ status: string; selectedOptions: string[] }>(
+      `/runner/control/thread/${thread.id}/message/${messageId}/poll-vote`,
+      { selectedOptions }
+    );
+    await refresh();
+  };
+
   const startMessageEdit = (message: ThreadMessage) => {
     const currentText = optimisticTextByMessageId[message.id] ?? message.text;
     setReactionPickerMessageId(null);
@@ -3692,8 +3705,9 @@ export default function ThreadPage() {
                       );
                       const hasInlineMedia = playableAttachments.length > 0;
                       const displayText = optimisticTextByMessageId[message.id] ?? message.text;
+                      const whatsappPoll = thread.platform === "WHATSAPP" ? getWhatsAppPoll(message) : null;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(displayText.trim());
-                      const showText = !(hasInlineMedia && isAttachmentOnlyText);
+                      const showText = !(hasInlineMedia && isAttachmentOnlyText) && !whatsappPoll;
                       // Pilot R-0094: an image sent with no caption shouldn't
                       // sit in the coloured message bubble - the operator wants
                       // just the picture. When the message is nothing but
@@ -3761,7 +3775,11 @@ export default function ThreadPage() {
                             {hasInlineMedia ? (
                               <div className="flex flex-col gap-2">
                                 {playableAttachments.map((a, attIdx) => (
-                                  <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                                  thread.platform === "WHATSAPP" ? (
+                                    <WhatsAppMedia key={a.guid ?? attIdx} attachment={a} />
+                                  ) : (
+                                    <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
+                                  )
                                 ))}
                                 {(() => {
                                   // Pick the first transcribable attachment to
@@ -3787,6 +3805,13 @@ export default function ThreadPage() {
                                   );
                                 })()}
                               </div>
+                            ) : null}
+                            {whatsappPoll ? (
+                              <WhatsAppPoll
+                                message={message}
+                                disabled={thread.platform !== "WHATSAPP"}
+                                onVote={voteOnPoll}
+                              />
                             ) : null}
                             {showText ? (
                               isEditingMessage ? (
@@ -3841,7 +3866,13 @@ export default function ThreadPage() {
                                 // #703: link-ified text (URLs open in the in-app
                                 // browser) replaces the plain span; #703's inline
                                 // preview card renders as a sibling below.
-                                <MessageTextWithLinks text={displayText} onOpenLink={openLinkInApp} />
+                                thread.platform === "WHATSAPP" ? (
+                                  <span className="text-balance whitespace-pre-wrap [overflow-wrap:anywhere]">
+                                    <WhatsAppText text={displayText} />
+                                  </span>
+                                ) : (
+                                  <MessageTextWithLinks text={displayText} onOpenLink={openLinkInApp} />
+                                )
                               )
                             ) : null}
                             {inlineCardUrl ? (
