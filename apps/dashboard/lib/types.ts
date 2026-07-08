@@ -336,6 +336,11 @@ export interface PlatformCard {
   connectedAt: string | null;
   lastError: string | null;
   enabled: boolean;
+  runnerProcess?: {
+    executableName: string;
+    executablePath: string;
+    command?: string;
+  };
   profileDir: string;
   browserProfileMode?: "isolated" | "personal";
   browserProfileSyncMode?: "smart" | "always" | "never" | null;

@@ -139,6 +139,19 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   WHATSAPP: "WhatsApp"
 };
 
+type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
+
+interface FullDiskAccessResponse {
+  message?: string;
+  runnerProcess?: PlatformCard["runnerProcess"];
+}
+
+function isIMessageFullDiskAccessProblem(row?: PlatformCard): boolean {
+  if (row?.platform !== "IMESSAGE") return false;
+  const text = `${row.lastError ?? ""} ${row.lastScanFailure?.errorSummary ?? ""}`;
+  return /Full Disk Access|chat\.db|Cannot read iMessage|unable to open database file/i.test(text);
+}
+
 function isSettingsTabId(value: string): value is SettingsTabId {
   return SETTINGS_TABS.some((tab) => tab.id === value);
 }
@@ -178,6 +191,7 @@ export default function SettingsPage() {
   const [platformRows, setPlatformRows] = useState<PlatformCard[]>([]);
   const [platformBusy, setPlatformBusy] = useState<PlatformCard["platform"] | null>(null);
   const [platformError, setPlatformError] = useState("");
+  const [platformNotice, setPlatformNotice] = useState("");
 
   // /settings#app-updates (the update toast / bell entry lands here): scroll
   // the App updates card into view and flash a short highlight ring so the
@@ -294,15 +308,27 @@ export default function SettingsPage() {
 
   const platformAction = async (
     platform: PlatformCard["platform"],
-    endpoint: "open-browser" | "connect" | "scan"
+    endpoint: PlatformActionEndpoint
   ) => {
     if (platformBusy) return;
     setPlatformBusy(platform);
     setPlatformError("");
+    setPlatformNotice("");
     try {
-      const path =
-        endpoint === "scan" ? "/runner/control/scan" : `/runner/control/platform/${endpoint}`;
-      await apiPost(path, { platform });
+      if (endpoint === "full-disk-access") {
+        const result = await apiPost<FullDiskAccessResponse>("/runner/control/imessage/full-disk-access", {});
+        const name = result.runnerProcess?.executableName ?? "node";
+        const path = result.runnerProcess?.executablePath;
+        setPlatformNotice(
+          path
+            ? `Opened Full Disk Access. Toggle ${name}. macOS may show it as ${name}: ${path}`
+            : result.message ?? "Opened Full Disk Access. Toggle the runner app, then restart."
+        );
+      } else {
+        const path =
+          endpoint === "scan" ? "/runner/control/scan" : `/runner/control/platform/${endpoint}`;
+        await apiPost(path, { platform });
+      }
       await refreshPlatforms();
       setSavedAt(Date.now());
     } catch {
@@ -360,6 +386,7 @@ export default function SettingsPage() {
               rows={platformRows}
               busy={platformBusy}
               error={platformError}
+              notice={platformNotice}
               onAction={platformAction}
             />
           ) : null}
@@ -622,18 +649,19 @@ function PlatformSettingsSection({
   rows,
   busy,
   error,
+  notice,
   onAction
 }: {
   rows: PlatformCard[];
   busy: PlatformCard["platform"] | null;
   error: string;
-  onAction: (
-    platform: PlatformCard["platform"],
-    endpoint: "open-browser" | "connect" | "scan"
-  ) => void;
+  notice: string;
+  onAction: (platform: PlatformCard["platform"], endpoint: PlatformActionEndpoint) => void;
 }) {
   const findRow = (platform: PlatformCard["platform"]) =>
     rows.find((row) => row.platform === platform);
+  const imessageRow = findRow("IMESSAGE");
+  const imessageNeedsFullDiskAccess = isIMessageFullDiskAccessProblem(imessageRow);
 
   return (
     <section className="mb-9">
@@ -641,15 +669,18 @@ function PlatformSettingsSection({
         Connected platforms
       </p>
       {error ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-overdue">{error}</p> : null}
+      {notice ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
       <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
         <PlatformSetupCard
-          row={findRow("IMESSAGE")}
+          row={imessageRow}
           fallbackPlatform="IMESSAGE"
           title="iMessage"
-          body="Reads Messages on this Mac. If names show as numbers, sync Contacts."
-          actionLabel="Scan iMessage"
+          body="Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
+          actionLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan iMessage"}
           busy={busy === "IMESSAGE"}
-          onPrimary={() => onAction("IMESSAGE", "scan")}
+          onPrimary={() =>
+            onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
+          }
         />
         <PlatformSetupCard
           row={findRow("LINKEDIN")}
@@ -693,6 +724,7 @@ function PlatformSetupCard({
   const status = row?.status ?? "NOT_CONNECTED";
   const connected = status === "CONNECTED";
   const enabled = row?.enabled ?? true;
+  const runnerProcess = fallbackPlatform === "IMESSAGE" ? row?.runnerProcess : undefined;
   const statusLabel = !enabled
     ? "Off"
     : connected
@@ -721,6 +753,12 @@ function PlatformSetupCard({
       </div>
       {row?.lastError ? (
         <p className="m-0 mt-3 text-[12.5px] leading-[1.45] text-risk-overdue">{row.lastError}</p>
+      ) : null}
+      {runnerProcess?.executablePath ? (
+        <p className="m-0 mt-3 break-all font-mono text-[11px] leading-[1.45] text-ink-3">
+          In Full Disk Access, this runner may appear as {runnerProcess.executableName}:{" "}
+          {runnerProcess.executablePath}
+        </p>
       ) : null}
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <button
