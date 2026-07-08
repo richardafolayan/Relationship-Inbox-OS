@@ -2,6 +2,7 @@
   "name": "relationship-inbox-os",
   "private": true,
   "version": "0.1.14",
+  "main": "apps/desktop/main.cjs",
   "packageManager": "npm@10.8.2",
   "workspaces": [
     "apps/*",
@@ -16,6 +17,7 @@
     "start:app": "node scripts/start-app.mjs",
     "start:desktop": "electron apps/desktop/main.cjs",
     "dev:desktop": "RIOS_DEV=1 electron apps/desktop/main.cjs",
+    "build:macos-dmg": "node scripts/build-macos-dmg.mjs",
     "create:macos-app": "node scripts/create-macos-app-bundle.mjs",
     "doctor": "node scripts/doctor.mjs",
     "fetch:whisper-model": "node scripts/fetch-whisper-model.mjs",
