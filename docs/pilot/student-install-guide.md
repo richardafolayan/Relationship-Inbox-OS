@@ -75,21 +75,24 @@ Either way, the installer takes over from here. While it runs it will:
   so **no admin rights or Mac password are needed** (it works on a managed or
   non-admin Mac too),
 - install the app into **`~/RelationshipInboxOS`** and set up what it needs,
+- create **Relationship Inbox OS.app** in your Applications folder,
 - set up your local database,
 - download a small voice-transcription model (about 150 MB) so voice notes
   transcribe automatically,
 - start the app and open it at **http://localhost:3100**.
 
-The long part is "Installing the app", which takes a few minutes. It's normal
-for the Terminal to sit quietly while it works.
+The long part is "Installing the app", which takes a few minutes. It is normal
+for Terminal to sit quietly while it works.
 
-> **Keep this Terminal window open.** It's what keeps the app running. To stop
-> the app, click the window and press **Ctrl + C**. To start it again later:
->
-> ```bash
-> cd ~/RelationshipInboxOS
-> npm run start:student
-> ```
+Once the browser opens, you can close Terminal. To start the app again later,
+open **Relationship Inbox OS** from Applications or Launchpad.
+
+If the app icon was not created for some reason, the Terminal fallback is:
+
+```bash
+cd ~/RelationshipInboxOS
+npm run start:student
+```
 
 ---
 
@@ -108,14 +111,14 @@ Relationship Inbox OS reads the messages already stored on your Mac. It never
 logs into anything and never sends anything on its own.
 
 1. Open **Messages** on your Mac and check you can see recent conversations.
-2. Give **Terminal Full Disk Access** so the app can read your local message
+2. Give **Relationship Inbox OS Full Disk Access** so the app can read your local message
    history: **System Settings → Privacy & Security → Full Disk Access**, find
-   **Terminal**, and turn it **on**. (If Terminal isn't listed, click **+**
-   and add it from Applications → Utilities.)
-3. macOS will say Terminal must quit to use the new permission. **Quit
-   Terminal** (⌘ + Q), then start the app again.
-4. The first time you *send* an iMessage reply, macOS asks "Terminal wants to
-   control Messages". Click **Allow**.
+   **Relationship Inbox OS**, and turn it **on**. (If it is not listed, click
+   **+** and add `~/Applications/Relationship Inbox OS.app`.)
+3. macOS may say the app must quit to use the new permission. Quit
+   **Relationship Inbox OS**, then open it again.
+4. The first time you *send* an iMessage reply, macOS asks "Relationship Inbox
+   OS wants to control Messages". Click **Allow**.
 
 What it does: reads your local iMessage/SMS history, summarises it, and shows
 what needs a reply. What it doesn't do: send anything unless you press send.
@@ -178,7 +181,7 @@ there is nothing to configure.
 
 The easy way is in the app itself: **Settings > App updates > Check for
 updates**, then **Update and relaunch** if one is available. It stages the
-update; stop the app with `Ctrl + C` and start it again to finish.
+update; quit Relationship Inbox OS and open it again to finish.
 
 The same thing from the Terminal, in the app folder
 (`cd ~/RelationshipInboxOS`):
