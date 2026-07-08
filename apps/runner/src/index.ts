@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, openSync, rmSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
 import express from "express";
 import compression from "compression";
@@ -142,6 +142,11 @@ import {
 import type { OverdueDigestRowInput } from "@inbox-os/core";
 
 const app = express();
+const runnerProcessInfo = {
+  executableName: basename(process.execPath),
+  executablePath: process.execPath,
+  command: process.argv.join(" ")
+};
 // How far back the per-thread receipts lookup scans the audit log. A thread's
 // own scan/send receipts are recent, so 180 days is generous while keeping the
 // query off the full historical telemetry table.
@@ -1988,6 +1993,31 @@ app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
     // non-fatal
   }
   res.json({ ok: true, steps: ranSteps, message: "Permissions reset. Toggle your terminal app ON for both Automation > Messages AND Accessibility, then retry the send." });
+}));
+
+app.post("/control/imessage/full-disk-access", asyncRoute(async (_req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "open Full Disk Access", kind: "external-action" })) return;
+  if (process.platform !== "darwin") {
+    res.status(400).json({ error: "macOS only", runnerProcess: runnerProcessInfo });
+    return;
+  }
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const run = promisify(execFile);
+  try {
+    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"], { timeout: 5_000 });
+  } catch {
+    res.status(500).json({
+      error: "Could not open Full Disk Access settings.",
+      runnerProcess: runnerProcessInfo
+    });
+    return;
+  }
+  res.json({
+    ok: true,
+    runnerProcess: runnerProcessInfo,
+    message: `Opened Full Disk Access. Enable ${runnerProcessInfo.executableName}, then quit and restart the app.`
+  });
 }));
 
 // One-shot historical iMessage backfill. The recurring scan is
@@ -5510,6 +5540,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
         enabled: settings.enabledPlatforms.includes(platform),
+        runnerProcess: platform === "IMESSAGE" ? runnerProcessInfo : undefined,
         profileDir: sharedProfileDir,
         browserProfileMode: runnerConfig.browserProfile.mode,
         browserProfileSyncMode:
