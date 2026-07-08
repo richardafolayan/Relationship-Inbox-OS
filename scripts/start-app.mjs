@@ -131,9 +131,41 @@ function run(label, cmd, cmdArgs, opts = {}) {
   return r.status === 0;
 }
 
+function probeNativeModule(specifier) {
+  return spawnSync(
+    process.execPath,
+    ["-e", `require(${JSON.stringify(specifier)})`],
+    { cwd: APP_DIR, encoding: "utf8" }
+  );
+}
+
+function nativeModuleNeedsRebuild(result) {
+  const text = `${result.stderr ?? ""}\n${result.stdout ?? ""}`;
+  return /NODE_MODULE_VERSION|ERR_DLOPEN_FAILED|was compiled against a different Node\.js version/i.test(text);
+}
+
+function ensureNativeModules() {
+  if (!canResolve("better-sqlite3")) return true;
+  const probe = probeNativeModule("better-sqlite3");
+  if (probe.status === 0) return true;
+  if (!nativeModuleNeedsRebuild(probe)) {
+    say(`  ${C.yellow}The local database driver could not be loaded.${C.reset}`);
+    return false;
+  }
+  say(`  ${C.yellow}The local database driver was built for a different Node.js version.${C.reset}`);
+  if (!run("Rebuilding the local database driver...", "npm", ["rebuild", "better-sqlite3"])) {
+    return false;
+  }
+  return probeNativeModule("better-sqlite3").status === 0;
+}
+
 function prepare() {
   const stamps = FORCE_REBUILD ? {} : loadStamps();
   const next = { ...stamps };
+
+  if (!ensureNativeModules()) {
+    return { ok: false };
+  }
 
   const schemaHash = hashPaths([join(APP_DIR, "packages/core/prisma/schema.prisma")]);
   const schemaChanged = stamps.schemaHash !== schemaHash;
