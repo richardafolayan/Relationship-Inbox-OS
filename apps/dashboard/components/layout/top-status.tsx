@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import Link from "next/link";
 import { Moon } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api";
 import { formatUntil } from "@/lib/focus";
@@ -9,8 +10,7 @@ import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { runActionWithFeedback } from "@/lib/feedback";
 import { onReassessChange } from "@/lib/reassess-status";
 import { onReportSendChange } from "@/lib/pilot-report-status";
-import { hasEverConnected, visibleImplementedPlatforms } from "@/lib/risk";
-import { shouldAutoCloseReconnect } from "@/lib/platform-reconnect";
+import { visibleImplementedPlatforms } from "@/lib/risk";
 import { NotificationBell } from "@/components/common/notification-center";
 import {
   EMPTY_THREAD_CHECK,
@@ -55,17 +55,6 @@ interface StartRunnerResponse {
   pid?: number;
   reason?: string;
 }
-
-// Proper-cased platform labels for the reconnect modal. PLATFORM_LABEL
-// in lib/risk is all-lowercase (used elsewhere for compact captions);
-// the modal wants real product casing.
-const PLATFORM_DISPLAY: Record<string, string> = {
-  LINKEDIN: "LinkedIn",
-  IMESSAGE: "iMessage",
-  INSTAGRAM: "Instagram",
-  TIKTOK: "TikTok",
-  WHATSAPP: "WhatsApp"
-};
 
 interface SendQueueItem {
   clientSendId: string;
@@ -390,8 +379,6 @@ export function TopStatus() {
   const [cancellingScan, setCancellingScan] = useState(false);
   const [runnerReachable, setRunnerReachable] = useState<boolean | null>(null);
   const [runnerStartState, setRunnerStartState] = useState<"idle" | "starting" | "started">("idle");
-  const [reconnectOpen, setReconnectOpen] = useState(false);
-  const [platformActionBusy, setPlatformActionBusy] = useState<string | null>(null);
   const [scanTriggering, setScanTriggering] = useState(false);
   // Issue #369. In-flight Reassess actions originate in the thread page
   // (lib/reassess-status emits an event). Surface the count in the
@@ -489,48 +476,8 @@ export function TopStatus() {
     health?.connectedPlatforms ??
     0;
   const pip = pipToneFor(connected, total);
-  // Platforms that need operator attention. The pip becomes a button
-  // that opens a minimal reconnect modal when any are non-CONNECTED —
-  // the only recovery path a v1 user gets, since the full operator
-  // console at /platforms is intentionally unlinked. (You can still
-  // type /platforms directly for the full diagnostics.)
   const degradedPlatforms = implemented?.filter((p) => p.status !== "CONNECTED") ?? [];
   const hasDegraded = degradedPlatforms.length > 0;
-  // If every listed platform has simply never been connected, the modal is
-  // first-time setup, not an error — soften the header so a non-user isn't
-  // told something is broken. (issue #708)
-  const anyEverConnected = degradedPlatforms.some(hasEverConnected);
-
-  // Keep the reconnect modal's open-state honest. `reconnectOpen` is tracked
-  // separately from `degradedPlatforms` (derived fresh each render from the
-  // polled snapshot), so when the last degraded platform reconnects — via the
-  // operator's own Reconnect click, a background poll, or a runner-event
-  // refresh — the list empties but the boolean stays true, leaving the modal
-  // showing its "These platforms aren't connected" header over an empty list.
-  // Auto-close once there is nothing left to reconnect; this doubles as
-  // confirmation the reconnect worked.
-  useEffect(() => {
-    if (shouldAutoCloseReconnect(reconnectOpen, hasDegraded)) {
-      setReconnectOpen(false);
-    }
-  }, [reconnectOpen, hasDegraded]);
-
-  const runPlatformAction = useCallback(
-    async (platform: string, endpoint: "connect" | "reset-session") => {
-      const key = `${platform}:${endpoint}`;
-      if (platformActionBusy) return;
-      setPlatformActionBusy(key);
-      try {
-        await apiPost(`/runner/control/platform/${endpoint}`, { platform });
-        await refreshRef.current();
-      } catch (error) {
-        console.warn(`[top-status] ${endpoint} failed for ${platform}`, error);
-      } finally {
-        setPlatformActionBusy(null);
-      }
-    },
-    [platformActionBusy]
-  );
 
   const scanLabel = formatRelativeScan(health?.lastScanAt ?? null);
   const runnerOffline = ready && runnerReachable === false;
@@ -652,24 +599,27 @@ export function TopStatus() {
           <span className="text-risk-overdue">Runner offline</span>
         </span>
       ) : hasDegraded ? (
-        <button
-          type="button"
-          onClick={() => setReconnectOpen(true)}
-          title={`${connected}/${total} platforms connected, click to reconnect`}
-          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2"
+        <Link
+          href="/settings#platforms"
+          title={`${connected}/${total} platforms connected, open platform settings`}
+          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
         >
           <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
           <span className="text-ink-2 underline-offset-2 hover:underline">
             {connected}/{total} connected
           </span>
-        </button>
+        </Link>
       ) : (
-        <span className="inline-flex items-center gap-[6px]" title={`${connected}/${total} platforms connected`}>
+        <Link
+          href="/settings#platforms"
+          className="inline-flex items-center gap-[6px] rounded-[6px] px-1 -mx-1 transition-colors duration-calm hover:bg-paper-2 focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/35"
+          title={`${connected}/${total} platforms connected, open platform settings`}
+        >
           <span className={`h-[6px] w-[6px] rounded-full ${pip}`} aria-hidden />
-          <span className="text-ink-2">
+          <span className="text-ink-2 underline-offset-2 hover:underline">
             {connected}/{total} connected
           </span>
-        </span>
+        </Link>
       )}
 
       {tickerIsActive ||
@@ -769,109 +719,6 @@ export function TopStatus() {
         ) : null}
       </div>
 
-      {reconnectOpen ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-ink/40 px-4"
-          role="dialog"
-          aria-modal="true"
-          onClick={() => setReconnectOpen(false)}
-        >
-          <div
-            className="w-full max-w-sm space-y-4 rounded-xl border border-hairline bg-paper p-5 shadow-xl"
-            onClick={(event) => event.stopPropagation()}
-          >
-            <div>
-              <p className="font-display text-[15px] font-medium tracking-[-0.012em] text-ink">
-                {anyEverConnected ? "Connection issue" : "Connect a platform"}
-              </p>
-              <p className="mt-1 font-mono text-[11px] text-ink-3">
-                {anyEverConnected
-                  ? "These platforms aren't connected. Reconnect, or reset the session if reconnect keeps failing."
-                  : "Connect a platform to start pulling in messages. Each one is optional."}
-              </p>
-            </div>
-            <div className="space-y-2">
-              {degradedPlatforms.map((p) => {
-                const label = PLATFORM_DISPLAY[p.platform]
-                  ?? p.platform.charAt(0) + p.platform.slice(1).toLowerCase();
-                const connectBusy = platformActionBusy === `${p.platform}:connect`;
-                const resetBusy = platformActionBusy === `${p.platform}:reset-session`;
-                // iMessage has no browser session — it reads chat.db
-                // locally. "Reconnect" (re-probe the DB) is the only
-                // meaningful action; "Reset session" is a browser
-                // concept that doesn't apply. Its only real failure
-                // mode is a missing macOS Full Disk Access grant, so
-                // say that instead of offering a session reset.
-                const isImessage = p.platform === "IMESSAGE";
-                // A platform the operator has never connected is "not set up",
-                // not "broken". Present it as an optional first-time setup
-                // (calm ink, "Connect", no scary red status, no reset) so a
-                // non-user isn't told their LinkedIn is failing. (issue #708)
-                const everConnected = hasEverConnected(p);
-                return (
-                  <div
-                    key={p.platform}
-                    className="flex flex-col gap-2 rounded-row border border-hairline bg-paper-2/40 px-3 py-2"
-                  >
-                    <span className="text-[13px] text-ink-2">
-                      {label}{" "}
-                      <span
-                        className={`font-mono text-[11px] ${everConnected ? "text-risk-overdue" : "text-ink-3"}`}
-                      >
-                        {everConnected ? p.status.toLowerCase().replace(/_/g, " ") : "not set up"}
-                      </span>
-                    </span>
-                    {isImessage ? (
-                      <span className="font-mono text-[11px] leading-snug text-ink-3">
-                        Reads Messages locally, no login. If it stays
-                        disconnected, grant the runner Full Disk Access
-                        in System Settings → Privacy &amp; Security, then
-                        retry.
-                      </span>
-                    ) : !everConnected ? (
-                      <span className="font-mono text-[11px] leading-snug text-ink-3">
-                        Optional. Connect it here if you use it. Otherwise
-                        we&apos;ll keep it out of your error banners.
-                      </span>
-                    ) : null}
-                    <span className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        disabled={!!platformActionBusy}
-                        onClick={() => void runPlatformAction(p.platform, "connect")}
-                        className="rounded-pill bg-ink px-3 py-1 font-mono text-[11px] text-paper transition-opacity duration-calm hover:opacity-90 disabled:opacity-50"
-                      >
-                        {connectBusy
-                          ? (isImessage ? "retrying…" : everConnected ? "reconnecting…" : "connecting…")
-                          : (isImessage ? "Retry" : everConnected ? "Reconnect" : "Connect")}
-                      </button>
-                      {isImessage || !everConnected ? null : (
-                        <button
-                          type="button"
-                          disabled={!!platformActionBusy}
-                          onClick={() => void runPlatformAction(p.platform, "reset-session")}
-                          className="rounded-pill border border-hairline px-3 py-1 font-mono text-[11px] text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:text-ink disabled:opacity-50"
-                        >
-                          {resetBusy ? "resetting…" : "Reset session"}
-                        </button>
-                      )}
-                    </span>
-                  </div>
-                );
-              })}
-            </div>
-            <div className="flex justify-end">
-              <button
-                type="button"
-                onClick={() => setReconnectOpen(false)}
-                className="font-mono text-[11px] text-ink-3 hover:text-ink"
-              >
-                Close
-              </button>
-            </div>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }
