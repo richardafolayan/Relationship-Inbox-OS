@@ -101,13 +101,21 @@ async function loadDashboardWhenReady(window, url) {
   const deadline = Date.now() + START_TIMEOUT_MS;
   while (!window.isDestroyed() && Date.now() < deadline) {
     if (await dashboardReady(url)) {
-      await window.loadURL(url);
+      try {
+        await window.loadURL(url);
+      } catch (error) {
+        if (!shuttingDown) writeLog(`Could not load dashboard: ${error.message}`);
+      }
       return;
     }
     await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
   if (!window.isDestroyed()) {
-    await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml().replace("Starting Relationship Inbox OS...", "Still starting. Check the app log if this takes more than a minute."))}`);
+    try {
+      await window.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml().replace("Starting Relationship Inbox OS...", "Still starting. Check the app log if this takes more than a minute."))}`);
+    } catch (error) {
+      if (!shuttingDown) writeLog(`Could not show startup timeout: ${error.message}`);
+    }
   }
 }
 
@@ -140,7 +148,9 @@ function createWindow() {
     shell.openExternal(targetUrl);
   });
 
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`);
+  void mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`).catch((error) => {
+    if (!shuttingDown) writeLog(`Could not show startup screen: ${error.message}`);
+  });
   void loadDashboardWhenReady(mainWindow, url);
 }
 

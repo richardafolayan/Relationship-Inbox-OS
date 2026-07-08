@@ -40,8 +40,10 @@ function isInternalAppUrl(value, env = process.env) {
 }
 
 function nodeCandidates(env = process.env, home = homedir()) {
+  const appDir = resolveAppDir(__dirname);
   return [
     env.RIOS_NODE_PATH,
+    join(appDir, "..", "runtime", "node", "bin", "node"),
     join(home, ".rios-node", "bin", "node"),
     "node"
   ].filter(Boolean);
