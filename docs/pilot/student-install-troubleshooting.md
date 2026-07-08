@@ -60,10 +60,11 @@ The runner reads `~/Library/Messages/chat.db`. Two things must be true:
 
 1. **You're signed into Messages.** Open the **Messages** app and confirm you
    can see recent conversations.
-2. **Terminal has Full Disk Access.** System Settings → Privacy & Security →
-   **Full Disk Access** → turn **Terminal** on. Then **restart the app**
-   (`Ctrl + C`, then start it again), because the permission only takes effect
-   on a fresh start.
+2. **Relationship Inbox OS has Full Disk Access.** System Settings → Privacy
+   & Security → **Full Disk Access** → turn **Relationship Inbox OS** on. If
+   it is not listed, click **+** and add
+   `~/Applications/Relationship Inbox OS.app`. Then quit and reopen the app,
+   because the permission only takes effect on a fresh start.
 
 `node scripts/doctor.mjs` reports the iMessage database as **FAIL** when the
 file exists but isn't readable, which is the Full Disk Access case.
@@ -90,11 +91,11 @@ in `.env`; the app then opens its own browser window for you to sign into.
 The app has two halves: the dashboard (port 3100) and the runner (port 4001).
 "Can't reach the runner" means the runner half isn't up.
 
-1. Check the Terminal running the app is still open and didn't print an error.
+1. Check that **Relationship Inbox OS** is running. If in doubt, open it from
+   Applications or Launchpad.
 2. Run `npm run doctor` (from `~/RelationshipInboxOS`). It pings both ports and
    the runner's `/health` endpoint.
-3. Restart the app: `Ctrl + C` in that Terminal, then `cd ~/RelationshipInboxOS
-   && npm run start:student`.
+3. Restart the app: quit **Relationship Inbox OS**, then open it again.
 
 If the runner crashes immediately on start, the log
 (`~/Library/Logs/RelationshipInboxOS/install-*.log`) has the reason. Send it
@@ -104,7 +105,7 @@ to me.
 
 Another copy of the app (or another program) is already on that port.
 
-- Close any other Terminal windows running the app, then start it once.
+- Quit any other running copy of Relationship Inbox OS, then start it once.
 - Find what's holding a port:
 
   ```bash

@@ -212,7 +212,7 @@ async function checkDashboard() {
     add(PASS, "Dashboard", `Responding on port ${DASHBOARD_PORT}.`);
   } else {
     add(WARN, "Dashboard", `Nothing on port ${DASHBOARD_PORT}.`,
-      `Start the app: cd "${APP_DIR}" && npm run start:student`);
+      `Start Relationship Inbox OS from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
@@ -225,7 +225,7 @@ async function checkRunner() {
       "The runner is starting or unhealthy — wait a moment, then reload the app.");
   } else {
     add(WARN, "Runner", `Nothing on port ${RUNNER_PORT}.`,
-      `Start the app: cd "${APP_DIR}" && npm run start:student`);
+      `Start Relationship Inbox OS from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
@@ -245,7 +245,7 @@ function checkMessagesDb() {
     add(PASS, "iMessage database", imessageOn ? "Readable." : "Readable (iMessage is off in .env).");
   } catch {
     add(FAIL, "iMessage database", "Found but not readable.",
-      "Give Terminal Full Disk Access: System Settings → Privacy & Security → Full Disk Access → turn on Terminal, then restart the app.");
+      "Give Relationship Inbox OS Full Disk Access: System Settings → Privacy & Security → Full Disk Access → turn on Relationship Inbox OS, then restart the app.");
   }
 }
 

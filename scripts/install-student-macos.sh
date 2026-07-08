@@ -30,6 +30,7 @@
 #   RIOS_INSTALL_DIR       where to install        (default ~/RelationshipInboxOS)
 #   RIOS_OPENAI_API_KEY    pre-fill the OpenAI key into .env
 #   RIOS_NO_START=1        install but don't launch the app / open the browser
+#   RIOS_NO_APP_BUNDLE=1   skip creating the Applications app icon
 #
 # Flags:
 #   --dry-run     check the Mac and print the plan; change nothing
@@ -51,6 +52,7 @@ APP_ZIP_URL_DEFAULT="REPLACE_WITH_PRIVATE_ZIP_URL"
 APP_ZIP_URL="${RIOS_APP_ZIP_URL:-$APP_ZIP_URL_DEFAULT}"
 
 INSTALL_DIR="${RIOS_INSTALL_DIR:-$HOME/RelationshipInboxOS}"
+APP_BUNDLE_DIR="${RIOS_APP_BUNDLE_DIR:-$HOME/Applications}"
 NODE_MAJOR=22
 NODE_RELEASE_DIR="https://nodejs.org/download/release/latest-v22.x"
 # Where a user-local Node 22 is installed when one isn't already present.
@@ -72,6 +74,8 @@ DRY_RUN=false
 NO_START=false
 SKIP_DEPS=false
 [ "${RIOS_NO_START:-}" = "1" ] && NO_START=true
+NO_APP_BUNDLE=false
+[ "${RIOS_NO_APP_BUNDLE:-}" = "1" ] && NO_APP_BUNDLE=true
 
 for arg in "$@"; do
   case "$arg" in
@@ -578,6 +582,47 @@ install_app() {
 }
 
 # --------------------------------------------------------------------------
+# macOS app bundle
+# --------------------------------------------------------------------------
+
+create_app_bundle() {
+  step "Creating the Mac app"
+
+  if [ "$NO_APP_BUNDLE" = true ]; then
+    info "Skipping the app icon (RIOS_NO_APP_BUNDLE=1)"
+    return 0
+  fi
+
+  if [ "$DRY_RUN" = true ]; then
+    warn "[dry-run] would create Relationship Inbox OS.app in $(display_path "$APP_BUNDLE_DIR")"
+    return 0
+  fi
+
+  if [ "$SKIP_DEPS" = true ]; then
+    warn "[skip-deps] skipping the app bundle"
+    return 0
+  fi
+
+  local script="$APP_DIR/scripts/create-macos-app-bundle.mjs"
+  if [ ! -f "$script" ]; then
+    warn "Couldn't find the app bundle creator. You can still start from Terminal."
+    return 0
+  fi
+
+  mkdir -p "$APP_BUNDLE_DIR" 2>>"$LOG_FILE" || {
+    warn "Couldn't create $(display_path "$APP_BUNDLE_DIR"). You can still start from Terminal."
+    return 0
+  }
+
+  if run "Creating Relationship Inbox OS.app..." \
+       node "$script" --app-dir "$APP_DIR" --out "$APP_BUNDLE_DIR" --node-dir "$RIOS_NODE_DIR"; then
+    ok "Created $(display_path "$APP_BUNDLE_DIR")/Relationship Inbox OS.app"
+  else
+    warn "Couldn't create the Mac app. You can still start from Terminal."
+  fi
+}
+
+# --------------------------------------------------------------------------
 # Start the app
 # --------------------------------------------------------------------------
 
@@ -594,14 +639,17 @@ wait_for_dashboard() {
 }
 
 start_app() {
-  local disp; disp="$(display_path "$APP_DIR")"
+  local disp app_bundle
+  disp="$(display_path "$APP_DIR")"
+  app_bundle="$APP_BUNDLE_DIR/Relationship Inbox OS.app"
 
   if [ "$NO_START" = true ] || [ "$DRY_RUN" = true ]; then
     step "Skipping app launch (per your request)"
     say ""
     say "  To start the app yourself:"
-    say "    ${BOLD}cd $disp${RESET}"
-    say "    ${BOLD}npm run start:student${RESET}"
+    say "    ${BOLD}open \"$APP_BUNDLE_DIR/Relationship Inbox OS.app\"${RESET}"
+    say "  Or from Terminal:"
+    say "    ${BOLD}cd $disp && npm run start:student${RESET}"
     say "  Then open ${BOLD}$DASHBOARD_URL${RESET} in Chrome."
     return 0
   fi
@@ -609,10 +657,28 @@ start_app() {
   step "Starting Relationship Inbox OS"
   cd "$APP_DIR" || die "Couldn't open the app folder $APP_DIR."
 
+  if [ "$NO_APP_BUNDLE" != true ] && [ -d "$app_bundle" ]; then
+    info "Opening the Mac app..."
+    if ! open "$app_bundle" >>"$LOG_FILE" 2>&1; then
+      warn "Couldn't open the Mac app. Falling back to Terminal start."
+    else
+      if wait_for_dashboard; then
+        ok "The app is up"
+        open "$DASHBOARD_URL" >/dev/null 2>&1 || true
+        print_success app
+      else
+        warn "The app is taking longer than usual to start."
+        say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
+        say "  doctor check:  ${BOLD}cd $disp && npm run doctor${RESET}"
+      fi
+      return 0
+    fi
+  fi
+
   info "Launching the app..."
   # Keep the app attached to this Terminal so Ctrl+C stops it, the way the
-  # guide describes. Its verbose output streams to the log. start-app runs
-  # the optimised production build prepared above (with a dev fallback).
+  # fallback path describes. Its verbose output streams to the log. start-app
+  # runs the optimised production build prepared above (with a dev fallback).
   node scripts/start-app.mjs >>"$LOG_FILE" 2>&1 &
   local dev_pid=$!
   trap 'printf "\n  Stopping the app...\n"; kill "$dev_pid" 2>/dev/null; wait "$dev_pid" 2>/dev/null; exit 0' INT TERM
@@ -620,7 +686,7 @@ start_app() {
   if wait_for_dashboard; then
     ok "The app is up"
     open "$DASHBOARD_URL" >/dev/null 2>&1 || true
-    print_success
+    print_success terminal
   else
     warn "The app is taking longer than usual to start."
     say "  Try opening $DASHBOARD_URL in Chrome. If it doesn't load, run the"
@@ -632,18 +698,44 @@ start_app() {
 }
 
 print_success() {
-  local disp; disp="$(display_path "$APP_DIR")"
+  local mode="${1:-app}" disp
+  disp="$(display_path "$APP_DIR")"
+  if [ "$mode" = "terminal" ]; then
+    cat <<EOF
+
+  ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
+
+  • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
+  • The app is installed at  ${BOLD}$disp${RESET}
+  • ${BOLD}Leave this Terminal window open${RESET} - it keeps the app running.
+  • To stop the app: click this window and press ${BOLD}Ctrl + C${RESET}.
+  • To start it again later:
+        ${BOLD}open "$APP_BUNDLE_DIR/Relationship Inbox OS.app"${RESET}
+    or  ${BOLD}cd $disp && npm run start:student${RESET}
+
+  Next, the app walks you through:
+    1. iMessage access   (a one-time macOS permission)
+    2. Connecting LinkedIn
+    3. Your first scan
+
+  Setup guide:  docs/pilot/student-install-guide.md
+  Stuck?        docs/pilot/student-install-troubleshooting.md
+  Health check: npm run doctor
+
+EOF
+    return 0
+  fi
+
   cat <<EOF
 
   ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
-  • ${BOLD}Leave this Terminal window open${RESET} — it keeps the app running.
-  • To stop the app: click this window and press ${BOLD}Ctrl + C${RESET}.
-  • To start it again later:
-        ${BOLD}cd $disp${RESET}
-        ${BOLD}npm run start:student${RESET}
+  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/Relationship Inbox OS.app${RESET}
+  • Next time, open ${BOLD}Relationship Inbox OS${RESET} from Applications or Launchpad.
+  • You can close this Terminal once the browser is open.
+  • To stop the app: quit ${BOLD}Relationship Inbox OS${RESET} from the Dock.
 
   Next, the app walks you through:
     1. iMessage access   (a one-time macOS permission)
@@ -672,6 +764,7 @@ main() {
   resolve_app_dir
   ensure_env
   install_app
+  create_app_bundle
   start_app
 }
 

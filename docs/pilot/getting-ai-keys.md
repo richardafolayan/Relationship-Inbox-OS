@@ -67,8 +67,10 @@ Slightly more capable, but the OpenAI API needs a small amount of credit.
 
 ## Restart and check it worked
 
-1. Stop the app: click its Terminal window and press **Ctrl + C**.
-2. Start it again:
+1. Quit Relationship Inbox OS.
+2. Open it again from Applications or Launchpad.
+
+If the app icon was not created, use the Terminal fallback:
 
    ```bash
    cd ~/RelationshipInboxOS
