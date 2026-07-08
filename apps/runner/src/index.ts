@@ -307,6 +307,18 @@ let enqueueWhatsAppInitialScan: (() => void) | null = null;
 // the scan queue for the same reason.
 let onWhatsAppMessageArrived: (() => void) | null = null;
 
+interface LinkedInRealtimeWatcher {
+  stop(): void;
+}
+
+interface LinkedInRealtimeAdapter {
+  startInboxRealtimeWatcher?: (input: {
+    debounceMs: number;
+    onChange: (reason: string) => void;
+    log?: (line: string) => void;
+  }) => LinkedInRealtimeWatcher;
+}
+
 // Ensure WHATSAPP is in the operator's enabledPlatforms once they link a
 // device, so the scheduled scan loop keeps pulling WhatsApp on the normal
 // cadence (the real-time message watcher covers the gaps between ticks). The
@@ -912,7 +924,10 @@ const scanQueue = createScanQueue({
 // Late-bind the initial-scan kick now that the scan queue exists (the
 // WhatsApp state-change hook above was wired before this point).
 enqueueWhatsAppInitialScan = () => {
-  const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+  const result = scanQueue.enqueueScan("WHATSAPP", {
+    respectCooldown: false,
+    coalesceWithPending: true
+  });
   void auditService.log({
     platform: "WHATSAPP",
     stage: "Scan",
@@ -931,7 +946,7 @@ enqueueWhatsAppInitialScan = () => {
 // serialised by the queue, so overlapping nudges can't produce parallel
 // WhatsApp scans. Only enqueues while connected — a nudge that lands
 // mid-disconnect is dropped by the scan gate anyway.
-const WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS = 4000;
+const WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS = 750;
 let whatsappMessageScanTimer: ReturnType<typeof setTimeout> | null = null;
 onWhatsAppMessageArrived = () => {
   if (whatsappMessageScanTimer) {
@@ -942,7 +957,10 @@ onWhatsAppMessageArrived = () => {
     if (whatsappConnect.state !== "connected") {
       return;
     }
-    const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+    const result = scanQueue.enqueueScan("WHATSAPP", {
+      respectCooldown: false,
+      coalesceWithPending: true
+    });
     void auditService.log({
       platform: "WHATSAPP",
       stage: "Scan",
@@ -954,6 +972,44 @@ onWhatsAppMessageArrived = () => {
     });
   }, WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS);
 };
+
+const LINKEDIN_INBOX_WATCH_DEBOUNCE_MS = 750;
+let linkedinInboxWatchScanTimer: ReturnType<typeof setTimeout> | null = null;
+function onLinkedInInboxChanged(reason: string): void {
+  if (linkedinInboxWatchScanTimer) {
+    return;
+  }
+  linkedinInboxWatchScanTimer = setTimeout(() => {
+    linkedinInboxWatchScanTimer = null;
+    void settingsStore.getSettings().then((currentSettings) => {
+      if (!currentSettings.enabledPlatforms.includes("LINKEDIN")) {
+        return auditService.log({
+          platform: "LINKEDIN",
+          stage: "Scan",
+          action: "LINKEDIN_INBOX_WATCH_TRIGGER",
+          status: "OK",
+          details: { reason, skipped: "disabled_in_settings" }
+        });
+      }
+      const result = scanQueue.enqueueScan("LINKEDIN", {
+        respectCooldown: false,
+        coalesceWithPending: true
+      });
+      return auditService.log({
+        platform: "LINKEDIN",
+        stage: "Scan",
+        action: "LINKEDIN_INBOX_WATCH_TRIGGER",
+        status: result.ok ? "OK" : "FAIL",
+        details: {
+          reason,
+          ...(result.ok
+            ? { jobId: result.jobId, status: result.status }
+            : { blocked: result.blocked, blockReason: result.reason })
+        }
+      });
+    });
+  }, LINKEDIN_INBOX_WATCH_DEBOUNCE_MS);
+}
 
 // Boot-time WhatsApp resume. The connect state machine lives in memory, so a
 // runner restart forgets a linked session even though whatsapp-web.js's
@@ -7628,7 +7684,10 @@ async function start(): Promise<void> {
               details: { reason, skipped: "disabled_in_settings" }
             });
           }
-          const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+          const result = scanQueue.enqueueScan("IMESSAGE", {
+            respectCooldown: false,
+            coalesceWithPending: true
+          });
           return auditService.log({
             platform: "IMESSAGE",
             stage: "Scan",
@@ -7646,6 +7705,13 @@ async function start(): Promise<void> {
     });
     watcher.start();
   }
+
+  const linkedInRealtimeAdapter = adapters.LINKEDIN as LinkedInRealtimeAdapter | undefined;
+  linkedInRealtimeAdapter?.startInboxRealtimeWatcher?.({
+    debounceMs: 300,
+    onChange: onLinkedInInboxChanged,
+    log: (line) => console.log(line)
+  });
 
   await new Promise<void>((resolve, reject) => {
     const server = app.listen(runnerConfig.port, runnerConfig.bindHost, () => {

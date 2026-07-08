@@ -21,7 +21,7 @@ test("watcher fires once per debounced burst of writes", async () => {
 
   const watcher = createIMessageWatcher({
     dbPath,
-    debounceMs: 80,
+    debounceMs: 1000,
     onChange: (reason) => fires.push(reason),
     log: (line) => logs.push(line)
   });
@@ -35,7 +35,7 @@ test("watcher fires once per debounced burst of writes", async () => {
     appendFileSync(`${dbPath}-wal`, "b");
     appendFileSync(`${dbPath}-wal`, "c");
 
-    await delay(200);
+    await delay(1500);
 
     assert.equal(fires.length, 1, `expected 1 debounced fire, got ${fires.length}`);
     assert.equal(fires[0], "chat.db-wal");

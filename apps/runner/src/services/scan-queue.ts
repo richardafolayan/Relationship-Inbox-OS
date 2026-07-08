@@ -222,6 +222,12 @@ type EnqueueScanOptions = {
   maxThreads?: number;
   maxOpens?: number;
   forceFallback?: boolean;
+  /**
+   * Live platform signals can arrive in bursts. Keep at most one pending
+   * follow-up job for the same platform while allowing that follow-up to sit
+   * behind the currently running scan.
+   */
+  coalesceWithPending?: boolean;
   /** Default "update". See ScanScope for what each value means. */
   scope?: ScanScope;
   /**
@@ -631,6 +637,23 @@ export function resolveEnqueueStatus(
   processingBeforeEnqueue: boolean
 ): "queued" | "running" {
   return processingBeforeEnqueue ? "queued" : "running";
+}
+
+export function jobCoversPlatform(
+  jobPlatform: PlatformName | undefined,
+  requestedPlatform: PlatformName | undefined
+): boolean {
+  if (!requestedPlatform) {
+    return !jobPlatform;
+  }
+  return jobPlatform === undefined || jobPlatform === requestedPlatform;
+}
+
+export function findPendingCoalescedScan(
+  queuedJobs: ScanJob[],
+  requestedPlatform: PlatformName | undefined
+): ScanJob | null {
+  return queuedJobs.find((entry) => jobCoversPlatform(entry.platform, requestedPlatform)) ?? null;
 }
 
 export function createScanQueue(deps: ScanQueueDeps) {
@@ -1064,7 +1087,19 @@ export function createScanQueue(deps: ScanQueueDeps) {
     options?: EnqueueScanOptions
   ): EnqueueScanResult {
     const requestId = options?.requestId ?? uuid();
-    if (isLinkedInInFlight({
+    if (options?.coalesceWithPending) {
+      const pending = findPendingCoalescedScan(queue, platform);
+      if (pending) {
+        return {
+          ok: true,
+          jobId: pending.jobId,
+          status: "queued",
+          requestId: pending.jobId,
+          platform: pending.platform
+        };
+      }
+    }
+    if (!options?.coalesceWithPending && isLinkedInInFlight({
       requestedPlatform: platform,
       currentJob,
       queuedJobs: queue

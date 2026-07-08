@@ -121,6 +121,25 @@ test("ensureConnected is idempotent — second call returns the same in-flight p
   assert.equal(initCount, 1);
 });
 
+test("incoming WhatsApp message event nudges the runner hook", async () => {
+  const client = createFakeClient();
+  let incomingCount = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onIncomingMessage: () => {
+      incomingCount += 1;
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  client.emit("message", { fromMe: false });
+
+  assert.equal(incomingCount, 1);
+});
+
 test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   const chats = [
     { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },

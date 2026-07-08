@@ -1,6 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveEnqueueStatus } from "../apps/runner/dist/services/scan-queue.js";
+import {
+  findPendingCoalescedScan,
+  jobCoversPlatform,
+  resolveEnqueueStatus
+} from "../apps/runner/dist/services/scan-queue.js";
 
 // Regression for P1-L3: enqueueScan must report "running" for the job that
 // starts immediately, not always "queued".
@@ -19,4 +23,26 @@ test("resolveEnqueueStatus reports running when no job is in flight", () => {
 test("resolveEnqueueStatus reports queued when a job is already in flight", () => {
   // processing was true before enqueue -> this job waits behind the active one.
   assert.equal(resolveEnqueueStatus(true), "queued");
+});
+
+test("jobCoversPlatform treats all-platform jobs as covering a platform", () => {
+  assert.equal(jobCoversPlatform(undefined, "LINKEDIN"), true);
+  assert.equal(jobCoversPlatform("LINKEDIN", "LINKEDIN"), true);
+  assert.equal(jobCoversPlatform("IMESSAGE", "LINKEDIN"), false);
+});
+
+test("findPendingCoalescedScan returns an existing queued platform scan", () => {
+  const queued = [
+    { jobId: "imessage-1", platform: "IMESSAGE" },
+    { jobId: "linkedin-1", platform: "LINKEDIN" }
+  ];
+
+  assert.equal(findPendingCoalescedScan(queued, "LINKEDIN")?.jobId, "linkedin-1");
+  assert.equal(findPendingCoalescedScan(queued, "WHATSAPP"), null);
+});
+
+test("findPendingCoalescedScan coalesces behind an all-platform queued scan", () => {
+  const queued = [{ jobId: "all-1", platform: undefined }];
+
+  assert.equal(findPendingCoalescedScan(queued, "WHATSAPP")?.jobId, "all-1");
 });

@@ -2207,6 +2207,204 @@ export class LinkedInAdapter implements PlatformAdapter {
     this.runLogger = logger;
   }
 
+  startInboxRealtimeWatcher(input: {
+    debounceMs: number;
+    onChange: (reason: string) => void;
+    log?: (line: string) => void;
+  }): { stop(): void } {
+    const log = input.log ?? ((line: string) => console.log(line));
+    const bindingName = "__relationshipInboxLinkedInChanged";
+    let stopped = false;
+    let page: Page | null = null;
+    let rearmTimer: ReturnType<typeof setTimeout> | null = null;
+    let exposed = false;
+
+    const clearRearm = (): void => {
+      if (rearmTimer) {
+        clearTimeout(rearmTimer);
+        rearmTimer = null;
+      }
+    };
+
+    const scheduleArm = (delayMs: number): void => {
+      if (stopped || rearmTimer) {
+        return;
+      }
+      rearmTimer = setTimeout(() => {
+        rearmTimer = null;
+        void arm();
+      }, delayMs);
+    };
+
+    const arm = async (): Promise<void> => {
+      if (stopped) {
+        return;
+      }
+      try {
+        const selectors = await this.deps.resolveSelectors();
+        const nextPage = await this.navigateInbox(selectors);
+        if (stopped || nextPage.isClosed()) {
+          return;
+        }
+
+        if (page !== nextPage) {
+          page = nextPage;
+          page.on("close", () => {
+            if (!stopped) {
+              page = null;
+              exposed = false;
+              scheduleArm(5_000);
+            }
+          });
+          page.on("framenavigated", (frame) => {
+            if (!stopped && frame === nextPage.mainFrame()) {
+              scheduleArm(1_000);
+            }
+          });
+        }
+
+        if (!exposed) {
+          await nextPage.exposeFunction(bindingName, (payload: unknown) => {
+            const reason =
+              payload && typeof payload === "object" && "reason" in payload
+                ? String((payload as { reason?: unknown }).reason ?? "dom_change")
+                : "dom_change";
+            try {
+              input.onChange(reason);
+            } catch {
+              // Keep page binding errors out of LinkedIn's document.
+            }
+          });
+          exposed = true;
+        }
+
+        await nextPage.evaluate(
+          ({ debounceMs, bindingName: pageBindingName }) => {
+            const win = window as unknown as Window & {
+              __relationshipInboxLinkedInWatchCleanup?: () => void;
+              [key: string]: unknown;
+            };
+            win.__relationshipInboxLinkedInWatchCleanup?.();
+
+            let lastFingerprint = "";
+            let timer: number | null = null;
+            const rowSelectors = [
+              "li.msg-conversation-listitem",
+              ".msg-conversation-listitem",
+              "a[href*='/messaging/thread/']"
+            ];
+            const unreadSelectors = [
+              ".notification-badge",
+              "[class*='unread']",
+              "[data-test*='unread']"
+            ];
+
+            const computeFingerprint = (): { fingerprint: string; rowCount: number; unreadCount: number } => {
+              const rows = rowSelectors.flatMap((selector) => Array.from(document.querySelectorAll(selector)));
+              const uniqueRows = Array.from(new Set(rows)).slice(0, 20);
+              const rowParts = uniqueRows.map((node) => {
+                const element = node as HTMLElement;
+                const anchor = element.matches("a")
+                  ? element
+                  : element.querySelector("a[href*='/messaging/']");
+                const href = anchor instanceof HTMLAnchorElement ? anchor.href : "";
+                return [
+                  href,
+                  element.getAttribute("data-urn") ?? "",
+                  element.getAttribute("data-test-id") ?? "",
+                  element.textContent?.length ?? 0
+                ].join("|");
+              });
+              const unreadCount = unreadSelectors.reduce(
+                (sum, selector) => sum + document.querySelectorAll(selector).length,
+                0
+              );
+              return {
+                fingerprint: `${location.href}::${unreadCount}::${rowParts.join("::")}`,
+                rowCount: uniqueRows.length,
+                unreadCount
+              };
+            };
+
+            const notifyIfChanged = (reason: string): void => {
+              if (!location.href.includes("/messaging")) {
+                return;
+              }
+              const current = computeFingerprint();
+              if (current.fingerprint === lastFingerprint) {
+                return;
+              }
+              lastFingerprint = current.fingerprint;
+              const notify = win[pageBindingName];
+              if (typeof notify === "function") {
+                void (notify as (payload: unknown) => Promise<void> | void)({
+                  reason,
+                  rowCount: current.rowCount,
+                  unreadCount: current.unreadCount
+                });
+              }
+            };
+
+            const scheduleNotify = (reason: string): void => {
+              if (timer !== null) {
+                window.clearTimeout(timer);
+              }
+              timer = window.setTimeout(() => {
+                timer = null;
+                notifyIfChanged(reason);
+              }, debounceMs);
+            };
+
+            lastFingerprint = computeFingerprint().fingerprint;
+            const observer = new MutationObserver(() => scheduleNotify("mutation"));
+            observer.observe(document.documentElement, {
+              childList: true,
+              subtree: true,
+              characterData: true,
+              attributes: true,
+              attributeFilter: ["class", "aria-label", "data-test-id"]
+            });
+
+            const interval = window.setInterval(() => scheduleNotify("interval"), 5_000);
+            win.__relationshipInboxLinkedInWatchCleanup = () => {
+              observer.disconnect();
+              window.clearInterval(interval);
+              if (timer !== null) {
+                window.clearTimeout(timer);
+              }
+            };
+          },
+          { debounceMs: Math.max(100, input.debounceMs), bindingName }
+        );
+
+        log(`[linkedin-watcher] armed (debounce ${input.debounceMs}ms)`);
+      } catch (error) {
+        log(`[linkedin-watcher] failed to arm: ${error instanceof Error ? error.message : String(error)}; retrying in 15s`);
+        scheduleArm(15_000);
+      }
+    };
+
+    void arm();
+
+    return {
+      stop(): void {
+        stopped = true;
+        clearRearm();
+        const currentPage = page;
+        page = null;
+        if (currentPage && !currentPage.isClosed()) {
+          void currentPage.evaluate(() => {
+            const win = window as Window & {
+              __relationshipInboxLinkedInWatchCleanup?: () => void;
+            };
+            win.__relationshipInboxLinkedInWatchCleanup?.();
+            delete win.__relationshipInboxLinkedInWatchCleanup;
+          }).catch(() => undefined);
+        }
+      }
+    };
+  }
+
   private resolveActiveStage(stage?: string | null): string | null {
     return stage ?? this.activeStage;
   }
