@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-05-21._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-08._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so they live here and not in `AGENTS.md`.
@@ -8,7 +8,9 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 ## Baseline
 
 - Active baseline branch: `v1/strip-back-pr1`.
-- Pilot-ready at commit `cb090ef` (`docs(pilot): slim README, add pilot guides, GitHub feedback flow`), unless newer commits supersede it.
+- Main release target: `main`.
+- Pilot-ready release version: `0.1.14`.
+- Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
 
 ## Landed
 
@@ -17,6 +19,9 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 - Student pilot feedback loop.
 - Bug-hunt hardening: live fixes cherry-picked onto v1.
 - Slimmed README, pilot guides, and the in-app feedback intake.
+- WhatsApp integration and rich-message handling are present in v1, guarded behind the pilot setup flow.
+- Student app update checks and launcher native-runtime rebuild guidance are present.
+- iMessage Full Disk Access setup guidance is present.
 
 ## Next
 
