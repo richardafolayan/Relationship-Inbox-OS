@@ -12,16 +12,19 @@ useful pilot feedback. If a fix here does not sort it, open a bug from the
 
 ## The app keeps the Terminal window busy
 
-That is normal. The Terminal window running the app has to stay open
-the whole time you are using the app. To stop the app, click that window
-and press `Ctrl + C`. To start it again: `cd ~/RelationshipInboxOS && npm run start:student`.
+Older installs kept Terminal busy while the app was running. Current installs
+create **Relationship Inbox OS.app** in Applications, so you can open the app
+from Applications or Launchpad and close Terminal once the browser is open.
+
+If the app icon was not created, use the Terminal fallback:
+`cd ~/RelationshipInboxOS && npm run start:student`.
 
 ## The page says "Can't reach the runner"
 
-The app has two halves and one of them is not up. Almost always: the
-Terminal running the app was closed or crashed.
+The app has two halves and one of them is not up. Almost always: Relationship
+Inbox OS is not running, or it crashed during startup.
 
-1. Open Terminal, run `cd ~/RelationshipInboxOS && npm run start:student`.
+1. Open **Relationship Inbox OS** from Applications or Launchpad.
 2. Wait for it to settle, then reload `http://localhost:3100`.
 
 ## A scan finished but no messages showed up
@@ -30,7 +33,7 @@ Terminal running the app was closed or crashed.
 - Make sure you are **signed into LinkedIn in Chrome** (the normal Chrome
   window, not a private one).
 - Press **⌘K**, type `scan`, and run **Full LinkedIn rescan** once.
-- iMessage threads need Full Disk Access for Terminal (see "My iMessage
+- iMessage threads need Full Disk Access for Relationship Inbox OS (see "My iMessage
   conversations don't show up" below).
 
 ## My iMessage conversations don't show up
@@ -38,12 +41,12 @@ Terminal running the app was closed or crashed.
 iMessage needs one macOS permission that LinkedIn does not. Check these, in
 order:
 
-1. **Full Disk Access.** The Terminal running the app must have it.
+1. **Full Disk Access.** Relationship Inbox OS must have it.
    Open **System Settings → Privacy & Security → Full Disk Access** and make
-   sure **Terminal** is switched on.
+   sure **Relationship Inbox OS** is switched on. If it is not listed, click
+   **+** and add `~/Applications/Relationship Inbox OS.app`.
 2. **Restart the app after granting it.** The permission only takes effect on
-   a fresh start: click the Terminal, press `Ctrl + C` to stop the app, then
-   run `cd ~/RelationshipInboxOS && npm run start:student`.
+   a fresh start: quit Relationship Inbox OS, then open it again.
 3. **Be signed into Messages.** Open the **Messages** app once and confirm you
    can see your chats.
 4. **Run a scan.** Press **⌘K**, type `scan`, choose **Run scan now**.
@@ -60,8 +63,8 @@ If it keeps happening, tell me. That is worth knowing.
 
 ## "Port already in use"
 
-Another copy of the app is still running. Close any other Terminal windows
-running the app, then start it once more. If it persists, restart your
+Another copy of the app is still running. Quit any other running copy of
+Relationship Inbox OS, then start it once more. If it persists, restart your
 Mac and try again.
 
 ## macOS asked for permission
@@ -72,9 +75,9 @@ expected:
 - **Full Disk Access** lets the app *read* your iMessages. You grant this
   yourself in System Settings (see "My iMessage conversations don't show up"
   above).
-- **"Terminal wants to control Messages"** appears the first time you *send*
-  an iMessage reply. Click **Allow**. If you dismissed it by accident, sending
-  will fail, tell me and we will re-trigger it.
+- **"Relationship Inbox OS wants to control Messages"** appears the first time
+  you *send* an iMessage reply. Click **Allow**. If you dismissed it by
+  accident, sending will fail, tell me and we will re-trigger it.
 
 You can decline both and LinkedIn still works fine on its own.
 
@@ -86,8 +89,8 @@ bug worth reporting.
 
 ## I want to start completely fresh
 
-1. Stop the app (`Ctrl + C` in the Terminal).
-2. Start it again: `cd ~/RelationshipInboxOS && npm run start:student`.
+1. Quit Relationship Inbox OS.
+2. Open it again from Applications or Launchpad.
 
 That is usually enough. A full data reset is a bigger step, ask me first
 rather than doing it yourself.

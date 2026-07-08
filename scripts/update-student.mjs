@@ -85,6 +85,33 @@ const C = process.stdout.isTTY
 function say(m) { process.stdout.write(m + "\n"); }
 function die(m) { process.stderr.write(`\n  ${C.r}✗ ${m}${C.reset}\n\n`); process.exit(1); }
 
+function macAppBundleDir() {
+  return process.env.RIOS_APP_BUNDLE_DIR || join(process.env.HOME || "", "Applications");
+}
+
+function macAppBundlePath() {
+  const out = macAppBundleDir();
+  return out ? join(out, "Relationship Inbox OS.app") : "";
+}
+
+function refreshMacAppBundle() {
+  const script = join(APP_DIR, "scripts", "create-macos-app-bundle.mjs");
+  if (!existsSync(script)) return;
+  const out = macAppBundleDir();
+  const nodeDir = process.env.RIOS_NODE_DIR || join(process.env.HOME || "", ".rios-node");
+  if (!out) return;
+  if (existsSync(macAppBundlePath())) return;
+  try {
+    execFileSync(process.execPath, [script, "--app-dir", APP_DIR, "--out", out, "--node-dir", nodeDir], {
+      cwd: APP_DIR,
+      stdio: "ignore"
+    });
+    say(`  Created the Relationship Inbox OS Mac app.`);
+  } catch {
+    say(`  ${C.y}Could not refresh the Mac app. The Terminal start command still works.${C.reset}`);
+  }
+}
+
 function currentVersion(dir) {
   for (const file of ["release.json", "package.json"]) {
     try {
@@ -315,9 +342,12 @@ async function applyUpdate(current, manifest) {
     }
   }
 
+  refreshMacAppBundle();
   pruneBackups(parent, Math.max(0, args.keepBackups));
   say(`\n  ${C.g}${C.b}Updated to ${manifest.version}.${C.reset}`);
-  say(`  Start the app again:  ${C.b}npm run start:student${C.reset}  (or node scripts/start-student.mjs)`);
+  const bundlePath = macAppBundlePath();
+  if (bundlePath) say(`  Start the app again:  ${C.b}open "${bundlePath}"${C.reset}`);
+  say(`  Terminal fallback:  ${C.b}npm run start:student${C.reset}`);
   say(`  Previous version kept at: ${backupDir}\n`);
 }
 
