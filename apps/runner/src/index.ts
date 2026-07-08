@@ -6301,8 +6301,33 @@ app.post("/control/whatsapp/connect", asyncRoute(async (_req, res) => {
   void adapter.ensureConnected().catch((error) => {
     console.warn(`[whatsapp] connect failed: ${error instanceof Error ? error.message : String(error)}`);
     whatsappConnect.state = "disconnected";
+    whatsappConnect.updatedAt = new Date().toISOString();
   });
   whatsappConnect.state = "connecting";
+  whatsappConnect.updatedAt = new Date().toISOString();
+  res.status(202).json({ ok: true, state: whatsappConnect.state });
+}));
+
+app.post("/control/whatsapp/refresh-qr", asyncRoute(async (_req, res) => {
+  if (!runnerConfig.whatsapp.enabled) {
+    res.status(409).json({ ok: false, reason: "disabled", message: "Set WHATSAPP_ENABLED=true and restart to use WhatsApp." });
+    return;
+  }
+  const adapter = adapters.WHATSAPP;
+  if (!adapter) {
+    res.status(500).json({ ok: false, reason: "no_adapter" });
+    return;
+  }
+  await adapter.closeSession("refresh_qr");
+  whatsappConnect.qr = null;
+  whatsappConnect.qrDataUrl = null;
+  whatsappConnect.state = "connecting";
+  whatsappConnect.updatedAt = new Date().toISOString();
+  void adapter.ensureConnected().catch((error) => {
+    console.warn(`[whatsapp] QR refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+    whatsappConnect.state = "disconnected";
+    whatsappConnect.updatedAt = new Date().toISOString();
+  });
   res.status(202).json({ ok: true, state: whatsappConnect.state });
 }));
 

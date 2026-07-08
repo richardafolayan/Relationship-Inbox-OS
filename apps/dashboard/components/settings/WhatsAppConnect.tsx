@@ -17,6 +17,7 @@ interface WhatsAppStatus {
 export function WhatsAppConnect() {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [refreshingQr, setRefreshingQr] = useState(false);
   const [error, setError] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -59,6 +60,20 @@ export function WhatsAppConnect() {
     }
   };
 
+  const refreshQr = async () => {
+    if (refreshingQr) return;
+    setRefreshingQr(true);
+    setError("");
+    try {
+      await apiPost("/runner/control/whatsapp/refresh-qr", {});
+      await refresh();
+    } catch {
+      setError("Couldn't refresh the WhatsApp QR code. Is the app running?");
+    } finally {
+      setRefreshingQr(false);
+    }
+  };
+
   // Hidden entirely until the operator has opted in at the runner level.
   if (status && !status.enabled) return null;
 
@@ -93,20 +108,32 @@ export function WhatsAppConnect() {
         <span className="font-mono text-[11px] text-ink-3">
           {connected
             ? "Connected"
-            : state === "qr_ready"
+            : refreshingQr
+              ? "Getting a new code"
+              : state === "qr_ready"
               ? "Scan the code"
               : state === "connecting"
                 ? "Connecting..."
                 : "Not connected"}
         </span>
-        {!connected ? (
+        {state === "qr_ready" ? (
+          <button
+            type="button"
+            onClick={refreshQr}
+            disabled={refreshingQr}
+            className="inline-flex items-center rounded-pill border border-hairline bg-paper px-3 py-[7px] text-[12px] font-medium text-ink hover:bg-[oklch(95%_0.004_80)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {refreshingQr ? "Refreshing..." : "New QR code"}
+          </button>
+        ) : null}
+        {!connected && state !== "qr_ready" ? (
           <button
             type="button"
             onClick={connect}
-            disabled={connecting || state === "connecting" || state === "qr_ready"}
+            disabled={connecting || state === "connecting"}
             className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
           >
-            {state === "connecting" || state === "qr_ready" ? "Connecting..." : "Connect WhatsApp"}
+            {state === "connecting" ? "Connecting..." : "Connect WhatsApp"}
           </button>
         ) : null}
       </div>
