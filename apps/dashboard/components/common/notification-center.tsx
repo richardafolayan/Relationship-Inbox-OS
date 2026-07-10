@@ -14,7 +14,6 @@ import {
   unseenNotificationCount,
   type CenterNotification
 } from "@/lib/notification-center";
-import { startAppUpdate } from "@/lib/app-update-action";
 import { UPDATE_NOTICE_ID } from "@/lib/update-notice";
 import { resolveCenterRowGesture } from "@/lib/toast-gesture";
 import { formatRelative } from "@/lib/time";
@@ -66,12 +65,10 @@ export function NotificationBell() {
   const openNotice = useCallback(
     (item: CenterNotification) => {
       // Opening a thread completes a message notice, so the row goes. The
-      // update reminder's completing act is updating, so clicking it starts
-      // the update instead of routing through Settings.
       if (item.id === UPDATE_NOTICE_ID) {
         markCenterNotificationsSeen([item.id]);
         setOpen(false);
-        void startAppUpdate();
+        router.push(item.href);
         return;
       } else {
         dismissCenterNotification(item.id);

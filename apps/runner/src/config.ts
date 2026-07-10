@@ -3,11 +3,12 @@ import { dirname, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
 
-dotenv.config({ path: resolve(process.cwd(), ".env") });
-
 const currentDir = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = resolve(currentDir, "../../..");
-export const dataDir = resolve(projectRoot, "data");
+const configDir = process.env.RIOS_CONFIG_DIR?.trim();
+if (configDir) dotenv.config({ path: resolve(configDir, ".env") });
+dotenv.config({ path: resolve(process.cwd(), ".env") });
+export const dataDir = resolve(process.env.RIOS_DATA_DIR?.trim() || resolve(projectRoot, "data"));
 
 export type BrowserProfileMode = "isolated" | "personal";
 export type BrowserProfileFallbackBehavior = "allow_isolated" | "error";
