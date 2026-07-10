@@ -6,5 +6,13 @@
   <true/>
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
+  <!-- Electron's documented hardened-runtime profile: without these an
+       ad-hoc (and even Developer ID) signed Electron app aborts at launch
+       because library validation rejects the frameworks and native modules
+       (different or missing Team IDs). -->
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
 </dict>
 </plist>
