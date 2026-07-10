@@ -3,7 +3,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -347,7 +346,10 @@ export async function buildMacosDmg(options = {}) {
 
     const packagedNodeDir = join(resourcesDir, "runtime", "node");
     rmSync(packagedNodeDir, { recursive: true, force: true });
-    cpSync(nodeDir, packagedNodeDir, { recursive: true });
+    // ditto keeps npm/npx/corepack as relative symlinks; cpSync rewrites
+    // them to absolute build-machine paths, which breaks npm on any other
+    // Mac and fails strict codesign verification.
+    copyBundle(nodeDir, packagedNodeDir);
 
     if (!options.noSign) signApp(paths.appPath, process.env.RIOS_CODESIGN_IDENTITY);
     const dmgPath = options.skipDmg ? "" : createDmg(paths.appPath, paths.outDir, version);
