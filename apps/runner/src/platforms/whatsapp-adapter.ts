@@ -25,13 +25,14 @@ import type {
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
-import type { Client, Message as WaMessage } from "whatsapp-web.js";
+import type { Chat as WaChat, Client, Message as WaMessage } from "whatsapp-web.js";
 import { createWhatsAppClient } from "./whatsapp/client";
 import { chatToThreadStub } from "./whatsapp/groupResolver";
 import { checkSendGuard, type SendGuardConfig, type SendGuardPrisma } from "./whatsapp/sendGuard";
 import { epochSecondsToIso } from "./whatsapp/whatsappTime";
 import { isGroupJid } from "./whatsapp/whatsappIdentity";
 import { mapWhatsAppKind, persistWhatsAppMedia, safeIdForFilename, type WhatsAppMessageMedia } from "./whatsapp/media";
+import { retryWithBackoff } from "./utils";
 import { copyFile, mkdir } from "node:fs/promises";
 import { extname, resolve, join } from "node:path";
 
@@ -65,6 +66,8 @@ export interface WhatsAppAdapterDeps {
 }
 
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
+const WHATSAPP_CHAT_READ_RETRY_ATTEMPTS = 3;
+const WHATSAPP_CHAT_READ_RETRY_BACKOFF_MS = 750;
 
 export class WhatsAppAdapter implements PlatformAdapter {
   readonly platform: PlatformName = PLATFORM_WHATSAPP;
@@ -100,13 +103,17 @@ export class WhatsAppAdapter implements PlatformAdapter {
         resolve();
       };
       const onAuthFailure = (msg: string) => {
+        this.ready = false;
+        this.readyPromise = null;
         this.deps.onStateChange?.("disconnected");
         reject(new Error(`WhatsApp auth_failure: ${msg}`));
       };
       const onDisconnected = (reason: string) => {
+        const wasReady = this.ready;
         this.ready = false;
+        this.readyPromise = null;
         this.deps.onStateChange?.("disconnected");
-        if (!this.ready) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
+        if (!wasReady) reject(new Error(`WhatsApp disconnected before ready: ${reason}`));
       };
 
       client.on("qr", (qr: string) => {
@@ -145,12 +152,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithRetry();
     return chats.filter((c) => (c.unreadCount ?? 0) > 0).map(chatToThreadStub);
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithRetry();
     // Chats arrive ordered by most-recent activity from wweb.js.
     return chats.slice(0, limit).map(chatToThreadStub);
   }
@@ -334,6 +341,20 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return this.client;
   }
 
+  private async getChatsWithRetry(): Promise<WaChat[]> {
+    return retryWithBackoff({
+      attempts: WHATSAPP_CHAT_READ_RETRY_ATTEMPTS,
+      baseDelayMs: WHATSAPP_CHAT_READ_RETRY_BACKOFF_MS,
+      isRetryable: isTransientWhatsAppBrowserError,
+      run: async (attempt) => {
+        if (attempt > 1 && (!this.client || !this.ready)) {
+          await this.ensureConnected();
+        }
+        return this.requireClient().getChats();
+      }
+    });
+  }
+
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {
     // Polls (`poll_creation` type) get flattened to a readable question +
     // bullet list so they appear inline in the thread timeline rather
@@ -420,6 +441,17 @@ export class WhatsAppAdapter implements PlatformAdapter {
       attachments
     };
   }
+}
+
+function isTransientWhatsAppBrowserError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /attempted to use detached frame/i.test(message) ||
+    /detached frame/i.test(message) ||
+    /execution context was destroyed/i.test(message) ||
+    /target page, context or browser has been closed/i.test(message) ||
+    /protocol error.*(?:target closed|session closed|cannot find context)/i.test(message)
+  );
 }
 
 /**

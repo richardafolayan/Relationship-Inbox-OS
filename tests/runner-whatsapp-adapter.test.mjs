@@ -163,6 +163,85 @@ test("fetchRecentThreads slices to the requested limit", async () => {
   assert.equal(stubs.length, 3);
 });
 
+test("scanUnreadThreads retries transient detached-frame chat reads", async () => {
+  let attempts = 0;
+  const chats = [{ id: { _serialized: "b@c.us" }, name: "B", unreadCount: 1, isGroup: false }];
+  const client = createFakeClient({
+    getChats: async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        throw new Error("Attempted to use detached Frame '3045D3209AD7F2A6617DF66AF3E261A6'.");
+      }
+      return chats;
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  const stubs = await adapter.scanUnreadThreads();
+  assert.equal(attempts, 2);
+  assert.deepEqual(
+    stubs.map((s) => s.platformThreadId),
+    ["b@c.us"]
+  );
+});
+
+test("scanUnreadThreads reconnects when a detached-frame read disconnects the client", async () => {
+  const firstClient = createFakeClient();
+  const secondClient = createFakeClient({
+    getChats: async () => [
+      { id: { _serialized: "b@c.us" }, name: "B", unreadCount: 1, isGroup: false }
+    ]
+  });
+  firstClient.getChats = async () => {
+    firstClient.emit("disconnected", "NAVIGATION");
+    throw new Error("Attempted to use detached Frame '3045D3209AD7F2A6617DF66AF3E261A6'.");
+  };
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      if (createCalls === 2) {
+        setImmediate(() => secondClient.emit("ready"));
+      }
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => firstClient.emit("ready"));
+  await ready;
+  const stubs = await adapter.scanUnreadThreads();
+  assert.equal(createCalls, 2);
+  assert.deepEqual(
+    stubs.map((s) => s.platformThreadId),
+    ["b@c.us"]
+  );
+});
+
+test("scanUnreadThreads does not retry non-transient chat read failures", async () => {
+  let attempts = 0;
+  const client = createFakeClient({
+    getChats: async () => {
+      attempts += 1;
+      throw new Error("WhatsApp storage unavailable");
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  await assert.rejects(adapter.scanUnreadThreads(), /storage unavailable/);
+  assert.equal(attempts, 1);
+});
+
 test("sendMessage refuses to send when the guard blocks (non-saved contact)", async () => {
   const client = createFakeClient({
     getContactById: async () => ({ isMyContact: false })
@@ -564,6 +643,29 @@ test("closeSession allows a fresh ensureConnected to proceed after a stuck mid-c
   const fresh = adapter.ensureConnected();
   setImmediate(() => secondClient.emit("ready"));
   await fresh;
+  assert.equal(createCalls, 2);
+});
+
+test("disconnect after ready clears the cached ready promise for reconnect", async () => {
+  const firstClient = createFakeClient();
+  const secondClient = createFakeClient();
+  let createCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      createCalls += 1;
+      return createCalls === 1 ? firstClient : secondClient;
+    }
+  });
+  const firstConnect = adapter.ensureConnected();
+  setImmediate(() => firstClient.emit("ready"));
+  await firstConnect;
+
+  firstClient.emit("disconnected", "NAVIGATION");
+
+  const reconnect = adapter.ensureConnected();
+  setImmediate(() => secondClient.emit("ready"));
+  await reconnect;
   assert.equal(createCalls, 2);
 });
 

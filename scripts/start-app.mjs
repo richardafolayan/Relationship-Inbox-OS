@@ -144,7 +144,7 @@ function prepare() {
     }
   }
 
-  // 2. Database schema - push when the schema changed or the database file
+  // 2. Database schema - sync when the schema changed or the database file
   //    does not exist yet. Additive changes (new tables/indexes) apply
   //    in place without touching data.
   if (schemaChanged || !existsSync(join(APP_DIR, "data/inbox-os.sqlite"))) {

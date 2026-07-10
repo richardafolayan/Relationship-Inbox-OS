@@ -552,7 +552,7 @@ install_app() {
 
   run "Preparing the local database..." npm run db:generate \
     || die "Database setup (generate) failed. The log has the details: $LOG_FILE"
-  run "Creating the local database..." npm run db:push \
+  run "Creating/updating the local database..." npm run db:push \
     || die "Database setup (create) failed. The log has the details: $LOG_FILE"
   ok "Local database ready"
 
