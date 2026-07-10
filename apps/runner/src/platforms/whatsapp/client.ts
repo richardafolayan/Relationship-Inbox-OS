@@ -32,8 +32,16 @@ export function createWhatsAppClient(opts: WhatsAppClientOptions): ClientType {
     // headless server use. Kept conservative — we don't pass a custom
     // executablePath because the bundled Chromium is what wweb.js tests
     // against.
+    //
+    // protocolTimeout: the default (30s) is too short for getChats() on
+    // accounts with hundreds of chats — wweb.js evaluates a single
+    // page.evaluate that loads every chat, and Puppeteer's CDP call
+    // exceeds 30s on busy accounts. Bumping to 180s keeps the happy
+    // path snappy (sub-second response on small accounts) while letting
+    // big-history accounts complete their first scan.
     puppeteer: {
       headless: true,
+      protocolTimeout: 180_000,
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
