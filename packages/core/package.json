@@ -17,6 +17,10 @@
     "./birthday": {
       "types": "./dist/birthday.d.ts",
       "import": "./dist/birthday.js"
+    },
+    "./imessage-system-events": {
+      "types": "./dist/imessage-system-events.d.ts",
+      "import": "./dist/imessage-system-events.js"
     }
   },
   "scripts": {
