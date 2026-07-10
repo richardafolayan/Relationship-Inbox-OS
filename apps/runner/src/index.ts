@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import express from "express";
 import compression from "compression";
 import multer from "multer";
@@ -115,6 +116,10 @@ import { cleanupDemoData, seedDemoData } from "./services/demo";
 import { checkPresenterGuard } from "./middleware/presenter-guard";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
+import {
+  createCompressedJsonCacheEntry,
+  type CompressedJsonCacheEntry
+} from "./services/compressed-json-cache";
 import {
   createLinkedInSmokeLogger,
   writeLatestLinkedInSmokePointer
@@ -269,7 +274,26 @@ const selectorReports = createSelectorTestStore();
 // snooze expiry) honest even if some future write path forgets to signal.
 // ---------------------------------------------------------------------------
 const INBOX_CACHE_TTL_MS = 20_000;
-const inboxResponseCache = new Map<string, { expires: number; body: unknown }>();
+const inboxResponseCache = new Map<string, CompressedJsonCacheEntry>();
+
+function sendCachedInboxResponse(
+  req: express.Request,
+  res: express.Response,
+  cached: CompressedJsonCacheEntry,
+  cacheStatus: "hit" | "miss",
+  startedAt: number
+): void {
+  res.setHeader("X-RIOS-Cache", cacheStatus);
+  res.setHeader("Server-Timing", `inbox-prep;dur=${(performance.now() - startedAt).toFixed(2)}`);
+  res.vary("Accept-Encoding");
+  res.type("application/json");
+  if (req.acceptsEncodings("gzip") === "gzip") {
+    res.setHeader("Content-Encoding", "gzip");
+    res.send(cached.gzip);
+    return;
+  }
+  res.send(cached.json);
+}
 let dataVersion = 0;
 function bumpDataVersion(): void {
   dataVersion += 1;
@@ -4541,6 +4565,7 @@ app.post(
 );
 
 app.get("/data/inbox", asyncRoute(async (req, res) => {
+  const startedAt = performance.now();
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
   const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
@@ -4560,7 +4585,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const cacheKey = req.originalUrl;
   const cached = inboxResponseCache.get(cacheKey);
   if (cached && Date.now() < cached.expires) {
-    res.json(cached.body);
+    sendCachedInboxResponse(req, res, cached, "hit", startedAt);
     return;
   }
   const versionAtStart = dataVersion;
@@ -4671,15 +4696,16 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   };
 
   const body = { rows, summary };
+  const response = createCompressedJsonCacheEntry(body, Date.now() + INBOX_CACHE_TTL_MS);
   // Only cache if no write/event landed while we were computing — otherwise
   // this response may already be missing that change.
   if (dataVersion === versionAtStart) {
     if (inboxResponseCache.size > 50) {
       inboxResponseCache.clear();
     }
-    inboxResponseCache.set(cacheKey, { expires: Date.now() + INBOX_CACHE_TTL_MS, body });
+    inboxResponseCache.set(cacheKey, response);
   }
-  res.json(body);
+  sendCachedInboxResponse(req, res, response, "miss", startedAt);
 }));
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
