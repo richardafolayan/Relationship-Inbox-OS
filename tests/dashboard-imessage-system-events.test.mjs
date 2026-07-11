@@ -4,13 +4,14 @@ import assert from "node:assert/strict";
 const { isNonContentIMessageSystemEvent: dashboardImpl } = await import(
   "../apps/dashboard/lib/imessage-system-events.ts"
 );
-const { isNonContentIMessageSystemEvent: coreImpl } = await import("@inbox-os/core");
+const { isNonContentIMessageSystemEvent: coreImpl } = await import(
+  "@inbox-os/core/imessage-system-events"
+);
 
-// The dashboard ships a copy of the helper because the rest of
-// @inbox-os/core can't be webpack-bundled into the browser
-// (transitive `node:crypto` import in `hash.js`). The two implementations
-// must stay behaviourally identical — this test runs the same inputs
-// through both and fails if they ever diverge.
+test("dashboard re-exports the browser-safe core matcher", () => {
+  assert.equal(dashboardImpl, coreImpl);
+});
+
 const cases = [
   { input: "Seyi kept an audio message from you.", expected: true },
   { input: "You kept an audio message from Lanre.", expected: true },
