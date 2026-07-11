@@ -98,7 +98,7 @@ export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPoll
         {status === "voted" ? <Check className="h-[13px] w-[13px]" strokeWidth={1.8} /> : null}
         {status === "voting" ? "Voting" : status === "voted" ? "Voted" : "Vote"}
       </button>
-      {error ? <span className="font-mono text-[11px] text-risk-overdue">{error}</span> : null}
+      {error ? <span className="text-[11px] text-ink-2">{error}</span> : null}
     </div>
   );
 }

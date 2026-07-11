@@ -8,6 +8,7 @@ import { Sidebar } from "@/components/layout/sidebar";
 import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
+import { ConsumerRecovery } from "@/components/common/consumer-recovery";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
@@ -74,6 +75,12 @@ import {
 import type { HealthResponse, InboxResponse, InboxRow, OperatorProfile } from "@/lib/types";
 import { recordThreadSource } from "@/lib/thread-source";
 import { isInTodayQueue } from "@/lib/today";
+import { recordClientError } from "@/lib/client-error-log";
+import {
+  classifyConsumerFailure,
+  logConsumerFailure,
+  type ConsumerFailure
+} from "@/lib/consumer-failure";
 
 const linkedInAutoScanStorageKey = "linkedin_dashboard_autoscan_enabled";
 // Auto-scan cadence is randomised per firing rather than a hard loop: a
@@ -142,6 +149,9 @@ export function AppShell({ children }: { children: ReactNode }) {
   // (AppShell lives in the root layout), so this only ever shows on a
   // genuine fresh mount.
   const [health, setHealth] = useState<HealthResponse | null | undefined>(undefined);
+  const [startupFailure, setStartupFailure] = useState<ConsumerFailure | null>(null);
+  const [runtimeFailure, setRuntimeFailure] = useState<ConsumerFailure | null>(null);
+  const [recovering, setRecovering] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [autoScanEnabled, setAutoScanEnabled] = useState(false);
   const [attentionCount, setAttentionCount] = useState(0);
@@ -264,10 +274,32 @@ export function AppShell({ children }: { children: ReactNode }) {
   const refreshMeta = useCallback(async () => {
     // Short TTLs so this 8s background poll de-dupes with the page-level
     // /data/inbox and /health reads instead of issuing parallel duplicates.
-    const [healthData, inboxData] = await Promise.all([
-      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }).catch(() => null),
-      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 4000 }).catch(() => null)
+    const [healthResult, inboxResult] = await Promise.allSettled([
+      apiGet<HealthResponse>("/runner/health", { ttlMs: 4000 }),
+      apiGet<InboxResponse>("/runner/data/inbox", { ttlMs: 4000 })
     ]);
+    const healthData = healthResult.status === "fulfilled" ? healthResult.value : null;
+    const inboxData = inboxResult.status === "fulfilled" ? inboxResult.value : null;
+
+    if (healthData && inboxData) {
+      setStartupFailure(null);
+    } else if (healthData) {
+      setStartupFailure(
+        classifyConsumerFailure(inboxResult.status === "rejected" ? inboxResult.reason : null, {
+          path: "/runner/data/inbox",
+          method: "GET",
+          phase: "startup"
+        })
+      );
+    } else {
+      setStartupFailure(
+        classifyConsumerFailure(healthResult.status === "rejected" ? healthResult.reason : null, {
+          path: "/runner/health",
+          method: "GET",
+          phase: "network"
+        })
+      );
+    }
 
     // healthData ?? prev ?? null: a fresh result wins; a failed poll
     // keeps the last good value (no mid-session blip to "offline"); and
@@ -280,6 +312,45 @@ export function AppShell({ children }: { children: ReactNode }) {
       maybeNotify(inboxData.rows);
     }
   }, [maybeNotify]);
+
+  const recoverApp = useCallback(async () => {
+    const activeFailure = runtimeFailure ?? startupFailure;
+    if (!activeFailure || recovering) return;
+    if (runtimeFailure) {
+      window.location.reload();
+      return;
+    }
+
+    setRecovering(true);
+    try {
+      if (activeFailure.code === "RUNNER_OFFLINE") {
+        const response = await fetch("/api/local-runner/start", { method: "POST" });
+        const payload = (await response.json().catch(() => ({}))) as { ok?: boolean };
+        if (!response.ok || !payload.ok) {
+          throw new Error("Local runner start request failed");
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 2500));
+        await refreshMeta();
+        window.setTimeout(() => void refreshMeta(), 6000);
+      } else {
+        await refreshMeta();
+      }
+    } catch (error) {
+      const failure = classifyConsumerFailure(error, {
+        path: "/api/local-runner/start",
+        method: "POST",
+        phase: "response"
+      });
+      logConsumerFailure(failure, error, {
+        path: "/api/local-runner/start",
+        method: "POST",
+        phase: "response"
+      });
+      setStartupFailure(failure);
+    } finally {
+      setRecovering(false);
+    }
+  }, [recovering, refreshMeta, runtimeFailure, startupFailure]);
 
   // Poll health + inbox every 8s while visible; pause in background tabs and
   // catch up on return (the hook fires an immediate tick on mount).
@@ -646,18 +717,30 @@ export function AppShell({ children }: { children: ReactNode }) {
     return () => window.removeEventListener("keydown", onKeydown);
   }, [paletteOpen, pathname, router]);
 
-  // Defense in depth: any rejection that escapes a callsite-level handler
-  // would otherwise bubble to Next.js's dev error overlay. Action callsites
-  // already capture their own errors via `runAction`; this is the safety net.
   useEffect(() => {
-    const onRejection = (event: PromiseRejectionEvent) => {
-      const reason = event.reason;
-      const message = reason instanceof Error ? reason.message : String(reason);
-      console.warn("[unhandledRejection]", message, reason);
+    const capture = (reason: unknown) => {
+      const failure = classifyConsumerFailure(reason, {
+        method: "POST",
+        phase: "runtime"
+      });
+      recordClientError(failure.message, Date.now());
+      logConsumerFailure(failure, reason, { method: "POST", phase: "runtime" });
+      setRuntimeFailure(failure);
+    };
+    const onError = (event: ErrorEvent) => {
+      capture(event.error ?? event.message);
       event.preventDefault();
     };
+    const onRejection = (event: PromiseRejectionEvent) => {
+      capture(event.reason);
+      event.preventDefault();
+    };
+    window.addEventListener("error", onError);
     window.addEventListener("unhandledrejection", onRejection);
-    return () => window.removeEventListener("unhandledrejection", onRejection);
+    return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onRejection);
+    };
   }, []);
 
   // Quiet hours: when the toggle is on AND the local time is between
@@ -687,6 +770,18 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex h-app-screen min-h-0 flex-col">
         <FullDemoBanner />
         <TopStatus />
+        {runtimeFailure ?? startupFailure ? (
+          <div className="border-b border-hairline bg-paper px-3 py-2 sm:px-6">
+            <ConsumerRecovery
+              failure={(runtimeFailure ?? startupFailure)!}
+              compact
+              onRetry={() => void recoverApp()}
+              retrying={recovering}
+              retryingLabel={(runtimeFailure ?? startupFailure)?.code === "RUNNER_OFFLINE" ? "Starting runner…" : "Trying again…"}
+              actionLabel={runtimeFailure ? "Reload" : undefined}
+            />
+          </div>
+        ) : null}
         <main className="min-h-0 flex-1 overflow-y-auto">{children}</main>
       </div>
       <MobileDock attentionCount={sidebarAttention} onOpenSearch={() => setPaletteOpen(true)} />

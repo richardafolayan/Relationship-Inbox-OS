@@ -88,10 +88,10 @@ export function Sidebar({
   // actually working as intended.
   const runnerLabel: { kind: "online" | "busy" | "offline" | "unknown"; text: string } = (() => {
     if (health === undefined) return { kind: "unknown", text: "Connecting…" };
-    if (!health) return { kind: "offline", text: "Runner offline" };
-    if (health.runnerStatus !== "ONLINE") return { kind: "busy", text: "Runner busy" };
-    if ((health.enrichmentQueue?.total ?? 0) > 0) return { kind: "busy", text: "Runner busy" };
-    return { kind: "online", text: "Runner online" };
+    if (!health) return { kind: "offline", text: "App helper paused" };
+    if (health.runnerStatus !== "ONLINE") return { kind: "busy", text: "App working" };
+    if ((health.enrichmentQueue?.total ?? 0) > 0) return { kind: "busy", text: "App working" };
+    return { kind: "online", text: "App ready" };
   })();
   const dotColor =
     runnerLabel.kind === "online"
@@ -100,7 +100,7 @@ export function Sidebar({
         ? "bg-risk-waiting"
         : runnerLabel.kind === "unknown"
           ? "bg-ink-3"
-          : "bg-risk-overdue";
+          : "bg-ink-3";
 
   const ToggleIcon = collapsed ? PanelLeftOpen : PanelLeftClose;
   const toggleTitle = collapsed ? "Expand sidebar ([)" : "Collapse sidebar ([)";

@@ -49,6 +49,7 @@ import {
   type ScanIntervalId
 } from "@/lib/scan-interval";
 import { cn } from "@/lib/utils";
+import { classifyConsumerFailure } from "@/lib/consumer-failure";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
@@ -670,7 +671,7 @@ function PlatformSettingsSection({
       <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
         Connected platforms
       </p>
-      {error ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-overdue">{error}</p> : null}
+      {error ? <p className="m-0 mb-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
       {notice ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
       <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
         <PlatformSetupCard
@@ -727,6 +728,12 @@ function PlatformSetupCard({
   const connected = status === "CONNECTED";
   const enabled = row?.enabled ?? true;
   const runnerProcess = fallbackPlatform === "IMESSAGE" ? row?.runnerProcess : undefined;
+  const platformFailure = row?.lastError
+    ? classifyConsumerFailure(new Error(row.lastError), {
+        path: "/runner/control/platform/connect",
+        method: "POST"
+      })
+    : null;
   const statusLabel = !enabled
     ? "Off"
     : connected
@@ -753,8 +760,10 @@ function PlatformSetupCard({
           {statusLabel}
         </span>
       </div>
-      {row?.lastError ? (
-        <p className="m-0 mt-3 text-[12.5px] leading-[1.45] text-risk-overdue">{row.lastError}</p>
+      {platformFailure ? (
+        <p className="m-0 mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2">
+          {platformFailure.message} {platformFailure.nextAction}
+        </p>
       ) : null}
       {runnerProcess?.executablePath ? (
         <p className="m-0 mt-3 break-all font-mono text-[11px] leading-[1.45] text-ink-3">
@@ -928,8 +937,8 @@ function ReassessAllControl() {
           read-only demo, nothing changed
         </span>
       ) : status === "error" ? (
-        <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
-          failed
+        <span className="text-[11px] text-ink-2" aria-live="polite">
+          Couldn’t reset. Try again.
         </span>
       ) : null}
       <button
@@ -1255,8 +1264,8 @@ function OverdueDigestRow() {
               saved
             </span>
           ) : status === "error" ? (
-            <span className="font-mono text-[11px] text-risk-overdue" aria-live="polite">
-              failed
+            <span className="text-[11px] text-ink-2" aria-live="polite">
+              Couldn’t save. Try again.
             </span>
           ) : null}
         </div>

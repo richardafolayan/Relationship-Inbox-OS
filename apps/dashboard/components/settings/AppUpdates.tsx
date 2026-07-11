@@ -210,7 +210,7 @@ export function AppUpdates() {
       ) : null}
 
       {error ? (
-        <p className="mt-3 text-[12px] text-risk-overdue" aria-live="polite">
+        <p className="mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
           {error}
         </p>
       ) : null}

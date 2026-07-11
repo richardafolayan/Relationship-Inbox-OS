@@ -12,6 +12,7 @@ import { Menu } from "@/components/ui/menu";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { DegradedBanner } from "@/components/common/degraded-banner";
 import { MacContactsHint } from "@/components/common/mac-contacts-hint";
+import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { ReceiptsDrawer } from "@/components/common/receipts-drawer";
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
@@ -80,7 +81,7 @@ export default function PlatformsPage() {
       />
 
       {actionError ? (
-        <p className="mb-6 font-mono text-[11px] text-risk-overdue">{actionError}</p>
+        <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{actionError}</p>
       ) : null}
 
       {/* iMessage names show as numbers when this Mac's Contacts app is empty
@@ -174,12 +175,17 @@ function PlatformCardView({
       : row.status === "DEGRADED"
         ? { className: "text-risk-waiting", label: "needs a look" }
         : row.status === "ERROR"
-          ? { className: "text-risk-overdue", label: "error" }
+          ? { className: "text-ink-2", label: "needs attention" }
           : { className: "text-ink-3", label: "not connected" };
 
   const scanLine = row.lastScanAt
     ? `last scan ${formatRelative(row.lastScanAt)}`
-    : row.lastError ?? "sign in to enable";
+    : row.lastError
+      ? classifyConsumerFailure(new Error(row.lastError), {
+          path: "/runner/control/platform/connect",
+          method: "POST"
+        }).message
+      : "sign in to enable";
 
   const report = row.latestSelectorReport;
   const passes = report?.results.filter((r) => r.status === "PASS").length ?? 0;
