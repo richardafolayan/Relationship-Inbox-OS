@@ -24,9 +24,13 @@ export function readEnvFile(path) {
 }
 
 export function loadAppEnv(appDir, target = process.env) {
-  const env = readEnvFile(join(appDir, ".env"));
-  for (const [key, value] of Object.entries(env)) {
-    if (target[key] === undefined) target[key] = value;
+  const configDir = target.RIOS_CONFIG_DIR?.trim();
+  const paths = [configDir && join(configDir, ".env"), join(appDir, ".env")].filter(Boolean);
+  for (const path of paths) {
+    const env = readEnvFile(path);
+    for (const [key, value] of Object.entries(env)) {
+      if (target[key] === undefined) target[key] = value;
+    }
   }
   return target;
 }

@@ -66,6 +66,7 @@ test("desktop icon is a local SVG with no remote assets", () => {
   const svg = readFileSync(join(ROOT, "apps/desktop/assets/icon.svg"), "utf8");
   assert.match(svg, /Relationship Inbox OS/);
   assert.doesNotMatch(svg, /href="https?:\/\//);
-  assert.match(svg, /#14d7d1/);
-  assert.match(svg, /#ff5d57/);
+  assert.match(svg, /#F7F2E8/);
+  assert.match(svg, /#202A35/);
+  assert.match(svg, /#D9902F/);
 });

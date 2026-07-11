@@ -3,14 +3,14 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
-  cpSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   renameSync,
   rmSync,
-  statSync,
   writeFileSync
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -112,6 +112,17 @@ function plistSet(plist, key, value) {
   } catch {
     execFileSync("/usr/libexec/PlistBuddy", ["-c", `Add :${key} string ${value}`, plist], { stdio: "ignore" });
   }
+}
+
+function plistSetBoolean(plist, key, value) {
+  try {
+    execFileSync("/usr/libexec/PlistBuddy", ["-c", `Delete :${key}`, plist], { stdio: "ignore" });
+  } catch {
+    // The key is absent on a fresh Electron template.
+  }
+  execFileSync("/usr/libexec/PlistBuddy", ["-c", `Add :${key} bool ${value ? "true" : "false"}`, plist], {
+    stdio: "ignore"
+  });
 }
 
 function plistDelete(plist, key) {
@@ -232,7 +243,10 @@ function rewriteInfoPlist(appPath, version) {
   plistSet(plist, "CFBundleIconFile", "app");
   plistSet(plist, "LSApplicationCategoryType", "public.app-category.productivity");
   plistSet(plist, "LSMinimumSystemVersion", "13.0");
+  plistSetBoolean(plist, "LSMultipleInstancesProhibited", true);
+  plistSetBoolean(plist, "NSHighResolutionCapable", true);
   plistSet(plist, "NSAppleEventsUsageDescription", "Relationship Inbox OS asks before sending through Messages. Sending is always user-triggered.");
+  plistSet(plist, "NSContactsUsageDescription", "Relationship Inbox OS uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.");
   plistSet(plist, "NSMicrophoneUsageDescription", "Relationship Inbox OS uses the microphone only when you choose dictation.");
   plistSet(plist, "NSCameraUsageDescription", "Relationship Inbox OS uses the camera only if you choose a feature that asks for it.");
   plistDelete(plist, "NSBluetoothAlwaysUsageDescription");
@@ -249,7 +263,19 @@ function renameElectronExecutable(appPath) {
 
 function signApp(appPath, identity) {
   const signIdentity = identity || "-";
-  run("codesign", ["--force", "--deep", "--sign", signIdentity, appPath]);
+  const entitlements = join(ROOT, "apps", "desktop", "entitlements.mac.plist");
+  run("codesign", [
+    "--force",
+    "--deep",
+    "--options",
+    "runtime",
+    "--entitlements",
+    entitlements,
+    "--sign",
+    signIdentity,
+    appPath
+  ]);
+  run("codesign", ["--verify", "--deep", "--strict", "--verbose=2", appPath]);
 }
 
 function copyBundle(source, destination) {
@@ -267,7 +293,16 @@ function createDmg(appPath, outDir, version) {
   run("ln", ["-s", "/Applications", join(dmgRoot, "Applications")]);
   rmSync(dmgPath, { force: true });
   run("hdiutil", ["create", "-volname", APP_NAME, "-srcfolder", dmgRoot, "-ov", "-format", "UDZO", dmgPath]);
+  run("hdiutil", ["verify", dmgPath]);
   return dmgPath;
+}
+
+export function directorySizeBytes(path) {
+  const stats = lstatSync(path);
+  if (!stats.isDirectory()) return stats.size;
+  let total = 0;
+  for (const entry of readdirSync(path)) total += directorySizeBytes(join(path, entry));
+  return total;
 }
 
 export function planPaths({ out, version = appVersion() } = {}) {
@@ -311,7 +346,10 @@ export async function buildMacosDmg(options = {}) {
 
     const packagedNodeDir = join(resourcesDir, "runtime", "node");
     rmSync(packagedNodeDir, { recursive: true, force: true });
-    cpSync(nodeDir, packagedNodeDir, { recursive: true });
+    // ditto keeps npm/npx/corepack as relative symlinks; cpSync rewrites
+    // them to absolute build-machine paths, which breaks npm on any other
+    // Mac and fails strict codesign verification.
+    copyBundle(nodeDir, packagedNodeDir);
 
     if (!options.noSign) signApp(paths.appPath, process.env.RIOS_CODESIGN_IDENTITY);
     const dmgPath = options.skipDmg ? "" : createDmg(paths.appPath, paths.outDir, version);
@@ -321,7 +359,8 @@ export async function buildMacosDmg(options = {}) {
       nodeDir,
       ref,
       version,
-      appSizeBytes: statSync(paths.appPath).size
+      appSizeBytes: directorySizeBytes(paths.appPath),
+      signingIdentity: options.noSign ? "unsigned" : process.env.RIOS_CODESIGN_IDENTITY || "ad-hoc"
     };
   } finally {
     rmSync(temp, { recursive: true, force: true });

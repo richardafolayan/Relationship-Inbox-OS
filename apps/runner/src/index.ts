@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import express from "express";
 import compression from "compression";
 import multer from "multer";
@@ -115,6 +116,10 @@ import { cleanupDemoData, seedDemoData } from "./services/demo";
 import { checkPresenterGuard } from "./middleware/presenter-guard";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
+import {
+  createCompressedJsonCacheEntry,
+  type CompressedJsonCacheEntry
+} from "./services/compressed-json-cache";
 import {
   createLinkedInSmokeLogger,
   writeLatestLinkedInSmokePointer
@@ -269,7 +274,26 @@ const selectorReports = createSelectorTestStore();
 // snooze expiry) honest even if some future write path forgets to signal.
 // ---------------------------------------------------------------------------
 const INBOX_CACHE_TTL_MS = 20_000;
-const inboxResponseCache = new Map<string, { expires: number; body: unknown }>();
+const inboxResponseCache = new Map<string, CompressedJsonCacheEntry>();
+
+function sendCachedInboxResponse(
+  req: express.Request,
+  res: express.Response,
+  cached: CompressedJsonCacheEntry,
+  cacheStatus: "hit" | "miss",
+  startedAt: number
+): void {
+  res.setHeader("X-RIOS-Cache", cacheStatus);
+  res.setHeader("Server-Timing", `inbox-prep;dur=${(performance.now() - startedAt).toFixed(2)}`);
+  res.vary("Accept-Encoding");
+  res.type("application/json");
+  if (req.acceptsEncodings("gzip") === "gzip") {
+    res.setHeader("Content-Encoding", "gzip");
+    res.send(cached.gzip);
+    return;
+  }
+  res.send(cached.json);
+}
 let dataVersion = 0;
 function bumpDataVersion(): void {
   dataVersion += 1;
@@ -1826,6 +1850,7 @@ app.get("/health", asyncRoute(async (_req, res) => {
   })();
 
   res.json({
+    application: "relationship-inbox-os",
     runnerStatus,
     lastScanAt: lastScanAt?.toISOString() ?? null,
     queueDepth: scanQueue.getQueueDepth(),
@@ -1948,13 +1973,7 @@ app.get("/artifacts/:type/:name", (req, res) => {
   }
 });
 
-// Reset macOS Automation permissions and re-trigger the Allow-Messages
-// dialog. Called from the dashboard banner when a send fails with -1743.
-// Runs `tccutil reset AppleEvents` (macOS-only, no-op on other OSes) and
-// then attempts a benign `osascript` against Messages so the system
-// re-prompts for Automation. Also opens System Settings -> Privacy ->
-// Automation as a fallback so the operator can flip the toggle directly.
-app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
+app.post("/control/imessage/permission-help", asyncRoute(async (_req, res) => {
   if (process.platform !== "darwin") {
     res.status(400).json({ error: "macOS only" });
     return;
@@ -1964,35 +1983,23 @@ app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
   const run = promisify(execFile);
   const ranSteps: string[] = [];
   try {
-    await run("tccutil", ["reset", "AppleEvents"], { timeout: 10_000 });
-    ranSteps.push("tccutil_reset");
-  } catch (error) {
-    ranSteps.push(`tccutil_reset_failed:${(error as Error).message}`);
-  }
-  try {
-    // Trigger a benign event so macOS knows we want Messages access; this
-    // pops the Allow-prompt on next osascript invocation against Messages.
     await run("osascript", ["-e", 'tell application "Messages" to count of services'], { timeout: 8_000 });
     ranSteps.push("messages_probe_ok");
   } catch (error) {
-    // Expected: the probe re-pops the Allow dialog. Operator clicks Allow,
-    // and the next real send works. If the probe still errored we surface
-    // the deeplink to settings as the fallback path.
-    ranSteps.push(`messages_probe_prompt:${((error as Error).message ?? "").slice(0, 80)}`);
+    ranSteps.push(`messages_probe_denied:${((error as Error).message ?? "").slice(0, 80)}`);
   }
   try {
-    // Open BOTH panes in turn so the operator can verify Automation +
-    // Accessibility — file sends now go through UI scripting (clipboard
-    // paste in the Messages window), which needs Accessibility on top of
-    // Automation. The first one opened wins focus; macOS keeps the other
-    // available a click away.
     await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], { timeout: 5_000 });
-    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"], { timeout: 5_000 });
     ranSteps.push("settings_opened");
   } catch {
-    // non-fatal
+    ranSteps.push("settings_open_failed");
   }
-  res.json({ ok: true, steps: ranSteps, message: "Permissions reset. Toggle your terminal app ON for both Automation > Messages AND Accessibility, then retry the send." });
+  const requester = process.env.RIOS_DESKTOP === "1" ? "Relationship Inbox OS" : "your terminal app";
+  res.json({
+    ok: true,
+    steps: ranSteps,
+    message: `In Automation, turn on Messages under ${requester}, return to the app, then retry. For file attachments, also turn on ${requester} in Accessibility. No permissions were reset.`
+  });
 }));
 
 app.post("/control/imessage/full-disk-access", asyncRoute(async (_req, res) => {
@@ -2318,7 +2325,11 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
     return;
   }
   const result = await runUpdateCheck({ projectRoot, feedUrl });
-  res.json({ configured: true, ...result });
+  res.json({
+    configured: true,
+    applyMode: process.env.RIOS_PACKAGED_APP === "1" ? "replace_app" : "automatic",
+    ...result
+  });
 }));
 
 app.post("/system/update", asyncRoute(async (_req, res) => {
@@ -2347,6 +2358,15 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
   }
   if (!check.updateAvailable) {
     res.status(409).json({ ok: false, reason: "no_update_available", currentVersion: check.currentVersion });
+    return;
+  }
+  if (process.env.RIOS_PACKAGED_APP === "1") {
+    res.status(409).json({
+      ok: false,
+      reason: "replace_app_required",
+      message:
+        "Quit Relationship Inbox OS, install the latest DMG by replacing the app in Applications, then reopen it. Your data and settings in Application Support are preserved."
+    });
     return;
   }
   const intent = {
@@ -4541,6 +4561,7 @@ app.post(
 );
 
 app.get("/data/inbox", asyncRoute(async (req, res) => {
+  const startedAt = performance.now();
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
   const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
@@ -4560,7 +4581,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const cacheKey = req.originalUrl;
   const cached = inboxResponseCache.get(cacheKey);
   if (cached && Date.now() < cached.expires) {
-    res.json(cached.body);
+    sendCachedInboxResponse(req, res, cached, "hit", startedAt);
     return;
   }
   const versionAtStart = dataVersion;
@@ -4671,15 +4692,16 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   };
 
   const body = { rows, summary };
+  const response = createCompressedJsonCacheEntry(body, Date.now() + INBOX_CACHE_TTL_MS);
   // Only cache if no write/event landed while we were computing — otherwise
   // this response may already be missing that change.
   if (dataVersion === versionAtStart) {
     if (inboxResponseCache.size > 50) {
       inboxResponseCache.clear();
     }
-    inboxResponseCache.set(cacheKey, { expires: Date.now() + INBOX_CACHE_TTL_MS, body });
+    inboxResponseCache.set(cacheKey, response);
   }
-  res.json(body);
+  sendCachedInboxResponse(req, res, response, "miss", startedAt);
 }));
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
