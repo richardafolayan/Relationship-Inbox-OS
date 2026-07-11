@@ -1,5 +1,9 @@
 # Automated student release publishing
 
+> [Release, update, and rollback](../operations/releases.md) is the canonical
+> description of current build, publish, update, and rollback behavior. This
+> page retains provider-specific setup detail.
+
 Publishing happens **automatically when code reaches `main`**: every push to
 `main` builds the student release, overwrites the two files in Dropbox (so the
 pilots' feed URL stays the same), verifies the live feed end to end, and fails
