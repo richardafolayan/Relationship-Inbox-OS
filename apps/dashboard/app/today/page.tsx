@@ -599,7 +599,7 @@ export default function TodayPage() {
       ) : null}
 
       {error ? (
-        <p className="mb-6 font-mono text-[11px] text-risk-overdue">{error}</p>
+        <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p>
       ) : null}
 
       <div className="grid min-h-[calc(100vh-140px)] grid-cols-1 gap-8 lg:grid-cols-[1fr_260px]">
@@ -742,8 +742,8 @@ export default function TodayPage() {
             </article>
           ) : loaded && inboxUnavailable && !data ? (
             <CaughtUp
-              title="Can’t reach the runner."
-              body="The runner isn’t responding. Once it’s back, this page fills in on the next scan."
+              title="Your conversations are paused."
+              body="The local helper is not responding. Choose Start runner above. This page will refill when it reconnects."
             />
           ) : loaded ? (
             <CaughtUp title="You’re caught up." body="Nothing else needs you tonight." />

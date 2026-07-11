@@ -235,7 +235,7 @@ export function ProfileDrawer({ open, personId, onClose }: ProfileDrawerProps) {
         </div>
 
         {error ? (
-          <p className="mb-4 font-mono text-[11px] text-risk-overdue">{error}</p>
+          <p className="mb-4 rounded-row border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p>
         ) : null}
 
         <div className="flex-1 overflow-y-auto pb-8">

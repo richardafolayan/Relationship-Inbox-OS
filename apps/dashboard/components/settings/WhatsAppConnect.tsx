@@ -102,7 +102,7 @@ export function WhatsAppConnect() {
             </p>
           </div>
         ) : null}
-        {error ? <p className="m-0 mt-[8px] font-mono text-[11px] text-risk-overdue">{error}</p> : null}
+        {error ? <p className="m-0 mt-[8px] rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
       </div>
       <div className="flex flex-wrap items-center gap-[10px]">
         <span className="font-mono text-[11px] text-ink-3">

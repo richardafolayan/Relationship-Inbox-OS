@@ -113,7 +113,7 @@ export function FocusSettingsSection() {
         ) : status === "saved" ? (
           <span className="font-mono text-[10px] text-ink-3">saved</span>
         ) : status === "error" ? (
-          <span className="font-mono text-[10px] text-risk-overdue">save failed</span>
+          <span className="text-[11px] text-ink-2">Couldn’t save. Try again.</span>
         ) : null}
       </div>
 

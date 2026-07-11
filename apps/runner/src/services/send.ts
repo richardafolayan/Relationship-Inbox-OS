@@ -6,6 +6,7 @@ import { prisma as defaultPrisma } from "../db";
 import type { EventBus, SettingsStore } from "../types/runtime";
 import { AdapterFailure } from "../platforms/utils";
 import { buildDemoSendReceipt } from "./demo-send";
+import { classifySendFailureKind, consumerSendFailure } from "./send-failure";
 
 interface SendServiceDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -474,16 +475,11 @@ export function createSendService(deps: SendServiceDeps) {
       // Map the (often opaque) error to a coarse kind the dashboard can
       // turn into a one-tap recovery action ("Open browser to sign in",
       // "Run selector tests", "Reset session", "Retry now").
-      const errorKind: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN" =
-        adapterError?.kind === "AUTH_REQUIRED"
-          ? "AUTH_REQUIRED"
-          : adapterError?.kind === "SELECTOR_MISMATCH"
-            ? "SELECTOR_FAIL"
-            : /profile.*lock|already in use|singleton/i.test(errorMessage)
-              ? "PROFILE_LOCKED"
-              : /timeout|temporarily|ECONN|navigation/i.test(errorMessage)
-                ? "TRANSIENT"
-                : "UNKNOWN";
+      const errorKind = classifySendFailureKind({
+        message: errorMessage,
+        adapterKind: adapterError?.kind
+      });
+      const consumerFailure = consumerSendFailure(errorKind);
 
       const logId = await deps.auditLog({
         platform: thread.platform as PlatformName,
@@ -520,7 +516,7 @@ export function createSendService(deps: SendServiceDeps) {
         platform: thread.platform as PlatformName,
         logId,
         clientSendId: input.clientSendId,
-        errorMessage,
+        errorMessage: consumerFailure.message,
         errorKind
       });
 

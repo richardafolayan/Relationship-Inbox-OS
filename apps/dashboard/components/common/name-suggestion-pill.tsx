@@ -172,7 +172,7 @@ export function NameSuggestionPill({ personId, inferredName, currentName, onChan
             </>
           )}
           {error ? (
-            <span className="px-2 py-1 text-[11px] text-risk-overdue">{error}</span>
+            <span className="px-2 py-1 text-[11px] text-ink-2">{error}</span>
           ) : null}
         </span>
       ) : null}

@@ -92,7 +92,7 @@ export function ProfileSections({ detail, hideName = false }: ProfileSectionsPro
                 {opening ? "opening…" : "open profile ↗"}
               </button>
               {openError ? (
-                <span className="ml-2 font-mono text-[11px] text-risk-overdue">{openError}</span>
+                <span className="ml-2 text-[11px] text-ink-2">{openError}</span>
               ) : null}
             </li>
           ) : null}

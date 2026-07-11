@@ -1,30 +1,79 @@
+import {
+  classifyConsumerFailure,
+  diagnosticMessage,
+  logConsumerFailure,
+  type ConsumerFailure,
+  type ConsumerFailureContext
+} from "./consumer-failure";
+
 export class ApiRequestError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly payload?: unknown,
-    readonly rawText?: string
+    readonly rawText?: string,
+    readonly failure?: ConsumerFailure
   ) {
-    super(message);
+    super(failure ? `${failure.message} ${failure.nextAction}` : message);
     this.name = "ApiRequestError";
   }
 }
 
-async function parseErrorPayload(response: Response): Promise<{ payload?: unknown; rawText?: string }> {
+function payloadMessage(payload: unknown, rawText?: string): string {
+  const record =
+    payload && typeof payload === "object" && !Array.isArray(payload)
+      ? (payload as Record<string, unknown>)
+      : null;
+  for (const key of ["error", "message", "reason"]) {
+    if (record && typeof record[key] === "string" && record[key]) {
+      return record[key] as string;
+    }
+  }
+  return rawText || "Unknown API error";
+}
+
+function requestError(
+  error: unknown,
+  context: ConsumerFailureContext,
+  status = context.status ?? 0,
+  payload?: unknown,
+  rawText?: string
+): ApiRequestError {
+  const diagnostic = context.diagnostic ?? diagnosticMessage(error);
+  const failure = classifyConsumerFailure(error, { ...context, diagnostic, status });
+  logConsumerFailure(failure, error, { ...context, diagnostic, status });
+  return new ApiRequestError(diagnostic, status, payload, rawText, failure);
+}
+
+async function readJson<T>(response: Response, context: ConsumerFailureContext): Promise<T> {
   const rawText = await response.text();
-  if (!rawText) {
-    return {};
+  if (!response.ok) {
+    let payload: unknown;
+    try {
+      payload = rawText ? JSON.parse(rawText) : undefined;
+    } catch {
+      payload = undefined;
+    }
+    const diagnostic = payloadMessage(payload, rawText || `Request failed: ${response.status}`);
+    throw requestError(
+      new Error(diagnostic),
+      { ...context, phase: "response", status: response.status, diagnostic },
+      response.status,
+      payload,
+      rawText
+    );
   }
 
   try {
-    return {
-      payload: JSON.parse(rawText),
+    return JSON.parse(rawText) as T;
+  } catch (error) {
+    throw requestError(
+      error,
+      { ...context, phase: "parse", status: response.status, diagnostic: rawText.slice(0, 300) },
+      response.status,
+      undefined,
       rawText
-    };
-  } catch {
-    return {
-      rawText
-    };
+    );
   }
 }
 
@@ -34,16 +83,16 @@ async function parseErrorPayload(response: Response): Promise<{ payload?: unknow
  * fresh, uncached read.
  */
 export async function apiGetRaw<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    ...init,
-    cache: "no-store"
-  });
-
-  if (!response.ok) {
-    throw new Error(`Request failed: ${response.status}`);
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      cache: "no-store"
+    });
+  } catch (error) {
+    throw requestError(error, { path, method: "GET", phase: "network" });
   }
-
-  return (await response.json()) as T;
+  return readJson<T>(response, { path, method: "GET" });
 }
 
 // ---------------------------------------------------------------------------
@@ -351,34 +400,30 @@ export async function apiPost<T>(path: string, body: unknown, init?: RequestInit
     headers.set("Content-Type", "application/json");
   }
 
-  const response = await fetch(path, {
-    ...init,
-    method: "POST",
-    headers,
-    body: JSON.stringify(body)
-  });
-
-  if (!response.ok) {
-    const parsed = await parseErrorPayload(response);
-    // Runner errors are inconsistent: some endpoints return `{ error }`,
-    // others `{ reason }` (e.g. enrich's `{status:"failed",reason:"..."}`),
-    // and some send back `{ message }`. Prefer the most descriptive shape
-    // before falling back to the raw body so the dashboard never surfaces
-    // a JSON blob to the operator.
-    const payload =
-      typeof parsed.payload === "object" && parsed.payload
-        ? (parsed.payload as Record<string, unknown>)
-        : null;
-    const stringField = (key: string): string | undefined =>
-      payload && typeof payload[key] === "string" ? (payload[key] as string) : undefined;
-    const message =
-      stringField("error") ??
-      stringField("message") ??
-      stringField("reason") ??
-      parsed.rawText ??
-      `Request failed: ${response.status}`;
-    throw new ApiRequestError(message, response.status, parsed.payload, parsed.rawText);
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      method: "POST",
+      headers,
+      body: JSON.stringify(body)
+    });
+  } catch (error) {
+    throw requestError(error, { path, method: "POST", phase: "network" });
   }
+  return readJson<T>(response, { path, method: "POST" });
+}
 
-  return (await response.json()) as T;
+export async function apiPostForm<T>(path: string, body: FormData, init?: RequestInit): Promise<T> {
+  let response: Response;
+  try {
+    response = await fetch(path, {
+      ...init,
+      method: "POST",
+      body
+    });
+  } catch (error) {
+    throw requestError(error, { path, method: "POST", phase: "network" });
+  }
+  return readJson<T>(response, { path, method: "POST" });
 }
