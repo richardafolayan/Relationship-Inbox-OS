@@ -51,7 +51,7 @@ export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPoll
   };
 
   return (
-    <div className="flex min-w-[min(72vw,300px)] flex-col gap-2">
+    <div className="flex min-w-[min(72vw,300px)] flex-col gap-2 rounded-[12px] border border-hairline bg-paper p-3 text-ink">
       <div className="text-[12px] font-medium uppercase tracking-[0.08em] text-ink-3">
         WhatsApp poll
       </div>
@@ -71,8 +71,9 @@ export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPoll
                 "flex w-full items-center gap-2 rounded-[8px] border px-3 py-2 text-left text-[13px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-60",
                 checked
                   ? "border-ink bg-paper text-ink"
-                  : "border-hairline bg-paper/60 text-ink hover:border-hairline-strong"
+                  : "border-hairline bg-paper-2 text-ink hover:border-hairline-strong"
               )}
+              aria-pressed={checked}
             >
               <span
                 className={cn(

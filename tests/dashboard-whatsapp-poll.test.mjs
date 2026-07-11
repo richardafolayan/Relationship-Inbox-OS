@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { getWhatsAppPoll } from "../apps/dashboard/lib/whatsapp-poll.ts";
 
 const baseMessage = (over = {}) => ({
@@ -46,4 +47,15 @@ test("getWhatsAppPoll falls back to old flattened poll text", () => {
     options: [{ name: "Tuesday" }, { name: "Wednesday" }],
     allowMultipleAnswers: true
   });
+});
+
+test("poll question and options use an isolated, valid themed surface", async () => {
+  const source = await readFile(
+    new URL("../apps/dashboard/components/thread/whatsapp-poll.tsx", import.meta.url),
+    "utf8"
+  );
+
+  assert.match(source, /border-hairline bg-paper p-3 text-ink/);
+  assert.match(source, /border-hairline bg-paper-2 text-ink/);
+  assert.doesNotMatch(source, /bg-paper\/60/);
 });
