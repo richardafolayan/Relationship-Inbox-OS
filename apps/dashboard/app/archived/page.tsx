@@ -358,7 +358,7 @@ export default function ArchivedPage() {
         ) : null}
       </header>
 
-      {error ? <p className="mb-6 font-mono text-[11px] text-risk-overdue">{error}</p> : null}
+      {error ? <p className="mb-6 rounded-row border border-hairline bg-paper-2 px-4 py-3 text-[12px] leading-[1.5] text-ink-2">{error}</p> : null}
 
       {isEmpty ? (
         <CaughtUp title="No archived threads yet." body="Threads you mark as handled land here." />

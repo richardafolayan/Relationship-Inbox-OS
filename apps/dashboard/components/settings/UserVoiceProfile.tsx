@@ -305,7 +305,7 @@ export function UserVoiceProfile({
         <span
           className={cn(
             "shrink-0 font-mono text-[11px]",
-            status === "error" ? "text-risk-overdue" : "text-ink-3"
+            status === "error" ? "text-ink-2" : "text-ink-3"
           )}
           aria-live="polite"
         >
@@ -386,7 +386,7 @@ export function UserVoiceProfile({
               </div>
               {analyzeError ? (
                 <p
-                  className="m-0 text-[12px] leading-[1.45] text-risk-overdue"
+                  className="m-0 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2"
                   aria-live="polite"
                 >
                   {analyzeError}

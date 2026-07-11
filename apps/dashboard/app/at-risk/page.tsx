@@ -288,10 +288,10 @@ export default function AtRiskPage() {
     return (
       <Canvas>
         <PageHead eyebrow="Relationship health" title="At risk" />
-        <p className="mb-2 font-mono text-[11px] uppercase tracking-[0.06em] text-risk-overdue">
-          Could not load at-risk threads
-        </p>
-        <p className="font-mono text-[12px] text-ink-3">{error}</p>
+        <div className="rounded-row border border-hairline bg-paper-2 px-4 py-3">
+          <p className="m-0 text-[13px] font-medium text-ink">These conversations could not be opened.</p>
+          <p className="m-0 mt-1 text-[12px] leading-[1.5] text-ink-3">{error}</p>
+        </div>
       </Canvas>
     );
   }
@@ -484,7 +484,7 @@ export default function AtRiskPage() {
                     : normalizePreview(focusThread.preview)}
                 </p>
                 {focusError ? (
-                  <p className="mb-3 font-mono text-[11px] text-risk-overdue">{focusError}</p>
+                  <p className="mb-3 rounded-row border border-hairline bg-paper-2 px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{focusError}</p>
                 ) : null}
                 <div className="flex flex-wrap items-center justify-end gap-2">
                   <Button variant="ghost" onClick={advance}>skip</Button>

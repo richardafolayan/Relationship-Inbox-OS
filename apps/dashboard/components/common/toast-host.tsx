@@ -23,9 +23,9 @@ const kindStyles: Record<Toast["kind"], { ring: string; dot: string; label: stri
     label: "text-[oklch(46%_0.12_150)]"
   },
   error: {
-    ring: "ring-1 ring-risk-overdue/40",
-    dot: "bg-risk-overdue",
-    label: "text-risk-overdue"
+    ring: "ring-1 ring-hairline-strong",
+    dot: "bg-ink-2",
+    label: "text-ink-2"
   }
 };
 

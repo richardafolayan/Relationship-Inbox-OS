@@ -575,7 +575,7 @@ export function TopStatus() {
   const tickerSub = tickerDetail(ticker);
   const tickerTone =
     ticker.kind === "send_failed"
-      ? "text-risk-overdue"
+      ? "text-ink-2"
       : ticker.kind === "send_succeeded" || ticker.kind === "thread_checked"
         ? "text-risk-fresh"
         : "text-ink-2";
@@ -594,9 +594,9 @@ export function TopStatus() {
           <span className="text-ink-3">Connecting…</span>
         </span>
       ) : runnerOffline ? (
-        <span className="inline-flex items-center gap-[6px]" title="Runner offline">
-          <span className="h-[6px] w-[6px] rounded-full bg-risk-overdue" aria-hidden />
-          <span className="text-risk-overdue">Runner offline</span>
+        <span className="inline-flex items-center gap-[6px]" title="Local helper paused">
+          <span className="h-[6px] w-[6px] rounded-full bg-ink-3" aria-hidden />
+          <span className="text-ink-2">App helper paused</span>
         </span>
       ) : hasDegraded ? (
         <Link
@@ -631,7 +631,7 @@ export function TopStatus() {
             {ticker.kind === "send_succeeded" || ticker.kind === "thread_checked" ? (
               <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-fresh" aria-hidden />
             ) : ticker.kind === "send_failed" ? (
-              <span className="inline-block h-[6px] w-[6px] rounded-full bg-risk-overdue" aria-hidden />
+              <span className="inline-block h-[6px] w-[6px] rounded-full bg-ink-3" aria-hidden />
             ) : null}
             <span className={`truncate ${tickerTone}`}>{tickerHeading}</span>
             {tickerIsActive ? (
