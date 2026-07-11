@@ -1,5 +1,8 @@
 # Student Pilot: Troubleshooting
 
+> Use the [technical troubleshooting playbook](../troubleshooting/playbook.md)
+> when the quick pilot checks here do not resolve the symptom.
+
 Quick fixes for the common snags while **using** the app. For **install-time**
 problems (Node version, ports, "inbox empty after install", uninstall), see
 [student-install-troubleshooting.md](./student-install-troubleshooting.md), or

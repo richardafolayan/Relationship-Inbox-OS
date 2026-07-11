@@ -23,6 +23,7 @@
     "perf:interactions": "node scripts/performance/measure-interaction-latency.mjs",
     "perf:launcher": "node scripts/performance/measure-launcher-preparation.mjs",
     "perf:seed": "node scripts/performance/seed-interaction-fixture.mjs",
+    "docs:check": "node scripts/check-docs.mjs",
     "fetch:whisper-model": "node scripts/fetch-whisper-model.mjs",
     "build:student-release": "node scripts/build-student-release.mjs",
     "publish:student-release": "node scripts/publish-student-release.mjs",

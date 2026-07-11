@@ -1,5 +1,8 @@
 # Releasing Student Builds (Dropbox)
 
+> [Release, update, and rollback](../operations/releases.md) is the canonical
+> current procedure. This page retains the detailed pilot-distribution setup.
+
 This is the internal guide for publishing a new student-pilot build and
 letting installed pilot apps update themselves. It is written in British
 English and uses no em or en dashes (the repo lints pilot docs for them).

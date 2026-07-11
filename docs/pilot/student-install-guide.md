@@ -1,5 +1,8 @@
 # Install Relationship Inbox OS on your Mac
 
+> The maintained installation procedure is [Install on macOS](../user/install.md).
+> This pilot page is retained for call-specific facilitation notes.
+
 This guide is for student pilots. **You do not need to know how to code.**
 
 You paste one command into Terminal. It checks your Mac, installs anything

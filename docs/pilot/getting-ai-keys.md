@@ -59,9 +59,10 @@ Slightly more capable, but the OpenAI API needs a small amount of credit.
    - If you made an **OpenAI** key (or both), leave it as `openai`.
    - If you only made the free **Gemini** key, change it to `AI_PROVIDER=gemini`.
 
-   This step matters: if you set up a Gemini key but leave `AI_PROVIDER=openai`,
-   the app looks for an OpenAI key it does not have, and the AI features stay
-   off.
+   This makes your preference explicit. If the selected provider has no key,
+   the current runner can select another configured provider, but relying on
+   that fallback makes setup harder to understand and diagnose. The complete
+   selection order is in the [AI reference](../developer/ai.md#effective-provider-selection).
 
 5. **Save** the file.
 
