@@ -87,7 +87,7 @@ export function NotificationCta() {
             type="button"
             onClick={() => void enable()}
             disabled={busy}
-            className="inline-flex items-center rounded-pill border border-transparent bg-ink px-[14px] py-[7px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-60"
+            className="inline-flex items-center rounded-pill border border-transparent bg-ink px-[14px] py-[7px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-60"
           >
             {busy ? "Asking…" : "Enable notifications"}
           </button>

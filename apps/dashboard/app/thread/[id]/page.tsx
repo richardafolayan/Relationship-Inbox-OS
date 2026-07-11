@@ -4919,7 +4919,7 @@ export default function ThreadPage() {
                               }
                               void scheduleSend(at);
                             }}
-                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {scheduling ? "Scheduling…" : "Schedule"}
                           </button>
@@ -5239,7 +5239,7 @@ export default function ThreadPage() {
               {/* Split button: primary action + a chevron to flip the mode.
                   The mode switcher only appears when full AI drafts are on;
                   otherwise this is an Ask-only button. */}
-              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
+              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-ink-2">
                 <button
                   type="button"
                   disabled={composing || !composeIntent.trim()}

@@ -56,7 +56,7 @@ export function PilotTourInviteCard({
           <button
             type="button"
             onClick={onStart}
-            className="inline-flex items-center rounded-pill bg-ink px-[16px] py-[8px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)]"
+            className="inline-flex items-center rounded-pill bg-ink px-[16px] py-[8px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2"
           >
             Start walkthrough
           </button>
