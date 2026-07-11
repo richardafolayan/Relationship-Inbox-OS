@@ -1,6 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
@@ -10,8 +18,10 @@ import {
   REQUIRED_NODE_MAJOR,
   bundledNodeCandidate,
   macArchToNodeArch,
+  macArchToOpenSslArch,
   parseArgs,
-  planPaths
+  planPaths,
+  prunePackagedFootprint
 } from "../scripts/build-macos-dmg.mjs";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -60,6 +70,82 @@ test("builder constants carry the desktop identity", () => {
   assert.equal(REQUIRED_NODE_MAJOR, 22);
   assert.equal(macArchToNodeArch("arm64"), "arm64");
   assert.equal(macArchToNodeArch("x64"), "x64");
+  assert.equal(macArchToOpenSslArch("arm64"), "darwin64-arm64-cc");
+  assert.equal(macArchToOpenSslArch("x64"), "darwin64-x86_64-cc");
+});
+
+test("packaging prune keeps runtime files for the target macOS architecture", () => {
+  const root = mkdtempSync(join(tmpdir(), "rios-package-prune-"));
+  const appPath = join(root, "Relationship Inbox OS.app");
+  const appResourceDir = join(appPath, "Contents", "Resources", "app");
+  const packagedNodeDir = join(appPath, "Contents", "Resources", "runtime", "node");
+  const touch = (relative, value = "x") => {
+    const path = join(root, relative);
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, value);
+    return path;
+  };
+
+  try {
+    for (const relative of [
+      "Relationship Inbox OS.app/Contents/Resources/app/apps/dashboard/.next/cache/webpack.pack",
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/electron/dist/Electron.app/runtime",
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/.bin/electron",
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/@electron/get/package.json",
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/onnxruntime-web/dist/ort.js",
+      "Relationship Inbox OS.app/Contents/Resources/app/tests/example.test.mjs",
+      "Relationship Inbox OS.app/Contents/Resources/app/design-review-screenshots/old.png",
+      "Relationship Inbox OS.app/Contents/Resources/default_app.asar",
+      "Relationship Inbox OS.app/Contents/Resources/electron.icns",
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/onnxruntime-node/bin/napi-v3/linux/arm64/runtime.so",
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/onnxruntime-node/bin/napi-v3/darwin/x64/runtime.dylib",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/include/node/openssl/archs/linux-aarch64/header.h",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/include/node/openssl/archs/darwin64-x86_64-cc/header.h",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/CHANGELOG.md",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/README.md",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/share/man/man1/node.1",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/bin/corepack",
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/lib/node_modules/corepack/dist/corepack.js"
+    ]) touch(relative);
+
+    const armOnnx = touch(
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/onnxruntime-node/bin/napi-v3/darwin/arm64/runtime.dylib",
+      "arm-runtime"
+    );
+    const armOpenSsl = touch(
+      "Relationship Inbox OS.app/Contents/Resources/runtime/node/include/node/openssl/archs/darwin64-arm64-cc/header.h",
+      "arm-header"
+    );
+    const npm = touch("Relationship Inbox OS.app/Contents/Resources/runtime/node/bin/npm", "npm");
+    const license = touch("Relationship Inbox OS.app/Contents/Resources/runtime/node/LICENSE", "license");
+    const patchright = touch(
+      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/patchright/package.json",
+      "{}"
+    );
+
+    const result = prunePackagedFootprint({
+      appPath,
+      appResourceDir,
+      packagedNodeDir,
+      arch: "arm64"
+    });
+
+    assert.ok(result.removedBytes > 0);
+    assert.equal(existsSync(armOnnx), true);
+    assert.equal(existsSync(armOpenSsl), true);
+    assert.equal(existsSync(npm), true);
+    assert.equal(existsSync(license), true);
+    assert.equal(existsSync(patchright), true);
+    assert.equal(existsSync(join(appResourceDir, "node_modules/electron")), false);
+    assert.equal(existsSync(join(appResourceDir, "apps/dashboard/.next/cache")), false);
+    assert.equal(existsSync(join(appResourceDir, "node_modules/onnxruntime-node/bin/napi-v3/linux")), false);
+    assert.equal(
+      existsSync(join(packagedNodeDir, "include/node/openssl/archs/darwin64-x86_64-cc")),
+      false
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("desktop icon is a local SVG with no remote assets", () => {
