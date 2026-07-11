@@ -5,7 +5,7 @@ import { FullDemoProvider } from "@/components/full-demo/FullDemoProvider";
 import { FullDemoOverlay } from "@/components/full-demo/FullDemoOverlay";
 
 export const metadata: Metadata = {
-  title: "Relationship Inbox OS",
+  title: "Tovi",
   description: "Local-first command centre for relationship replies"
 };
 

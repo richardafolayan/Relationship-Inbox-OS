@@ -24,6 +24,7 @@ export const UPDATE_CHECK_INTERVAL_MS = 60 * 1000;
 
 /** The runner's GET /system/update-check response shape (fail-safe server side). */
 export interface UpdateCheckResponse {
+  applyMode?: "automatic" | "replace_app";
   configured: boolean;
   currentVersion: string;
   latestVersion: string;
@@ -38,10 +39,15 @@ export interface UpdateNotice {
   href: string;
 }
 
-export function buildUpdateNotice(latestVersion: string): UpdateNotice {
+export function buildUpdateNotice(
+  latestVersion: string,
+  applyMode: "automatic" | "replace_app" = "automatic"
+): UpdateNotice {
   return {
     title: `Update available v${latestVersion}`,
-    body: "A new build is ready. Click to update and reopen the app.",
+    body: applyMode === "replace_app"
+      ? "A new Mac build is ready. Open Settings for safe install steps."
+      : "A new build is ready. Click to update and reopen the app.",
     href: UPDATE_NOTICE_HREF
   };
 }

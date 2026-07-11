@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — student release builder.
+// Tovi — student release builder.
 //
 // Produces a pilot-install source zip plus the latest.json the updater reads.
 // Run it from a checkout of the branch you want to release (normally

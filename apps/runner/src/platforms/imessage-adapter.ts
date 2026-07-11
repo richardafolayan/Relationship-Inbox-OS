@@ -16,6 +16,11 @@ import { IMessageDb, type IMessageThreadRow } from "./imessage-db";
 import { groupStubFields } from "./imessage-group-name";
 import { imessageMessageBodyText } from "./imessage-message-text";
 import { sendIMessage, sendIMessageToChat } from "./imessage-send";
+import {
+  accessibilityGuidance,
+  automationGuidance,
+  fullDiskAccessGuidance
+} from "./macos-permission-guidance";
 import { loadBestContactResolver, type ContactResolver } from "../services/contact-resolver";
 
 const execFileAsync = promisify(execFile);
@@ -129,7 +134,7 @@ export class IMessageAdapter implements PlatformAdapter {
           /SQLITE_CANTOPEN|authorization/i.test(String(error));
         throw new AdapterFailure(
           isPermission
-            ? "Cannot read iMessage chat.db - grant Full Disk Access to the runner's terminal."
+            ? fullDiskAccessGuidance()
             : `Failed to open iMessage chat.db: ${(error as Error).message}`,
           {
             kind: "AUTH_REQUIRED",
@@ -378,9 +383,9 @@ export class IMessageAdapter implements PlatformAdapter {
       const isAccessibility = /osascript is not allowed to send keystrokes|\(1002\)|System Events.*not authorized/.test(stderr + message);
       throw new AdapterFailure(
         isAccessibility
-          ? "Messages.app needs Accessibility permission to deliver files - grant it under System Settings > Privacy & Security > Accessibility for your terminal app, then retry."
+          ? accessibilityGuidance()
           : isAutomation
-            ? "Messages.app rejected automation - grant Automation permission to the runner's terminal."
+            ? automationGuidance()
             : `iMessage send failed: ${message}`,
         {
           kind: isAutomation || isAccessibility ? "AUTH_REQUIRED" : "THREAD_FETCH_FAILED",
@@ -514,7 +519,7 @@ export class IMessageAdapter implements PlatformAdapter {
       const isUnknownChat = /Can.t get chat id|-1728/.test(stderr + message);
       throw new AdapterFailure(
         isAutomation
-          ? "Messages.app rejected automation - grant Automation permission to the runner's terminal."
+          ? automationGuidance()
           : isUnknownChat
             ? "Messages.app doesn't know this group chat on this Mac - open it in Messages once, then retry."
             : `iMessage group send failed: ${message}`,

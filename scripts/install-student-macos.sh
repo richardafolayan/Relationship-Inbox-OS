@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Relationship Inbox OS — student-pilot installer (macOS).
+# Tovi — student-pilot installer (macOS).
 #
 # Goal: a non-technical student pastes ONE command into Terminal and ends up
 # with the app installed, the local database set up, and the app open in their
@@ -147,7 +147,7 @@ check_macos() {
   step "Checking your Mac"
 
   if [ "$(uname -s)" != "Darwin" ]; then
-    die "This installer is for macOS only. Relationship Inbox OS needs a Mac for iMessage."
+    die "This installer is for macOS only. Tovi needs a Mac for iMessage."
   fi
   ok "macOS detected"
 
@@ -168,6 +168,10 @@ check_macos() {
 }
 
 check_disk() {
+  if [ "$SKIP_DEPS" = true ]; then
+    info "[skip-deps] skipping the production disk-space check"
+    return 0
+  fi
   # Available GB on the volume that holds the install target's parent.
   local target_parent free
   target_parent="$(dirname "$INSTALL_DIR")"
@@ -413,7 +417,7 @@ install_from_source() {
     rm -rf "$backup"
     ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
   else
-    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like Relationship Inbox OS. Move it aside and run the installer again."
+    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like Tovi. Move it aside and run the installer again."
   fi
 
   APP_DIR="$INSTALL_DIR"
@@ -438,7 +442,7 @@ download_app() {
   tmp_zip="${TMPDIR:-/tmp}/relationship-inbox-os.zip"
   extract_tmp="${TMPDIR:-/tmp}/rios-extract-$$"
 
-  info "Downloading Relationship Inbox OS..."
+  info "Downloading Tovi..."
   if ! curl -fSL --progress-bar --max-time 1200 "$APP_ZIP_URL" -o "$tmp_zip" 2>>"$LOG_FILE"; then
     die "Couldn't download the app. Check your Wi-Fi and the link, then try again."
   fi
@@ -594,7 +598,7 @@ create_app_bundle() {
   fi
 
   if [ "$DRY_RUN" = true ]; then
-    warn "[dry-run] would create Relationship Inbox OS.app in $(display_path "$APP_BUNDLE_DIR")"
+    warn "[dry-run] would create Tovi.app in $(display_path "$APP_BUNDLE_DIR")"
     return 0
   fi
 
@@ -614,9 +618,9 @@ create_app_bundle() {
     return 0
   }
 
-  if run "Creating Relationship Inbox OS.app..." \
+  if run "Creating Tovi.app..." \
        node "$script" --app-dir "$APP_DIR" --out "$APP_BUNDLE_DIR" --node-dir "$RIOS_NODE_DIR"; then
-    ok "Created $(display_path "$APP_BUNDLE_DIR")/Relationship Inbox OS.app"
+    ok "Created $(display_path "$APP_BUNDLE_DIR")/Tovi.app"
   else
     warn "Couldn't create the Mac app. You can still start from Terminal."
   fi
@@ -641,20 +645,20 @@ wait_for_dashboard() {
 start_app() {
   local disp app_bundle
   disp="$(display_path "$APP_DIR")"
-  app_bundle="$APP_BUNDLE_DIR/Relationship Inbox OS.app"
+  app_bundle="$APP_BUNDLE_DIR/Tovi.app"
 
   if [ "$NO_START" = true ] || [ "$DRY_RUN" = true ]; then
     step "Skipping app launch (per your request)"
     say ""
     say "  To start the app yourself:"
-    say "    ${BOLD}open \"$APP_BUNDLE_DIR/Relationship Inbox OS.app\"${RESET}"
+    say "    ${BOLD}open \"$APP_BUNDLE_DIR/Tovi.app\"${RESET}"
     say "  Or from Terminal:"
     say "    ${BOLD}cd $disp && npm run start:student${RESET}"
     say "  Then open ${BOLD}$DASHBOARD_URL${RESET} in Chrome."
     return 0
   fi
 
-  step "Starting Relationship Inbox OS"
+  step "Starting Tovi"
   cd "$APP_DIR" || die "Couldn't open the app folder $APP_DIR."
 
   if [ "$NO_APP_BUNDLE" != true ] && [ -d "$app_bundle" ]; then
@@ -703,14 +707,14 @@ print_success() {
   if [ "$mode" = "terminal" ]; then
     cat <<EOF
 
-  ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
+  ${GREEN}${BOLD}Tovi is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
   • ${BOLD}Leave this Terminal window open${RESET} - it keeps the app running.
   • To stop the app: click this window and press ${BOLD}Ctrl + C${RESET}.
   • To start it again later:
-        ${BOLD}open "$APP_BUNDLE_DIR/Relationship Inbox OS.app"${RESET}
+        ${BOLD}open "$APP_BUNDLE_DIR/Tovi.app"${RESET}
     or  ${BOLD}cd $disp && npm run start:student${RESET}
 
   Next, the app walks you through:
@@ -728,14 +732,14 @@ EOF
 
   cat <<EOF
 
-  ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
+  ${GREEN}${BOLD}Tovi is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
-  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/Relationship Inbox OS.app${RESET}
-  • Next time, open ${BOLD}Relationship Inbox OS${RESET} from Applications or Launchpad.
+  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/Tovi.app${RESET}
+  • Next time, open ${BOLD}Tovi${RESET} from Applications or Launchpad.
   • You can close this Terminal once the browser is open.
-  • To stop the app: quit ${BOLD}Relationship Inbox OS${RESET} from the Dock.
+  • To stop the app: quit ${BOLD}Tovi${RESET} from the Dock.
 
   Next, the app walks you through:
     1. iMessage access   (a one-time macOS permission)
@@ -754,7 +758,7 @@ EOF
 # --------------------------------------------------------------------------
 
 main() {
-  printf '\n%s%sRelationship Inbox OS — installer%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf '\n%s%sTovi — installer%s\n' "$BOLD" "$BLUE" "$RESET"
   printf '%sLog: %s%s\n' "$DIM" "$LOG_FILE" "$RESET"
   [ "$DRY_RUN" = true ] && printf '%s(dry run — nothing will be changed)%s\n' "$YELLOW" "$RESET"
 

@@ -1,9 +1,9 @@
 name: CI
 on:
   pull_request:
-    branches: [develop, staging, main]
+    branches: [develop, staging, main, v1/strip-back-pr1]
   push:
-    branches: [develop, staging, main]
+    branches: [develop, staging, main, v1/strip-back-pr1]
 permissions:
   contents: read
 jobs:
@@ -17,5 +17,6 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx prisma generate --schema packages/core/prisma/schema.prisma
+      - run: npm run docs:check
       - run: npm run lint
       - run: npm run test:all

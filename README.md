@@ -1,11 +1,11 @@
-# Relationship Inbox OS
+# Tovi (formerly Relationship Inbox OS)
 
 I'm bad at replying. Someone messages me, I think *"I'll reply properly when
 I've got a moment"*, and then a week passes. By the time I come back the
 chat has gone cold and I've half-forgotten what we were talking about.
 Rereading it to catch up feels like work, so I close the tab.
 
-Relationship Inbox OS is the fix I built for myself: a calm, local-first
+Tovi is the fix I built for myself: a calm, local-first
 workspace that pulls my unread messages into one place, tells me what each
 one is about and what I still owe a reply on, and lets me actually deal with
 it, without ever opening a feed.
@@ -29,12 +29,12 @@ It is **not** a dashboard, a CRM, or a tool that replies for you. It helps
 If you're here for the student pilot, you only need three pages. Start with
 the first:
 
-1. **[Install guide](docs/pilot/student-install-guide.md)**: setting it up,
+1. **[Install guide](docs/user/install.md)**: setting it up,
    written to be followed on a short call with me. No technical background
    needed.
 2. **[What to test](docs/pilot/student-pilot-instructions.md)**: the pilot
    is about one question: *does this actually help you reply to people?*
-3. **[Troubleshooting](docs/pilot/troubleshooting.md)**: quick fixes when
+3. **[Troubleshooting](docs/troubleshooting/playbook.md)**: verified checks and safe fixes when
    something looks stuck.
 
 The first pilot is **Mac and Chrome first**. You can stop reading this
@@ -59,16 +59,19 @@ drafts. Nothing is ever sent automatically.
 - **iMessage**: works, on macOS.
 - **Instagram, TikTok**: beta; their UIs shift often, so they degrade
   gracefully rather than failing silently.
-- **WhatsApp**: foundation only, not usable yet.
+- **WhatsApp**: opt-in support, disabled by default while it remains a pilot integration.
 
-It runs entirely on your own machine. Your data lives on your laptop in a
-local SQLite database, not on a server. The only thing that leaves is API
-calls to your chosen AI provider, and you can turn AI off entirely.
+The application and its database run on your own machine. Configured external
+services can still receive data: AI and transcription providers receive the
+content needed for those features, platform adapters communicate with their
+platforms, and an explicitly submitted feedback report is sent to its configured
+endpoint. AI can be turned off entirely. See the
+[privacy boundaries](docs/user/guide.md#feedback-and-privacy).
 
 ## Quick start
 
 For developers. Pilot testers: use the
-[install guide](docs/pilot/student-install-guide.md) instead.
+[install guide](docs/user/install.md) instead.
 
 **You need:** Node.js 20+, npm, and Chrome.
 
@@ -125,7 +128,7 @@ The runner needs a browser session to read LinkedIn.
   fallback for when personal Chrome mode can't be used.
 
 Full detail, including why `personal` is gentler on LinkedIn, is in the
-[developer reference](docs/reference.md#browser-modes).
+[browser configuration reference](docs/developer/configuration.md#browser-profiles-and-platform-access).
 
 ## How it's built
 
@@ -141,8 +144,12 @@ autonomous send loop.
 
 ## Docs
 
-- [Pilot install guide](docs/pilot/student-install-guide.md)
+- [Documentation index](docs/index.md)
+- [User install guide](docs/user/install.md)
+- [User guide](docs/user/guide.md)
 - [Pilot testing instructions](docs/pilot/student-pilot-instructions.md)
-- [Pilot troubleshooting](docs/pilot/troubleshooting.md)
-- [Developer reference](docs/reference.md): configuration, CLIs, runner API
+- [Operator runbook](docs/operations/runbook.md)
+- [Troubleshooting playbook](docs/troubleshooting/playbook.md)
+- [Developer reference](docs/developer/repository.md)
+- [Architecture decisions](docs/adr/README.md)
 - [Current product direction](docs/strategy/current-product-direction.md)

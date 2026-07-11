@@ -48,6 +48,13 @@ import {
   type AiErrorClassification
 } from "./ai-providers";
 import { raceAiProviders } from "./ai-race";
+import {
+  deriveMechanicalWritingRules,
+  mechanicalWritingRulesPromptFragment,
+  repairMechanicalWritingRules,
+  validateMechanicalWritingRules
+} from "./ai-output-rules";
+import { preserveAmbiguousEvidence } from "./ai-ambiguity";
 
 // Re-exported so existing tests + callers continue to import from ai.ts.
 export const classifyLlmError = classifyLlmErrorImpl;
@@ -224,6 +231,13 @@ export const PREDRAFT_FIDELITY_REMINDER = [
   "IDENTITY (strict). The reply speaks AS the operator. Every first-person claim (\"I'm...\", \"my...\") must be grounded in the operator's OWN messages or the operator profile — NEVER borrow the contact's circumstances as the operator's own. If the CONTACT has a visa situation, a project/MVP, a job, a deadline, or a plan, it is THEIRS: the reply says \"your MVP\", \"your visa situation\" — never \"my MVP\", \"while I'm on a student visa\".",
   "NO FABRICATED REASONS (strict). When the reply needs to explain WHY the operator did or changed something and the operator never stated a reason in their messages, the draft must stay honestly vague (\"plans shifted a bit\", \"still figuring out my timings\") or defer (\"long story, I'll explain when we speak\"). NEVER manufacture a concrete rationale — no invented steps, requirements, constraints, reviews, or processes (\"to align with self employment steps\", \"after reviewing what the MVP needs\"). A vague true line beats a specific invented one every time.",
   "Self-check before returning each reply: every substantive phrase should be traceable to something the contact actually said, and every first-person fact traceable to the operator's own messages or profile."
+].join(" ");
+
+export const AMBIGUITY_DISCIPLINE = [
+  "UNCERTAINTY (strict). Preserve uncertainty whenever the evidence is ambiguous or incomplete.",
+  "Do not resolve an unnamed 'it', 'they', process, result, relationship, event, or decision into a specific domain. If the transcript does not say interview, exam, application, diagnosis, offer, or relationship, do not introduce one.",
+  "Do not turn 'not sure yet', 'they will let me know', 'maybe', or 'I think' into success, failure, acceptance, rejection, confirmation, or a firm plan.",
+  "Use the contact's own uncertainty in summaries and replies. A calm acknowledgement or 'let me know when you hear' is safer than congratulations, commiseration, or advice based on a guessed outcome."
 ].join(" ");
 
 /**
@@ -1272,6 +1286,19 @@ export function applyVoiceRules(text: string): string {
     .trim();
 }
 
+export function enforceConfiguredWritingRules(
+  text: string,
+  profile: OperatorProfile | null | undefined
+): string {
+  const rules = deriveMechanicalWritingRules(profile);
+  const repaired = repairMechanicalWritingRules(text, rules);
+  const remaining = validateMechanicalWritingRules(repaired, rules);
+  if (remaining.length > 0) {
+    throw new Error(`Mechanical writing-rule repair failed: ${remaining.join(",")}`);
+  }
+  return repaired;
+}
+
 // Enforce sentence-start capitalisation after . ? !. The voice prompts
 // both ask for this but the model still slips ("hope you're good? things
 // have been..." → should be "Things"). Belt-and-braces, applied to every
@@ -1617,7 +1644,30 @@ export function parseComposedFocusNote(value: unknown): ComposedFocusNote {
   };
 }
 
-export function createAiService(settingsStore: SettingsStore): AiService {
+export interface AiProviderCallMetric {
+  providerId: AiProvider;
+  model: string;
+  attempt: number;
+  status: "success" | "error";
+  durationMs: number;
+  promptTokens: number | null;
+  completionTokens: number | null;
+  totalTokens: number | null;
+  cachedPromptTokens: number | null;
+  errorKind: AiErrorClassification["kind"] | null;
+}
+
+export interface CreateAiServiceOptions {
+  forceProviderId?: AiProvider;
+  onProviderCall?: (metric: AiProviderCallMetric) => void;
+  now?: () => Date;
+}
+
+export function createAiService(
+  settingsStore: SettingsStore,
+  options: CreateAiServiceOptions = {}
+): AiService {
+  const now = (): Date => options.now?.() ?? new Date();
   // Build one client per provider up front, guarded by API key presence.
   // Z.AI and Google's Gemini API both expose OpenAI-compatible chat
   // endpoints, so reusing the OpenAI SDK with a different baseURL + key is
@@ -1732,6 +1782,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
 
     let lastClass: AiErrorClassification | null = null;
     for (let attempt = 1; attempt <= entry.maxAttempts; attempt++) {
+      const startedAt = performance.now();
       try {
         const response = await client.chat.completions.create({
           model,
@@ -1745,6 +1796,14 @@ export function createAiService(settingsStore: SettingsStore): AiService {
           ...providerOptions(providerId, model),
           ...geminiExtraBody(providerId, model)
         });
+        const usage = response.usage as
+          | {
+              prompt_tokens?: number;
+              completion_tokens?: number;
+              total_tokens?: number;
+              prompt_tokens_details?: { cached_tokens?: number };
+            }
+          | undefined;
         const content = response.choices[0]?.message?.content;
         if (!content) {
           lastClass = {
@@ -1752,6 +1811,18 @@ export function createAiService(settingsStore: SettingsStore): AiService {
             message: `${providerId} returned empty content (model=${model}, attempt ${attempt}/${entry.maxAttempts})`,
             retriable: true
           };
+          options.onProviderCall?.({
+            providerId,
+            model,
+            attempt,
+            status: "error",
+            durationMs: performance.now() - startedAt,
+            promptTokens: usage?.prompt_tokens ?? null,
+            completionTokens: usage?.completion_tokens ?? null,
+            totalTokens: usage?.total_tokens ?? null,
+            cachedPromptTokens: usage?.prompt_tokens_details?.cached_tokens ?? null,
+            errorKind: lastClass.kind
+          });
           console.warn(`[ai] ${lastClass.message}`);
           if (attempt < entry.maxAttempts) {
             await sleep(entry.baseBackoffMs * attempt + Math.random() * 1500);
@@ -1759,9 +1830,34 @@ export function createAiService(settingsStore: SettingsStore): AiService {
           }
           break;
         }
-        return { ok: true, result: parser(parseAiJson(content, model)) };
+        const result = parser(parseAiJson(content, model));
+        options.onProviderCall?.({
+          providerId,
+          model,
+          attempt,
+          status: "success",
+          durationMs: performance.now() - startedAt,
+          promptTokens: usage?.prompt_tokens ?? null,
+          completionTokens: usage?.completion_tokens ?? null,
+          totalTokens: usage?.total_tokens ?? null,
+          cachedPromptTokens: usage?.prompt_tokens_details?.cached_tokens ?? null,
+          errorKind: null
+        });
+        return { ok: true, result };
       } catch (error) {
         lastClass = entry.classifyError(error);
+        options.onProviderCall?.({
+          providerId,
+          model,
+          attempt,
+          status: "error",
+          durationMs: performance.now() - startedAt,
+          promptTokens: null,
+          completionTokens: null,
+          totalTokens: null,
+          cachedPromptTokens: null,
+          errorKind: lastClass.kind
+        });
         console.warn(
           `[ai] ${providerId} call failed (model=${model}, attempt ${attempt}/${entry.maxAttempts}). Reason: ${lastClass.message}`
         );
@@ -1800,8 +1896,9 @@ export function createAiService(settingsStore: SettingsStore): AiService {
     opts?: { forceProviderId?: AiProvider }
   ): Promise<{ result: T; source: AiSource | null }> {
     const { provider: activeId, model: activeModel } = await resolveActive();
-    const chain: AiProvider[] = opts?.forceProviderId
-      ? [opts.forceProviderId]
+    const forcedProviderId = opts?.forceProviderId ?? options.forceProviderId;
+    const chain: AiProvider[] = forcedProviderId
+      ? [forcedProviderId]
       : [activeId, ...fallbackChain.filter((id) => id !== activeId)];
 
     let activeFailure: AiErrorClassification | null = null;
@@ -1822,7 +1919,7 @@ export function createAiService(settingsStore: SettingsStore): AiService {
         // `fellBack` describes the chain walk (active failed, fallback
         // ran). When forceProviderId is set, there was no walk to
         // describe — collapse to "no fallback" regardless.
-        const fellBack = !opts?.forceProviderId && !isFirstInChain;
+        const fellBack = !forcedProviderId && !isFirstInChain;
         const source: AiSource = {
           providerId,
           providerDisplayName: entry.displayName,
@@ -2160,7 +2257,7 @@ open_loops guidance (RECONNECT):
   }
 }
 
-${currentTimeContext()}
+${options.now ? currentTimeContext(now()) : currentTimeContext()}
 
 Reminder: lines starting with \`operator:\` are the operator's own words; the contact's own lines are prefixed with their name (or \`contact:\` when no name is known). Never paraphrase one as if it were the other, and never treat a name mentioned inside a message body as the contact's name.
 
@@ -2183,6 +2280,8 @@ ${BANTER_DISCIPLINE}
 ${contactNameContext(input.displayName)}
 
 ${PRONOUN_DISCIPLINE}
+
+${AMBIGUITY_DISCIPLINE}
 
 ${groupChatContext(input)}
 
@@ -2313,6 +2412,11 @@ ${transcript}`;
     // 120-char cut that stored "...acknowledge the update and gently"). The
     // Today hero renders the result in full via <FitText> (issue #193).
     result.what_they_want = capAskSummary(result.what_they_want);
+    result.summary = preserveAmbiguousEvidence(
+      result.summary,
+      input.messages,
+      "They are not sure of the outcome yet."
+    );
     // A rare model response returns an empty/whitespace ask (seen 2026-07-04
     // on a live thread). An empty hero is worse than the raw latest inbound —
     // fall back to the same capped text the whole-call fallback uses.
@@ -2486,7 +2590,7 @@ ${transcript}`;
       // Only acknowledge if WE haven't already replied since their last
       // message. If outboundMs > inboundMs the operator's already on top.
       if (Number.isFinite(outboundMs) && outboundMs >= inboundMs) return "";
-      const gapDays = (Date.now() - inboundMs) / (1000 * 60 * 60 * 24);
+      const gapDays = (now().getTime() - inboundMs) / (1000 * 60 * 60 * 24);
       if (gapDays < 14) return "";
       const phrase =
         gapDays >= 60
@@ -2607,7 +2711,7 @@ Hard rules:
         .map((p) => p.text.trim())
         .filter((t) => t.length > 0);
       if (substance.length === 0 && !brief.on_you?.trim()) return "";
-      const lines: string[] = ["", "Reply brief from the latest analysis — engage with EVERY beat in 'They said' across the three replies, not just the first one. A reply that ignores a substantive beat the contact took the time to share will feel like the operator skim-read the message."];
+      const lines: string[] = ["", "Reply brief from the latest analysis — EACH suggested reply must engage with EVERY reply-relevant beat in 'They said' and every required point, not just the first one. The three suggestions are complete alternatives, not partial fragments that only work when combined. A reply that ignores a substantive beat the contact took the time to share will feel like the operator skim-read the message."];
       if (brief.where_it_stands?.trim()) {
         lines.push(`Where it stands: ${brief.where_it_stands.trim()}`);
       }
@@ -2645,15 +2749,17 @@ it's formal.
 
 ${PREDRAFT_FIDELITY_REMINDER}
 
+${AMBIGUITY_DISCIPLINE}
+
 ${contactNameContext(input.displayName)}
 
 ${PRONOUN_DISCIPLINE}
 
 ${groupChatContext(input)}
 
-${currentTimeContext()}
+${options.now ? currentTimeContext(now()) : currentTimeContext()}
 
-${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
+${modeBlock}${lateReplyHint}${replyBriefFragment}${operatorProfileFragment(input.operatorProfile)}${mechanicalWritingRulesPromptFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nContact profile (use to ground references in something the contact has actually said or shared, do NOT invent details that are not present):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -2674,6 +2780,7 @@ ${recentExchange || "(no recent messages)"}`;
       ? `${SYSTEM_PROMPT}\n\n${selectVoicePrompt(input.platform)}`
       : SYSTEM_PROMPT;
     const tier = input.platform ? getVoiceTier(input.platform) : null;
+    const configuredRules = deriveMechanicalWritingRules(input.operatorProfile);
 
     const { result: parsed, source } = await modelJson(
       prompt,
@@ -2687,11 +2794,21 @@ ${recentExchange || "(no recent messages)"}`;
     return {
       ...parsed,
       replies: parsed.replies.map((r) => {
-        let cleaned = applyVoiceRules(r.text);
-        cleaned = enforceSentenceStartCapitals(cleaned);
+        const ambiguityFallback =
+          r.label === "A"
+            ? "Fair enough, let me know when you know more"
+            : r.label === "B"
+              ? "Makes sense, keep me posted"
+              : "No worries, hope it becomes clearer soon";
+        let cleaned = applyVoiceRules(
+          preserveAmbiguousEvidence(r.text, input.recentMessages, ambiguityFallback)
+        );
+        if (!configuredRules.allLowercase) cleaned = enforceSentenceStartCapitals(cleaned);
+        if (tier === "casual") cleaned = softenCasualTrailingPeriod(cleaned);
+        cleaned = enforceConfiguredWritingRules(cleaned, input.operatorProfile);
         return {
           ...r,
-          text: tier === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned
+          text: cleaned
         };
       }),
       source
@@ -3072,7 +3189,7 @@ Operator profile: ${JSON.stringify(selfPayload)}`;
       if (!Number.isFinite(lastInboundAt)) return 0;
       const ref = Number.isFinite(lastOutboundAt) ? Math.max(lastInboundAt, lastOutboundAt) : lastInboundAt;
       // Gap = how long since the most recent message in the thread.
-      return Math.max(0, (Date.now() - ref) / (1000 * 60 * 60 * 24));
+      return Math.max(0, (now().getTime() - ref) / (1000 * 60 * 60 * 24));
     })();
 
     // Late-reply hint, bucketed so the opener varies by gap length rather
@@ -3136,14 +3253,14 @@ ${PRONOUN_DISCIPLINE}
 
 ${groupChatContext(input)}
 
-${currentTimeContext()}
+${options.now ? currentTimeContext(now()) : currentTimeContext()}
 
 Operator's intent: ${safeTruncate(trimmed, 600)}
 
 Recent voice samples (operator's own past messages on this thread, oldest first):
 ${cleanedSamples.length > 0 ? cleanedSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n") : "(no prior outbound on this thread — match general British peer-to-peer warmth)"}
 ${recipientSamples.length > 0 ? `\nRecipient's recent messages on this thread (oldest first — match their tempo, length, and warmth, not just the last line):\n${recipientSamples.map((s, i) => `${i + 1}. ${safeTruncate(s, 320)}`).join("\n")}` : ""}
-${lastInbound ? `\nLast message from recipient: ${safeTruncate(renderMessageBody(lastInbound), 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${styleGuidance}${
+${lastInbound ? `\nLast message from recipient: ${safeTruncate(renderMessageBody(lastInbound), 400)}` : ""}${lateReplyHint}${relationshipHint}${operatorProfileFragment(input.operatorProfile)}${mechanicalWritingRulesPromptFragment(input.operatorProfile)}${styleGuidance}${
   input.contact
     ? `\n\nRecipient profile (ground references in real fields here, do not invent):\n${JSON.stringify(snapshotForPrompt(input.contact))}`
     : ""
@@ -3175,8 +3292,10 @@ Return strict JSON: { "text": "string" }`;
     }
 
     let cleaned = applyVoiceRules(stripUnpairedSurrogates(result.text));
-    cleaned = enforceSentenceStartCapitals(cleaned);
-    return getVoiceTier(input.platform) === "casual" ? softenCasualTrailingPeriod(cleaned) : cleaned;
+    const configuredRules = deriveMechanicalWritingRules(input.operatorProfile);
+    if (!configuredRules.allLowercase) cleaned = enforceSentenceStartCapitals(cleaned);
+    if (getVoiceTier(input.platform) === "casual") cleaned = softenCasualTrailingPeriod(cleaned);
+    return enforceConfiguredWritingRules(cleaned, input.operatorProfile);
   }
 
   /**
@@ -3525,7 +3644,7 @@ HARD RULES (strict):
 - Write the answer in SECOND PERSON — refer to the operator as "you". NEVER write "the operator" or "operator" in the answer text; that label only exists for transcript attribution.
 - Do not fabricate names, dates, jobs, locations, or any personal facts not in the context. General knowledge is allowed only for general questions, clearly framed as such.
 
-${currentTimeContext()}
+${options.now ? currentTimeContext(now()) : currentTimeContext()}
 
 Contact: ${input.displayName}
 
@@ -3649,7 +3768,7 @@ Return strict JSON: { "close": "string", "professional": "string", "reason": "st
     if (!client) {
       return null;
     }
-    const prompt = `Triage this report from a small pilot of Relationship Inbox OS, a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
+    const prompt = `Triage this report from a small pilot of Tovi (formerly Relationship Inbox OS), a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
 
 Return strict JSON matching this exact shape:
 {

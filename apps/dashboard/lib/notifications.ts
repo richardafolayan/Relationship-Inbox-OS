@@ -246,7 +246,7 @@ export function notifyNewMessageDigest(rows: InboxRow[], onOpen: () => void): vo
 export function notifyAppUpdateAvailable(latestVersion: string, onUpdate: () => void): boolean {
   return show(
     `Update available v${latestVersion}`,
-    "Click to update and reopen Relationship Inbox OS.",
+    "Click to update and reopen Tovi.",
     `inbox-os:update:${latestVersion}`,
     onUpdate
   );

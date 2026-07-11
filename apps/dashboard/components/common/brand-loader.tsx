@@ -1,4 +1,4 @@
-// Branded loading mark for unavoidable waits: the "Inbox OS" wordmark with
+// Branded loading mark for unavoidable waits: the "Tovi" wordmark with
 // three staggered coral pulse dots (the app's existing in-progress motion,
 // see .animate-pulse-dot in globals.css). Purely functional - it exists so a
 // genuine load reads as the app working rather than a blank stare.
@@ -18,7 +18,7 @@ export function BrandLoader({ className = "" }: { className?: string }) {
       aria-label="Loading"
     >
       <span className="font-display text-[13px] font-semibold tracking-[-0.01em] text-ink-2">
-        Inbox OS
+        Tovi
       </span>
       <span className="flex items-center gap-[4px]" aria-hidden>
         {DOT_DELAYS_MS.map((delay) => (

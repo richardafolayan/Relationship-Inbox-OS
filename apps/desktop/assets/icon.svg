@@ -1,30 +1,5 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-label="Relationship Inbox OS">
-  <defs>
-    <linearGradient id="background" x1="128" y1="96" x2="896" y2="928" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#14d7d1"/>
-      <stop offset="0.54" stop-color="#1286f5"/>
-      <stop offset="1" stop-color="#1453d9"/>
-    </linearGradient>
-    <linearGradient id="paper" x1="286" y1="224" x2="738" y2="794" gradientUnits="userSpaceOnUse">
-      <stop offset="0" stop-color="#ffffff"/>
-      <stop offset="1" stop-color="#eaf7ff"/>
-    </linearGradient>
-    <filter id="shadow" x="178" y="174" width="668" height="706" filterUnits="userSpaceOnUse" color-interpolation-filters="sRGB">
-      <feDropShadow dx="0" dy="24" stdDeviation="30" flood-color="#062a5e" flood-opacity="0.32"/>
-    </filter>
-  </defs>
-  <rect x="64" y="64" width="896" height="896" rx="212" fill="url(#background)"/>
-  <path d="M190 704c70 102 187 164 322 164 134 0 252-62 322-164H190Z" fill="#062a5e" opacity="0.14"/>
-  <g filter="url(#shadow)">
-    <path d="M276 258c0-39 31-70 70-70h332c39 0 70 31 70 70v496c0 39-31 70-70 70H346c-39 0-70-31-70-70V258Z" fill="url(#paper)"/>
-    <path d="M276 404h472v350c0 39-31 70-70 70H346c-39 0-70-31-70-70V404Z" fill="#ffffff"/>
-    <path d="M346 188h332c39 0 70 31 70 70v146H276V258c0-39 31-70 70-70Z" fill="#f8fdff"/>
-  </g>
-  <path d="M354 493h316" stroke="#94a9bd" stroke-width="40" stroke-linecap="round"/>
-  <path d="M354 610h218" stroke="#c2d0dd" stroke-width="40" stroke-linecap="round"/>
-  <path d="M354 727h274" stroke="#c2d0dd" stroke-width="40" stroke-linecap="round"/>
-  <path d="M354 306h180" stroke="#1286f5" stroke-width="42" stroke-linecap="round"/>
-  <circle cx="694" cy="286" r="94" fill="#ff5d57"/>
-  <circle cx="694" cy="286" r="46" fill="#ffffff"/>
-  <path d="M476 834c82 0 145-45 145-107 0-40-26-74-67-92l-42-18c-50-22-78-64-78-116V354h96v145c0 17 10 32 26 39l39 17c78 34 126 97 126 172 0 120-107 207-245 207-74 0-140-25-185-66l64-72c31 24 72 38 121 38Z" fill="#071826"/>
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 512 512" role="img" aria-label="Tovi">
+  <rect x="36" y="36" width="440" height="440" rx="96.8" fill="#F7F2E8"/>
+  <path d="M 146 374 C 106 352 80 313 75 266 C 69 212 90 160 132 124 C 171 91 220 76 271 81 C 334 87 387 117 418 162 C 447 204 450 260 426 310 C 399 365 346 394 282 394 H 224 C 207 394 191 399 177 408 L 126 440" fill="none" stroke="#202A35" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" transform="translate(71.200 71.200) scale(0.721875)"/>
+  <circle cx="254.556" cy="253.113" r="21.656" fill="#D9902F"/>
 </svg>

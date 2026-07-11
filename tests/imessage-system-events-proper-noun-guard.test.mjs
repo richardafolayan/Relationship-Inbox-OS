@@ -14,9 +14,9 @@ import assert from "node:assert/strict";
 // whole prefix is an all-caps shouting row). Single-token prefixes stay
 // permissive so all-lowercase / all-caps single names still match.
 //
-// Both source copies are imported directly (not the @inbox-os/core dist
-// build) so the test pins the actual source edits and the two
-// implementations stay in lockstep regardless of build state.
+// Exercise the dashboard boundary and canonical source together. The
+// dashboard boundary re-exports the built browser-safe core subpath, so this
+// also catches stale build output during the normal build-before-test flow.
 const { isNonContentIMessageSystemEvent: dashboardImpl } = await import(
   "../apps/dashboard/lib/imessage-system-events.ts"
 );
@@ -65,7 +65,7 @@ for (const input of shortClausesEndingInPhrase) {
       false,
       `dashboard dropped a real message: ${JSON.stringify(input)}`
     );
-    // Lockstep: the two copies must agree.
+    // The public dashboard boundary and canonical source must agree.
     assert.equal(coreImpl(input), dashboardImpl(input));
   });
 }
