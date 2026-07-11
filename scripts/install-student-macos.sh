@@ -168,6 +168,10 @@ check_macos() {
 }
 
 check_disk() {
+  if [ "$SKIP_DEPS" = true ]; then
+    info "[skip-deps] skipping the production disk-space check"
+    return 0
+  fi
   # Available GB on the volume that holds the install target's parent.
   local target_parent free
   target_parent="$(dirname "$INSTALL_DIR")"

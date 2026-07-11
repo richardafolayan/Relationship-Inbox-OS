@@ -34,8 +34,65 @@ test("startAppEnvironment pins desktop ports and marks desktop mode", () => {
   assert.equal(env.DASHBOARD_PORT, "3222");
   assert.equal(env.RUNNER_PORT, "4555");
   assert.equal(env.RIOS_DESKTOP, "1");
-  assert.equal(env.PATH, "/tmp/node22/bin:/usr/bin");
+  assert.equal(env.RIOS_RECLAIM_EXISTING, "1");
   assert.equal(env.OTHER, "keep");
+  // The bundled Node must win, the caller's PATH stays, and the GUI-launch
+  // fallback system paths come last so a terminal PATH is never shadowed.
+  const parts = env.PATH.split(":");
+  assert.equal(parts[0], "/tmp/node22/bin");
+  assert.ok(parts.includes("/usr/bin"));
+  assert.ok(env.PATH.endsWith("/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"));
+});
+
+test("startAppEnvironment carries packaged storage locations to the launcher", () => {
+  const env = launcher.startAppEnvironment({ PATH: "/usr/bin" }, "/tmp/node22/bin/node", {
+    appDir: "/tmp/app",
+    configDir: "/tmp/config",
+    dataDir: "/tmp/config/data",
+    stateDir: "/tmp/config/state",
+    packaged: true
+  });
+  assert.equal(env.RIOS_CONFIG_DIR, "/tmp/config");
+  assert.equal(env.RIOS_DATA_DIR, "/tmp/config/data");
+  assert.equal(env.RIOS_STATE_DIR, "/tmp/config/state");
+  assert.equal(env.RIOS_PACKAGED_APP, "1");
+});
+
+test("desktopPaths keeps config, data, state and logs outside the app bundle", () => {
+  const paths = launcher.desktopPaths({
+    userData: "/Users/s/Library/Application Support/Relationship Inbox OS",
+    logs: "/Users/s/Library/Logs/RelationshipInboxOS",
+    home: "/Users/s"
+  });
+  assert.equal(paths.configDir, "/Users/s/Library/Application Support/Relationship Inbox OS");
+  assert.equal(paths.dataDir, join(paths.configDir, "data"));
+  assert.equal(paths.stateDir, join(paths.configDir, "state"));
+  assert.equal(paths.logsDir, "/Users/s/Library/Logs/RelationshipInboxOS");
+  assert.equal(paths.legacyDir, "/Users/s/RelationshipInboxOS");
+});
+
+test("mergeEnvValues forces keys, preserves comments, and keepExisting only fills gaps", () => {
+  const input = "# comment\nDATABASE_URL=file:./old.sqlite\nIMESSAGE_ENABLED=false\n";
+  const forced = launcher.mergeEnvValues(input, { DATABASE_URL: "file:/new/inbox.sqlite" });
+  assert.match(forced, /^# comment$/m);
+  assert.match(forced, /^DATABASE_URL=file:\/new\/inbox\.sqlite$/m);
+  assert.match(forced, /^IMESSAGE_ENABLED=false$/m);
+
+  const defaults = launcher.mergeEnvValues(forced, {
+    IMESSAGE_ENABLED: "true",
+    BROWSER_PROFILE_MODE: "personal"
+  }, { keepExisting: true });
+  // The user's explicit choice survives; missing keys are appended.
+  assert.match(defaults, /^IMESSAGE_ENABLED=false$/m);
+  assert.match(defaults, /^BROWSER_PROFILE_MODE=personal$/m);
+});
+
+test("isSafeExternalUrl allows web and mail links only", () => {
+  assert.equal(launcher.isSafeExternalUrl("https://example.com"), true);
+  assert.equal(launcher.isSafeExternalUrl("mailto:someone@example.com"), true);
+  assert.equal(launcher.isSafeExternalUrl("file:///etc/passwd"), false);
+  assert.equal(launcher.isSafeExternalUrl("javascript:alert(1)"), false);
+  assert.equal(launcher.isSafeExternalUrl("not a url"), false);
 });
 
 test("node version helpers require Node 22", () => {

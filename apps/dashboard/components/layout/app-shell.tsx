@@ -308,7 +308,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       dismissCenterNotification(UPDATE_NOTICE_ID);
       return;
     }
-    const notice = buildUpdateNotice(check.latestVersion);
+    const notice = buildUpdateNotice(check.latestVersion, check.applyMode);
     recordCenterNotifications([
       {
         id: UPDATE_NOTICE_ID,
@@ -322,7 +322,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     writeNotifiedUpdateVersion(check.latestVersion);
     if (plan === "record-and-toast") {
       const activateUpdate = () => {
-        void startAppUpdate(check.latestVersion);
+        if (check.applyMode === "replace_app") {
+          router.push("/settings#app-updates");
+        } else {
+          void startAppUpdate(check.latestVersion);
+        }
       };
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -340,7 +344,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         });
       }
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     void checkAppUpdate();

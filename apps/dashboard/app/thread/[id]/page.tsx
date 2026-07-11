@@ -1928,12 +1928,12 @@ export default function ThreadPage() {
             label: "Grant Messages access",
             run: async () => {
               try {
-                await apiPost("/runner/control/imessage/permission-reset", {});
+                const result = await apiPost<{ message?: string }>("/runner/control/imessage/permission-help", {});
                 setError(
-                  "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then click retry."
+                  result.message ?? "Open Automation, allow Relationship Inbox OS to control Messages, return here, then click retry."
                 );
               } catch (err) {
-                setError(err instanceof Error ? err.message : "Permission reset failed");
+                setError(err instanceof Error ? err.message : "Could not open Mac permission settings");
               }
             }
           };

@@ -7,6 +7,7 @@ import { apiGetRaw, apiPost } from "@/lib/api";
 // detached updater so pilots do not need a terminal or a manual restart.
 
 interface UpdateCheck {
+  applyMode?: "automatic" | "replace_app";
   configured: boolean;
   currentVersion: string;
   latestVersion: string;
@@ -37,6 +38,7 @@ export function AppUpdates() {
   const [runnerOffline, setRunnerOffline] = useState(false);
   const [started, setStarted] = useState<{ from: string; to: string; message?: string } | null>(null);
   const [error, setError] = useState("");
+  const [installHelp, setInstallHelp] = useState("");
 
   const check = useCallback(async (manual: boolean) => {
     setChecking(true);
@@ -86,6 +88,12 @@ export function AppUpdates() {
   }, [check]);
 
   const prepareUpdate = useCallback(async () => {
+    if (info?.applyMode === "replace_app") {
+      setInstallHelp(
+        "Quit Relationship Inbox OS, open the latest DMG from Richard, drag the app into Applications and choose Replace, then reopen it. Your messages and settings are kept."
+      );
+      return;
+    }
     setUpdating(true);
     setError("");
     try {
@@ -173,7 +181,7 @@ export function AppUpdates() {
               disabled={updating}
               className="inline-flex items-center rounded-pill border border-hairline-strong px-[14px] py-[8px] text-[12.5px] font-medium text-accent-ink transition-colors duration-calm hover:bg-paper disabled:opacity-60"
             >
-              {updating ? "Updating app…" : "Update app"}
+              {updating ? "Updating app…" : info.applyMode === "replace_app" ? "Show update steps" : "Update app"}
             </button>
           ) : null}
         </div>
@@ -192,6 +200,12 @@ export function AppUpdates() {
           {started.message ?? "Update started."} v{started.from} to v{started.to}. This
           page may disconnect for a moment while Relationship Inbox OS reopens.
           Your messages and settings are kept.
+        </p>
+      ) : null}
+
+      {installHelp ? (
+        <p className="mt-3 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
+          {installHelp}
         </p>
       ) : null}
 

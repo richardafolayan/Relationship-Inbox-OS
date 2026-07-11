@@ -80,6 +80,8 @@ export function buildInfoPlist({ bundleId = DEFAULT_BUNDLE_ID, version = "0.0.0"
   <string>13.0</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>Relationship Inbox OS asks before sending through Messages. Sending is always user-triggered.</string>
+  <key>NSContactsUsageDescription</key>
+  <string>Relationship Inbox OS uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.</string>
 </dict>
 </plist>
 `;
