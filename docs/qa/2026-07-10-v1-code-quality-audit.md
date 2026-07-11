@@ -68,3 +68,37 @@ Expected measurable result:
   with enough reachability evidence to remove safely.
 - No new architecture, lint, or dependency tool. #803 owns dependency and
   footprint changes, and the selected duplication can be removed without one.
+
+## Outcome
+
+The selected change is complete:
+
+- `packages/core/src/imessage-system-events.ts` remains the unchanged canonical
+  implementation.
+- `@inbox-os/core/imessage-system-events` exposes only that browser-safe module.
+- The dashboard matcher module fell from 71 lines to one re-export.
+- The implementation and focused-test diff has 20 insertions and 85 deletions,
+  a net reduction of 65 lines.
+- The dashboard boundary test asserts function identity with the core subpath,
+  so reintroducing a second implementation will fail the focused suite.
+
+Validation:
+
+- 54 focused iMessage system-event tests passed.
+- Core, dashboard, and runner TypeScript lint passed.
+- The optimized production dashboard build passed, confirming that the browser
+  entry does not pull the core root's Node-only dependency graph into Webpack.
+- The repository-wide suite built core and runner, then passed 2,148 of 2,149
+  tests. One untouched LinkedIn delayed-hydration timing test missed its expected
+  450 ms rejection under full-suite host load. Its isolated rerun passed 1 of 1
+  in 9.7 seconds. The test and LinkedIn adapter are owned by active workstreams
+  and were not changed here.
+- `git diff --check` passed.
+- Visual verification is not applicable because no rendered UI, copy, layout,
+  or interaction changed.
+
+The final coordination check found no exact file overlap with published PRs
+#810, #811, or #812, or with the current #802 and #803 worktree diffs. #803's
+broader manifest claim is respected by limiting `packages/core/package.json` to
+one dependency-free export-map entry; the overlap and exact ownership boundary
+were documented on #800 before implementation.
