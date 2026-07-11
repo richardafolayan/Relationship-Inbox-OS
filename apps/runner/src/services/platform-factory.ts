@@ -49,7 +49,10 @@ export function createAdapters(input: {
   onWhatsAppStateChange?: (state: WhatsAppConnectState) => void;
   /** Fired when whatsapp-web.js reports an inbound message; the runner
    *  debounces it into a WhatsApp scan (real-time inbox flow). */
-  onWhatsAppIncomingMessage?: () => void;
+  onWhatsAppIncomingMessage?: (input: {
+    platformThreadId: string;
+    sourceChangedAt: string;
+  }) => void;
 }): {
   // `Partial` because not every PlatformName has an adapter on main today.
   // IMESSAGE was added to PlatformName so prisma can read existing iMessage

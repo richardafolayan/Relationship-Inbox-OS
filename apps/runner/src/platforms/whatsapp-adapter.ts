@@ -60,7 +60,10 @@ export interface WhatsAppAdapterDeps {
    * still picks those up on the next scheduled pass. Must never throw or
    * block the wweb.js event loop.
    */
-  onIncomingMessage?: () => void;
+  onIncomingMessage?: (input: {
+    platformThreadId: string;
+    sourceChangedAt: string;
+  }) => void;
   /** Client factory override, for tests. */
   createClient?: (authDir: string) => Client;
 }
@@ -126,9 +129,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
       // the library's event loop.
       if (this.deps.onIncomingMessage) {
         const notify = this.deps.onIncomingMessage;
-        client.on("message", () => {
+        client.on("message", (message: WaMessage) => {
           try {
-            notify();
+            notify({
+              platformThreadId: message.from,
+              sourceChangedAt: new Date().toISOString()
+            });
           } catch {
             // Fire-and-forget: never let a scan-enqueue hiccup crash the
             // wweb.js message pipeline.
@@ -154,6 +160,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
     const chats = await this.requireClient().getChats();
     // Chats arrive ordered by most-recent activity from wweb.js.
     return chats.slice(0, limit).map(chatToThreadStub);
+  }
+
+  async fetchThreadById(platformThreadId: string): Promise<ThreadStub | null> {
+    const chat = await this.requireClient().getChatById(platformThreadId).catch(() => null);
+    return chat ? chatToThreadStub(chat) : null;
   }
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
@@ -187,9 +198,14 @@ export class WhatsAppAdapter implements PlatformAdapter {
     const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
     if (media.length === 0) {
       const sent = await client.sendMessage(thread.platformThreadId, text);
+      const acknowledgedAt = new Date().toISOString();
+      const verifiedBy = await this.waitForAcknowledgement(sent);
       return {
         sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
-        verifiedBy: "best_effort"
+        acknowledgedAt,
+        platformResultAt: new Date().toISOString(),
+        platformMessageKey: sent.id?._serialized,
+        verifiedBy
       };
     }
 
@@ -202,6 +218,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // because they're all part of one operator action.
     const sentAttachments: AttachmentPlaceholder[] = [];
     let firstSentTs: number | undefined;
+    let firstMessageKey: string | undefined;
+    let everyMessageAcknowledged = true;
+    let acknowledgedAt: string | undefined;
     for (let i = 0; i < media.length; i++) {
       const a = media[i]!;
       let payload: unknown;
@@ -230,10 +249,16 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (a.kind === "gif") opts.sendVideoAsGif = true;
       if (a.kind === "sticker") opts.sendMediaAsSticker = true;
       const sent = await (client as unknown as {
-        sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<{ timestamp: number; id: { _serialized: string } }>;
+        sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<WaMessage>;
       }).sendMessage(thread.platformThreadId, payload, opts);
+      acknowledgedAt ??= new Date().toISOString();
+      const messageVerification = await this.waitForAcknowledgement(sent);
+      if (messageVerification !== "platform_acknowledged") {
+        everyMessageAcknowledged = false;
+      }
       if (firstSentTs === undefined) firstSentTs = sent.timestamp;
       const rawGuid = sent.id?._serialized ?? "";
+      firstMessageKey ??= rawGuid || undefined;
       const safeGuid = rawGuid ? safeIdForFilename(rawGuid) : "";
 
       // Mirror the staged file under whatsappMediaDir keyed by the sent
@@ -273,7 +298,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
       sentAt:
         epochSecondsToIso(firstSentTs ?? Math.floor(Date.now() / 1000)) ??
         new Date().toISOString(),
-      verifiedBy: "best_effort",
+      acknowledgedAt,
+      platformResultAt: new Date().toISOString(),
+      platformMessageKey: firstMessageKey,
+      verifiedBy: everyMessageAcknowledged ? "platform_acknowledged" : "best_effort",
       attachments: sentAttachments
     };
   }
@@ -318,8 +346,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
       allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
     });
     const sent = await (client as unknown as {
-      sendMessage: (jid: string, content: unknown) => Promise<{ timestamp: number; id?: { _serialized?: string } }>;
+      sendMessage: (jid: string, content: unknown) => Promise<WaMessage>;
     }).sendMessage(thread.platformThreadId, payload);
+    const acknowledgedAt = new Date().toISOString();
+    const verifiedBy = await this.waitForAcknowledgement(sent);
     const structuredPoll: WhatsAppPollPayload = {
       question,
       options: options.map((name) => ({ name })),
@@ -327,8 +357,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
     };
     return {
       sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
+      acknowledgedAt,
+      platformResultAt: new Date().toISOString(),
       platformMessageKey: sent.id?._serialized,
-      verifiedBy: "best_effort",
+      verifiedBy,
       attachments: [
         {
           type: "poll",
@@ -348,6 +380,45 @@ export class WhatsAppAdapter implements PlatformAdapter {
    */
   async openThread(_thread: ThreadStub): Promise<void> {
     return;
+  }
+
+  private async waitForAcknowledgement(
+    sent: Pick<WaMessage, "ack" | "id">
+  ): Promise<SendReceipt["verifiedBy"]> {
+    const currentAck = Number(sent.ack);
+    if (currentAck < 0) {
+      throw new Error("WhatsApp reported a failed platform acknowledgement");
+    }
+    if (currentAck >= 1) {
+      return "platform_acknowledged";
+    }
+
+    const messageId = sent.id?._serialized;
+    if (!messageId) return "best_effort";
+    const client = this.requireClient();
+
+    return new Promise<SendReceipt["verifiedBy"]>((resolve, reject) => {
+      let settled = false;
+      const finish = (result: SendReceipt["verifiedBy"], error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        client.removeListener("message_ack", onAck);
+        if (error) reject(error);
+        else resolve(result);
+      };
+      const onAck = (message: WaMessage, ack: number): void => {
+        if (message.id?._serialized !== messageId) return;
+        if (ack < 0) {
+          finish("best_effort", new Error("WhatsApp reported a failed platform acknowledgement"));
+        } else if (ack >= 1) {
+          finish("platform_acknowledged");
+        }
+      };
+      const timer = setTimeout(() => finish("best_effort"), 5_000);
+      timer.unref?.();
+      client.on("message_ack", onAck);
+    });
   }
 
   async voteOnPoll(

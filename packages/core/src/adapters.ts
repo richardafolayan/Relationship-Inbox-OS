@@ -5,6 +5,12 @@ export interface PlatformAdapter {
   ensureConnected(): Promise<void>;
   scanUnreadThreads(): Promise<ThreadStub[]>;
   fetchRecentThreads(limit: number): Promise<ThreadStub[]>;
+  /**
+   * Optional targeted lookup used when a platform event identifies the exact
+   * conversation that changed. Falls back to the normal unread/recent scan
+   * when the adapter cannot resolve a stable thread id safely.
+   */
+  fetchThreadById?(platformThreadId: string): Promise<ThreadStub | null>;
   fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]>;
   /**
    * `attachments` lets a platform send media alongside text. Optional

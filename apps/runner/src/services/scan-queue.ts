@@ -54,6 +54,7 @@ import {
   normalizeCanonicalLinkedInThreadId
 } from "../linkedin/linkedinIdentity.js";
 import { parseLinkedInListTimestamp } from "../linkedin/linkedinTime.js";
+import type { MessageSyncMetric } from "./message-sync-latency";
 
 interface ScanQueueDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -102,6 +103,11 @@ interface ScanQueueDeps {
    * (the /control/scan route already 409s an unlinked WhatsApp scan).
    */
   isPlatformScannable?: (platform: PlatformName) => boolean;
+  recordLatency?: (input: {
+    metric: MessageSyncMetric;
+    durationMs: number;
+    platform?: PlatformName;
+  }) => void;
 }
 
 /**
@@ -124,7 +130,15 @@ type ScanJob = {
   scope: ScanScope;
   /** Drives per-platform adaptive backoff bookkeeping in runJob (#403). */
   fromScheduler?: boolean;
+  platformThreadId?: string;
+  trigger?: ScanTrigger;
 };
+
+export interface ScanTrigger {
+  kind: "filesystem" | "platform_event" | "browser_change";
+  sourceChangedAt: string;
+  reason: string;
+}
 
 interface TraceAwareAdapter {
   setRunLogger?: (logger: RunLogger | null) => void;
@@ -222,6 +236,9 @@ type EnqueueScanOptions = {
   maxThreads?: number;
   maxOpens?: number;
   forceFallback?: boolean;
+  coalesceWithPending?: boolean;
+  platformThreadId?: string;
+  trigger?: ScanTrigger;
   /** Default "update". See ScanScope for what each value means. */
   scope?: ScanScope;
   /**
@@ -631,6 +648,27 @@ export function resolveEnqueueStatus(
   processingBeforeEnqueue: boolean
 ): "queued" | "running" {
   return processingBeforeEnqueue ? "queued" : "running";
+}
+
+export function jobCoversTriggeredScan(
+  job: Pick<ScanJob, "platform" | "platformThreadId">,
+  requestedPlatform: PlatformName | undefined,
+  requestedThreadId: string | undefined
+): boolean {
+  if (requestedPlatform === undefined) {
+    return job.platform === undefined && job.platformThreadId === undefined;
+  }
+  if (job.platform !== undefined && job.platform !== requestedPlatform) return false;
+  if (job.platformThreadId === undefined) return true;
+  return requestedThreadId !== undefined && job.platformThreadId === requestedThreadId;
+}
+
+function earlierTrigger(current: ScanTrigger | undefined, incoming: ScanTrigger | undefined): ScanTrigger | undefined {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  return Date.parse(current.sourceChangedAt) <= Date.parse(incoming.sourceChangedAt)
+    ? { ...current, reason: current.reason === incoming.reason ? current.reason : `${current.reason},${incoming.reason}` }
+    : { ...incoming, reason: current.reason === incoming.reason ? incoming.reason : `${current.reason},${incoming.reason}` };
 }
 
 export function createScanQueue(deps: ScanQueueDeps) {
@@ -1064,7 +1102,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
     options?: EnqueueScanOptions
   ): EnqueueScanResult {
     const requestId = options?.requestId ?? uuid();
-    if (isLinkedInInFlight({
+    if (options?.coalesceWithPending) {
+      const pending = queue.find((entry) =>
+        jobCoversTriggeredScan(entry, platform, options.platformThreadId)
+      );
+      if (pending) {
+        pending.trigger = earlierTrigger(pending.trigger, options.trigger);
+        return {
+          ok: true,
+          jobId: pending.jobId,
+          status: "queued",
+          requestId: pending.jobId,
+          platform: pending.platform
+        };
+      }
+    }
+    if (!options?.coalesceWithPending && isLinkedInInFlight({
       requestedPlatform: platform,
       currentJob,
       queuedJobs: queue
@@ -1124,7 +1177,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
       maxOpens: normalizePositiveScanCap(options?.maxOpens),
       forceFallback: shouldUseForceFallback(options?.forceFallback),
       scope: options?.scope ?? "update",
-      fromScheduler: options?.fromScheduler === true
+      fromScheduler: options?.fromScheduler === true,
+      platformThreadId: options?.platformThreadId,
+      trigger: options?.trigger
     };
 
     // Capture whether a job is already in flight BEFORE triggerProcessNext():
@@ -1147,26 +1202,33 @@ export function createScanQueue(deps: ScanQueueDeps) {
   function startScheduler(): void {
     if (isAutoScanDisabledInDev()) {
       if (scheduler) {
-        clearInterval(scheduler);
+        clearTimeout(scheduler);
         scheduler = undefined;
       }
       return;
     }
 
     if (scheduler) {
-      clearInterval(scheduler);
+      clearTimeout(scheduler);
     }
 
-    scheduler = setInterval(() => {
-      void (async () => {
+    const scheduleNext = (delayMs: number): void => {
+      scheduler = setTimeout(() => void tick(), Math.max(1_000, Math.min(delayMs, 60_000)));
+      scheduler.unref?.();
+    };
+
+    const tick = async (): Promise<void> => {
+      try {
         const settings = await deps.settingsStore.getSettings();
         if (settings.demoMode) {
+          scheduleNext(60_000);
           return;
         }
 
         const now = Date.now();
         const intervalMs = settings.scanIntervalSeconds * 1000;
         if (processing) {
+          scheduleNext(1_000);
           return;
         }
 
@@ -1197,8 +1259,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
             fromScheduler: true
           });
         }
-      })().catch((error) => {
-        void deps.auditLog({
+
+        if (processing || queue.length > 0) {
+          scheduleNext(1_000);
+          return;
+        }
+        const nextDueMs = enabledPlatforms.reduce((soonest, platform) => {
+          const state = adaptiveBackoffByPlatform.get(platform);
+          if (!state) return Math.min(soonest, intervalMs);
+          const dueAt =
+            state.lastScheduledScanAt +
+            intervalMs * adaptiveBackoffMultiplier(state.consecutiveNoChange);
+          return Math.min(soonest, Math.max(1_000, dueAt - Date.now()));
+        }, 60_000);
+        scheduleNext(nextDueMs);
+      } catch (error) {
+        await deps.auditLog({
           stage: "Scan",
           action: "SCHEDULER_TICK_FAIL",
           status: "FAIL",
@@ -1208,8 +1284,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
             stack: error instanceof Error ? error.stack : undefined
           }
         });
-      });
-    }, 1000);
+        scheduleNext(5_000);
+      }
+    };
+
+    scheduleNext(1_000);
   }
 
   async function processNext(): Promise<void> {
@@ -2124,7 +2203,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
             // below costs seconds of synchronous SQLite per tick on a real
             // Messages library and used to run on EVERY watcher tick.
             let incrementalPlan: IncrementalScanPlan | null = null;
-            if (adapterSupportsIncrementalScan(adapter)) {
+            if (job.platformThreadId && adapter.fetchThreadById) {
+              const targeted = await adapter.fetchThreadById(job.platformThreadId);
+              candidatesToSync = targeted ? [{ thread: targeted }] : [];
+              rawThreadCount = candidatesToSync.length;
+              effectiveThreadCount = rawThreadCount;
+              candidatesBeforeCap = rawThreadCount;
+              threadsScannedCount = rawThreadCount;
+              unreadCandidatesCount = targeted && (targeted.unreadCount ?? 0) > 0 ? 1 : 0;
+              needsReplyCandidatesCount = targeted?.needsReplyFromList ? 1 : 0;
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Resolved event-targeted thread",
+                details: {
+                  platformThreadId: job.platformThreadId,
+                  found: Boolean(targeted)
+                }
+              });
+            } else if (adapterSupportsIncrementalScan(adapter)) {
               const storedWatermark = await loadScanWatermark(platform);
               incrementalPlan = await resolveIncrementalScanPlan(adapter, storedWatermark);
               capturedScanWatermark = incrementalPlan.watermark;
@@ -2140,7 +2236,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
               });
             }
 
-            if (incrementalPlan && incrementalPlan.mode === "skip") {
+            if (job.platformThreadId && adapter.fetchThreadById) {
+              headline("COLLECT_TARGETED_OK", "event-targeted candidate collection complete", {
+                platformThreadId: job.platformThreadId,
+                candidatesCount: candidatesToSync.length
+              });
+            } else if (incrementalPlan && incrementalPlan.mode === "skip") {
               // Nothing changed upstream since the last completed scan -
               // finish the tick with zero candidates. Same flow/events as a
               // scan that found no work, so consumers see a normal scan.
@@ -2344,7 +2445,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 job.jobId,
                 runLogger,
                 candidateToSync.messages,
-                markedFullBackfill
+                markedFullBackfill,
+                false,
+                job.trigger
               );
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
@@ -2887,7 +2990,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // AI for ACTIVE threads — running it synchronously across hundreds of
     // dormant backfill threads just rate-limits the AI provider and is not
     // what the backfill is for.
-    skipAi = false
+    skipAi = false,
+    trigger?: ScanTrigger
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
@@ -3410,6 +3514,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    const persistedAt = new Date().toISOString();
+    const syncTiming = trigger
+      ? {
+          sourceChangedAt: trigger.sourceChangedAt,
+          persistedAt,
+          trigger: trigger.kind
+        }
+      : undefined;
+    if (syncTiming) {
+      deps.recordLatency?.({
+        metric: "source_change_to_persisted_message",
+        durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
+        platform
+      });
+      deps.eventBus.emit({
+        type: "MESSAGES_PERSISTED",
+        jobId,
+        threadId: thread.id,
+        platform,
+        syncTiming
+      });
+    }
+
     // Transcription enqueue. We resolve the persisted Message ids in a
     // single query rather than per-message lookups, then hand each one to
     // the optional hook. Fire-and-forget: scans never block on OpenAI
@@ -3847,7 +3974,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     deps.eventBus.emit({
       type: "THREAD_UPDATED",
       jobId,
-      threadId: thread.id
+      threadId: thread.id,
+      syncTiming
     });
 
     await deps.auditLog({
@@ -3932,6 +4060,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         runLogger?: RunLogger;
         messages?: NormalizedMessage[];
         skipAi?: boolean;
+        trigger?: ScanTrigger;
       }
     ) =>
       syncThread(
@@ -3942,7 +4071,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         input.runLogger,
         input.messages,
         false,
-        input.skipAi ?? false
+        input.skipAi ?? false,
+        input.trigger
       ),
     clearAbort
   };

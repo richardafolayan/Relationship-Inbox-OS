@@ -16,7 +16,8 @@ function createFakeClient(overrides = {}) {
     getChats: overrides.getChats ?? (async () => []),
     getChatById: overrides.getChatById ?? (async () => null),
     sendMessage:
-      overrides.sendMessage ?? (async () => ({ timestamp: 1700000100, id: { _serialized: "x" } })),
+      overrides.sendMessage ??
+      (async () => ({ timestamp: 1700000100, id: { _serialized: "x" }, ack: 1 })),
     getMessageById: overrides.getMessageById ?? (async () => null),
     getContactById:
       overrides.getContactById ??
@@ -121,6 +122,25 @@ test("ensureConnected is idempotent — second call returns the same in-flight p
   assert.equal(initCount, 1);
 });
 
+test("incoming WhatsApp message includes a targeted thread hint", async () => {
+  const client = createFakeClient();
+  const changes = [];
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onIncomingMessage: (change) => changes.push(change)
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  client.emit("message", { from: "group@g.us", fromMe: false });
+
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].platformThreadId, "group@g.us");
+  assert.equal(Number.isFinite(Date.parse(changes[0].sourceChangedAt)), true);
+});
+
 test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   const chats = [
     { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },
@@ -193,7 +213,7 @@ test("sendMessage allows WhatsApp group sends even when the group is not a saved
     },
     sendMessage: async (jid) => {
       sentJid = jid;
-      return { timestamp: 1700000100, id: { _serialized: "group-msg-1" } };
+      return { timestamp: 1700000100, id: { _serialized: "group-msg-1" }, ack: 1 };
     }
   });
   const adapter = new WhatsAppAdapter({
@@ -216,7 +236,7 @@ test("sendMessage allows WhatsApp group sends even when the group is not a saved
 
   assert.equal(sentJid, "120363123456789@g.us");
   assert.equal(contactLookups, 0);
-  assert.equal(receipt.verifiedBy, "best_effort");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
 });
 
 test("sendMessage delegates to client.sendMessage when the guard allows", async () => {
@@ -225,7 +245,7 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
     sendMessage: async (jid, text) => {
       sentText = text;
       assert.equal(jid, "447111222333@c.us");
-      return { timestamp: 1700000100, id: { _serialized: "msg-1" } };
+      return { timestamp: 1700000100, id: { _serialized: "msg-1" }, ack: 1 };
     }
   });
   const adapter = new WhatsAppAdapter({
@@ -240,7 +260,8 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
     "hello"
   );
   assert.equal(sentText, "hello");
-  assert.equal(receipt.verifiedBy, "best_effort");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(receipt.platformMessageKey, "msg-1");
   assert.equal(receipt.sentAt, "2023-11-14T22:15:00.000Z");
 });
 
@@ -251,7 +272,7 @@ test("sendPoll sends a native WhatsApp poll and returns structured metadata", as
     sendMessage: async (jid, content) => {
       sentJid = jid;
       sentPoll = content;
-      return { timestamp: 1700000100, id: { _serialized: "poll-msg-1" } };
+      return { timestamp: 1700000100, id: { _serialized: "poll-msg-1" }, ack: 1 };
     }
   });
   const adapter = new WhatsAppAdapter({

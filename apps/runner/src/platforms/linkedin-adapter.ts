@@ -2200,11 +2200,207 @@ export class LinkedInAdapter implements PlatformAdapter {
    * plenty while still picking up rotations within a run.
    */
   private lastCookieSyncAt: number | null = null;
+  private realtimeWatcher: { stop(): void } | null = null;
 
   constructor(private readonly deps: LinkedInAdapterDependencies) {}
 
   setRunLogger(logger: RunLogger | null): void {
     this.runLogger = logger;
+  }
+
+  startInboxRealtimeWatcher(input: {
+    debounceMs: number;
+    onChange: (change: { reason: string; sourceChangedAt: string }) => void;
+    log?: (line: string) => void;
+  }): { stop(): void } {
+    this.realtimeWatcher?.stop();
+    const log = input.log ?? (() => undefined);
+    const bindingName = "__relationshipInboxLinkedInChanged";
+    let stopped = false;
+    let page: Page | null = null;
+    let rearmTimer: ReturnType<typeof setTimeout> | null = null;
+    let bindingExposed = false;
+
+    const scheduleArm = (delayMs: number): void => {
+      if (stopped || rearmTimer) return;
+      rearmTimer = setTimeout(() => {
+        rearmTimer = null;
+        void arm();
+      }, delayMs);
+      rearmTimer.unref?.();
+    };
+
+    const arm = async (): Promise<void> => {
+      if (stopped) return;
+      try {
+        const nextPage = await this.getPage();
+        if (stopped || nextPage.isClosed()) return;
+
+        if (page !== nextPage) {
+          page = nextPage;
+          bindingExposed = false;
+          nextPage.on("close", () => {
+            if (stopped) return;
+            page = null;
+            bindingExposed = false;
+            scheduleArm(5_000);
+          });
+          nextPage.on("framenavigated", (frame) => {
+            if (!stopped && frame === nextPage.mainFrame()) {
+              scheduleArm(1_000);
+            }
+          });
+        }
+
+        if (!nextPage.url().includes("/messaging")) {
+          scheduleArm(15_000);
+          return;
+        }
+
+        if (!bindingExposed) {
+          await nextPage.exposeFunction(bindingName, (payload: unknown) => {
+            const change = payload && typeof payload === "object"
+              ? (payload as { reason?: unknown; sourceChangedAt?: unknown })
+              : {};
+            try {
+              input.onChange({
+                reason: String(change.reason ?? "dom_change"),
+                sourceChangedAt:
+                  typeof change.sourceChangedAt === "string"
+                    ? change.sourceChangedAt
+                    : new Date().toISOString()
+              });
+            } catch {
+              return;
+            }
+          });
+          bindingExposed = true;
+        }
+
+        await nextPage.evaluate(
+          ({ debounceMs, bindingName: pageBindingName }) => {
+            const win = window as unknown as Window & {
+              __relationshipInboxLinkedInWatchCleanup?: () => void;
+              [key: string]: unknown;
+            };
+            win.__relationshipInboxLinkedInWatchCleanup?.();
+
+            let lastFingerprint = "";
+            let timer: number | null = null;
+            let pendingSourceChangedAt: string | null = null;
+            const rowSelectors = [
+              "li.msg-conversation-listitem",
+              ".msg-conversation-listitem",
+              "a[href*='/messaging/thread/']"
+            ];
+
+            const hash = (value: string): string => {
+              let result = 2166136261;
+              for (let index = 0; index < value.length; index += 1) {
+                result ^= value.charCodeAt(index);
+                result = Math.imul(result, 16777619);
+              }
+              return (result >>> 0).toString(36);
+            };
+
+            const fingerprint = (): string => {
+              if (!location.href.includes("/messaging")) return "";
+              const rows = rowSelectors.flatMap((selector) =>
+                Array.from(document.querySelectorAll(selector))
+              );
+              const uniqueRows = Array.from(new Set(rows)).slice(0, 20);
+              return uniqueRows
+                .map((node) => {
+                  const element = node as HTMLElement;
+                  const anchor = element.matches("a")
+                    ? element
+                    : element.querySelector("a[href*='/messaging/']");
+                  const href = anchor instanceof HTMLAnchorElement ? anchor.href : "";
+                  const text = (element.textContent ?? "").replace(/\s+/g, " ").trim();
+                  return [
+                    href,
+                    element.getAttribute("data-urn") ?? "",
+                    element.getAttribute("data-test-id") ?? "",
+                    hash(text)
+                  ].join("|");
+                })
+                .join("::");
+            };
+
+            const notifyIfChanged = (reason: string): void => {
+              const current = fingerprint();
+              const sourceChangedAt = pendingSourceChangedAt ?? new Date().toISOString();
+              pendingSourceChangedAt = null;
+              if (!current || current === lastFingerprint) return;
+              lastFingerprint = current;
+              const notify = win[pageBindingName];
+              if (typeof notify === "function") {
+                void (notify as (payload: unknown) => Promise<void> | void)({
+                  reason,
+                  sourceChangedAt
+                });
+              }
+            };
+
+            const scheduleNotify = (reason: string): void => {
+              pendingSourceChangedAt ??= new Date().toISOString();
+              if (timer !== null) window.clearTimeout(timer);
+              timer = window.setTimeout(() => {
+                timer = null;
+                notifyIfChanged(reason);
+              }, debounceMs);
+            };
+
+            lastFingerprint = fingerprint();
+            const observer = new MutationObserver(() => scheduleNotify("mutation"));
+            observer.observe(document.documentElement, {
+              childList: true,
+              subtree: true,
+              characterData: true,
+              attributes: true,
+              attributeFilter: ["class", "aria-label", "data-test-id"]
+            });
+            const fallback = window.setInterval(() => scheduleNotify("local_fingerprint"), 15_000);
+            win.__relationshipInboxLinkedInWatchCleanup = () => {
+              observer.disconnect();
+              window.clearInterval(fallback);
+              if (timer !== null) window.clearTimeout(timer);
+            };
+          },
+          { debounceMs: Math.max(100, input.debounceMs), bindingName }
+        );
+        log(`[linkedin-watcher] armed (debounce ${input.debounceMs}ms)`);
+      } catch (error) {
+        log(
+          `[linkedin-watcher] failed to arm: ${error instanceof Error ? error.message : String(error)}; retrying in 15s`
+        );
+        scheduleArm(15_000);
+      }
+    };
+
+    const watcher = {
+      stop(): void {
+        stopped = true;
+        if (rearmTimer) clearTimeout(rearmTimer);
+        rearmTimer = null;
+        const currentPage = page;
+        page = null;
+        if (currentPage && !currentPage.isClosed()) {
+          void currentPage
+            .evaluate(() => {
+              const win = window as Window & {
+                __relationshipInboxLinkedInWatchCleanup?: () => void;
+              };
+              win.__relationshipInboxLinkedInWatchCleanup?.();
+              delete win.__relationshipInboxLinkedInWatchCleanup;
+            })
+            .catch(() => undefined);
+        }
+      }
+    };
+    this.realtimeWatcher = watcher;
+    void arm();
+    return watcher;
   }
 
   private resolveActiveStage(stage?: string | null): string | null {
@@ -9923,6 +10119,7 @@ export class LinkedInAdapter implements PlatformAdapter {
         console.warn(`${tag} click send_button (selector=${selectors.send_button})`);
         const sendBtn = page.locator(selectors.send_button).first();
         await humanClick(page, sendBtn, { timeout: 10_000, reading: null });
+        const acknowledgedAt = new Date().toISOString();
         console.warn(`${tag} send_button clicked, entering verify loop`);
 
         const start = Date.now();
@@ -9958,6 +10155,8 @@ export class LinkedInAdapter implements PlatformAdapter {
         console.warn(`${tag} send complete verifiedBy=${verifiedBy}`);
         return {
           sentAt: new Date().toISOString(),
+          acknowledgedAt,
+          platformResultAt: new Date().toISOString(),
           verifiedBy
         };
       } catch (error) {
@@ -10232,6 +10431,8 @@ export class LinkedInAdapter implements PlatformAdapter {
   }
 
   async closeSession(_reason?: string): Promise<void> {
+    this.realtimeWatcher?.stop();
+    this.realtimeWatcher = null;
     await this.deps.sessionManager.closePlatformPage({
       platform: this.platform,
       personKey: this.deps.personKey ?? "default"

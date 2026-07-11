@@ -77,7 +77,7 @@ export interface RunnerConfig {
     /**
      * Debounce window for the chat.db filesystem watcher. SQLite writes a
      * burst of WAL/SHM events per message; we collapse them into one scan
-     * enqueue. 500ms is empirically enough to coalesce a single iMessage
+     * enqueue. 200ms is enough to coalesce a single iMessage
      * arrival without noticeably delaying its appearance in the inbox.
      */
     watchDebounceMs: number;
@@ -608,7 +608,7 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // Full Disk Access granted to the runner's parent process.
       enabled: (env.IMESSAGE_ENABLED ?? "").trim().toLowerCase() === "true" && process.platform === "darwin",
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
-      watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
+      watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 200),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
     },
     contacts: {

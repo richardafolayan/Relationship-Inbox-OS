@@ -35,12 +35,18 @@ interface SendServiceDeps {
   withPlatformLock: <T>(platform: PlatformName, work: () => Promise<T>) => Promise<T>;
   /** Override the Prisma client. Defaults to the runner's singleton; tests inject a fake. */
   prisma?: PrismaClient;
+  onPlatformResult?: (input: {
+    clientSendId: string;
+    platform: PlatformName;
+    outcome: "success" | "failure";
+    finishedAt: string;
+  }) => void;
 }
 
 interface SendResult {
   sentAt: string;
   screenshotFile?: string;
-  verifiedBy: "bubble_detected" | "timestamp_advanced" | "best_effort";
+  verifiedBy: SendReceipt["verifiedBy"];
   replayed: boolean;
 }
 
@@ -461,12 +467,22 @@ export function createSendService(deps: SendServiceDeps) {
         screenshotFile: receipt.screenshotFile
       });
 
+      const platformResultAt = receipt.platformResultAt ?? new Date().toISOString();
+      deps.onPlatformResult?.({
+        clientSendId: input.clientSendId,
+        platform: thread.platform as PlatformName,
+        outcome: "success",
+        finishedAt: platformResultAt
+      });
       deps.eventBus.emit({
         type: "MESSAGE_SENT",
         jobId,
         threadId: thread.id,
         platform: thread.platform as PlatformName,
-        clientSendId: input.clientSendId
+        clientSendId: input.clientSendId,
+        verifiedBy: receipt.verifiedBy,
+        acknowledgedAt: receipt.acknowledgedAt,
+        platformResultAt
       });
     } catch (error) {
       const adapterError = error instanceof AdapterFailure ? error : undefined;
@@ -509,6 +525,13 @@ export function createSendService(deps: SendServiceDeps) {
         }
       });
 
+      const platformResultAt = new Date().toISOString();
+      deps.onPlatformResult?.({
+        clientSendId: input.clientSendId,
+        platform: thread.platform as PlatformName,
+        outcome: "failure",
+        finishedAt: platformResultAt
+      });
       deps.eventBus.emit({
         type: "MESSAGE_SEND_FAILED",
         jobId,
@@ -517,7 +540,8 @@ export function createSendService(deps: SendServiceDeps) {
         logId,
         clientSendId: input.clientSendId,
         errorMessage: consumerFailure.message,
-        errorKind
+        errorKind,
+        platformResultAt
       });
 
       // Don't rethrow — the worker already logged FAILED state. Rethrowing

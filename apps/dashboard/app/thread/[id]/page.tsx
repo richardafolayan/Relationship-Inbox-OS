@@ -101,6 +101,11 @@ import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
+import {
+  afterNextPaint,
+  recordMessageSyncLatency
+} from "@/lib/message-sync-latency";
+import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
 
@@ -846,7 +851,7 @@ export default function ThreadPage() {
   // the composer keys off the local time, so this lets it appear/disappear
   // live as the clock crosses the 22:00 / 06:00 quiet-window boundary without
   // the operator needing to re-type. One render a minute is negligible next to
-  // the 3s send-queue poll already running on this page.
+  // the active-window send reconciliation already running on this page.
   const [clockNow, setClockNow] = useState(() => new Date());
   useEffect(() => {
     const id = setInterval(() => setClockNow(new Date()), 60_000);
@@ -1182,6 +1187,12 @@ export default function ThreadPage() {
         errorMessage?: string;
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
+        platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
+        syncTiming?: {
+          sourceChangedAt: string;
+          persistedAt: string;
+          trigger: string;
+        };
       }>).detail;
       if (!detail || !threadId) return;
       // Sibling-aware routing: accept events for the open thread OR any sibling
@@ -1207,6 +1218,17 @@ export default function ThreadPage() {
               : p
           )
         );
+      } else if (detail.type === "MESSAGES_PERSISTED" && detail.syncTiming) {
+        const persistedAt = detail.syncTiming.persistedAt;
+        void refreshThread().then(() => {
+          afterNextPaint(() => {
+            recordMessageSyncLatency({
+              metric: "persisted_message_to_visible_ui",
+              durationMs: Date.now() - Date.parse(persistedAt),
+              platform: detail.platform
+            });
+          });
+        });
       } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
         // Thread-only + debounced: a scan burst of THREAD_UPDATED events
         // collapses into one /data/thread refetch instead of N full refreshes.
@@ -1235,11 +1257,16 @@ export default function ThreadPage() {
 
   // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
-    if (!threadId) return undefined;
+    if (!threadId || pendingSends.length === 0) return undefined;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
     const tick = async () => {
       if (cancelled) return;
-      if (pendingSendsRef.current.length === 0) return;
+      if (
+        pendingSendsRef.current.length === 0 ||
+        pendingSendsRef.current.every((pending) => pending.failed)
+      ) return;
       try {
         const queue = await apiGet<{
           recent: Array<{
@@ -1287,14 +1314,22 @@ export default function ThreadPage() {
       } catch {
         // Network blip - try again next tick.
       }
+      if (
+        cancelled ||
+        pendingSendsRef.current.length === 0 ||
+        pendingSendsRef.current.every((pending) => pending.failed)
+      ) return;
+      timer = setTimeout(
+        () => void tick(),
+        nextSendReconcileDelayMs(Date.now() - startedAt, document.visibilityState === "visible")
+      );
     };
-    const timer = setInterval(() => void tick(), 3000);
     void tick();
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
-  }, [threadId, refresh]);
+  }, [threadId, refresh, pendingSends.length]);
 
   const checkPendingDelivery = useCallback(
     async (clientSendId: string) => {
@@ -1438,6 +1473,13 @@ export default function ThreadPage() {
       ...prev,
       { clientSendId, text, sentAt, attachments: attachmentsToSend }
     ]);
+    afterNextPaint(() => {
+      recordMessageSyncLatency({
+        metric: "send_click_to_visible_acknowledgement",
+        durationMs: Date.now() - Date.parse(sentAt),
+        platform: thread.platform
+      });
+    });
     setComposer("");
     // Reset the source too: an emptied composer must never keep the AI-predraft
     // accent frame + badge (#350). Without this the badge frames a blank input
@@ -1456,6 +1498,7 @@ export default function ThreadPage() {
         const form = new FormData();
         form.append("text", text);
         form.append("clientSendId", clientSendId);
+        form.append("clientRequestedAt", sentAt);
         if (replyToMessageId) form.append("replyToMessageId", replyToMessageId);
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
@@ -1465,6 +1508,7 @@ export default function ThreadPage() {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
           clientSendId,
+          clientRequestedAt: sentAt,
           ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
