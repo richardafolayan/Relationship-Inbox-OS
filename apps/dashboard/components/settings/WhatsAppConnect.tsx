@@ -131,7 +131,7 @@ export function WhatsAppConnect() {
             type="button"
             onClick={connect}
             disabled={connecting || state === "connecting"}
-            className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+            className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {state === "connecting" ? "Connecting..." : "Connect WhatsApp"}
           </button>

@@ -337,7 +337,7 @@ export function UserVoiceProfile({
                   onClick={() => void saveReview()}
                   disabled={savingReview}
                   data-testid="voice-review-save"
-                  className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-3 py-[7px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-3 py-[7px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   {savingReview ? (
                     <>
@@ -526,7 +526,7 @@ export function UserVoiceProfile({
               type="button"
               onClick={() => void finishSetup()}
               disabled={finishing || !loaded}
-              className="rounded-pill bg-ink px-4 py-[9px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-pill bg-ink px-4 py-[9px] text-[13px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {finishing ? "Saving…" : "Done, take me in"}
             </button>

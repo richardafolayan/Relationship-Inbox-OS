@@ -31,7 +31,7 @@ export function FullDemoSettingsCard() {
       <div className="flex flex-wrap items-center gap-2">
         <Link
           href="/demo"
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-1.5 text-sm font-medium text-paper hover:bg-[oklch(28%_0.01_80)]"
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-1.5 text-sm font-medium text-paper hover:bg-ink-2"
         >
           Open demo
         </Link>

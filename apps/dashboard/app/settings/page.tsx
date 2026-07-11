@@ -727,10 +727,15 @@ function PlatformSetupCard({
   const connected = status === "CONNECTED";
   const enabled = row?.enabled ?? true;
   const runnerProcess = fallbackPlatform === "IMESSAGE" ? row?.runnerProcess : undefined;
-  const statusLabel = !enabled
-    ? "Off"
-    : connected
+  // `enabled` is the auto-scan toggle (Capture), not the connection itself:
+  // a connected platform with scans off still supports manual scans and
+  // opening the browser, so it must not read as a bare "Off".
+  const statusLabel = connected
+    ? enabled
       ? "Connected"
+      : "Connected · auto-scan off"
+    : !enabled
+      ? "Off"
       : status === "DEGRADED"
         ? "Needs a look"
         : status === "ERROR"
@@ -766,8 +771,8 @@ function PlatformSetupCard({
         <button
           type="button"
           onClick={onPrimary}
-          disabled={busy || !enabled}
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={busy}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Working..." : actionLabel}
         </button>
