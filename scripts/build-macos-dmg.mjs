@@ -18,7 +18,9 @@ import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
-export const APP_NAME = "Relationship Inbox OS";
+export const APP_NAME = "Tovi";
+// BUNDLE_ID intentionally keeps the original identifier: macOS TCC permission
+// grants (Full Disk Access, Automation, Accessibility) are keyed to it.
 export const BUNDLE_ID = "com.relationshipinboxos.desktop";
 export const REQUIRED_NODE_MAJOR = 22;
 
@@ -245,10 +247,10 @@ function rewriteInfoPlist(appPath, version) {
   plistSet(plist, "LSMinimumSystemVersion", "13.0");
   plistSetBoolean(plist, "LSMultipleInstancesProhibited", true);
   plistSetBoolean(plist, "NSHighResolutionCapable", true);
-  plistSet(plist, "NSAppleEventsUsageDescription", "Relationship Inbox OS asks before sending through Messages. Sending is always user-triggered.");
-  plistSet(plist, "NSContactsUsageDescription", "Relationship Inbox OS uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.");
-  plistSet(plist, "NSMicrophoneUsageDescription", "Relationship Inbox OS uses the microphone only when you choose dictation.");
-  plistSet(plist, "NSCameraUsageDescription", "Relationship Inbox OS uses the camera only if you choose a feature that asks for it.");
+  plistSet(plist, "NSAppleEventsUsageDescription", "Tovi asks before sending through Messages. Sending is always user-triggered.");
+  plistSet(plist, "NSContactsUsageDescription", "Tovi uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.");
+  plistSet(plist, "NSMicrophoneUsageDescription", "Tovi uses the microphone only when you choose dictation.");
+  plistSet(plist, "NSCameraUsageDescription", "Tovi uses the camera only if you choose a feature that asks for it.");
   plistDelete(plist, "NSBluetoothAlwaysUsageDescription");
   plistDelete(plist, "NSBluetoothPeripheralUsageDescription");
 }
@@ -286,7 +288,7 @@ function copyBundle(source, destination) {
 function createDmg(appPath, outDir, version) {
   ensureTool("hdiutil");
   const dmgRoot = join(outDir, "dmg-root");
-  const dmgPath = join(outDir, `Relationship-Inbox-OS-${version}.dmg`);
+  const dmgPath = join(outDir, `Tovi-${version}.dmg`);
   rmSync(dmgRoot, { recursive: true, force: true });
   mkdirSync(dmgRoot, { recursive: true });
   copyBundle(appPath, join(dmgRoot, basename(appPath)));
@@ -308,7 +310,7 @@ export function directorySizeBytes(path) {
 export function planPaths({ out, version = appVersion() } = {}) {
   const outDir = resolve(ROOT, out || "release-dist/macos");
   const appPath = join(outDir, `${APP_NAME}.app`);
-  const dmgPath = join(outDir, `Relationship-Inbox-OS-${version}.dmg`);
+  const dmgPath = join(outDir, `Tovi-${version}.dmg`);
   const runtimeDir = join(outDir, "runtime", `node-v${REQUIRED_NODE_MAJOR}-darwin-${macArchToNodeArch()}`);
   return { outDir, appPath, dmgPath, runtimeDir };
 }
@@ -368,7 +370,7 @@ export async function buildMacosDmg(options = {}) {
 }
 
 function printHelp() {
-  process.stdout.write(`Build a local macOS DMG for Relationship Inbox OS.
+  process.stdout.write(`Build a local macOS DMG for Tovi.
 
 Usage:
   npm run build:macos-dmg -- [options]

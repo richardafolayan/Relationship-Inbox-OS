@@ -79,7 +79,7 @@ function launchApp() {
       say(`Could not restart the app: ${error.message}`);
     });
     child.unref();
-    say(`Started Relationship Inbox OS again (pid ${child.pid ?? "unknown"}).`);
+    say(`Started Tovi again (pid ${child.pid ?? "unknown"}).`);
   } finally {
     closeSync(fd);
   }

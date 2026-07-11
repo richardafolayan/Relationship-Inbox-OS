@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — publish a student release to Dropbox.
+// Tovi — publish a student release to Dropbox.
 //
 // One safe command that: builds the release, refuses to publish if anything
 // secret would leak, OVERWRITES the same two files in Dropbox (so the share
@@ -313,7 +313,7 @@ async function verifyLiveFeed(expected) {
 
 // ---- main ----------------------------------------------------------------
 async function main() {
-  say(`\n${C.b}Relationship Inbox OS — publish student release${C.reset}`);
+  say(`\n${C.b}Tovi — publish student release${C.reset}`);
   if (args.dryRun) say(`${C.y}(dry run — building + verifying, uploading nothing)${C.reset}`);
 
   // One-time setup: resolve stable (no-`st=`) share links for the configured

@@ -19,7 +19,7 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 test("macOS DMG builder plans a branded app and DMG path", () => {
   const paths = planPaths({ out: "tmp-out", version: "1.2.3" });
   assert.equal(paths.appPath, resolve(ROOT, "tmp-out", `${APP_NAME}.app`));
-  assert.equal(paths.dmgPath, resolve(ROOT, "tmp-out", "Relationship-Inbox-OS-1.2.3.dmg"));
+  assert.equal(paths.dmgPath, resolve(ROOT, "tmp-out", "Tovi-1.2.3.dmg"));
   assert.match(paths.runtimeDir, new RegExp(`node-v${REQUIRED_NODE_MAJOR}-darwin-(arm64|x64)$`));
 });
 
@@ -55,7 +55,7 @@ test("DMG args expose release-safe switches", () => {
 });
 
 test("builder constants carry the desktop identity", () => {
-  assert.equal(APP_NAME, "Relationship Inbox OS");
+  assert.equal(APP_NAME, "Tovi");
   assert.equal(BUNDLE_ID, "com.relationshipinboxos.desktop");
   assert.equal(REQUIRED_NODE_MAJOR, 22);
   assert.equal(macArchToNodeArch("arm64"), "arm64");
@@ -64,7 +64,7 @@ test("builder constants carry the desktop identity", () => {
 
 test("desktop icon is a local SVG with no remote assets", () => {
   const svg = readFileSync(join(ROOT, "apps/desktop/assets/icon.svg"), "utf8");
-  assert.match(svg, /Relationship Inbox OS/);
+  assert.match(svg, /Tovi/);
   assert.doesNotMatch(svg, /href="https?:\/\//);
   assert.match(svg, /#F7F2E8/);
   assert.match(svg, /#202A35/);

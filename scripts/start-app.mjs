@@ -349,7 +349,7 @@ async function startApp(prod) {
     await shutdown(1);
     return;
   }
-  say(`  ${C.green}Relationship Inbox OS is ready.${C.reset}`);
+  say(`  ${C.green}Tovi is ready.${C.reset}`);
 }
 
 async function main() {
@@ -362,7 +362,7 @@ async function main() {
       reclaim: process.env.RIOS_RECLAIM_EXISTING === "1"
     });
     if (recovery.status === "already_running") {
-      say("Relationship Inbox OS is already running.");
+      say("Tovi is already running.");
       process.exit(2);
     }
     if (recovery.status === "recovered") {
@@ -373,7 +373,7 @@ async function main() {
       const conflict = portConflict(port, APP_DIR);
       if (!conflict) continue;
       say(`Could not start because port ${port} for the ${label} is already in use.`);
-      say("Close the other application using that port, then choose Retry in Relationship Inbox OS.");
+      say("Close the other application using that port, then choose Retry in Tovi.");
       process.exit(1);
     }
   }

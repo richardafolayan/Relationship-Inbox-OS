@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — student updater.
+// Tovi — student updater.
 //
 // Checks whether a newer pilot build exists and, on request, applies it while
 // preserving the pilot's personal data. Safe by design: it verifies a sha256
@@ -91,7 +91,7 @@ function macAppBundleDir() {
 
 function macAppBundlePath() {
   const out = macAppBundleDir();
-  return out ? join(out, "Relationship Inbox OS.app") : "";
+  return out ? join(out, "Tovi.app") : "";
 }
 
 function refreshMacAppBundle() {
@@ -106,7 +106,7 @@ function refreshMacAppBundle() {
       cwd: APP_DIR,
       stdio: "ignore"
     });
-    say(`  Created the Relationship Inbox OS Mac app.`);
+    say(`  Created the Tovi Mac app.`);
   } catch {
     say(`  ${C.y}Could not refresh the Mac app. The Terminal start command still works.${C.reset}`);
   }
@@ -171,7 +171,7 @@ function report(current, manifest) {
     }, null, 2));
     return available;
   }
-  say(`\n  ${C.b}Relationship Inbox OS — update check${C.reset}`);
+  say(`\n  ${C.b}Tovi — update check${C.reset}`);
   say(`  Installed:  ${current}`);
   say(`  Latest:     ${manifest.version}`);
   if (available) {
