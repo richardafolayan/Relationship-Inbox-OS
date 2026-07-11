@@ -58,13 +58,19 @@ import {
   imessageVoiceSnapshotPath,
   snapshotImessageVoice
 } from "./services/imessage-voice-store";
-import { createScanQueue } from "./services/scan-queue";
+import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
 import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
 import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
 import { createIMessageWatcher } from "./services/imessage-watcher";
+import { createChangeTriggeredScan } from "./services/change-triggered-scan";
+import {
+  createMessageSyncLatencyTracker,
+  MESSAGE_SYNC_METRICS,
+  type MessageSyncMetric
+} from "./services/message-sync-latency";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
@@ -254,6 +260,7 @@ const settingsStore = createSettingsStore();
 const overdueDigestStore = createOverdueDigestStore(prisma);
 const auditService = createAuditService();
 const eventBus = createEventBus();
+const messageSyncLatency = createMessageSyncLatencyTracker();
 const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
 
@@ -305,7 +312,12 @@ const whatsappConnect: {
 let enqueueWhatsAppInitialScan: (() => void) | null = null;
 // Debounced "an inbound WhatsApp message arrived → scan" nudge. Late-bound to
 // the scan queue for the same reason.
-let onWhatsAppMessageArrived: (() => void) | null = null;
+let onWhatsAppMessageArrived:
+  | ((input: { platformThreadId: string; sourceChangedAt: string }) => void)
+  | null = null;
+let onLinkedInInboxChanged:
+  | ((change: { reason: string; sourceChangedAt: string }) => void)
+  | null = null;
 
 // Ensure WHATSAPP is in the operator's enabledPlatforms once they link a
 // device, so the scheduled scan loop keeps pulling WhatsApp on the normal
@@ -376,7 +388,7 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
     }
     eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state });
   },
-  onWhatsAppIncomingMessage: () => onWhatsAppMessageArrived?.(),
+  onWhatsAppIncomingMessage: (input) => onWhatsAppMessageArrived?.(input),
   onWhatsAppQr: (qr) => {
     whatsappConnect.qr = qr;
     whatsappConnect.updatedAt = new Date().toISOString();
@@ -443,6 +455,7 @@ type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
     maxMessages: number;
     requestId: string;
     messages?: NormalizedMessage[];
+    trigger?: ScanTrigger;
   }) => Promise<{ updatedThreads: number; parsedMessages: number }>;
 };
 
@@ -886,6 +899,7 @@ const scanQueue = createScanQueue({
   screenshotDir: runnerConfig.screenshotDir,
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
+  recordLatency: (input) => messageSyncLatency.record(input),
   onNewPerson: (input) => enqueueEnrichmentForScan?.(input),
   // WhatsApp only scans while the operator has linked a device: an unlinked
   // scan would launch a headless whatsapp-web.js Puppeteer and park it on a
@@ -912,7 +926,10 @@ const scanQueue = createScanQueue({
 // Late-bind the initial-scan kick now that the scan queue exists (the
 // WhatsApp state-change hook above was wired before this point).
 enqueueWhatsAppInitialScan = () => {
-  const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+  const result = scanQueue.enqueueScan("WHATSAPP", {
+    respectCooldown: true,
+    coalesceWithPending: true
+  });
   void auditService.log({
     platform: "WHATSAPP",
     stage: "Scan",
@@ -924,25 +941,21 @@ enqueueWhatsAppInitialScan = () => {
   });
 };
 
-// Real-time WhatsApp inbound → debounced scan. whatsapp-web.js fires a
-// "message" event per inbound message; a busy group could fire many in a
-// burst, so we coalesce them into one scan on a trailing timer (the WhatsApp
-// analogue of the iMessage chat.db watcher's debounce). The scan itself is
-// serialised by the queue, so overlapping nudges can't produce parallel
-// WhatsApp scans. Only enqueues while connected — a nudge that lands
-// mid-disconnect is dropped by the scan gate anyway.
-const WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS = 4000;
-let whatsappMessageScanTimer: ReturnType<typeof setTimeout> | null = null;
-onWhatsAppMessageArrived = () => {
-  if (whatsappMessageScanTimer) {
-    return;
-  }
-  whatsappMessageScanTimer = setTimeout(() => {
-    whatsappMessageScanTimer = null;
-    if (whatsappConnect.state !== "connected") {
-      return;
-    }
-    const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+const whatsappChangeTriggeredScan = createChangeTriggeredScan({
+  platform: "WHATSAPP",
+  debounceMs: 750,
+  enqueue: (signal) => {
+    if (whatsappConnect.state !== "connected") return { ok: true };
+    const result = scanQueue.enqueueScan("WHATSAPP", {
+      respectCooldown: true,
+      coalesceWithPending: true,
+      platformThreadId: signal.platformThreadId,
+      trigger: {
+        kind: "platform_event",
+        sourceChangedAt: signal.sourceChangedAt,
+        reason: signal.reason
+      }
+    });
     void auditService.log({
       platform: "WHATSAPP",
       stage: "Scan",
@@ -952,8 +965,76 @@ onWhatsAppMessageArrived = () => {
         ? { jobId: result.jobId, status: result.status }
         : { blocked: result.blocked, blockReason: result.reason }
     });
-  }, WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS);
+    return result;
+  },
+  log: (line) => console.log(line)
+});
+onWhatsAppMessageArrived = (input) => {
+  whatsappChangeTriggeredScan.notify({
+    reason: "message",
+    sourceChangedAt: input.sourceChangedAt,
+    platformThreadId: input.platformThreadId
+  });
 };
+
+const imessageChangeTriggeredScan = createChangeTriggeredScan({
+  platform: "IMESSAGE",
+  debounceMs: 25,
+  enqueue: (signal) =>
+    scanQueue.enqueueScan("IMESSAGE", {
+      respectCooldown: true,
+      coalesceWithPending: true,
+      trigger: {
+        kind: "filesystem",
+        sourceChangedAt: signal.sourceChangedAt,
+        reason: signal.reason
+      }
+    }),
+  log: (line) => console.log(line)
+});
+
+const linkedinChangeTriggeredScan = createChangeTriggeredScan({
+  platform: "LINKEDIN",
+  debounceMs: 500,
+  enqueue: (signal) =>
+    scanQueue.enqueueScan("LINKEDIN", {
+      respectCooldown: true,
+      coalesceWithPending: true,
+      trigger: {
+        kind: "browser_change",
+        sourceChangedAt: signal.sourceChangedAt,
+        reason: signal.reason
+      }
+    }),
+  log: (line) => console.log(line)
+});
+onLinkedInInboxChanged = ({ reason, sourceChangedAt }) => {
+  if (scanQueue.isScanning() && scanQueue.getCurrentScanPlatform() === "LINKEDIN") return;
+  void settingsStore.getSettings().then((settings) => {
+    if (!settings.enabledPlatforms.includes("LINKEDIN")) return;
+    linkedinChangeTriggeredScan.notify({
+      reason,
+      sourceChangedAt
+    });
+  });
+};
+
+function startLinkedInRealtimeWatcher(): void {
+  const realtimeAdapter = adapters.LINKEDIN as
+    | (PlatformAdapter & {
+        startInboxRealtimeWatcher?: (input: {
+          debounceMs: number;
+          onChange: (change: { reason: string; sourceChangedAt: string }) => void;
+          log?: (line: string) => void;
+        }) => { stop(): void };
+      })
+    | undefined;
+  realtimeAdapter?.startInboxRealtimeWatcher?.({
+    debounceMs: 300,
+    onChange: (change) => onLinkedInInboxChanged?.(change),
+    log: (line) => console.log(line)
+  });
+}
 
 // Boot-time WhatsApp resume. The connect state machine lives in memory, so a
 // runner restart forgets a linked session even though whatsapp-web.js's
@@ -992,6 +1073,7 @@ const sendService = createSendService({
   eventBus,
   settingsStore,
   auditLog: (input) => auditService.log(input),
+  onPlatformResult: (input) => messageSyncLatency.finishSend(input),
   // Same per-platform mutex key the scan queue uses, so a send and a scan
   // never drive the shared managed page at the same time.
   withPlatformLock: withPlatformControlLock
@@ -3076,6 +3158,9 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         platform,
         status: "CONNECTED"
       });
+      if (platform === "LINKEDIN") {
+        startLinkedInRealtimeWatcher();
+      }
 
       await auditService.log({
         platform,
@@ -3279,6 +3364,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     .object({
       text: z.string(),
       clientSendId: z.string().uuid(),
+      clientRequestedAt: z.string().datetime().optional(),
       // Optional ISO 8601 timestamp. When present, the send is persisted
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
       // when the time elapses. When absent, the send is enqueued
@@ -3359,6 +3445,10 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // the dashboard tab does not lose the send — the row is in the DB and
   // the worker keeps draining.
   try {
+    messageSyncLatency.startSend(
+      payload.clientSendId,
+      payload.clientRequestedAt ?? new Date().toISOString()
+    );
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
@@ -5773,6 +5863,31 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
   });
 }));
 
+app.post("/control/message-sync-latency", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      metric: z.enum(MESSAGE_SYNC_METRICS),
+      durationMs: z.number().finite().min(0).max(24 * 60 * 60 * 1_000),
+      platform: z.enum(["LINKEDIN", "IMESSAGE", "WHATSAPP"]).optional(),
+      outcome: z.enum(["success", "failure"]).optional()
+    })
+    .parse(req.body) as {
+      metric: MessageSyncMetric;
+      durationMs: number;
+      platform?: PlatformName;
+      outcome?: "success" | "failure";
+    };
+  messageSyncLatency.record(payload);
+  res.json({ status: "recorded" });
+}));
+
+app.get("/data/message-sync-latency", (_req, res) => {
+  res.json({
+    generatedAt: new Date().toISOString(),
+    summary: messageSyncLatency.summary()
+  });
+});
+
 app.get("/data/people", asyncRoute(async (_req, res) => {
   const [people, visibleThreadGroups, enrichments] = await Promise.all([
     prisma.person.findMany({
@@ -7610,7 +7725,7 @@ async function start(): Promise<void> {
     const watcher = createIMessageWatcher({
       dbPath: runnerConfig.imessage.dbPath,
       debounceMs: runnerConfig.imessage.watchDebounceMs,
-      onChange: (reason) => {
+      onChange: ({ reason, sourceChangedAt }) => {
         // Honour the operator-facing settings toggle. The chat.db watcher
         // is gated by the env-level imessage.enabled flag (does this host
         // even have iMessage?), but settings.enabledPlatforms is the
@@ -7628,23 +7743,24 @@ async function start(): Promise<void> {
               details: { reason, skipped: "disabled_in_settings" }
             });
           }
-          const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+          imessageChangeTriggeredScan.notify({ reason, sourceChangedAt });
           return auditService.log({
             platform: "IMESSAGE",
             stage: "Scan",
             action: "IMESSAGE_WATCH_TRIGGER",
-            status: result.ok ? "OK" : "FAIL",
-            details: {
-              reason,
-              ...(result.ok
-                ? { jobId: result.jobId, status: result.status }
-                : { blocked: result.blocked, blockReason: result.reason })
-            }
+            status: "OK",
+            details: { reason, sourceChangedAt, status: "change_coalesced" }
           });
         });
       }
     });
     watcher.start();
+  }
+
+  const linkedInPlatform = await prisma.platform.findUnique({ where: { name: "LINKEDIN" } });
+  const currentSettings = await settingsStore.getSettings();
+  if (linkedInPlatform?.connectedAt && currentSettings.enabledPlatforms.includes("LINKEDIN")) {
+    startLinkedInRealtimeWatcher();
   }
 
   await new Promise<void>((resolve, reject) => {

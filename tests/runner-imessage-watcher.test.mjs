@@ -22,7 +22,7 @@ test("watcher fires once per debounced burst of writes", async () => {
   const watcher = createIMessageWatcher({
     dbPath,
     debounceMs: 80,
-    onChange: (reason) => fires.push(reason),
+    onChange: (change) => fires.push(change),
     log: (line) => logs.push(line)
   });
 
@@ -38,7 +38,8 @@ test("watcher fires once per debounced burst of writes", async () => {
     await delay(200);
 
     assert.equal(fires.length, 1, `expected 1 debounced fire, got ${fires.length}`);
-    assert.equal(fires[0], "chat.db-wal");
+    assert.equal(fires[0].reason, "chat.db-wal");
+    assert.equal(Number.isFinite(Date.parse(fires[0].sourceChangedAt)), true);
   } finally {
     watcher.stop();
     rmSync(dir, { recursive: true, force: true });
@@ -52,7 +53,7 @@ test("stop cancels a pending debounced fire", async () => {
   const watcher = createIMessageWatcher({
     dbPath,
     debounceMs: 200,
-    onChange: (reason) => fires.push(reason),
+    onChange: (change) => fires.push(change),
     log: () => {}
   });
 

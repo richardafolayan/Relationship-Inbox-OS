@@ -392,6 +392,7 @@ export class IMessageAdapter implements PlatformAdapter {
         }
       );
     }
+    const acknowledgedAt = new Date().toISOString();
 
     // Poll chat.db briefly for the new outbound row to get its guid +
     // delivery status. We care about three signals from Messages.app:
@@ -400,11 +401,12 @@ export class IMessageAdapter implements PlatformAdapter {
     //     Message Forwarding pathway). Throw with a clear hint so the
     //     dashboard surfaces the real reason instead of "Sent ✓".
     //   - is_delivered = 1 → recipient device acknowledged, we're done
-    //   - is_sent = 1 but is_delivered = 0 → handed off, recipient may
-    //     be offline; report "best_effort" rather than throwing.
+    //   - is_sent = 1 but is_delivered = 0 → Messages.app accepted it,
+    //     recipient delivery is still pending.
     let receiptGuid: string | undefined;
     let receiptTs: string | undefined;
     let isDelivered = false;
+    let isSent = false;
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const status = db.findOutboundDeliveryStatus(receiptChatGuid, sendStartedAt - 1000);
@@ -428,10 +430,11 @@ export class IMessageAdapter implements PlatformAdapter {
         }
         receiptGuid = status.guid;
         receiptTs = status.timestamp;
+        isSent = status.isSent;
         if (status.isDelivered) {
           isDelivered = true;
-          break;
         }
+        if (status.isSent || status.isDelivered) break;
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
@@ -441,6 +444,18 @@ export class IMessageAdapter implements PlatformAdapter {
       // unusual chat.db states (e.g. corrupted date column).
       const fallback = db.findOutboundSince(receiptChatGuid, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
+    }
+    if (!receiptGuid || (!isSent && !isDelivered)) {
+      throw new AdapterFailure(
+        "Messages.app did not confirm that the outbound message was accepted within 5 seconds",
+        {
+          kind: "THREAD_FETCH_FAILED",
+          platform: this.platform,
+          stage: "persist",
+          platformThreadId: thread.platformThreadId,
+          details: { handle, receiptChatGuid }
+        }
+      );
     }
 
     // Capture attachments from chat.db for the new outbound message so
@@ -458,6 +473,8 @@ export class IMessageAdapter implements PlatformAdapter {
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
+      acknowledgedAt,
+      platformResultAt: new Date().toISOString(),
       // chat.db's row guid for the message we just sent. send.ts uses
       // this as the persisted Message.platformMessageKey so a later
       // scan, which also keys by guid, dedups against this row instead
@@ -465,10 +482,9 @@ export class IMessageAdapter implements PlatformAdapter {
       // up as two Message rows: one from the send-side stableHash and
       // one from the scan-side guid.
       platformMessageKey: receiptGuid,
-      // "bubble_detected" if Messages.app confirmed delivery; else
-      // "best_effort" — the bubble exists but the recipient hasn't
-      // acked yet (offline, slow, etc.).
-      verifiedBy: isDelivered ? "bubble_detected" : "best_effort",
+      // "bubble_detected" if the recipient acknowledged delivery; otherwise
+      // "platform_acknowledged" because Messages.app accepted the send.
+      verifiedBy: isDelivered ? "bubble_detected" : "platform_acknowledged",
       attachments: receiptAttachments.length > 0 ? receiptAttachments : undefined
     };
   }
@@ -512,12 +528,14 @@ export class IMessageAdapter implements PlatformAdapter {
         }
       );
     }
+    const acknowledgedAt = new Date().toISOString();
 
     // Same receipt polling as the 1:1 path: guid + delivery state from
     // chat.db so send.ts can dedup against the scan and report honestly.
     let receiptGuid: string | undefined;
     let receiptTs: string | undefined;
     let isDelivered = false;
+    let isSent = false;
     const deadline = Date.now() + 5_000;
     while (Date.now() < deadline) {
       const status = db.findOutboundDeliveryStatus(chatGuid, sendStartedAt - 1000);
@@ -536,10 +554,11 @@ export class IMessageAdapter implements PlatformAdapter {
         }
         receiptGuid = status.guid;
         receiptTs = status.timestamp;
+        isSent = status.isSent;
         if (status.isDelivered) {
           isDelivered = true;
-          break;
         }
+        if (status.isSent || status.isDelivered) break;
       }
       await new Promise((resolve) => setTimeout(resolve, 200));
     }
@@ -547,11 +566,25 @@ export class IMessageAdapter implements PlatformAdapter {
       const fallback = db.findOutboundSince(chatGuid, sendStartedAt - 1000);
       receiptTs = fallback?.timestamp;
     }
+    if (!receiptGuid || (!isSent && !isDelivered)) {
+      throw new AdapterFailure(
+        "Messages.app did not confirm that the group message was accepted within 5 seconds",
+        {
+          kind: "THREAD_FETCH_FAILED",
+          platform: this.platform,
+          stage: "persist",
+          platformThreadId: thread.platformThreadId,
+          details: { chatGuid }
+        }
+      );
+    }
 
     return {
       sentAt: receiptTs ?? new Date().toISOString(),
+      acknowledgedAt,
+      platformResultAt: new Date().toISOString(),
       platformMessageKey: receiptGuid,
-      verifiedBy: isDelivered ? "bubble_detected" : "best_effort"
+      verifiedBy: isDelivered ? "bubble_detected" : "platform_acknowledged"
     };
   }
 
