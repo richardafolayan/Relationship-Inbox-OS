@@ -3649,7 +3649,7 @@ Return strict JSON: { "close": "string", "professional": "string", "reason": "st
     if (!client) {
       return null;
     }
-    const prompt = `Triage this report from a small pilot of Relationship Inbox OS, a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
+    const prompt = `Triage this report from a small pilot of Tovi (formerly Relationship Inbox OS), a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
 
 Return strict JSON matching this exact shape:
 {

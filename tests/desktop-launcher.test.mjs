@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -111,6 +112,28 @@ test("resolveAppDir and startAppArgs point at the existing launcher", () => {
 
 test("loadingHtml uses the product name and no external assets", () => {
   const html = launcher.loadingHtml();
-  assert.match(html, /Relationship Inbox OS/);
+  assert.match(html, /Tovi/);
   assert.doesNotMatch(html, /https?:\/\//);
+});
+
+test("rebrand pins storage and permissions to the pre-Tovi identifiers", () => {
+  // The app displays as Tovi, but the storage folder and log folder must keep
+  // their original names: every existing install's database lives there, and
+  // macOS TCC grants are keyed to the unchanged bundle id. Dropping either
+  // pin strands user data on the next update.
+  assert.equal(launcher.APP_NAME, "Tovi");
+  assert.equal(launcher.STORAGE_DIR_NAME, "Relationship Inbox OS");
+  assert.equal(launcher.LOGS_DIR_NAME, "RelationshipInboxOS");
+  assert.equal(launcher.APP_ID, "relationship-inbox-os");
+
+  const mainSource = readFileSync(
+    join(resolve("apps/desktop"), "main.cjs"),
+    "utf8"
+  );
+  const pin = /app\.setPath\(\s*"userData",\s*join\(app\.getPath\("appData"\),\s*STORAGE_DIR_NAME\)\s*\)/;
+  assert.match(mainSource, pin, "main.cjs must pin userData before anything resolves storage paths");
+  assert.ok(
+    mainSource.indexOf('app.setPath("userData"') < mainSource.indexOf("function storagePaths"),
+    "the userData pin must run before storagePaths() can be called"
+  );
 });

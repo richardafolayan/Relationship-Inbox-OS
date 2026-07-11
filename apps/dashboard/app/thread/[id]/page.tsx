@@ -1930,7 +1930,7 @@ export default function ThreadPage() {
               try {
                 const result = await apiPost<{ message?: string }>("/runner/control/imessage/permission-help", {});
                 setError(
-                  result.message ?? "Open Automation, allow Relationship Inbox OS to control Messages, return here, then click retry."
+                  result.message ?? "Open Automation, allow Tovi to control Messages, return here, then click retry."
                 );
               } catch (err) {
                 setError(err instanceof Error ? err.message : "Could not open Mac permission settings");

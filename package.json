@@ -1,7 +1,7 @@
 {
   "name": "relationship-inbox-os",
   "private": true,
-  "version": "0.1.14",
+  "version": "0.1.15",
   "main": "apps/desktop/main.cjs",
   "packageManager": "npm@10.8.2",
   "workspaces": [

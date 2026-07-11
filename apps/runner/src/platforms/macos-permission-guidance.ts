@@ -1,5 +1,5 @@
 export function permissionRequesterName(env: NodeJS.ProcessEnv = process.env): string {
-  return env.RIOS_DESKTOP === "1" ? "Relationship Inbox OS" : "your terminal app";
+  return env.RIOS_DESKTOP === "1" ? "Tovi" : "your terminal app";
 }
 
 export function fullDiskAccessGuidance(env: NodeJS.ProcessEnv = process.env): string {

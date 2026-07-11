@@ -17,6 +17,8 @@ const { homedir } = require("node:os");
 const { join } = require("node:path");
 const {
   APP_NAME,
+  LOGS_DIR_NAME,
+  STORAGE_DIR_NAME,
   REQUIRED_NODE_MAJOR,
   dashboardUrl,
   desktopPaths,
@@ -53,7 +55,11 @@ let restartHistory = [];
 let shuttingDown = false;
 
 app.setName(APP_NAME);
-app.setAppLogsPath(join(homedir(), "Library", "Logs", "RelationshipInboxOS"));
+// Pin storage to the pre-rebrand folder BEFORE anything resolves userData:
+// setName("Tovi") would otherwise move it to .../Application Support/Tovi and
+// every existing install would boot with an empty database.
+app.setPath("userData", join(app.getPath("appData"), STORAGE_DIR_NAME));
+app.setAppLogsPath(join(homedir(), "Library", "Logs", LOGS_DIR_NAME));
 
 function storagePaths() {
   if (desktopStorage) return desktopStorage;
@@ -145,7 +151,7 @@ async function preparePackagedStorage() {
     const result = await showMessageBox({
       type: "question",
       title: APP_NAME,
-      message: "Existing Relationship Inbox OS data was found.",
+      message: "Existing Tovi (Relationship Inbox OS) data was found.",
       detail:
         "Import your existing settings, message database and browser sessions into the Mac app? The original folder will remain unchanged, so you can return to it if needed.",
       buttons: ["Import existing data", "Start fresh", "Quit"],
@@ -235,7 +241,7 @@ async function localAppReady() {
   return dashboard && runner;
 }
 
-function showLoading(message = "Starting Relationship Inbox OS...") {
+function showLoading(message = "Starting Tovi...") {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   void mainWindow
     .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml(message))}`)
@@ -273,7 +279,7 @@ function startLocalApp() {
   if (!node) {
     dialog.showErrorBox(
       APP_NAME,
-      `Node.js ${REQUIRED_NODE_MAJOR} is missing from this Mac app. Reinstall Relationship Inbox OS from the DMG, then try again.`
+      `Node.js ${REQUIRED_NODE_MAJOR} is missing from this Mac app. Reinstall Tovi from the DMG, then try again.`
     );
     quitReady = true;
     app.quit();
@@ -360,7 +366,7 @@ async function stopLocalApp() {
 async function restartLocalApp() {
   if (shuttingDown) return;
   ++lifecycleGeneration;
-  showLoading("Restarting Relationship Inbox OS...");
+  showLoading("Restarting Tovi...");
   await stopLocalApp();
   restartHistory = [];
   const generation = startLocalApp();
@@ -374,7 +380,7 @@ async function showStartupRecovery(reason) {
     const result = await showMessageBox({
       type: "warning",
       title: APP_NAME,
-      message: "Relationship Inbox OS needs help starting.",
+      message: "Tovi needs help starting.",
       detail: `${reason}\n\nRetry starts the runner and dashboard again. Show Logs opens the diagnostic log. Your message data is not removed.`,
       buttons: ["Retry", "Show Logs", "Quit"],
       defaultId: 0,
@@ -415,7 +421,7 @@ async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
       title: "Set up Messages",
       message: "Messages is not ready on this Mac.",
       detail:
-        "1. Open the Messages app.\n2. Sign in and confirm a conversation is visible.\n3. Return to Relationship Inbox OS and choose Check Permissions from the app menu.\n\nNo SIP changes are required.",
+        "1. Open the Messages app.\n2. Sign in and confirm a conversation is visible.\n3. Return to Tovi and choose Check Permissions from the app menu.\n\nNo SIP changes are required.",
       buttons: ["Open Messages", "Not now"],
       defaultId: 0,
       cancelId: 1,
@@ -428,9 +434,9 @@ async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
     const result = await showMessageBox({
       type: "warning",
       title: "Allow iMessage access",
-      message: "Relationship Inbox OS needs Full Disk Access to read your local Messages database.",
+      message: "Tovi needs Full Disk Access to read your local Messages database.",
       detail:
-        "1. Open System Settings, then Privacy & Security, then Full Disk Access.\n2. Turn on Relationship Inbox OS. If it is not listed, use the plus button and choose the app from Applications.\n3. Quit and reopen Relationship Inbox OS, then choose Check Permissions.\n\nContacts names use the same local access. Sending asks separately for Automation only when you choose Send. File attachments may also ask for Accessibility. No SIP changes are required.",
+        "1. Open System Settings, then Privacy & Security, then Full Disk Access.\n2. Turn on Tovi. If it is not listed, use the plus button and choose the app from Applications.\n3. Quit and reopen Tovi, then choose Check Permissions.\n\nContacts names use the same local access. Sending asks separately for Automation only when you choose Send. File attachments may also ask for Accessibility. No SIP changes are required.",
       buttons: ["Open Full Disk Access", "Retry", "Not now"],
       defaultId: 0,
       cancelId: 2,
@@ -449,7 +455,7 @@ async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
     title: "Mac permissions",
     message: "iMessage reading is ready.",
     detail:
-      "Automation is requested only when you choose Send. Allow Relationship Inbox OS to control Messages, then retry the send. File attachments may also require Accessibility. Contacts names are read locally and are never uploaded by the desktop app.",
+      "Automation is requested only when you choose Send. Allow Tovi to control Messages, then retry the send. File attachments may also require Accessibility. Contacts names are read locally and are never uploaded by the desktop app.",
     buttons: ["Done", "Open Privacy & Security"],
     defaultId: 0,
     cancelId: 0,
@@ -597,7 +603,7 @@ if (!gotLock) {
     if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
   }).catch((error) => {
     writeLog(`Desktop startup failed: ${error.message}`);
-    dialog.showErrorBox(APP_NAME, `Relationship Inbox OS could not start.\n\n${error.message}`);
+    dialog.showErrorBox(APP_NAME, `Tovi could not start.\n\n${error.message}`);
     quitReady = true;
     app.quit();
   });

@@ -23,7 +23,7 @@ export function startAppUpdate(latestVersion?: string): Promise<UpdateStartRespo
     id: UPDATE_NOTICE_ID,
     kind: "pending",
     title: latestVersion ? `Updating to v${latestVersion}…` : "Updating app…",
-    description: "Relationship Inbox OS will close and reopen itself."
+    description: "Tovi will close and reopen itself."
   });
 
   inFlight = apiPost<UpdateStartResponse>("/runner/system/update", {})

@@ -153,7 +153,7 @@ export function InAppBrowser({
             <span className="text-[15px] font-medium leading-snug text-ink">{preview.title}</span>
           ) : null}
           <span className="text-[13px] text-ink-3">
-            This site can't be viewed inside Inbox OS.
+            This site can't be viewed inside Tovi.
           </span>
         </div>
         <button

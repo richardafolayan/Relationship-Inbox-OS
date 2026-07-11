@@ -9,9 +9,9 @@ import {
 
 test("packaged permission guidance names the Mac app and gives retryable System Settings paths", () => {
   const env = { RIOS_DESKTOP: "1" };
-  assert.match(fullDiskAccessGuidance(env), /Full Disk Access.*Relationship Inbox OS.*quit and reopen.*retry/i);
-  assert.match(automationGuidance(env), /Automation.*Messages.*Relationship Inbox OS.*retry/i);
-  assert.match(accessibilityGuidance(env), /Accessibility.*Relationship Inbox OS.*retry/i);
+  assert.match(fullDiskAccessGuidance(env), /Full Disk Access.*Tovi.*quit and reopen.*retry/i);
+  assert.match(automationGuidance(env), /Automation.*Messages.*Tovi.*retry/i);
+  assert.match(accessibilityGuidance(env), /Accessibility.*Tovi.*retry/i);
 });
 
 test("permission help never resets TCC or asks for SIP changes", () => {

@@ -1,11 +1,11 @@
-# Relationship Inbox OS
+# Tovi (formerly Relationship Inbox OS)
 
 I'm bad at replying. Someone messages me, I think *"I'll reply properly when
 I've got a moment"*, and then a week passes. By the time I come back the
 chat has gone cold and I've half-forgotten what we were talking about.
 Rereading it to catch up feels like work, so I close the tab.
 
-Relationship Inbox OS is the fix I built for myself: a calm, local-first
+Tovi is the fix I built for myself: a calm, local-first
 workspace that pulls my unread messages into one place, tells me what each
 one is about and what I still owe a reply on, and lets me actually deal with
 it, without ever opening a feed.

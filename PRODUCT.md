@@ -23,7 +23,7 @@ means; a real reply is the end.
 
 ## Product Purpose
 
-Relationship Inbox OS reduces the friction between "I should reply to them" and "I have
+Tovi (formerly Relationship Inbox OS) reduces the friction between "I should reply to them" and "I have
 replied to them, properly." It does three things, in order:
 
 1. **Surfaces who needs you and why** — a calm, ranked queue (Today) instead of an

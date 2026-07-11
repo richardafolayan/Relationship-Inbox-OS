@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — download the local speech-to-text model.
+// Tovi — download the local speech-to-text model.
 //
 // Voice-note transcription (the pilot default) runs locally via
 // transformers.js + ONNX Runtime — no external binary, no Xcode/Homebrew.

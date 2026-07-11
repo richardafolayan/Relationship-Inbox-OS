@@ -1994,7 +1994,7 @@ app.post("/control/imessage/permission-help", asyncRoute(async (_req, res) => {
   } catch {
     ranSteps.push("settings_open_failed");
   }
-  const requester = process.env.RIOS_DESKTOP === "1" ? "Relationship Inbox OS" : "your terminal app";
+  const requester = process.env.RIOS_DESKTOP === "1" ? "Tovi" : "your terminal app";
   res.json({
     ok: true,
     steps: ranSteps,
@@ -2365,7 +2365,7 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
       ok: false,
       reason: "replace_app_required",
       message:
-        "Quit Relationship Inbox OS, install the latest DMG by replacing the app in Applications, then reopen it. Your data and settings in Application Support are preserved."
+        "Quit Tovi, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old Relationship Inbox OS app if it is still in Applications. Your data and settings in Application Support are preserved."
     });
     return;
   }
@@ -2383,7 +2383,7 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     fromVersion: intent.fromVersion,
     toVersion: intent.toVersion,
     logPath: restart.logPath,
-    message: "Update started. Relationship Inbox OS will reopen when it finishes."
+    message: "Update started. Tovi will reopen when it finishes."
   });
 }));
 
