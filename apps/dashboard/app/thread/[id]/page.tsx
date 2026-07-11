@@ -38,7 +38,7 @@ import {
   X
 } from "lucide-react";
 import { Menu } from "@/components/ui/menu";
-import { apiGet, apiPost, peekCache, runAction } from "@/lib/api";
+import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
@@ -101,6 +101,8 @@ import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
+import { classifyConsumerFailure } from "@/lib/consumer-failure";
+import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
 
 // Thread workspace - landscape layout.
 //
@@ -144,6 +146,24 @@ const SCROLL_BOTTOM_THRESHOLD = 200;
 // SCROLL_BOTTOM_THRESHOLD so it appears only once you're genuinely reading
 // history, not on a small nudge away from the bottom.
 const JUMP_TO_LATEST_THRESHOLD = 600;
+
+type ComposerAttachment = {
+  id: string;
+  file: File;
+  previewUrl: string;
+  kind: "photo" | "voice_note" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown";
+};
+
+type PendingSend = {
+  clientSendId: string;
+  text: string;
+  sentAt: string;
+  attachments: ComposerAttachment[];
+  failed?: boolean;
+  uncertain?: boolean;
+  errorMessage?: string;
+  errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+};
 
 // Picks the topmost visible message bubble below the sticky header to
 // anchor scroll preservation on. Selecting by data-message-id (set on
@@ -645,12 +665,7 @@ export default function ThreadPage() {
   // Outbound attachments staged in the composer. Cleared after a successful
   // send. Each entry holds the actual File for upload + a previewUrl for the
   // chip thumbnail (image previews; a generic icon for everything else).
-  const [composerAttachments, setComposerAttachments] = useState<Array<{
-    id: string;
-    file: File;
-    previewUrl: string;
-    kind: "photo" | "voice_note" | "video" | "audio" | "pdf" | "sticker" | "gif" | "unknown";
-  }>>([]);
+  const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -838,19 +853,7 @@ export default function ThreadPage() {
     return () => clearInterval(id);
   }, []);
 
-  const [pendingSends, setPendingSends] = useState<
-    Array<{
-      clientSendId: string;
-      text: string;
-      sentAt: string;
-      failed?: boolean;
-      errorMessage?: string;
-      // Coarse classification used to render a one-tap recovery action
-      // (Open browser / Run selector tests / Reset session / Retry now)
-      // instead of dumping a raw error message at the operator.
-      errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
-    }>
-  >([]);
+  const [pendingSends, setPendingSends] = useState<PendingSend[]>([]);
   const pendingSendsRef = useRef(pendingSends);
   useEffect(() => {
     pendingSendsRef.current = pendingSends;
@@ -1177,7 +1180,7 @@ export default function ThreadPage() {
         threadId?: string;
         clientSendId?: string;
         errorMessage?: string;
-        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
+        errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
       }>).detail;
       if (!detail || !threadId) return;
@@ -1194,7 +1197,13 @@ export default function ThreadPage() {
         setPendingSends((prev) =>
           prev.map((p) =>
             p.clientSendId === detail.clientSendId
-              ? { ...p, failed: true, errorMessage: message, errorKind: detail.errorKind }
+              ? {
+                  ...p,
+                  failed: true,
+                  uncertain: detail.errorKind === "DELIVERY_UNCERTAIN",
+                  errorMessage: message,
+                  errorKind: detail.errorKind
+                }
               : p
           )
         );
@@ -1238,6 +1247,9 @@ export default function ThreadPage() {
             threadId: string;
             status: "SENT" | "FAILED";
             errorMessage?: string;
+            errorKind?: PendingSend["errorKind"];
+            retrySafe?: boolean;
+            deliveryUncertain?: boolean;
           }>;
         }>("/runner/data/send-queue");
         if (cancelled) return;
@@ -1257,7 +1269,10 @@ export default function ThreadPage() {
             return {
               ...pending,
               failed: true,
-              errorMessage: match.errorMessage ?? "Send failed"
+              uncertain: match.deliveryUncertain === true,
+              errorMessage:
+                match.errorMessage ?? "The message was not sent. Check the account before trying again.",
+              errorKind: match.errorKind
             };
           }
           return pending;
@@ -1280,6 +1295,107 @@ export default function ThreadPage() {
       clearInterval(timer);
     };
   }, [threadId, refresh]);
+
+  const checkPendingDelivery = useCallback(
+    async (clientSendId: string) => {
+      const pending = pendingSendsRef.current.find((item) => item.clientSendId === clientSendId);
+      if (!pending) return;
+      try {
+        const response = await apiGet<SendStatusResponse>(
+          `/runner/data/send-status/${encodeURIComponent(clientSendId)}`
+        );
+        const outcome = resolveSendRecovery(response);
+        if (outcome.kind === "sent") {
+          for (const attachment of pending.attachments) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          await refresh();
+          setPendingSends((prev) => prev.filter((item) => item.clientSendId !== clientSendId));
+          setError(null);
+          return;
+        }
+        if (outcome.kind === "waiting") {
+          for (const attachment of pending.attachments) {
+            if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
+          }
+          setPendingSends((prev) =>
+            prev.map((item) =>
+              item.clientSendId === clientSendId
+                ? {
+                    ...item,
+                    attachments: [],
+                    failed: false,
+                    uncertain: false,
+                    errorMessage: undefined,
+                    errorKind: undefined
+                  }
+                : item
+            )
+          );
+          setError(null);
+          return;
+        }
+        if (outcome.kind === "not_sent") {
+          setComposer((current) => current || pending.text);
+          setComposerAttachments((current) =>
+            restoreFailedAttachments(pending.attachments, current)
+          );
+          setPendingSends((prev) =>
+            prev.filter((item) => item.clientSendId !== clientSendId)
+          );
+          setError(outcome.message);
+          return;
+        }
+        if (outcome.kind === "uncertain") {
+          setPendingSends((prev) =>
+            prev.map((item) =>
+              item.clientSendId === clientSendId
+                ? {
+                    ...item,
+                    failed: true,
+                    uncertain: true,
+                    errorMessage: outcome.message,
+                    errorKind: "DELIVERY_UNCERTAIN"
+                  }
+                : item
+            )
+          );
+          setError(outcome.message);
+          return;
+        }
+        setPendingSends((prev) =>
+          prev.map((item) =>
+            item.clientSendId === clientSendId
+              ? {
+                  ...item,
+                  failed: true,
+                  uncertain: false,
+                  errorMessage: outcome.message,
+                  errorKind: outcome.errorKind
+                }
+              : item
+          )
+        );
+        setError(outcome.message);
+      } catch {
+        const message = "Delivery is still not confirmed. Reconnect, then check the conversation before sending again.";
+        setPendingSends((prev) =>
+          prev.map((item) =>
+            item.clientSendId === clientSendId
+              ? {
+                  ...item,
+                  uncertain: true,
+                  errorMessage: message,
+                  errorKind: "DELIVERY_UNCERTAIN"
+                }
+              : item
+          )
+        );
+        setError(message);
+      }
+    },
+    [refresh]
+  );
 
   // Suggestions-spinner safety timer. When the runner-side status is
   // "generating", arm a 30s ceiling. If real chips arrive sooner the
@@ -1318,7 +1434,10 @@ export default function ThreadPage() {
     const text = composer;
     const attachmentsToSend = composerAttachments;
     const sentAt = new Date().toISOString();
-    setPendingSends((prev) => [...prev, { clientSendId, text, sentAt }]);
+    setPendingSends((prev) => [
+      ...prev,
+      { clientSendId, text, sentAt, attachments: attachmentsToSend }
+    ]);
     setComposer("");
     // Reset the source too: an emptied composer must never keep the AI-predraft
     // accent frame + badge (#350). Without this the badge frames a blank input
@@ -1341,14 +1460,7 @@ export default function ThreadPage() {
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
         }
-        const resp = await fetch(`/runner/control/thread/${thread.id}/send`, {
-          method: "POST",
-          body: form
-        });
-        if (!resp.ok) {
-          const errText = await resp.text();
-          throw new Error(errText || `Send failed (${resp.status})`);
-        }
+        await apiPostForm(`/runner/control/thread/${thread.id}/send`, form);
       } else {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
@@ -1363,25 +1475,37 @@ export default function ThreadPage() {
         if (a.previewUrl) URL.revokeObjectURL(a.previewUrl);
       }
     } catch (sendError) {
-      const message = sendError instanceof Error ? sendError.message : "Failed to enqueue send";
-      setPendingSends((prev) =>
-        prev.map((p) =>
-          p.clientSendId === clientSendId ? { ...p, failed: true, errorMessage: message } : p
-        )
-      );
-      setError(message);
-      setComposer(text);
-      // Merge rather than overwrite: prepend the failed attachments to whatever
-      // the operator staged while the send was in flight. The optimistic clear
-      // emptied the list at send time, so `prev` holds only newly-staged items
-      // and there are no duplicates. Overwriting (the old behaviour) discarded
-      // those new items and leaked their previewUrl object URLs.
-      setComposerAttachments((prev) => restoreFailedAttachments(attachmentsToSend, prev));
+      const failure = classifyConsumerFailure(sendError, {
+        path: `/runner/control/thread/${thread.id}/send`,
+        method: "POST"
+      });
+      if (failure.deliveryUncertain) {
+        const message = "Delivery is not confirmed. Check the conversation before sending again.";
+        setPendingSends((prev) =>
+          prev.map((p) =>
+            p.clientSendId === clientSendId
+              ? {
+                  ...p,
+                  uncertain: true,
+                  errorMessage: message,
+                  errorKind: "DELIVERY_UNCERTAIN"
+                }
+              : p
+          )
+        );
+        setError(message);
+        window.setTimeout(() => void checkPendingDelivery(clientSendId), 750);
+      } else {
+        setPendingSends((prev) => prev.filter((p) => p.clientSendId !== clientSendId));
+        setError(failure.message);
+        setComposer((current) => current || text);
+        setComposerAttachments((prev) => restoreFailedAttachments(attachmentsToSend, prev));
+      }
     } finally {
       sendingRef.current = false;
       setSending(false);
     }
-  }, [composer, composerAttachments, sending, thread, focusedThreadParentId]);
+  }, [checkPendingDelivery, composer, composerAttachments, sending, thread, focusedThreadParentId]);
 
   const addFiles = useCallback((files: FileList | File[]) => {
     const list = Array.from(files);
@@ -1884,7 +2008,7 @@ export default function ThreadPage() {
 
   const retryPendingSend = (clientSendId: string) => {
     const target = pendingSends.find((p) => p.clientSendId === clientSendId);
-    if (!target || !thread) return;
+    if (!target || !thread || target.uncertain) return;
     // Re-queue the existing failed SendRequest under a fresh clientSendId
     // via the runner's /retry-send endpoint (the runner keeps the failed
     // row for receipts and inserts a new PENDING row with the same text).
@@ -4094,7 +4218,7 @@ export default function ThreadPage() {
                         </div>
                         {reactionError ? (
                           <span
-                            className={`mt-[6px] font-mono text-[11px] text-risk-overdue ${
+                            className={`mt-[6px] text-[11px] text-ink-3 ${
                               message.direction === "OUT" ? "self-end" : "self-start"
                             }`}
                           >
@@ -4103,7 +4227,7 @@ export default function ThreadPage() {
                         ) : null}
                         {editError ? (
                           <span
-                            className={`mt-[6px] font-mono text-[11px] text-risk-overdue ${
+                            className={`mt-[6px] text-[11px] text-ink-3 ${
                               message.direction === "OUT" ? "self-end" : "self-start"
                             }`}
                           >
@@ -4253,8 +4377,8 @@ export default function ThreadPage() {
               >
                 <div
                   className={`text-balance whitespace-pre-wrap [overflow-wrap:anywhere] px-4 py-3 text-[14.5px] leading-[1.5] ${
-                    pending.failed
-                      ? "rounded-2xl rounded-br-[6px] border border-risk-overdue bg-paper text-ink"
+                    pending.failed || pending.uncertain
+                      ? "rounded-2xl rounded-br-[6px] border border-hairline-strong bg-paper text-ink"
                       : "rounded-2xl rounded-br-[6px] bg-ink text-paper opacity-80"
                   }`}
                 >
@@ -4262,10 +4386,12 @@ export default function ThreadPage() {
                 </div>
                 <div className="mt-[6px] flex items-center gap-2 font-mono text-[11px] tracking-[0.02em] text-ink-3">
                   <span>{formatClock(pending.sentAt)}</span>
-                  {pending.failed ? (
+                  {pending.failed || pending.uncertain ? (
                     <>
-                      <span className="text-risk-overdue">
-                        · {pending.errorKind === "AUTH_REQUIRED"
+                      <span className="text-ink-2">
+                        · {pending.uncertain || pending.errorKind === "DELIVERY_UNCERTAIN"
+                          ? "delivery not confirmed"
+                          : pending.errorKind === "AUTH_REQUIRED"
                           ? "auth required"
                           : pending.errorKind === "SELECTOR_FAIL"
                             ? "selector failed"
@@ -4273,7 +4399,15 @@ export default function ThreadPage() {
                               ? "profile locked"
                               : "failed"}
                       </span>
-                      {(() => {
+                      {pending.uncertain ? (
+                        <button
+                          type="button"
+                          onClick={() => void checkPendingDelivery(pending.clientSendId)}
+                          className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                        >
+                          check delivery
+                        </button>
+                      ) : (() => {
                         const recovery = recoveryActionFor(pending);
                         return recovery ? (
                           <button
@@ -4286,14 +4420,16 @@ export default function ThreadPage() {
                           </button>
                         ) : null;
                       })()}
-                      <button
-                        type="button"
-                        onClick={() => retryPendingSend(pending.clientSendId)}
-                        className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
-                        title={pending.errorMessage}
-                      >
-                        retry
-                      </button>
+                      {!pending.uncertain ? (
+                        <button
+                          type="button"
+                          onClick={() => retryPendingSend(pending.clientSendId)}
+                          className="text-ink-2 underline-offset-2 hover:text-ink hover:underline"
+                          title={pending.errorMessage}
+                        >
+                          retry
+                        </button>
+                      ) : null}
                     </>
                   ) : (
                     <span className="flex items-center gap-1">
@@ -4302,8 +4438,8 @@ export default function ThreadPage() {
                     </span>
                   )}
                 </div>
-                {pending.failed && pending.errorMessage ? (
-                  <p className="mt-[6px] max-w-[420px] text-right font-mono text-[11px] leading-[1.45] text-risk-overdue">
+                {(pending.failed || pending.uncertain) && pending.errorMessage ? (
+                  <p className="mt-[6px] max-w-[420px] text-right text-[12px] leading-[1.45] text-ink-3">
                     {pending.errorMessage}
                   </p>
                 ) : null}
@@ -4331,19 +4467,19 @@ export default function ThreadPage() {
           ) : null}
           <div className="mx-auto w-full max-w-[820px] px-3 pb-[max(8px,env(safe-area-inset-bottom))] pt-2 sm:px-8 sm:pb-2">
             {error ? (
-              <p className="mb-1.5 font-mono text-[11px] text-risk-overdue">{error}</p>
+              <p className="mb-1.5 rounded-[10px] border border-hairline bg-paper-2 px-2.5 py-1.5 text-[12px] leading-[1.45] text-ink-2">{error}</p>
             ) : null}
             {/* #462 follow-up: a transient dictation failure keeps the
                 recorded clip in memory so the operator can retry the same
                 audio with one tap instead of speaking again. */}
             {dictationRetry ? (
-              <div className="mb-1.5 flex items-center gap-2 rounded-[10px] border border-risk-overdue/30 bg-risk-overdue/5 px-2.5 py-1.5 text-[11px] text-risk-overdue">
+              <div className="mb-1.5 flex items-center gap-2 rounded-[10px] border border-hairline-strong bg-paper-2 px-2.5 py-1.5 text-[11px] text-ink-2">
                 <span className="flex-1 leading-snug">{dictationRetry}</span>
                 <button
                   type="button"
                   onClick={retryDictation}
                   disabled={dictationStatus !== "idle"}
-                  className="shrink-0 rounded-pill border border-risk-overdue/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.06em] transition-colors duration-calm hover:bg-risk-overdue/10 disabled:opacity-50"
+                  className="shrink-0 rounded-pill border border-hairline-strong bg-paper px-2 py-0.5 font-mono text-[10px] uppercase tracking-[0.06em] transition-colors duration-calm hover:text-ink disabled:opacity-50"
                 >
                   {dictationStatus === "transcribing" ? "Retrying…" : "Try again"}
                 </button>
@@ -4352,7 +4488,7 @@ export default function ThreadPage() {
                   onClick={dismissDictationRetry}
                   disabled={dictationStatus === "transcribing"}
                   aria-label="Dismiss"
-                  className="shrink-0 text-risk-overdue/70 transition-colors duration-calm hover:text-risk-overdue disabled:opacity-50"
+                  className="shrink-0 text-ink-3 transition-colors duration-calm hover:text-ink disabled:opacity-50"
                 >
                   <X className="h-3.5 w-3.5" strokeWidth={2} />
                 </button>
@@ -5312,7 +5448,7 @@ export default function ThreadPage() {
                 ) : null}
               </div>
               {composeError ? (
-                <span className="font-mono text-[11px] text-risk-overdue">{composeError}</span>
+                <span className="rounded-[8px] border border-hairline bg-paper-2 px-2 py-1 text-[11px] text-ink-2">{composeError}</span>
               ) : null}
             </div>
             {composeDraft ? (

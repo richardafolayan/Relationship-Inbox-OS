@@ -221,7 +221,7 @@ export type RunnerEvent =
       // Coarse classification of the failure so the dashboard can offer
       // a one-tap recovery action without parsing the error message.
       // Mirrors the categories in the README's troubleshooting table.
-      errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "UNKNOWN";
+      errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
     })
   | (RunnerEventBase & {
       // Fired when an async send is queued, started, or its position changes.

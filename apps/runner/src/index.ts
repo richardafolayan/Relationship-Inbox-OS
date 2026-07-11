@@ -67,6 +67,7 @@ import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profil
 import { createIMessageWatcher } from "./services/imessage-watcher";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
+import { parsePersistedSendFailure } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
 import { createBirthdaySync } from "./services/birthday-sync";
@@ -5750,14 +5751,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
       enqueuedAt: row.createdAt.toISOString()
     })),
     recent: recentDoneRows.map((row) => {
-      let errorPayload: unknown = null;
-      if (row.errorJson) {
-        try {
-          errorPayload = JSON.parse(row.errorJson);
-        } catch {
-          errorPayload = null;
-        }
-      }
+      const failure = row.status === "FAILED" ? parsePersistedSendFailure(row.errorJson) : null;
       return {
         clientSendId: row.clientSendId,
         threadId: row.threadId,
@@ -5765,11 +5759,46 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
         platform: row.thread.platform,
         status: row.status,
         completedAt: row.updatedAt.toISOString(),
-        errorMessage: errorPayload && typeof errorPayload === "object" && "message" in errorPayload
-          ? (errorPayload as { message?: string }).message
-          : undefined
+        errorMessage: failure?.message,
+        errorKind: failure?.errorKind,
+        retrySafe: failure?.retrySafe,
+        deliveryUncertain: failure?.deliveryUncertain
       };
     })
+  });
+}));
+
+app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
+  const { clientSendId } = z.object({ clientSendId: z.string().uuid() }).parse(req.params);
+  const row = await prisma.sendRequest.findUnique({
+    where: { clientSendId },
+    select: {
+      clientSendId: true,
+      threadId: true,
+      status: true,
+      errorJson: true,
+      updatedAt: true
+    }
+  });
+  if (!row) {
+    res.json({
+      clientSendId,
+      status: "NOT_FOUND",
+      retrySafe: true,
+      deliveryUncertain: false
+    });
+    return;
+  }
+  const failure = row.status === "FAILED" ? parsePersistedSendFailure(row.errorJson) : null;
+  res.json({
+    clientSendId: row.clientSendId,
+    threadId: row.threadId,
+    status: row.status,
+    updatedAt: row.updatedAt.toISOString(),
+    errorMessage: failure?.message,
+    errorKind: failure?.errorKind,
+    retrySafe: failure?.retrySafe ?? false,
+    deliveryUncertain: failure?.deliveryUncertain ?? false
   });
 }));
 
