@@ -1,6 +1,10 @@
 import type { MessageForPrompt } from "../types/runtime";
 
-const UNCERTAINTY_PATTERN = /\b(?:not sure|don['’]?t know|doesn['’]?t know|waiting to hear|hear back|let (?:me|us|them) know|unclear|uncertain)\b/iu;
+// The trigger must indicate the SENDER lacks an outcome ("they'll let me
+// know", "waiting to hear"), never that they want a reply from the operator.
+// A bare imperative "let me know" is one of the most common inbound phrases
+// in the product and must not arm this guard.
+const UNCERTAINTY_PATTERN = /\b(?:not sure|don['’]?t know|doesn['’]?t know|no news yet|waiting to hear|hear back|waiting to find out|won['’]?t know|unclear|uncertain|(?:they|she|he)(?:['’]ll| will) let (?:me|us) know)\b/iu;
 const DOMAIN_PATTERNS = [
   /\binterviews?\b/iu,
   /\bexams?\b/iu,
@@ -35,13 +39,17 @@ export function hasUnspecifiedAmbiguousOutcome(
   return UNCERTAINTY_PATTERN.test(latest) && !DOMAIN_PATTERNS.some((pattern) => pattern.test(latest));
 }
 
-export function containsUnsupportedDomainInference(
+// Only a RESOLVED outcome the transcript never stated ("passed", "got the
+// job") justifies discarding generated text. A domain noun alone ("event",
+// "test") is routinely a fair paraphrase, so it stays; the prompt-side
+// AMBIGUITY_DISCIPLINE handles domain inference softly.
+export function containsUnsupportedOutcomeClaim(
   text: string,
   messages: readonly MessageForPrompt[]
 ): boolean {
   if (!hasUnspecifiedAmbiguousOutcome(messages)) return false;
   const transcript = messages.map((message) => message.text).join("\n");
-  return [...DOMAIN_PATTERNS, ...OUTCOME_PATTERNS].some(
+  return OUTCOME_PATTERNS.some(
     (pattern) => pattern.test(text) && !pattern.test(transcript)
   );
 }
@@ -51,5 +59,5 @@ export function preserveAmbiguousEvidence(
   messages: readonly MessageForPrompt[],
   safeFallback: string
 ): string {
-  return containsUnsupportedDomainInference(text, messages) ? safeFallback : text;
+  return containsUnsupportedOutcomeClaim(text, messages) ? safeFallback : text;
 }

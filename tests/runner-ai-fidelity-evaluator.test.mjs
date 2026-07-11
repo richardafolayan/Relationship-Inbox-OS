@@ -86,19 +86,22 @@ test("ambiguity discipline is wired into both summary and suggested-reply prompt
   assert.match(source, /complete alternatives, not partial fragments/);
 });
 
-test("unsupported domains are deterministically replaced only for unspecified ambiguous outcomes", () => {
+test("only unsupported RESOLVED outcomes are deterministically replaced for ambiguous threads", () => {
   const ambiguous = [
     { direction: "OUT", text: "How did it go?", timestamp: "2026-07-10T08:00:00.000Z" },
     { direction: "IN", text: "Not sure yet, they said they'll let me know soon", timestamp: "2026-07-10T08:20:00.000Z" }
   ];
   assert.equal(hasUnspecifiedAmbiguousOutcome(ambiguous), true);
+  // A domain-noun paraphrase is preserved. Deterministic replacement is
+  // reserved for invented resolved outcomes; domain inference is handled by
+  // the prompt-side ambiguity discipline.
   assert.equal(
     preserveAmbiguousEvidence(
       "They are waiting to hear about a recent application.",
       ambiguous,
       "They are waiting to hear back, and the outcome is still uncertain."
     ),
-    "They are waiting to hear back, and the outcome is still uncertain."
+    "They are waiting to hear about a recent application."
   );
   assert.equal(
     preserveAmbiguousEvidence("Looks like they passed.", ambiguous, "Outcome still uncertain."),
@@ -112,6 +115,43 @@ test("unsupported domains are deterministically replaced only for unspecified am
   assert.equal(
     preserveAmbiguousEvidence("The application outcome is uncertain.", explicit, "fallback"),
     "The application outcome is uncertain."
+  );
+});
+
+test("a reply-request 'let me know' never arms the ambiguity guard", () => {
+  const invite = [
+    { direction: "IN", text: "Are you free Saturday? Let me know", timestamp: "2026-07-10T09:00:00.000Z" }
+  ];
+  assert.equal(hasUnspecifiedAmbiguousOutcome(invite), false);
+  assert.equal(
+    preserveAmbiguousEvidence(
+      "They invited you to an event on Saturday and want an answer.",
+      invite,
+      "They are not sure of the outcome yet."
+    ),
+    "They invited you to an event on Saturday and want an answer."
+  );
+});
+
+test("punctuation bans require worded rule statements, not punctuation characters", () => {
+  const noRules = {
+    forbidFullStops: false,
+    forbidExclamationMarks: false,
+    forbidQuestionMarks: false,
+    forbidEmoji: false,
+    allLowercase: false
+  };
+  const cases = [
+    { about: "I never use jargon! Keep things warm and direct.", avoidedPhrases: "" },
+    { about: "I do not like small talk, ok? Straight to the point.", avoidedPhrases: "" },
+    { about: "friendly, casual", avoidedPhrases: "no worries!" }
+  ];
+  for (const profile of cases) {
+    assert.deepEqual(deriveMechanicalWritingRules(profile), noRules, JSON.stringify(profile));
+  }
+  assert.deepEqual(
+    deriveMechanicalWritingRules({ about: "Never use exclamation marks or question marks.", avoidedPhrases: "" }),
+    { ...noRules, forbidExclamationMarks: true, forbidQuestionMarks: true }
   );
 });
 

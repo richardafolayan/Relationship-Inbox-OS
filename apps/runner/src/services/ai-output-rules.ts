@@ -29,9 +29,13 @@ export function deriveMechanicalWritingRules(
 ): MechanicalWritingRules {
   const source = [profile?.about, profile?.avoidedPhrases].filter(Boolean).join("\n");
   return {
+    // Only worded rule statements ("never use exclamation marks") count.
+    // Matching the characters themselves turned ordinary profile prose
+    // ("I never use jargon!") or an avoided phrase containing punctuation
+    // ("no worries!") into a global ban.
     forbidFullStops: statesBan(source, "full\\s*stops?|periods?|\\bdots?\\b"),
-    forbidExclamationMarks: statesBan(source, "exclamation(?:\\s+marks?)?|exclamation\\s+points?|!"),
-    forbidQuestionMarks: statesBan(source, "question\\s+marks?|\\?"),
+    forbidExclamationMarks: statesBan(source, "exclamation(?:\\s+marks?|\\s+points?)?\\b"),
+    forbidQuestionMarks: statesBan(source, "question\\s+marks?"),
     forbidEmoji: statesBan(source, "emojis?|emoticons?"),
     allLowercase:
       /\b(?:all|always|only|write|writes|writing|message|messages|text|texts|typing)\b[^.!?\n]{0,24}\blower[ -]?case\b/i.test(
