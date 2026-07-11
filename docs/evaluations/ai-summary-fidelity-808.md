@@ -159,3 +159,34 @@ node --import tsx apps/runner/src/scripts/review-local-ai-fidelity.ts --db <loca
   does not claim to understand every possible natural-language phrasing.
 - The local review validates existing cached live outputs structurally. It does
   not commit or externally judge private message content.
+
+## Merge-review addendum (2026-07-11)
+
+Pre-merge review found and fixed two false-positive classes in the live
+post-generation guards. Both are pinned by regression tests in
+`tests/runner-ai-fidelity-evaluator.test.mjs`.
+
+1. Ambiguity guard trigger. The uncertainty trigger previously armed on a bare
+   reply-request "let me know", so an ordinary inbound like "Are you free
+   Saturday? Let me know" could get its correct summary and suggested replies
+   replaced with generic uncertainty fallbacks. The trigger now requires
+   sender-side unresolved-outcome phrasing ("they'll let me know", "waiting to
+   hear", "won't know", "not sure"). Deterministic replacement of unsupported
+   domain or outcome words is unchanged once the tightened trigger fires: on a
+   genuinely ambiguous thread the conservative fallback stays truthful, while
+   an invented domain word is the hallucination class this issue targets.
+2. Mechanical rule derivation. Punctuation bans previously matched the literal
+   characters `!` and `?`, so profile prose such as "I never use jargon!" or an
+   `avoidedPhrases` entry like "no worries!" silently banned that punctuation
+   in every AI reply. Bans now derive only from worded rule statements
+   ("exclamation marks", "question marks"); `avoidedPhrases` entries can no
+   longer trip character-level bans.
+
+Post-fix rerun (Google `gemma-4-31b-it`, same seven cases, same pinned-rerun
+assembly as above because HTTP 500 responses persisted): six cases scored 100
+on every dimension except reply coverage on the multi-topic case (91.7). The
+terse-casual case kept returning provider 500s in the final pass; earlier
+same-day runs scored it 100 on every dimension except reply coverage (50 to
+66.7 across runs). Reply coverage remains the noisy, known-weak dimension and
+swings run to run on unchanged code; it is documented here so the headline
+table above is not read as a stable guarantee.

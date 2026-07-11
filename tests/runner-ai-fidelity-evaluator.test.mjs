@@ -86,22 +86,21 @@ test("ambiguity discipline is wired into both summary and suggested-reply prompt
   assert.match(source, /complete alternatives, not partial fragments/);
 });
 
-test("only unsupported RESOLVED outcomes are deterministically replaced for ambiguous threads", () => {
+test("unsupported domains and outcomes are replaced only under genuine sender uncertainty", () => {
   const ambiguous = [
     { direction: "OUT", text: "How did it go?", timestamp: "2026-07-10T08:00:00.000Z" },
     { direction: "IN", text: "Not sure yet, they said they'll let me know soon", timestamp: "2026-07-10T08:20:00.000Z" }
   ];
   assert.equal(hasUnspecifiedAmbiguousOutcome(ambiguous), true);
-  // A domain-noun paraphrase is preserved. Deterministic replacement is
-  // reserved for invented resolved outcomes; domain inference is handled by
-  // the prompt-side ambiguity discipline.
+  // Under the tightened trigger, a domain word the transcript never stated
+  // ("application") is an invented specific and is deterministically wiped.
   assert.equal(
     preserveAmbiguousEvidence(
       "They are waiting to hear about a recent application.",
       ambiguous,
       "They are waiting to hear back, and the outcome is still uncertain."
     ),
-    "They are waiting to hear about a recent application."
+    "They are waiting to hear back, and the outcome is still uncertain."
   );
   assert.equal(
     preserveAmbiguousEvidence("Looks like they passed.", ambiguous, "Outcome still uncertain."),

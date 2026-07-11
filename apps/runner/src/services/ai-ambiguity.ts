@@ -39,17 +39,19 @@ export function hasUnspecifiedAmbiguousOutcome(
   return UNCERTAINTY_PATTERN.test(latest) && !DOMAIN_PATTERNS.some((pattern) => pattern.test(latest));
 }
 
-// Only a RESOLVED outcome the transcript never stated ("passed", "got the
-// job") justifies discarding generated text. A domain noun alone ("event",
-// "test") is routinely a fair paraphrase, so it stays; the prompt-side
-// AMBIGUITY_DISCIPLINE handles domain inference softly.
-export function containsUnsupportedOutcomeClaim(
+// With the trigger restricted to genuine sender-side uncertainty, a domain
+// noun ("interview", "exam") or resolved outcome ("passed") the transcript
+// never stated is exactly the hallucination class #808 targets, and the
+// conservative fallback is truthful for such threads. The residual cost is
+// an over-cautious wipe when the summary paraphrases transcript content
+// with a domain synonym on a genuinely-uncertain thread.
+export function containsUnsupportedDomainInference(
   text: string,
   messages: readonly MessageForPrompt[]
 ): boolean {
   if (!hasUnspecifiedAmbiguousOutcome(messages)) return false;
   const transcript = messages.map((message) => message.text).join("\n");
-  return OUTCOME_PATTERNS.some(
+  return [...DOMAIN_PATTERNS, ...OUTCOME_PATTERNS].some(
     (pattern) => pattern.test(text) && !pattern.test(transcript)
   );
 }
@@ -59,5 +61,5 @@ export function preserveAmbiguousEvidence(
   messages: readonly MessageForPrompt[],
   safeFallback: string
 ): string {
-  return containsUnsupportedOutcomeClaim(text, messages) ? safeFallback : text;
+  return containsUnsupportedDomainInference(text, messages) ? safeFallback : text;
 }
