@@ -87,3 +87,30 @@ test("the thread page exception still exists where we think it does", () => {
   // delete it from ALLOWED above (and this test) so the invariant tightens.
   assert.ok(SEED_IN_USESTATE.test(source), "expected the documented useState(peekCache) seed in the thread page");
 });
+
+// R-0106 / #824: the prod build statically prerenders Today, so clock-
+// derived header text (date line, greeting) computed from a render-time
+// `new Date()` bakes BUILD-time strings into the HTML and mismatches the
+// live clock at hydration (React minified #418, args=[text]). The clock
+// must flow through useSyncExternalStore with a null server snapshot, the
+// same contract useCacheSeed pins above.
+
+test("Today's date line + greeting read the clock through the hydration-safe store", () => {
+  const source = readFileSync(
+    join(process.cwd(), "apps/dashboard/app/today/page.tsx"),
+    "utf8"
+  );
+  assert.match(
+    source,
+    /useSyncExternalStore\(subscribeClockNever, clockTextSnapshot, \(\) => null\)/,
+    "clock text must come from useSyncExternalStore with a null server snapshot"
+  );
+  // The old render-time computation must not come back.
+  assert.doesNotMatch(source, /const today = new Date\(\);\s*\n\s*const dayLabel/);
+  // The greeting strings live inside the snapshot helper, not in render.
+  const snapshotBlock = source.slice(
+    source.indexOf("function clockTextSnapshot"),
+    source.indexOf("}", source.indexOf("return `"))
+  );
+  assert.match(snapshotBlock, /Good morning/);
+});

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
 import { useRouter } from "next/navigation";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
@@ -109,6 +109,30 @@ const OXBLOOD_TODAY_VARS = {
   "--risk-waiting": "#9a6a12",
   "--risk-fresh": "#1f6b3a"
 } as CSSProperties;
+
+// Hydration-safe clock text (R-0106 / #824). The prod build statically
+// prerenders this page, so computing the date line / greeting from
+// `new Date()` during render bakes BUILD-time text into the HTML; at
+// hydration the client clock disagrees and React throws minified #418
+// ("server rendered text didn't match"). useSyncExternalStore renders the
+// server snapshot (empty) during SSR + hydration by construction, then the
+// post-hydration pass fills the live value; client-side navigations are not
+// hydration, so they paint the clock on first render with no flash.
+const subscribeClockNever = () => () => {};
+function clockTextSnapshot(): string {
+  const now = new Date();
+  const dayLabel = now.toLocaleDateString("en-GB", {
+    weekday: "long",
+    day: "numeric",
+    month: "long"
+  });
+  const hour = now.getHours();
+  const greeting =
+    hour < 5 ? "Late evening" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  // Joined into one string because getSnapshot results are compared with
+  // Object.is — a fresh object every call would loop. Stable within the hour.
+  return `${dayLabel}|${greeting}`;
+}
 
 export default function TodayPage() {
   const router = useRouter();
@@ -467,19 +491,19 @@ export default function TodayPage() {
     [hero, visibleRemaining]
   );
 
-  const today = new Date();
-  const dayLabel = today.toLocaleDateString("en-GB", {
-    weekday: "long",
-    day: "numeric",
-    month: "long"
-  });
-  const hour = today.getHours();
-  const greeting =
-    hour < 5 ? "Late evening" : hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  // Clock-derived text through the hydration-safe store — see
+  // clockTextSnapshot above. Empty strings during SSR/hydration (matching
+  // the statically prerendered HTML), live values right after.
+  const clockText = useSyncExternalStore(subscribeClockNever, clockTextSnapshot, () => null);
+  const [dayLabel, greeting] = clockText ? clockText.split("|") : ["", ""];
   // Greet by the configured name when set; a bare greeting otherwise — the
   // app no longer assumes who the user is.
   const operatorName = profile?.displayName?.trim() ?? "";
-  const greetingLine = operatorName ? `${greeting}, ${operatorName}.` : `${greeting}.`;
+  const greetingLine = !greeting
+    ? ""
+    : operatorName
+      ? `${greeting}, ${operatorName}.`
+      : `${greeting}.`;
   const needsSetup = profile !== null && !profile.setupCompletedAt;
 
   const heroRisk = hero ? toDisplayRisk(hero.riskLevel) : null;
