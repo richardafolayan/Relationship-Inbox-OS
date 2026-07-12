@@ -1,6 +1,7 @@
 "use client";
 
 import type { ThreadMessage } from "@/lib/types";
+import { PhotoViewer } from "@/components/thread/photo-viewer";
 
 interface WhatsAppMediaProps {
   attachment: ThreadMessage["attachments"][number];
@@ -29,14 +30,11 @@ export function WhatsAppMedia({ attachment }: WhatsAppMediaProps) {
 
   if (attachment.kind === "photo") {
     return (
-      <a href={url} target="_blank" rel="noreferrer" className="block">
-        <img
-          src={url}
-          alt={attachment.rawLabel ?? "WhatsApp photo"}
-          className="max-h-[320px] max-w-full rounded-[12px] object-contain"
-          loading="lazy"
-        />
-      </a>
+      <PhotoViewer
+        src={url}
+        alt={attachment.rawLabel ?? "WhatsApp photo"}
+        className="max-h-[320px] max-w-full rounded-[12px] object-contain"
+      />
     );
   }
 
@@ -55,14 +53,11 @@ export function WhatsAppMedia({ attachment }: WhatsAppMediaProps) {
 
   if (attachment.kind === "gif" && attachment.type?.startsWith("image/")) {
     return (
-      <a href={url} target="_blank" rel="noreferrer" className="block">
-        <img
-          src={url}
-          alt={attachment.rawLabel ?? "WhatsApp GIF"}
-          className="max-h-[320px] max-w-full rounded-[12px] object-contain"
-          loading="lazy"
-        />
-      </a>
+      <PhotoViewer
+        src={url}
+        alt={attachment.rawLabel ?? "WhatsApp GIF"}
+        className="max-h-[320px] max-w-full rounded-[12px] object-contain"
+      />
     );
   }
 

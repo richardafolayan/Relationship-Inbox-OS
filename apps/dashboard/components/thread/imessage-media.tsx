@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { apiPost } from "@/lib/api";
 import { isLinkedInVoiceGuid } from "@/lib/linkedin-voice-guid";
 import type { ThreadMessage } from "@/lib/types";
+import { PhotoViewer } from "@/components/thread/photo-viewer";
 
 interface IMessageMediaProps {
   attachment: ThreadMessage["attachments"][number];
@@ -213,14 +214,11 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
 
   if (attachment.kind === "photo" || attachment.kind === "sticker") {
     return (
-      <a href={url} target="_blank" rel="noreferrer" className="block">
-        <img
-          src={url}
-          alt={attachment.rawLabel ?? "iMessage photo"}
-          className="max-h-[320px] max-w-full rounded-[12px] object-contain"
-          loading="lazy"
-        />
-      </a>
+      <PhotoViewer
+        src={url}
+        alt={attachment.rawLabel ?? "iMessage photo"}
+        className="max-h-[320px] max-w-full rounded-[12px] object-contain"
+      />
     );
   }
 
