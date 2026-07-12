@@ -499,6 +499,32 @@ function openDashboardPath(pathname) {
   mainWindow.focus();
 }
 
+// Dispatch a DOM CustomEvent inside the dashboard page. Used by menu items
+// that trigger in-app surfaces (the pilot feedback modal listens for
+// "pilot-feedback-open" on window — see dashboard lib/pilot.ts). Serialised
+// through JSON so no page content can leak into main-process code.
+function dispatchInApp(eventName, detail) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  const script = `window.dispatchEvent(new CustomEvent(${JSON.stringify(eventName)}, { detail: ${JSON.stringify(detail ?? null)} })); undefined;`;
+  mainWindow.webContents.executeJavaScript(script, true).catch((error) => {
+    writeLog(`Could not dispatch ${eventName}: ${error.message}`);
+  });
+}
+
+function goInHistory(direction) {
+  const contents = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  if (!contents) return;
+  const history = contents.navigationHistory;
+  if (direction === "back" && history.canGoBack()) history.goBack();
+  if (direction === "forward" && history.canGoForward()) history.goForward();
+}
+
+// Menu buildout (R-0104 / #822): the pilot flagged the bare default menu.
+// Navigation lives under Go (matching the sidebar: Today / Inbox /
+// Reconnect / Settings), Back/Forward + Reload under View (also the escape
+// hatch if any surface ever traps the operator again — see R-0103), and
+// feedback entry points under Help so "how do I report this" is always one
+// menu away.
 function createMenu() {
   const template = [
     {
@@ -507,6 +533,7 @@ function createMenu() {
         { role: "about" },
         { type: "separator" },
         { label: "Settings...", accelerator: "CommandOrControl+,", click: () => openDashboardPath("/settings") },
+        { type: "separator" },
         { label: "Check Permissions...", click: () => void showPermissionHelp() },
         { label: "Retry Startup", click: () => void restartLocalApp() },
         { label: "Show Logs", click: () => void shell.openPath(storagePaths().logsDir) },
@@ -519,8 +546,42 @@ function createMenu() {
       ]
     },
     { label: "Edit", submenu: [{ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" }] },
-    { label: "View", submenu: [{ role: "resetZoom" }, { role: "zoomIn" }, { role: "zoomOut" }, { type: "separator" }, { role: "togglefullscreen" }] },
-    { label: "Window", submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }] }
+    {
+      label: "View",
+      submenu: [
+        { label: "Back", accelerator: "CommandOrControl+[", click: () => goInHistory("back") },
+        { label: "Forward", accelerator: "CommandOrControl+]", click: () => goInHistory("forward") },
+        { role: "reload" },
+        { type: "separator" },
+        { role: "resetZoom" },
+        { role: "zoomIn" },
+        { role: "zoomOut" },
+        { type: "separator" },
+        { role: "togglefullscreen" }
+      ]
+    },
+    {
+      label: "Go",
+      submenu: [
+        { label: "Today", accelerator: "CommandOrControl+1", click: () => openDashboardPath("/today") },
+        { label: "Inbox", accelerator: "CommandOrControl+2", click: () => openDashboardPath("/inbox") },
+        { label: "Reconnect", accelerator: "CommandOrControl+3", click: () => openDashboardPath("/reconnect") },
+        { label: "Archived", accelerator: "CommandOrControl+4", click: () => openDashboardPath("/archived") },
+        { type: "separator" },
+        { label: "Settings", click: () => openDashboardPath("/settings") }
+      ]
+    },
+    { label: "Window", submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }] },
+    {
+      label: "Help",
+      submenu: [
+        { label: "Send Feedback...", click: () => dispatchInApp("pilot-feedback-open", { type: "feedback" }) },
+        { label: "Report a Bug...", click: () => dispatchInApp("pilot-feedback-open", { type: "bug" }) },
+        { type: "separator" },
+        { label: "Check Permissions...", click: () => void showPermissionHelp() },
+        { label: "Show Logs", click: () => void shell.openPath(storagePaths().logsDir) }
+      ]
+    }
   ];
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
