@@ -66,6 +66,8 @@ export interface WhatsAppAdapterDeps {
   }) => void;
   /** Client factory override, for tests. */
   createClient?: (authDir: string) => Client;
+  /** Sleep override so tests can fast-forward the send-guard wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
@@ -181,17 +183,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     attachments?: OutboundAttachment[]
   ): Promise<SendReceipt> {
     const client = this.requireClient();
-    const guard = await checkSendGuard(
-      {
-        client,
-        prisma: this.deps.prisma,
-        config: this.deps.sendGuardConfig
-      },
-      thread.platformThreadId
-    );
-    if (!guard.allowed) {
-      throw new Error(`WhatsApp send blocked: ${guard.reason}`);
-    }
+    await this.awaitSendClearance(thread.platformThreadId);
 
     // No attachments → original text-only path. wweb.js's sendMessage
     // returns the sent Message object, whose timestamp we mirror.
@@ -308,17 +300,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async sendPoll(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt> {
     const client = this.requireClient();
-    const guard = await checkSendGuard(
-      {
-        client,
-        prisma: this.deps.prisma,
-        config: this.deps.sendGuardConfig
-      },
-      thread.platformThreadId
-    );
-    if (!guard.allowed) {
-      throw new Error(`WhatsApp send blocked: ${guard.reason}`);
-    }
+    await this.awaitSendClearance(thread.platformThreadId);
 
     const question = poll.question.trim();
     const options = poll.options.map((option) => option.trim()).filter(Boolean);
@@ -464,6 +446,43 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   // --- internals ---
+
+  /**
+   * Run the send guard, and when the only obstacle is the per-recipient
+   * interval, wait it out and re-check instead of failing the send
+   * (R-0098 / #816: the operator expects a quick follow-up to queue, not
+   * error). Non-waitable denials (unsaved contact, daily cap) still throw
+   * immediately. Total wait is bounded to one interval window plus slack —
+   * the direct send-poll HTTP route sits behind Next's 30s proxy timeout,
+   * and a second re-arm mid-wait means something else is actively sending
+   * to this recipient, which should surface rather than stack waits.
+   */
+  private async awaitSendClearance(recipientJid: string): Promise<void> {
+    const sleep =
+      this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const deadline = Date.now() + this.deps.sendGuardConfig.minIntervalMs + 10_000;
+    const maxWaits = 2;
+    for (let waits = 0; ; waits += 1) {
+      const guard = await checkSendGuard(
+        {
+          client: this.requireClient(),
+          prisma: this.deps.prisma,
+          config: this.deps.sendGuardConfig
+        },
+        recipientJid
+      );
+      if (guard.allowed) return;
+      if (guard.retryAfterMs === undefined) {
+        throw new Error(`WhatsApp send blocked: ${guard.reason}`);
+      }
+      // +250ms so the re-check lands after the interval boundary, not on it.
+      const waitMs = guard.retryAfterMs + 250;
+      if (waits >= maxWaits || Date.now() + waitMs > deadline) {
+        throw new Error(`WhatsApp send blocked: ${guard.reason}`);
+      }
+      await sleep(waitMs);
+    }
+  }
 
   private requireClient(): Client {
     if (!this.client || !this.ready) {

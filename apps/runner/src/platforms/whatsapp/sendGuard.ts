@@ -50,7 +50,20 @@ export interface SendGuardConfig {
   dailyCap: number;
 }
 
-export type SendGuardResult = { allowed: true } | { allowed: false; reason: string };
+export type SendGuardResult =
+  | { allowed: true }
+  | {
+      allowed: false;
+      reason: string;
+      /**
+       * When set, the denial is transient: waiting this many ms and
+       * re-checking is expected to succeed. Only the per-recipient interval
+       * sets this — saved-contact and daily-cap denials are not waitable.
+       * Callers (the adapter send paths) use it to queue the send until the
+       * interval elapses instead of surfacing an error (R-0098 / #816).
+       */
+      retryAfterMs?: number;
+    };
 
 export interface SendGuardDeps {
   client: WhatsAppContactLookup;
@@ -100,7 +113,8 @@ export async function checkSendGuard(
     const remainingSec = Math.ceil(remainingMs / 1000);
     return {
       allowed: false,
-      reason: `Per-recipient send interval not yet elapsed (${remainingSec}s remaining)`
+      reason: `Per-recipient send interval not yet elapsed (${remainingSec}s remaining)`,
+      retryAfterMs: remainingMs
     };
   }
 

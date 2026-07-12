@@ -697,3 +697,139 @@ test("no 'message' listener is attached when onIncomingMessage is omitted", asyn
   await connecting;
   assert.equal(client.listenerCount("message"), 0);
 });
+
+// --- #816 (R-0098): interval-blocked sends queue until clear instead of failing ---
+
+test("sendMessage waits out the per-recipient interval and then sends (queued, not failed)", async () => {
+  // First guard check sees a 24s-old outbound (30s interval -> ~6s
+  // remaining); after the adapter sleeps the advertised remainder, the
+  // re-check sees nothing recent and the send proceeds.
+  let findFirstCalls = 0;
+  const slept = [];
+  let sentText = null;
+  const client = createFakeClient({
+    // ack: 1 -> already platform-acknowledged, so the #827 ack-wait
+    // resolves immediately instead of waiting on a message_ack event.
+    sendMessage: async (jid, text) => {
+      sentText = text;
+      return { timestamp: 1700000100, ack: 1, id: { _serialized: "msg-queued" } };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({
+      findFirst: async () => {
+        findFirstCalls += 1;
+        return findFirstCalls === 1 ? { timestamp: new Date(Date.now() - 24_000) } : null;
+      }
+    }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendMessage(
+    { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+    "queued follow-up"
+  );
+
+  assert.equal(sentText, "queued follow-up");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(findFirstCalls, 2);
+  assert.equal(slept.length, 1);
+  // Waits the guard's advertised remainder (~6s) plus the 250ms buffer.
+  assert.ok(slept[0] > 5_000 && slept[0] <= 6_000 + 250, `waited ${slept[0]}ms`);
+});
+
+test("sendPoll also waits out the per-recipient interval instead of failing", async () => {
+  let findFirstCalls = 0;
+  const slept = [];
+  const client = createFakeClient({
+    sendMessage: async () => ({ timestamp: 1700000100, ack: 1, id: { _serialized: "poll-queued" } })
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({
+      findFirst: async () => {
+        findFirstCalls += 1;
+        return findFirstCalls === 1 ? { timestamp: new Date(Date.now() - 5_000) } : null;
+      }
+    }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendPoll(
+    { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+    { question: "Sunday at 3?", options: ["Yes", "No"], allowMultipleAnswers: false }
+  );
+
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(slept.length, 1);
+});
+
+test("non-waitable guard denials (daily cap) still fail immediately without sleeping", async () => {
+  const slept = [];
+  const client = createFakeClient();
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({ count: async () => 30 }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "over cap"
+    ),
+    /WhatsApp send blocked.*24h send cap reached/
+  );
+  assert.equal(slept.length, 0);
+});
+
+test("a wait that would exceed the bounded deadline fails instead of stacking sleeps", async () => {
+  // Every check keeps reporting a freshly re-armed interval (something else
+  // is actively sending to this recipient). The adapter must give up once
+  // the deadline (one interval window + slack) would be exceeded, not loop.
+  const slept = [];
+  const client = createFakeClient();
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({
+      // Always "just sent": full 30s remaining on every check.
+      findFirst: async () => ({ timestamp: new Date(Date.now()) })
+    }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "never clears"
+    ),
+    /WhatsApp send blocked.*Per-recipient send interval/
+  );
+  // Bounded: at most one interval window fits inside the deadline.
+  assert.ok(slept.length <= 2, `slept ${slept.length} times`);
+});
