@@ -3052,10 +3052,10 @@ export default function ThreadPage() {
   const lastTimestamp = thread.messages[thread.messages.length - 1]?.timestamp ?? null;
   const riskLabel =
     risk === "overdue"
-      ? `overdue · last reply ${formatRelative(lastInboundAt)}`
+      ? `overdue · received ${formatRelative(lastInboundAt)}`
       : risk === "waiting"
-        ? `waiting · last reply ${formatRelative(lastInboundAt)}`
-        : `fresh · last reply ${formatRelative(lastTimestamp)}`;
+        ? `waiting · received ${formatRelative(lastInboundAt)}`
+        : `fresh · last message ${formatRelative(lastTimestamp)}`;
 
   // Suggestion source: prefer runner-generated chips when present,
   // otherwise fall back to the static prototype set so the dropdown is
