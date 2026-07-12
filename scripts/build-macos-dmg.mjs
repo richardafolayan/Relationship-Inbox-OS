@@ -268,8 +268,21 @@ function logicalBytes(path) {
   );
 }
 
+// lstat-based existence: existsSync FOLLOWS symlinks, so once the electron
+// package dir is pruned, existsSync(".bin/electron") is false and the now
+// dangling symlink survives into the bundle, where it fails
+// `codesign --verify --deep --strict` with "No such file or directory".
+function pathEntryExists(path) {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function removeMeasured(path, removed) {
-  if (!existsSync(path)) return;
+  if (!pathEntryExists(path)) return;
   const bytes = logicalBytes(path);
   rmSync(path, { recursive: true, force: true });
   removed.push({ path, bytes });
