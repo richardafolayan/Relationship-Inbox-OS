@@ -164,7 +164,7 @@ test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   assert.equal(stubs[1].isGroup, true);
 });
 
-test("fetchRecentThreads slices to the requested limit", async () => {
+test("fetchRecentThreads indexes every existing chat on the first sweep", async () => {
   const chats = Array.from({ length: 10 }, (_, i) => ({
     id: { _serialized: `c${i}@c.us` },
     name: `C${i}`,
@@ -179,6 +179,26 @@ test("fetchRecentThreads slices to the requested limit", async () => {
   const ready = adapter.ensureConnected();
   setImmediate(() => client.emit("ready"));
   await ready;
+  const stubs = await adapter.fetchRecentThreads(3);
+  assert.equal(stubs.length, 10);
+});
+
+test("fetchRecentThreads applies the requested limit after the initial index", async () => {
+  const chats = Array.from({ length: 10 }, (_, i) => ({
+    id: { _serialized: `c${i}@c.us` },
+    name: `C${i}`,
+    isGroup: false,
+    unreadCount: 0
+  }));
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  await adapter.fetchRecentThreads(3);
   const stubs = await adapter.fetchRecentThreads(3);
   assert.equal(stubs.length, 3);
 });

@@ -78,6 +78,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;
+  private indexedExistingChats = false;
 
   constructor(private readonly deps: WhatsAppAdapterDeps) {}
 
@@ -161,8 +162,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
     const chats = await this.requireClient().getChats();
-    // Chats arrive ordered by most-recent activity from wweb.js.
-    return chats.slice(0, limit).map(chatToThreadStub);
+    const selected = this.indexedExistingChats ? chats.slice(0, limit) : chats;
+    this.indexedExistingChats = true;
+    return selected.map(chatToThreadStub);
   }
 
   async fetchThreadById(platformThreadId: string): Promise<ThreadStub | null> {
