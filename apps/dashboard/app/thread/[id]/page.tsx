@@ -528,7 +528,9 @@ export default function ThreadPage() {
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
   );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
-  const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
+  const [siblingPlatform, setSiblingPlatform] = useState<
+    "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP"
+  >("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   // Focused thread: cuid of the parent message whose thread we're zoomed
@@ -3162,13 +3164,20 @@ export default function ThreadPage() {
               <div className="flex items-center gap-1">
                 <select
                   value={siblingPlatform}
-                  onChange={(e) => setSiblingPlatform(e.target.value as "all" | "LINKEDIN" | "IMESSAGE")}
+                  onChange={(e) =>
+                    setSiblingPlatform(
+                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP"
+                    )
+                  }
                   className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
                   aria-label="Filter sibling threads by platform"
                 >
                   <option value="all">All</option>
                   <option value="LINKEDIN">LinkedIn</option>
                   <option value="IMESSAGE">iMessage</option>
+                  {siblings.some((row) => row.platform === "WHATSAPP") ? (
+                    <option value="WHATSAPP">WhatsApp</option>
+                  ) : null}
                 </select>
                 <button
                   type="button"

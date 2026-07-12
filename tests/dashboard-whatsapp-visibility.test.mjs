@@ -54,3 +54,13 @@ test("the visible set does not mutate IMPLEMENTED_PLATFORMS", () => {
   assert.deepEqual([...IMPLEMENTED_PLATFORMS], before);
   assert.ok(!IMPLEMENTED_PLATFORMS.includes("WHATSAPP"));
 });
+
+test("thread page sibling filter offers WhatsApp behind the same opt-in idea (#820)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /<option value="WHATSAPP">WhatsApp<\/option>/);
+  assert.match(source, /siblings\.some\(\(row\) => row\.platform === "WHATSAPP"\)/);
+});
