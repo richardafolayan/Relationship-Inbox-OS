@@ -671,6 +671,12 @@ export default function ThreadPage() {
   // send. Each entry holds the actual File for upload + a previewUrl for the
   // chip thumbnail (image previews; a generic icon for everything else).
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  // #823 (R-0105): dragging files anywhere over the chat column attaches
+  // them, like the feedback form. `dragDepthRef` counts nested
+  // dragenter/dragleave pairs so the overlay doesn't flicker while the
+  // pointer crosses child elements.
+  const [dropActive, setDropActive] = useState(false);
+  const dragDepthRef = useRef(0);
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -1571,6 +1577,83 @@ export default function ThreadPage() {
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return next;
     });
+  }, []);
+
+  // --- #823 (R-0105): drag-and-drop files onto the chat to attach them ---
+
+  // Same platform gate as the paperclip button: only iMessage and WhatsApp
+  // sends support attachments today.
+  const composerAcceptsFiles =
+    thread?.platform === "IMESSAGE" || thread?.platform === "WHATSAPP";
+
+  // Mirror of the paperclip <input accept=…> filter, applied to dropped
+  // files: images, videos, audio, PDFs (plus .gif by extension — some
+  // sources report GIFs with an empty MIME type).
+  const isAttachableFile = useCallback((file: File) => {
+    const mime = (file.type ?? "").toLowerCase();
+    return (
+      mime.startsWith("image/") ||
+      mime.startsWith("video/") ||
+      mime.startsWith("audio/") ||
+      mime === "application/pdf" ||
+      file.name.toLowerCase().endsWith(".gif")
+    );
+  }, []);
+
+  const dragHasFiles = (event: React.DragEvent) =>
+    Array.from(event.dataTransfer?.types ?? []).includes("Files");
+
+  const onComposerDragEnter = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles || !dragHasFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setDropActive(true);
+    },
+    [composerAcceptsFiles]
+  );
+  const onComposerDragOver = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles || !dragHasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    },
+    [composerAcceptsFiles]
+  );
+  const onComposerDragLeave = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles || !dragHasFiles(event)) return;
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setDropActive(false);
+    },
+    [composerAcceptsFiles]
+  );
+  const onComposerDrop = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles) return;
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDropActive(false);
+      const files = Array.from(event.dataTransfer?.files ?? []).filter(isAttachableFile);
+      if (files.length > 0) addFiles(files);
+    },
+    [composerAcceptsFiles, addFiles, isAttachableFile]
+  );
+
+  // A drop that misses the zone (or lands before hydration) must never let
+  // the browser/Electron navigate to the dropped file and replace the app.
+  useEffect(() => {
+    const prevent = (event: DragEvent) => {
+      if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("dragover", prevent);
+    window.addEventListener("drop", prevent);
+    return () => {
+      window.removeEventListener("dragover", prevent);
+      window.removeEventListener("drop", prevent);
+    };
   }, []);
 
   const replaceComposerRange = useCallback(
@@ -3257,7 +3340,24 @@ export default function ThreadPage() {
       </aside>
 
       {/* ───── Chat column ───── */}
-      <div className="flex h-full min-h-0 flex-col border-r border-hairline">
+      <div
+        className="relative flex h-full min-h-0 flex-col border-r border-hairline"
+        onDragEnter={onComposerDragEnter}
+        onDragOver={onComposerDragOver}
+        onDragLeave={onComposerDragLeave}
+        onDrop={onComposerDrop}
+      >
+        {dropActive ? (
+          <div
+            data-testid="composer-drop-overlay"
+            className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-[color-mix(in_oklch,var(--paper)_78%,transparent)] backdrop-blur-sm"
+          >
+            <div className="flex items-center gap-2 rounded-[12px] border border-dashed border-ink-3 bg-paper px-5 py-3 text-[13px] font-medium text-ink shadow-[0_4px_24px_rgba(0,0,0,0.18)]">
+              <Paperclip className="h-[15px] w-[15px]" strokeWidth={1.8} />
+              Drop to attach
+            </div>
+          </div>
+        ) : null}
         {degraded ? (
           <div className="flex-shrink-0 px-4 pt-6 sm:px-8 lg:px-12">
             <DegradedBanner
