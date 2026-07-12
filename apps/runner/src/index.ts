@@ -4042,6 +4042,47 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
   });
 }));
 
+// Live poll tallies for the dashboard's "View votes" affordance
+// (R-0100 / #818). Read-only: no presenter guard, no audit row. Fetched on
+// demand because platform-side tallies mutate continuously — persisting
+// counts at scan time would show stale numbers within minutes.
+app.get("/control/thread/:threadId/message/:messageId/poll-votes", asyncRoute(async (req, res) => {
+  const { threadId, messageId } = z
+    .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
+    .parse(req.params);
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.threadId !== threadId) {
+    res.status(404).json({ error: "message not found in thread" });
+    return;
+  }
+  if (!message.platformMessageKey) {
+    res.status(400).json({ error: "message has no platform key" });
+    return;
+  }
+
+  const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
+  if (!adapter.getPollVotes) {
+    res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
+    return;
+  }
+  const threadStub: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+
+  // Serialised with sends/votes on the same platform lock — wweb.js store
+  // reads are cheap, but interleaving them with an in-flight send has
+  // produced Puppeteer races elsewhere, so stay consistent with poll-vote.
+  const votes = await withPlatformControlLock(target.platform, () =>
+    adapter.getPollVotes!(threadStub, message.platformMessageKey!)
+  );
+  res.json({ votes });
+}));
+
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "rescan the thread", kind: "external-action" })) return;

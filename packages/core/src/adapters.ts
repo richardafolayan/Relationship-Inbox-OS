@@ -1,5 +1,19 @@
 import type { NormalizedMessage, OutboundAttachment, OutboundPoll, PlatformName, SendReceipt, ThreadStub } from "./types";
 
+/** One participant's current selection on a platform poll (see getPollVotes). */
+export interface PollVoteRecord {
+  /** Platform-side voter id (e.g. WhatsApp JID). */
+  voterId: string;
+  /** Display name when the platform can resolve one; null otherwise. */
+  voterName: string | null;
+  /** True when the vote belongs to the operator's own account. */
+  isMe: boolean;
+  /** Names of the currently-selected options. Empty = vote retracted. */
+  selectedOptions: string[];
+  /** ISO timestamp of the last selection change, when known. */
+  votedAt: string | null;
+}
+
 export interface PlatformAdapter {
   platform: PlatformName;
   ensureConnected(): Promise<void>;
@@ -60,6 +74,17 @@ export interface PlatformAdapter {
    */
   editMessage?(thread: ThreadStub, platformMessageKey: string, text: string): Promise<void>;
   voteOnPoll?(thread: ThreadStub, platformMessageKey: string, selectedOptions: string[]): Promise<void>;
+  /**
+   * Optional, paired with `voteOnPoll`. Returns the current votes on a poll
+   * message identified by its platform-side message key. Read-only — used by
+   * the dashboard's "View votes" affordance on WhatsApp poll bubbles
+   * (R-0100 / #818). Tallies mutate continuously on the platform, so callers
+   * fetch on demand rather than persisting counts.
+   */
+  getPollVotes?(
+    thread: ThreadStub,
+    platformMessageKey: string
+  ): Promise<PollVoteRecord[]>;
   /**
    * Optional. Returns a cheap, opaque change watermark for the platform's
    * upstream message store (e.g. iMessage chat.db's max message ROWID, row

@@ -62,7 +62,7 @@ import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imess
 import { WhatsAppMedia } from "@/components/thread/whatsapp-media";
 import { WhatsAppPoll } from "@/components/thread/whatsapp-poll";
 import { WhatsAppText } from "@/components/thread/whatsapp-text";
-import { getWhatsAppPoll } from "@/lib/whatsapp-poll";
+import { getWhatsAppPoll, type PollVoteRecord } from "@/lib/whatsapp-poll";
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
 import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
@@ -2353,6 +2353,17 @@ export default function ThreadPage() {
     await refresh();
   };
 
+  // Live tallies for the poll bubble's "View votes" (R-0100 / #818).
+  // Always fetched fresh — WhatsApp-side votes change under us, so there
+  // is nothing worth caching.
+  const fetchPollVotes = async (messageId: string) => {
+    if (!thread) return [];
+    const response = await apiGet<{ votes: PollVoteRecord[] }>(
+      `/runner/control/thread/${thread.id}/message/${messageId}/poll-votes`
+    );
+    return response.votes;
+  };
+
   const startMessageEdit = (message: ThreadMessage) => {
     const currentText = optimisticTextByMessageId[message.id] ?? message.text;
     setReactionPickerMessageId(null);
@@ -4090,6 +4101,7 @@ export default function ThreadPage() {
                                 message={message}
                                 disabled={thread.platform !== "WHATSAPP"}
                                 onVote={voteOnPoll}
+                                onFetchVotes={fetchPollVotes}
                               />
                             ) : null}
                             {showText ? (

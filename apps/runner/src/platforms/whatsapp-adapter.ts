@@ -23,6 +23,7 @@ import type {
   OutboundPoll,
   PlatformAdapter,
   PlatformName,
+  PollVoteRecord,
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
@@ -416,6 +417,66 @@ export class WhatsAppAdapter implements PlatformAdapter {
       throw new Error("WhatsApp poll vote failed: poll message not found");
     }
     await message.vote(selectedOptions);
+  }
+
+  /**
+   * Live poll tallies for the dashboard's "View votes" affordance
+   * (R-0100 / #818). Read-only: fetches the poll message from the wweb.js
+   * store and maps its PollVote records, resolving voter display names
+   * best-effort (a failed contact lookup falls back to the bare JID).
+   * Fetched on demand because tallies mutate continuously — persisted
+   * counts would be stale within minutes (see normaliseMessage note).
+   */
+  async getPollVotes(
+    _thread: ThreadStub,
+    platformMessageKey: string
+  ): Promise<PollVoteRecord[]> {
+    const client = this.requireClient();
+    const message = await (client as unknown as {
+      getMessageById: (messageId: string) => Promise<{
+        type?: string;
+        getPollVotes?: () => Promise<
+          Array<{
+            voter?: string;
+            selectedOptions?: Array<{ name?: string } | null>;
+            interractedAtTs?: number;
+          }>
+        >;
+      } | null>;
+    }).getMessageById(platformMessageKey);
+    if (!message || message.type !== "poll_creation" || typeof message.getPollVotes !== "function") {
+      throw new Error("WhatsApp poll votes unavailable: poll message not found");
+    }
+    const votes = await message.getPollVotes();
+    const myId =
+      (client as unknown as { info?: { wid?: { _serialized?: string } } }).info?.wid
+        ?._serialized ?? null;
+    return Promise.all(
+      votes.map(async (vote) => {
+        const voterId = vote.voter ?? "";
+        let voterName: string | null = null;
+        if (voterId) {
+          try {
+            const contact = await client.getContactById(voterId);
+            voterName = contact.pushname || contact.name || null;
+          } catch {
+            // Left-the-group / unknown voters keep the bare JID.
+          }
+        }
+        return {
+          voterId,
+          voterName,
+          isMe: myId !== null && voterId === myId,
+          selectedOptions: (vote.selectedOptions ?? [])
+            .map((option) => (option?.name ?? "").trim())
+            .filter((name) => name.length > 0),
+          votedAt:
+            typeof vote.interractedAtTs === "number" && Number.isFinite(vote.interractedAtTs)
+              ? new Date(vote.interractedAtTs).toISOString()
+              : null
+        };
+      })
+    );
   }
 
   async closeSession(_reason?: string): Promise<void> {
