@@ -619,9 +619,14 @@ function createWindow() {
     if (!shuttingDown) void showStartupRecovery("The app window closed unexpectedly.");
   });
   mainWindow.webContents.setWindowOpenHandler(({ url: targetUrl }) => {
-    if (isInternalAppUrl(targetUrl, process.env)) {
-      void mainWindow.loadURL(targetUrl);
-    } else if (isSafeExternalUrl(targetUrl)) {
+    // Never replace the app inside the main window. Routing internal URLs
+    // through loadURL() here meant a target="_blank" photo or document
+    // swapped the whole window for the raw file with no back button — the
+    // operator was stranded until they found the Settings menu item
+    // (R-0103 / #821). The dashboard now opens photos in an in-app viewer,
+    // and internal URLs are plain http on localhost, so the default browser
+    // renders/downloads them fine and has its own chrome + back button.
+    if (isSafeExternalUrl(targetUrl)) {
       void shell.openExternal(targetUrl);
     } else {
       writeLog(`Blocked unsupported external URL: ${targetUrl}`);
