@@ -833,3 +833,91 @@ test("a wait that would exceed the bounded deadline fails instead of stacking sl
   // Bounded: at most one interval window fits inside the deadline.
   assert.ok(slept.length <= 2, `slept ${slept.length} times`);
 });
+
+// --- #818 (R-0100): live poll tallies ---
+
+test("getPollVotes maps wweb.js PollVote records with name resolution and self-detection", async () => {
+  const client = createFakeClient({
+    getMessageById: async (id) => {
+      assert.equal(id, "poll-msg-1");
+      return {
+        type: "poll_creation",
+        getPollVotes: async () => [
+          {
+            voter: "447111222333@c.us",
+            selectedOptions: [{ name: "Yes" }],
+            interractedAtTs: 1_780_000_000_000
+          },
+          {
+            voter: "me@c.us",
+            selectedOptions: [{ name: "Yes" }, { name: "No" }],
+            interractedAtTs: 1_780_000_100_000
+          },
+          // Retracted vote (deselected everything) + unresolvable contact.
+          { voter: "unknown@c.us", selectedOptions: [] }
+        ]
+      };
+    },
+    getContactById: async (jid) => {
+      if (jid === "unknown@c.us") throw new Error("contact left");
+      if (jid === "me@c.us") return { isMyContact: true, pushname: "", name: "" };
+      return { isMyContact: true, pushname: "Cynthia", name: "Cynthia A" };
+    }
+  });
+  client.info = { wid: { _serialized: "me@c.us" } };
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const votes = await adapter.getPollVotes(
+    { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+    "poll-msg-1"
+  );
+
+  assert.deepEqual(votes, [
+    {
+      voterId: "447111222333@c.us",
+      voterName: "Cynthia",
+      isMe: false,
+      selectedOptions: ["Yes"],
+      votedAt: new Date(1_780_000_000_000).toISOString()
+    },
+    {
+      voterId: "me@c.us",
+      voterName: null,
+      isMe: true,
+      selectedOptions: ["Yes", "No"],
+      votedAt: new Date(1_780_000_100_000).toISOString()
+    },
+    {
+      voterId: "unknown@c.us",
+      voterName: null,
+      isMe: false,
+      selectedOptions: [],
+      votedAt: null
+    }
+  ]);
+});
+
+test("getPollVotes throws a readable error when the poll message cannot be found", async () => {
+  const client = createFakeClient({ getMessageById: async () => null });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.getPollVotes(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "gone"
+    ),
+    /poll message not found/
+  );
+});

@@ -1,10 +1,15 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { Check, Loader2 } from "lucide-react";
+import { BarChart2, Check, Loader2 } from "lucide-react";
 import type { ThreadMessage } from "@/lib/types";
 import { cn } from "@/lib/utils";
-import { getWhatsAppPoll } from "@/lib/whatsapp-poll";
+import {
+  aggregatePollVotes,
+  getWhatsAppPoll,
+  type PollOptionTally,
+  type PollVoteRecord
+} from "@/lib/whatsapp-poll";
 
 export { getWhatsAppPoll };
 
@@ -12,9 +17,15 @@ interface WhatsAppPollProps {
   message: ThreadMessage;
   disabled?: boolean;
   onVote: (messageId: string, selectedOptions: string[]) => Promise<void>;
+  /**
+   * Fetches the live vote records for this poll (R-0100 / #818). Absent
+   * (e.g. non-WhatsApp render contexts) the "View votes" affordance is
+   * hidden entirely.
+   */
+  onFetchVotes?: (messageId: string) => Promise<PollVoteRecord[]>;
 }
 
-export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPollProps) {
+export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }: WhatsAppPollProps) {
   const poll = getWhatsAppPoll(message);
   const options = useMemo(
     () => (poll?.options ?? []).map((option) => (option.name ?? "").trim()).filter(Boolean),
@@ -23,6 +34,9 @@ export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPoll
   const [selected, setSelected] = useState<string[]>([]);
   const [status, setStatus] = useState<"idle" | "voting" | "voted">("idle");
   const [error, setError] = useState<string | null>(null);
+  const [votesStatus, setVotesStatus] = useState<"hidden" | "loading" | "shown">("hidden");
+  const [tallies, setTallies] = useState<PollOptionTally[] | null>(null);
+  const [votesError, setVotesError] = useState<string | null>(null);
 
   if (!poll || options.length === 0) return null;
 
@@ -47,6 +61,22 @@ export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPoll
     } catch (voteError) {
       setStatus("idle");
       setError(voteError instanceof Error ? voteError.message : "Poll vote failed");
+    }
+  };
+
+  const loadVotes = async () => {
+    if (!onFetchVotes || votesStatus === "loading") return;
+    setVotesStatus("loading");
+    setVotesError(null);
+    try {
+      const votes = await onFetchVotes(message.id);
+      setTallies(aggregatePollVotes(options, votes));
+      setVotesStatus("shown");
+    } catch (fetchError) {
+      setVotesStatus(tallies ? "shown" : "hidden");
+      setVotesError(
+        fetchError instanceof Error ? fetchError.message : "Could not load votes"
+      );
     }
   };
 
@@ -89,16 +119,50 @@ export function WhatsAppPoll({ message, disabled = false, onVote }: WhatsAppPoll
           );
         })}
       </div>
-      <button
-        type="button"
-        disabled={disabled || selected.length === 0 || status === "voting" || status === "voted"}
-        onClick={() => void submit()}
-        className="inline-flex h-[30px] w-fit items-center gap-1.5 rounded-[6px] bg-ink px-3 text-[12px] font-medium text-paper transition-colors duration-calm hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {status === "voting" ? <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} /> : null}
-        {status === "voted" ? <Check className="h-[13px] w-[13px]" strokeWidth={1.8} /> : null}
-        {status === "voting" ? "Voting" : status === "voted" ? "Voted" : "Vote"}
-      </button>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          disabled={disabled || selected.length === 0 || status === "voting" || status === "voted"}
+          onClick={() => void submit()}
+          className="inline-flex h-[30px] w-fit items-center gap-1.5 rounded-[6px] bg-ink px-3 text-[12px] font-medium text-paper transition-colors duration-calm hover:bg-ink/90 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {status === "voting" ? <Loader2 className="h-[13px] w-[13px] animate-spin" strokeWidth={1.8} /> : null}
+          {status === "voted" ? <Check className="h-[13px] w-[13px]" strokeWidth={1.8} /> : null}
+          {status === "voting" ? "Voting" : status === "voted" ? "Voted" : "Vote"}
+        </button>
+        {onFetchVotes && !disabled ? (
+          <button
+            type="button"
+            disabled={votesStatus === "loading"}
+            onClick={() => void loadVotes()}
+            className="inline-flex items-center gap-1 text-[11px] text-ink-3 transition-colors duration-calm hover:text-ink disabled:cursor-not-allowed"
+          >
+            {votesStatus === "loading" ? (
+              <Loader2 className="h-[11px] w-[11px] animate-spin" strokeWidth={1.8} />
+            ) : (
+              <BarChart2 className="h-[11px] w-[11px]" strokeWidth={1.8} />
+            )}
+            {votesStatus === "shown" ? "Refresh votes" : "View votes"}
+          </button>
+        ) : null}
+      </div>
+      {votesStatus === "shown" && tallies ? (
+        <div data-testid="poll-vote-tallies" className="flex flex-col gap-1 border-t border-hairline pt-2">
+          {tallies.map((tally) => (
+            <div key={tally.name} className="flex items-baseline justify-between gap-3 text-[12px]">
+              <span className="min-w-0 truncate text-ink">{tally.name}</span>
+              <span className="shrink-0 text-right text-ink-3">
+                {tally.count}
+                {tally.voters.length > 0 ? ` · ${tally.voters.join(", ")}` : ""}
+              </span>
+            </div>
+          ))}
+          {tallies.every((tally) => tally.count === 0) ? (
+            <span className="text-[11px] text-ink-3">No votes yet</span>
+          ) : null}
+        </div>
+      ) : null}
+      {votesError ? <span className="text-[11px] text-ink-2">{votesError}</span> : null}
       {error ? <span className="text-[11px] text-ink-2">{error}</span> : null}
     </div>
   );
