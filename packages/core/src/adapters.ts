@@ -11,6 +11,15 @@ export interface PlatformAdapter {
    * when the adapter cannot resolve a stable thread id safely.
    */
   fetchThreadById?(platformThreadId: string): Promise<ThreadStub | null>;
+  /**
+   * Optional. Every conversation the platform account can see, as cheap
+   * stubs (no message fetches). Powers the searchable chat directory
+   * (R-0101 / #819): the dashboard's palette lists chats that have no
+   * Thread row yet, and opening one imports it on demand via
+   * `fetchThreadById` + the normal ingest path. Only adapters whose
+   * platform exposes a cheap full chat list implement this (WhatsApp).
+   */
+  listAllChats?(): Promise<ThreadStub[]>;
   fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]>;
   /**
    * `attachments` lets a platform send media alongside text. Optional

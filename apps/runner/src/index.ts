@@ -46,6 +46,7 @@ import { createSelectorTestService, isSelectorTestServiceError } from "./service
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters, type WhatsAppConnectState } from "./services/platform-factory";
 import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
+import { parseJid } from "./platforms/whatsapp/whatsappIdentity";
 import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
 import QRCode from "qrcode";
@@ -6535,6 +6536,108 @@ app.get("/data/whatsapp/status", asyncRoute(async (_req, res) => {
     qrDataUrl: whatsappConnect.qrDataUrl,
     updatedAt: whatsappConnect.updatedAt
   });
+}));
+
+// R-0101 / #819: pilots expect to find ANY WhatsApp contact in search, but
+// only unread/recent chats ever get Thread rows, so a dormant chat was
+// invisible until the contact messaged again. The directory lists chats
+// that have no Thread row yet (chat id + display name only — no message
+// fetches); the ⌘K palette merges them into its results, and picking one
+// imports the conversation on demand via /control/whatsapp/open-chat.
+// The raw chat list is cached briefly (it's a whole-account store read);
+// the has-a-thread-row filter re-runs per request so a just-imported chat
+// drops out immediately.
+let whatsappDirectoryCache: {
+  at: number;
+  entries: Array<{ chatId: string; name: string; isGroup: boolean }>;
+} | null = null;
+const WHATSAPP_DIRECTORY_TTL_MS = 2 * 60 * 1000;
+
+app.get("/data/whatsapp/directory", asyncRoute(async (_req, res) => {
+  const adapter = adapters.WHATSAPP;
+  if (!adapter?.listAllChats || whatsappConnect.state !== "connected") {
+    res.json({ chats: [] });
+    return;
+  }
+  const now = Date.now();
+  if (!whatsappDirectoryCache || now - whatsappDirectoryCache.at >= WHATSAPP_DIRECTORY_TTL_MS) {
+    const stubs = await adapter.listAllChats();
+    whatsappDirectoryCache = {
+      at: now,
+      entries: stubs
+        // Broadcast/status pseudo-chats and malformed JIDs are not
+        // conversations the operator can meaningfully open.
+        .filter((stub) => {
+          const kind = parseJid(stub.platformThreadId)?.kind;
+          return kind === "contact" || kind === "group";
+        })
+        .map((stub) => ({
+          chatId: stub.platformThreadId,
+          name: stub.displayName,
+          isGroup: Boolean(stub.isGroup)
+        }))
+    };
+  }
+  const known = new Set(
+    (
+      await prisma.thread.findMany({
+        where: { platform: "WHATSAPP" },
+        select: { platformThreadId: true }
+      })
+    ).map((thread) => thread.platformThreadId)
+  );
+  res.json({ chats: whatsappDirectoryCache.entries.filter((chat) => !known.has(chat.chatId)) });
+}));
+
+// Import a directory chat on demand: fetch its stub, run it through the
+// same idempotent ingest path scans use (skipAi keeps the open fast; the
+// recurring scanner enriches it later), and hand back the new thread id
+// for navigation.
+app.post("/control/whatsapp/open-chat", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "open a WhatsApp chat", kind: "external-action" })) return;
+  const { chatId } = z.object({ chatId: z.string().min(3).max(120) }).parse(req.body ?? {});
+  const kind = parseJid(chatId)?.kind;
+  if (kind !== "contact" && kind !== "group") {
+    res.status(400).json({ error: "unsupported chat id" });
+    return;
+  }
+
+  const existing = await prisma.thread.findFirst({
+    where: { platform: "WHATSAPP", platformThreadId: chatId },
+    select: { id: true }
+  });
+  if (existing) {
+    res.json({ threadId: existing.id, imported: false });
+    return;
+  }
+
+  const adapter = adapters.WHATSAPP;
+  if (!adapter?.fetchThreadById || whatsappConnect.state !== "connected") {
+    res.status(409).json({ error: "WhatsApp is not connected" });
+    return;
+  }
+  const stub = await withPlatformControlLock("WHATSAPP", () => adapter.fetchThreadById!(chatId));
+  if (!stub) {
+    res.status(404).json({ error: "chat not found on WhatsApp" });
+    return;
+  }
+  const settings = await settingsStore.getSettings();
+  await scanQueue.syncThreadForIngest({
+    platform: "WHATSAPP",
+    candidate: stub,
+    maxMessages: settings.maxMessagesPerThread,
+    requestId: getControlTrace(res)?.requestId ?? uuid(),
+    skipAi: true
+  });
+  const thread = await prisma.thread.findFirst({
+    where: { platform: "WHATSAPP", platformThreadId: chatId },
+    select: { id: true }
+  });
+  if (!thread) {
+    res.status(500).json({ error: "chat import did not produce a thread" });
+    return;
+  }
+  res.json({ threadId: thread.id, imported: true });
 }));
 
 // #703 link previews. Unfurl a URL into title/description/image server-side

@@ -54,3 +54,24 @@ test("empty / whitespace query matches everything (palette shows defaults)", () 
   assert.equal(paletteItemMatches(item, ""), true);
   assert.equal(paletteItemMatches(item, "   "), true);
 });
+
+// --- #819 (R-0101): WhatsApp directory entries in the palette ---
+
+test("palette wires the WhatsApp directory: fetch, ranked-last items, keepOpen import", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../apps/dashboard/components/layout/command-palette.tsx", import.meta.url),
+    "utf8"
+  );
+  // Fetches the directory of thread-less chats alongside the inbox index.
+  assert.match(source, /\/runner\/data\/whatsapp\/directory/);
+  // Selecting an entry imports the chat then navigates.
+  assert.match(source, /\/runner\/control\/whatsapp\/open-chat/);
+  // Directory entries rank after real threads so an existing conversation
+  // always wins a name clash.
+  assert.match(source, /\[\.\.\.pages, \.\.\.threadItems, \.\.\.directoryItems\]/);
+  // The panel must stay open while the async import runs.
+  assert.match(source, /keepOpen: true/);
+  assert.match(source, /if \(!target\.keepOpen\) onClose\(\);/);
+  assert.match(source, /if \(!item\.keepOpen\) onClose\(\);/);
+});

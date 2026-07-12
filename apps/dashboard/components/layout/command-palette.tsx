@@ -27,6 +27,10 @@ interface PaletteItem {
   // Omitted for page/action entries — their label is already the whole text.
   search?: string;
   run: () => void;
+  // Directory imports (#819) close themselves once the async open lands;
+  // the panel must not close on Enter/click for those or the in-flight
+  // "Opening…" state would be lost.
+  keepOpen?: boolean;
 }
 
 // ⌘K palette. Replaces the topbar's search and the old "run scan now"
@@ -45,11 +49,22 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   return <CommandPalettePanel onClose={onClose} />;
 }
 
+interface WhatsAppDirectoryChat {
+  chatId: string;
+  name: string;
+  isGroup: boolean;
+}
+
 function CommandPalettePanel({ onClose }: { onClose: () => void }) {
   const router = useRouter();
   const [query, setQuery] = useState("");
   const [threads, setThreads] = useState<InboxResponse["rows"]>([]);
+  // WhatsApp chats with no thread row yet (R-0101 / #819) — dormant
+  // contacts the scan sweep never imported. Empty when WhatsApp isn't
+  // connected (the endpoint answers []) or the fetch fails.
+  const [waDirectory, setWaDirectory] = useState<WhatsAppDirectoryChat[]>([]);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [openingChatId, setOpeningChatId] = useState<string | null>(null);
 
   useEffect(() => {
     // Index the full inbox, not just the first 30 rows. With hundreds of
@@ -60,7 +75,24 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
     void apiGet<InboxResponse>("/runner/data/inbox")
       .then((data) => setThreads(data.rows))
       .catch(() => undefined);
+    void apiGet<{ chats: WhatsAppDirectoryChat[] }>("/runner/data/whatsapp/directory")
+      .then((data) => setWaDirectory(data.chats ?? []))
+      .catch(() => undefined);
   }, []);
+
+  // Import the chat, then jump to the new thread. The palette stays open
+  // with an "Opening…" tag until the import lands (typically 1–3s), so
+  // Enter doesn't silently do nothing.
+  const openDirectoryChat = (chat: WhatsAppDirectoryChat) => {
+    if (openingChatId) return;
+    setOpeningChatId(chat.chatId);
+    void apiPost<{ threadId: string }>("/runner/control/whatsapp/open-chat", { chatId: chat.chatId })
+      .then((response) => {
+        router.push(`/thread/${response.threadId}`);
+        onClose();
+      })
+      .catch(() => setOpeningChatId(null));
+  };
 
   const items: PaletteItem[] = useMemo(() => {
     const pages: PaletteItem[] = [
@@ -112,10 +144,27 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
         run: () => router.push(`/thread/${thread.id}`)
       };
     });
-    const all = [...pages, ...threadItems];
+    // WhatsApp chats with no thread row yet (R-0101 / #819). Ranked after
+    // real threads so an existing conversation always wins a name clash;
+    // selecting one imports the chat then navigates.
+    const directoryItems: PaletteItem[] = waDirectory.map((chat) => ({
+      id: `wa-dir-${chat.chatId}`,
+      label:
+        openingChatId === chat.chatId
+          ? `${chat.name} - opening…`
+          : `${chat.name} - open WhatsApp chat`,
+      search: chat.name,
+      kind: "WhatsApp",
+      keepOpen: true,
+      run: () => openDirectoryChat(chat)
+    }));
+    const all = [...pages, ...threadItems, ...directoryItems];
     if (!query.trim()) return all.slice(0, 8);
     return all.filter((item) => paletteItemMatches(item, query)).slice(0, 12);
-  }, [query, router, threads]);
+    // openDirectoryChat is stable enough for this memo (state setters +
+    // router); openingChatId is included so the "opening…" label renders.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [query, router, threads, waDirectory, openingChatId]);
 
   // Reset to the top match whenever the *query* changes — the best match
   // should be highlighted as the operator types.
@@ -143,7 +192,7 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
       const target = items[activeIndex];
       if (target) {
         target.run();
-        onClose();
+        if (!target.keepOpen) onClose();
       }
     }
   };
@@ -172,7 +221,7 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
               onMouseEnter={() => setActiveIndex(index)}
               onClick={() => {
                 item.run();
-                onClose();
+                if (!item.keepOpen) onClose();
               }}
               className={`flex cursor-pointer items-center gap-[10px] rounded-[10px] px-[14px] py-[10px] text-[14px] ${
                 index === activeIndex ? "bg-paper-2 text-ink" : "text-ink-2"

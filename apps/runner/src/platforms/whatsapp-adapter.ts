@@ -169,6 +169,18 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return chat ? chatToThreadStub(chat) : null;
   }
 
+  /**
+   * Every chat on the account as cheap stubs — no message fetches. Powers
+   * the searchable directory (R-0101 / #819) so contacts whose chats fall
+   * outside the recent-sweep window can still be found and opened. The
+   * wweb.js Chat list is already in memory client-side, so this is one
+   * store read regardless of account size.
+   */
+  async listAllChats(): Promise<ThreadStub[]> {
+    const chats = await this.requireClient().getChats();
+    return chats.map(chatToThreadStub);
+  }
+
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
     const client = this.requireClient();
     const chat = await client.getChatById(thread.platformThreadId);

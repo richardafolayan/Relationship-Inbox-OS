@@ -833,3 +833,27 @@ test("a wait that would exceed the bounded deadline fails instead of stacking sl
   // Bounded: at most one interval window fits inside the deadline.
   assert.ok(slept.length <= 2, `slept ${slept.length} times`);
 });
+
+// --- #819 (R-0101): searchable chat directory ---
+
+test("listAllChats returns a stub for every chat with no limit applied", async () => {
+  const chats = Array.from({ length: 250 }, (_, i) => ({
+    id: { _serialized: `dir${i}@c.us` },
+    name: `Contact ${i}`,
+    isGroup: false,
+    unreadCount: 0
+  }));
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const stubs = await adapter.listAllChats();
+  assert.equal(stubs.length, 250);
+  assert.equal(stubs[0].platformThreadId, "dir0@c.us");
+  assert.equal(stubs[249].displayName, "Contact 249");
+});
