@@ -80,8 +80,11 @@ import { createScheduledSendPromoter } from "./services/scheduled-send-promoter"
 import { createBirthdaySync } from "./services/birthday-sync";
 import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
 import {
+  canSelfUpdateInPlace,
+  containingAppBundle,
   launchUpdateApplyAndRestart,
   readAppVersion,
+  resolveUpdateFeedUrl,
   runUpdateCheck,
   stagePendingUpdate
 } from "./services/system-update";
@@ -2395,7 +2398,8 @@ app.get("/system/version", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/system/update-check", asyncRoute(async (_req, res) => {
-  const feedUrl = runnerConfig.updateFeedUrl;
+  const packaged = process.env.RIOS_PACKAGED_APP === "1";
+  const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
   if (!feedUrl) {
     const current = readAppVersion(projectRoot).version;
     res.json({
@@ -2410,7 +2414,9 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
   const result = await runUpdateCheck({ projectRoot, feedUrl });
   res.json({
     configured: true,
-    applyMode: process.env.RIOS_PACKAGED_APP === "1" ? "replace_app" : "automatic",
+    // Dev-channel packaged installs self-update in place (quit, swap, relaunch);
+    // student packaged installs still ask for a DMG reinstall.
+    applyMode: packaged && !canSelfUpdateInPlace(projectRoot, packaged) ? "replace_app" : "automatic",
     ...result
   });
 }));
@@ -2421,7 +2427,8 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
   // would otherwise start a real self-update mid-presentation. Gate
   // it server-side as an external action (blocked live + sandbox).
   if (await checkPresenterGuard(res, settingsStore, { action: "update and restart the app", kind: "external-action" })) return;
-  const feedUrl = runnerConfig.updateFeedUrl;
+  const packaged = process.env.RIOS_PACKAGED_APP === "1";
+  const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
   if (!feedUrl) {
     res.status(409).json({ ok: false, reason: "no_feed_configured" });
     return;
@@ -2443,12 +2450,23 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     res.status(409).json({ ok: false, reason: "no_update_available", currentVersion: check.currentVersion });
     return;
   }
-  if (process.env.RIOS_PACKAGED_APP === "1") {
+  if (packaged && !canSelfUpdateInPlace(projectRoot, packaged)) {
     res.status(409).json({
       ok: false,
       reason: "replace_app_required",
       message:
         "Quit Tovi, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old Relationship Inbox OS app if it is still in Applications. Your data and settings in Application Support are preserved."
+    });
+    return;
+  }
+  const appBundle = packaged ? containingAppBundle(projectRoot) : "";
+  if (packaged && !appBundle) {
+    // Dev channel but not the expected …/Tovi.app/Contents/Resources/app
+    // layout; refuse rather than swap code out from under a live Electron.
+    res.status(409).json({
+      ok: false,
+      reason: "replace_app_required",
+      message: "This packaged install has an unexpected layout, so the in-place updater refuses to run. Reinstall from the latest DMG instead."
     });
     return;
   }
@@ -2459,7 +2477,11 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     feedUrl
   };
   stagePendingUpdate(dataDir, intent);
-  const restart = launchUpdateApplyAndRestart({ projectRoot, feedUrl });
+  const restart = launchUpdateApplyAndRestart({
+    projectRoot,
+    feedUrl,
+    ...(appBundle ? { appBundle } : {})
+  });
   res.status(202).json({
     ok: true,
     updating: true,

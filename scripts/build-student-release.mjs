@@ -35,6 +35,11 @@
 //   --zip-url <url>     Dropbox (dl=1) URL of the uploaded zip, written into latest.json
 //   --ref <git-ref>     git ref to archive (default: HEAD)
 //   --out <dir>         output directory (default: release-dist/)
+//   --channel <name>    release channel: "student" (default) or "dev". The dev
+//                       channel stamps version <pkg>-dev.<commit count> so every
+//                       push is strictly newer than the last within the channel,
+//                       names the zips -dev- instead of -student-, and floors
+//                       minimumInstallerVersion so dev installs always qualify.
 //   --notes <line>      a release-note line (repeatable)
 //   --notes-file <path> read release notes from a file (one per line)
 //   --min-installer <v> minimumInstallerVersion in latest.json (default: package version)
@@ -108,6 +113,7 @@ function parseArgs(argv) {
     if (a === "--zip-url") out.zipUrl = next();
     else if (a === "--ref") out.ref = next();
     else if (a === "--out") out.out = next();
+    else if (a === "--channel") out.channel = next();
     else if (a === "--notes") out.notes.push(next());
     else if (a === "--notes-file") out.notesFile = next();
     else if (a === "--min-installer") out.minInstaller = next();
@@ -128,6 +134,16 @@ if (args.help) {
 const OUT_DIR = resolve(ROOT, args.out || "release-dist");
 const REF = args.ref || "HEAD";
 const PLACEHOLDER_URL = "https://REPLACE-WITH-DROPBOX-DIRECT-LINK?dl=1";
+const CHANNELS = ["student", "dev"];
+const CHANNEL = args.channel || "student";
+if (!CHANNELS.includes(CHANNEL)) {
+  die(`Unknown --channel "${CHANNEL}". Use one of: ${CHANNELS.join(", ")}.`);
+}
+// The dev channel updates on every push without a package.json bump, so dev
+// installs must never trip the minimum-installer gate. Note the floor sits
+// BELOW any real version: a prerelease like 1.2.3-dev.9 ranks under 1.2.3, so
+// a floor equal to a core version would block that core's own dev builds.
+const DEV_MIN_INSTALLER = "0.0.1";
 
 function git(...a) {
   return execFileSync("git", a, { cwd: ROOT, encoding: "utf8" }).trim();
@@ -139,6 +155,17 @@ function pkgVersionFromRef(ref) {
   const pkg = JSON.parse(git("show", `${ref}:package.json`));
   if (!pkg.version) die(`package.json at ${ref} does not have a version.`);
   return pkg.version;
+}
+// Dev builds append -dev.<commit count> so semver prerelease comparison makes
+// every push to the branch strictly newer than the previous dev build.
+function releaseVersionFromRef(ref) {
+  const core = pkgVersionFromRef(ref);
+  if (CHANNEL !== "dev") return core;
+  const count = git("rev-list", "--count", ref);
+  return `${core}-dev.${count}`;
+}
+function zipBaseName() {
+  return `${APP_FOLDER_NAME}-${CHANNEL}`;
 }
 function die(msg) {
   process.stderr.write(`\n  ✗ ${msg}\n`);
@@ -153,12 +180,17 @@ function walk(dir, base = dir, acc = []) {
   return acc;
 }
 
-function readNotes(version) {
+function readNotes(version, commit) {
   if (args.notesFile) {
     return readFileSync(resolve(ROOT, args.notesFile), "utf8")
       .split(/\r?\n/).map((l) => l.replace(/^[-*]\s*/, "").trim()).filter(Boolean);
   }
   if (args.notes.length) return args.notes;
+  if (CHANNEL === "dev") {
+    let subject = "";
+    try { subject = git("log", "-1", "--format=%s", REF); } catch { /* not a git checkout */ }
+    return [subject ? `Dev build ${commit}: ${subject}` : `Dev build ${commit || version}.`];
+  }
   return [`Student pilot build ${version}.`];
 }
 
@@ -168,10 +200,11 @@ function writeManifest({ version, build, commit, zipPath, sha256 }) {
     version,
     build,
     commit,
+    channel: CHANNEL,
     zipUrl,
     sha256,
-    releaseNotes: readNotes(version),
-    minimumInstallerVersion: args.minInstaller || version
+    releaseNotes: readNotes(version, commit),
+    minimumInstallerVersion: args.minInstaller || (CHANNEL === "dev" ? DEV_MIN_INSTALLER : version)
   };
   const manifestPath = join(OUT_DIR, "latest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
@@ -185,7 +218,7 @@ async function manifestOnly() {
   mkdirSync(OUT_DIR, { recursive: true });
   const zipPath = args.zip
     ? resolve(ROOT, args.zip)
-    : join(OUT_DIR, `${APP_FOLDER_NAME}-student-latest.zip`);
+    : join(OUT_DIR, `${zipBaseName()}-latest.zip`);
   if (!existsSync(zipPath)) die(`No zip to checksum at ${zipPath}. Build a release first, or pass --zip.`);
   const sha256 = await sha256File(zipPath);
 
@@ -218,12 +251,12 @@ async function manifestOnly() {
 
 // ---- full build ----------------------------------------------------------
 async function build() {
-  const version = pkgVersionFromRef(REF);
+  const version = releaseVersionFromRef(REF);
   const build = new Date().toISOString();
   const commit = git("rev-parse", "--short", REF);
   const fullCommit = git("rev-parse", REF);
 
-  process.stdout.write(`\n  Building student release ${version} (${commit}) from ${REF}\n`);
+  process.stdout.write(`\n  Building ${CHANNEL} release ${version} (${commit}) from ${REF}\n`);
 
   mkdirSync(OUT_DIR, { recursive: true });
   const staging = mkdtempSync(join(tmpdir(), "rios-release-"));
@@ -240,7 +273,7 @@ async function build() {
     // 2. Bake a release.json so the installed app knows what it is.
     writeFileSync(
       join(appDir, "release.json"),
-      JSON.stringify({ version, build, commit: fullCommit, channel: "student" }, null, 2) + "\n"
+      JSON.stringify({ version, build, commit: fullCommit, channel: CHANNEL }, null, 2) + "\n"
     );
 
     // 2b. Bake the pilot-feedback token into .env.example (if provided at
@@ -260,8 +293,8 @@ async function build() {
     }
 
     // 4. Zip (top-level relationship-inbox-os/ folder). -X drops macOS extras.
-    const versionedZip = join(OUT_DIR, `${APP_FOLDER_NAME}-student-${version}.zip`);
-    const latestZip = join(OUT_DIR, `${APP_FOLDER_NAME}-student-latest.zip`);
+    const versionedZip = join(OUT_DIR, `${zipBaseName()}-${version}.zip`);
+    const latestZip = join(OUT_DIR, `${zipBaseName()}-latest.zip`);
     rmSync(versionedZip, { force: true });
     execFileSync("zip", ["-r", "-X", "-q", versionedZip, APP_FOLDER_NAME], { cwd: staging });
 
@@ -287,7 +320,7 @@ async function build() {
     process.stdout.write(`    manifest        : ${manifestPath}\n`);
     process.stdout.write(`    sha256          : ${sha256}\n`);
     process.stdout.write(`\n  Next:\n`);
-    process.stdout.write(`    1. Upload ${APP_FOLDER_NAME}-student-latest.zip to Dropbox.\n`);
+    process.stdout.write(`    1. Upload ${zipBaseName()}-latest.zip to Dropbox.\n`);
     process.stdout.write(`    2. Copy its share link and change dl=0 to dl=1.\n`);
     process.stdout.write(`    3. npm run build:student-release -- --manifest-only --zip-url "<that dl=1 link>"\n`);
     process.stdout.write(`    4. Upload latest.json to Dropbox (use raw=1 or dl=1 for its link).\n`);

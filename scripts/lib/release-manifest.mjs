@@ -131,6 +131,11 @@ export function validateLatestJson(obj) {
   if ("commit" in obj && (typeof obj.commit !== "string" || obj.commit.trim() === "")) {
     errors.push("commit must be a non-empty string");
   }
+  // channel is OPTIONAL (older manifests omit it); when present it must be a
+  // sane string so the updater's channel-mismatch guard can trust it.
+  if ("channel" in obj && (typeof obj.channel !== "string" || obj.channel.trim() === "")) {
+    errors.push("channel must be a non-empty string when present");
+  }
   if ("zipUrl" in obj && !isHttpUrl(obj.zipUrl)) {
     errors.push(`zipUrl must be an http(s) URL: ${JSON.stringify(obj.zipUrl)}`);
   }

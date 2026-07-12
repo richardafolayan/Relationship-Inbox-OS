@@ -47,6 +47,7 @@ export function parseArgs(argv) {
     const next = () => argv[++i];
     if (arg === "--out") out.out = next();
     else if (arg === "--ref") out.ref = next();
+    else if (arg === "--channel") out.channel = next();
     else if (arg === "--node-dir") out.nodeDir = next();
     else if (arg === "--skip-install") out.skipInstall = true;
     else if (arg === "--skip-build") out.skipBuild = true;
@@ -70,6 +71,39 @@ export function macArchToOpenSslArch(arch = process.arch) {
 
 export function appVersion(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version || "0.0.0";
+}
+
+// The DMG is the local/dev artifact (pilots install via the zip installer), so
+// it stamps channel "dev" by default: the installed app then checks the
+// rolling GitHub `dev` prerelease feed and can self-update in place on every
+// push to v1/strip-back-pr1 (issue #843). Pass --channel student to build a
+// pilot-flavoured bundle with no baked feed.
+export const DMG_CHANNELS = ["dev", "student"];
+export const DEFAULT_DMG_CHANNEL = "dev";
+
+export function devUpdateFeedUrl(root = ROOT, env = process.env) {
+  if (env.RIOS_DEV_UPDATE_FEED_URL?.trim()) return env.RIOS_DEV_UPDATE_FEED_URL.trim();
+  const remote = execFileSync("git", ["remote", "get-url", "origin"], {
+    cwd: root,
+    encoding: "utf8"
+  }).trim();
+  const match = remote.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (!match) {
+    throw new Error(`could not derive the GitHub repo from origin (${remote}); set RIOS_DEV_UPDATE_FEED_URL`);
+  }
+  return `https://github.com/${match[1]}/${match[2]}/releases/download/dev/latest.json`;
+}
+
+// Mirror of the release builder's dev stamping: -dev.<commit count> makes each
+// branch commit strictly newer within the dev channel.
+export function channelReleaseVersion(channel, ref, root = ROOT) {
+  const core = appVersion(root);
+  if (channel !== "dev") return core;
+  const count = execFileSync("git", ["rev-list", "--count", ref], {
+    cwd: root,
+    encoding: "utf8"
+  }).trim();
+  return `${core}-dev.${count}`;
 }
 
 export function electronTemplateApp() {
@@ -399,11 +433,15 @@ export async function buildMacosDmg(options = {}) {
   const version = appVersion();
   const paths = planPaths({ out: options.out, version });
   const ref = options.ref || "HEAD";
+  const channel = options.channel || DEFAULT_DMG_CHANNEL;
+  if (!DMG_CHANNELS.includes(channel)) {
+    throw new Error(`unknown --channel "${channel}"; use one of: ${DMG_CHANNELS.join(", ")}`);
+  }
   const iconSvg = join(ROOT, "apps", "desktop", "assets", "icon.svg");
   const nodeDir = resolve(options.nodeDir || paths.runtimeDir);
 
   if (options.dryRun) {
-    return { ...paths, nodeDir, ref, version, dryRun: true };
+    return { ...paths, nodeDir, ref, version, channel, dryRun: true };
   }
 
   mkdirSync(paths.outDir, { recursive: true });
@@ -417,6 +455,24 @@ export async function buildMacosDmg(options = {}) {
     const appResourceDir = join(resourcesDir, "app");
     rmSync(appResourceDir, { recursive: true, force: true });
     stageSource(ref, appResourceDir);
+
+    // Bake a release.json so the installed app knows its exact build, channel,
+    // and (dev only) which feed to self-update from. The runner prefers this
+    // baked feed over RIOS_UPDATE_FEED_URL in .env, so a dev install never
+    // fights the pilot Dropbox link that env-reconcile maintains there.
+    const releaseVersion = channelReleaseVersion(channel, ref);
+    const releaseInfo = {
+      version: releaseVersion,
+      build: new Date().toISOString(),
+      commit: execFileSync("git", ["rev-parse", ref], { cwd: ROOT, encoding: "utf8" }).trim(),
+      channel
+    };
+    if (channel === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
+    writeFileSync(
+      join(appResourceDir, "release.json"),
+      JSON.stringify(releaseInfo, null, 2) + "\n"
+    );
+
     if (!options.skipInstall) installDependencies(appResourceDir, nodeDir);
     if (!options.skipBuild) buildRuntimeArtifacts(appResourceDir, nodeDir);
     generateIcon(iconSvg, resourcesDir, temp);
@@ -461,6 +517,9 @@ Usage:
 Options:
   --out DIR          Output directory (default: release-dist/macos)
   --ref REF          Git ref to package (default: HEAD)
+  --channel NAME     Release channel baked into release.json: "dev" (default,
+                     self-updates from the GitHub dev prerelease feed) or
+                     "student" (no baked feed; updates come from RIOS_UPDATE_FEED_URL)
   --node-dir DIR     Reuse/download Node 22 in this directory
   --skip-install     Do not run npm ci in the staged app
   --skip-build       Do not prebuild Prisma, runner, core, or dashboard

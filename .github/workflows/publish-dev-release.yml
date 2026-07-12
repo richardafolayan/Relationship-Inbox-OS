@@ -1,0 +1,133 @@
+# Publishes a DEV-channel build on every push to v1/strip-back-pr1, so
+# Richard's dev install of Tovi can one-click update to the latest v1 work
+# without a full DMG rebuild (issue #843).
+#
+# Unlike the pilot channel (Dropbox, publish-student-release.yml), the dev
+# channel ships via a rolling GitHub prerelease tagged `dev` on this PUBLIC
+# repo: the asset URLs are deterministic and stable
+# (releases/download/dev/latest.json + relationship-inbox-os-dev-latest.zip),
+# so no Dropbox secrets or share-link setup are needed. The built-in
+# GITHUB_TOKEN is enough.
+#
+# Every push publishes version <pkg>-dev.<commit count>, which the updater's
+# semver prerelease comparison treats as strictly newer than the previous dev
+# build. Pilot installs never see this feed (their RIOS_UPDATE_FEED_URL points
+# at Dropbox, and the updater refuses channel-mismatched manifests).
+#
+# NO pilot-feedback token is baked into dev zips: release assets on a public
+# repo are world-readable, and Richard's installed .env already carries the
+# values (the start wrapper's env reconcile only fills blanks).
+name: Publish Dev Release
+
+on:
+  push:
+    branches: ["v1/strip-back-pr1"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+# Serialise publishes so two runs never interleave asset uploads. A newer run
+# waits rather than cancelling: a cancelled half-upload could leave the zip and
+# manifest mismatched for longer than the normal upload window. (Even then the
+# updater's sha256 check fails safe.)
+concurrency:
+  group: publish-dev-release
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: dev
+  ZIP_NAME: relationship-inbox-os-dev-latest.zip
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Publish the exact pushed commit; full history so the builder can
+          # stamp -dev.<commit count> and the commit subject into the notes.
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate --schema packages/core/prisma/schema.prisma
+
+      # v1-targeted PRs skip lint+test in ci.yml, so this gate is the only CI
+      # safety net before a build lands on the dev feed (and on Richard's
+      # daily-driver install).
+      - name: Release-safety checks (typecheck + full suite)
+        run: |
+          npm run lint
+          npm run test:all
+
+      - name: Build the dev release
+        run: |
+          node scripts/build-student-release.mjs --channel dev \
+            --zip-url "https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ZIP_NAME}"
+
+      - name: Publish to the rolling `dev` prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("release-dist/latest.json","utf8")).version')
+          NOTES="Rolling dev-channel build from v1/strip-back-pr1. Current: ${VERSION} (${GITHUB_SHA})."
+          if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --target "$GITHUB_SHA" \
+              --title "Dev channel (rolling)" --notes "$NOTES"
+          else
+            gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --prerelease --notes "$NOTES"
+          fi
+          # Zip first, manifest last: if the run dies between the two, the live
+          # feed still advertises the OLD version and nobody installs a
+          # mismatched build (the updater also verifies sha256 before acting).
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            "release-dist/${ZIP_NAME}"
+          gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --clobber \
+            release-dist/latest.json
+
+      - name: Verify the live feed end to end
+        run: |
+          FEED="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/latest.json"
+          EXPECTED_SHA=$(node -p 'JSON.parse(require("fs").readFileSync("release-dist/latest.json","utf8")).sha256')
+          EXPECTED_VERSION=$(node -p 'JSON.parse(require("fs").readFileSync("release-dist/latest.json","utf8")).version')
+          for attempt in 1 2 3 4 5; do
+            LIVE_VERSION=$(curl -fsSL "$FEED" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).version' || echo "")
+            if [ "$LIVE_VERSION" = "$EXPECTED_VERSION" ]; then
+              ZIP_URL=$(curl -fsSL "$FEED" | node -p 'JSON.parse(require("fs").readFileSync(0,"utf8")).zipUrl')
+              curl -fsSL "$ZIP_URL" -o live.zip
+              LIVE_SHA=$(shasum -a 256 live.zip | cut -d' ' -f1)
+              if [ "$LIVE_SHA" = "$EXPECTED_SHA" ]; then
+                echo "Live feed verified: ${EXPECTED_VERSION} (${LIVE_SHA})"
+                exit 0
+              fi
+              echo "zip sha mismatch (expected ${EXPECTED_SHA}, got ${LIVE_SHA}); retrying"
+            else
+              echo "feed not live yet (got '${LIVE_VERSION}', want '${EXPECTED_VERSION}'); retrying"
+            fi
+            sleep 5
+          done
+          echo "::error::published dev feed did not verify live"
+          exit 1
+
+      - name: Upload release artefacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dev-release
+          path: |
+            release-dist/relationship-inbox-os-dev-*.zip
+            release-dist/latest.json
+            release-dist/*.sha256
+          if-no-files-found: warn
+          retention-days: 14
