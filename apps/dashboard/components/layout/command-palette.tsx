@@ -162,7 +162,7 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
           value={query}
           onChange={(event) => setQuery(event.target.value)}
           onKeyDown={onKeyDown}
-          placeholder="Search people, pages, or threads…"
+          placeholder="Search conversations, pages, or actions…"
           className="w-full border-0 border-b border-hairline bg-transparent px-5 py-[18px] text-[16px] text-ink outline-none placeholder:text-ink-4"
         />
         <ul className="m-0 list-none p-[6px]">
@@ -188,7 +188,9 @@ function CommandPalettePanel({ onClose }: { onClose: () => void }) {
             </li>
           ))}
           {!items.length ? (
-            <li className="px-[14px] py-[10px] text-[14px] text-ink-3">No matches.</li>
+            <li className="px-[14px] py-[10px] text-[14px] text-ink-3">
+              No matching conversations. A contact appears after a conversation is synced.
+            </li>
           ) : null}
         </ul>
       </div>
