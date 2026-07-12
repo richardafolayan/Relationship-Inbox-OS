@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { extractProfileSections } from "../apps/runner/dist/platforms/linkedin-profile-adapter.js";
 
 const FIXTURE_DIR = join(process.cwd(), "tests", "fixtures", "linkedin");

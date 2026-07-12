@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { LinkedInAdapter } from "../apps/runner/dist/platforms/linkedin-adapter.js";
 
 function selectorsForInbox(inboxUrl) {

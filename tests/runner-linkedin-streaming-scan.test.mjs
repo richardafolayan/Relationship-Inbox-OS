@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { LinkedInAdapter } from "../apps/runner/dist/platforms/linkedin-adapter.js";
 
 function selectorsForInbox(inboxUrl) {
@@ -36,6 +36,22 @@ function ensureMessagingTitle(html) {
   if (/<head[^>]*>/i.test(html)) return html.replace(/<head[^>]*>/i, (m) => `${m}${title}`);
   if (/<html[^>]*>/i.test(html)) return html.replace(/<html[^>]*>/i, (m) => `${m}<head>${title}</head>`);
   return `${title}${html}`;
+}
+
+// patchright runs page.evaluate in an isolated world, so main-world globals
+// authored by fixture scripts are invisible to it; raw CDP Runtime.evaluate
+// still targets the main world, which is where the fixtures keep their metrics.
+async function readMainWorldGlobal(page, expression) {
+  const session = await page.context().newCDPSession(page);
+  try {
+    const { result } = await session.send("Runtime.evaluate", {
+      expression,
+      returnByValue: true
+    });
+    return result.value;
+  } finally {
+    await session.detach();
+  }
 }
 
 async function createFixture(options = {}) {
@@ -267,7 +283,7 @@ test("LinkedIn streaming resolver accepts UL+LI+div list layout and opens rows v
   assert.equal(metrics.stopReason === "list_root_not_found", false);
   assert.equal(metrics.openedRows >= 1, true);
 
-  const clickMetrics = await fixture.page.evaluate(() => window.__streamingFixtureMetrics);
+  const clickMetrics = await readMainWorldGlobal(fixture.page, "window.__streamingFixtureMetrics");
   assert.equal(clickMetrics.divClickCount >= 1, true);
   assert.equal(clickMetrics.liDirectClickCount, 0);
 });
@@ -508,7 +524,7 @@ test("LinkedIn streaming scan does not trust stale active class when token misma
   });
 
   const staleEntry = collected.find((entry) => entry.thread.displayName === "Stale Active");
-  const fixtureMetrics = await fixture.page.evaluate(() => window.__staleActiveFixtureMetrics ?? null);
+  const fixtureMetrics = await readMainWorldGlobal(fixture.page, "window.__staleActiveFixtureMetrics ?? null");
   if ((fixtureMetrics?.staleRowClickCount ?? 0) < 1) {
     console.error("stale test debug:", {
       collected: collected.map((c) => c.thread.displayName),
@@ -576,7 +592,7 @@ test("LinkedIn streaming scan reveals list from narrow layout back control only 
 
   const names = collected.map((entry) => entry.thread.displayName);
   assert.equal(names.includes("Narrow One"), true);
-  const fixtureMetrics = await fixture.page.evaluate(() => window.__narrowFixtureMetrics ?? null);
+  const fixtureMetrics = await readMainWorldGlobal(fixture.page, "window.__narrowFixtureMetrics ?? null");
   assert.equal((fixtureMetrics?.backClicks ?? 0) >= 1, true);
   assert.equal(metrics.stopReason === "list_root_not_found", false);
 });
@@ -609,7 +625,7 @@ test("LinkedIn streaming scan runs a second pass and captures threads surfaced a
   assert.equal(new Set(collected.map((entry) => entry.rowKey)).size, collected.length);
   assert.equal(["deep_scroll_exhausted", "max_threads", "no_scroll_container"].includes(metrics.stopReason), true);
 
-  const fixtureMetrics = await fixture.page.evaluate(() => window.__secondPassFixtureMetrics ?? null);
+  const fixtureMetrics = await readMainWorldGlobal(fixture.page, "window.__secondPassFixtureMetrics ?? null");
   assert.equal(Boolean(fixtureMetrics?.omegaInserted), true);
   assert.equal((fixtureMetrics?.openCounts?.omega ?? 0), 1);
 });

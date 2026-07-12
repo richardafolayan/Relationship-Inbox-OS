@@ -4,7 +4,7 @@ import { mkdtemp } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { createSelectorTestService } from "../apps/runner/dist/services/selector-tests.js";
 
 test("selector test service returns counts and screenshots on deterministic local HTML", async (t) => {

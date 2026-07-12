@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { createServer } from "node:http";
 import { once } from "node:events";
-import { chromium } from "playwright";
+import { chromium } from "patchright";
 import { LinkedInAdapter } from "../apps/runner/dist/platforms/linkedin-adapter.js";
 import {
   hasLinkedInVoice,

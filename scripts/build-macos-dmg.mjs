@@ -64,6 +64,10 @@ export function macArchToNodeArch(arch = process.arch) {
   return "x64";
 }
 
+export function macArchToOpenSslArch(arch = process.arch) {
+  return arch === "arm64" ? "darwin64-arm64-cc" : "darwin64-x86_64-cc";
+}
+
 export function appVersion(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8")).version || "0.0.0";
 }
@@ -220,6 +224,79 @@ function buildRuntimeArtifacts(appResourceDir, nodeDir) {
   run(npm, ["run", "build", "--workspace", "@inbox-os/dashboard"], { cwd: appResourceDir, env });
 }
 
+function logicalBytes(path) {
+  if (!existsSync(path)) return 0;
+  const stats = lstatSync(path);
+  if (!stats.isDirectory()) return stats.size;
+  return readdirSync(path).reduce(
+    (total, entry) => total + logicalBytes(join(path, entry)),
+    0
+  );
+}
+
+function removeMeasured(path, removed) {
+  if (!existsSync(path)) return;
+  const bytes = logicalBytes(path);
+  rmSync(path, { recursive: true, force: true });
+  removed.push({ path, bytes });
+}
+
+function removeDirectoryEntriesExcept(root, keep, removed) {
+  if (!existsSync(root)) return;
+  for (const entry of readdirSync(root)) {
+    if (!keep.has(entry)) removeMeasured(join(root, entry), removed);
+  }
+}
+
+export function prunePackagedFootprint({ appPath, appResourceDir, packagedNodeDir, arch = process.arch }) {
+  const removed = [];
+  const modulesDir = join(appResourceDir, "node_modules");
+
+  for (const path of [
+    join(appResourceDir, "apps", "dashboard", ".next", "cache"),
+    join(modulesDir, "electron"),
+    join(modulesDir, ".bin", "electron"),
+    join(modulesDir, "@electron", "get"),
+    join(modulesDir, "onnxruntime-web"),
+    join(appResourceDir, "tests"),
+    join(appResourceDir, "design-review-screenshots"),
+    join(appPath, "Contents", "Resources", "default_app.asar"),
+    join(appPath, "Contents", "Resources", "electron.icns")
+  ]) {
+    removeMeasured(path, removed);
+  }
+
+  const onnxRoot = join(modulesDir, "onnxruntime-node", "bin", "napi-v3");
+  removeDirectoryEntriesExcept(onnxRoot, new Set(["darwin"]), removed);
+  removeDirectoryEntriesExcept(
+    join(onnxRoot, "darwin"),
+    new Set([macArchToNodeArch(arch)]),
+    removed
+  );
+
+  const opensslArchRoot = join(packagedNodeDir, "include", "node", "openssl", "archs");
+  removeDirectoryEntriesExcept(
+    opensslArchRoot,
+    new Set([macArchToOpenSslArch(arch)]),
+    removed
+  );
+
+  for (const path of [
+    join(packagedNodeDir, "CHANGELOG.md"),
+    join(packagedNodeDir, "README.md"),
+    join(packagedNodeDir, "share"),
+    join(packagedNodeDir, "bin", "corepack"),
+    join(packagedNodeDir, "lib", "node_modules", "corepack")
+  ]) {
+    removeMeasured(path, removed);
+  }
+
+  return {
+    removed,
+    removedBytes: removed.reduce((total, entry) => total + entry.bytes, 0)
+  };
+}
+
 function generateIcon(iconSvg, resourcesDir, tempDir) {
   ensureTool("sips");
   ensureTool("iconutil");
@@ -352,6 +429,11 @@ export async function buildMacosDmg(options = {}) {
     // them to absolute build-machine paths, which breaks npm on any other
     // Mac and fails strict codesign verification.
     copyBundle(nodeDir, packagedNodeDir);
+    const footprint = prunePackagedFootprint({
+      appPath: paths.appPath,
+      appResourceDir,
+      packagedNodeDir
+    });
 
     if (!options.noSign) signApp(paths.appPath, process.env.RIOS_CODESIGN_IDENTITY);
     const dmgPath = options.skipDmg ? "" : createDmg(paths.appPath, paths.outDir, version);
@@ -361,7 +443,8 @@ export async function buildMacosDmg(options = {}) {
       nodeDir,
       ref,
       version,
-      appSizeBytes: directorySizeBytes(paths.appPath),
+      footprint,
+      appSizeBytes: logicalBytes(paths.appPath),
       signingIdentity: options.noSign ? "unsigned" : process.env.RIOS_CODESIGN_IDENTITY || "ad-hoc"
     };
   } finally {
@@ -402,6 +485,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     process.stdout.write(`Built ${result.appPath}\n`);
     if (result.dmgPath) process.stdout.write(`Created ${result.dmgPath}\n`);
+    process.stdout.write(`Removed ${result.footprint.removedBytes} bytes of build-only or incompatible packaged files\n`);
   }).catch((error) => {
     process.stderr.write(`\n  build failed: ${error?.message || String(error)}\n`);
     process.exit(1);
