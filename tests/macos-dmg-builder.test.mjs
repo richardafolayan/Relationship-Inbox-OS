@@ -2,10 +2,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -90,7 +92,6 @@ test("packaging prune keeps runtime files for the target macOS architecture", ()
     for (const relative of [
       "Relationship Inbox OS.app/Contents/Resources/app/apps/dashboard/.next/cache/webpack.pack",
       "Relationship Inbox OS.app/Contents/Resources/app/node_modules/electron/dist/Electron.app/runtime",
-      "Relationship Inbox OS.app/Contents/Resources/app/node_modules/.bin/electron",
       "Relationship Inbox OS.app/Contents/Resources/app/node_modules/@electron/get/package.json",
       "Relationship Inbox OS.app/Contents/Resources/app/node_modules/onnxruntime-web/dist/ort.js",
       "Relationship Inbox OS.app/Contents/Resources/app/tests/example.test.mjs",
@@ -123,6 +124,14 @@ test("packaging prune keeps runtime files for the target macOS architecture", ()
       "{}"
     );
 
+    // npm links .bin/electron INTO the electron package (a real symlink, not a
+    // file). The prune removes the package dir first, leaving this link
+    // dangling; existsSync follows links so it cannot see it, and a dangling
+    // link in the bundle fails `codesign --verify --deep --strict`.
+    const electronShim = join(appResourceDir, "node_modules/.bin/electron");
+    mkdirSync(join(appResourceDir, "node_modules/.bin"), { recursive: true });
+    symlinkSync("../electron/cli.js", electronShim);
+
     const result = prunePackagedFootprint({
       appPath,
       appResourceDir,
@@ -137,6 +146,11 @@ test("packaging prune keeps runtime files for the target macOS architecture", ()
     assert.equal(existsSync(license), true);
     assert.equal(existsSync(patchright), true);
     assert.equal(existsSync(join(appResourceDir, "node_modules/electron")), false);
+    assert.throws(
+      () => lstatSync(electronShim),
+      /ENOENT/,
+      "dangling .bin/electron symlink must be pruned, not left to break codesign"
+    );
     assert.equal(existsSync(join(appResourceDir, "apps/dashboard/.next/cache")), false);
     assert.equal(existsSync(join(appResourceDir, "node_modules/onnxruntime-node/bin/napi-v3/linux")), false);
     assert.equal(
