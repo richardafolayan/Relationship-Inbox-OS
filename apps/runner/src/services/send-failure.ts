@@ -26,8 +26,26 @@ export function classifySendFailureKind(input: {
   }
   if (input.adapterKind === "AUTH_REQUIRED") return "AUTH_REQUIRED";
   if (input.adapterKind === "SELECTOR_MISMATCH") return "SELECTOR_FAIL";
+  // A dropped or expired platform session surfaces as a raw "not connected" /
+  // "call ensureConnected() first" / "disconnected before ready" / auth_failure
+  // error. Retrying a dead session just fails again — the operator needs to
+  // reconnect the account, so route these to AUTH_REQUIRED (needs reconnect).
+  // This MUST sit above the TRANSIENT check: "ensureConnected" contains the
+  // substring "eConn", which used to match the bare ECONN network-errno token
+  // below and mislabel a fully disconnected adapter as a transient blip
+  // (surfacing "connection stopped, retry" with no reconnect action).
+  if (
+    /not connected|ensureConnected|needs reconnect|disconnected before ready|session (closed|expired|ended)|logged out|auth[_ ]?fail/i.test(
+      input.message
+    )
+  ) {
+    return "AUTH_REQUIRED";
+  }
   if (/profile.*lock|already in use|singleton/i.test(input.message)) return "PROFILE_LOCKED";
-  if (/timeout|temporarily|ECONN|navigation/i.test(input.message)) return "TRANSIENT";
+  // \bECONN (not a bare ECONN alternation) so real errno tokens like
+  // ECONNRESET / ECONNREFUSED still match without catching the "eConn" inside
+  // "ensureConnected".
+  if (/timeout|temporarily|\bECONN|navigation/i.test(input.message)) return "TRANSIENT";
   return "UNKNOWN";
 }
 

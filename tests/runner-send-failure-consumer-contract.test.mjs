@@ -34,6 +34,27 @@ test("interrupted claimed sends stay uncertain after restart", () => {
   assert.doesNotMatch(failure.message, /stack|runner restarted/i);
 });
 
+test("a disconnected adapter asks the operator to reconnect, not retry a blip", () => {
+  // Regression: "ensureConnected" contains "eConn", which matched the ECONN
+  // network-errno token and mislabelled a dropped WhatsApp session as
+  // TRANSIENT ("connection stopped, retry") with no reconnect action.
+  const kind = classifySendFailureKind({
+    message: "WhatsApp adapter not connected — call ensureConnected() first"
+  });
+  const failure = consumerSendFailure(kind);
+
+  assert.equal(kind, "AUTH_REQUIRED");
+  assert.match(failure.message, /reconnect/i);
+  assert.doesNotMatch(failure.message, /connection stopped/i);
+});
+
+test("real ECONN network errno still classifies as transient", () => {
+  const kind = classifySendFailureKind({
+    message: "Error: connect ECONNREFUSED 127.0.0.1:443"
+  });
+  assert.equal(kind, "TRANSIENT");
+});
+
 test("definite send failures return safe recovery copy", () => {
   const failure = parsePersistedSendFailure(
     JSON.stringify({
