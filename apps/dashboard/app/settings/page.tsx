@@ -50,6 +50,8 @@ import {
 } from "@/lib/scan-interval";
 import { cn } from "@/lib/utils";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
+import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
+import { startSetupWizard } from "@/lib/setup-wizard";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
@@ -145,14 +147,6 @@ type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-a
 interface FullDiskAccessResponse {
   message?: string;
   runnerProcess?: PlatformCard["runnerProcess"];
-}
-
-function isIMessageFullDiskAccessProblem(row?: PlatformCard): boolean {
-  if (row?.platform !== "IMESSAGE") return false;
-  if (row.status === "CONNECTED") return false;
-  const text = `${row.lastError ?? ""} ${row.lastScanFailure?.errorSummary ?? ""}`;
-  if (/NODE_MODULE_VERSION|better_sqlite3|different Node\.js version/i.test(text)) return false;
-  return /Full Disk Access|chat\.db|Cannot read iMessage|unable to open database file/i.test(text);
 }
 
 function isSettingsTabId(value: string): value is SettingsTabId {
@@ -793,6 +787,21 @@ function PlatformSetupCard({
 function SetupGuideSection() {
   return (
     <section className="mb-9">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-[8px] bg-paper-2/45 px-4 py-4">
+        <div className="min-w-0">
+          <p className="m-0 text-[15.5px] font-medium text-ink">Setup assistant</p>
+          <p className="m-0 mt-[3px] text-[13.5px] leading-[1.45] text-ink-3">
+            Walks you through the AI key and connecting your messages, step by step.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => startSetupWizard()}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)]"
+        >
+          Run setup assistant
+        </button>
+      </div>
       <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
         Setup guide
       </p>

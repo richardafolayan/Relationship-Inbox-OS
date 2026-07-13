@@ -20,6 +20,12 @@ import { ensurePathInside, safeUploadFilename, streamFileToResponse } from "./ut
 import { safeJsonParse } from "./utils/json";
 import { filterDismissedOpenLoops } from "./utils/open-loops";
 import { createSettingsStore } from "./services/settings";
+import {
+  applyGeminiKey,
+  resolveEnvWritePath,
+  upsertEnvFile,
+  validateGeminiKey
+} from "./services/setup-ai-key";
 import { createAuditService } from "./services/audit";
 import { createEventBus } from "./services/event-bus";
 import {
@@ -2382,6 +2388,27 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
     configuredProviders,
     activeProviderConfigured: configuredProviders.includes(activeProvider)
   });
+}));
+
+// First-run setup (#845): save a Gemini API key from the setup wizard.
+// Validates the key live against Google before persisting, writes it into
+// the .env the runner reads (atomic parse-and-update, other keys and
+// comments preserved), then applies it to the live process so AI calls use
+// it immediately — no restart. The key value is never logged.
+app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
+  const result = await applyGeminiKey(req.body?.key, {
+    validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
+    persist: (key) => upsertEnvFile(resolveEnvWritePath(), "GEMINI_API_KEY", key),
+    applyRuntime: (key) => {
+      process.env.GEMINI_API_KEY = key;
+      runnerConfig.geminiApiKey = key;
+    }
+  });
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.message });
+    return;
+  }
+  res.json({ ok: true, provider: "gemini" });
 }));
 
 // ---- System / self-update -------------------------------------------------

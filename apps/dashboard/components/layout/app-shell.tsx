@@ -12,6 +12,7 @@ import { ConsumerRecovery } from "@/components/common/consumer-recovery";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
+import { SetupWizard } from "@/components/common/SetupWizard";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
@@ -789,6 +790,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <ToastHost />
       <PilotFeedbackModal />
       <PilotTour />
+      <SetupWizard />
       <FocusOverlays />
     </div>
   );
