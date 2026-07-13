@@ -448,7 +448,11 @@ async function main() {
   const current = currentVersion(APP_DIR);
   const manifest = await loadManifest(FEED_URL);
   enforceChannelMatch(currentChannel(APP_DIR), manifest);
-  enforceMinimumInstallerVersion(current, manifest);
+  // The minimum-installer gate only applies when we're about to CHANGE the
+  // install. --check-only (used by the in-app "App updates" card) must always
+  // report, never die — otherwise every install older than the release's floor
+  // would see a hard error instead of "update available" and in-app updates
+  // would self-block.
   const available = report(current, manifest);
 
   if (args.apply) {
@@ -456,8 +460,10 @@ async function main() {
       say(`  Nothing to do — already on the latest version.\n`);
       return;
     }
+    enforceMinimumInstallerVersion(current, manifest);
     await applyUpdate(current, manifest);
   } else if (args.dryRun) {
+    enforceMinimumInstallerVersion(current, manifest);
     await applyUpdate(current, manifest);
   }
 }
