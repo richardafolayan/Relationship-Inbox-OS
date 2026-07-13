@@ -53,6 +53,28 @@ export function processIsAlive(pid, kill = process.kill) {
 export function processSnapshot(pid, exec = execFileSync) {
   const normalized = positivePid(pid);
   if (!normalized) return { pid: null, cwd: "", command: "" };
+  if (process.platform === "win32") {
+    try {
+      const output = exec(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Get-CimInstance Win32_Process -Filter \"ProcessId = ${normalized}\" | Select-Object ExecutablePath,CommandLine | ConvertTo-Json -Compress`
+        ],
+        { encoding: "utf8" }
+      ).trim();
+      const row = output ? JSON.parse(output) : {};
+      return {
+        pid: normalized,
+        cwd: "",
+        command: [row.ExecutablePath, row.CommandLine].filter(Boolean).join(" ")
+      };
+    } catch {
+      return { pid: normalized, cwd: "", command: "" };
+    }
+  }
   let cwd = "";
   let command = "";
   try {
@@ -82,6 +104,25 @@ export function processBelongsToApp(snapshot, appDir) {
 }
 
 export function listeningPids(port, exec = execFileSync) {
+  if (process.platform === "win32") {
+    try {
+      return exec(
+        "powershell.exe",
+        [
+          "-NoProfile",
+          "-NonInteractive",
+          "-Command",
+          `Get-NetTCPConnection -State Listen -LocalPort ${Number(port)} -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique`
+        ],
+        { encoding: "utf8" }
+      )
+        .split(/\s+/)
+        .map(positivePid)
+        .filter(Boolean);
+    } catch {
+      return [];
+    }
+  }
   try {
     return exec("lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-t"], { encoding: "utf8" })
       .split(/\s+/)

@@ -64,9 +64,12 @@ export default function PlatformsPage() {
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refresh]);
 
-  const visibleRows = rows.filter((row) => VISIBLE_PLATFORMS.includes(row.platform));
-  const connected = visibleRows.filter((row) => row.status === "CONNECTED").length;
-  const total = visibleRows.length || VISIBLE_PLATFORMS.length;
+  const visibleRows = rows.filter(
+    (row) => VISIBLE_PLATFORMS.includes(row.platform) || (row.platform === "WHATSAPP" && row.enabled)
+  );
+  const supportedRows = visibleRows.filter((row) => row.supported !== false);
+  const connected = supportedRows.filter((row) => row.status === "CONNECTED").length;
+  const total = rows.length > 0 ? supportedRows.length : VISIBLE_PLATFORMS.length;
 
   return (
     <Canvas>
@@ -170,7 +173,9 @@ function PlatformCardView({
   const display = PLATFORM_DISPLAY[row.platform];
   const glyph = PLATFORM_GLYPH[row.platform];
   const statusToken =
-    row.status === "CONNECTED"
+    row.supported === false
+      ? { className: "text-ink-3", label: "not available" }
+      : row.status === "CONNECTED"
       ? { className: "text-risk-fresh", label: "connected" }
       : row.status === "DEGRADED"
         ? { className: "text-risk-waiting", label: "needs a look" }
@@ -178,7 +183,9 @@ function PlatformCardView({
           ? { className: "text-ink-2", label: "needs attention" }
           : { className: "text-ink-3", label: "not connected" };
 
-  const scanLine = row.lastScanAt
+  const scanLine = row.supported === false
+    ? "macOS only"
+    : row.lastScanAt
     ? `last scan ${formatRelative(row.lastScanAt)}`
     : row.lastError
       ? classifyConsumerFailure(new Error(row.lastError), {
@@ -227,24 +234,30 @@ function PlatformCardView({
           >
             <Info className="h-[14px] w-[14px]" strokeWidth={1.6} />
           </button>
-          <Button
-            variant="quiet"
-            className="px-[12px] py-[7px] text-[12px]"
-            onClick={() =>
-              runActionWithFeedback(
-                apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                {
-                  pending: `Opening ${display}…`,
-                  success: `${display} opened`,
-                  failure: `Couldn't open ${display}`,
-                  setError: setActionError
-                }
-              )
-            }
-          >
-            {row.status === "CONNECTED" ? "Open browser" : "Connect"}
-          </Button>
-          <Menu
+          {row.supported === false ? (
+            <Button variant="quiet" className="px-[12px] py-[7px] text-[12px]" disabled>
+              Not available
+            </Button>
+          ) : (
+            <Button
+              variant="quiet"
+              className="px-[12px] py-[7px] text-[12px]"
+              onClick={() =>
+                runActionWithFeedback(
+                  apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+                  {
+                    pending: `Opening ${display}…`,
+                    success: `${display} opened`,
+                    failure: `Couldn't open ${display}`,
+                    setError: setActionError
+                  }
+                )
+              }
+            >
+              {row.status === "CONNECTED" ? "Open browser" : "Connect"}
+            </Button>
+          )}
+          {row.supported !== false ? <Menu
             trigger={
               <button
                 type="button"
@@ -311,7 +324,7 @@ function PlatformCardView({
                 }
               }
             ]}
-          />
+          /> : null}
         </div>
       </div>
 

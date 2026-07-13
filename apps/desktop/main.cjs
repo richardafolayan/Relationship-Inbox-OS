@@ -16,11 +16,13 @@ const { get } = require("node:http");
 const { homedir } = require("node:os");
 const { join } = require("node:path");
 const {
+  APP_ID,
   APP_NAME,
   LOGS_DIR_NAME,
   STORAGE_DIR_NAME,
   REQUIRED_NODE_MAJOR,
   dashboardUrl,
+  desktopCapabilities,
   desktopPaths,
   isInternalAppUrl,
   isSafeExternalUrl,
@@ -28,6 +30,7 @@ const {
   loadingHtml,
   mergeEnvValues,
   nodeCandidates,
+  packagedFeatureDefaults,
   resolveAppDir,
   runnerPort,
   startAppArgs,
@@ -55,11 +58,16 @@ let restartHistory = [];
 let shuttingDown = false;
 
 app.setName(APP_NAME);
+if (process.platform === "win32") app.setAppUserModelId(APP_ID);
 // Pin storage to the pre-rebrand folder BEFORE anything resolves userData:
 // setName("Tovi") would otherwise move it to .../Application Support/Tovi and
 // every existing install would boot with an empty database.
 app.setPath("userData", join(app.getPath("appData"), STORAGE_DIR_NAME));
-app.setAppLogsPath(join(homedir(), "Library", "Logs", LOGS_DIR_NAME));
+app.setAppLogsPath(
+  process.platform === "darwin"
+    ? join(homedir(), "Library", "Logs", LOGS_DIR_NAME)
+    : join(app.getPath("userData"), "logs")
+);
 
 function storagePaths() {
   if (desktopStorage) return desktopStorage;
@@ -153,7 +161,7 @@ async function preparePackagedStorage() {
       title: APP_NAME,
       message: "Existing Tovi (Relationship Inbox OS) data was found.",
       detail:
-        "Import your existing settings, message database and browser sessions into the Mac app? The original folder will remain unchanged, so you can return to it if needed.",
+        "Import your existing settings, message database and browser sessions into Tovi? The original folder will remain unchanged, so you can return to it if needed.",
       buttons: ["Import existing data", "Start fresh", "Quit"],
       defaultId: 0,
       cancelId: 2,
@@ -185,9 +193,20 @@ async function preparePackagedStorage() {
     DATABASE_URL: `file:${join(paths.dataDir, "inbox-os.sqlite")}`,
     TRANSCRIPTION_MODEL_DIR: join(paths.dataDir, "models")
   });
+  const featureDefaults = packagedFeatureDefaults(process.platform);
   envText = mergeEnvValues(envText, {
-    BROWSER_PROFILE_MODE: "personal",
-    IMESSAGE_ENABLED: "true"
+    IMESSAGE_ENABLED: featureDefaults.IMESSAGE_ENABLED,
+    ...(process.platform === "win32"
+      ? { BROWSER_PROFILE_MODE: featureDefaults.BROWSER_PROFILE_MODE }
+      : {})
+  });
+  envText = mergeEnvValues(envText, {
+    ...(process.platform === "win32"
+      ? {}
+      : { BROWSER_PROFILE_MODE: featureDefaults.BROWSER_PROFILE_MODE }),
+    ...(featureDefaults.WHATSAPP_ENABLED
+      ? { WHATSAPP_ENABLED: featureDefaults.WHATSAPP_ENABLED }
+      : {})
   }, { keepExisting: true });
   writeFileSync(envPath, envText, { mode: 0o600 });
   chmodSync(envPath, 0o600);
@@ -279,7 +298,7 @@ function startLocalApp() {
   if (!node) {
     dialog.showErrorBox(
       APP_NAME,
-      `Node.js ${REQUIRED_NODE_MAJOR} is missing from this Mac app. Reinstall Tovi from the DMG, then try again.`
+      `Node.js ${REQUIRED_NODE_MAJOR} is missing from this Tovi installation. Reinstall Tovi, then try again.`
     );
     quitReady = true;
     app.quit();
@@ -398,6 +417,9 @@ async function showStartupRecovery(reason) {
 }
 
 function messagesAccessStatus() {
+  if (!desktopCapabilities(process.platform).imessageSupported) {
+    return { status: "unsupported", path: "" };
+  }
   const path = join(homedir(), "Library", "Messages", "chat.db");
   try {
     const fd = openSync(path, "r");
@@ -413,6 +435,19 @@ function messagesAccessStatus() {
 }
 
 async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
+  if (!desktopCapabilities(process.platform).macPermissionsSupported) {
+    if (onlyWhenMissing) return;
+    await showMessageBox({
+      type: "info",
+      title: "Windows permissions",
+      message: "No extra Windows permissions are needed.",
+      detail: "LinkedIn uses Chrome and WhatsApp connects through a QR code. iMessage is only available on macOS.",
+      buttons: ["Done"],
+      defaultId: 0,
+      noLink: true
+    });
+    return;
+  }
   const access = messagesAccessStatus();
   if (onlyWhenMissing && access.status === "granted") return;
   if (access.status === "messages_not_set_up") {
@@ -526,24 +561,27 @@ function goInHistory(direction) {
 // feedback entry points under Help so "how do I report this" is always one
 // menu away.
 function createMenu() {
+  const macPermissionsSupported = desktopCapabilities(process.platform).macPermissionsSupported;
+  const appMenu = [
+    { role: "about" },
+    { type: "separator" },
+    { label: "Settings...", accelerator: "CommandOrControl+,", click: () => openDashboardPath("/settings") },
+    { type: "separator" },
+    ...(macPermissionsSupported
+      ? [{ label: "Check Permissions...", click: () => void showPermissionHelp() }]
+      : []),
+    { label: "Retry Startup", click: () => void restartLocalApp() },
+    { label: "Show Logs", click: () => void shell.openPath(storagePaths().logsDir) },
+    { type: "separator" },
+    ...(process.platform === "darwin"
+      ? [{ role: "hide" }, { role: "hideOthers" }, { role: "unhide" }, { type: "separator" }]
+      : []),
+    { role: "quit" }
+  ];
   const template = [
     {
       label: APP_NAME,
-      submenu: [
-        { role: "about" },
-        { type: "separator" },
-        { label: "Settings...", accelerator: "CommandOrControl+,", click: () => openDashboardPath("/settings") },
-        { type: "separator" },
-        { label: "Check Permissions...", click: () => void showPermissionHelp() },
-        { label: "Retry Startup", click: () => void restartLocalApp() },
-        { label: "Show Logs", click: () => void shell.openPath(storagePaths().logsDir) },
-        { type: "separator" },
-        { role: "hide" },
-        { role: "hideOthers" },
-        { role: "unhide" },
-        { type: "separator" },
-        { role: "quit" }
-      ]
+      submenu: appMenu
     },
     { label: "Edit", submenu: [{ role: "undo" }, { role: "redo" }, { type: "separator" }, { role: "cut" }, { role: "copy" }, { role: "paste" }, { role: "selectAll" }] },
     {
@@ -578,7 +616,9 @@ function createMenu() {
         { label: "Send Feedback...", click: () => dispatchInApp("pilot-feedback-open", { type: "feedback" }) },
         { label: "Report a Bug...", click: () => dispatchInApp("pilot-feedback-open", { type: "bug" }) },
         { type: "separator" },
-        { label: "Check Permissions...", click: () => void showPermissionHelp() },
+        ...(macPermissionsSupported
+          ? [{ label: "Check Permissions...", click: () => void showPermissionHelp() }]
+          : []),
         { label: "Show Logs", click: () => void shell.openPath(storagePaths().logsDir) }
       ]
     }

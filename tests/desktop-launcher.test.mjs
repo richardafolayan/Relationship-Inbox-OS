@@ -59,6 +59,33 @@ test("startAppEnvironment carries packaged storage locations to the launcher", (
   assert.equal(env.RIOS_PACKAGED_APP, "1");
 });
 
+test("Windows desktop launch uses the bundled Node runtime and Windows capabilities", () => {
+  const appDir = "C:\\Program Files\\Tovi\\resources\\app";
+  assert.equal(
+    launcher.bundledNodePath(appDir, "win32"),
+    "C:\\Program Files\\Tovi\\resources\\runtime\\node\\node.exe"
+  );
+
+  const env = launcher.startAppEnvironment(
+    { PATH: "C:\\Windows\\System32" },
+    "C:\\Program Files\\Tovi\\resources\\runtime\\node\\node.exe",
+    { appDir, platform: "win32" }
+  );
+  assert.match(env.PATH, /runtime\\node/);
+  assert.doesNotMatch(env.PATH, /homebrew/);
+
+  assert.deepEqual(launcher.desktopCapabilities("win32"), {
+    imessageSupported: false,
+    imessageUnavailableReason: "iMessage is only available on macOS.",
+    macPermissionsSupported: false
+  });
+  assert.deepEqual(launcher.packagedFeatureDefaults("win32"), {
+    BROWSER_PROFILE_MODE: "isolated",
+    IMESSAGE_ENABLED: "false",
+    WHATSAPP_ENABLED: "true"
+  });
+});
+
 test("desktopPaths keeps config, data, state and logs outside the app bundle", () => {
   const paths = launcher.desktopPaths({
     userData: "/Users/s/Library/Application Support/Relationship Inbox OS",

@@ -5758,6 +5758,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const data = await Promise.all(
     (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"] as PlatformName[]).map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
+      const supported = platform !== "IMESSAGE" || process.platform === "darwin";
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
         prisma.auditLog.findFirst({
@@ -5789,7 +5790,10 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         lastScanAt: row?.lastScanAt?.toISOString() ?? null,
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
-        enabled: settings.enabledPlatforms.includes(platform),
+        enabled: supported && settings.enabledPlatforms.includes(platform),
+        supported,
+        unavailableReason:
+          supported ? null : "iMessage is only available on macOS.",
         runnerProcess: platform === "IMESSAGE" ? runnerProcessInfo : undefined,
         profileDir: sharedProfileDir,
         browserProfileMode: runnerConfig.browserProfile.mode,
