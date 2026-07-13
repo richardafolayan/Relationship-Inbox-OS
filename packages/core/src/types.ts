@@ -462,6 +462,7 @@ export type PresenterDemoMode = "off" | "sandbox" | "live";
 
 export interface AppSettings {
   scanIntervalSeconds: number;
+  automaticUpdates: boolean;
   amberHours: number;
   redHours: number;
   headless: boolean;

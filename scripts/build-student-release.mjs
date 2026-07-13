@@ -170,7 +170,7 @@ function git(...a) {
 // on a stale pilot version. Overridable for tests/forks; otherwise derived
 // from the git origin like the DMG builder does.
 function devUpdateFeedUrl() {
-  const override = (process.env.RIOS_DEV_UPDATE_FEED_URL || args.updateFeedUrl || "").trim();
+  const override = (args.updateFeedUrl || process.env.RIOS_DEV_UPDATE_FEED_URL || "").trim();
   if (override) return override;
   let remote = "";
   try { remote = git("remote", "get-url", "origin"); } catch { /* no remote */ }

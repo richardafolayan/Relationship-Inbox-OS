@@ -205,3 +205,65 @@ export function launchUpdateApplyAndRestart(opts: {
     closeSync(fd);
   }
 }
+
+export interface AutomaticUpdateScheduler {
+  start(): void;
+  stop(): void;
+  runNow(): Promise<"busy" | "disabled" | "checked">;
+}
+
+export function createAutomaticUpdateScheduler(opts: {
+  isEnabled(): Promise<boolean>;
+  installIfAvailable(): Promise<void>;
+  initialDelayMs?: number;
+  intervalMs?: number;
+  onError?(error: unknown): void;
+}): AutomaticUpdateScheduler {
+  const initialDelayMs = opts.initialDelayMs ?? 15_000;
+  const intervalMs = opts.intervalMs ?? 60 * 60_000;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = true;
+  let running = false;
+
+  const schedule = (delayMs: number): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void runAndReschedule();
+    }, delayMs);
+    timer.unref();
+  };
+
+  const runNow = async (): Promise<"busy" | "disabled" | "checked"> => {
+    if (running) return "busy";
+    running = true;
+    try {
+      if (!(await opts.isEnabled())) return "disabled";
+      await opts.installIfAvailable();
+      return "checked";
+    } catch (error) {
+      opts.onError?.(error);
+      return "checked";
+    } finally {
+      running = false;
+    }
+  };
+
+  const runAndReschedule = async (): Promise<void> => {
+    await runNow();
+    schedule(intervalMs);
+  };
+
+  return {
+    start() {
+      if (!stopped) return;
+      stopped = false;
+      schedule(initialDelayMs);
+    },
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+    runNow
+  };
+}

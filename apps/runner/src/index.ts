@@ -82,6 +82,7 @@ import { createImessageNameSync, type ImessageNameSync } from "./services/imessa
 import {
   canSelfUpdateInPlace,
   containingAppBundle,
+  createAutomaticUpdateScheduler,
   launchUpdateApplyAndRestart,
   readAppVersion,
   resolveUpdateFeedUrl,
@@ -2399,11 +2400,13 @@ app.get("/system/version", asyncRoute(async (_req, res) => {
 
 app.get("/system/update-check", asyncRoute(async (_req, res) => {
   const packaged = process.env.RIOS_PACKAGED_APP === "1";
+  const settings = await settingsStore.getSettings();
   const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
   if (!feedUrl) {
     const current = readAppVersion(projectRoot).version;
     res.json({
       configured: false,
+      automaticUpdates: settings.automaticUpdates,
       currentVersion: current,
       latestVersion: current,
       updateAvailable: false,
@@ -2414,6 +2417,7 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
   const result = await runUpdateCheck({ projectRoot, feedUrl });
   res.json({
     configured: true,
+    automaticUpdates: settings.automaticUpdates,
     // Dev-channel packaged installs self-update in place (quit, swap, relaunch);
     // student packaged installs still ask for a DMG reinstall.
     applyMode: packaged && !canSelfUpdateInPlace(projectRoot, packaged) ? "replace_app" : "automatic",
@@ -2421,54 +2425,45 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
   });
 }));
 
-app.post("/system/update", asyncRoute(async (_req, res) => {
-  // /system/update is NOT a /control/ path, so the dashboard's default-deny
-  // fetch interceptor never sees it — the Settings app update button
-  // would otherwise start a real self-update mid-presentation. Gate
-  // it server-side as an external action (blocked live + sandbox).
-  if (await checkPresenterGuard(res, settingsStore, { action: "update and restart the app", kind: "external-action" })) return;
+type UpdateStartResult =
+  | { status: "started"; fromVersion: string; toVersion: string; logPath: string }
+  | { status: "already_starting" }
+  | { status: "no_feed_configured" }
+  | { status: "dev_checkout" }
+  | { status: "check_failed"; error: string }
+  | { status: "no_update_available"; currentVersion: string }
+  | { status: "replace_app_required"; message: string };
+
+let updateLaunchInProgress = false;
+let updateStartInProgress = false;
+
+async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
   const packaged = process.env.RIOS_PACKAGED_APP === "1";
   const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
-  if (!feedUrl) {
-    res.status(409).json({ ok: false, reason: "no_feed_configured" });
-    return;
-  }
+  if (!feedUrl) return { status: "no_feed_configured" };
   if (existsSync(join(projectRoot, ".git"))) {
-    res.status(409).json({
-      ok: false,
-      reason: "dev_checkout",
-      message: "This checkout is updated with git, not the student updater."
-    });
-    return;
+    return { status: "dev_checkout" };
   }
   const check = await runUpdateCheck({ projectRoot, feedUrl });
   if (check.error) {
-    res.status(502).json({ ok: false, reason: "check_failed", error: check.error });
-    return;
+    return { status: "check_failed", error: check.error };
   }
   if (!check.updateAvailable) {
-    res.status(409).json({ ok: false, reason: "no_update_available", currentVersion: check.currentVersion });
-    return;
+    return { status: "no_update_available", currentVersion: check.currentVersion };
   }
   if (packaged && !canSelfUpdateInPlace(projectRoot, packaged)) {
-    res.status(409).json({
-      ok: false,
-      reason: "replace_app_required",
+    return {
+      status: "replace_app_required",
       message:
         "Quit Tovi, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old Relationship Inbox OS app if it is still in Applications. Your data and settings in Application Support are preserved."
-    });
-    return;
+    };
   }
   const appBundle = packaged ? containingAppBundle(projectRoot) : "";
   if (packaged && !appBundle) {
-    // Dev channel but not the expected …/Tovi.app/Contents/Resources/app
-    // layout; refuse rather than swap code out from under a live Electron.
-    res.status(409).json({
-      ok: false,
-      reason: "replace_app_required",
+    return {
+      status: "replace_app_required",
       message: "This packaged install has an unexpected layout, so the in-place updater refuses to run. Reinstall from the latest DMG instead."
-    });
-    return;
+    };
   }
   const intent = {
     requestedAt: new Date().toISOString(),
@@ -2482,20 +2477,99 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     feedUrl,
     ...(appBundle ? { appBundle } : {})
   });
-  res.status(202).json({
-    ok: true,
-    updating: true,
+  updateLaunchInProgress = true;
+  return {
+    status: "started",
     fromVersion: intent.fromVersion,
     toVersion: intent.toVersion,
-    logPath: restart.logPath,
-    message: "Update started. Tovi will reopen when it finishes."
-  });
+    logPath: restart.logPath
+  };
+}
+
+async function startAvailableUpdate(): Promise<UpdateStartResult> {
+  if (updateLaunchInProgress || updateStartInProgress) return { status: "already_starting" };
+  updateStartInProgress = true;
+  try {
+    return await checkAndStartAvailableUpdate();
+  } finally {
+    updateStartInProgress = false;
+  }
+}
+
+app.post("/system/update", asyncRoute(async (_req, res) => {
+  // /system/update is NOT a /control/ path, so the dashboard's default-deny
+  // fetch interceptor never sees it — the Settings app update button
+  // would otherwise start a real self-update mid-presentation. Gate
+  // it server-side as an external action (blocked live + sandbox).
+  if (await checkPresenterGuard(res, settingsStore, { action: "update and restart the app", kind: "external-action" })) return;
+  const result = await startAvailableUpdate();
+  if (result.status === "started") {
+    res.status(202).json({
+      ok: true,
+      updating: true,
+      fromVersion: result.fromVersion,
+      toVersion: result.toVersion,
+      logPath: result.logPath,
+      message: "Update started. Tovi will reopen when it finishes."
+    });
+    return;
+  }
+  if (result.status === "check_failed") {
+    res.status(502).json({ ok: false, reason: result.status, error: result.error });
+    return;
+  }
+  if (result.status === "replace_app_required") {
+    res.status(409).json({ ok: false, reason: result.status, message: result.message });
+    return;
+  }
+  if (result.status === "dev_checkout") {
+    res.status(409).json({
+      ok: false,
+      reason: result.status,
+      message: "This checkout is updated with git, not the student updater."
+    });
+    return;
+  }
+  if (result.status === "no_update_available") {
+    res.status(409).json({ ok: false, reason: result.status, currentVersion: result.currentVersion });
+    return;
+  }
+  if (result.status === "already_starting") {
+    res.status(202).json({ ok: true, updating: true, message: "The update is already starting." });
+    return;
+  }
+  res.status(409).json({ ok: false, reason: result.status });
 }));
+
+const automaticUpdateScheduler = createAutomaticUpdateScheduler({
+  async isEnabled() {
+    const settings = await settingsStore.getSettings();
+    return settings.automaticUpdates &&
+      !settings.demoMode &&
+      settings.presenterDemoMode !== "sandbox" &&
+      settings.presenterDemoMode !== "live" &&
+      !settings.presenterReadOnly;
+  },
+  async installIfAvailable() {
+    const result = await startAvailableUpdate();
+    if (result.status === "started") {
+      console.log(`[system-update] automatic update ${result.fromVersion} -> ${result.toVersion} started`);
+    } else if (result.status === "check_failed") {
+      console.warn(`[system-update] automatic check failed: ${result.error}`);
+    }
+  },
+  onError(error) {
+    console.warn(
+      `[system-update] automatic update failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+});
 
 app.post("/control/settings", asyncRoute(async (req, res) => {
   const payload = z
     .object({
       scanIntervalSeconds: z.number().int().min(10).max(3600).optional(),
+      automaticUpdates: z.boolean().optional(),
       amberHours: z.number().int().min(1).max(72).optional(),
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
@@ -7885,6 +7959,7 @@ async function start(): Promise<void> {
     });
     server.on("error", (error) => reject(error));
   });
+  automaticUpdateScheduler.start();
 }
 
 start().catch((error) => {

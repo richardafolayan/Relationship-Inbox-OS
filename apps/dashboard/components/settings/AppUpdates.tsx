@@ -8,6 +8,7 @@ import { apiGetRaw, apiPost } from "@/lib/api";
 
 interface UpdateCheck {
   applyMode?: "automatic" | "replace_app";
+  automaticUpdates: boolean;
   configured: boolean;
   currentVersion: string;
   latestVersion: string;
@@ -29,6 +30,10 @@ interface StageResponse {
   message?: string;
 }
 
+interface SettingsResponse {
+  automaticUpdates: boolean;
+}
+
 export function AppUpdates() {
   const [info, setInfo] = useState<UpdateCheck | null>(null);
   const [checking, setChecking] = useState(false);
@@ -39,6 +44,9 @@ export function AppUpdates() {
   const [started, setStarted] = useState<{ from: string; to: string; message?: string } | null>(null);
   const [error, setError] = useState("");
   const [installHelp, setInstallHelp] = useState("");
+  const [automaticUpdates, setAutomaticUpdates] = useState(true);
+  const [savingAutomaticUpdates, setSavingAutomaticUpdates] = useState(false);
+  const [automaticUpdatesMsg, setAutomaticUpdatesMsg] = useState("");
 
   const check = useCallback(async (manual: boolean) => {
     setChecking(true);
@@ -48,6 +56,7 @@ export function AppUpdates() {
     try {
       const res = await apiGetRaw<UpdateCheck>("/runner/system/update-check");
       setInfo(res);
+      setAutomaticUpdates(res.automaticUpdates);
       if (res.error) {
         setError("Couldn’t check the update feed. Try again in a moment.");
       }
@@ -67,6 +76,7 @@ export function AppUpdates() {
         const version = await apiGetRaw<AppVersion>("/runner/system/version");
         setInfo({
           configured: false,
+          automaticUpdates,
           currentVersion: version.version,
           latestVersion: version.version,
           updateAvailable: false,
@@ -81,7 +91,7 @@ export function AppUpdates() {
     } finally {
       setChecking(false);
     }
-  }, []);
+  }, [automaticUpdates]);
 
   useEffect(() => {
     void check(false);
@@ -135,6 +145,27 @@ export function AppUpdates() {
     }
   }, [check]);
 
+  const toggleAutomaticUpdates = useCallback(async () => {
+    const next = !automaticUpdates;
+    setSavingAutomaticUpdates(true);
+    setAutomaticUpdatesMsg("Saving…");
+    setError("");
+    try {
+      const saved = await apiPost<SettingsResponse>("/runner/control/settings", {
+        automaticUpdates: next
+      });
+      setAutomaticUpdates(saved.automaticUpdates);
+      setInfo((current) => current ? { ...current, automaticUpdates: saved.automaticUpdates } : current);
+      setAutomaticUpdatesMsg("Saved");
+      window.setTimeout(() => setAutomaticUpdatesMsg(""), 1800);
+    } catch {
+      setAutomaticUpdatesMsg("");
+      setError("Couldn’t save automatic update settings. Try again.");
+    } finally {
+      setSavingAutomaticUpdates(false);
+    }
+  }, [automaticUpdates]);
+
   const version = info?.currentVersion ?? "…";
 
   return (
@@ -184,6 +215,39 @@ export function AppUpdates() {
               {updating ? "Updating app…" : info.applyMode === "replace_app" ? "Show update steps" : "Update app"}
             </button>
           ) : null}
+        </div>
+      </div>
+
+      <div className="mt-4 flex items-center justify-between gap-5 border-t border-hairline pt-4">
+        <div>
+          <p className="text-[13px] font-medium text-ink">Install updates automatically</p>
+          <p className="mt-1 max-w-[58ch] text-[12px] leading-relaxed text-ink-3">
+            Tovi checks shortly after opening and once an hour. When an update is ready,
+            it installs it and reopens with your messages and settings kept.
+          </p>
+        </div>
+        <div className="flex shrink-0 items-center gap-2.5">
+          <span className="min-w-[42px] text-right font-mono text-[11px] text-ink-3" aria-live="polite">
+            {automaticUpdatesMsg || (automaticUpdates ? "On" : "Off")}
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={automaticUpdates}
+            aria-label="Install updates automatically"
+            onClick={() => void toggleAutomaticUpdates()}
+            disabled={savingAutomaticUpdates || info?.applyMode === "replace_app"}
+            className={`relative h-[20px] w-[36px] shrink-0 rounded-pill transition-colors duration-calm ${
+              automaticUpdates ? "bg-accent" : "bg-hairline-strong"
+            } disabled:cursor-not-allowed disabled:opacity-50`}
+          >
+            <span
+              aria-hidden
+              className={`absolute left-0 top-[2px] h-[16px] w-[16px] rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.3)] transition-transform duration-calm ${
+                automaticUpdates ? "translate-x-[18px]" : "translate-x-[2px]"
+              }`}
+            />
+          </button>
         </div>
       </div>
 
