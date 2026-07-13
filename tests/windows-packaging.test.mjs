@@ -34,6 +34,14 @@ test("package config builds an unpacked NSIS app with an external Node runtime",
   assert.deepEqual(pkg.build.win.target[0], { target: "nsis", arch: ["x64"] });
   assert.equal(pkg.build.extraResources[0].from, "build/windows-runtime/${arch}");
   assert.equal(pkg.build.extraResources[0].to, "runtime/node");
+  assert.equal(
+    pkg.build.extraResources[1].from,
+    "node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
+  );
+  assert.equal(
+    pkg.build.extraResources[1].to,
+    "app/node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
+  );
   assert.equal(pkg.dependencies.prisma, "^6.3.1");
   assert.equal(runnerPkg.dependencies["onnxruntime-node"], "1.21.0");
 });
