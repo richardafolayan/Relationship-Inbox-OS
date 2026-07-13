@@ -156,12 +156,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithDetachedFrameRecovery();
     return chats.filter((c) => (c.unreadCount ?? 0) > 0).map(chatToThreadStub);
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithDetachedFrameRecovery();
     const selected = this.indexedExistingChats ? chats.slice(0, limit) : chats;
     this.indexedExistingChats = true;
     return selected.map(chatToThreadStub);
@@ -554,6 +554,20 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return this.client;
   }
 
+  private async getChatsWithDetachedFrameRecovery(): Promise<Awaited<ReturnType<Client["getChats"]>>> {
+    try {
+      return await this.requireClient().getChats();
+    } catch (error) {
+      if (!isDetachedFrameError(error)) {
+        throw error;
+      }
+    }
+
+    await this.closeSession("detached_frame");
+    await this.ensureConnected();
+    return this.requireClient().getChats();
+  }
+
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {
     // Polls (`poll_creation` type) get flattened to a readable question +
     // bullet list so they appear inline in the thread timeline rather
@@ -640,6 +654,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
       attachments
     };
   }
+}
+
+function isDetachedFrameError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /detached\s+frame/i.test(message);
 }
 
 /**

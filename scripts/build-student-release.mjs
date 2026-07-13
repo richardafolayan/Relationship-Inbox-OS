@@ -42,7 +42,9 @@
 //                       minimumInstallerVersion so dev installs always qualify.
 //   --notes <line>      a release-note line (repeatable)
 //   --notes-file <path> read release notes from a file (one per line)
-//   --min-installer <v> minimumInstallerVersion in latest.json (default: package version)
+//   --min-installer <v> minimumInstallerVersion in latest.json (default: the channel
+//                       floor — 0.1.0 student / 0.0.1 dev — the oldest installer that
+//                       can apply updates, NOT the release version)
 //   --manifest-only     do not rebuild the zip; just (re)write latest.json from an existing zip
 //   --zip <path>        which zip to checksum in --manifest-only mode (default: the -latest zip)
 
@@ -144,6 +146,14 @@ if (!CHANNELS.includes(CHANNEL)) {
 // BELOW any real version: a prerelease like 1.2.3-dev.9 ranks under 1.2.3, so
 // a floor equal to a core version would block that core's own dev builds.
 const DEV_MIN_INSTALLER = "0.0.1";
+// The student floor is the OLDEST installer that can still correctly apply an
+// update — NOT the version being released. Defaulting it to the new version
+// (the old behaviour) made every older install self-block: the updater would
+// refuse to apply (or even report) an update it thinks it is too old for, so a
+// pilot on 0.1.13 checking a 0.1.14 feed saw a hard error instead of "update
+// available". Only bump this (via --min-installer) for a genuinely breaking
+// change to the swap/preserve protocol that an old updater really can't handle.
+const STUDENT_MIN_INSTALLER = "0.1.0";
 
 function git(...a) {
   return execFileSync("git", a, { cwd: ROOT, encoding: "utf8" }).trim();
@@ -204,7 +214,7 @@ function writeManifest({ version, build, commit, zipPath, sha256 }) {
     zipUrl,
     sha256,
     releaseNotes: readNotes(version, commit),
-    minimumInstallerVersion: args.minInstaller || (CHANNEL === "dev" ? DEV_MIN_INSTALLER : version)
+    minimumInstallerVersion: args.minInstaller || (CHANNEL === "dev" ? DEV_MIN_INSTALLER : STUDENT_MIN_INSTALLER)
   };
   const manifestPath = join(OUT_DIR, "latest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");

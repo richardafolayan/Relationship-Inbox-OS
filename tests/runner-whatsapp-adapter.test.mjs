@@ -164,6 +164,66 @@ test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   assert.equal(stubs[1].isGroup, true);
 });
 
+test("scanUnreadThreads reconnects once when WhatsApp replaces its browser frame", async () => {
+  let firstDestroyed = false;
+  const staleClient = createFakeClient({
+    getChats: async () => {
+      throw new Error("Attempted to use detached Frame '7EE3D604511108886782BA4502E441CD'.");
+    },
+    destroy: async () => {
+      firstDestroyed = true;
+    }
+  });
+  const liveClient = createFakeClient({
+    getChats: async () => [
+      { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },
+      { id: { _serialized: "b@c.us" }, name: "B", unreadCount: 2, isGroup: false }
+    ]
+  });
+  const clients = [staleClient, liveClient];
+  const states = [];
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => clients.shift(),
+    onStateChange: (state) => states.push(state)
+  });
+
+  const initialConnection = adapter.ensureConnected();
+  setImmediate(() => staleClient.emit("ready"));
+  await initialConnection;
+
+  const scan = adapter.scanUnreadThreads();
+  setImmediate(() => liveClient.emit("ready"));
+  const threads = await scan;
+
+  assert.equal(firstDestroyed, true);
+  assert.deepEqual(threads.map((thread) => thread.platformThreadId), ["b@c.us"]);
+  assert.deepEqual(states, ["connecting", "connected", "disconnected", "connecting", "connected"]);
+});
+
+test("scanUnreadThreads does not reconnect for unrelated collection failures", async () => {
+  const client = createFakeClient({
+    getChats: async () => {
+      throw new Error("WhatsApp collection timed out");
+    }
+  });
+  let factoryCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      factoryCalls += 1;
+      return client;
+    }
+  });
+
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+
+  await assert.rejects(adapter.scanUnreadThreads(), /collection timed out/);
+  assert.equal(factoryCalls, 1);
+});
+
 test("fetchRecentThreads indexes every existing chat on the first sweep", async () => {
   const chats = Array.from({ length: 10 }, (_, i) => ({
     id: { _serialized: `c${i}@c.us` },
