@@ -58,13 +58,17 @@ export function readAppVersion(projectRoot: string): AppVersion {
 
 /**
  * The feed this install self-updates from. A dev-channel build bakes its feed
- * into release.json (paired atomically with the code), and that wins over the
- * env-configured URL so a dev install never follows the pilot Dropbox link
- * that .env reconcile maintains in the user's .env.
+ * into release.json (paired atomically with the code). A dev install uses ONLY
+ * that baked feed and never the env-configured URL: RIOS_UPDATE_FEED_URL is the
+ * pilot Dropbox link that .env reconcile always maintains, so falling back to it
+ * would silently point a dev install at a stale pilot version (a wrong-channel
+ * feed). If a dev install somehow has no baked feed, return undefined ("updates
+ * not configured") rather than the misleading pilot feed. Non-dev installs use
+ * the configured URL as before.
  */
 export function resolveUpdateFeedUrl(projectRoot: string, configuredUrl?: string): string | undefined {
   const app = readAppVersion(projectRoot);
-  if (app.channel === "dev" && app.updateFeedUrl) return app.updateFeedUrl;
+  if (app.channel === "dev") return app.updateFeedUrl;
   return configuredUrl;
 }
 
@@ -200,4 +204,66 @@ export function launchUpdateApplyAndRestart(opts: {
   } finally {
     closeSync(fd);
   }
+}
+
+export interface AutomaticUpdateScheduler {
+  start(): void;
+  stop(): void;
+  runNow(): Promise<"busy" | "disabled" | "checked">;
+}
+
+export function createAutomaticUpdateScheduler(opts: {
+  isEnabled(): Promise<boolean>;
+  installIfAvailable(): Promise<void>;
+  initialDelayMs?: number;
+  intervalMs?: number;
+  onError?(error: unknown): void;
+}): AutomaticUpdateScheduler {
+  const initialDelayMs = opts.initialDelayMs ?? 15_000;
+  const intervalMs = opts.intervalMs ?? 60 * 60_000;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = true;
+  let running = false;
+
+  const schedule = (delayMs: number): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void runAndReschedule();
+    }, delayMs);
+    timer.unref();
+  };
+
+  const runNow = async (): Promise<"busy" | "disabled" | "checked"> => {
+    if (running) return "busy";
+    running = true;
+    try {
+      if (!(await opts.isEnabled())) return "disabled";
+      await opts.installIfAvailable();
+      return "checked";
+    } catch (error) {
+      opts.onError?.(error);
+      return "checked";
+    } finally {
+      running = false;
+    }
+  };
+
+  const runAndReschedule = async (): Promise<void> => {
+    await runNow();
+    schedule(intervalMs);
+  };
+
+  return {
+    start() {
+      if (!stopped) return;
+      stopped = false;
+      schedule(initialDelayMs);
+    },
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+    runNow
+  };
 }

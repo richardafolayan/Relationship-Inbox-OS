@@ -80,6 +80,16 @@ test("resolveUpdateFeedUrl prefers the baked dev feed over the env feed", () => 
       resolveUpdateFeedUrl(dir, "https://dropbox.example/latest.json?raw=1"),
       "https://dropbox.example/latest.json?raw=1"
     );
+    // A dev install with NO baked feed must NOT fall back to the pilot Dropbox
+    // feed (wrong channel/stale version). It reports "not configured" instead.
+    // This is the exact strand a pre-fix dev zip caused after the first update.
+    writeFileSync(join(dir, "release.json"), JSON.stringify({
+      version: "0.1.15-dev.101", channel: "dev"
+    }));
+    assert.equal(
+      resolveUpdateFeedUrl(dir, "https://dropbox.example/latest.json?raw=1"),
+      undefined
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -137,9 +147,11 @@ test("DMG channel stamping: dev default, dev version suffix, derived feed URL", 
 test("build-student-release --channel dev stamps version, channel, and floor", () => {
   const out = mkdtempSync(join(tmpdir(), "rios-dev-build-"));
   try {
+    const feedUrl = "https://github.com/o/r/releases/download/dev/latest.json";
     execFileSync(process.execPath, [
       BUILD, "--channel", "dev", "--out", out,
-      "--zip-url", "https://github.com/o/r/releases/download/dev/relationship-inbox-os-dev-latest.zip"
+      "--zip-url", "https://github.com/o/r/releases/download/dev/relationship-inbox-os-dev-latest.zip",
+      "--update-feed-url", feedUrl
     ], {
       cwd: ROOT,
       stdio: "ignore",
@@ -163,6 +175,64 @@ test("build-student-release --channel dev stamps version, channel, and floor", (
     ));
     assert.equal(release.channel, "dev");
     assert.equal(release.version, manifest.version);
+    // The self-update feed MUST be baked into the ZIP's release.json so it
+    // survives each in-place update; without it a dev install reverts to the
+    // pilot feed after the first update (the strand this test guards against).
+    assert.equal(release.updateFeedUrl, feedUrl);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("build-student-release explicit dev feed overrides the environment default", () => {
+  const out = mkdtempSync(join(tmpdir(), "rios-dev-explicit-feed-"));
+  try {
+    const feedUrl = "https://github.com/o/r/releases/download/dev/latest.json";
+    execFileSync(process.execPath, [
+      BUILD, "--channel", "dev", "--out", out,
+      "--zip-url", "https://github.com/o/r/releases/download/dev/relationship-inbox-os-dev-latest.zip",
+      "--update-feed-url", feedUrl
+    ], {
+      cwd: ROOT,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        RIOS_RELEASE_ENV_FILE: "/nonexistent/.env.release.local",
+        RIOS_DEV_UPDATE_FEED_URL: "https://github.com/stale/fork/releases/download/dev/latest.json"
+      }
+    });
+    const release = JSON.parse(execFileSync(
+      "unzip", ["-p", join(out, "relationship-inbox-os-dev-latest.zip"), "relationship-inbox-os/release.json"],
+      { encoding: "utf8" }
+    ));
+    assert.equal(release.updateFeedUrl, feedUrl);
+  } finally {
+    rmSync(out, { recursive: true, force: true });
+  }
+});
+
+test("build-student-release --channel dev derives the feed URL from git origin", () => {
+  const out = mkdtempSync(join(tmpdir(), "rios-dev-derive-"));
+  try {
+    // No --update-feed-url and no RIOS_DEV_UPDATE_FEED_URL: the builder must
+    // derive it from the repo's origin so a plain `--channel dev` build is
+    // still self-perpetuating.
+    execFileSync(process.execPath, [
+      BUILD, "--channel", "dev", "--out", out,
+      "--zip-url", "https://github.com/o/r/releases/download/dev/relationship-inbox-os-dev-latest.zip"
+    ], {
+      cwd: ROOT,
+      stdio: "ignore",
+      env: { ...process.env, RIOS_RELEASE_ENV_FILE: "/nonexistent/.env.release.local", RIOS_DEV_UPDATE_FEED_URL: "" }
+    });
+    const release = JSON.parse(execFileSync(
+      "unzip", ["-p", join(out, "relationship-inbox-os-dev-latest.zip"), "relationship-inbox-os/release.json"],
+      { encoding: "utf8" }
+    ));
+    assert.match(
+      release.updateFeedUrl,
+      /^https:\/\/github\.com\/[^/]+\/[^/]+\/releases\/download\/dev\/latest\.json$/
+    );
   } finally {
     rmSync(out, { recursive: true, force: true });
   }
@@ -196,7 +266,11 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
   const inner = join(stage, "relationship-inbox-os");
   mkdirSync(inner, { recursive: true });
   writeFileSync(join(inner, "package.json"), JSON.stringify({ name: "relationship-inbox-os", version: "0.1.0" }));
-  writeFileSync(join(inner, "release.json"), JSON.stringify({ version: "0.1.0-dev.2", channel: "dev" }));
+  writeFileSync(join(inner, "release.json"), JSON.stringify({
+    version: "0.1.0-dev.2",
+    channel: "dev",
+    updateFeedUrl: "https://github.com/o/r/releases/download/dev/latest.json"
+  }));
   writeFileSync(join(inner, "NEWCODE.txt"), "dev.2");
   const zipPath = join(work, "app.zip");
   execFileSync("zip", ["-r", "-q", zipPath, "relationship-inbox-os"], { cwd: stage });
@@ -256,6 +330,10 @@ test("dev updater: channel guard, backup root outside the bundle, ad-hoc re-sign
       assert.equal(
         JSON.parse(readFileSync(join(appDir, "release.json"), "utf8")).version,
         "0.1.0-dev.2"
+      );
+      assert.equal(
+        JSON.parse(readFileSync(join(appDir, "release.json"), "utf8")).updateFeedUrl,
+        "https://github.com/o/r/releases/download/dev/latest.json"
       );
       const backups = readdirSync(backupRoot).filter((n) => n.startsWith(".rios-backup-"));
       assert.equal(backups.length, 1, "backup must land in --backup-root");

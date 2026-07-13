@@ -38,8 +38,11 @@
 //   --channel <name>    release channel: "student" (default) or "dev". The dev
 //                       channel stamps version <pkg>-dev.<commit count> so every
 //                       push is strictly newer than the last within the channel,
-//                       names the zips -dev- instead of -student-, and floors
-//                       minimumInstallerVersion so dev installs always qualify.
+//                       names the zips -dev- instead of -student-, floors
+//                       minimumInstallerVersion so dev installs always qualify,
+//                       and bakes the self-update feed into release.json.
+//   --update-feed-url <url>  dev only: the feed release.json points at (default:
+//                       derived from the git origin; or RIOS_DEV_UPDATE_FEED_URL)
 //   --notes <line>      a release-note line (repeatable)
 //   --notes-file <path> read release notes from a file (one per line)
 //   --min-installer <v> minimumInstallerVersion in latest.json (default: the channel
@@ -116,6 +119,7 @@ function parseArgs(argv) {
     else if (a === "--ref") out.ref = next();
     else if (a === "--out") out.out = next();
     else if (a === "--channel") out.channel = next();
+    else if (a === "--update-feed-url") out.updateFeedUrl = next();
     else if (a === "--notes") out.notes.push(next());
     else if (a === "--notes-file") out.notesFile = next();
     else if (a === "--min-installer") out.minInstaller = next();
@@ -157,6 +161,24 @@ const STUDENT_MIN_INSTALLER = "0.1.0";
 
 function git(...a) {
   return execFileSync("git", a, { cwd: ROOT, encoding: "utf8" }).trim();
+}
+// The feed a dev install self-updates from. It MUST be baked into the zip's
+// release.json (not just the DMG's): a self-update installs this zip's
+// release.json OVER the old one, so if the feed pointer were missing here the
+// app would forget its dev feed after the first update and fall back to the
+// env RIOS_UPDATE_FEED_URL (the pilot Dropbox link), stranding the dev channel
+// on a stale pilot version. Overridable for tests/forks; otherwise derived
+// from the git origin like the DMG builder does.
+function devUpdateFeedUrl() {
+  const override = (args.updateFeedUrl || process.env.RIOS_DEV_UPDATE_FEED_URL || "").trim();
+  if (override) return override;
+  let remote = "";
+  try { remote = git("remote", "get-url", "origin"); } catch { /* no remote */ }
+  const match = remote.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (!match) {
+    die("could not derive the dev update feed from git origin; set RIOS_DEV_UPDATE_FEED_URL or pass --update-feed-url.");
+  }
+  return `https://github.com/${match[1]}/${match[2]}/releases/download/dev/latest.json`;
 }
 function pkgVersion() {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
@@ -280,10 +302,14 @@ async function build() {
     execFileSync("tar", ["-xf", tarPath, "-C", appDir]);
     rmSync(tarPath, { force: true });
 
-    // 2. Bake a release.json so the installed app knows what it is.
+    // 2. Bake a release.json so the installed app knows what it is. Dev builds
+    // also carry the feed they self-update from, so the pointer survives each
+    // in-place update (see devUpdateFeedUrl).
+    const releaseInfo = { version, build, commit: fullCommit, channel: CHANNEL };
+    if (CHANNEL === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
     writeFileSync(
       join(appDir, "release.json"),
-      JSON.stringify({ version, build, commit: fullCommit, channel: CHANNEL }, null, 2) + "\n"
+      JSON.stringify(releaseInfo, null, 2) + "\n"
     );
 
     // 2b. Bake the pilot-feedback token into .env.example (if provided at
