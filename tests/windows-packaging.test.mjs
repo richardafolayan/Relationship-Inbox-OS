@@ -27,6 +27,7 @@ test("Windows runtime helpers select the verified Node archive", () => {
 
 test("package config builds an unpacked NSIS app with an external Node runtime", () => {
   const pkg = JSON.parse(readFileSync(resolve("package.json"), "utf8"));
+  const runnerPkg = JSON.parse(readFileSync(resolve("apps/runner/package.json"), "utf8"));
   assert.equal(pkg.scripts["build:windows"], "node scripts/build-windows-installer.mjs");
   assert.equal(pkg.build.asar, false);
   assert.equal(pkg.build.npmRebuild, false);
@@ -34,6 +35,7 @@ test("package config builds an unpacked NSIS app with an external Node runtime",
   assert.equal(pkg.build.extraResources[0].from, "build/windows-runtime/${arch}");
   assert.equal(pkg.build.extraResources[0].to, "runtime/node");
   assert.equal(pkg.dependencies.prisma, "^6.3.1");
+  assert.equal(runnerPkg.dependencies["onnxruntime-node"], "1.21.0");
 });
 
 test("Windows builder invokes npm through Node instead of the npm.cmd shim", () => {
