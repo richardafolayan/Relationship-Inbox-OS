@@ -84,6 +84,7 @@ test("checkSendGuard rejects when a send to the same recipient is within the int
   assert.equal(result.allowed, false);
   assert.match(result.reason, /Per-recipient send interval not yet elapsed/);
   assert.match(result.reason, /20s remaining/);
+  assert.equal(result.retryAfterMs, 20_000);
 });
 
 test("checkSendGuard allows a send when the prior send to this recipient was OUTSIDE the interval window", async () => {

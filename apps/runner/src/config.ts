@@ -2,6 +2,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
+import {
+  availablePlatformNames,
+  resolvePlatformAvailability,
+  type PlatformAvailability
+} from "./platform-availability";
+import type { PlatformName } from "@inbox-os/core";
 
 dotenv.config({ path: resolve(process.cwd(), ".env") });
 
@@ -64,6 +70,8 @@ export interface RunnerConfig {
      * profiles above — WhatsApp uses its own Puppeteer instance. */
     WHATSAPP: string;
   };
+  platformAvailability: PlatformAvailability;
+  availablePlatforms: PlatformName[];
   /** WhatsApp Web adapter config (#774). Off by default. */
   whatsapp: {
     enabled: boolean;
@@ -515,6 +523,7 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
 }
 
 export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): RunnerConfig {
+  const platformAvailability = resolvePlatformAvailability(env);
   return {
     port: parseIntOrDefault(env.RUNNER_PORT, 4001),
     bindHost: env.RUNNER_HOST?.trim() || "127.0.0.1",
@@ -586,12 +595,14 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       IMESSAGE: resolve(dataDir, "profiles", "imessage"),
       WHATSAPP: resolve(dataDir, "profiles", "whatsapp")
     },
+    platformAvailability,
+    availablePlatforms: availablePlatformNames(platformAvailability),
     whatsapp: {
       // WhatsApp Web adapter via whatsapp-web.js (#774). OFF by default: it
       // spins up its own headless Chromium and needs a one-time QR scan, so
       // it must never boot for pilots who haven't opted in. Set
       // WHATSAPP_ENABLED=true to turn it on, then connect via Settings.
-      enabled: (env.WHATSAPP_ENABLED ?? "").trim().toLowerCase() === "true",
+      enabled: platformAvailability.WHATSAPP,
       mediaDir: resolve(dataDir, "whatsapp-media"),
       // Send guard: cap outbound volume + minimum spacing so an automation
       // bug can't blast a WhatsApp number (ban-sensitive). Conservative
@@ -605,7 +616,7 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       // Mac-only adapter. Default off so Linux/CI runners don't try to open
       // a non-existent chat.db. Set IMESSAGE_ENABLED=true on a Mac with
       // Full Disk Access granted to the runner's parent process.
-      enabled: (env.IMESSAGE_ENABLED ?? "").trim().toLowerCase() === "true" && process.platform === "darwin",
+      enabled: platformAvailability.IMESSAGE,
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
       watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")

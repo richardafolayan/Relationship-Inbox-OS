@@ -62,6 +62,7 @@ export interface WhatsAppAdapterDeps {
   onIncomingMessage?: () => void;
   /** Client factory override, for tests. */
   createClient?: (authDir: string) => Client;
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
@@ -145,12 +146,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithDetachedFrameRecovery();
     return chats.filter((c) => (c.unreadCount ?? 0) > 0).map(chatToThreadStub);
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithDetachedFrameRecovery();
     // Chats arrive ordered by most-recent activity from wweb.js.
     return chats.slice(0, limit).map(chatToThreadStub);
   }
@@ -169,7 +170,7 @@ export class WhatsAppAdapter implements PlatformAdapter {
     attachments?: OutboundAttachment[]
   ): Promise<SendReceipt> {
     const client = this.requireClient();
-    const guard = await checkSendGuard(
+    let guard = await checkSendGuard(
       {
         client,
         prisma: this.deps.prisma,
@@ -177,6 +178,18 @@ export class WhatsAppAdapter implements PlatformAdapter {
       },
       thread.platformThreadId
     );
+    if (!guard.allowed && guard.retryAfterMs !== undefined) {
+      const sleep = this.deps.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+      await sleep(guard.retryAfterMs);
+      guard = await checkSendGuard(
+        {
+          client,
+          prisma: this.deps.prisma,
+          config: this.deps.sendGuardConfig
+        },
+        thread.platformThreadId
+      );
+    }
     if (!guard.allowed) {
       throw new Error(`WhatsApp send blocked: ${guard.reason}`);
     }
@@ -334,6 +347,20 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return this.client;
   }
 
+  private async getChatsWithDetachedFrameRecovery(): Promise<Awaited<ReturnType<Client["getChats"]>>> {
+    try {
+      return await this.requireClient().getChats();
+    } catch (error) {
+      if (!isDetachedFrameError(error)) {
+        throw error;
+      }
+    }
+
+    await this.closeSession("detached_frame");
+    await this.ensureConnected();
+    return this.requireClient().getChats();
+  }
+
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {
     // Polls (`poll_creation` type) get flattened to a readable question +
     // bullet list so they appear inline in the thread timeline rather
@@ -420,6 +447,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
       attachments
     };
   }
+}
+
+function isDetachedFrameError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /detached\s+frame/i.test(message);
 }
 
 /**

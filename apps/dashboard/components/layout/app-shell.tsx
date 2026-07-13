@@ -421,14 +421,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       const skip = autoScanInFlightRef.current || isQuietHoursActive() || !isWithinActiveHours();
       if (!skip) {
         autoScanInFlightRef.current = true;
-        // Kick LinkedIn (rate-limited browser session) and iMessage (local
-        // chat.db read, essentially free) on the same cadence. The runner
-        // serializes them per-platform; iMessage will usually finish in
-        // under a second while LinkedIn is still going.
-        void Promise.all([
-          apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "update" }).catch(() => undefined),
-          apiPost("/runner/control/scan", { platform: "IMESSAGE", scope: "update" }).catch(() => undefined)
-        ]).finally(() => {
+        void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined).finally(() => {
           autoScanInFlightRef.current = false;
         });
       }

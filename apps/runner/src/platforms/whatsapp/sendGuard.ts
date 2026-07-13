@@ -50,7 +50,9 @@ export interface SendGuardConfig {
   dailyCap: number;
 }
 
-export type SendGuardResult = { allowed: true } | { allowed: false; reason: string };
+export type SendGuardResult =
+  | { allowed: true }
+  | { allowed: false; reason: string; retryAfterMs?: number };
 
 export interface SendGuardDeps {
   client: WhatsAppContactLookup;
@@ -100,7 +102,8 @@ export async function checkSendGuard(
     const remainingSec = Math.ceil(remainingMs / 1000);
     return {
       allowed: false,
-      reason: `Per-recipient send interval not yet elapsed (${remainingSec}s remaining)`
+      reason: `Per-recipient send interval not yet elapsed (${remainingSec}s remaining)`,
+      retryAfterMs: remainingMs
     };
   }
 

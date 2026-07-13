@@ -1175,9 +1175,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // with active backoff (#403) are skipped this tick and picked
         // up on a later one. The queue serialises jobs so this never
         // produces parallel scans of different platforms.
-        const enabledPlatforms = settings.enabledPlatforms.filter((platform) =>
-          allPlatforms.includes(platform)
-        );
+        const enabledPlatforms = allPlatforms.filter((platform) => Boolean(deps.adapters[platform]));
         for (const platform of enabledPlatforms) {
           if (deps.isPlatformScannable && !deps.isPlatformScannable(platform)) {
             continue;
@@ -1253,9 +1251,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const settings = await deps.settingsStore.getSettings();
     const scanPlatforms = job.platform
       ? [job.platform]
-      : settings.enabledPlatforms.filter(
+      : allPlatforms.filter(
           (platform) =>
-            allPlatforms.includes(platform) &&
+            Boolean(deps.adapters[platform]) &&
             (!deps.isPlatformScannable || deps.isPlatformScannable(platform))
         );
 
@@ -1343,12 +1341,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
         const adapter = deps.adapters[platform];
         if (!adapter) {
-          // Adapter map is Partial: a platform appearing in enabledPlatforms
-          // without a registered adapter is a config drift, not a fatal
-          // runtime state. Log and skip this iteration. Every enabled
-          // platform now has a registered adapter or the calm not-implemented
-          // stub (WHATSAPP when WHATSAPP_ENABLED is off), so this skip is a
-          // belt-and-braces guard against future drift.
           await deps.auditLog({
             platform,
             stage: "Scan",

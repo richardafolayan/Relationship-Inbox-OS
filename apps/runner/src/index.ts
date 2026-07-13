@@ -420,7 +420,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
+const allPlatforms: PlatformName[] = runnerConfig.availablePlatforms;
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -1033,7 +1033,7 @@ scheduledSendPromoter.start();
 // Syncs contact birthdays from the macOS AddressBook into Person rows once
 // at boot and then daily. Mac-only and read-only against Contacts; a no-op
 // when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
-if (runnerConfig.contacts.birthdaySyncEnabled) {
+if (runnerConfig.contacts.birthdaySyncEnabled && runnerConfig.platformAvailability.IMESSAGE) {
   createBirthdaySync().start();
 }
 
@@ -1044,7 +1044,7 @@ if (runnerConfig.contacts.birthdaySyncEnabled) {
 // idempotent (steady-state ticks write nothing). Also feeds the dashboard's
 // "this Mac has no saved contacts" hint via getHealth().
 let imessageNameSync: ImessageNameSync | null = null;
-if (process.platform === "darwin") {
+if (runnerConfig.platformAvailability.IMESSAGE) {
   imessageNameSync = createImessageNameSync();
   imessageNameSync.start();
 }
@@ -1120,8 +1120,10 @@ const enrichmentQueue = createEnrichmentQueue({
 // re-enrich admin endpoint) so the operator can opt into a single
 // "research this person" action. Set ENRICH_AUTO_ENABLED=1 to turn
 // the periodic + on-scan auto-enrichment back on.
-const autoEnrichmentEnabled = (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "1"
-  || (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "true";
+const autoEnrichmentEnabled = runnerConfig.platformAvailability.LINKEDIN && (
+  (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "1"
+  || (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "true"
+);
 enqueueEnrichmentForScan = (input) => {
   if (!autoEnrichmentEnabled) return;
   void enrichmentQueue.enqueue(input.personId, input.trigger);
@@ -1415,6 +1417,9 @@ async function getThreadStub(threadId: string): Promise<{
   if (!thread) {
     throw new Error("Thread not found");
   }
+  if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
+    throw new Error("Thread not found");
+  }
 
   return {
     threadId: thread.id,
@@ -1563,8 +1568,12 @@ async function loadVisibleThreadRows(options?: {
   const now = new Date();
   const threads = await prisma.thread.findMany({
     where: options?.archived
-      ? { archivedAt: { not: null } }
+      ? {
+          platform: { in: runnerConfig.availablePlatforms },
+          archivedAt: { not: null }
+        }
       : {
+          platform: { in: runnerConfig.availablePlatforms },
           archivedAt: null,
           // Hide snoozed threads from active views until the timer expires.
           // The dashboard polls every 10s, so threads resurface naturally
@@ -1755,7 +1764,7 @@ app.get("/health", asyncRoute(async (_req, res) => {
   // isn't running; the DB rows stay harmless and the queue's own
   // start() recovery picks them up if ENRICH_AUTO_ENABLED is set.
   const [platforms, enrichmentPending, enrichmentRunning] = await Promise.all([
-    prisma.platform.findMany(),
+    prisma.platform.findMany({ where: { name: { in: runnerConfig.availablePlatforms } } }),
     autoEnrichmentEnabled
       ? prisma.enrichmentJob.count({
           where: {
@@ -2868,6 +2877,11 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
       scope: z.enum(["update", "full"]).optional()
     })
     .parse(req.body ?? {});
+
+  if (payload.platform && !runnerConfig.availablePlatforms.includes(payload.platform)) {
+    res.status(404).json({ ok: false, reason: "platform_disabled" });
+    return;
+  }
 
   // #774: never let a WhatsApp scan run before the operator has linked a
   // device. The scan path calls ensureConnected(), which for a disconnected
@@ -4163,6 +4177,10 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
     res.status(404).json({ error: "Thread not found" });
     return;
   }
+  if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
 
   const rawOpenLoops = thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [];
   const dismissed = new Set(
@@ -4529,6 +4547,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   });
 
   if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+  if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
     res.status(404).json({ error: "Thread not found" });
     return;
   }
@@ -5311,13 +5333,12 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 }));
 
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
-  const settings = await settingsStore.getSettings();
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
   const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"] as PlatformName[]).map(async (platform) => {
+    runnerConfig.availablePlatforms.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
@@ -5350,7 +5371,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         lastScanAt: row?.lastScanAt?.toISOString() ?? null,
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
-        enabled: settings.enabledPlatforms.includes(platform),
+        enabled: true,
         profileDir: sharedProfileDir,
         browserProfileMode: runnerConfig.browserProfile.mode,
         browserProfileSyncMode:
@@ -5400,6 +5421,7 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
   const requested = Number(req.query.limit);
   const limit = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 1000) : 200;
   const logs = await prisma.auditLog.findMany({
+    where: { OR: [{ platform: null }, { platform: { in: runnerConfig.availablePlatforms } }] },
     orderBy: { timestamp: "desc" },
     take: limit
   });
@@ -5502,7 +5524,7 @@ app.get("/data/archived", asyncRoute(async (_req, res) => {
 app.get("/data/send-queue", asyncRoute(async (_req, res) => {
   const [activeRows, scheduledRows, recentDoneRows] = await Promise.all([
     prisma.sendRequest.findMany({
-      where: { status: "PENDING" },
+      where: { status: "PENDING", thread: { platform: { in: runnerConfig.availablePlatforms } } },
       include: {
         thread: {
           include: { person: true }
@@ -5511,7 +5533,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
       orderBy: { createdAt: "asc" }
     }),
     prisma.sendRequest.findMany({
-      where: { status: "SCHEDULED" },
+      where: { status: "SCHEDULED", thread: { platform: { in: runnerConfig.availablePlatforms } } },
       include: {
         thread: {
           include: { person: true }
@@ -5523,7 +5545,10 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
     // before fading out, and so a failed send is visible even if the user
     // misses the live transition.
     prisma.sendRequest.findMany({
-      where: { status: { in: ["SENT", "FAILED"] } },
+      where: {
+        status: { in: ["SENT", "FAILED"] },
+        thread: { platform: { in: runnerConfig.availablePlatforms } }
+      },
       include: {
         thread: {
           include: { person: true }
@@ -5586,6 +5611,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
 app.get("/data/people", asyncRoute(async (_req, res) => {
   const [people, visibleThreadGroups, enrichments] = await Promise.all([
     prisma.person.findMany({
+      where: { platform: { in: runnerConfig.availablePlatforms } },
       orderBy: {
         updatedAt: "desc"
       }
@@ -5667,7 +5693,10 @@ app.get("/data/birthdays", asyncRoute(async (_req, res) => {
   // gentle "reach out" reminder. Each links to the person's most-recent
   // thread so the dashboard can open the conversation in one click.
   const people = await prisma.person.findMany({
-    where: { birthday: { not: null } },
+    where: {
+      platform: { in: runnerConfig.availablePlatforms },
+      birthday: { not: null }
+    },
     select: {
       id: true,
       displayName: true,
@@ -5711,13 +5740,17 @@ app.get("/data/birthdays", asyncRoute(async (_req, res) => {
 // latest iMessage name-sync health snapshot, or null until the first tick
 // completes / on non-macOS hosts where the sync doesn't run.
 app.get("/data/imessage-contact-health", asyncRoute(async (_req, res) => {
-  res.json(imessageNameSync?.getHealth() ?? null);
+  res.json(runnerConfig.platformAvailability.IMESSAGE ? imessageNameSync?.getHealth() ?? null : null);
 }));
 
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
   const person = await prisma.person.findUnique({ where: { id: personId } });
   if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  if (!runnerConfig.availablePlatforms.includes(person.platform as PlatformName)) {
     res.status(404).json({ error: "person not found" });
     return;
   }
@@ -7396,36 +7429,18 @@ async function start(): Promise<void> {
       dbPath: runnerConfig.imessage.dbPath,
       debounceMs: runnerConfig.imessage.watchDebounceMs,
       onChange: (reason) => {
-        // Honour the operator-facing settings toggle. The chat.db watcher
-        // is gated by the env-level imessage.enabled flag (does this host
-        // even have iMessage?), but settings.enabledPlatforms is the
-        // user-facing "scan iMessage" switch the dashboard renders. If
-        // the operator has it off we must not enqueue scans — otherwise
-        // /data/platforms shows iMessage disabled while the runner is
-        // happily scanning it in the background (issue #202).
-        void settingsStore.getSettings().then((currentSettings) => {
-          if (!currentSettings.enabledPlatforms.includes("IMESSAGE")) {
-            return auditService.log({
-              platform: "IMESSAGE",
-              stage: "Scan",
-              action: "IMESSAGE_WATCH_TRIGGER",
-              status: "OK",
-              details: { reason, skipped: "disabled_in_settings" }
-            });
+        const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
+        void auditService.log({
+          platform: "IMESSAGE",
+          stage: "Scan",
+          action: "IMESSAGE_WATCH_TRIGGER",
+          status: result.ok ? "OK" : "FAIL",
+          details: {
+            reason,
+            ...(result.ok
+              ? { jobId: result.jobId, status: result.status }
+              : { blocked: result.blocked, blockReason: result.reason })
           }
-          const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
-          return auditService.log({
-            platform: "IMESSAGE",
-            stage: "Scan",
-            action: "IMESSAGE_WATCH_TRIGGER",
-            status: result.ok ? "OK" : "FAIL",
-            details: {
-              reason,
-              ...(result.ok
-                ? { jobId: result.jobId, status: result.status }
-                : { blocked: result.blocked, blockReason: result.reason })
-            }
-          });
         });
       }
     });

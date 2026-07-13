@@ -4,7 +4,6 @@ import { resolve, dirname } from "node:path";
 import { runnerConfig } from "../config";
 import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
-import { BetaAdapter } from "../platforms/beta-adapter";
 import { IMessageAdapter } from "../platforms/imessage-adapter";
 import { WhatsAppAdapter } from "../platforms/whatsapp-adapter";
 import type { SendGuardPrisma } from "../platforms/whatsapp/sendGuard";
@@ -75,8 +74,10 @@ export function createAdapters(input: {
     onPersonalProfileFallback: input.onPersonalProfileFallback
   });
 
-  const adapters: Partial<Record<PlatformName, PlatformAdapter>> = {
-    LINKEDIN: new LinkedInAdapter({
+  const adapters: Partial<Record<PlatformName, PlatformAdapter>> = {};
+
+  if (runnerConfig.platformAvailability.LINKEDIN) {
+    adapters.LINKEDIN = new LinkedInAdapter({
       screenshotDir: runnerConfig.screenshotDir,
       domDumpDir: runnerConfig.domDumpDir,
       scanMaxThreads: runnerConfig.linkedInScan.maxThreads,
@@ -111,43 +112,27 @@ export function createAdapters(input: {
               profileDirectory: runnerConfig.browserProfile.personalChromeProfileDirectory
             }
           : undefined
-    }),
-    INSTAGRAM: new BetaAdapter({
-      platform: "INSTAGRAM",
-      screenshotDir: runnerConfig.screenshotDir,
-      domDumpDir: runnerConfig.domDumpDir,
-      resolveSelectors: () => resolveSelectorsForPlatform("INSTAGRAM"),
-      sessionManager
-    }),
-    TIKTOK: new BetaAdapter({
-      platform: "TIKTOK",
-      screenshotDir: runnerConfig.screenshotDir,
-      domDumpDir: runnerConfig.domDumpDir,
-      resolveSelectors: () => resolveSelectorsForPlatform("TIKTOK"),
-      sessionManager
-    }),
-    IMESSAGE: new IMessageAdapter({
+    });
+  }
+
+  if (runnerConfig.platformAvailability.IMESSAGE) {
+    adapters.IMESSAGE = new IMessageAdapter({
       dbPath: runnerConfig.imessage.dbPath,
       contactsVcfPath: runnerConfig.imessage.contactsVcfPath
-    }),
-    // WhatsApp (#774): the real whatsapp-web.js adapter, but ONLY when the
-    // operator has opted in (WHATSAPP_ENABLED=true) AND a prisma client was
-    // threaded through for the send guard. Otherwise the not-implemented
-    // stub keeps the runner booting cleanly with a clear error on any
-    // WhatsApp op - the calm "not connected" state, never a crash.
-    WHATSAPP:
-      runnerConfig.whatsapp.enabled && input.whatsappPrisma
-        ? new WhatsAppAdapter({
-            authDir: runnerConfig.profileDirs.WHATSAPP,
-            mediaDir: runnerConfig.whatsapp.mediaDir,
-            sendGuardConfig: runnerConfig.whatsapp.send,
-            prisma: input.whatsappPrisma,
-            onQr: input.onWhatsAppQr,
-            onStateChange: input.onWhatsAppStateChange,
-            onIncomingMessage: input.onWhatsAppIncomingMessage
-          })
-        : createNotImplementedAdapter("WHATSAPP")
-  };
+    });
+  }
+
+  if (runnerConfig.platformAvailability.WHATSAPP && input.whatsappPrisma) {
+    adapters.WHATSAPP = new WhatsAppAdapter({
+      authDir: runnerConfig.profileDirs.WHATSAPP,
+      mediaDir: runnerConfig.whatsapp.mediaDir,
+      sendGuardConfig: runnerConfig.whatsapp.send,
+      prisma: input.whatsappPrisma,
+      onQr: input.onWhatsAppQr,
+      onStateChange: input.onWhatsAppStateChange,
+      onIncomingMessage: input.onWhatsAppIncomingMessage
+    });
+  }
 
   return {
     adapters,

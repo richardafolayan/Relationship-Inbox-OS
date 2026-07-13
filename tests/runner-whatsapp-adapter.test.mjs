@@ -144,6 +144,66 @@ test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   assert.equal(stubs[1].isGroup, true);
 });
 
+test("scanUnreadThreads reconnects once when WhatsApp replaces its browser frame", async () => {
+  let firstDestroyed = false;
+  const staleClient = createFakeClient({
+    getChats: async () => {
+      throw new Error("Attempted to use detached Frame '7EE3D604511108886782BA4502E441CD'.");
+    },
+    destroy: async () => {
+      firstDestroyed = true;
+    }
+  });
+  const liveClient = createFakeClient({
+    getChats: async () => [
+      { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },
+      { id: { _serialized: "b@c.us" }, name: "B", unreadCount: 2, isGroup: false }
+    ]
+  });
+  const clients = [staleClient, liveClient];
+  const states = [];
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => clients.shift(),
+    onStateChange: (state) => states.push(state)
+  });
+
+  const initialConnection = adapter.ensureConnected();
+  setImmediate(() => staleClient.emit("ready"));
+  await initialConnection;
+
+  const scan = adapter.scanUnreadThreads();
+  setImmediate(() => liveClient.emit("ready"));
+  const threads = await scan;
+
+  assert.equal(firstDestroyed, true);
+  assert.deepEqual(threads.map((thread) => thread.platformThreadId), ["b@c.us"]);
+  assert.deepEqual(states, ["connecting", "connected", "disconnected", "connecting", "connected"]);
+});
+
+test("scanUnreadThreads does not reconnect for unrelated collection failures", async () => {
+  const client = createFakeClient({
+    getChats: async () => {
+      throw new Error("WhatsApp collection timed out");
+    }
+  });
+  let factoryCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      factoryCalls += 1;
+      return client;
+    }
+  });
+
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+
+  await assert.rejects(adapter.scanUnreadThreads(), /collection timed out/);
+  assert.equal(factoryCalls, 1);
+});
+
 test("fetchRecentThreads slices to the requested limit", async () => {
   const chats = Array.from({ length: 10 }, (_, i) => ({
     id: { _serialized: `c${i}@c.us` },
@@ -242,6 +302,51 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
   assert.equal(sentText, "hello");
   assert.equal(receipt.verifiedBy, "best_effort");
   assert.equal(receipt.sentAt, "2023-11-14T22:15:00.000Z");
+});
+
+test("sendMessage keeps a per-recipient cooldown queued, then sends after it elapses", async () => {
+  const client = createFakeClient({
+    getContactById: async () => ({ isMyContact: true }),
+    sendMessage: async (jid, text) => {
+      assert.equal(jid, "447111222333@c.us");
+      assert.equal(text, "Queued message");
+      return { timestamp: 1700000100, id: { _serialized: "queued-send" } };
+    }
+  });
+  let guardChecks = 0;
+  let waitedMs = null;
+  const adapter = new WhatsAppAdapter({
+    authDir: "/tmp/wa-auth",
+    mediaDir: "/tmp/wa-media",
+    sendGuardConfig: { minIntervalMs: 15_000, dailyCap: 40 },
+    prisma: {
+      message: {
+        async findFirst() {
+          guardChecks += 1;
+          return guardChecks === 1 ? { timestamp: new Date(Date.now() - 9_000) } : null;
+        },
+        async count() {
+          return 0;
+        }
+      }
+    },
+    createClient: () => client,
+    sleep: async (ms) => {
+      waitedMs = ms;
+    }
+  });
+
+  const connected = adapter.ensureConnected();
+  client.emit("ready");
+  await connected;
+  const receipt = await adapter.sendMessage(
+    { platformThreadId: "447111222333@c.us", displayName: "Saved contact", lastMessagePreview: "" },
+    "Queued message"
+  );
+
+  assert.ok(waitedMs >= 5_900 && waitedMs <= 6_100);
+  assert.equal(guardChecks, 2);
+  assert.equal(receipt.verifiedBy, "best_effort");
 });
 
 test("fetchThreadMessages normalises wweb.js Message shapes (1:1)", async () => {
