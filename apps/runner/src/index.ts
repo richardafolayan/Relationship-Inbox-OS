@@ -27,6 +27,7 @@ import {
   validateGeminiKey
 } from "./services/setup-ai-key";
 import { createAuditService } from "./services/audit";
+import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
 import {
   createAiService,
@@ -1337,41 +1338,6 @@ function buildControlAction(method: string, path: string, phase: "START" | "END"
     .toUpperCase();
   const suffix = normalized || "ROOT";
   return `${method.toUpperCase()}_${suffix}_${phase}`;
-}
-
-function summarizeControlBody(body: unknown): Record<string, unknown> {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return { bodyType: typeof body };
-  }
-
-  const record = body as Record<string, unknown>;
-  const summary: Record<string, unknown> = {
-    bodyKeys: Object.keys(record).slice(0, 12)
-  };
-
-  if (typeof record.platform === "string") {
-    summary.platform = record.platform;
-  }
-  if (typeof record.mode === "string") {
-    summary.mode = record.mode;
-  }
-  if (typeof record.key === "string") {
-    summary.key = record.key;
-  }
-  if (typeof record.hours === "number") {
-    summary.hours = record.hours;
-  }
-  if (typeof record.selector === "string") {
-    summary.selectorLength = record.selector.length;
-  }
-  if (typeof record.text === "string") {
-    summary.textLength = record.text.length;
-  }
-  if (typeof record.clientSendId === "string") {
-    summary.hasClientSendId = true;
-  }
-
-  return summary;
 }
 
 function summarizeError(error: unknown): Record<string, unknown> {

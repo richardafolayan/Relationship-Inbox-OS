@@ -213,7 +213,7 @@ function AiKeyStep({
       icon={<KeyRound className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden />}
       eyebrow="Step 1 of 2"
       title="Add your free AI key."
-      body="Tovi uses Google's free Gemini tier to summarise conversations and help with drafts. Nothing is sent anywhere until you press send."
+      body="Tovi uses Google's Gemini service for summaries and optional writing help. To do that, it sends the relevant conversation text to Google. Tovi never sends a reply to another person unless you press send."
     >
       {status === "saved" ? (
         <p className="m-0 mt-5 flex items-center gap-2 text-[13.5px] text-ink" aria-live="polite">
@@ -235,7 +235,7 @@ function AiKeyStep({
               </a>{" "}
               and sign in with any Google account.
             </li>
-            <li>Press Create API key and copy it.</li>
+            <li>If a key is already shown, press Copy. Otherwise, press Create API key, follow the short Google dialog, then copy the new key.</li>
             <li>Paste it below. The key stays on this Mac.</li>
           </ol>
           <div className="mt-4 flex flex-wrap items-center gap-2">
@@ -349,7 +349,7 @@ function MessagesStep({ onNext }: { onNext: () => void }) {
           title="iMessage"
           body={
             imessageNeedsAccess
-              ? "macOS needs to grant Full Disk Access before Tovi can read Messages on this Mac."
+              ? "Press Open Full Disk Access, turn on Relationship Inbox OS, then quit and reopen Tovi. This is a one-time Mac permission."
               : "Reads the Messages app on this Mac."
           }
           connected={imessage?.status === "CONNECTED"}

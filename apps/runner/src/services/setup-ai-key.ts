@@ -149,7 +149,7 @@ export async function applyGeminiKey(
     return {
       ok: false,
       status: 502,
-      message: "The key checked out but couldn't be saved. Try again, or set GEMINI_API_KEY in .env by hand."
+      message: "The key checked out but couldn't be saved. Quit and reopen Tovi, then run the setup assistant again. If it still fails, tell the person running the pilot."
     };
   }
   deps.applyRuntime(key);

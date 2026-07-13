@@ -42,6 +42,18 @@ Open Relationship Inbox OS from Applications or Launchpad. The source-install
 launcher starts the local runner and dashboard and opens
 `http://localhost:3100`.
 
+On a new install, the setup assistant opens before Today. Press **Start setup**
+and follow the two steps on screen:
+
+1. Create and paste a free Google Gemini key for summaries and optional writing
+   help. The app checks and saves it for you. You do not need to edit a file or
+   restart the app.
+2. Connect iMessage or LinkedIn. The assistant explains each permission and
+   sign-in as you reach it.
+
+You can skip either step. To return later, open **Settings > Setup** and press
+**Run setup assistant**.
+
 Grant only the permissions needed for features you choose:
 
 | Permission | Needed for | When and how |
@@ -60,16 +72,19 @@ dashboard requests audio only and has no current camera capture flow.
 ### iMessage
 
 1. Confirm recent conversations appear in Apple's Messages app.
-2. Grant Full Disk Access and restart Relationship Inbox OS.
-3. In Settings, run an iMessage scan.
+2. In the setup assistant, press **Open Full Disk Access**. Turn on
+   **Relationship Inbox OS**, then quit and reopen the app.
+3. In the setup assistant, press **Scan iMessage**. You can also do this later
+   from Settings.
 4. On the first user-triggered send, allow Messages automation.
 
 ### LinkedIn
 
 The pilot default mirrors the selected normal Chrome profile. Sign into
-LinkedIn in Chrome first, then use Connect LinkedIn in Settings. Complete 2FA
-or any account verification yourself. The app does not need a stored password
-for the normal path.
+LinkedIn in Chrome first, then press **Connect LinkedIn** in the setup
+assistant. You can also do this later from Settings. Complete 2FA or any
+account verification yourself. The app does not need a stored password for
+the normal path.
 
 ### WhatsApp
 
@@ -85,11 +100,14 @@ setup.
 
 The app works as a message inbox without an AI key. Summaries, reply briefs,
 classification, and writing help need at least one configured provider key.
-See [AI key setup](../pilot/getting-ai-keys.md) for account-specific steps and
-[AI routing](../developer/ai.md) for the exact technical behavior.
+Use the first-run setup assistant, or open **Settings > Setup > Run setup
+assistant**, to create and save a free Gemini key. See
+[AI key setup](../pilot/getting-ai-keys.md) for the exact click-by-click steps.
+No file editing, Terminal command, or restart is needed.
 
-After editing `.env`, quit and reopen the app. Provider clients and API keys
-are read at runner startup.
+When summaries or writing help run, the relevant conversation text is sent to
+Google's Gemini service for processing. The key remains on this Mac. Tovi
+never sends a reply to another person unless you press send.
 
 ## Verify the installation
 

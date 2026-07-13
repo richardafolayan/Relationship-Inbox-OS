@@ -103,10 +103,13 @@ npm run start:student
 
 Once the app opens in your browser, it guides you through the rest:
 
-1. **iMessage access**: a one-time macOS permission (see below).
-2. **Connecting LinkedIn**: you log in yourself.
-3. **Your first scan**: pulls your conversations in.
-4. **Your inbox**: opens once the scan finishes.
+1. Press **Start setup** on the welcome screen.
+2. Add a free Google Gemini key for summaries and optional writing help.
+3. Connect iMessage or LinkedIn.
+4. Press **Go to Today**.
+
+You can skip either setup step. To come back later, open **Settings > Setup**
+and press **Run setup assistant**.
 
 ### Connect iMessage
 
@@ -114,13 +117,14 @@ Relationship Inbox OS reads the messages already stored on your Mac. It never
 logs into anything and never sends anything on its own.
 
 1. Open **Messages** on your Mac and check you can see recent conversations.
-2. Give **Relationship Inbox OS Full Disk Access** so the app can read your local message
-   history: **System Settings → Privacy & Security → Full Disk Access**, find
-   **Relationship Inbox OS**, and turn it **on**. (If it is not listed, click
-   **+** and add `~/Applications/Relationship Inbox OS.app`.)
-3. macOS may say the app must quit to use the new permission. Quit
+2. In Tovi's setup assistant, press **Open Full Disk Access**.
+3. In the Mac window that opens, find **Relationship Inbox OS** and turn it
+   **on**. If it is not listed, press **+** and add
+   `~/Applications/Relationship Inbox OS.app`.
+4. macOS may say the app must quit to use the new permission. Quit
    **Relationship Inbox OS**, then open it again.
-4. The first time you *send* an iMessage reply, macOS asks "Relationship Inbox
+5. Return to the setup assistant and press **Scan iMessage**.
+6. The first time you *send* an iMessage reply, macOS asks "Relationship Inbox
    OS wants to control Messages". Click **Allow**.
 
 What it does: reads your local iMessage/SMS history, summarises it, and shows
@@ -131,20 +135,26 @@ what needs a reply. What it doesn't do: send anything unless you press send.
 Relationship Inbox OS uses a normal, signed-in Chrome. **It never asks for or
 stores your LinkedIn password.**
 
-1. In the app, click **Connect LinkedIn**.
-2. Log into LinkedIn yourself, the normal way.
-3. Complete any security check (2FA) if LinkedIn asks.
-4. Come back to Relationship Inbox OS and press **Start LinkedIn scan**.
+1. Sign into LinkedIn in your normal Google Chrome window.
+2. In Tovi's setup assistant, press **Connect LinkedIn**.
+3. Log into LinkedIn yourself if the window asks you to.
+4. Complete any security check (2FA) if LinkedIn asks.
+5. Come back to Tovi. The setup assistant changes to **Connected** when it is
+   ready.
 
 You only log in once; it remembers the session.
 
 ### Add an AI key (for summaries and reply help)
 
-The summaries, action items, and reply suggestions are written by an AI model,
-which needs a key (yours, kept private on your Mac). The free Google Gemini key
-is the easiest. It takes a few minutes and the steps are in
-[getting-ai-keys.md](./getting-ai-keys.md). Without a key the app still shows
-your conversations, but without the summaries and reply help.
+The setup assistant explains how to create and paste a free Google Gemini key.
+It checks and saves the key for you, with no file editing, Terminal command, or
+restart. The full click-by-click steps are in
+[getting-ai-keys.md](./getting-ai-keys.md).
+
+Without a key, the app still shows your conversations but cannot create
+summaries or writing help. When those features run, the relevant conversation
+text is sent to Google's Gemini service for processing. Your key stays on this
+Mac. Tovi never sends a reply to another person unless you press send.
 
 ### Set up your reply style
 

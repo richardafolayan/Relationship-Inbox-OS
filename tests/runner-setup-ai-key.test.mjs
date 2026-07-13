@@ -16,6 +16,18 @@ const {
   upsertEnvFile,
   validateGeminiKey
 } = await import("../apps/runner/dist/services/setup-ai-key.js");
+const { summarizeControlBody } = await import("../apps/runner/src/services/control-audit.ts");
+
+test("control audit summaries never contain an API key value", () => {
+  const secret = "AQ.secret-key-01234567890123456789";
+  const summary = summarizeControlBody({ key: secret, platform: "IMESSAGE" });
+  assert.deepEqual(summary, {
+    bodyKeys: ["key", "platform"],
+    platform: "IMESSAGE",
+    hasKey: true
+  });
+  assert.equal(JSON.stringify(summary).includes(secret), false);
+});
 
 test("upsertEnvContent updates an existing key and preserves everything else", () => {
   const content = [
