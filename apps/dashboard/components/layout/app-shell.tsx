@@ -9,6 +9,7 @@ import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ConsumerRecovery } from "@/components/common/consumer-recovery";
+import { FullDiskAccessBanner } from "@/components/common/full-disk-access-banner";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
@@ -770,6 +771,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex h-app-screen min-h-0 flex-col">
         <FullDemoBanner />
         <TopStatus />
+        <FullDiskAccessBanner />
         {runtimeFailure ?? startupFailure ? (
           <div className="border-b border-hairline bg-paper px-3 py-2 sm:px-6">
             <ConsumerRecovery
