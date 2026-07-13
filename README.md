@@ -73,7 +73,7 @@ The build also includes optional notifications, quiet hours, dictation, voice-no
 
 ## For pilot testers
 
-The first pilot is macOS and Chrome first.
+The student pilot is built around macOS and Chrome.
 
 Start here:
 
@@ -172,7 +172,7 @@ The current build deliberately avoids:
 - relationship scoring
 - a people CRM
 - an analytics dashboard
-- automatic sending
+- autonomous replies or auto-send decisions
 - a public launch or paid product
 - LeadOS crossover
 - broad platform expansion before the core reply loop is proven
