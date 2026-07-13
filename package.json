@@ -99,6 +99,10 @@
           "lib/**/*",
           "build/Release/better_sqlite3.node"
         ]
+      },
+      {
+        "from": "node_modules/next",
+        "to": "app/node_modules/next"
       }
     ],
     "win": {

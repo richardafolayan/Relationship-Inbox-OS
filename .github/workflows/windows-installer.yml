@@ -28,9 +28,11 @@ jobs:
           $app = Join-Path $resources "app"
           $onnx = Get-ChildItem (Join-Path $app "node_modules/onnxruntime-node/bin/napi-v3/win32") -Filter onnxruntime_binding.node -Recurse | Select-Object -First 1
           $sqlite = Get-ChildItem (Join-Path $app "node_modules/better-sqlite3") -Filter better_sqlite3.node -Recurse | Select-Object -First 1
+          $next = Join-Path $app "node_modules/next/dist/bin/next"
           if (-not (Test-Path $node)) { throw "Bundled Node runtime is missing" }
           if (-not $onnx) { throw "Windows ONNX Runtime payload is missing" }
           if (-not $sqlite) { throw "Windows better-sqlite3 payload is missing" }
+          if (-not (Test-Path $next)) { throw "Packaged Next.js runtime is missing" }
           & $node -e "process.chdir(process.argv[1]); require('./node_modules/better-sqlite3'); console.log('better-sqlite3 ok')" $app
       - name: Smoke test packaged services
         shell: pwsh

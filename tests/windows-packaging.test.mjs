@@ -54,6 +54,10 @@ test("package config builds an unpacked NSIS app with an external Node runtime",
     pkg.build.extraResources[2].filter,
     ["package.json", "lib/**/*", "build/Release/better_sqlite3.node"]
   );
+  assert.deepEqual(pkg.build.extraResources[3], {
+    from: "node_modules/next",
+    to: "app/node_modules/next"
+  });
   assert.equal(pkg.dependencies.prisma, "^6.3.1");
   assert.equal(runnerPkg.dependencies["onnxruntime-node"], "1.21.0");
 });
