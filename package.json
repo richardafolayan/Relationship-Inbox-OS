@@ -92,10 +92,12 @@
         "to": "app/node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
       },
       {
-        "from": "node_modules/better-sqlite3/build/Release",
-        "to": "app/node_modules/better-sqlite3/build/Release",
+        "from": "node_modules/better-sqlite3",
+        "to": "app/node_modules/better-sqlite3",
         "filter": [
-          "better_sqlite3.node"
+          "package.json",
+          "lib/**/*",
+          "build/Release/better_sqlite3.node"
         ]
       }
     ],
