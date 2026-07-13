@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
+import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import {
   portConflict,
   recoverPriorRuntime,
@@ -152,10 +153,15 @@ function databaseFile() {
 function syncDatabase() {
   mkdirSync(DATA_DIR, { recursive: true });
   process.env.DATABASE_URL ||= `file:${join(DATA_DIR, "inbox-os.sqlite")}`;
+  const invocation = prismaDbPushInvocation({
+    appDir: APP_DIR,
+    packaged: PACKAGED,
+    npmCommand: NPM_COMMAND
+  });
   return run(
     "Updating the database...",
-    NPM_COMMAND,
-    ["exec", "--", "prisma", "db", "push", "--schema", "packages/core/prisma/schema.prisma"],
+    invocation.command,
+    invocation.args,
     { env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL } }
   );
 }
