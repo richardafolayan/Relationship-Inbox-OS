@@ -34,6 +34,12 @@ disagree. Run `npm run docs:check` after changing code or documentation.
 - [Tests and verification](developer/testing.md)
 - [Architecture decision records](adr/README.md)
 
+## Planning and strategy
+
+- [Current product direction](strategy/current-product-direction.md)
+- [Current build status](strategy/current-build-status.md)
+- [Windows portability and non-Apple messaging feasibility](strategy/windows-portability.md)
+
 ## Canonical-source rule
 
 Implementation facts should have one home:
