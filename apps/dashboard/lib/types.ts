@@ -336,6 +336,8 @@ export interface PlatformCard {
   connectedAt: string | null;
   lastError: string | null;
   enabled: boolean;
+  supported?: boolean;
+  unavailableReason?: string | null;
   runnerProcess?: {
     executableName: string;
     executablePath: string;

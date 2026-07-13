@@ -678,8 +678,18 @@ function PlatformSettingsSection({
           row={imessageRow}
           fallbackPlatform="IMESSAGE"
           title="iMessage"
-          body="Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
-          actionLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan iMessage"}
+          body={
+            imessageRow?.supported === false
+              ? imessageRow.unavailableReason ?? "iMessage is not available on this computer."
+              : "Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
+          }
+          actionLabel={
+            imessageRow?.supported === false
+              ? "Not available"
+              : imessageNeedsFullDiskAccess
+                ? "Open Full Disk Access"
+                : "Scan iMessage"
+          }
           busy={busy === "IMESSAGE"}
           onPrimary={() =>
             onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
@@ -689,7 +699,11 @@ function PlatformSettingsSection({
           row={findRow("LINKEDIN")}
           fallbackPlatform="LINKEDIN"
           title="LinkedIn"
-          body="Uses your normal Chrome session. Sign in there first."
+          body={
+            findRow("LINKEDIN")?.browserProfileMode === "isolated"
+              ? "Uses a dedicated Chrome profile. Sign in when Tovi opens it."
+              : "Uses your normal Chrome session. Sign in there first."
+          }
           actionLabel={findRow("LINKEDIN")?.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}
           busy={busy === "LINKEDIN"}
           onPrimary={() =>
@@ -727,6 +741,7 @@ function PlatformSetupCard({
   const status = row?.status ?? "NOT_CONNECTED";
   const connected = status === "CONNECTED";
   const enabled = row?.enabled ?? true;
+  const supported = row?.supported !== false;
   const runnerProcess = fallbackPlatform === "IMESSAGE" ? row?.runnerProcess : undefined;
   const platformFailure = row?.lastError
     ? classifyConsumerFailure(new Error(row.lastError), {
@@ -734,7 +749,9 @@ function PlatformSetupCard({
         method: "POST"
       })
     : null;
-  const statusLabel = !enabled
+  const statusLabel = !supported
+    ? "Not available"
+    : !enabled
     ? "Off"
     : connected
       ? "Connected"
@@ -760,7 +777,7 @@ function PlatformSetupCard({
           {statusLabel}
         </span>
       </div>
-      {platformFailure ? (
+      {supported && platformFailure ? (
         <p className="m-0 mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2">
           {platformFailure.message} {platformFailure.nextAction}
         </p>
@@ -775,7 +792,7 @@ function PlatformSetupCard({
         <button
           type="button"
           onClick={onPrimary}
-          disabled={busy || !enabled}
+          disabled={busy || !enabled || !supported}
           className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Working..." : actionLabel}

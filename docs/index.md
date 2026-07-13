@@ -39,6 +39,7 @@ disagree. Run `npm run docs:check` after changing code or documentation.
 - [Current product direction](strategy/current-product-direction.md)
 - [Current build status](strategy/current-build-status.md)
 - [Windows portability and non-Apple messaging feasibility](strategy/windows-portability.md)
+- [Windows pilot install](pilot/windows-install.md)
 
 ## Canonical-source rule
 

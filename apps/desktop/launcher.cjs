@@ -1,5 +1,5 @@
 const { homedir } = require("node:os");
-const { dirname, join, resolve } = require("node:path");
+const { delimiter, dirname, join, resolve, win32 } = require("node:path");
 
 const APP_NAME = "Tovi";
 const APP_ID = "relationship-inbox-os";
@@ -53,12 +53,20 @@ function isSafeExternalUrl(value) {
   }
 }
 
-function nodeCandidates(env = process.env, home = homedir()) {
+function bundledNodePath(appDir, platform = process.platform) {
+  return platform === "win32"
+    ? win32.join(appDir, "..", "runtime", "node", "node.exe")
+    : join(appDir, "..", "runtime", "node", "bin", "node");
+}
+
+function nodeCandidates(env = process.env, home = homedir(), platform = process.platform) {
   const appDir = resolveAppDir(__dirname);
   return [
     env.RIOS_NODE_PATH,
-    join(appDir, "..", "runtime", "node", "bin", "node"),
-    join(home, ".rios-node", "bin", "node"),
+    bundledNodePath(appDir, platform),
+    platform === "win32"
+      ? join(home, ".rios-node", "node.exe")
+      : join(home, ".rios-node", "bin", "node"),
     "node"
   ].filter(Boolean);
 }
@@ -84,17 +92,22 @@ function desktopPaths({ userData, logs, home = homedir() }) {
 }
 
 function startAppEnvironment(env = process.env, nodeExecutable = "", options = {}) {
-  const appDir = resolve(options.appDir || resolveAppDir(__dirname));
+  const platform = options.platform || process.platform;
+  const pathApi = platform === "win32" ? win32 : { dirname, join };
+  const appDir = platform === "win32"
+    ? win32.resolve(options.appDir || resolveAppDir(__dirname))
+    : resolve(options.appDir || resolveAppDir(__dirname));
+  const pathDelimiter = platform === "win32" ? ";" : delimiter;
   const pathEntries = [
-    nodeExecutable && nodeExecutable !== "node" ? dirname(nodeExecutable) : "",
-    join(appDir, "node_modules", ".bin"),
+    nodeExecutable && nodeExecutable !== "node" ? pathApi.dirname(nodeExecutable) : "",
+    pathApi.join(appDir, "node_modules", ".bin"),
     env.PATH || "",
-    "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    platform === "win32" ? "" : "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
   ].filter(Boolean);
   return {
     ...env,
     DASHBOARD_PORT: dashboardPort(env),
-    PATH: pathEntries.join(":"),
+    PATH: pathEntries.join(pathDelimiter),
     RUNNER_PORT: runnerPort(env),
     RIOS_CONFIG_DIR: options.configDir || env.RIOS_CONFIG_DIR,
     RIOS_DATA_DIR: options.dataDir || env.RIOS_DATA_DIR,
@@ -103,6 +116,24 @@ function startAppEnvironment(env = process.env, nodeExecutable = "", options = {
     RIOS_RECLAIM_EXISTING: "1",
     RIOS_STATE_DIR: options.stateDir || env.RIOS_STATE_DIR
   };
+}
+
+function desktopCapabilities(platform = process.platform) {
+  const imessageSupported = platform === "darwin";
+  return {
+    imessageSupported,
+    imessageUnavailableReason: imessageSupported ? null : "iMessage is only available on macOS.",
+    macPermissionsSupported: imessageSupported
+  };
+}
+
+function packagedFeatureDefaults(platform = process.platform) {
+  const defaults = {
+    BROWSER_PROFILE_MODE: platform === "win32" ? "isolated" : "personal",
+    IMESSAGE_ENABLED: platform === "darwin" ? "true" : "false"
+  };
+  if (platform === "win32") defaults.WHATSAPP_ENABLED = "true";
+  return defaults;
 }
 
 function startAppArgs(appDir) {
@@ -185,8 +216,10 @@ module.exports = {
   LOGS_DIR_NAME,
   STORAGE_DIR_NAME,
   REQUIRED_NODE_MAJOR,
+  bundledNodePath,
   dashboardPort,
   dashboardUrl,
+  desktopCapabilities,
   desktopPaths,
   isInternalAppUrl,
   isLocalDashboardUrl,
@@ -194,6 +227,7 @@ module.exports = {
   loadingHtml,
   mergeEnvValues,
   nodeCandidates,
+  packagedFeatureDefaults,
   parseNodeMajor,
   resolveAppDir,
   runnerPort,

@@ -29,6 +29,11 @@ test("WhatsApp stays hidden when its card exists but was never connected", () =>
   assert.ok(!visible.includes("WHATSAPP"));
 });
 
+test("WhatsApp is visible when the pilot build explicitly enables it", () => {
+  const visible = visibleImplementedPlatforms([card({ connectedAt: null, enabled: true })]);
+  assert.ok(visible.includes("WHATSAPP"));
+});
+
 test("WhatsApp becomes visible once it has ever been connected", () => {
   const visible = visibleImplementedPlatforms([
     card({ status: "CONNECTED", connectedAt: "2026-07-06T10:00:00.000Z" })
@@ -53,6 +58,16 @@ test("the visible set does not mutate IMPLEMENTED_PLATFORMS", () => {
   ]);
   assert.deepEqual([...IMPLEMENTED_PLATFORMS], before);
   assert.ok(!IMPLEMENTED_PLATFORMS.includes("WHATSAPP"));
+});
+
+test("unsupported host platforms are excluded from connected totals", () => {
+  const visible = visibleImplementedPlatforms([
+    { platform: "LINKEDIN", connectedAt: null, supported: true },
+    { platform: "IMESSAGE", connectedAt: null, supported: false },
+    { platform: "WHATSAPP", connectedAt: null, supported: true }
+  ]);
+
+  assert.deepEqual(visible, ["LINKEDIN"]);
 });
 
 test("thread page sibling filter offers WhatsApp behind the same opt-in idea (#820)", async () => {

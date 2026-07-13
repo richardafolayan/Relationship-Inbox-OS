@@ -12,6 +12,7 @@ import { join, resolve } from "node:path";
 import {
   resolveBrowserProfileConfig,
   resolveConnectTimeoutMs,
+  resolveDefaultChromeUserDataDir,
   dataDir
 } from "../apps/runner/dist/config.js";
 import { launchPersistentContextForPlatform } from "../apps/runner/dist/platforms/browser-launch.js";
@@ -20,6 +21,24 @@ import { preparePersonalProfileMirror } from "../apps/runner/dist/platforms/pers
 function uniqueTempDir(prefix) {
   return join(tmpdir(), `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
 }
+
+test("resolveDefaultChromeUserDataDir uses the host Chrome profile location", () => {
+  assert.equal(
+    resolveDefaultChromeUserDataDir({ HOME: "/Users/student" }, "darwin"),
+    "/Users/student/Library/Application Support/Google/Chrome"
+  );
+  assert.equal(
+    resolveDefaultChromeUserDataDir(
+      { LOCALAPPDATA: "C:\\Users\\student\\AppData\\Local" },
+      "win32"
+    ),
+    "C:\\Users\\student\\AppData\\Local\\Google\\Chrome\\User Data"
+  );
+  assert.equal(
+    resolveDefaultChromeUserDataDir({ HOME: "/home/student" }, "linux"),
+    "/home/student/.config/google-chrome"
+  );
+});
 
 function basePersonalConfig(overrides = {}) {
   return {
@@ -185,6 +204,32 @@ test("launchPersistentContextForPlatform keeps isolated launch behaviour unchang
   assert.equal(calls[0]?.userDataDir, "/tmp/isolated/linkedin");
   assert.equal(calls[0]?.options.channel, undefined);
   assert.deepEqual(calls[0]?.options.args, ["--disable-blink-features=AutomationControlled"]);
+});
+
+test("launchPersistentContextForPlatform uses installed Chrome with an isolated Windows profile", async () => {
+  const calls = [];
+  await launchPersistentContextForPlatform({
+    platform: "LINKEDIN",
+    launchPersistentContext: async (userDataDir, options) => {
+      calls.push({ userDataDir, options });
+      return { kind: "windows-isolated-context" };
+    },
+    isolatedProfileDir: "C:\\Users\\student\\AppData\\Roaming\\Tovi\\linkedin",
+    headless: false,
+    hostPlatform: "win32",
+    browserProfile: {
+      mode: "isolated",
+      fallbackBehavior: "allow_isolated",
+      personalProfileSyncMode: "smart",
+      personalProfileMirrorRoot: "C:\\mirror",
+      personalChromeUserDataDir: "C:\\Chrome",
+      personalChromeProfileDirectory: "Default",
+      personalChromeProfileName: "Default",
+      personalChromeProfileResolutionStrategy: "directory_exact"
+    }
+  });
+
+  assert.equal(calls[0]?.options.channel, "chrome");
 });
 
 test("launchPersistentContextForPlatform uses mirrored target directory for personal launch", async () => {

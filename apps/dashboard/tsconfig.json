@@ -26,6 +26,12 @@
       }
     ],
     "paths": {
+      "@inbox-os/core": [
+        "../../packages/core/dist/index.d.ts"
+      ],
+      "@inbox-os/core/*": [
+        "../../packages/core/dist/*"
+      ],
       "@/*": [
         "./*"
       ]

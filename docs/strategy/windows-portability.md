@@ -1,13 +1,12 @@
 # Windows portability and non-Apple messaging feasibility
 
-Status: Exploration. This is a decision-support document, not an accepted
-plan. It answers pilot feedback R-0111 (issue 847): can Tovi run on Windows,
+Status: Windows pilot implemented. It answers pilot feedback R-0111 (issue 847): can Tovi run on Windows,
 and if iMessage cannot come along, can Android messages, WhatsApp, and
 LinkedIn stand in?
 
-Scope note: nothing here changes product direction. The current baseline
-stays macOS-only until a Windows track is explicitly committed. This page
-exists so that commitment can be made with real numbers instead of guesses.
+Scope note: the Windows pilot supports WhatsApp and LinkedIn with iMessage
+cleanly unavailable. Google Messages for web remains a separately scoped
+adapter, not part of the first Windows pilot build.
 
 ## TL;DR
 
@@ -24,13 +23,15 @@ exists so that commitment can be made with real numbers instead of guesses.
   already backs LinkedIn and the beta platforms. It is a genuine build, but
   it fits the existing [platform adapter boundary](../adr/0002-platform-adapter-boundary.md)
   rather than fighting it.
-- The two real engineering costs are packaging (there is no Windows
-  installer today) and a small number of macOS shell-outs used for audio and
-  image transcoding. Neither is large in isolation. The Android adapter is
-  the largest single piece of new work.
-- Recommended sequencing is boot-on-Windows first (WhatsApp plus LinkedIn,
-  no iMessage), then a Google Messages adapter, rather than trying to ship
-  everything at once.
+- The Windows pilot ships as a per-user NSIS installer with a bundled Node 22
+  runtime. Its Windows CI build verifies `better-sqlite3`, the win32 ONNX
+  Runtime payload, and a packaged runner/dashboard startup.
+- LinkedIn uses an isolated Patchright profile on Windows. Personal-mode
+  Chrome cookie mirroring remains macOS-only because Windows Chrome uses
+  app-bound cookie encryption.
+- Browser-recorded dictation already produces 16 kHz mono PCM WAV. The runner
+  now recognizes that shape directly, so the Windows pilot does not shell out
+  to `afconvert` for compose dictation.
 
 ## What already runs cross-platform
 
@@ -39,7 +40,7 @@ exists so that commitment can be made with real numbers instead of guesses.
 | Dashboard | Next.js in Electron renderer | Portable. No OS-specific code in the render path. |
 | Runner | Node service | Portable except for the shell-outs listed below. |
 | AI processing | Cloud providers (`openai`, `gemini`, `glm`) | Portable. Provider selection is in [`ai-providers.ts`](../../apps/runner/src/services/ai-providers.ts); no local model is required for text. |
-| LinkedIn | Patchright/Playwright browser | Portable. Chromium is cross-platform; personal-mode Chrome mirroring needs a Windows Chrome path check. |
+| LinkedIn | Patchright/Playwright browser | Portable in isolated mode. Windows pilots sign in once in Tovi's dedicated browser profile; personal-mode cookie mirroring is macOS-only. |
 | WhatsApp | `whatsapp-web.js` and its Puppeteer | Portable. QR/linked-device auth has no OS dependency. |
 | SQLite storage | `better-sqlite3` | Portable native module; needs a per-platform prebuild (see native modules below). |
 | Local Whisper (optional) | `whisper.cpp` CLI | `whisper.cpp` builds on Windows; the WAV pre-step needs a non-Apple converter (see audio below). |
@@ -87,28 +88,23 @@ Windows path forward.
   needs. Sources: [`imessage-attachment-server.ts`](../../apps/runner/src/services/imessage-attachment-server.ts)
   (`convertAudioToWhisperWav`, image conversion) and
   [`imessage-send.ts`](../../apps/runner/src/platforms/imessage-send.ts).
-- Nuance: most of this is entangled with iMessage attachments, which are
-  macOS-only anyway. Live dictation encodes its WAV in the browser before it
-  reaches the runner, so the primary voice-compose path does not depend on
-  `afconvert`. The server-side `convertToWav` fallback in the local-whisper
-  and transformers providers is the only general-purpose use.
-- Windows path: replace the WAV fallback with a bundled `ffmpeg` (or a WASM
-  encoder) behind the same `convertToWav` seam the providers already accept.
-  The image/voice-note transcoding can stay macOS-only because it only ever
-  runs against iMessage content.
+- Live dictation encodes 16 kHz mono PCM WAV in the browser, then passes
+  through the runner's local provider. The runner validates that WAV shape
+  and uses it directly on every OS. This keeps the default compose-dictation
+  path independent of `afconvert`.
+- Nonconforming audio still uses `afconvert` on macOS. That fallback is tied
+  to iMessage attachments, which are not available on Windows.
 
-### Packaging (DMG only, no Windows installer)
+### Packaging
 
 - There is no `electron-builder`. Packaging is a custom
   [`build-macos-dmg.mjs`](../../scripts/build-macos-dmg.mjs) plus
   [`create-macos-app-bundle.mjs`](../../scripts/create-macos-app-bundle.mjs),
   and the updater channel publishes a `.dmg`. There is no `.exe`/NSIS target.
-- Windows path: add a Windows packaging track. The lowest-risk option is to
-  adopt `electron-builder` with an NSIS target for Windows while leaving the
-  existing mac scripts in place, rather than porting the bespoke DMG builder.
-  This also gives Windows auto-update a supported path instead of hand-rolling
-  one. Estimated as the second-largest piece of work after the Android
-  adapter.
+- The Windows pilot uses `electron-builder` with an x64 NSIS target while the
+  existing macOS scripts remain unchanged. The installer bundles Node 22 and
+  is built natively on `windows-latest` so Node native modules match the
+  runtime used by the runner.
 
 ### Desktop shell and permission flows
 
@@ -150,26 +146,22 @@ browser-driven platforms.
 
 ## Native modules
 
-`better-sqlite3` and any `whisper.cpp` build are native and must be compiled
-or prebuilt for `win32-x64` (and ideally `win32-arm64`). The mac build
-already handles native rebuilds during packaging; the Windows track needs the
-same step in its installer pipeline. This is routine for `electron-builder`
-but must be planned for, because a mismatched ABI is the most common
-first-run failure on a new platform.
+`better-sqlite3`, `onnxruntime-node`, and any optional `whisper.cpp` build are
+native. The installer is built on Windows with Node 22 and deliberately does
+not rebuild dependencies for Electron's ABI, because the runner loads them
+from the bundled Node process. CI verifies the packaged `better-sqlite3`
+binary loads and that the `win32-x64` ONNX Runtime binding is present.
 
 ## Suggested phasing
 
 This is a recommendation, not a commitment. Each phase is independently
 shippable and independently valuable.
 
-- Phase 0, boot on Windows. Branch the desktop shell paths and permission
-  flows by platform, add a Windows packaging target (`electron-builder`
-  NSIS), and confirm the app launches with WhatsApp and LinkedIn working and
-  iMessage cleanly absent. No new platform code. This alone answers most of
-  the pilot's question and is the smallest useful milestone.
-- Phase 1, portable voice. Swap the server-side WAV fallback to a bundled
-  cross-platform converter so dictation and local Whisper work off macOS.
-  Small, isolated, behind an existing seam.
+- Phase 0, complete for the pilot. The desktop shell uses Windows storage and
+  logs, bundles Node 22, installs through NSIS, enables WhatsApp, uses an
+  isolated LinkedIn browser profile, and presents iMessage as unavailable.
+- Phase 1, complete for compose dictation. Browser-recorded WAV is consumed
+  directly by the local transformers/ONNX provider on Windows.
 - Phase 2, Android messages. Build the Google Messages for web adapter as a
   new browser platform: selector registry, identity, parse, send, and
   verification tests, dashboard connect flow with QR. This is the large one.
@@ -183,8 +175,9 @@ shippable and independently valuable.
   Windows. The adapter gate exists; the UI copy and platform list need a
   distinct "not supported on this OS" state so a Windows user is not told to
   grant Full Disk Access for a feature that cannot exist.
-- Personal-mode Chrome mirroring for LinkedIn assumes a discoverable Chrome
-  profile path; the Windows profile location differs and needs its own probe.
+- Windows LinkedIn intentionally uses an isolated profile. Supporting Chrome
+  personal-mode cookies would require a Windows app-bound cookie strategy and
+  is not required for the pilot.
 - Google Messages and WhatsApp both tie the inbox to a phone that must stay
   online. Two phone-paired platforms plus a browser platform is more moving
   parts for a single user to keep connected.
@@ -195,8 +188,7 @@ shippable and independently valuable.
 
 ## Recommendation
 
-Windows is achievable and the runtime is largely ready. If a Windows track is
-opened, start with Phase 0 (boot on Windows with the browser platforms, no
-iMessage) to validate demand cheaply, then decide on the Google Messages
-adapter (Phase 2), which is where the real cost sits. Until that commitment
-is made, this document is the record of what it would take.
+Use the Windows pilot installer to validate WhatsApp, LinkedIn, reply review,
+user-triggered sending, and compose dictation with Windows students. Treat a
+Google Messages adapter as the next explicit product decision; it remains the
+largest new platform build and should be justified by pilot demand.

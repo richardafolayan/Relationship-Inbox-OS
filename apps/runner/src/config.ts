@@ -1,5 +1,5 @@
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, win32 } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
 
@@ -481,9 +481,23 @@ export function resolveConnectTimeoutMs(profileMode: BrowserProfileMode, env: No
   return profileMode === "personal" ? personalTimeoutMs : isolatedTimeoutMs;
 }
 
+export function resolveDefaultChromeUserDataDir(
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform
+): string {
+  const homeDir = env.HOME ?? env.USERPROFILE ?? "/Users/richard";
+  if (platform === "win32") {
+    const localAppData = env.LOCALAPPDATA ?? win32.join(homeDir, "AppData", "Local");
+    return win32.resolve(localAppData, "Google", "Chrome", "User Data");
+  }
+  if (platform === "darwin") {
+    return resolve(homeDir, "Library", "Application Support", "Google", "Chrome");
+  }
+  return resolve(env.XDG_CONFIG_HOME ?? resolve(homeDir, ".config"), "google-chrome");
+}
+
 export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env): BrowserProfileConfig {
-  const homeDir = env.HOME ?? "/Users/richard";
-  const defaultChromeUserDataDir = resolve(homeDir, "Library", "Application Support", "Google", "Chrome");
+  const defaultChromeUserDataDir = resolveDefaultChromeUserDataDir(env);
   const mode = env.BROWSER_PROFILE_MODE?.toLowerCase() === "personal" ? "personal" : "isolated";
   const fallbackRaw = env.PERSONAL_PROFILE_FALLBACK?.toLowerCase();
   const fallbackBehavior =

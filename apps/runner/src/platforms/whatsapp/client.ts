@@ -17,6 +17,8 @@
 // `require` gives the default export; the named exports (`Client`,
 // `LocalAuth`) hang off it. Type-only imports read the .d.ts and are erased.
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
+import { win32 } from "node:path";
 import type { Client as ClientType } from "whatsapp-web.js";
 
 const lazyRequire = createRequire(import.meta.url);
@@ -28,19 +30,41 @@ export interface WhatsAppClientOptions {
   clientId?: string;
 }
 
+export function resolveWindowsChromeExecutable(
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform,
+  pathExists: (path: string) => boolean = existsSync
+): string | undefined {
+  if (platform !== "win32") return undefined;
+  const candidates = [
+    env.LOCALAPPDATA
+      ? win32.join(env.LOCALAPPDATA, "Google", "Chrome", "Application", "chrome.exe")
+      : "",
+    env.PROGRAMFILES
+      ? win32.join(env.PROGRAMFILES, "Google", "Chrome", "Application", "chrome.exe")
+      : "",
+    env["PROGRAMFILES(X86)"]
+      ? win32.join(env["PROGRAMFILES(X86)"], "Google", "Chrome", "Application", "chrome.exe")
+      : ""
+  ].filter(Boolean);
+  return candidates.find(pathExists);
+}
+
 export function createWhatsAppClient(opts: WhatsAppClientOptions): ClientType {
   const { Client, LocalAuth } = lazyRequire("whatsapp-web.js");
+  const executablePath = resolveWindowsChromeExecutable();
   return new Client({
     authStrategy: new LocalAuth({
       clientId: opts.clientId ?? "inbox-os",
       dataPath: opts.authDir
     }),
     // wweb.js spawns its own Puppeteer; the args mirror its docs for
-    // headless server use. Kept conservative — we don't pass a custom
-    // executablePath because the bundled Chromium is what wweb.js tests
-    // against.
+    // headless server use. Packaged Windows builds reuse the Chrome install
+    // already required by LinkedIn because Puppeteer's download cache is not
+    // part of the installer.
     puppeteer: {
       headless: true,
+      ...(executablePath ? { executablePath } : {}),
       args: [
         "--no-sandbox",
         "--disable-setuid-sandbox",
