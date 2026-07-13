@@ -35,11 +35,32 @@ jobs:
       - name: Smoke test packaged services
         shell: pwsh
         run: |
+          $resources = Resolve-Path "dist/windows/win-unpacked/resources"
           $exe = Resolve-Path "dist/windows/win-unpacked/Tovi.exe"
-          $process = Start-Process $exe -PassThru
+          $desktop = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($desktop.HasExited) { throw "Packaged Tovi desktop exited during launch" }
+          & taskkill.exe /PID $desktop.Id /T /F | Out-Null
+
+          $node = Join-Path $resources "runtime/node/node.exe"
+          $app = Join-Path $resources "app"
+          $data = Join-Path $env:RUNNER_TEMP "tovi-smoke-data"
+          $stdout = Join-Path $env:RUNNER_TEMP "tovi-smoke.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "tovi-smoke.stderr.log"
+          New-Item -ItemType Directory -Path $data -Force | Out-Null
+          $env:DATABASE_URL = "file:$(Join-Path $data 'inbox-os.sqlite')"
+          $env:IMESSAGE_ENABLED = "false"
+          $env:RIOS_CONFIG_DIR = $data
+          $env:RIOS_DATA_DIR = $data
+          $env:RIOS_PACKAGED_APP = "1"
+          $env:RIOS_RECLAIM_EXISTING = "1"
+          $env:RIOS_STATE_DIR = Join-Path $data "runtime"
+          $env:WHATSAPP_ENABLED = "false"
+          $process = Start-Process $node -ArgumentList (Join-Path $app "scripts/start-app.mjs") -WorkingDirectory $app -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
           try {
             $ready = $false
-            for ($attempt = 0; $attempt -lt 90; $attempt++) {
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              if ($process.HasExited) { break }
               try {
                 $health = Invoke-RestMethod "http://127.0.0.1:4001/health" -TimeoutSec 2
                 $dashboard = Invoke-WebRequest "http://127.0.0.1:3100" -TimeoutSec 2 -UseBasicParsing
@@ -50,9 +71,13 @@ jobs:
               } catch {}
               Start-Sleep -Seconds 1
             }
-            if (-not $ready) { throw "Packaged Tovi services did not become ready" }
+            if (-not $ready) {
+              if (Test-Path $stdout) { Get-Content $stdout }
+              if (Test-Path $stderr) { Get-Content $stderr }
+              throw "Packaged Tovi services did not become ready"
+            }
           } finally {
-            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
           }
       - uses: actions/upload-artifact@v4
         with:
