@@ -58,13 +58,17 @@ export function readAppVersion(projectRoot: string): AppVersion {
 
 /**
  * The feed this install self-updates from. A dev-channel build bakes its feed
- * into release.json (paired atomically with the code), and that wins over the
- * env-configured URL so a dev install never follows the pilot Dropbox link
- * that .env reconcile maintains in the user's .env.
+ * into release.json (paired atomically with the code). A dev install uses ONLY
+ * that baked feed and never the env-configured URL: RIOS_UPDATE_FEED_URL is the
+ * pilot Dropbox link that .env reconcile always maintains, so falling back to it
+ * would silently point a dev install at a stale pilot version (a wrong-channel
+ * feed). If a dev install somehow has no baked feed, return undefined ("updates
+ * not configured") rather than the misleading pilot feed. Non-dev installs use
+ * the configured URL as before.
  */
 export function resolveUpdateFeedUrl(projectRoot: string, configuredUrl?: string): string | undefined {
   const app = readAppVersion(projectRoot);
-  if (app.channel === "dev" && app.updateFeedUrl) return app.updateFeedUrl;
+  if (app.channel === "dev") return app.updateFeedUrl;
   return configuredUrl;
 }
 
