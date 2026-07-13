@@ -5,9 +5,11 @@ import { prisma } from "../db";
 import type {
   AckTemplates,
   AiHelpLevel,
+  CalendarSyncSettings,
   DemoSeedManifest,
   FocusAudience,
   FocusSettings,
+  FocusWindowSource,
   FocusWindowState,
   OperatorProfile,
   ReplyStyle,
@@ -49,7 +51,16 @@ const emptyFocusWindow: FocusWindowState = {
   professionalNote: "",
   audience: "favourites",
   windowId: "",
-  ackedPersonIds: []
+  ackedPersonIds: [],
+  source: "manual",
+  sourceEventKey: ""
+};
+
+const defaultCalendarSync: CalendarSyncSettings = {
+  url: "",
+  enabled: false,
+  keyword: "",
+  audience: "favourites"
 };
 
 const defaultFocusSettings: FocusSettings = {
@@ -69,7 +80,8 @@ const emptyOperatorProfile: OperatorProfile = {
   setupCompletedAt: "",
   focusWindow: { ...emptyFocusWindow, ackedPersonIds: [] },
   ackTemplates: { ...DEFAULT_ACK_TEMPLATES },
-  focusSettings: { ...defaultFocusSettings }
+  focusSettings: { ...defaultFocusSettings },
+  calendarSync: { ...defaultCalendarSync }
 };
 
 function asString(value: unknown): string {
@@ -102,6 +114,10 @@ function asStringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
 }
 
+function asFocusWindowSource(value: unknown): FocusWindowSource {
+  return value === "calendar" ? "calendar" : "manual";
+}
+
 function asFocusWindow(value: unknown): FocusWindowState {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
   return {
@@ -113,7 +129,19 @@ function asFocusWindow(value: unknown): FocusWindowState {
     professionalNote: asString(raw.professionalNote),
     audience: asFocusAudience(raw.audience),
     windowId: asString(raw.windowId),
-    ackedPersonIds: asStringArray(raw.ackedPersonIds)
+    ackedPersonIds: asStringArray(raw.ackedPersonIds),
+    source: asFocusWindowSource(raw.source),
+    sourceEventKey: asString(raw.sourceEventKey)
+  };
+}
+
+function asCalendarSync(value: unknown): CalendarSyncSettings {
+  const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  return {
+    url: asString(raw.url),
+    enabled: asBoolean(raw.enabled, defaultCalendarSync.enabled),
+    keyword: asString(raw.keyword),
+    audience: asFocusAudience(raw.audience)
   };
 }
 
@@ -318,7 +346,8 @@ export function createSettingsStore(): SettingsStore {
         setupCompletedAt: asString(parsed.setupCompletedAt),
         focusWindow: asFocusWindow(parsed.focusWindow),
         ackTemplates: asAckTemplates(parsed.ackTemplates),
-        focusSettings: asFocusSettings(parsed.focusSettings)
+        focusSettings: asFocusSettings(parsed.focusSettings),
+        calendarSync: asCalendarSync(parsed.calendarSync)
       };
     } catch {
       return { ...emptyOperatorProfile };
@@ -354,7 +383,11 @@ export function createSettingsStore(): SettingsStore {
       focusSettings:
         partial.focusSettings !== undefined
           ? asFocusSettings(partial.focusSettings)
-          : current.focusSettings
+          : current.focusSettings,
+      calendarSync:
+        partial.calendarSync !== undefined
+          ? asCalendarSync(partial.calendarSync)
+          : current.calendarSync
     };
     await prisma.setting.upsert({
       where: { key: OPERATOR_PROFILE_KEY },

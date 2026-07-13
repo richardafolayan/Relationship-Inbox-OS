@@ -2,7 +2,7 @@
 
 import { useMemo } from "react";
 import { Moon, Info } from "lucide-react";
-import { focusRailIdleLine, formatUntil, isFocusAckCandidate } from "@/lib/focus";
+import { focusRailIdleLine, formatUntil, isCalendarWindow, isFocusAckCandidate } from "@/lib/focus";
 import { openFocusReview, openFocusSetup, useFocusWindow } from "@/lib/use-focus-window";
 import type { InboxRow } from "@/lib/types";
 
@@ -66,6 +66,11 @@ export function FocusRailCard({ rows }: { rows: InboxRow[] }) {
       <h2 className="m-0 font-display text-[17px] font-semibold leading-[1.25] tracking-[-0.018em] text-ink">
         {untilLabel ? `Focus block active until ${untilLabel}.` : "Focus block active."}
       </h2>
+      {isCalendarWindow(focusWindow) ? (
+        <p className="m-0 mt-[6px] text-[12px] leading-[1.5] text-ink-3">
+          Started automatically from your calendar. End it any time if this isn’t a focus time.
+        </p>
+      ) : null}
       <p className="m-0 mt-[8px] text-[13px] leading-[1.5] text-ink-2">
         {openCount > 0 ? (
           <>

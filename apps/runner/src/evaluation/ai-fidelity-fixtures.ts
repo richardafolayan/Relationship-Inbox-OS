@@ -22,10 +22,13 @@ function profile(input: Partial<OperatorProfile> & Pick<OperatorProfile, "displa
       professionalNote: "",
       audience: "favourites",
       windowId: "",
-      ackedPersonIds: []
+      ackedPersonIds: [],
+      source: "manual",
+      sourceEventKey: ""
     },
     ackTemplates: { close: "", professional: "" },
-    focusSettings: { reasonLabel: true, oneNotePerPerson: true, audience: "favourites" }
+    focusSettings: { reasonLabel: true, oneNotePerPerson: true, audience: "favourites" },
+    calendarSync: { url: "", enabled: false, keyword: "", audience: "favourites" }
   };
 }
 
