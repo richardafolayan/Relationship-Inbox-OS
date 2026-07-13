@@ -7,6 +7,7 @@ import {
   nodeArchiveName,
   windowsRuntimeDir
 } from "../scripts/prepare-windows-runtime.mjs";
+import { npmInvocation } from "../scripts/build-windows-installer.mjs";
 
 test("Windows runtime helpers select the verified Node archive", () => {
   assert.equal(nodeArchiveName("22.21.1", "x64"), "node-v22.21.1-win-x64.zip");
@@ -33,4 +34,16 @@ test("package config builds an unpacked NSIS app with an external Node runtime",
   assert.equal(pkg.build.extraResources[0].from, "build/windows-runtime/${arch}");
   assert.equal(pkg.build.extraResources[0].to, "runtime/node");
   assert.equal(pkg.dependencies.prisma, "^6.3.1");
+});
+
+test("Windows builder invokes npm through Node instead of the npm.cmd shim", () => {
+  const invocation = npmInvocation(["run", "db:generate"], {
+    npm_execpath: "C:\\hostedtoolcache\\node\\npm-cli.js"
+  });
+  assert.equal(invocation.command, process.execPath);
+  assert.deepEqual(invocation.args, [
+    "C:\\hostedtoolcache\\node\\npm-cli.js",
+    "run",
+    "db:generate"
+  ]);
 });
