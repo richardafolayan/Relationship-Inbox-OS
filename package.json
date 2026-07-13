@@ -90,6 +90,13 @@
       {
         "from": "node_modules/onnxruntime-node/bin/napi-v3/win32/x64",
         "to": "app/node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
+      },
+      {
+        "from": "node_modules/better-sqlite3/build/Release",
+        "to": "app/node_modules/better-sqlite3/build/Release",
+        "filter": [
+          "better_sqlite3.node"
+        ]
       }
     ],
     "win": {
