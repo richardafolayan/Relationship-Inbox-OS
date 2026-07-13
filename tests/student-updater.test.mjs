@@ -153,6 +153,24 @@ test("student updater: check, apply+preserve, rollback-on-bad-checksum", async (
       assert.equal(after, before, "refused update should not create a backup");
     });
 
+    await t.test("check-only reports an update even when the installer is too old (never dies)", async () => {
+      // Regression: enforceMinimumInstallerVersion used to run before report(),
+      // so a --check-only against a feed whose minimumInstallerVersion is newer
+      // than the install died with a hard error. The in-app "App updates" card
+      // runs --check-only, so that made every older install self-block instead
+      // of surfacing "update available". check-only must always report.
+      const before = readdirSync(work).filter((n) => n.startsWith(".rios-backup-")).length;
+      const { code, stdout, stderr } = await runUpdater([
+        "--check-only", "--json", "--dir", appDir, "--url", url("/requires-new-installer.json")
+      ]);
+      assert.equal(code, 0, `check-only should exit 0, got ${code} (stderr: ${stderr})`);
+      const parsed = JSON.parse(stdout);
+      assert.equal(parsed.updateAvailable, true);
+      assert.equal(parsed.latestVersion, "0.2.0");
+      const after = readdirSync(work).filter((n) => n.startsWith(".rios-backup-")).length;
+      assert.equal(after, before, "a check-only should never touch the install");
+    });
+
     await t.test("apply refuses to touch a git checkout", async () => {
       // Release zips never contain .git, so .git == a development checkout.
       mkdirSync(join(appDir, ".git"), { recursive: true });
