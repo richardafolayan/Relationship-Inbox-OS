@@ -14,6 +14,7 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
+import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import {
   portConflict,
@@ -346,11 +347,7 @@ async function startApp(prod) {
   }
 
   if (prod) {
-    launch(
-      "dashboard",
-      process.execPath,
-      [join(APP_DIR, "node_modules", "next", "dist", "bin", "next"), "start", "-p", DASHBOARD_PORT]
-    );
+    launch("dashboard", process.execPath, packagedDashboardArgs(APP_DIR, DASHBOARD_PORT));
   } else {
     launch("dashboard", NPM_COMMAND, ["run", "dev", "--workspace", "@inbox-os/dashboard"]);
   }
