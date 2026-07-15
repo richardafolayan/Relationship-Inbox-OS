@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 const {
   addNotifications,
   removeNotification,
+  removeNotifications,
   markNotificationsSeen,
   markAllNotificationsSeen,
   unseenNotificationCount,
@@ -16,6 +17,7 @@ const {
   readCenterNotifications,
   recordNewMessageNotifications,
   dismissCenterNotification,
+  dismissCenterNotifications,
   clearCenterNotifications,
   markCenterNotificationsSeen,
   markAllCenterNotificationsSeen,
@@ -90,6 +92,14 @@ test("removeNotification removes only the target", () => {
     ["t-2"]
   );
   assert.equal(removeNotification(items, "missing").length, 2);
+});
+
+test("removeNotifications removes only the targeted entries", () => {
+  const items = [entry({ id: "demo-1" }), entry({ id: "real-1" }), entry({ id: "demo-2" })];
+  assert.deepEqual(
+    removeNotifications(items, ["demo-1", "demo-2"]).map((notification) => notification.id),
+    ["real-1"]
+  );
 });
 
 test("markNotificationsSeen flips only the targets; markAllNotificationsSeen flips everything", () => {
@@ -308,6 +318,23 @@ test("dismiss / clear / mark-seen round-trip through storage", () => {
   });
 });
 
+test("dismissCenterNotifications clears demo notices without touching real or system entries", () => {
+  withWindow(() => {
+    recordNewMessageNotifications(
+      [row({ id: "demo-1" }), row({ id: "real-1" }), row({ id: "demo-2" })],
+      5000
+    );
+    recordOverdueDigestNotification(digestPeople, 6000);
+
+    dismissCenterNotifications(["demo-1", "demo-2"]);
+
+    assert.deepEqual(
+      readCenterNotifications().map((notification) => notification.id),
+      [OVERDUE_DIGEST_NOTIFICATION_ID, "real-1"]
+    );
+  });
+});
+
 test("onCenterNotificationsChange fires for same-tab writes and matching cross-tab storage events", () => {
   withWindow(({ win }) => {
     let calls = 0;
@@ -381,6 +408,7 @@ test("without a window (SSR) every entry point is a safe no-op", () => {
     assert.doesNotThrow(() => recordNewMessageNotifications([row()], 5000));
     assert.doesNotThrow(() => recordOverdueDigestNotification(digestPeople, 5000));
     assert.doesNotThrow(() => dismissCenterNotification("t-1"));
+    assert.doesNotThrow(() => dismissCenterNotifications(["t-1"]));
     assert.doesNotThrow(() => clearCenterNotifications());
     assert.doesNotThrow(() => markCenterNotificationsSeen(["t-1"]));
     assert.doesNotThrow(() => markAllCenterNotificationsSeen());
