@@ -5,7 +5,13 @@
 // landing in a follow-up. Removing either from this union without
 // also removing the underlying DB rows would break the runner's
 // prisma reads.
-export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
+export type PlatformName =
+  | "LINKEDIN"
+  | "INSTAGRAM"
+  | "TIKTOK"
+  | "IMESSAGE"
+  | "WHATSAPP"
+  | "GOOGLE_MESSAGES";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
 export type PlatformStatus = "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";

@@ -20,6 +20,7 @@ enum PlatformName {
   // (see feat/whatsapp-phase-b on origin for the in-flight adapter).
   IMESSAGE
   WHATSAPP
+  GOOGLE_MESSAGES
 }
 
 enum PlatformStatus {

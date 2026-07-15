@@ -70,6 +70,7 @@ export interface RunnerConfig {
     /** whatsapp-web.js LocalAuth root. Separate from the Playwright-managed
      * profiles above — WhatsApp uses its own Puppeteer instance. */
     WHATSAPP: string;
+    GOOGLE_MESSAGES: string;
   };
   platformAvailability: PlatformAvailability;
   availablePlatforms: PlatformName[];
@@ -78,6 +79,9 @@ export interface RunnerConfig {
     enabled: boolean;
     mediaDir: string;
     send: { dailyCap: number; minIntervalMs: number };
+  };
+  googleMessages: {
+    mediaDir: string;
   };
   imessage: {
     enabled: boolean;
@@ -608,7 +612,8 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       INSTAGRAM: resolve(dataDir, "profiles", "instagram"),
       TIKTOK: resolve(dataDir, "profiles", "tiktok"),
       IMESSAGE: resolve(dataDir, "profiles", "imessage"),
-      WHATSAPP: resolve(dataDir, "profiles", "whatsapp")
+      WHATSAPP: resolve(dataDir, "profiles", "whatsapp"),
+      GOOGLE_MESSAGES: resolve(dataDir, "profiles", "google-messages")
     },
     platformAvailability,
     availablePlatforms: availablePlatformNames(platformAvailability),
@@ -626,6 +631,9 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
         dailyCap: parseIntOrDefault(env.WHATSAPP_MAX_PER_DAY, 40),
         minIntervalMs: parseIntOrDefault(env.WHATSAPP_MIN_INTERVAL_MS, 15_000)
       }
+    },
+    googleMessages: {
+      mediaDir: resolve(dataDir, "google-messages-media")
     },
     imessage: {
       // Mac-only adapter. Default off so Linux/CI runners don't try to open

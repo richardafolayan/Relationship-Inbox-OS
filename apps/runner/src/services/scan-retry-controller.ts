@@ -8,7 +8,14 @@
 import type { PlatformName } from "@inbox-os/core";
 export type ScanRetryPlatform = PlatformName;
 
-const allPlatforms: ScanRetryPlatform[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
+const allPlatforms: ScanRetryPlatform[] = [
+  "LINKEDIN",
+  "INSTAGRAM",
+  "TIKTOK",
+  "IMESSAGE",
+  "WHATSAPP",
+  "GOOGLE_MESSAGES"
+];
 
 interface PlatformCooldownState {
   consecutiveFailures: number;

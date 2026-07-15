@@ -19,7 +19,7 @@ test("WhatsApp composer exposes rich text, poll and media send controls", () => 
   assert.match(THREAD_PAGE, /prefixComposerLines\(\(\) => "> "\)/);
   assert.match(THREAD_PAGE, /sendWhatsAppPoll/);
   assert.match(THREAD_PAGE, /image\/\*,video\/\*,audio\/\*,application\/pdf,\.gif/);
-  assert.match(THREAD_PAGE, /thread\.platform === "IMESSAGE" \|\| thread\.platform === "WHATSAPP"/);
+  assert.match(THREAD_PAGE, /thread\.platform === "IMESSAGE"[\s\S]*?thread\.platform === "WHATSAPP"/);
 });
 
 test("runner exposes a dedicated WhatsApp poll send route", () => {

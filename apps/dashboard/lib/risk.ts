@@ -12,20 +12,21 @@ export function toDisplayRisk(level: RunnerRisk): DisplayRisk {
 }
 
 export const PLATFORM_LABEL: Record<
-  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP",
+  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES",
   string
 > = {
   LINKEDIN: "linkedin",
   INSTAGRAM: "instagram",
   TIKTOK: "tiktok",
   IMESSAGE: "imessage",
-  WHATSAPP: "whatsapp"
+  WHATSAPP: "whatsapp",
+  GOOGLE_MESSAGES: "google messages"
 };
 
 // Compatibility fallback for an older runner that does not return platform
 // cards. Current runners return the exact env-enabled set.
 export const IMPLEMENTED_PLATFORMS: ReadonlyArray<
-  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"
+  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
 > = ["LINKEDIN", "IMESSAGE"];
 
 // The platform set the operator sees in connected counts, the reconnect
@@ -38,7 +39,7 @@ export function visibleImplementedPlatforms(
     enabled?: boolean;
     supported?: boolean;
   }> | null | undefined
-): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"> {
+): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"> {
   if (!platforms) return IMPLEMENTED_PLATFORMS;
   return platforms
     .filter((platform) => platform.supported !== false)
@@ -48,8 +49,11 @@ export function visibleImplementedPlatforms(
     )
     .map((platform) => platform.platform)
     .filter(
-      (platform): platform is "LINKEDIN" | "IMESSAGE" | "WHATSAPP" =>
-        platform === "LINKEDIN" || platform === "IMESSAGE" || platform === "WHATSAPP"
+      (platform): platform is "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
+        platform === "LINKEDIN" ||
+        platform === "IMESSAGE" ||
+        platform === "WHATSAPP" ||
+        platform === "GOOGLE_MESSAGES"
     );
 }
 

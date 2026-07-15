@@ -174,7 +174,10 @@ function packagedFeatureDefaults(platform = process.platform) {
     BROWSER_PROFILE_MODE: platform === "win32" ? "isolated" : "personal",
     IMESSAGE_ENABLED: platform === "darwin" ? "true" : "false"
   };
-  if (platform === "win32") defaults.WHATSAPP_ENABLED = "true";
+  if (platform === "win32") {
+    defaults.WHATSAPP_ENABLED = "true";
+    defaults.GOOGLE_MESSAGES_ENABLED = "true";
+  }
   return defaults;
 }
 

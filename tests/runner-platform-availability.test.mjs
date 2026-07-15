@@ -9,8 +9,10 @@ test("platform switches use pilot-safe defaults", () => {
   assert.deepEqual(resolvePlatformAvailability({}, "darwin"), {
     LINKEDIN: true,
     IMESSAGE: false,
-    WHATSAPP: false
+    WHATSAPP: false,
+    GOOGLE_MESSAGES: false
   });
+  assert.equal(resolvePlatformAvailability({}, "win32").GOOGLE_MESSAGES, true);
 });
 
 test("each platform can be enabled or disabled independently", () => {
@@ -18,7 +20,8 @@ test("each platform can be enabled or disabled independently", () => {
     {
       LINKEDIN_ENABLED: "false",
       IMESSAGE_ENABLED: "true",
-      WHATSAPP_ENABLED: "1"
+      WHATSAPP_ENABLED: "1",
+      GOOGLE_MESSAGES_ENABLED: "yes"
     },
     "darwin"
   );
@@ -26,9 +29,10 @@ test("each platform can be enabled or disabled independently", () => {
   assert.deepEqual(availability, {
     LINKEDIN: false,
     IMESSAGE: true,
-    WHATSAPP: true
+    WHATSAPP: true,
+    GOOGLE_MESSAGES: true
   });
-  assert.deepEqual(availablePlatformNames(availability), ["IMESSAGE", "WHATSAPP"]);
+  assert.deepEqual(availablePlatformNames(availability), ["IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]);
 });
 
 test("iMessage remains unavailable away from macOS", () => {
@@ -39,4 +43,5 @@ test("iMessage remains unavailable away from macOS", () => {
 test("common false and true spellings are accepted", () => {
   assert.equal(resolvePlatformAvailability({ LINKEDIN_ENABLED: "off" }, "darwin").LINKEDIN, false);
   assert.equal(resolvePlatformAvailability({ WHATSAPP_ENABLED: "yes" }, "darwin").WHATSAPP, true);
+  assert.equal(resolvePlatformAvailability({ GOOGLE_MESSAGES_ENABLED: "off" }, "win32").GOOGLE_MESSAGES, false);
 });

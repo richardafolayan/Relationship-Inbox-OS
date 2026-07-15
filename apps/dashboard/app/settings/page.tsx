@@ -94,7 +94,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   {
     id: "platforms",
     label: "Platforms",
-    description: "Connect iMessage, LinkedIn, and WhatsApp.",
+    description: "Connect iMessage, Google Messages, LinkedIn, and WhatsApp.",
     icon: Plug
   },
   {
@@ -141,7 +141,8 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   INSTAGRAM: "Instagram",
   TIKTOK: "TikTok",
   IMESSAGE: "iMessage",
-  WHATSAPP: "WhatsApp"
+  WHATSAPP: "WhatsApp",
+  GOOGLE_MESSAGES: "Google Messages"
 };
 
 type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
@@ -688,6 +689,20 @@ function PlatformSettingsSection({
           busy={busy === "IMESSAGE"}
           onPrimary={() =>
             onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
+          }
+        />
+        <PlatformSetupCard
+          row={findRow("GOOGLE_MESSAGES")}
+          fallbackPlatform="GOOGLE_MESSAGES"
+          title="Google Messages"
+          body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
+          actionLabel={findRow("GOOGLE_MESSAGES")?.status === "CONNECTED" ? "Open Google Messages" : "Pair Android phone"}
+          busy={busy === "GOOGLE_MESSAGES"}
+          onPrimary={() =>
+            onAction(
+              "GOOGLE_MESSAGES",
+              findRow("GOOGLE_MESSAGES")?.status === "CONNECTED" ? "open-browser" : "connect"
+            )
           }
         />
         <PlatformSetupCard

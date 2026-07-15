@@ -1,7 +1,7 @@
 # Windows pilot install
 
-The Windows pilot supports WhatsApp and LinkedIn. iMessage is shown as not
-available. Google Messages for web is not included in this build.
+The Windows pilot supports Google Messages, WhatsApp, and LinkedIn. iMessage
+is shown as not available because Apple does not provide it on Windows.
 
 ## Install
 
@@ -17,6 +17,10 @@ available. Google Messages for web is not included in this build.
 
 ## Connect platforms
 
+- Google Messages: choose **Pair Android phone**. Sign in with the same Google
+  account used by Google Messages on the phone, then confirm the matching
+  emoji on the phone if asked. Tovi can read and send SMS, MMS, and RCS through
+  the paired web session. The phone must stay online.
 - LinkedIn: choose Connect and sign in inside Tovi's dedicated browser. The
   Windows pilot does not copy cookies from the student's normal Chrome
   profile.
@@ -29,10 +33,19 @@ own.
 
 1. Confirm Settings shows iMessage as **Not available** without asking for
    Full Disk Access.
-2. Connect LinkedIn and WhatsApp.
-3. Scan both platforms and open one conversation from each.
-4. Record a short dictated reply, review the text, then edit it.
-5. Send a test reply only after confirming the recipient and final wording.
+2. Pair Google Messages, then connect LinkedIn and WhatsApp.
+3. Scan all three platforms and open one conversation from each.
+4. In Google Messages, check a one-to-one SMS or RCS chat and a group chat.
+5. Attach one photo to a Google Messages reply and remove it before sending.
+6. Record a short dictated reply, review the text, then edit it.
+7. Send a test reply only after confirming the recipient and final wording.
+
+Google Messages on the web can show quoted replies but cannot create a new
+quoted reply. Open the paired Google Messages window for that action.
+Google documents the pairing flow and web requirements in
+[Use Messages for web](https://support.google.com/messages/answer/7611075),
+and documents the desktop quoted-reply limitation in
+[Reply to a message](https://support.google.com/messages/answer/10456318).
 
 If startup fails, open **Tovi > Show Logs** and attach the log to a bug report.
 Do not paste private message content into the report.

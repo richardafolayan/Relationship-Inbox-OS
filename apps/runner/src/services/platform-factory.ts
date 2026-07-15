@@ -6,6 +6,7 @@ import type { SettingsStore } from "../types/runtime";
 import { LinkedInAdapter } from "../platforms/linkedin-adapter";
 import { IMessageAdapter } from "../platforms/imessage-adapter";
 import { WhatsAppAdapter } from "../platforms/whatsapp-adapter";
+import { GoogleMessagesAdapter } from "../platforms/google-messages-adapter";
 import type { SendGuardPrisma } from "../platforms/whatsapp/sendGuard";
 import type { ConnectStepInfo, PersonalProfileFallbackInfo } from "../platforms/browser-launch";
 import { createSessionManager } from "./session-manager";
@@ -134,6 +135,16 @@ export function createAdapters(input: {
       onQr: input.onWhatsAppQr,
       onStateChange: input.onWhatsAppStateChange,
       onIncomingMessage: input.onWhatsAppIncomingMessage
+    });
+  }
+
+  if (runnerConfig.platformAvailability.GOOGLE_MESSAGES) {
+    adapters.GOOGLE_MESSAGES = new GoogleMessagesAdapter({
+      screenshotDir: runnerConfig.screenshotDir,
+      domDumpDir: runnerConfig.domDumpDir,
+      mediaDir: runnerConfig.googleMessages.mediaDir,
+      resolveSelectors: () => resolveSelectorsForPlatform("GOOGLE_MESSAGES"),
+      sessionManager
     });
   }
 

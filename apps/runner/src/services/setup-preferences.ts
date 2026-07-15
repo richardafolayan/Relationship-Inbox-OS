@@ -3,7 +3,12 @@ import { prisma } from "../db";
 import { safeJsonParse } from "../utils/json";
 
 const SETUP_PREFERENCES_KEY = "setup_preferences_v2";
-const SETUP_PLATFORMS: PlatformName[] = ["IMESSAGE", "LINKEDIN", "WHATSAPP"];
+const SETUP_PLATFORMS: PlatformName[] = [
+  "IMESSAGE",
+  "LINKEDIN",
+  "WHATSAPP",
+  "GOOGLE_MESSAGES"
+];
 
 export type SetupTranscriptionMode = "off" | "standard" | "enhanced";
 

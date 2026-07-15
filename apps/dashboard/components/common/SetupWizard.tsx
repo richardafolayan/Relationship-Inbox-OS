@@ -28,7 +28,7 @@ import {
 import type { OperatorProfile, PlatformCard } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-type SetupPlatform = "IMESSAGE" | "LINKEDIN" | "WHATSAPP";
+type SetupPlatform = "IMESSAGE" | "LINKEDIN" | "WHATSAPP" | "GOOGLE_MESSAGES";
 type TranscriptionMode = "off" | "standard" | "enhanced";
 type Step = "welcome" | "profile" | "sources" | "connect" | "contacts" | "ai" | "transcription" | "review" | "done";
 
@@ -230,8 +230,9 @@ function SourcesStep({ selected, onChange, onBack, onNext }: { selected: SetupPl
   const [busy, setBusy] = useState(false);
   const choices: Array<[SetupPlatform, string, string]> = [
     ["IMESSAGE", "iMessage", "Messages and Contacts on this Mac"],
+    ["GOOGLE_MESSAGES", "Google Messages", "SMS, MMS, and RCS from your Android phone"],
     ["LINKEDIN", "LinkedIn", "Your normal LinkedIn account in Chrome"],
-    ["WHATSAPP", "WhatsApp", "Link this Mac from WhatsApp on your phone"]
+    ["WHATSAPP", "WhatsApp", "Link this computer from WhatsApp on your phone"]
   ];
   const toggle = (platform: SetupPlatform) => onChange(selected.includes(platform) ? selected.filter((item) => item !== platform) : [...selected, platform]);
   return <Card icon={<MessageSquareText />} eyebrow="Message sources" title="Where do you get messages?" body="Select only what you use. Unselected services stay inactive and do not need to be connected.">
@@ -252,14 +253,16 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
     catch { setNotice("That did not finish. Follow the instructions below, then try again."); }
     finally { setBusy(null); }
   };
-  if (selected.length === 0) return <Card icon={<MessageSquareText />} eyebrow="Messages" title="No message sources selected." body="That is fine. You can add iMessage, LinkedIn, or WhatsApp later in Settings."><Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary></Actions></Card>;
+  if (selected.length === 0) return <Card icon={<MessageSquareText />} eyebrow="Messages" title="No message sources selected." body="That is fine. You can add iMessage, Google Messages, LinkedIn, or WhatsApp later in Settings."><Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary></Actions></Card>;
   const imessage = rows.find((row) => row.platform === "IMESSAGE");
+  const googleMessages = rows.find((row) => row.platform === "GOOGLE_MESSAGES");
   const linkedin = rows.find((row) => row.platform === "LINKEDIN");
   const needsAccess = isIMessageFullDiskAccessProblem(imessage);
   return <Card icon={<MessageSquareText />} eyebrow="Connect messages" title="Connect each source you chose." body={`Complete one card at a time. ${APP_NAME} reads conversations into your inbox. Sending always needs your click.`}>
     {notice ? <Notice>{notice}</Notice> : null}
     <div className="mt-5 grid gap-3">
       {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? `Press Open Mac permission. In Full Disk Access, turn on ${APP_NAME} or ${LEGACY_APP_NAME}. Then quit and reopen ${APP_NAME}.` : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
+      {selected.includes("GOOGLE_MESSAGES") ? <Platform title="Google Messages" connected={googleMessages?.status === "CONNECTED"} body={`Press Pair Android phone. Sign in to Google Messages in the window, then confirm the matching emoji on your phone if asked. Keep the window open until ${APP_NAME} says connected.`} action="Pair Android phone" busy={busy === "GOOGLE_MESSAGES"} onClick={() => void act("GOOGLE_MESSAGES", "/runner/control/platform/connect", { platform: "GOOGLE_MESSAGES" })} /> : null}
       {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body={`Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until ${APP_NAME} says connected.`} action="Connect LinkedIn" busy={busy === "LINKEDIN"} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
       {selected.includes("WHATSAPP") ? <div className="rounded-[10px] border border-hairline bg-paper-2/45 p-4"><WhatsAppConnect /><ol className="mb-0 mt-3 pl-5 text-[12.5px] leading-6 text-ink-2"><li>Open WhatsApp on your phone.</li><li>Open Settings, then Linked Devices.</li><li>Press Link a Device and scan the code shown here.</li></ol></div> : null}
     </div>
@@ -315,7 +318,7 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
   const rows = setup?.platforms ?? [];
   return <Card icon={<Settings2 />} eyebrow="Final check" title={`Here is what ${APP_NAME} will use.`} body="Green means ready now. Anything unfinished can be completed later from Settings.">
     <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">
-      {selected.length ? selected.map((platform) => { const connected = rows.some((row) => row.name === platform && row.status === "CONNECTED"); return <Summary key={platform} label={{ IMESSAGE: "iMessage", LINKEDIN: "LinkedIn", WHATSAPP: "WhatsApp" }[platform]} value={connected ? "Connected" : "Finish in Settings"} ok={connected} />; }) : <Summary label="Message sources" value="None selected" ok />}
+      {selected.length ? selected.map((platform) => { const connected = rows.some((row) => row.name === platform && row.status === "CONNECTED"); return <Summary key={platform} label={{ IMESSAGE: "iMessage", GOOGLE_MESSAGES: "Google Messages", LINKEDIN: "LinkedIn", WHATSAPP: "WhatsApp" }[platform]} value={connected ? "Connected" : "Finish in Settings"} ok={connected} />; }) : <Summary label="Message sources" value="None selected" ok />}
       {selected.includes("IMESSAGE") ? <Summary label="Contact names" value={(setup?.contacts?.addressBookContactCount ?? 0) > 0 ? `${setup!.contacts!.addressBookContactCount} records available` : "Check Contacts later"} ok={(setup?.contacts?.addressBookContactCount ?? 0) > 0} /> : null}
       <Summary label="AI help" value={!aiEnabled ? "Off by choice" : aiConfigured ? "Ready" : "Key still needed"} ok={!aiEnabled || aiConfigured} />
       <Summary label="Voice transcription" value={setup?.transcription.mode === "standard" ? "Standard local model" : setup?.transcription.mode === "enhanced" ? "Enhanced local model" : "Off by choice"} ok={setup?.transcription.phase !== "error"} />

@@ -34,6 +34,8 @@ function platformLabel(platform: string | undefined): string {
       return "instagram";
     case "TIKTOK":
       return "tiktok";
+    case "GOOGLE_MESSAGES":
+      return "google messages";
     default:
       return platform.toLowerCase();
   }

@@ -1,0 +1,12 @@
+{
+  "inbox_url": "https://messages.google.com/web/conversations",
+  "thread_list": "mws-conversations-list, [role='list'][aria-label*='Conversation'], nav",
+  "thread_item": "mws-conversation-list-item, a[href*='/web/conversations/'], [role='listitem']",
+  "unread_badge": "[aria-label*='unread' i], .unread, [class*='unread']",
+  "thread_snippet": "mws-conversation-snippet, [class*='snippet'], [class*='preview']",
+  "message_container": "mws-messages-list, mws-conversation-view, main, [role='main']",
+  "message_item": "mws-message-wrapper, [data-e2e-message-id], [data-message-id], [role='row']",
+  "message_text": "mws-text-message-part, [class*='text-message'], [dir='auto']",
+  "composer_input": "mws-message-compose textarea, textarea[aria-label], [contenteditable='true'][role='textbox']",
+  "send_button": "button[aria-label^='Send' i], mws-message-send-button button, button[type='submit']"
+}

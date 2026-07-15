@@ -364,18 +364,13 @@ let onLinkedInInboxChanged:
   | ((change: { reason: string; sourceChangedAt: string }) => void)
   | null = null;
 
-// Ensure WHATSAPP is in the operator's enabledPlatforms once they link a
-// device, so the scheduled scan loop keeps pulling WhatsApp on the normal
-// cadence (the real-time message watcher covers the gaps between ticks). The
-// scan gate still no-ops WhatsApp whenever it isn't connected, so enabling it
-// is safe across disconnects. Idempotent — a no-op once WHATSAPP is present.
-async function ensureWhatsAppEnabledInSettings(): Promise<void> {
+async function ensurePlatformEnabledInSettings(platform: PlatformName): Promise<void> {
   const settings = await settingsStore.getSettings();
-  if (settings.enabledPlatforms.includes("WHATSAPP")) {
+  if (settings.enabledPlatforms.includes(platform)) {
     return;
   }
   await settingsStore.updateSettings({
-    enabledPlatforms: [...settings.enabledPlatforms, "WHATSAPP"]
+    enabledPlatforms: [...settings.enabledPlatforms, platform]
   });
 }
 
@@ -422,7 +417,7 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
       // kick an initial scan so threads appear right away instead of waiting
       // for the next tick. Both go through the normal paths, so the scan
       // shows in the TopStatus ticker like any other.
-      void ensureWhatsAppEnabledInSettings().catch((error) => {
+      void ensurePlatformEnabledInSettings("WHATSAPP").catch((error) => {
         console.warn(
           `[whatsapp] could not enable in settings: ${
             error instanceof Error ? error.message : String(error)
@@ -1346,7 +1341,7 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 function parsePlatform(value: unknown): PlatformName {
-  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).parse(value);
+  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]).parse(value);
   return parsed;
 }
 
@@ -1360,7 +1355,13 @@ interface ControlTraceContext {
 }
 
 function maybeParsePlatform(value: unknown): PlatformName | undefined {
-  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK" && value !== "IMESSAGE") {
+  if (
+    value !== "LINKEDIN" &&
+    value !== "INSTAGRAM" &&
+    value !== "TIKTOK" &&
+    value !== "IMESSAGE" &&
+    value !== "GOOGLE_MESSAGES"
+  ) {
     return undefined;
   }
   return value;
@@ -1512,7 +1513,8 @@ function summarizeFailureDetails(details: Record<string, unknown> | undefined): 
   };
 }
 
-function connectTimeoutMsForCurrentProfile(): number {
+function connectTimeoutMsForCurrentProfile(platform?: PlatformName): number {
+  if (platform === "GOOGLE_MESSAGES") return 120_000;
   return resolveConnectTimeoutMs(runnerConfig.browserProfile.mode, process.env);
 }
 
@@ -1777,7 +1779,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).default("LINKEDIN"),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -2367,6 +2369,18 @@ app.get("/data/whatsapp-attachment/:guid", asyncRoute(async (req, res) => {
   await streamWhatsAppMedia({ ...media, res });
 }));
 
+app.get("/data/google-messages-attachment/:guid", asyncRoute(async (req, res) => {
+  const { guid } = z.object({
+    guid: z.string().regex(/^[a-f0-9]{64}\.[a-z0-9]{1,9}$/i)
+  }).parse(req.params);
+  const absolutePath = ensurePathInside(runnerConfig.googleMessages.mediaDir, guid);
+  if (!existsSync(absolutePath)) {
+    res.status(404).json({ error: "Google Messages attachment not found" });
+    return;
+  }
+  res.sendFile(absolutePath);
+}));
+
 // Stream a LinkedIn voice-message audio file to the dashboard. Mirror
 // of /data/imessage-attachment but for the bytes captured by the
 // LinkedIn adapter during scan (`captureLinkedInVoiceMessage`). The
@@ -2466,7 +2480,7 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
     getSetupPreferences(),
     settingsStore.getSettings(),
     prisma.platform.findMany({
-      where: { name: { in: ["IMESSAGE", "LINKEDIN", "WHATSAPP"] } },
+      where: { name: { in: ["IMESSAGE", "LINKEDIN", "WHATSAPP", "GOOGLE_MESSAGES"] } },
       select: { name: true, status: true, connectedAt: true, lastError: true }
     }),
     settingsStore.getOperatorProfile()
@@ -2488,7 +2502,7 @@ app.get("/data/setup/status", asyncRoute(async (_req, res) => {
 
 app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
   const payload = z.object({
-    selectedPlatforms: z.array(z.enum(["IMESSAGE", "LINKEDIN", "WHATSAPP"])).optional(),
+    selectedPlatforms: z.array(z.enum(["IMESSAGE", "LINKEDIN", "WHATSAPP", "GOOGLE_MESSAGES"])).optional(),
     aiEnabled: z.boolean().optional(),
     startedAt: z.string().max(100).optional(),
     completedAt: z.string().max(100).optional()
@@ -2498,8 +2512,11 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
     settingsStore.getSettings()
   ]);
   const existingPilotPlatforms = currentSettings.enabledPlatforms.filter(
-    (platform): platform is "IMESSAGE" | "LINKEDIN" | "WHATSAPP" =>
-      platform === "IMESSAGE" || platform === "LINKEDIN" || platform === "WHATSAPP"
+    (platform): platform is "IMESSAGE" | "LINKEDIN" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
+      platform === "IMESSAGE" ||
+      platform === "LINKEDIN" ||
+      platform === "WHATSAPP" ||
+      platform === "GOOGLE_MESSAGES"
   );
   const selectedPlatforms = payload.selectedPlatforms ??
     (current.startedAt || current.selectedPlatforms.length > 0
@@ -2722,7 +2739,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"])).optional(),
+      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"])).optional(),
       demoMode: z.boolean().optional(),
       presenterDemoMode: z.enum(["off", "sandbox", "live"]).optional(),
       presenterReadOnly: z.boolean().optional(),
@@ -3248,7 +3265,7 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "run a scan", kind: "external-action" })) return;
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).optional(),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional(),
@@ -3334,11 +3351,11 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "connect a platform", kind: "external-action" })) return;
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
-  const connectTimeoutMs = connectTimeoutMsForCurrentProfile();
+  const connectTimeoutMs = connectTimeoutMsForCurrentProfile(platform);
 
   await withPlatformControlLock(platform, async () => {
     await auditService.log({
@@ -3422,6 +3439,8 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
           connectedAt
         }
       });
+
+      await ensurePlatformEnabledInSettings(platform);
 
       eventBus.emit({
         type: "PLATFORM_STATUS_CHANGED",
@@ -3514,7 +3533,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "run selector tests", kind: "external-action" })) return;
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]),
       key: z
         .enum([
           "thread_list",
@@ -5913,11 +5932,14 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
+  const platformsForDisplay = process.platform === "darwin"
+    ? runnerConfig.availablePlatforms
+    : Array.from(new Set([...runnerConfig.availablePlatforms, "IMESSAGE" as const]));
   const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    runnerConfig.availablePlatforms.map(async (platform) => {
+    platformsForDisplay.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
       const supported = platform !== "IMESSAGE" || process.platform === "darwin";
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
@@ -6191,7 +6213,7 @@ app.post("/control/message-sync-latency", asyncRoute(async (req, res) => {
     .object({
       metric: z.enum(MESSAGE_SYNC_METRICS),
       durationMs: z.number().finite().min(0).max(24 * 60 * 60 * 1_000),
-      platform: z.enum(["LINKEDIN", "IMESSAGE", "WHATSAPP"]).optional(),
+      platform: z.enum(["LINKEDIN", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).optional(),
       outcome: z.enum(["success", "failure"]).optional()
     })
     .parse(req.body) as {
@@ -7233,7 +7255,7 @@ app.get("/control/pilot-feedback/status", asyncRoute(async (_req, res) => {
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "open the platform browser", kind: "external-action" })) return;
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     // The zod payload restricts platform to the three with adapters today,
     // but the adapters map is now Partial — narrow via requireAdapter to
@@ -7907,7 +7929,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "reset the platform session", kind: "external-action" })) return;
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional() }).parse(req.body ?? {});
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]).optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");

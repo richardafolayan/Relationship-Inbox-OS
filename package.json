@@ -77,6 +77,7 @@
       "packages/core/dist/**/*",
       "packages/core/package.json",
       "packages/core/prisma/**/*",
+      "packages/core/selectors/**/*",
       "scripts/start-app.mjs",
       "scripts/lib/**/*",
       "node_modules/**/*"

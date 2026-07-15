@@ -216,6 +216,9 @@ async function preparePackagedStorage() {
       : { BROWSER_PROFILE_MODE: featureDefaults.BROWSER_PROFILE_MODE }),
     ...(featureDefaults.WHATSAPP_ENABLED
       ? { WHATSAPP_ENABLED: featureDefaults.WHATSAPP_ENABLED }
+      : {}),
+    ...(featureDefaults.GOOGLE_MESSAGES_ENABLED
+      ? { GOOGLE_MESSAGES_ENABLED: featureDefaults.GOOGLE_MESSAGES_ENABLED }
       : {})
   }, { keepExisting: true });
   writeFileSync(envPath, envText, { mode: 0o600 });

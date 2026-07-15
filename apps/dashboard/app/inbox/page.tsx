@@ -47,7 +47,7 @@ import {
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
 type PriorityGroupFilter = "all" | string;
 type SortMode = "oldest" | "recent" | "name";
 
@@ -81,7 +81,8 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
   { key: "IMESSAGE", label: "iMessage" },
-  { key: "WHATSAPP", label: "WhatsApp" }
+  { key: "WHATSAPP", label: "WhatsApp" },
+  { key: "GOOGLE_MESSAGES", label: "Google Messages" }
 ];
 
 const SORT_MODES: { key: SortMode; label: string }[] = [
@@ -95,7 +96,8 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
   IMESSAGE: "iM",
   INSTAGRAM: "ig",
   TIKTOK: "tt",
-  WHATSAPP: "wa"
+  WHATSAPP: "wa",
+  GOOGLE_MESSAGES: "gm"
 };
 
 function applyTab(row: InboxRow, tab: RiskTab): boolean {

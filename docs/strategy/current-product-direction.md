@@ -1,13 +1,14 @@
 # Current Product Direction
 
-_Living document. Keep this updated as the direction changes. Last updated: 2026-07-13._
+_Living document. Keep this updated as the direction changes. Last updated: 2026-07-15._
 
 Tovi is being prepared for a small 3-5 student pilot. It should
 feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
 analytics console, or AI ghostwriter.
 
-The current pilot baseline is `v1/strip-back-pr1`. Windows Phase 0 is an
-explicit parallel track on `feat/windows-phase-0`.
+The current pilot baseline is `v1/strip-back-pr1`. The Windows parity track is
+`feat/google-messages-windows-parity`. Google Messages is an explicit pilot
+requirement for Android phone users, overriding the earlier Phase 0 exclusion.
 
 ## Product principles
 
@@ -41,11 +42,13 @@ Stop adding core product features. Prepare and run the 3-5 student pilot.
 Only build small operational improvements that reduce pilot friction, for
 example direct feedback submission, install/readme clarity, or setup hardening.
 
-## Windows Phase 0
+## Windows pilot parity
 
-Pursue the smallest Windows pilot milestone in parallel: package and boot Tovi
-on Windows with LinkedIn and WhatsApp, with iMessage clearly unavailable. Do
-not pull Google Messages or Windows auto-update into this phase.
+Package and boot Tovi on Windows with Google Messages, LinkedIn, and WhatsApp.
+Google Messages supplies Android SMS, MMS, and RCS through a user-paired web
+session. iMessage and macOS Contacts birthday sync remain clearly unavailable
+because they depend on Apple-only local services. All sends remain
+user-triggered.
 
 ---
 

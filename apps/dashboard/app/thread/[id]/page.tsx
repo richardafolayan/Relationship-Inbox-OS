@@ -61,6 +61,7 @@ import type {
 } from "@/lib/types";
 import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
 import { WhatsAppMedia } from "@/components/thread/whatsapp-media";
+import { GoogleMessagesMedia } from "@/components/thread/google-messages-media";
 import { WhatsAppPoll } from "@/components/thread/whatsapp-poll";
 import { WhatsAppText } from "@/components/thread/whatsapp-text";
 import { getWhatsAppPoll, type PollVoteRecord } from "@/lib/whatsapp-poll";
@@ -530,7 +531,7 @@ export default function ThreadPage() {
   );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
   const [siblingPlatform, setSiblingPlatform] = useState<
-    "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP"
+    "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
   >("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
@@ -1192,7 +1193,7 @@ export default function ThreadPage() {
         errorMessage?: string;
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
-        platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
+        platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
         syncTiming?: {
           sourceChangedAt: string;
           persistedAt: string;
@@ -1579,7 +1580,9 @@ export default function ThreadPage() {
   }, []);
 
   const composerAcceptsFiles =
-    thread?.platform === "IMESSAGE" || thread?.platform === "WHATSAPP";
+    thread?.platform === "IMESSAGE" ||
+    thread?.platform === "WHATSAPP" ||
+    thread?.platform === "GOOGLE_MESSAGES";
 
   const isAttachableFile = useCallback((file: File) => {
     const mime = (file.type ?? "").toLowerCase();
@@ -3257,7 +3260,7 @@ export default function ThreadPage() {
                   value={siblingPlatform}
                   onChange={(e) =>
                     setSiblingPlatform(
-                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP"
+                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
                     )
                   }
                   className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
@@ -3266,6 +3269,9 @@ export default function ThreadPage() {
                   <option value="all">All</option>
                   <option value="LINKEDIN">LinkedIn</option>
                   <option value="IMESSAGE">iMessage</option>
+                  {siblings.some((row) => row.platform === "GOOGLE_MESSAGES") ? (
+                    <option value="GOOGLE_MESSAGES">Google Messages</option>
+                  ) : null}
                   {siblings.some((row) => row.platform === "WHATSAPP") ? (
                     <option value="WHATSAPP">WhatsApp</option>
                   ) : null}
@@ -4141,7 +4147,8 @@ export default function ThreadPage() {
                       // reactions are read-only here (applied from the Messages
                       // app, surfaced via synthesised stickers), so we never show
                       // the picker for them.
-                      const canReact = thread.platform === "LINKEDIN";
+                      const canReact =
+                        thread.platform === "LINKEDIN" || thread.platform === "GOOGLE_MESSAGES";
                       const canEdit =
                         thread.platform === "LINKEDIN" && message.direction === "OUT" && showText;
                       const pickerOpen = reactionPickerMessageId === message.id;
@@ -4173,6 +4180,8 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   thread.platform === "WHATSAPP" ? (
                                     <WhatsAppMedia key={a.guid ?? attIdx} attachment={a} />
+                                  ) : thread.platform === "GOOGLE_MESSAGES" ? (
+                                    <GoogleMessagesMedia key={a.guid ?? attIdx} attachment={a} />
                                   ) : (
                                     <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                   )
@@ -5225,7 +5234,9 @@ export default function ThreadPage() {
                       </div>
                     ) : null}
                   </div>
-                  {thread.platform === "IMESSAGE" || thread.platform === "WHATSAPP" ? (
+                  {thread.platform === "IMESSAGE" ||
+                  thread.platform === "WHATSAPP" ||
+                  thread.platform === "GOOGLE_MESSAGES" ? (
                     <>
                       <input
                         type="file"
