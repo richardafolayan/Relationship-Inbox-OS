@@ -59,17 +59,19 @@ test("automatic update scheduler honours the off setting", async () => {
 
 // ---- readAppVersion ------------------------------------------------------
 
-test("readAppVersion prefers release.json (with build + commit)", () => {
+test("readAppVersion prefers release.json (with build, commit, and release notes)", () => {
   const dir = mkdtempSync(join(tmpdir(), "rios-ver-"));
   try {
     writeFileSync(join(dir, "release.json"), JSON.stringify({
-      version: "9.9.9", build: "2026-06-06T00:00:00Z", commit: "abc1234", channel: "student"
+      version: "9.9.9", build: "2026-06-06T00:00:00Z", commit: "abc1234", channel: "student",
+      releaseNotes: ["A calmer update card", 123, "Clearer update steps"]
     }));
     writeFileSync(join(dir, "package.json"), JSON.stringify({ version: "0.0.1" }));
     const v = readAppVersion(dir);
     assert.equal(v.version, "9.9.9");
     assert.equal(v.commit, "abc1234");
     assert.equal(v.channel, "student");
+    assert.deepEqual(v.releaseNotes, ["A calmer update card", "Clearer update steps"]);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -148,6 +150,7 @@ test("runUpdateCheck reports an available update from a feed", async () => {
     assert.equal(newer.updateAvailable, true);
     assert.equal(newer.latestVersion, "0.2.0");
     assert.equal(newer.currentVersion, "0.1.0");
+    assert.deepEqual(newer.currentReleaseNotes, []);
     assert.deepEqual(newer.releaseNotes, ["New stuff"]);
     assert.equal(newer.error, undefined);
 

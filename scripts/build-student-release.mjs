@@ -226,7 +226,7 @@ function readNotes(version, commit) {
   return [`Student pilot build ${version}.`];
 }
 
-function writeManifest({ version, build, commit, zipPath, sha256 }) {
+function writeManifest({ version, build, commit, zipPath, sha256, releaseNotes = readNotes(version, commit) }) {
   const zipUrl = args.zipUrl || PLACEHOLDER_URL;
   const manifest = {
     version,
@@ -235,7 +235,7 @@ function writeManifest({ version, build, commit, zipPath, sha256 }) {
     channel: CHANNEL,
     zipUrl,
     sha256,
-    releaseNotes: readNotes(version, commit),
+    releaseNotes,
     minimumInstallerVersion: args.minInstaller || (CHANNEL === "dev" ? DEV_MIN_INSTALLER : STUDENT_MIN_INSTALLER)
   };
   const manifestPath = join(OUT_DIR, "latest.json");
@@ -259,6 +259,7 @@ async function manifestOnly() {
   let version = pkgVersion();
   let build = new Date().toISOString();
   let commit = "";
+  let releaseNotes;
   try {
     const baked = JSON.parse(
       execFileSync("unzip", ["-p", zipPath, `${APP_FOLDER_NAME}/release.json`], { encoding: "utf8" })
@@ -266,10 +267,13 @@ async function manifestOnly() {
     if (baked.version) version = baked.version;
     if (baked.build) build = baked.build;
     if (baked.commit) commit = String(baked.commit).slice(0, 7);
+    if (!args.notesFile && args.notes.length === 0 && Array.isArray(baked.releaseNotes)) {
+      releaseNotes = baked.releaseNotes.filter((note) => typeof note === "string");
+    }
   } catch {
     try { commit = git("rev-parse", "--short", REF); } catch { /* not a git checkout */ }
   }
-  const { manifestPath, zipUrl } = writeManifest({ version, build, commit, zipPath, sha256 });
+  const { manifestPath, zipUrl } = writeManifest({ version, build, commit, zipPath, sha256, releaseNotes });
 
   process.stdout.write(`\n  Regenerated manifest only.\n`);
   process.stdout.write(`  latest.json : ${manifestPath}\n`);
@@ -287,6 +291,7 @@ async function build() {
   const build = new Date().toISOString();
   const commit = git("rev-parse", "--short", REF);
   const fullCommit = git("rev-parse", REF);
+  const releaseNotes = readNotes(version, commit);
 
   process.stdout.write(`\n  Building ${CHANNEL} release ${version} (${commit}) from ${REF}\n`);
 
@@ -305,7 +310,7 @@ async function build() {
     // 2. Bake a release.json so the installed app knows what it is. Dev builds
     // also carry the feed they self-update from, so the pointer survives each
     // in-place update (see devUpdateFeedUrl).
-    const releaseInfo = { version, build, commit: fullCommit, channel: CHANNEL };
+    const releaseInfo = { version, build, commit: fullCommit, channel: CHANNEL, releaseNotes };
     if (CHANNEL === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
     writeFileSync(
       join(appDir, "release.json"),
@@ -346,7 +351,7 @@ async function build() {
     // 6. latest copy + checksum + manifest.
     cpSync(versionedZip, latestZip);
     const sha256 = await sha256File(versionedZip);
-    const { manifestPath, shaPath, zipUrl } = writeManifest({ version, build, commit, zipPath: versionedZip, sha256 });
+    const { manifestPath, shaPath, zipUrl } = writeManifest({ version, build, commit, zipPath: versionedZip, sha256, releaseNotes });
 
     const sizeMb = (statSync(versionedZip).size / (1024 * 1024)).toFixed(1);
     process.stdout.write(`\n  Built (${sizeMb} MB, ${zipEntries.length} files):\n`);

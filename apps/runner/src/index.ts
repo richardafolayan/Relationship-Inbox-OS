@@ -2550,12 +2550,13 @@ app.get("/system/update-check", asyncRoute(async (_req, res) => {
   const settings = await settingsStore.getSettings();
   const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
   if (!feedUrl) {
-    const current = readAppVersion(projectRoot).version;
+    const current = readAppVersion(projectRoot);
     res.json({
       configured: false,
       automaticUpdates: settings.automaticUpdates,
-      currentVersion: current,
-      latestVersion: current,
+      currentVersion: current.version,
+      currentReleaseNotes: current.releaseNotes ?? [],
+      latestVersion: current.version,
       updateAvailable: false,
       releaseNotes: []
     });

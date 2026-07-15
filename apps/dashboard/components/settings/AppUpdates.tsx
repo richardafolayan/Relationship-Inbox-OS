@@ -12,6 +12,7 @@ interface UpdateCheck {
   automaticUpdates: boolean;
   configured: boolean;
   currentVersion: string;
+  currentReleaseNotes: string[];
   latestVersion: string;
   updateAvailable: boolean;
   releaseNotes: string[];
@@ -20,6 +21,7 @@ interface UpdateCheck {
 
 interface AppVersion {
   version: string;
+  releaseNotes?: string[];
 }
 
 interface StageResponse {
@@ -79,6 +81,7 @@ export function AppUpdates() {
           configured: false,
           automaticUpdates,
           currentVersion: version.version,
+          currentReleaseNotes: version.releaseNotes ?? [],
           latestVersion: version.version,
           updateAvailable: false,
           releaseNotes: []
@@ -252,12 +255,29 @@ export function AppUpdates() {
         </div>
       </div>
 
-      {info?.updateAvailable && info.releaseNotes.length ? (
-        <ul className="mt-3 list-disc pl-5 text-[12px] text-ink-2">
-          {info.releaseNotes.slice(0, 4).map((note, i) => (
-            <li key={i}>{note}</li>
-          ))}
-        </ul>
+      {info?.currentReleaseNotes.length || (info?.updateAvailable && info.releaseNotes.length) ? (
+        <div className="mt-4 grid gap-3 border-t border-hairline pt-4 sm:grid-cols-2">
+          {info.currentReleaseNotes.length ? (
+            <div>
+              <p className="text-[12px] font-medium text-ink">What’s new in v{info.currentVersion}</p>
+              <ul className="mt-1.5 list-disc space-y-1 pl-4 text-[12px] leading-relaxed text-ink-2">
+                {info.currentReleaseNotes.slice(0, 4).map((note, i) => (
+                  <li key={i}>{note}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {info.updateAvailable && info.releaseNotes.length ? (
+            <div>
+              <p className="text-[12px] font-medium text-ink">Coming in v{info.latestVersion}</p>
+              <ul className="mt-1.5 list-disc space-y-1 pl-4 text-[12px] leading-relaxed text-ink-2">
+                {info.releaseNotes.slice(0, 4).map((note, i) => (
+                  <li key={i}>{note}</li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+        </div>
       ) : null}
 
       {started ? (
