@@ -233,3 +233,88 @@ test("toInboxRow maps contact tags to personGroups", () => {
   ]);
   assert.deepEqual(toInboxRow(rows[0], 1, THRESHOLDS).personGroups, ["Close friends", "Society"]);
 });
+
+// --- R-0106 / #824: needsReply + risk describe the MERGED conversation ---
+
+function siblingPair({ inboundOn, outboundOn }) {
+  // One person, two iMessage handle-chats. `inboundOn`/`outboundOn` place
+  // the newest inbound / outbound on either the "phone" or "email" sibling.
+  const phone = buildRow({
+    id: "imsg-phone",
+    platform: "IMESSAGE",
+    platformThreadId: "any;-;+447873519605",
+    personId: "kwame",
+    person: { id: "kwame", displayName: "Kwame", platform: "IMESSAGE" },
+    lastInboundAt: inboundOn === "phone" ? hoursAgo(8) : hoursAgo(30),
+    lastOutboundAt: outboundOn === "phone" ? hoursAgo(20) : hoursAgo(48),
+    lastMessageAt: hoursAgo(8),
+    _count: { messages: 500 }
+  });
+  const email = buildRow({
+    id: "imsg-email",
+    platform: "IMESSAGE",
+    platformThreadId: "any;-;kwame@example.com",
+    personId: "kwame",
+    person: { id: "kwame", displayName: "Kwame", platform: "IMESSAGE" },
+    lastInboundAt: inboundOn === "email" ? hoursAgo(8) : hoursAgo(30),
+    lastOutboundAt: outboundOn === "email" ? hoursAgo(20) : hoursAgo(48),
+    lastMessageAt: hoursAgo(8),
+    _count: { messages: 40 }
+  });
+  return { phone, email };
+}
+
+test("a fresh inbound on one visible sibling is not cancelled by the winner's own stale pair", () => {
+  // Newest inbound (8h ago) on the email sibling; newest outbound (20h ago)
+  // on the phone sibling. Merged view: the contact spoke last -> reply owed.
+  const { phone, email } = siblingPair({ inboundOn: "email", outboundOn: "phone" });
+  const rows = shapeThreadRows([phone, email]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].needsReply, true, "merged conversation owes a reply");
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
+  assert.equal(shaped.needsReply, true);
+  // 8h inbound wait with amber at 6h / red at 18h -> AMBER, matching the
+  // thread page's own "waiting" badge over the merged timeline.
+  assert.equal(shaped.riskLevel, "AMBER");
+});
+
+test("an outbound sent from the other handle counts as having replied", () => {
+  // Newest inbound 30h ago on phone; the operator answered 20h ago from the
+  // email handle. Merged view: replied, nothing owed - the row must not
+  // resurrect needsReply just because the phone sibling's own pair looks
+  // unanswered.
+  const { phone, email } = siblingPair({ inboundOn: "phone", outboundOn: "email" });
+  phone.lastInboundAt = hoursAgo(30);
+  phone.lastOutboundAt = hoursAgo(48);
+  email.lastInboundAt = hoursAgo(72);
+  email.lastOutboundAt = hoursAgo(20);
+  const rows = shapeThreadRows([phone, email]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].needsReply, false, "the email-handle reply settles the merged conversation");
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
+  assert.equal(shaped.needsReply, false);
+  assert.equal(shaped.riskLevel, "GREEN");
+});
+
+test("a fresh inbound on an archived sibling (canonicalSiblings) still flags the visible row", () => {
+  // Only the phone sibling is visible; its own pair reads as replied
+  // (outbound 20h > inbound 30h). But the person's archived email sibling
+  // received an inbound 8h ago - the merged thread view shows "waiting",
+  // so the inbox row must agree instead of hiding the person from every
+  // needs-reply surface.
+  const { phone, email } = siblingPair({ inboundOn: "email", outboundOn: "phone" });
+  phone.lastInboundAt = hoursAgo(30);
+  phone.lastOutboundAt = hoursAgo(20);
+  email.archivedAt = hoursAgo(100);
+  const rows = shapeThreadRows([phone], [phone, email]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].needsReply, true);
+  const shaped = toInboxRow(rows[0], 1, THRESHOLDS);
+  assert.equal(shaped.needsReply, true);
+  assert.equal(shaped.riskLevel, "AMBER");
+  assert.equal(
+    shaped.lastInboundAt,
+    email.lastInboundAt.toISOString(),
+    "the row's waiting clock starts at the merged newest inbound"
+  );
+});

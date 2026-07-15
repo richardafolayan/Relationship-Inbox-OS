@@ -2,6 +2,7 @@ import type { AppSettings } from "./types";
 
 export const defaultSettings: AppSettings = {
   scanIntervalSeconds: 60,
+  automaticUpdates: true,
   amberHours: 6,
   redHours: 18,
   // Headful by default ON PURPOSE. Headless is one of the strongest bot

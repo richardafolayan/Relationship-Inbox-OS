@@ -330,6 +330,45 @@ function canonicalByImessagePerson(siblings: ThreadRowSource[]): Map<string, Thr
   return byPerson;
 }
 
+// Latest inbound/outbound timestamps per iMessage person across ALL
+// siblings. needsReply and risk must describe the MERGED conversation (what
+// the opened thread shows), not whichever sibling is the visible
+// representative: a fresh inbound on one handle-chat must not read as
+// "nothing owed" because the representative's own timestamps lag — and the
+// reverse, an outbound sent from the other handle must count as having
+// replied (R-0106 / #824: a thread the operator clearly hadn't answered was
+// missing from every needs-reply surface while its page said "waiting").
+interface ReplyStateFold {
+  lastInboundAt: Date | null;
+  lastOutboundAt: Date | null;
+}
+
+function maxDate(a: Date | null, b: Date | null): Date | null {
+  if (!a) return b;
+  if (!b) return a;
+  return a.getTime() >= b.getTime() ? a : b;
+}
+
+function foldReplyState(current: ReplyStateFold, row: ReplyStateFold): ReplyStateFold {
+  return {
+    lastInboundAt: maxDate(current.lastInboundAt, row.lastInboundAt),
+    lastOutboundAt: maxDate(current.lastOutboundAt, row.lastOutboundAt)
+  };
+}
+
+function replyStateByImessagePerson(siblings: ThreadRowSource[]): Map<string, ReplyStateFold> {
+  const byPerson = new Map<string, ReplyStateFold>();
+  for (const row of siblings) {
+    if (row.platform !== "IMESSAGE") {
+      continue;
+    }
+    const key = imessagePersonKey(row);
+    const current = byPerson.get(key) ?? { lastInboundAt: null, lastOutboundAt: null };
+    byPerson.set(key, foldReplyState(current, row));
+  }
+  return byPerson;
+}
+
 // Newest DISPLAY bundle per iMessage person across ALL siblings (incl.
 // archived/snoozed ones absent from the visible `rows`). Folded into the
 // collapsed row so its preview/lastMessageAt reflect the newest message in the
@@ -403,9 +442,20 @@ export function shapeThreadRows(
       // Canonical pick (id + AI fields) and display fold are independent:
       // keep the more-canonical source, but always fold display across BOTH
       // siblings so a newer message on the losing sibling still surfaces.
+      // Reply state (lastInboundAt/lastOutboundAt → needsReply, risk) folds
+      // too: the merged conversation owes a reply iff its newest inbound
+      // beats its newest outbound across BOTH siblings, not just the
+      // winner's own pair (R-0106 / #824).
       const winner = prefersCandidate(existing, candidate) ? candidate : existing;
+      const folded = foldReplyState(
+        { lastInboundAt: existing.source.lastInboundAt, lastOutboundAt: existing.source.lastOutboundAt },
+        { lastInboundAt: candidate.source.lastInboundAt, lastOutboundAt: candidate.source.lastOutboundAt }
+      );
+      const foldedSource = { ...winner.source, ...folded };
       deduped.set(dedupeKey, {
         ...winner,
+        source: foldedSource,
+        needsReply: deriveNeedsReply(foldedSource),
         display: pickNewerDisplay(existing.display, candidate.display)
       });
     }
@@ -418,6 +468,7 @@ export function shapeThreadRows(
   if (canonicalSiblings && canonicalSiblings.length > 0) {
     const canonicalByPerson = canonicalByImessagePerson(canonicalSiblings);
     const newestDisplayByPerson = newestDisplayByImessagePerson(canonicalSiblings);
+    const replyStateByPerson = replyStateByImessagePerson(canonicalSiblings);
     for (const group of deduped.values()) {
       if (group.source.platform !== "IMESSAGE") {
         continue;
@@ -432,6 +483,22 @@ export function shapeThreadRows(
       const newestDisplay = newestDisplayByPerson.get(group.dedupeKey);
       if (newestDisplay) {
         group.display = pickNewerDisplay(group.display, newestDisplay);
+      }
+      // Fold reply state across ALL siblings too, so needsReply and the
+      // recomputed risk match the merged thread view even when the freshest
+      // inbound (or the answering outbound) lives on an archived/snoozed
+      // sibling (R-0106 / #824).
+      const replyState = replyStateByPerson.get(group.dedupeKey);
+      if (replyState) {
+        const foldedSource = {
+          ...group.source,
+          ...foldReplyState(
+            { lastInboundAt: group.source.lastInboundAt, lastOutboundAt: group.source.lastOutboundAt },
+            replyState
+          )
+        };
+        group.source = foldedSource;
+        group.needsReply = deriveNeedsReply(foldedSource);
       }
     }
   }

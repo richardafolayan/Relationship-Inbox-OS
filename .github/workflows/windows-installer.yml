@@ -1,0 +1,89 @@
+name: Windows installer
+
+on:
+  pull_request:
+    branches: [v1/strip-back-pr1]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows-installer:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+          cache: npm
+      - run: npm ci
+      - run: npm run build:windows
+      - name: Verify packaged native modules and runtime
+        shell: pwsh
+        run: |
+          $resources = Resolve-Path "dist/windows/win-unpacked/resources"
+          $node = Join-Path $resources "runtime/node/node.exe"
+          $app = Join-Path $resources "app"
+          $onnx = Get-ChildItem (Join-Path $app "node_modules/onnxruntime-node/bin/napi-v3/win32") -Filter onnxruntime_binding.node -Recurse | Select-Object -First 1
+          $sqlite = Get-ChildItem (Join-Path $app "node_modules/better-sqlite3") -Filter better_sqlite3.node -Recurse | Select-Object -First 1
+          $next = Join-Path $app "node_modules/next/dist/bin/next"
+          if (-not (Test-Path $node)) { throw "Bundled Node runtime is missing" }
+          if (-not $onnx) { throw "Windows ONNX Runtime payload is missing" }
+          if (-not $sqlite) { throw "Windows better-sqlite3 payload is missing" }
+          if (-not (Test-Path $next)) { throw "Packaged Next.js runtime is missing" }
+          & $node -e "process.chdir(process.argv[1]); require('./node_modules/better-sqlite3'); console.log('better-sqlite3 ok')" $app
+      - name: Smoke test packaged services
+        shell: pwsh
+        run: |
+          $resources = Resolve-Path "dist/windows/win-unpacked/resources"
+          $exe = Resolve-Path "dist/windows/win-unpacked/Tovi.exe"
+          $desktop = Start-Process $exe -PassThru
+          Start-Sleep -Seconds 8
+          if ($desktop.HasExited) { throw "Packaged Tovi desktop exited during launch" }
+          & taskkill.exe /PID $desktop.Id /T /F | Out-Null
+
+          $node = Join-Path $resources "runtime/node/node.exe"
+          $app = Join-Path $resources "app"
+          $data = Join-Path $env:RUNNER_TEMP "tovi-smoke-data"
+          $stdout = Join-Path $env:RUNNER_TEMP "tovi-smoke.stdout.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "tovi-smoke.stderr.log"
+          New-Item -ItemType Directory -Path $data -Force | Out-Null
+          $env:DATABASE_URL = "file:$(Join-Path $data 'inbox-os.sqlite')"
+          $env:IMESSAGE_ENABLED = "false"
+          $env:RIOS_CONFIG_DIR = $data
+          $env:RIOS_DATA_DIR = $data
+          $env:RIOS_PACKAGED_APP = "1"
+          $env:RIOS_RECLAIM_EXISTING = "1"
+          $env:RIOS_STATE_DIR = Join-Path $data "runtime"
+          $env:WHATSAPP_ENABLED = "false"
+          $process = Start-Process $node -ArgumentList (Join-Path $app "scripts/start-app.mjs") -WorkingDirectory $app -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $ready = $false
+            for ($attempt = 0; $attempt -lt 60; $attempt++) {
+              if ($process.HasExited) { break }
+              try {
+                $health = Invoke-RestMethod "http://127.0.0.1:4001/health" -TimeoutSec 2
+                $dashboard = Invoke-WebRequest "http://127.0.0.1:3100" -TimeoutSec 2 -UseBasicParsing
+                if ($health.application -eq "relationship-inbox-os" -and $dashboard.StatusCode -lt 500) {
+                  $ready = $true
+                  break
+                }
+              } catch {}
+              Start-Sleep -Seconds 1
+            }
+            if (-not $ready) {
+              if (Test-Path $stdout) { Get-Content $stdout }
+              if (Test-Path $stderr) { Get-Content $stderr }
+              throw "Packaged Tovi services did not become ready"
+            }
+          } finally {
+            if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
+          }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tovi-windows-pilot-installer
+          path: dist/windows/Tovi-Setup-*.exe
+          if-no-files-found: error
+          retention-days: 14

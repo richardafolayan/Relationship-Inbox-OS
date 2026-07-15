@@ -14,6 +14,8 @@ import { createRequire } from "node:module";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
+import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
+import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import {
   portConflict,
   recoverPriorRuntime,
@@ -37,6 +39,7 @@ const DASHBOARD_PORT = String(process.env.DASHBOARD_PORT || "3100");
 const RUNNER_PORT = String(process.env.RUNNER_PORT || "4001");
 const DASHBOARD_URL = `http://127.0.0.1:${DASHBOARD_PORT}`;
 const RUNNER_HEALTH_URL = `http://127.0.0.1:${RUNNER_PORT}/health`;
+const NPM_COMMAND = process.platform === "win32" ? "npm.cmd" : "npm";
 
 const C = process.stdout.isTTY
   ? { bold: "\x1b[1m", dim: "\x1b[2m", green: "\x1b[32m", yellow: "\x1b[33m", reset: "\x1b[0m" }
@@ -134,11 +137,11 @@ function ensureNativeModules() {
   const probe = probeNativeModule("better-sqlite3");
   if (probe.status === 0) return true;
   if (PACKAGED || !nativeModuleNeedsRebuild(probe)) {
-    say(`  ${C.yellow}The local database driver could not be loaded. Reinstall the Mac app and try again.${C.reset}`);
+    say(`  ${C.yellow}The local database driver could not be loaded. Reinstall Tovi and try again.${C.reset}`);
     return false;
   }
   say(`  ${C.yellow}The local database driver needs to be rebuilt for Node.js.${C.reset}`);
-  return run("Rebuilding the local database driver...", "npm", ["rebuild", "better-sqlite3"])
+  return run("Rebuilding the local database driver...", NPM_COMMAND, ["rebuild", "better-sqlite3"])
     && probeNativeModule("better-sqlite3").status === 0;
 }
 
@@ -151,10 +154,15 @@ function databaseFile() {
 function syncDatabase() {
   mkdirSync(DATA_DIR, { recursive: true });
   process.env.DATABASE_URL ||= `file:${join(DATA_DIR, "inbox-os.sqlite")}`;
+  const invocation = prismaDbPushInvocation({
+    appDir: APP_DIR,
+    packaged: PACKAGED,
+    npmCommand: NPM_COMMAND
+  });
   return run(
     "Updating the database...",
-    "npm",
-    ["exec", "--", "prisma", "db", "push", "--schema", "packages/core/prisma/schema.prisma"],
+    invocation.command,
+    invocation.args,
     { env: { ...process.env, DATABASE_URL: process.env.DATABASE_URL } }
   );
 }
@@ -167,7 +175,7 @@ function packagedArtifactsReady() {
   ];
   const missing = required.filter((path) => !existsSync(join(APP_DIR, path)));
   if (missing.length === 0) return true;
-  say(`  ${C.yellow}The Mac app is incomplete (${missing.join(", ")}). Reinstall it from the DMG.${C.reset}`);
+  say(`  ${C.yellow}The Tovi installation is incomplete (${missing.join(", ")}). Reinstall it and try again.${C.reset}`);
   return false;
 }
 
@@ -180,7 +188,7 @@ function prepare() {
   const schemaHash = hashPaths([join(APP_DIR, "packages/core/prisma/schema.prisma")]);
   const schemaChanged = stamps.schemaHash !== schemaHash;
   if (!PACKAGED && (schemaChanged || !canResolve("@prisma/client"))) {
-    if (!run("Updating the database client...", "npm", ["run", "db:generate"])) return { ok: false };
+    if (!run("Updating the database client...", NPM_COMMAND, ["run", "db:generate"])) return { ok: false };
   }
   if (schemaChanged || !existsSync(databaseFile())) {
     if (!syncDatabase()) return { ok: false };
@@ -196,7 +204,7 @@ function prepare() {
     join(APP_DIR, "packages/core/tsconfig.json")
   ]);
   if (stamps.coreHash !== coreHash || !existsSync(join(APP_DIR, "packages/core/dist/index.js"))) {
-    if (!run("Building shared components...", "npm", ["run", "build", "--workspace", "@inbox-os/core"])) {
+    if (!run("Building shared components...", NPM_COMMAND, ["run", "build", "--workspace", "@inbox-os/core"])) {
       return { ok: false };
     }
     next.coreHash = coreHash;
@@ -209,7 +217,7 @@ function prepare() {
     join(APP_DIR, "apps/runner/tsconfig.json")
   ]);
   if (stamps.runnerHash !== runnerHash || !existsSync(join(APP_DIR, "apps/runner/dist/index.js"))) {
-    if (!run("Building the local service...", "npm", ["run", "build", "--workspace", "@inbox-os/runner"])) {
+    if (!run("Building the local service...", NPM_COMMAND, ["run", "build", "--workspace", "@inbox-os/runner"])) {
       return { ok: false };
     }
     next.runnerHash = runnerHash;
@@ -223,7 +231,7 @@ function prepare() {
   if (stamps.dashboardStamp === dashboardStamp && existsSync(buildIdPath)) return { ok: true, prod: true };
 
   say(`  ${C.bold}Optimising the app for speed (about a minute, once per update)...${C.reset}`);
-  if (!run("Building the app...", "npm", ["run", "build", "--workspace", "@inbox-os/dashboard"])) {
+  if (!run("Building the app...", NPM_COMMAND, ["run", "build", "--workspace", "@inbox-os/dashboard"])) {
     say(`  ${C.yellow}The optimised build did not complete. Starting in compatibility mode.${C.reset}`);
     return { ok: true, prod: false };
   }
@@ -296,8 +304,8 @@ async function startApp(prod) {
     process.exit(code);
   };
 
-  const launch = (name, scriptArgs) => {
-    const child = spawn("npm", scriptArgs, {
+  const launch = (name, command, commandArgs) => {
+    const child = spawn(command, commandArgs, {
       cwd: APP_DIR,
       detached: process.platform !== "win32",
       stdio: "inherit"
@@ -328,23 +336,21 @@ async function startApp(prod) {
     void shutdown(1);
   });
 
-  launch(
-    "runner",
-    prod
-      ? ["run", "start", "--workspace", "@inbox-os/runner"]
-      : ["run", "dev", "--workspace", "@inbox-os/runner"]
-  );
+  if (prod) {
+    launch("runner", process.execPath, [join(APP_DIR, "apps", "runner", "dist", "index.js")]);
+  } else {
+    launch("runner", NPM_COMMAND, ["run", "dev", "--workspace", "@inbox-os/runner"]);
+  }
   if (!(await waitFor("The local service", runnerReady, 120_000))) {
     await shutdown(1);
     return;
   }
 
-  launch(
-    "dashboard",
-    prod
-      ? ["run", "start", "--workspace", "@inbox-os/dashboard"]
-      : ["run", "dev", "--workspace", "@inbox-os/dashboard"]
-  );
+  if (prod) {
+    launch("dashboard", process.execPath, packagedDashboardArgs(APP_DIR, DASHBOARD_PORT));
+  } else {
+    launch("dashboard", NPM_COMMAND, ["run", "dev", "--workspace", "@inbox-os/dashboard"]);
+  }
   if (!(await waitFor("The app window", dashboardReady, 180_000))) {
     await shutdown(1);
     return;

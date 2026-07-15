@@ -4,6 +4,7 @@ node_modules
 .next
 dist
 coverage
+/build/windows-runtime/
 # Student release artefacts (zips, latest.json, checksums) + backups the
 # updater makes. Never commit built release zips — rebuild them.
 /release-dist/

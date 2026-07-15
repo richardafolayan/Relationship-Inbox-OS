@@ -1,6 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { existsSync, statSync, createReadStream, mkdirSync, renameSync, rmSync } from "node:fs";
+import { existsSync, statSync, createReadStream, mkdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { extname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -212,6 +212,12 @@ export async function convertVideoToAudioM4a(absolutePath: string): Promise<stri
  * afconvert command stays in lockstep with the other shapes.
  */
 export async function convertAudioToWhisperWav(absolutePath: string): Promise<string | null> {
+  try {
+    if (isWhisperReadyWav(readFileSync(absolutePath))) return absolutePath;
+  } catch {
+    return null;
+  }
+  if (process.platform !== "darwin") return null;
   // Cache extension (`whisper.wav`) is distinct from any other shape we
   // emit so concurrent CAF / video / WAV conversions on the same source
   // each get their own cache slot.
@@ -222,4 +228,30 @@ export async function convertAudioToWhisperWav(absolutePath: string): Promise<st
       { timeout: 60_000 }
     );
   });
+}
+
+export function isWhisperReadyWav(buffer: Buffer): boolean {
+  if (buffer.length < 44) return false;
+  if (buffer.toString("ascii", 0, 4) !== "RIFF") return false;
+  if (buffer.toString("ascii", 8, 12) !== "WAVE") return false;
+
+  let offset = 12;
+  let validFormat = false;
+  let hasAudio = false;
+  while (offset + 8 <= buffer.length) {
+    const chunkId = buffer.toString("ascii", offset, offset + 4);
+    const chunkSize = buffer.readUInt32LE(offset + 4);
+    const chunkStart = offset + 8;
+    if (chunkStart + chunkSize > buffer.length) return false;
+    if (chunkId === "fmt " && chunkSize >= 16) {
+      validFormat =
+        buffer.readUInt16LE(chunkStart) === 1 &&
+        buffer.readUInt16LE(chunkStart + 2) === 1 &&
+        buffer.readUInt32LE(chunkStart + 4) === 16_000 &&
+        buffer.readUInt16LE(chunkStart + 14) === 16;
+    }
+    if (chunkId === "data") hasAudio = chunkSize > 0;
+    offset = chunkStart + chunkSize + (chunkSize & 1);
+  }
+  return validFormat && hasAudio;
 }

@@ -8,10 +8,54 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  pendingUpdatePath, readAppVersion, runUpdateCheck, stagePendingUpdate
+  createAutomaticUpdateScheduler, pendingUpdatePath, readAppVersion, runUpdateCheck, stagePendingUpdate
 } from "../apps/runner/dist/services/system-update.js";
+import { defaultSettings } from "../packages/core/dist/defaults.js";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("automatic update installation is on by default", () => {
+  assert.equal(defaultSettings.automaticUpdates, true);
+});
+
+test("automatic update scheduler checks after startup and repeats", async () => {
+  let installs = 0;
+  let resolveRepeated;
+  const repeated = new Promise((resolve) => {
+    resolveRepeated = resolve;
+  });
+  const scheduler = createAutomaticUpdateScheduler({
+    isEnabled: async () => true,
+    installIfAvailable: async () => {
+      installs += 1;
+      if (installs === 2) resolveRepeated();
+    },
+    initialDelayMs: 5,
+    intervalMs: 5
+  });
+  scheduler.start();
+  try {
+    await Promise.race([
+      repeated,
+      new Promise((_, reject) => setTimeout(() => reject(new Error("scheduler did not repeat")), 1000))
+    ]);
+    assert.equal(installs, 2);
+  } finally {
+    scheduler.stop();
+  }
+});
+
+test("automatic update scheduler honours the off setting", async () => {
+  let installs = 0;
+  const scheduler = createAutomaticUpdateScheduler({
+    isEnabled: async () => false,
+    installIfAvailable: async () => {
+      installs += 1;
+    }
+  });
+  assert.equal(await scheduler.runNow(), "disabled");
+  assert.equal(installs, 0);
+});
 
 // ---- readAppVersion ------------------------------------------------------
 

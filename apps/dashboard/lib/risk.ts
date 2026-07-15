@@ -26,23 +26,33 @@ export const PLATFORM_LABEL: Record<
 // denominator and the platforms list both key off this so adding a new
 // adapter only requires updating one place. WHATSAPP is intentionally not
 // here: it is opt-in per operator, so it joins the visible set dynamically
-// via visibleImplementedPlatforms below once the operator has linked it.
+// once it is enabled or has previously been linked.
 export const IMPLEMENTED_PLATFORMS: ReadonlyArray<
   "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"
 > = ["LINKEDIN", "IMESSAGE"];
 
 // The platform set the operator actually sees in connected-counts, the
 // reconnect modal, and filter chips. LinkedIn + iMessage are always on;
-// WhatsApp appears only once this operator has EVER linked it (connectedAt,
-// the same "uses this platform" signal as #708) — a pilot who never opted in
-// must not see a third platform materialise. Pass the /data/platforms cards.
+// WhatsApp appears once it is explicitly enabled or has EVER been linked.
+// Windows pilot builds enable it during setup; macOS pilots who never opted in
+// still do not see a third platform materialise. Pass the /data/platforms cards.
 export function visibleImplementedPlatforms(
-  platforms: ReadonlyArray<{ platform: string; connectedAt: string | null }> | null | undefined
+  platforms: ReadonlyArray<{
+    platform: string;
+    connectedAt: string | null;
+    enabled?: boolean;
+    supported?: boolean;
+  }> | null | undefined
 ): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"> {
-  const whatsapp = platforms?.find((p) => p.platform === "WHATSAPP");
-  return whatsapp && hasEverConnected(whatsapp)
-    ? [...IMPLEMENTED_PLATFORMS, "WHATSAPP"]
+  const supportedBase = platforms
+    ? IMPLEMENTED_PLATFORMS.filter(
+        (platform) => platforms.find((row) => row.platform === platform)?.supported !== false
+      )
     : IMPLEMENTED_PLATFORMS;
+  const whatsapp = platforms?.find((p) => p.platform === "WHATSAPP");
+  return whatsapp && whatsapp.supported !== false && (whatsapp.enabled || hasEverConnected(whatsapp))
+    ? [...supportedBase, "WHATSAPP"]
+    : supportedBase;
 }
 
 // A platform the operator has never connected is "not set up", not "broken".

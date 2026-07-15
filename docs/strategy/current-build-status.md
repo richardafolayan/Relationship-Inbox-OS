@@ -1,6 +1,6 @@
 # Current Build Status
 
-_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-08._
+_Volatile. Update this whenever branches, commits, or build state change. Last updated: 2026-07-13._
 
 This file holds fast-moving build state on purpose. Branch tips and commit
 hashes go stale quickly, so they live here and not in `AGENTS.md`.
@@ -11,6 +11,7 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 - Main release target: `main`.
 - Pilot-ready release version: `0.1.14`.
 - Release base before the version bump: `2ff0623` (`Merge pull request #795 from richardafolayan/fix/launcher-native-runtime-guard`).
+- Parallel Windows track: `feat/windows-phase-0`, based on portability decision commit `5fa2e5c`.
 
 ## Landed
 
@@ -27,6 +28,7 @@ hashes go stale quickly, so they live here and not in `AGENTS.md`.
 
 - Prepare and run the 3-5 student pilot.
 - Only small operational improvements that reduce pilot friction (direct feedback submission, install/readme clarity, setup hardening).
+- Complete Windows Phase 0 verification on Windows x64: NSIS install, first boot, LinkedIn connect/scan, WhatsApp QR/scan, user-triggered send, quit/relaunch, and clean iMessage-unavailable UI.
 
 ---
 

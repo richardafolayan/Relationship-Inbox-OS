@@ -18,6 +18,7 @@
     "start:desktop": "electron apps/desktop/main.cjs",
     "dev:desktop": "RIOS_DEV=1 electron apps/desktop/main.cjs",
     "build:macos-dmg": "node scripts/build-macos-dmg.mjs",
+    "build:windows": "node scripts/build-windows-installer.mjs",
     "create:macos-app": "node scripts/create-macos-app-bundle.mjs",
     "doctor": "node scripts/doctor.mjs",
     "perf:interactions": "node scripts/performance/measure-interaction-latency.mjs",
@@ -49,9 +50,79 @@
   },
   "devDependencies": {
     "electron": "^39.2.6",
-    "prisma": "^6.3.1",
+    "electron-builder": "^26.15.3",
     "turbo": "^2.3.3",
     "typescript": "^5.7.3"
+  },
+  "dependencies": {
+    "prisma": "^6.3.1"
+  },
+  "build": {
+    "appId": "relationship-inbox-os",
+    "productName": "Tovi",
+    "asar": false,
+    "npmRebuild": false,
+    "directories": {
+      "output": "dist/windows"
+    },
+    "files": [
+      ".env.example",
+      "package.json",
+      "apps/desktop/**/*",
+      "apps/dashboard/.next/**/*",
+      "apps/dashboard/next.config.mjs",
+      "apps/dashboard/package.json",
+      "apps/dashboard/public/**/*",
+      "apps/runner/dist/**/*",
+      "apps/runner/package.json",
+      "packages/core/dist/**/*",
+      "packages/core/package.json",
+      "packages/core/prisma/**/*",
+      "scripts/start-app.mjs",
+      "scripts/lib/**/*",
+      "node_modules/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "build/windows-runtime/${arch}",
+        "to": "runtime/node"
+      },
+      {
+        "from": "node_modules/onnxruntime-node/bin/napi-v3/win32/x64",
+        "to": "app/node_modules/onnxruntime-node/bin/napi-v3/win32/x64"
+      },
+      {
+        "from": "node_modules/better-sqlite3",
+        "to": "app/node_modules/better-sqlite3",
+        "filter": [
+          "package.json",
+          "lib/**/*",
+          "build/Release/better_sqlite3.node"
+        ]
+      },
+      {
+        "from": "node_modules/next",
+        "to": "app/node_modules/next"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Tovi-Setup-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Tovi"
+    }
   },
   "overrides": {
     "postcss": "^8.5.10"
