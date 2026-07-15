@@ -12,6 +12,10 @@ export function isDemoThread(row: WithPlatformThreadId): boolean {
   return (row.platformThreadId ?? "").startsWith("demo-");
 }
 
+export function getDemoThreadIds<T extends WithPlatformThreadId & { id: string }>(rows: T[]): string[] {
+  return rows.filter(isDemoThread).map((row) => row.id);
+}
+
 /**
  * While a sandbox guided flow is active, narrow inbox rows to demo threads
  * only. Outside sandbox flows this is a no-op, so normal Today/Inbox keep
