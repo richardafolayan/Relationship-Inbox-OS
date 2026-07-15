@@ -58,8 +58,8 @@ NODE_RELEASE_DIR="https://nodejs.org/download/release/latest-v22.x"
 # Where a user-local Node 22 is installed when one isn't already present.
 # A plain folder in the home dir — no admin rights needed to write here.
 RIOS_NODE_DIR="${RIOS_NODE_DIR:-$HOME/.rios-node}"
-MIN_FREE_GB=10
-REC_FREE_GB=20
+MIN_FREE_GB=4
+REC_FREE_GB=8
 MIN_MACOS_MAJOR=13            # Ventura
 DASHBOARD_PORT="${DASHBOARD_PORT:-3100}"
 DASHBOARD_URL="http://localhost:${DASHBOARD_PORT}"
@@ -526,7 +526,7 @@ ensure_env() {
     set_env_var "$env_file" "OPENAI_API_KEY" "$RIOS_OPENAI_API_KEY"
     ok "OpenAI key saved"
   elif ! grep -q '^OPENAI_API_KEY=.\+' "$env_file" 2>/dev/null; then
-    warn "No OpenAI key set yet — Richard will give you one to paste into .env"
+    info "No AI key set. AI is optional and can be added safely in Tovi's setup assistant."
   fi
 }
 
@@ -540,13 +540,12 @@ install_app() {
 
   if [ "$DRY_RUN" = true ]; then
     warn "[dry-run] would run: npm install --include=dev"
-    warn "[dry-run] would run: npx playwright install chromium"
     warn "[dry-run] would run: npm run db:generate && npm run db:push"
     return 0
   fi
 
   if [ "$SKIP_DEPS" = true ]; then
-    warn "[skip-deps] skipping npm install, the LinkedIn browser, and database setup"
+    warn "[skip-deps] skipping npm install and database setup"
     return 0
   fi
 
@@ -554,26 +553,11 @@ install_app() {
     || die "Installing dependencies failed. The log has the details: $LOG_FILE"
   ok "Dependencies installed"
 
-  run "Installing the browser for LinkedIn (Chromium only)..." npx playwright install chromium \
-    || warn "Couldn't install the LinkedIn browser now — you can retry later with: npx playwright install chromium"
-  ok "LinkedIn browser ready"
-
   run "Preparing the local database..." npm run db:generate \
     || die "Database setup (generate) failed. The log has the details: $LOG_FILE"
   run "Creating the local database..." npm run db:push \
     || die "Database setup (create) failed. The log has the details: $LOG_FILE"
   ok "Local database ready"
-
-  # Download the local voice-transcription model so transcription works on
-  # first run. Non-fatal: a network hiccup must not fail the whole install —
-  # voice notes simply transcribe once the model is fetched (retryable).
-  if run "Downloading the voice-transcription model (one-time, ~150 MB)..." \
-       env TRANSCRIPTION_MODEL_DIR="$APP_DIR/data/models" npm run fetch:whisper-model; then
-    ok "Voice-transcription model ready"
-  else
-    warn "Couldn't download the transcription model now — voice notes will transcribe once it's fetched."
-    warn "Retry later with:  cd \"$APP_DIR\" && npm run fetch:whisper-model"
-  fi
 
   # Build the optimised (production) dashboard now so the first launch is
   # instant instead of compiling pages on demand. Non-fatal: the launcher
@@ -717,10 +701,11 @@ print_success() {
         ${BOLD}open "$APP_BUNDLE_DIR/Tovi.app"${RESET}
     or  ${BOLD}cd $disp && npm run start:student${RESET}
 
-  Next, the app walks you through:
-    1. iMessage access   (a one-time macOS permission)
-    2. Connecting LinkedIn
-    3. Your first scan
+  Next, Tovi's setup assistant lets you choose:
+    1. The message sources you actually use
+    2. Optional AI help and an optional Gemini key
+    3. Optional local voice transcription
+    4. Contacts, updates, and your first scan
 
   Setup guide:  docs/pilot/student-install-guide.md
   Stuck?        docs/pilot/student-install-troubleshooting.md
@@ -741,10 +726,11 @@ EOF
   • You can close this Terminal once the browser is open.
   • To stop the app: quit ${BOLD}Tovi${RESET} from the Dock.
 
-  Next, the app walks you through:
-    1. iMessage access   (a one-time macOS permission)
-    2. Connecting LinkedIn
-    3. Your first scan
+  Next, Tovi's setup assistant lets you choose:
+    1. The message sources you actually use
+    2. Optional AI help and an optional Gemini key
+    3. Optional local voice transcription
+    4. Contacts, updates, and your first scan
 
   Setup guide:  docs/pilot/student-install-guide.md
   Stuck?        docs/pilot/student-install-troubleshooting.md

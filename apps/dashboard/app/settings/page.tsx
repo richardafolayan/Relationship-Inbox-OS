@@ -39,7 +39,6 @@ import type {
   OverdueDigestSettings
 } from "@/lib/overdue-digest";
 import type { PlatformCard } from "@/lib/types";
-import { isIMessageFullDiskAccessProblem } from "@/lib/imessage-fda";
 import { clearTourSeen, startPilotTour } from "@/lib/pilot-tour";
 import {
   DEFAULT_SCAN_INTERVAL,
@@ -51,6 +50,9 @@ import {
 } from "@/lib/scan-interval";
 import { cn } from "@/lib/utils";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
+import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
+import { startSetupWizard } from "@/lib/setup-wizard";
+import { OptionalComponents } from "@/components/settings/OptionalComponents";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
@@ -803,6 +805,22 @@ function PlatformSetupCard({
 function SetupGuideSection() {
   return (
     <section className="mb-9">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-[8px] bg-paper-2/45 px-4 py-4">
+        <div className="min-w-0">
+          <p className="m-0 text-[15.5px] font-medium text-ink">Setup assistant</p>
+          <p className="m-0 mt-[3px] text-[13.5px] leading-[1.45] text-ink-3">
+            Choose message sources, Contacts, optional AI, voice transcription, and updates, step by step.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => startSetupWizard()}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)]"
+        >
+          Run setup assistant
+        </button>
+      </div>
+      <OptionalComponents />
       <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
         Setup guide
       </p>

@@ -1691,27 +1691,45 @@ export function createAiService(
   // nano output. 45s clears a slow-but-legit Gemma response; the fallback
   // chain still catches genuine hangs.
   const GEMINI_CLIENT_OPTIONS = { timeout: 45_000, maxRetries: 0 } as const;
-  const openAiClient = runnerConfig.openAiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.openAiApiKey, ...AI_CLIENT_OPTIONS })
-    : null;
-  const glmClient = runnerConfig.zAiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.zAiApiKey, baseURL: runnerConfig.zAiBaseUrl, ...AI_CLIENT_OPTIONS })
-    : null;
-  const geminiClient = runnerConfig.geminiApiKey
-    ? new OpenAI({ apiKey: runnerConfig.geminiApiKey, baseURL: runnerConfig.geminiBaseUrl, ...GEMINI_CLIENT_OPTIONS })
-    : null;
+  // Clients are memoized per key rather than built once: the first-run
+  // setup wizard (#845) saves GEMINI_API_KEY at runtime by mutating
+  // runnerConfig, and the next call here picks the key up without a
+  // restart. For an unchanged key this is a string compare, so the hot
+  // path stays as cheap as the old build-once consts.
+  function makeClientCache(
+    build: (key: string) => OpenAI
+  ): (key: string | undefined) => OpenAI | null {
+    let cachedKey: string | undefined;
+    let cachedClient: OpenAI | null = null;
+    return (key) => {
+      if (key !== cachedKey) {
+        cachedKey = key;
+        cachedClient = key ? build(key) : null;
+      }
+      return cachedClient;
+    };
+  }
+  const openAiCache = makeClientCache((key) => new OpenAI({ apiKey: key, ...AI_CLIENT_OPTIONS }));
+  const glmCache = makeClientCache(
+    (key) => new OpenAI({ apiKey: key, baseURL: runnerConfig.zAiBaseUrl, ...AI_CLIENT_OPTIONS })
+  );
+  const geminiCache = makeClientCache(
+    (key) => new OpenAI({ apiKey: key, baseURL: runnerConfig.geminiBaseUrl, ...GEMINI_CLIENT_OPTIONS })
+  );
+  const openAiClient = (): OpenAI | null => openAiCache(runnerConfig.openAiApiKey);
+  const glmClient = (): OpenAI | null => glmCache(runnerConfig.zAiApiKey);
+  const geminiClient = (): OpenAI | null => geminiCache(runnerConfig.geminiApiKey);
 
-  // Per-provider client + model resolution. The set of clients is built
-  // once at startup; any new provider added here also needs an entry in
-  // `providerRegistry` (see ./ai-providers).
+  // Per-provider client + model resolution. Any new provider added here
+  // also needs an entry in `providerRegistry` (see ./ai-providers).
   function resolveProvider(providerId: AiProvider): { client: OpenAI | null; model: string } {
     if (providerId === "glm") {
-      return { client: glmClient, model: runnerConfig.glmModel };
+      return { client: glmClient(), model: runnerConfig.glmModel };
     }
     if (providerId === "gemini") {
-      return { client: geminiClient, model: runnerConfig.geminiModel };
+      return { client: geminiClient(), model: runnerConfig.geminiModel };
     }
-    return { client: openAiClient, model: runnerConfig.openAiModel };
+    return { client: openAiClient(), model: runnerConfig.openAiModel };
   }
 
   /**
@@ -1740,25 +1758,32 @@ export function createAiService(
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
+    if (settings.aiEnabled === false) {
+      return {
+        client: null,
+        model: runnerConfig.openAiModel,
+        provider: settings.aiProvider ?? runnerConfig.aiProvider
+      };
+    }
     const requested: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
     // Key-presence fallback: if the requested provider has no key but another
     // is configured, use that one. Lets an operator (e.g. a pilot) set just
     // ANY one key without also flipping AI_PROVIDER. Only providers with a
     // built client are considered configured.
     const configured: AiProvider[] = [];
-    if (openAiClient) configured.push("openai");
-    if (geminiClient) configured.push("gemini");
-    if (glmClient) configured.push("glm");
+    if (openAiClient()) configured.push("openai");
+    if (geminiClient()) configured.push("gemini");
+    if (glmClient()) configured.push("glm");
     const providerId = pickActiveProvider(requested, configured);
     if (providerId === "glm") {
       const model = settings.glmModel?.trim() || runnerConfig.glmModel;
-      return { client: glmClient, model, provider: providerId };
+      return { client: glmClient(), model, provider: providerId };
     }
     if (providerId === "gemini") {
       const model = settings.geminiModel?.trim() || runnerConfig.geminiModel;
-      return { client: geminiClient, model, provider: providerId };
+      return { client: geminiClient(), model, provider: providerId };
     }
-    return { client: openAiClient, model: runnerConfig.openAiModel, provider: providerId };
+    return { client: openAiClient(), model: runnerConfig.openAiModel, provider: providerId };
   }
 
   /**

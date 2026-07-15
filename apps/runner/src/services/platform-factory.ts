@@ -139,7 +139,7 @@ export function createAdapters(input: {
     // stub keeps the runner booting cleanly with a clear error on any
     // WhatsApp op - the calm "not connected" state, never a crash.
     WHATSAPP:
-      runnerConfig.whatsapp.enabled && input.whatsappPrisma
+      input.whatsappPrisma
         ? new WhatsAppAdapter({
             authDir: runnerConfig.profileDirs.WHATSAPP,
             mediaDir: runnerConfig.whatsapp.mediaDir,

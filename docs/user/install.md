@@ -11,7 +11,7 @@ You need:
 - Messages signed in on the Mac if you want iMessage;
 - Google Chrome signed in to LinkedIn if you want LinkedIn personal-profile
   mode;
-- at least 10 GB free, with 20 GB recommended;
+- at least 4 GB free, with 8 GB recommended;
 - a stable internet connection for the first install.
 
 The pilot installer uses Node 22. If the Mac does not already have the exact
@@ -26,7 +26,7 @@ checksum, and installs it under `~/.rios-node` without `sudo`.
    folder into Terminal, then press Return.
 4. Wait while the installer copies the tracked application into
    `~/RelationshipInboxOS`, installs dependencies, creates the database,
-   downloads the local transcription model, prepares the dashboard, and
+   prepares the dashboard, and
    creates `~/Applications/Relationship Inbox OS.app`.
 
 The installer is safe to rerun. It preserves the existing `.env`, `data/`,
@@ -41,6 +41,12 @@ an untrusted download URL.
 Open Relationship Inbox OS from Applications or Launchpad. The source-install
 launcher starts the local runner and dashboard and opens
 `http://localhost:3100`.
+
+On a new install, the setup assistant opens before Today. It asks for your
+name, lets you choose iMessage, LinkedIn, and WhatsApp independently, checks
+Contacts, and offers optional AI help and optional local voice transcription.
+Nothing is required just to open Today. Every choice can be changed later in
+**Settings > Setup**.
 
 Grant only the permissions needed for features you choose:
 
@@ -60,23 +66,34 @@ dashboard requests audio only and has no current camera capture flow.
 ### iMessage
 
 1. Confirm recent conversations appear in Apple's Messages app.
-2. Grant Full Disk Access and restart Relationship Inbox OS.
-3. In Settings, run an iMessage scan.
+2. In the setup assistant, press **Open Full Disk Access**. Turn on
+   **Relationship Inbox OS**, then quit and reopen the app.
+3. In the setup assistant, press **Scan iMessage**. You can also do this later
+   from Settings.
 4. On the first user-triggered send, allow Messages automation.
 
 ### LinkedIn
 
 The pilot default mirrors the selected normal Chrome profile. Sign into
-LinkedIn in Chrome first, then use Connect LinkedIn in Settings. Complete 2FA
-or any account verification yourself. The app does not need a stored password
-for the normal path.
+LinkedIn in Chrome first, then press **Connect LinkedIn** in the setup
+assistant. You can also do this later from Settings. Complete 2FA or any
+account verification yourself. The app does not need a stored password for
+the normal path.
 
 ### WhatsApp
 
-WhatsApp is opt-in and disabled unless the build has
-`WHATSAPP_ENABLED=true`. When enabled, Settings displays a QR flow. Scan it
-with the linked-device flow in WhatsApp. The runner stores a local session
-below the installation's `data/profiles/whatsapp` directory.
+Choose WhatsApp in the setup assistant. Press **Connect WhatsApp**, then open
+WhatsApp on your phone, open **Settings > Linked Devices > Link a Device**, and
+scan the QR code Tovi shows. The local linked-device session is kept below the
+installation's `data/profiles/whatsapp` directory.
+
+## Configure voice transcription
+
+Voice transcription is off on a fresh install and uses no model space. Choose
+**Standard** to download the local `whisper-base.en` model at about 150 MB, or
+**Enhanced** to download `whisper-small.en` at about 500 MB. Audio stays on the
+Mac. Open **Settings > Setup > Optional components** to switch models, turn
+transcription off, or remove the downloaded model later.
 
 Instagram and TikTok adapters are beta and are not part of the primary pilot
 setup.
@@ -85,11 +102,14 @@ setup.
 
 The app works as a message inbox without an AI key. Summaries, reply briefs,
 classification, and writing help need at least one configured provider key.
-See [AI key setup](../pilot/getting-ai-keys.md) for account-specific steps and
-[AI routing](../developer/ai.md) for the exact technical behavior.
+Use the first-run setup assistant, or open **Settings > Setup > Run setup
+assistant**, to create and save a free Gemini key. See
+[AI key setup](../pilot/getting-ai-keys.md) for the exact click-by-click steps.
+No file editing, Terminal command, or restart is needed.
 
-After editing `.env`, quit and reopen the app. Provider clients and API keys
-are read at runner startup.
+When summaries or writing help run, the relevant conversation text is sent to
+Google's Gemini service for processing. The key remains on this Mac. Tovi
+never sends a reply to another person unless you press send.
 
 ## Verify the installation
 
