@@ -22,20 +22,15 @@ export const PLATFORM_LABEL: Record<
   WHATSAPP: "whatsapp"
 };
 
-// Platforms whose adapter is live in the runner. The "X/N connected"
-// denominator and the platforms list both key off this so adding a new
-// adapter only requires updating one place. WHATSAPP is intentionally not
-// here: it is opt-in per operator, so it joins the visible set dynamically
-// once it is enabled or has previously been linked.
+// Compatibility fallback for an older runner that does not return platform
+// cards. Current runners return the exact env-enabled set.
 export const IMPLEMENTED_PLATFORMS: ReadonlyArray<
   "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"
 > = ["LINKEDIN", "IMESSAGE"];
 
-// The platform set the operator actually sees in connected-counts, the
-// reconnect modal, and filter chips. LinkedIn + iMessage are always on;
-// WhatsApp appears once it is explicitly enabled or has EVER been linked.
-// Windows pilot builds enable it during setup; macOS pilots who never opted in
-// still do not see a third platform materialise. Pass the /data/platforms cards.
+// The platform set the operator sees in connected counts, the reconnect
+// modal, and filter chips. /data/platforms is already filtered by the runner's
+// environment switches, so the dashboard mirrors it exactly.
 export function visibleImplementedPlatforms(
   platforms: ReadonlyArray<{
     platform: string;
@@ -44,15 +39,18 @@ export function visibleImplementedPlatforms(
     supported?: boolean;
   }> | null | undefined
 ): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"> {
-  const supportedBase = platforms
-    ? IMPLEMENTED_PLATFORMS.filter(
-        (platform) => platforms.find((row) => row.platform === platform)?.supported !== false
-      )
-    : IMPLEMENTED_PLATFORMS;
-  const whatsapp = platforms?.find((p) => p.platform === "WHATSAPP");
-  return whatsapp && whatsapp.supported !== false && (whatsapp.enabled || hasEverConnected(whatsapp))
-    ? [...supportedBase, "WHATSAPP"]
-    : supportedBase;
+  if (!platforms) return IMPLEMENTED_PLATFORMS;
+  return platforms
+    .filter((platform) => platform.supported !== false)
+    .filter(
+      (platform) =>
+        platform.platform !== "WHATSAPP" || platform.enabled || hasEverConnected(platform)
+    )
+    .map((platform) => platform.platform)
+    .filter(
+      (platform): platform is "LINKEDIN" | "IMESSAGE" | "WHATSAPP" =>
+        platform === "LINKEDIN" || platform === "IMESSAGE" || platform === "WHATSAPP"
+    );
 }
 
 // A platform the operator has never connected is "not set up", not "broken".

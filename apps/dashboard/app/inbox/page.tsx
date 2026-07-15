@@ -27,7 +27,7 @@ import {
 } from "@/lib/inbox-pagination";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
-import { hasEverConnected, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
@@ -75,10 +75,8 @@ const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
   { key: "outreach", label: "Outreach" }
 ];
 
-// Full label list, including opt-in platforms. The popover renders a
-// filtered view (see platformFilterOptions in the page component) so a
-// pilot who never linked WhatsApp doesn't see its chip; ChipsRow keeps
-// reading labels from the full list.
+// Full label lookup. The popover filters this against /data/platforms so
+// disabled platforms never appear while active chip labels stay available.
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
@@ -385,15 +383,18 @@ export default function InboxPage() {
     return Array.from(groups).sort((a, b) => a.localeCompare(b));
   }, [allRows]);
 
-  // WhatsApp is opt-in: its filter chip only shows for an operator who has
-  // linked it at least once (or still has WhatsApp threads from before a
-  // disconnect). Everyone else keeps the two-platform popover.
   const platformFilterOptions = useMemo(() => {
-    const showWhatsApp =
-      platforms.some((p) => p.platform === "WHATSAPP" && hasEverConnected(p)) ||
-      allRows.some((row) => row.platform === "WHATSAPP");
-    return PLATFORM_FILTERS.filter((option) => option.key !== "WHATSAPP" || showWhatsApp);
-  }, [platforms, allRows]);
+    const available = new Set(platforms.map((platform) => platform.platform));
+    return PLATFORM_FILTERS.filter(
+      (option) => option.key === "all" || available.has(option.key)
+    );
+  }, [platforms]);
+
+  useEffect(() => {
+    if (platformFilter === "all") return;
+    if (platformFilterOptions.some((option) => option.key === platformFilter)) return;
+    setPlatformFilter("all");
+  }, [platformFilter, platformFilterOptions]);
 
   useEffect(() => {
     if (priorityGroup === "all") return;

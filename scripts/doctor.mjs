@@ -232,6 +232,7 @@ async function checkRunner() {
 function checkMessagesDb() {
   if (process.platform !== "darwin") return;
   const imessageOn = (env.IMESSAGE_ENABLED || "").trim().toLowerCase() === "true";
+  if (!imessageOn) return;
   const dbPath = (env.IMESSAGE_DB_PATH || "").trim() ||
     join(homedir(), "Library", "Messages", "chat.db");
   if (!existsSync(dbPath)) {
@@ -250,19 +251,22 @@ function checkMessagesDb() {
 }
 
 function checkLinkedInBrowser() {
+  const linkedinFlag = (env.LINKEDIN_ENABLED || "").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(linkedinFlag)) return;
+
   const mode = (env.BROWSER_PROFILE_MODE || "personal").trim().toLowerCase();
   if (mode === "personal") {
     add(PASS, "LinkedIn browser", "Uses the installed Google Chrome app. No separate browser download needed.");
   } else {
-  const chromiumGlob = join(homedir(), "Library", "Caches", "ms-playwright");
-  const hasChromium = existsSync(chromiumGlob) &&
-    sh(`ls -d "${chromiumGlob}"/chromium* 2>/dev/null | head -1`);
-  if (!hasChromium) {
-    add(WARN, "LinkedIn browser", "Chromium for LinkedIn isn't installed yet.",
-      `Run: cd "${APP_DIR}" && npx playwright install chromium`);
-  } else {
-    add(PASS, "LinkedIn browser", "Chromium installed.");
-  }
+    const chromiumGlob = join(homedir(), "Library", "Caches", "ms-playwright");
+    const hasChromium = existsSync(chromiumGlob) &&
+      sh(`ls -d "${chromiumGlob}"/chromium* 2>/dev/null | head -1`);
+    if (!hasChromium) {
+      add(WARN, "LinkedIn browser", "Chromium for LinkedIn isn't installed yet.",
+        `Run: cd "${APP_DIR}" && npx playwright install chromium`);
+    } else {
+      add(PASS, "LinkedIn browser", "Chromium installed.");
+    }
   }
 
   if (mode === "personal") {
