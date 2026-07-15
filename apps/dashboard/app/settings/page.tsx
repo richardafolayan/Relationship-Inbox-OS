@@ -18,6 +18,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
+import { CalendarFocusSection } from "@/components/settings/CalendarFocusSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
@@ -511,7 +512,12 @@ export default function SettingsPage() {
             </>
           ) : null}
 
-          {activeTab === "focus" ? <FocusSettingsSection /> : null}
+          {activeTab === "focus" ? (
+            <>
+              <FocusSettingsSection />
+              <CalendarFocusSection />
+            </>
+          ) : null}
 
           {activeTab === "app" ? (
             <>

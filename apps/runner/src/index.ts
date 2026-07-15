@@ -90,6 +90,9 @@ import { createSendQueue } from "./services/send-queue";
 import { parsePersistedSendFailure } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
+import { createCalendarFocusService } from "./services/calendar-focus";
+import { fetchIcsText } from "./services/calendar-fetch";
+import { summarizeCalendar } from "./services/calendar-ics";
 import { createBirthdaySync } from "./services/birthday-sync";
 import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
 import {
@@ -1219,6 +1222,13 @@ const scheduledSendPromoter = createScheduledSendPromoter({
   eventBus
 });
 scheduledSendPromoter.start();
+
+// Calendar auto-focus (issue #786): while the operator has a calendar
+// subscription enabled, open a Focus window on its own whenever a live event
+// is happening and close it when the event ends. Runs every 60s; the feed is
+// cached between network fetches. No-op until a URL is saved and enabled.
+const calendarFocusService = createCalendarFocusService({ settingsStore });
+calendarFocusService.start();
 
 // Syncs contact birthdays from the macOS AddressBook into Person rows once
 // at boot and then daily. Mac-only and read-only against Contacts; a no-op
@@ -6860,7 +6870,12 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           professionalNote: z.string().max(2000).default(""),
           audience: z.enum(["favourites", "all_personal"]),
           windowId: z.string().max(80),
-          ackedPersonIds: z.array(z.string().max(120)).max(5000)
+          ackedPersonIds: z.array(z.string().max(120)).max(5000),
+          // Calendar auto-focus (#786). Older dashboard builds don't send
+          // these; default so a hand-started window round-trips as "manual"
+          // and a calendar window keeps its dismissal key through an edit/end.
+          source: z.enum(["manual", "calendar"]).default("manual"),
+          sourceEventKey: z.string().max(120).default("")
         })
         .optional(),
       ackTemplates: z
@@ -6875,11 +6890,50 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           oneNotePerPerson: z.boolean(),
           audience: z.enum(["favourites", "all_personal"])
         })
+        .optional(),
+      calendarSync: z
+        .object({
+          url: z.string().max(2000),
+          enabled: z.boolean(),
+          keyword: z.string().max(120),
+          audience: z.enum(["favourites", "all_personal"])
+        })
         .optional()
     })
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);
+  // When the calendar subscription changed, re-check the feed right away so a
+  // just-enabled window opens without waiting for the next 60s tick.
+  if (payload.calendarSync !== undefined) {
+    void calendarFocusService.refresh().catch(() => undefined);
+  }
   res.json(updated);
+}));
+
+// Calendar auto-focus (#786): the Settings "check calendar" button. Fetches
+// the operator's iCal feed once (SSRF-guarded) and reports the live event and
+// the next upcoming one so they can confirm the URL works. Always 200 with an
+// { ok } flag so the dashboard shows a calm message, not a thrown error.
+app.post("/control/calendar/preview", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "check your calendar", kind: "external-action" })) return;
+  const { url, keyword } = z
+    .object({ url: z.string().max(2000), keyword: z.string().max(120).optional() })
+    .parse(req.body);
+  const trimmed = url.trim();
+  if (!trimmed) {
+    res.json({ ok: false, error: "Add your calendar's secret iCal address first." });
+    return;
+  }
+  try {
+    const { text } = await fetchIcsText(trimmed);
+    const summary = summarizeCalendar(text, { now: new Date(), keyword: keyword ?? "" });
+    res.json({ ok: true, active: summary.active, next: summary.next });
+  } catch (error) {
+    res.json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Could not read that calendar."
+    });
+  }
 }));
 
 // Issue #438 (pilot R-0059). Opt-in: infer the operator's reply-style fields

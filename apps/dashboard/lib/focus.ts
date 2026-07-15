@@ -15,6 +15,7 @@
 
 import type {
   AckTemplates,
+  CalendarSyncSettings,
   FocusAudience,
   FocusSettings,
   FocusTier,
@@ -39,6 +40,14 @@ export const DEFAULT_FOCUS_SETTINGS: FocusSettings = {
   audience: "favourites"
 };
 
+// Calendar auto-focus (issue #786): disabled with no URL by default.
+export const DEFAULT_CALENDAR_SYNC: CalendarSyncSettings = {
+  url: "",
+  enabled: false,
+  keyword: "",
+  audience: "favourites"
+};
+
 export const EMPTY_FOCUS_WINDOW: FocusWindowState = {
   active: false,
   startedAt: "",
@@ -48,7 +57,9 @@ export const EMPTY_FOCUS_WINDOW: FocusWindowState = {
   professionalNote: "",
   audience: "favourites",
   windowId: "",
-  ackedPersonIds: []
+  ackedPersonIds: [],
+  source: "manual",
+  sourceEventKey: ""
 };
 
 // Reason chips offered in the setup sheet. Optional — the operator can also
@@ -91,6 +102,19 @@ export function readAckTemplates(profile: OperatorProfile | null | undefined): A
 
 export function readFocusSettings(profile: OperatorProfile | null | undefined): FocusSettings {
   return profile?.focusSettings ?? DEFAULT_FOCUS_SETTINGS;
+}
+
+export function readCalendarSync(
+  profile: OperatorProfile | null | undefined
+): CalendarSyncSettings {
+  return profile?.calendarSync ?? DEFAULT_CALENDAR_SYNC;
+}
+
+/** True when this live window was opened by the calendar rather than by hand
+ *  (issue #786). Surfaces the "started from your calendar" affordance so the
+ *  operator knows why focus turned on and can end it if the event is wrong. */
+export function isCalendarWindow(window: FocusWindowState | null | undefined): boolean {
+  return window?.source === "calendar";
 }
 
 /**

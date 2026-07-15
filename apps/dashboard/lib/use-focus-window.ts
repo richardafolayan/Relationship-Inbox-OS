@@ -11,10 +11,18 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiGet, apiPost } from "@/lib/api";
 import { useCacheSeed } from "@/lib/use-cache-seed";
-import type { AckTemplates, FocusAudience, FocusSettings, FocusWindowState, OperatorProfile } from "@/lib/types";
+import type {
+  AckTemplates,
+  CalendarSyncSettings,
+  FocusAudience,
+  FocusSettings,
+  FocusWindowState,
+  OperatorProfile
+} from "@/lib/types";
 import {
   isFocusActive,
   readAckTemplates,
+  readCalendarSync,
   readFocusSettings,
   readFocusWindow
 } from "@/lib/focus";
@@ -100,6 +108,7 @@ export interface UseFocusWindow {
   focusWindow: FocusWindowState;
   templates: AckTemplates;
   settings: FocusSettings;
+  calendarSync: CalendarSyncSettings;
   active: boolean;
   reload: () => void;
   startFocus: (opts: {
@@ -126,6 +135,8 @@ export interface UseFocusWindow {
   markManyAcked: (personIds: Array<string | undefined>) => Promise<void>;
   saveTemplates: (templates: AckTemplates) => Promise<OperatorProfile>;
   saveSettings: (settings: FocusSettings) => Promise<OperatorProfile>;
+  /** Save the calendar auto-focus subscription (issue #786). */
+  saveCalendarSync: (calendarSync: CalendarSyncSettings) => Promise<OperatorProfile>;
 }
 
 export function useFocusWindow(): UseFocusWindow {
@@ -160,6 +171,7 @@ export function useFocusWindow(): UseFocusWindow {
   const focusWindow = readFocusWindow(profile);
   const templates = readAckTemplates(profile);
   const settings = readFocusSettings(profile);
+  const calendarSync = readCalendarSync(profile);
 
   // Flip the UI off the moment the live window's endsAt passes, without a
   // reload. isFocusActive() already derives liveness from the clock at every
@@ -226,7 +238,11 @@ export function useFocusWindow(): UseFocusWindow {
           professionalNote: opts.professionalNote ?? "",
           audience: opts.audience,
           windowId: newWindowId(),
-          ackedPersonIds: []
+          ackedPersonIds: [],
+          // A hand-started window; the calendar auto-focus service never
+          // touches it (issue #786).
+          source: "manual",
+          sourceEventKey: ""
         }
       }),
     [update]
@@ -298,11 +314,17 @@ export function useFocusWindow(): UseFocusWindow {
     [update]
   );
 
+  const saveCalendarSync = useCallback(
+    (next: CalendarSyncSettings) => update({ calendarSync: next }),
+    [update]
+  );
+
   return {
     profile,
     focusWindow,
     templates,
     settings,
+    calendarSync,
     active: isFocusActive(focusWindow),
     reload: load,
     startFocus,
@@ -312,6 +334,7 @@ export function useFocusWindow(): UseFocusWindow {
     markAcked,
     markManyAcked,
     saveTemplates,
-    saveSettings
+    saveSettings,
+    saveCalendarSync
   };
 }

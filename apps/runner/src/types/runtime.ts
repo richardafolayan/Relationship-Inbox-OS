@@ -162,7 +162,21 @@ export interface FocusWindowState {
   windowId: string;
   /** Person ids already acknowledged in this window (one note per person). */
   ackedPersonIds: string[];
+  /** What opened this window. "manual" = the operator started it by hand;
+   *  "calendar" = the calendar auto-focus service opened it for a live event
+   *  (issue #786). Older profile rows have no field and coerce to "manual".
+   *  The auto-focus service never touches a "manual" window, so a hand-started
+   *  block always wins over the calendar. */
+  source: FocusWindowSource;
+  /** For a "calendar" window, a stable id for the specific event occurrence
+   *  that opened it. Ending an auto-window stops it re-opening for THIS
+   *  occurrence, while a later occurrence of the same event still triggers a
+   *  fresh window. "" for manual windows. */
+  sourceEventKey: string;
 }
+
+/** What opened a focus window: by hand, or by the calendar auto-focus service. */
+export type FocusWindowSource = "manual" | "calendar";
 
 /**
  * The operator's two acknowledgement note templates, in their own words.
@@ -183,6 +197,27 @@ export interface FocusSettings {
   /** If someone messages twice in one window, only acknowledge once. */
   oneNotePerPerson: boolean;
   /** Default audience pre-selected when starting a new window. */
+  audience: FocusAudience;
+}
+
+/**
+ * Calendar auto-focus (issue #786, pilot R-0097). The operator pastes the
+ * read-only "secret address in iCal format" URL that Google / Apple / Outlook
+ * calendars all expose; the runner subscribes to that feed and auto-opens a
+ * Focus window while an event is live, so heads-down blocks start on their
+ * own. Read-only, no OAuth, no cloud project. It still never auto-sends — an
+ * auto-opened window only surfaces the same one-tap acknowledgements a manual
+ * window does.
+ */
+export interface CalendarSyncSettings {
+  /** The secret iCal (ICS) feed URL. "" = not configured. */
+  url: string;
+  /** Master switch. Even with a URL saved, nothing runs until this is on. */
+  enabled: boolean;
+  /** Optional case-insensitive title filter. "" = every busy timed event
+   *  triggers focus; otherwise only events whose title contains this word. */
+  keyword: string;
+  /** Audience an auto-opened window covers (same choices as a manual one). */
   audience: FocusAudience;
 }
 
@@ -210,6 +245,9 @@ export interface OperatorProfile {
   ackTemplates: AckTemplates;
   /** Focus Reply Buffer: preferences (reason label, one-note-per-person, audience). */
   focusSettings: FocusSettings;
+  /** Calendar auto-focus subscription (issue #786). Added last, so older
+   *  profile rows parse fine (coerced to the disabled default). */
+  calendarSync: CalendarSyncSettings;
 }
 
 /**

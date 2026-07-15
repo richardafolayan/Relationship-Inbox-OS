@@ -274,7 +274,20 @@ export interface FocusWindowState {
   windowId: string;
   /** Person ids already acknowledged this window (one note per person). */
   ackedPersonIds: string[];
+  /**
+   * What opened this window (issue #786): "manual" when the operator started
+   * it, "calendar" when the calendar auto-focus service did. Optional on the
+   * dashboard mirror so pre-feature runner payloads parse; treated as "manual"
+   * when absent.
+   */
+  source?: FocusWindowSource;
+  /** For a calendar window, the id of the event occurrence that opened it, so
+   *  ending it dismisses only that occurrence. "" / absent for manual. */
+  sourceEventKey?: string;
 }
+
+/** What opened a focus window: by hand, or by the calendar auto-focus service. */
+export type FocusWindowSource = "manual" | "calendar";
 
 /**
  * Response of POST /runner/control/focus/compose-note ("Help me phrase
@@ -306,6 +319,40 @@ export interface FocusSettings {
 }
 
 /**
+ * Calendar auto-focus subscription (issue #786). Mirrors runner-side
+ * `CalendarSyncSettings`. The operator pastes their calendar's read-only
+ * "secret address in iCal format" URL and the runner auto-opens a Focus
+ * window while an event is live. No OAuth; still never auto-sends.
+ */
+export interface CalendarSyncSettings {
+  /** The secret iCal (ICS) feed URL. "" = not configured. */
+  url: string;
+  /** Master switch. Nothing runs until this is on, even with a URL saved. */
+  enabled: boolean;
+  /** Optional case-insensitive title filter. "" = every busy timed event. */
+  keyword: string;
+  /** Audience an auto-opened window covers. */
+  audience: FocusAudience;
+}
+
+/** POST /runner/control/calendar/preview response — the live and next events
+ *  for the "check calendar" button. */
+export interface CalendarPreviewResponse {
+  ok: boolean;
+  error?: string;
+  active?: CalendarPreviewOccurrence | null;
+  next?: CalendarPreviewOccurrence | null;
+}
+
+export interface CalendarPreviewOccurrence {
+  key: string;
+  uid: string;
+  title: string;
+  startMs: number;
+  endMs: number;
+}
+
+/**
  * The user's voice + identity profile used by the AI prompts and the Today
  * greeting. Matches runner-side `OperatorProfile`. String fields are stored
  * as plain strings; "" means "not set" (no opinion injected into prompts).
@@ -327,6 +374,9 @@ export interface OperatorProfile {
   focusWindow?: FocusWindowState;
   ackTemplates?: AckTemplates;
   focusSettings?: FocusSettings;
+  /** Calendar auto-focus subscription (issue #786). Optional for the same
+   *  pre-feature-parse reason as the other focus fields. */
+  calendarSync?: CalendarSyncSettings;
 }
 
 export interface PlatformCard {
