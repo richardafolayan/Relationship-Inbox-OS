@@ -12,12 +12,14 @@ export interface AppVersion {
   build?: string;
   commit?: string;
   channel?: string;
+  releaseNotes?: string[];
   /** Dev-channel builds bake the feed they self-update from into release.json. */
   updateFeedUrl?: string;
 }
 
 export interface UpdateCheckResult {
   currentVersion: string;
+  currentReleaseNotes: string[];
   latestVersion: string;
   updateAvailable: boolean;
   releaseNotes: string[];
@@ -46,6 +48,9 @@ export function readAppVersion(projectRoot: string): AppVersion {
           build: typeof parsed.build === "string" ? parsed.build : undefined,
           commit: typeof parsed.commit === "string" ? parsed.commit : undefined,
           channel: typeof parsed.channel === "string" ? parsed.channel : undefined,
+          releaseNotes: Array.isArray(parsed.releaseNotes)
+            ? parsed.releaseNotes.filter((note: unknown): note is string => typeof note === "string")
+            : undefined,
           updateFeedUrl: typeof parsed.updateFeedUrl === "string" ? parsed.updateFeedUrl : undefined
         };
       }
@@ -111,9 +116,11 @@ export function runUpdateCheck(opts: {
   const updaterPath = opts.updaterPath ?? resolve(projectRoot, "scripts/update-student.mjs");
   const nodeBin = opts.nodeBin ?? process.execPath;
   const timeoutMs = opts.timeoutMs ?? 20_000;
-  const current = readAppVersion(projectRoot).version;
+  const installed = readAppVersion(projectRoot);
+  const current = installed.version;
   const base: UpdateCheckResult = {
     currentVersion: current,
+    currentReleaseNotes: installed.releaseNotes ?? [],
     latestVersion: current,
     updateAvailable: false,
     releaseNotes: []
@@ -143,6 +150,7 @@ export function runUpdateCheck(opts: {
           const parsed = JSON.parse(out);
           done({
             currentVersion: String(parsed.currentVersion ?? current),
+            currentReleaseNotes: installed.releaseNotes ?? [],
             latestVersion: String(parsed.latestVersion ?? current),
             updateAvailable: Boolean(parsed.updateAvailable),
             releaseNotes: Array.isArray(parsed.releaseNotes)
