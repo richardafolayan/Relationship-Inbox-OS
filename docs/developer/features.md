@@ -26,7 +26,7 @@ Status terms:
 | Responsive shell | Primary | Collapsible desktop sidebar, phone bottom dock, runner status, attention count, notification center, and themes. [`app-shell.tsx`](../../apps/dashboard/components/layout/app-shell.tsx) |
 | Favorites | Primary | Pins a person within existing queue/order semantics and enables favorite-only filtering. Stored as `Person.favouritedAt`. |
 | Mark done | Primary | Clears active reply obligation across the correct canonical/sibling target set without sending anything. |
-| Archive and resurface | Primary | Removes a thread from active views. A new inbound needing a reply can restore it automatically. |
+| Archive and restore | Primary | Removes a thread from active views until the user explicitly restores it. |
 | Snooze and unsnooze | Primary | Hides active threads until a time; new inbound can clear the snooze. Suggested durations and direct unsnooze are supported. |
 | Private reminder | Primary | Natural-language reminder text is stored with a snooze and shown privately when the thread returns. It is never sent. |
 | Saved drafts | Primary | One or more persisted draft records are read by thread; current UI saves and deletes the active draft. |

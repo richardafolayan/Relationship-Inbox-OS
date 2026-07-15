@@ -425,6 +425,23 @@ export function decideSameThreadTwinDeleteMerge(
   });
 }
 
+export function applyHandledBoundary(input: {
+  needsReply: boolean;
+  handledAt: Date | null;
+  lastInboundAt: Date | null;
+}): { needsReply: boolean; clearHandledAt: boolean } {
+  if (!input.handledAt) {
+    return { needsReply: input.needsReply, clearHandledAt: false };
+  }
+  const receivedNewInbound = Boolean(
+    input.lastInboundAt && input.lastInboundAt.getTime() > input.handledAt.getTime()
+  );
+  return {
+    needsReply: receivedNewInbound ? input.needsReply : false,
+    clearHandledAt: receivedNewInbound
+  };
+}
+
 export function normalizePositiveScanCap(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) {
     return undefined;
@@ -3622,7 +3639,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const messageDerivedNeedsReply = Boolean(
       resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
     );
-    const resolvedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
+    const derivedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
+    const handledBoundary = applyHandledBoundary({
+      needsReply: derivedNeedsReply,
+      handledAt: thread.handledAt,
+      lastInboundAt: resolvedLastInboundAt
+    });
+    const resolvedNeedsReply = handledBoundary.needsReply;
     // latestRealMessage already excludes system-event placeholders. The
     // previous fallback `?? latestMessagesDesc[0]` could surface a
     // "[system event]" row as lastMessageDirection/Text on threads where
@@ -3868,9 +3891,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         (!thread.lastInboundAt || resolvedLastInboundAt.getTime() > thread.lastInboundAt.getTime())
           ? { snoozedUntil: null }
           : {}),
-        riskLevel: risk.level,
-        slaDueAt: risk.slaDueAt,
-        riskReason: hasPersistedMessages
+        ...(handledBoundary.clearHandledAt ? { handledAt: null } : {}),
+        riskLevel: resolvedNeedsReply ? risk.level : "GREEN",
+        slaDueAt: resolvedNeedsReply ? risk.slaDueAt : null,
+        riskReason: thread.handledAt && !handledBoundary.clearHandledAt
+          ? "Marked done manually"
+          : hasPersistedMessages
           ? risk.riskReason
           : resolvedNeedsReply
             ? "Awaiting reply (list preview signal)"
