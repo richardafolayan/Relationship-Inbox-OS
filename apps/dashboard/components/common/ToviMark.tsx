@@ -12,11 +12,18 @@ export function ToviMark({ className }: { className?: string }) {
       xmlns="http://www.w3.org/2000/svg"
       className={cn("h-8 w-8", className)}
     >
-      <rect x="36" y="36" width="440" height="440" rx="96.8" fill="#F7F2E8" />
+      <rect
+        x="36"
+        y="36"
+        width="440"
+        height="440"
+        rx="96.8"
+        fill="var(--tovi-mark-tile)"
+      />
       <path
         d="M 146 374 C 106 352 80 313 75 266 C 69 212 90 160 132 124 C 171 91 220 76 271 81 C 334 87 387 117 418 162 C 447 204 450 260 426 310 C 399 365 346 394 282 394 H 224 C 207 394 191 399 177 408 L 126 440"
         fill="none"
-        stroke="#202A35"
+        stroke="var(--tovi-mark-stroke)"
         strokeWidth="26"
         strokeLinecap="round"
         strokeLinejoin="round"
