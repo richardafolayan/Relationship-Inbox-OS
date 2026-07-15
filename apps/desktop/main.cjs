@@ -42,6 +42,11 @@ const APP_DIR = resolveAppDir(__dirname);
 const START_TIMEOUT_MS = 180_000;
 const POLL_INTERVAL_MS = 1000;
 const STOP_TIMEOUT_MS = 8000;
+const MENU_REFRESH_INTERVAL_MS = 60_000;
+// Keep these values aligned with apps/dashboard/lib/ui-scale.ts.
+const TEXT_SIZE_LEVELS = ["normal", "large", "extra"];
+const UI_SCALE_STORAGE_KEY = "inbox_os_ui_scale";
+const UI_SCALE_CHANGE_EVENT = "inbox-ui-scale";
 
 let mainWindow = null;
 let appProcess = null;
@@ -58,6 +63,9 @@ let recoveryDialogOpen = false;
 let reclaimPortConflictsOnce = false;
 let restartHistory = [];
 let shuttingDown = false;
+let favouriteContacts = [];
+let currentTextSize = "normal";
+let menuRefreshTimer = null;
 
 app.setName(APP_NAME);
 if (process.platform === "win32") app.setAppUserModelId(APP_ID);
@@ -294,6 +302,7 @@ async function loadDashboardWhenReady(window, url, generation) {
         await window.loadURL(url);
         if (!window.isVisible()) window.show();
         restartHistory = [];
+        setTimeout(refreshMenuState, 500);
         if (!permissionPromptShown) {
           permissionPromptShown = true;
           setTimeout(() => void showPermissionHelp({ onlyWhenMissing: true }), 750);
@@ -610,12 +619,161 @@ function goInHistory(direction) {
   if (direction === "forward" && history.canGoForward()) history.goForward();
 }
 
-// Menu buildout (R-0104 / #822): the pilot flagged the bare default menu.
-// Navigation lives under Go (matching the sidebar: Today / Inbox /
-// Reconnect / Settings), Back/Forward + Reload under View (also the escape
-// hatch if any surface ever traps the operator again — see R-0103), and
-// feedback entry points under Help so "how do I report this" is always one
-// menu away.
+function runInPage(expression) {
+  const contents = mainWindow && !mainWindow.isDestroyed() ? mainWindow.webContents : null;
+  if (!contents) return Promise.resolve(undefined);
+  return contents.executeJavaScript(expression, true).catch((error) => {
+    writeLog(`Could not run page script: ${error.message}`);
+    return undefined;
+  });
+}
+
+function getRunnerJson(path) {
+  return new Promise((resolveJson) => {
+    let handle;
+    try {
+      handle = get(`http://127.0.0.1:${runnerPort(process.env)}${path}`, { timeout: 2500 }, (response) => {
+        if (!(response.statusCode > 0 && response.statusCode < 400)) {
+          response.resume();
+          resolveJson(null);
+          return;
+        }
+        let body = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          if (body.length < 256_000) body += chunk;
+        });
+        response.on("end", () => {
+          try {
+            resolveJson(JSON.parse(body));
+          } catch {
+            resolveJson(null);
+          }
+        });
+      });
+    } catch {
+      resolveJson(null);
+      return;
+    }
+    handle.on("timeout", () => {
+      handle.destroy();
+      resolveJson(null);
+    });
+    handle.on("error", () => resolveJson(null));
+  });
+}
+
+async function refreshFavourites() {
+  const data = await getRunnerJson("/data/favourites");
+  if (!Array.isArray(data)) return;
+  const next = data
+    .filter((item) => item && typeof item.id === "string" && typeof item.name === "string" && item.name.trim())
+    .slice(0, 5)
+    .map((item) => ({
+      id: item.id,
+      name: String(item.name),
+      threadId: typeof item.threadId === "string" ? item.threadId : null
+    }));
+  if (JSON.stringify(next) === JSON.stringify(favouriteContacts)) return;
+  favouriteContacts = next;
+  createMenu();
+}
+
+function openFavourite(contact) {
+  if (contact.threadId) openDashboardPath(`/thread/${encodeURIComponent(contact.threadId)}`);
+  else openDashboardPath(`/inbox?q=${encodeURIComponent(contact.name)}`);
+}
+
+function textSizeScript(op, arg) {
+  return `(function(){
+  var order = ${JSON.stringify(TEXT_SIZE_LEVELS)};
+  var KEY = ${JSON.stringify(UI_SCALE_STORAGE_KEY)};
+  var EVENT = ${JSON.stringify(UI_SCALE_CHANGE_EVENT)};
+  var bridge = window.__toviUiScale;
+  function read(){
+    var attr = document.documentElement.getAttribute("data-ui-scale");
+    if (attr === "large" || attr === "extra") return attr;
+    try { var s = localStorage.getItem(KEY); if (s === "large" || s === "extra") return s; } catch (e) {}
+    return "normal";
+  }
+  function apply(next){
+    if (order.indexOf(next) < 0) next = "normal";
+    if (next === "normal") document.documentElement.removeAttribute("data-ui-scale");
+    else document.documentElement.setAttribute("data-ui-scale", next);
+    try { if (next === "normal") localStorage.removeItem(KEY); else localStorage.setItem(KEY, next); } catch (e) {}
+    try { window.dispatchEvent(new CustomEvent(EVENT, { detail: { scale: next } })); } catch (e) {}
+    return next;
+  }
+  function step(dir){
+    var i = order.indexOf(read()); if (i < 0) i = 0;
+    var j = Math.max(0, Math.min(order.length - 1, dir === "down" ? i - 1 : i + 1));
+    return apply(order[j]);
+  }
+  var op = ${JSON.stringify(op)}, arg = ${JSON.stringify(arg ?? null)};
+  if (op === "get") return bridge && bridge.get ? bridge.get() : read();
+  if (op === "set") return bridge && bridge.set ? bridge.set(arg) : apply(arg);
+  if (op === "step") return bridge && bridge.step ? bridge.step(arg) : step(arg);
+  return read();
+})();`;
+}
+
+async function applyTextSize(op, arg) {
+  const result = await runInPage(textSizeScript(op, arg));
+  if (typeof result !== "string" || !TEXT_SIZE_LEVELS.includes(result)) return;
+  const changed = result !== currentTextSize;
+  currentTextSize = result;
+  if (changed || op === "get") createMenu();
+}
+
+function refreshMenuState() {
+  void refreshFavourites();
+  void applyTextSize("get");
+}
+
+function textSizeMenu() {
+  const level = (label, value) => ({
+    label,
+    type: "radio",
+    checked: currentTextSize === value,
+    click: () => void applyTextSize("set", value)
+  });
+  return {
+    label: "Text Size",
+    submenu: [
+      { label: "Bigger", accelerator: "CommandOrControl+=", click: () => void applyTextSize("step", "up") },
+      { label: "Smaller", accelerator: "CommandOrControl+-", click: () => void applyTextSize("step", "down") },
+      { label: "Actual Size", accelerator: "CommandOrControl+0", click: () => void applyTextSize("set", "normal") },
+      { type: "separator" },
+      level("Normal", "normal"),
+      level("Large", "large"),
+      level("Extra Large", "extra")
+    ]
+  };
+}
+
+function favouriteMenuItems() {
+  if (favouriteContacts.length === 0) {
+    return [{ label: "No favourites yet", enabled: false }];
+  }
+  return favouriteContacts.map((contact, index) => ({
+    label: contact.name,
+    accelerator: index < 9 ? `CommandOrControl+Shift+${index + 1}` : undefined,
+    click: () => openFavourite(contact)
+  }));
+}
+
+function settingsSectionsSubmenu() {
+  return [
+    { label: "All Settings", click: () => openDashboardPath("/settings") },
+    { type: "separator" },
+    { label: "Platforms", click: () => openDashboardPath("/settings#platforms") },
+    { label: "Notifications", click: () => openDashboardPath("/settings#notifications") },
+    { label: "Reply Style", click: () => openDashboardPath("/settings#writing") },
+    { label: "Focus", click: () => openDashboardPath("/settings#focus") },
+    { label: "App & Updates", click: () => openDashboardPath("/settings#app") }
+  ];
+}
+
 function createMenu() {
   const macPermissionsSupported = desktopCapabilities(process.platform).macPermissionsSupported;
   const appMenu = [
@@ -647,9 +805,7 @@ function createMenu() {
         { label: "Forward", accelerator: "CommandOrControl+]", click: () => goInHistory("forward") },
         { role: "reload" },
         { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
+        textSizeMenu(),
         { type: "separator" },
         { role: "togglefullscreen" }
       ]
@@ -661,8 +817,17 @@ function createMenu() {
         { label: "Inbox", accelerator: "CommandOrControl+2", click: () => openDashboardPath("/inbox") },
         { label: "Reconnect", accelerator: "CommandOrControl+3", click: () => openDashboardPath("/reconnect") },
         { label: "Archived", accelerator: "CommandOrControl+4", click: () => openDashboardPath("/archived") },
+        { label: "People", accelerator: "CommandOrControl+5", click: () => openDashboardPath("/people") },
         { type: "separator" },
-        { label: "Settings", click: () => openDashboardPath("/settings") }
+        { label: "Settings", submenu: settingsSectionsSubmenu() }
+      ]
+    },
+    {
+      label: "Favourites",
+      submenu: [
+        ...favouriteMenuItems(),
+        { type: "separator" },
+        { label: "All People...", click: () => openDashboardPath("/people") }
       ]
     },
     { label: "Window", submenu: [{ role: "minimize" }, { role: "zoom" }, { type: "separator" }, { role: "front" }] },
@@ -706,6 +871,9 @@ function createWindow() {
   mainWindow.on("close", () => saveWindowBounds(mainWindow));
   mainWindow.on("closed", () => {
     mainWindow = null;
+  });
+  mainWindow.on("focus", () => {
+    if (!shuttingDown && appProcess) refreshMenuState();
   });
   mainWindow.on("unresponsive", () => {
     if (!shuttingDown) void showStartupRecovery("The app window stopped responding.");
@@ -761,6 +929,12 @@ if (!gotLock) {
     }
     createMenu();
     createWindow();
+    menuRefreshTimer = setInterval(() => {
+      if (!shuttingDown && appProcess && mainWindow && !mainWindow.isDestroyed()) {
+        void refreshFavourites();
+      }
+    }, MENU_REFRESH_INTERVAL_MS);
+    menuRefreshTimer.unref?.();
     const generation = startLocalApp();
     if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
   }).catch((error) => {
@@ -787,6 +961,10 @@ if (!gotLock) {
     quitInProgress = true;
     shuttingDown = true;
     ++lifecycleGeneration;
+    if (menuRefreshTimer) {
+      clearInterval(menuRefreshTimer);
+      menuRefreshTimer = null;
+    }
     void stopLocalApp().finally(() => {
       quitReady = true;
       if (logStream) {

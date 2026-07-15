@@ -54,10 +54,16 @@ import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
 import { startSetupWizard } from "@/lib/setup-wizard";
 import { OptionalComponents } from "@/components/settings/OptionalComponents";
+import {
+  applyUiScale,
+  onUiScaleChange,
+  readUiScale,
+  UI_SCALE_OPTIONS,
+  type UiScale
+} from "@/lib/ui-scale";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
-const UI_SCALE_KEY = "inbox_os_ui_scale";
 const DEFAULT_SETTINGS_TAB: SettingsTabId = "setup";
 
 type SettingsTabId =
@@ -128,13 +134,6 @@ const SETTINGS_TABS: SettingsTab[] = [
   }
 ];
 
-type UiScale = "normal" | "large" | "extra";
-
-const UI_SCALE_OPTIONS: Array<{ id: UiScale; label: string }> = [
-  { id: "normal", label: "Normal" },
-  { id: "large", label: "Large" },
-  { id: "extra", label: "Extra" }
-];
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "LinkedIn",
@@ -232,8 +231,7 @@ export default function SettingsPage() {
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setScanInterval(readScanInterval());
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
-    const storedScale = window.localStorage.getItem(UI_SCALE_KEY);
-    setUiScale(storedScale === "large" || storedScale === "extra" ? storedScale : "normal");
+    setUiScale(readUiScale());
     void apiGet<{ headless?: boolean }>("/runner/data/settings")
       .then((data) => {
         if (data && typeof data.headless === "boolean") setHeadless(data.headless);
@@ -253,6 +251,8 @@ export default function SettingsPage() {
     window.addEventListener("runner-resync", onResync);
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refreshPlatforms]);
+
+  useEffect(() => onUiScaleChange(() => setUiScale(readUiScale())), []);
 
   const toggleQuietHours = () => {
     const next = !quietHours;
@@ -294,14 +294,7 @@ export default function SettingsPage() {
   };
 
   const chooseUiScale = (next: UiScale) => {
-    setUiScale(next);
-    if (next === "normal") {
-      window.localStorage.removeItem(UI_SCALE_KEY);
-      document.documentElement.removeAttribute("data-ui-scale");
-    } else {
-      window.localStorage.setItem(UI_SCALE_KEY, next);
-      document.documentElement.setAttribute("data-ui-scale", next);
-    }
+    setUiScale(applyUiScale(next));
     setSavedAt(Date.now());
   };
 
