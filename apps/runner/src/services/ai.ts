@@ -1758,6 +1758,13 @@ export function createAiService(
     // the cold-start default seeded from the AI_PROVIDER env var. Settings
     // reads are a single SQLite row lookup — cheap enough to do per call.
     const settings = await settingsStore.getSettings();
+    if (settings.aiEnabled === false) {
+      return {
+        client: null,
+        model: runnerConfig.openAiModel,
+        provider: settings.aiProvider ?? runnerConfig.aiProvider
+      };
+    }
     const requested: AiProvider = settings.aiProvider ?? runnerConfig.aiProvider;
     // Key-presence fallback: if the requested provider has no key but another
     // is configured, use that one. Lets an operator (e.g. a pilot) set just

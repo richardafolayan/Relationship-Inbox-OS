@@ -250,6 +250,10 @@ function checkMessagesDb() {
 }
 
 function checkLinkedInBrowser() {
+  const mode = (env.BROWSER_PROFILE_MODE || "personal").trim().toLowerCase();
+  if (mode === "personal") {
+    add(PASS, "LinkedIn browser", "Uses the installed Google Chrome app. No separate browser download needed.");
+  } else {
   const chromiumGlob = join(homedir(), "Library", "Caches", "ms-playwright");
   const hasChromium = existsSync(chromiumGlob) &&
     sh(`ls -d "${chromiumGlob}"/chromium* 2>/dev/null | head -1`);
@@ -259,8 +263,8 @@ function checkLinkedInBrowser() {
   } else {
     add(PASS, "LinkedIn browser", "Chromium installed.");
   }
+  }
 
-  const mode = (env.BROWSER_PROFILE_MODE || "personal").trim().toLowerCase();
   if (mode === "personal") {
     const userData = (env.PERSONAL_CHROME_USER_DATA_DIR || "").trim() ||
       join(homedir(), "Library", "Application Support", "Google", "Chrome");
@@ -295,9 +299,7 @@ function checkAiKey() {
     add(PASS, "AI key",
       `${configured} key set (AI_PROVIDER is ${provider} with no key, so the app uses ${configured}).`);
   } else {
-    add(WARN, "AI key", "No AI key in .env.",
-      "Add an OpenAI or Gemini key (see docs/pilot/getting-ai-keys.md). " +
-      "AI summaries and reply help stay off until then; the app still works without it.");
+    add(PASS, "AI key", "Not configured. AI help is optional and can be added in Settings.");
   }
 }
 

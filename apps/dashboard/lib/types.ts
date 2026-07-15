@@ -699,6 +699,7 @@ export interface AppSettings {
   headless: boolean;
   maxMessagesPerThread: number;
   enabledPlatforms: Array<PlatformName>;
+  aiEnabled?: boolean;
   demoMode: boolean;
   presenterDemoMode?: PresenterDemoMode;
   presenterReadOnly?: boolean;

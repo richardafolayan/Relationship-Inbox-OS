@@ -1,513 +1,338 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
-import { ArrowRight, Check, KeyRound, MessageSquareText, Sparkles } from "lucide-react";
-import { apiGet, apiPost, ApiRequestError } from "@/lib/api";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Check,
+  ContactRound,
+  Download,
+  KeyRound,
+  MessageSquareText,
+  Mic2,
+  Settings2,
+  Sparkles,
+  UserRound
+} from "lucide-react";
+import { apiGet, apiGetRaw, apiPost, ApiRequestError } from "@/lib/api";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
+import { startPilotTour } from "@/lib/pilot-tour";
 import {
   isSetupComplete,
   markSetupComplete,
-  onSetupWizardStart,
-  resolveSetupGate
+  onSetupWizardStart
 } from "@/lib/setup-wizard";
-import type { PlatformCard } from "@/lib/types";
+import type { OperatorProfile, PlatformCard } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
-// First-run setup wizard (#845, pilot R-0109). A full-screen overlay shown
-// before Today when the install has neither an AI key nor any connected
-// platform. Three steps: welcome, AI key, connect messages, then done.
-// Every step is skippable and the whole wizard can be dismissed at any
-// point; Settings > Setup has a "Run setup assistant" button to reopen it.
+type SetupPlatform = "IMESSAGE" | "LINKEDIN" | "WHATSAPP";
+type TranscriptionMode = "off" | "standard" | "enhanced";
+type Step = "welcome" | "profile" | "sources" | "connect" | "contacts" | "ai" | "transcription" | "review" | "done";
 
-interface AiStatus {
-  activeProvider: string;
-  activeModel: string;
-  configuredProviders: string[];
-  activeProviderConfigured: boolean;
+interface SetupPreferences {
+  selectedPlatforms: SetupPlatform[];
+  aiEnabled: boolean;
+  transcriptionMode: TranscriptionMode;
+  startedAt: string;
+  completedAt: string;
 }
 
-type WizardStep = "welcome" | "ai" | "messages" | "done";
-const STEP_ORDER: WizardStep[] = ["welcome", "ai", "messages", "done"];
+interface TranscriptionStatus {
+  mode: TranscriptionMode;
+  phase: "idle" | "downloading" | "error";
+  installedMode: TranscriptionMode;
+  modelId: string | null;
+  downloadedBytes: number;
+  approximateDownloadBytes: number;
+  error: string | null;
+}
+
+interface ContactHealth {
+  contactsLoaded: number;
+  addressBookContactCount: number;
+  unresolvedImessageHandleCount: number;
+  shouldHintEmptyContacts: boolean;
+  lastCheckedAt: string;
+}
+
+interface SetupStatus {
+  preferences: SetupPreferences;
+  settings: { enabledPlatforms: string[]; aiEnabled: boolean; automaticUpdates: boolean };
+  platforms: Array<{ name: SetupPlatform; status: string; connectedAt: string | null; lastError: string | null }>;
+  operatorProfile: OperatorProfile;
+  transcription: TranscriptionStatus;
+  contacts: ContactHealth | null;
+  version: string;
+}
+
+interface AiStatus {
+  enabled: boolean;
+  configuredProviders: string[];
+}
+
+const ALL_STEPS: Step[] = ["welcome", "profile", "sources", "connect", "contacts", "ai", "transcription", "review", "done"];
 
 export function SetupWizard() {
-  const [open, setOpen] = useState(false);
-  const [step, setStep] = useState<WizardStep>("welcome");
-  const [aiConfigured, setAiConfigured] = useState(false);
   const router = useRouter();
+  const [open, setOpen] = useState(false);
+  const [step, setStep] = useState<Step>("welcome");
+  const [status, setStatus] = useState<SetupStatus | null>(null);
+  const [aiConfigured, setAiConfigured] = useState(false);
+  const [selected, setSelected] = useState<SetupPlatform[]>([]);
+  const [aiEnabled, setAiEnabled] = useState(false);
 
-  // First-run gate: evaluated once per app open, and only until the
-  // complete flag lands in localStorage. Unknown runner state never shows
-  // the wizard; an already-set-up install is auto-marked complete so it
-  // never sees this again (upgrades included).
+  const load = useCallback(async () => {
+    const [setup, ai] = await Promise.all([
+      apiGetRaw<SetupStatus>("/runner/data/setup/status"),
+      apiGetRaw<AiStatus>("/runner/data/ai-status")
+    ]);
+    setStatus(setup);
+    setSelected(setup.preferences.selectedPlatforms);
+    setAiEnabled(setup.preferences.aiEnabled);
+    setAiConfigured(ai.configuredProviders.length > 0);
+    return { setup, ai };
+  }, []);
+
   useEffect(() => {
-    const storage = window.localStorage;
-    if (isSetupComplete(storage)) return;
+    if (isSetupComplete(window.localStorage)) return;
     let cancelled = false;
-    void (async () => {
-      const [ai, platforms] = await Promise.all([
-        apiGet<AiStatus>("/runner/data/ai-status").catch(() => null),
-        apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => null)
-      ]);
+    void load().then(({ setup, ai }) => {
       if (cancelled) return;
-      const decision = resolveSetupGate({
-        storedComplete: isSetupComplete(storage),
-        aiConfigured: ai ? ai.configuredProviders.length > 0 : null,
-        anyPlatformConnected: platforms
-          ? platforms.some((row) => row.status === "CONNECTED")
-          : null
-      });
-      if (decision === "auto-complete") {
-        markSetupComplete(storage);
+      if (setup.preferences.completedAt) {
+        markSetupComplete(window.localStorage);
         return;
       }
-      if (decision === "show") {
-        setAiConfigured(ai ? ai.configuredProviders.length > 0 : false);
-        setStep("welcome");
-        setOpen(true);
+      const existingInstall =
+        !setup.preferences.startedAt &&
+        (ai.configuredProviders.length > 0 || setup.platforms.some((platform) => platform.status === "CONNECTED"));
+      if (existingInstall) {
+        markSetupComplete(window.localStorage);
+        return;
       }
-    })();
-    return () => {
-      cancelled = true;
-    };
+      setOpen(true);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [load]);
+
+  useEffect(() => onSetupWizardStart(() => {
+    void load().catch(() => undefined);
+    setStep("welcome");
+    setOpen(true);
+  }), [load]);
+
+  const steps = useMemo(
+    () => ALL_STEPS.filter((item) => item !== "contacts" || selected.includes("IMESSAGE")),
+    [selected]
+  );
+  const index = Math.max(0, steps.indexOf(step));
+  const next = () => setStep(steps[Math.min(index + 1, steps.length - 1)]!);
+  const back = () => setStep(steps[Math.max(index - 1, 0)]!);
+
+  const savePreferences = useCallback(async (partial: Partial<Pick<SetupPreferences, "selectedPlatforms" | "aiEnabled" | "startedAt" | "completedAt">>) => {
+    const result = await apiPost<{ preferences: SetupPreferences }>("/runner/control/setup/preferences", partial);
+    setSelected(result.preferences.selectedPlatforms);
+    setAiEnabled(result.preferences.aiEnabled);
+    setStatus((current) => current ? { ...current, preferences: result.preferences } : current);
+    return result.preferences;
   }, []);
 
-  // Settings > Setup "Run setup assistant" reopens the wizard on demand.
-  useEffect(
-    () =>
-      onSetupWizardStart(() => {
-        void apiGet<AiStatus>("/runner/data/ai-status")
-          .then((ai) => setAiConfigured(ai.configuredProviders.length > 0))
-          .catch(() => setAiConfigured(false));
-        setStep("welcome");
-        setOpen(true);
-      }),
-    []
-  );
-
-  const finish = useCallback(() => {
+  const finish = useCallback(async () => {
+    const now = new Date().toISOString();
+    await savePreferences({ completedAt: now }).catch(() => undefined);
+    await apiPost("/runner/control/operator-profile", { setupCompletedAt: now }).catch(() => undefined);
     markSetupComplete(window.localStorage);
     setOpen(false);
-  }, []);
-
-  const goToToday = useCallback(() => {
-    finish();
-    router.push("/today");
-  }, [finish, router]);
+  }, [savePreferences]);
 
   if (!open) return null;
 
-  const stepIndex = STEP_ORDER.indexOf(step);
-  const next = () => setStep(STEP_ORDER[Math.min(stepIndex + 1, STEP_ORDER.length - 1)]!);
-
   return (
-    <div
-      role="dialog"
-      aria-modal="true"
-      aria-label="First time setup"
-      data-testid="setup-wizard"
-      className="fixed inset-0 z-[100] overflow-y-auto bg-paper"
-    >
-      <div className="mx-auto flex min-h-full w-full max-w-[640px] flex-col px-5 py-8 sm:py-12">
+    <div role="dialog" aria-modal="true" aria-label="Set up Tovi" data-testid="setup-wizard" className="fixed inset-0 z-[100] overflow-y-auto bg-paper">
+      <div className="mx-auto flex min-h-full w-full max-w-[720px] flex-col px-5 py-8 sm:py-12">
         <div className="mb-8 flex items-center justify-between gap-4">
-          <div className="flex items-center gap-[10px]" aria-label={`Step ${stepIndex + 1} of ${STEP_ORDER.length}`}>
-            {STEP_ORDER.map((s, i) => (
-              <span
-                key={s}
-                aria-hidden
-                className={cn(
-                  "h-[5px] rounded-pill transition-all duration-calm",
-                  i === stepIndex ? "w-7 bg-accent" : i < stepIndex ? "w-3 bg-accent/50" : "w-3 bg-hairline-strong"
-                )}
-              />
+          <div className="flex items-center gap-[8px]" aria-label={`Step ${index + 1} of ${steps.length}`}>
+            {steps.map((item, itemIndex) => (
+              <span key={item} aria-hidden className={cn("h-[5px] rounded-pill transition-all", itemIndex === index ? "w-7 bg-accent" : itemIndex < index ? "w-3 bg-accent/50" : "w-3 bg-hairline-strong")} />
             ))}
           </div>
           {step !== "done" ? (
-            <button
-              type="button"
-              onClick={finish}
-              className="font-mono text-[11px] text-ink-3 underline decoration-hairline-strong underline-offset-2 transition-colors duration-calm hover:text-ink"
-            >
-              Skip setup
+            <button type="button" onClick={() => void finish()} className="font-mono text-[11px] text-ink-3 underline underline-offset-2 hover:text-ink">
+              Finish later
             </button>
           ) : null}
         </div>
 
         {step === "welcome" ? (
-          <WizardCard
-            icon={<Sparkles className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden />}
-            eyebrow="Welcome"
-            title="Let's set up Tovi."
-            body="Tovi shows who is waiting on a reply, what they said, and what you still need to address. Before it can do that, it needs two things: a free AI key and access to your messages. This takes a few minutes and you can skip any step."
-          >
-            <div className="mt-6 flex flex-wrap items-center gap-3">
-              <PrimaryButton onClick={next}>
-                Start setup
-                <ArrowRight className="ml-[6px] h-[14px] w-[14px]" strokeWidth={2} aria-hidden />
-              </PrimaryButton>
-              <QuietButton onClick={finish}>Do this later</QuietButton>
-            </div>
-          </WizardCard>
+          <Card icon={<Sparkles />} eyebrow="Welcome" title="Make Tovi yours." body="Choose what you want Tovi to help with. You can add, change, or remove anything later in Settings.">
+            <InfoRows rows={[
+              ["Messages", "Choose only the places you actually use."],
+              ["AI help", "Optional. Tovi still works as a calm reply inbox without it."],
+              ["Voice notes", "Off by default. A local model downloads only if you choose one."]
+            ]} />
+            <Actions><Primary onClick={() => { void savePreferences({ startedAt: status?.preferences.startedAt || new Date().toISOString() }); next(); }}>Start setup <ArrowRight /></Primary></Actions>
+          </Card>
         ) : null}
+
+        {step === "profile" ? <ProfileStep initial={status?.operatorProfile} onBack={back} onNext={next} /> : null}
+
+        {step === "sources" ? (
+          <SourcesStep selected={selected} onChange={setSelected} onBack={back} onNext={async () => { await savePreferences({ selectedPlatforms: selected }); next(); }} />
+        ) : null}
+
+        {step === "connect" ? <ConnectStep selected={selected} onBack={back} onNext={next} /> : null}
+
+        {step === "contacts" ? <ContactsStep health={status?.contacts ?? null} onBack={back} onNext={next} /> : null}
 
         {step === "ai" ? (
-          <AiKeyStep alreadyConfigured={aiConfigured} onSaved={() => setAiConfigured(true)} onNext={next} />
+          <AiStep enabled={aiEnabled} configured={aiConfigured} onEnabled={async (value) => { setAiEnabled(value); await savePreferences({ aiEnabled: value }); }} onConfigured={() => setAiConfigured(true)} onBack={back} onNext={next} />
         ) : null}
 
-        {step === "messages" ? <MessagesStep onNext={next} /> : null}
+        {step === "transcription" ? <TranscriptionStep initial={status?.transcription} onBack={back} onNext={next} /> : null}
+
+        {step === "review" ? (
+          <ReviewStep selected={selected} aiEnabled={aiEnabled} aiConfigured={aiConfigured} automaticUpdates={status?.settings.automaticUpdates !== false} version={status?.version ?? ""} onBack={back} onRefresh={load} onNext={next} />
+        ) : null}
 
         {step === "done" ? (
-          <WizardCard
-            icon={<Check className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden />}
-            eyebrow="All set"
-            title="You're ready."
-            body="Today will fill up as scans find conversations that need you. There is a short walkthrough waiting on the Today page, and you can teach Tovi your reply style any time in Settings under Reply style."
-          >
-            <div className="mt-6 flex flex-wrap items-center gap-3">
-              <PrimaryButton onClick={goToToday}>Go to Today</PrimaryButton>
-            </div>
-          </WizardCard>
+          <Card icon={<Check />} eyebrow="Ready" title="Tovi is ready when you are." body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
+            <Actions>
+              <Primary onClick={() => { void finish().then(() => router.push("/today")); }}>Go to Today</Primary>
+              <Quiet onClick={() => { void finish().then(() => { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
+            </Actions>
+          </Card>
         ) : null}
       </div>
     </div>
   );
 }
 
-function AiKeyStep({
-  alreadyConfigured,
-  onSaved,
-  onNext
-}: {
-  alreadyConfigured: boolean;
-  onSaved: () => void;
-  onNext: () => void;
-}) {
-  const [key, setKey] = useState("");
-  const [status, setStatus] = useState<"idle" | "checking" | "saved" | "error">(
-    alreadyConfigured ? "saved" : "idle"
-  );
-  const [error, setError] = useState("");
-
+function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; onBack: () => void; onNext: () => void }) {
+  const [name, setName] = useState(initial?.displayName ?? "");
+  const [busy, setBusy] = useState(false);
   const save = async () => {
-    if (status === "checking") return;
-    setStatus("checking");
-    setError("");
-    try {
-      await apiPost("/runner/control/setup/ai-key", { key: key.trim() });
-      setStatus("saved");
-      onSaved();
-    } catch (err) {
-      setStatus("error");
-      const payload = err instanceof ApiRequestError ? err.payload : undefined;
-      const message =
-        payload && typeof payload === "object" && "error" in payload && typeof payload.error === "string"
-          ? payload.error
-          : "Couldn't save the key. Is the app running?";
-      setError(message);
-    }
+    if (!name.trim()) { onNext(); return; }
+    setBusy(true);
+    await apiPost("/runner/control/operator-profile", { displayName: name.trim() }).catch(() => undefined);
+    window.dispatchEvent(new CustomEvent("operator-profile-saved"));
+    setBusy(false);
+    onNext();
   };
-
-  return (
-    <WizardCard
-      icon={<KeyRound className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden />}
-      eyebrow="Step 1 of 2"
-      title="Add your free AI key."
-      body="Tovi uses Google's Gemini service for summaries and optional writing help. To do that, it sends the relevant conversation text to Google. Tovi never sends a reply to another person unless you press send."
-    >
-      {status === "saved" ? (
-        <p className="m-0 mt-5 flex items-center gap-2 text-[13.5px] text-ink" aria-live="polite">
-          <Check className="h-[15px] w-[15px] text-risk-fresh" strokeWidth={2} aria-hidden />
-          AI is set up. Summaries and drafts will work.
-        </p>
-      ) : (
-        <>
-          <ol className="m-0 mt-5 flex list-decimal flex-col gap-[7px] pl-[18px] text-[13.5px] leading-[1.55] text-ink-2">
-            <li>
-              Open{" "}
-              <a
-                href="https://aistudio.google.com/apikey"
-                target="_blank"
-                rel="noreferrer"
-                className="text-ink underline decoration-hairline-strong underline-offset-2 hover:decoration-ink"
-              >
-                aistudio.google.com/apikey
-              </a>{" "}
-              and sign in with any Google account.
-            </li>
-            <li>If a key is already shown, press Copy. Otherwise, press Create API key, follow the short Google dialog, then copy the new key.</li>
-            <li>Paste it below. The key stays on this Mac.</li>
-          </ol>
-          <div className="mt-4 flex flex-wrap items-center gap-2">
-            <input
-              type="password"
-              value={key}
-              onChange={(event) => setKey(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter" && key.trim()) void save();
-              }}
-              placeholder="Paste your API key"
-              autoComplete="off"
-              spellCheck={false}
-              aria-label="Gemini API key"
-              className="min-w-0 flex-1 rounded-[8px] border border-hairline bg-paper px-3 py-[9px] font-mono text-[13px] text-ink placeholder:text-ink-3 focus:border-hairline-strong focus:outline-none"
-            />
-            <PrimaryButton onClick={() => void save()} disabled={status === "checking" || !key.trim()}>
-              {status === "checking" ? "Checking..." : "Save key"}
-            </PrimaryButton>
-          </div>
-          {status === "error" ? (
-            <p
-              className="m-0 mt-3 rounded-row border border-hairline bg-paper-2/60 px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2"
-              aria-live="polite"
-            >
-              {error}
-            </p>
-          ) : null}
-        </>
-      )}
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        {status === "saved" ? (
-          <PrimaryButton onClick={onNext}>
-            Continue
-            <ArrowRight className="ml-[6px] h-[14px] w-[14px]" strokeWidth={2} aria-hidden />
-          </PrimaryButton>
-        ) : (
-          <QuietButton onClick={onNext}>Do this later</QuietButton>
-        )}
-      </div>
-    </WizardCard>
-  );
+  return <Card icon={<UserRound />} eyebrow="About you" title="What should Tovi call you?" body="This name stays in your app and makes the welcome screen feel like yours.">
+    <label className="mt-5 block text-[13px] text-ink-2">Your first name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus className="mt-2 block w-full rounded-[8px] border border-hairline bg-paper px-3 py-[10px] text-[14px] text-ink focus:border-hairline-strong focus:outline-none" placeholder="For example, Maya" /></label>
+    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : name.trim() ? "Save and continue" : "Skip for now"}</Primary></Actions>
+  </Card>;
 }
 
-function MessagesStep({ onNext }: { onNext: () => void }) {
+function SourcesStep({ selected, onChange, onBack, onNext }: { selected: SetupPlatform[]; onChange: (value: SetupPlatform[]) => void; onBack: () => void; onNext: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const choices: Array<[SetupPlatform, string, string]> = [
+    ["IMESSAGE", "iMessage", "Messages and Contacts on this Mac"],
+    ["LINKEDIN", "LinkedIn", "Your normal LinkedIn account in Chrome"],
+    ["WHATSAPP", "WhatsApp", "Link this Mac from WhatsApp on your phone"]
+  ];
+  const toggle = (platform: SetupPlatform) => onChange(selected.includes(platform) ? selected.filter((item) => item !== platform) : [...selected, platform]);
+  return <Card icon={<MessageSquareText />} eyebrow="Message sources" title="Where do you get messages?" body="Select only what you use. Unselected services stay inactive and do not need to be connected.">
+    <div className="mt-5 grid gap-3">{choices.map(([value, label, body]) => <button key={value} type="button" aria-pressed={selected.includes(value)} onClick={() => toggle(value)} className={cn("flex items-center gap-3 rounded-[10px] border px-4 py-4 text-left", selected.includes(value) ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/40")}><span className={cn("grid h-5 w-5 place-items-center rounded-[5px] border", selected.includes(value) ? "border-accent bg-accent text-white" : "border-hairline-strong")}>{selected.includes(value) ? <Check className="h-3.5 w-3.5" /> : null}</span><span><span className="block text-[15px] font-medium text-ink">{label}</span><span className="mt-0.5 block text-[12.5px] text-ink-3">{body}</span></span></button>)}</div>
+    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => { setBusy(true); void onNext().finally(() => setBusy(false)); }}>{busy ? "Saving..." : selected.length ? "Set up these sources" : "Continue without messages"}</Primary></Actions>
+  </Card>;
+}
+
+function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; onBack: () => void; onNext: () => void }) {
   const [rows, setRows] = useState<PlatformCard[]>([]);
-  const [whatsappEnabled, setWhatsappEnabled] = useState(false);
-  const [busy, setBusy] = useState<PlatformCard["platform"] | null>(null);
+  const [busy, setBusy] = useState<SetupPlatform | null>(null);
   const [notice, setNotice] = useState("");
-  const [error, setError] = useState("");
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-
-  const refresh = useCallback(async () => {
-    const [data, whatsapp] = await Promise.all([
-      apiGet<PlatformCard[]>("/runner/data/platforms").catch(() => null),
-      // WhatsApp is opt-in at the runner level; only offer it in the wizard
-      // when the operator has turned it on, so the step doesn't show an
-      // empty card for the common install where WhatsApp is off.
-      apiGet<{ enabled?: boolean }>("/runner/data/whatsapp/status").catch(() => null)
-    ]);
-    if (data) setRows(data);
-    if (whatsapp) setWhatsappEnabled(whatsapp.enabled === true);
-  }, []);
-
-  // Poll while this step is on screen so a connect completed in another
-  // window (LinkedIn sign-in, WhatsApp QR scan) flips the card live.
-  useEffect(() => {
-    void refresh();
-    pollRef.current = setInterval(() => void refresh(), 3000);
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-  }, [refresh]);
-
-  const act = async (platform: PlatformCard["platform"], path: string, body: unknown) => {
-    if (busy) return;
-    setBusy(platform);
-    setError("");
-    setNotice("");
-    try {
-      const result = await apiPost<{ message?: string }>(path, body);
-      if (result?.message) setNotice(result.message);
-      await refresh();
-    } catch {
-      setError("That didn't work. Is the app running?");
-    } finally {
-      setBusy(null);
-    }
+  const refresh = useCallback(() => apiGetRaw<PlatformCard[]>("/runner/data/platforms").then(setRows).catch(() => undefined), []);
+  useEffect(() => { void refresh(); const timer = window.setInterval(() => void refresh(), 3000); return () => window.clearInterval(timer); }, [refresh]);
+  const act = async (platform: SetupPlatform, path: string, body: unknown) => {
+    setBusy(platform); setNotice("");
+    try { const result = await apiPost<{ message?: string }>(path, body); setNotice(result.message ?? "Done. Checking the connection now."); await refresh(); }
+    catch { setNotice("That did not finish. Follow the instructions below, then try again."); }
+    finally { setBusy(null); }
   };
-
+  if (selected.length === 0) return <Card icon={<MessageSquareText />} eyebrow="Messages" title="No message sources selected." body="That is fine. You can add iMessage, LinkedIn, or WhatsApp later in Settings."><Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary></Actions></Card>;
   const imessage = rows.find((row) => row.platform === "IMESSAGE");
   const linkedin = rows.find((row) => row.platform === "LINKEDIN");
-  const imessageNeedsAccess = isIMessageFullDiskAccessProblem(imessage);
-  const anyConnected = rows.some((row) => row.status === "CONNECTED");
-
-  return (
-    <WizardCard
-      icon={<MessageSquareText className="h-[18px] w-[18px]" strokeWidth={1.8} aria-hidden />}
-      eyebrow="Step 2 of 2"
-      title="Connect your messages."
-      body="Connect at least one place you get messages. Tovi only reads; you still write and send every reply yourself."
-    >
-      {error ? (
-        <p className="m-0 mt-4 rounded-row border border-hairline bg-paper-2/60 px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2">
-          {error}
-        </p>
-      ) : null}
-      {notice ? <p className="m-0 mt-4 font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
-      <div className="mt-5 grid gap-3">
-        <WizardPlatformCard
-          title="iMessage"
-          body={
-            imessageNeedsAccess
-              ? "Press Open Full Disk Access, turn on Relationship Inbox OS, then quit and reopen Tovi. This is a one-time Mac permission."
-              : "Reads the Messages app on this Mac."
-          }
-          connected={imessage?.status === "CONNECTED"}
-          actionLabel={imessageNeedsAccess ? "Open Full Disk Access" : "Scan iMessage"}
-          busy={busy === "IMESSAGE"}
-          onAction={() =>
-            void act(
-              "IMESSAGE",
-              imessageNeedsAccess
-                ? "/runner/control/imessage/full-disk-access"
-                : "/runner/control/scan",
-              imessageNeedsAccess ? {} : { platform: "IMESSAGE" }
-            )
-          }
-        />
-        <WizardPlatformCard
-          title="LinkedIn"
-          body="Uses your normal Chrome session. Sign into LinkedIn in Chrome first."
-          connected={linkedin?.status === "CONNECTED"}
-          actionLabel={linkedin?.status === "CONNECTED" ? "Connected" : "Connect LinkedIn"}
-          busy={busy === "LINKEDIN"}
-          onAction={() =>
-            void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })
-          }
-        />
-        {whatsappEnabled ? (
-          <div className="rounded-[10px] border border-hairline bg-paper-2/45 px-4 py-4">
-            <WhatsAppConnect />
-          </div>
-        ) : null}
-      </div>
-      <div className="mt-6 flex flex-wrap items-center gap-3">
-        {anyConnected ? (
-          <PrimaryButton onClick={onNext}>
-            Continue
-            <ArrowRight className="ml-[6px] h-[14px] w-[14px]" strokeWidth={2} aria-hidden />
-          </PrimaryButton>
-        ) : (
-          <QuietButton onClick={onNext}>Do this later</QuietButton>
-        )}
-      </div>
-    </WizardCard>
-  );
-}
-
-function WizardPlatformCard({
-  title,
-  body,
-  connected,
-  actionLabel,
-  busy,
-  onAction
-}: {
-  title: string;
-  body: string;
-  connected?: boolean;
-  actionLabel: string;
-  busy: boolean;
-  onAction: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-[10px] border border-hairline bg-paper-2/45 px-4 py-4">
-      <div className="min-w-0 flex-1">
-        <p className="m-0 flex items-center gap-2 text-[15.5px] font-medium text-ink">
-          {title}
-          {connected ? (
-            <span className="rounded-pill bg-risk-fresh/15 px-2 py-[2px] font-mono text-[10.5px] text-risk-fresh">
-              Connected
-            </span>
-          ) : null}
-        </p>
-        <p className="m-0 mt-[3px] text-[13px] leading-[1.45] text-ink-3" style={{ textWrap: "pretty" }}>
-          {body}
-        </p>
-      </div>
-      {!connected ? (
-        <button
-          type="button"
-          onClick={onAction}
-          disabled={busy}
-          className="inline-flex shrink-0 items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? "Working..." : actionLabel}
-        </button>
-      ) : null}
+  const needsAccess = isIMessageFullDiskAccessProblem(imessage);
+  return <Card icon={<MessageSquareText />} eyebrow="Connect messages" title="Connect each source you chose." body="Complete one card at a time. Tovi reads conversations into your inbox. Sending always needs your click.">
+    {notice ? <Notice>{notice}</Notice> : null}
+    <div className="mt-5 grid gap-3">
+      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? "Press Open Mac permission. In Full Disk Access, turn on Tovi or Relationship Inbox OS. Then quit and reopen Tovi." : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
+      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body="Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until Tovi says connected." action="Connect LinkedIn" busy={busy === "LINKEDIN"} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
+      {selected.includes("WHATSAPP") ? <div className="rounded-[10px] border border-hairline bg-paper-2/45 p-4"><WhatsAppConnect /><ol className="mb-0 mt-3 pl-5 text-[12.5px] leading-6 text-ink-2"><li>Open WhatsApp on your phone.</li><li>Open Settings, then Linked Devices.</li><li>Press Link a Device and scan the code shown here.</li></ol></div> : null}
     </div>
-  );
+    <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary><Quiet onClick={onNext}>Finish connections later</Quiet></Actions>
+  </Card>;
 }
 
-function WizardCard({
-  icon,
-  eyebrow,
-  title,
-  body,
-  children
-}: {
-  icon: React.ReactNode;
-  eyebrow: string;
-  title: string;
-  body: string;
-  children?: React.ReactNode;
-}) {
-  return (
-    <section className="relative overflow-hidden rounded-card border border-hairline bg-paper p-6 shadow-card sm:p-8">
-      <div
-        aria-hidden
-        className="pointer-events-none absolute inset-0"
-        style={{
-          background:
-            "radial-gradient(ellipse at 100% 0%, color-mix(in oklch, var(--accent) 8%, transparent), transparent 55%)"
-        }}
-      />
-      <div className="relative">
-        <p className="m-0 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.1em] text-accent-ink">
-          {icon}
-          {eyebrow}
-        </p>
-        <h1 className="m-0 mt-3 max-w-[26ch] font-display text-[26px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">
-          {title}
-        </h1>
-        <p className="m-0 mt-3 max-w-[58ch] text-[14px] leading-[1.6] text-ink-2" style={{ textWrap: "pretty" }}>
-          {body}
-        </p>
-        {children}
-      </div>
-    </section>
-  );
+function ContactsStep({ health, onBack, onNext }: { health: ContactHealth | null; onBack: () => void; onNext: () => void }) {
+  const [current, setCurrent] = useState(health);
+  const [busy, setBusy] = useState(false);
+  const recheck = async () => { setBusy(true); const result = await apiPost<{ health: ContactHealth }>("/runner/control/imessage/contacts/resync", {}).catch(() => null); if (result) setCurrent(result.health); setBusy(false); };
+  const ready = (current?.addressBookContactCount ?? 0) > 0;
+  return <Card icon={<ContactRound />} eyebrow="Contact names" title="Make sure names can show." body="Tovi matches iMessage phone numbers and email addresses with the Contacts app on this Mac.">
+    <Notice>{ready ? `${current!.addressBookContactCount} contact records are available. Tovi will use them when it can match a conversation.` : "No Mac contacts were found yet. Your messages still work, but some people may appear as a phone number."}</Notice>
+    {!ready ? <ol className="mt-4 pl-5 text-[13px] leading-6 text-ink-2"><li>Open the Contacts app on this Mac.</li><li>If your contacts are on your iPhone, open System Settings, your name, iCloud, then turn on Contacts.</li><li>Wait for names to appear in Contacts, then return here and press Check again.</li></ol> : null}
+    <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void recheck()}>{busy ? "Checking..." : ready ? "Check again" : "Check Contacts again"}</Primary><Quiet onClick={onNext}>{ready ? "Continue" : "Continue for now"}</Quiet></Actions>
+  </Card>;
 }
 
-function PrimaryButton({
-  onClick,
-  disabled,
-  children
-}: {
-  onClick: () => void;
-  disabled?: boolean;
-  children: React.ReactNode;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={disabled}
-      className="inline-flex items-center rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
-    >
-      {children}
-    </button>
-  );
+function AiStep({ enabled, configured, onEnabled, onConfigured, onBack, onNext }: { enabled: boolean; configured: boolean; onEnabled: (value: boolean) => Promise<void>; onConfigured: () => void; onBack: () => void; onNext: () => void }) {
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const saveKey = async () => { setBusy(true); setError(""); try { await apiPost("/runner/control/setup/ai-key", { key: key.trim() }); await onEnabled(true); onConfigured(); } catch (err) { const payload = err instanceof ApiRequestError ? err.payload as { error?: string } : undefined; setError(payload?.error ?? "The key could not be checked. Try copying it again."); } finally { setBusy(false); } };
+  return <Card icon={<KeyRound />} eyebrow="Optional AI help" title="Would you like summaries and writing help?" body="AI is optional. When it is on, the relevant conversation text is sent to Google Gemini for summaries or help you request. Nothing is ever sent to another person automatically.">
+    <div className="mt-5 grid gap-3"><Choice selected={!enabled} title="No AI help" body="Keep message organisation and reply tracking. No conversation text is sent to an AI service." onClick={() => void onEnabled(false)} /><Choice selected={enabled} title="Use optional AI help" body="Add a free Gemini key. You can turn this off later." onClick={() => void onEnabled(true)} /></div>
+    {enabled ? configured ? <Notice>AI is ready. Your saved Gemini key will be used.</Notice> : <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/40 p-4"><ol className="m-0 pl-5 text-[13px] leading-6 text-ink-2"><li>Open <a className="underline" target="_blank" rel="noreferrer" href="https://aistudio.google.com/apikey">Google AI Studio</a> and sign in.</li><li>Press Create API key, then Copy.</li><li>Paste the key below. Tovi checks it and keeps it on this Mac.</li></ol><div className="mt-3 flex gap-2"><input type="password" value={key} onChange={(event) => setKey(event.target.value)} className="min-w-0 flex-1 rounded-[8px] border border-hairline bg-paper px-3 py-2 font-mono text-[13px]" placeholder="Paste Gemini API key" /><Primary disabled={busy || !key.trim()} onClick={() => void saveKey()}>{busy ? "Checking..." : "Check and save"}</Primary></div>{error ? <Notice>{error}</Notice> : null}</div> : null}
+    <Actions><Back onClick={onBack} /><Primary onClick={onNext}>{enabled && !configured ? "Set up later" : "Continue"}</Primary></Actions>
+  </Card>;
 }
 
-function QuietButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 transition-colors duration-calm hover:border-hairline-strong hover:bg-paper-2 hover:text-ink"
-    >
-      {children}
-    </button>
-  );
+function TranscriptionStep({ initial, onBack, onNext }: { initial?: TranscriptionStatus; onBack: () => void; onNext: () => void }) {
+  const [status, setStatus] = useState<TranscriptionStatus | undefined>(initial);
+  const [busy, setBusy] = useState(false);
+  const refresh = useCallback(() => apiGetRaw<TranscriptionStatus>("/runner/data/setup/transcription").then(setStatus).catch(() => undefined), []);
+  useEffect(() => { if (status?.phase !== "downloading") return; const timer = window.setInterval(() => void refresh(), 1500); return () => window.clearInterval(timer); }, [status?.phase, refresh]);
+  const choose = async (mode: TranscriptionMode, removeDownloadedModels = false) => { setBusy(true); const nextStatus = await apiPost<TranscriptionStatus>("/runner/control/setup/transcription", { mode, removeDownloadedModels }).catch(() => null); if (nextStatus) setStatus(nextStatus); setBusy(false); };
+  const downloading = status?.phase === "downloading";
+  return <Card icon={<Mic2 />} eyebrow="Optional voice notes" title="Choose voice transcription." body="Transcription runs on this Mac. Audio does not need to go to an AI company. Models download only when you choose one.">
+    <div className="mt-5 grid gap-3"><Choice selected={status?.mode === "off"} title="Off" body="No model download. Voice notes can still be played." onClick={() => void choose("off")} /><Choice selected={status?.mode === "standard"} title="Standard, about 150 MB" body="Good everyday English transcription using the local base model." onClick={() => void choose("standard")} /><Choice selected={status?.mode === "enhanced"} title="Enhanced, about 500 MB" body="Better accuracy using a larger local model. Choose this only if you want it." onClick={() => void choose("enhanced")} /></div>
+    {downloading ? <Notice><Download className="mr-2 inline h-4 w-4" />Downloading the chosen model. You can keep this screen open. It turns on only after the download finishes.</Notice> : null}
+    {status?.phase === "error" ? <Notice>The download did not finish. Check your internet connection and choose the model again.</Notice> : null}
+    {status?.installedMode !== "off" && status?.mode === "off" ? <button type="button" onClick={() => void choose("off", true)} className="mt-4 text-[12.5px] text-ink-2 underline underline-offset-2">Remove the downloaded model from this Mac</button> : null}
+    <Actions><Back onClick={onBack} /><Primary disabled={busy || downloading} onClick={onNext}>{downloading ? "Downloading..." : "Continue"}</Primary></Actions>
+  </Card>;
 }
+
+function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, version, onBack, onRefresh, onNext }: { selected: SetupPlatform[]; aiEnabled: boolean; aiConfigured: boolean; automaticUpdates: boolean; version: string; onBack: () => void; onRefresh: () => Promise<unknown>; onNext: () => void }) {
+  const [setup, setSetup] = useState<SetupStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const refresh = async () => { setBusy(true); const value = await onRefresh().catch(() => null) as { setup?: SetupStatus } | null; if (value?.setup) setSetup(value.setup); setBusy(false); };
+  useEffect(() => { void refresh(); }, []);
+  const rows = setup?.platforms ?? [];
+  return <Card icon={<Settings2 />} eyebrow="Final check" title="Here is what Tovi will use." body="Green means ready now. Anything unfinished can be completed later from Settings.">
+    <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">
+      {selected.length ? selected.map((platform) => { const connected = rows.some((row) => row.name === platform && row.status === "CONNECTED"); return <Summary key={platform} label={{ IMESSAGE: "iMessage", LINKEDIN: "LinkedIn", WHATSAPP: "WhatsApp" }[platform]} value={connected ? "Connected" : "Finish in Settings"} ok={connected} />; }) : <Summary label="Message sources" value="None selected" ok />}
+      {selected.includes("IMESSAGE") ? <Summary label="Contact names" value={(setup?.contacts?.addressBookContactCount ?? 0) > 0 ? `${setup!.contacts!.addressBookContactCount} records available` : "Check Contacts later"} ok={(setup?.contacts?.addressBookContactCount ?? 0) > 0} /> : null}
+      <Summary label="AI help" value={!aiEnabled ? "Off by choice" : aiConfigured ? "Ready" : "Key still needed"} ok={!aiEnabled || aiConfigured} />
+      <Summary label="Voice transcription" value={setup?.transcription.mode === "standard" ? "Standard local model" : setup?.transcription.mode === "enhanced" ? "Enhanced local model" : "Off by choice"} ok={setup?.transcription.phase !== "error"} />
+      <Summary label="Automatic updates" value={automaticUpdates ? "On" : "Off"} ok={automaticUpdates} />
+      <Summary label="Installed version" value={version || "Current install"} ok />
+    </div>
+    <p className="mt-4 text-[12.5px] leading-5 text-ink-3">When an update is ready, Tovi checks automatically. Keep automatic updates on in Settings. If Tovi asks you to replace the app, download the new installer, open it, and drag Tovi into Applications again. Your data and choices stay in place.</p>
+    <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Finish setup</Primary><Quiet onClick={() => void refresh()}>{busy ? "Checking..." : "Check again"}</Quiet></Actions>
+  </Card>;
+}
+
+function Card({ icon, eyebrow, title, body, children }: { icon: React.ReactNode; eyebrow: string; title: string; body: string; children?: React.ReactNode }) { return <section className="relative overflow-hidden rounded-card border border-hairline bg-paper p-6 shadow-card sm:p-8"><div className="relative"><p className="m-0 flex items-center gap-2 font-mono text-[10px] uppercase tracking-[0.1em] text-accent-ink"><span className="[&>svg]:h-[18px] [&>svg]:w-[18px]">{icon}</span>{eyebrow}</p><h1 className="m-0 mt-3 max-w-[28ch] font-display text-[27px] font-semibold leading-[1.15] tracking-[-0.02em] text-ink">{title}</h1><p className="m-0 mt-3 max-w-[62ch] text-[14px] leading-[1.6] text-ink-2">{body}</p>{children}</div></section>; }
+function Actions({ children }: { children: React.ReactNode }) { return <div className="mt-6 flex flex-wrap items-center gap-3">{children}</div>; }
+function Primary({ onClick, disabled, children }: { onClick: () => void; disabled?: boolean; children: React.ReactNode }) { return <button type="button" onClick={onClick} disabled={disabled} className="inline-flex items-center gap-1.5 rounded-pill bg-ink px-4 py-[9px] text-[13.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5">{children}</button>; }
+function Quiet({ onClick, children }: { onClick: () => void; children: React.ReactNode }) { return <button type="button" onClick={onClick} className="inline-flex items-center rounded-pill border border-hairline px-4 py-[9px] text-[13.5px] font-medium text-ink-2 hover:bg-paper-2">{children}</button>; }
+function Back({ onClick }: { onClick: () => void }) { return <Quiet onClick={onClick}><ArrowLeft className="mr-1.5 h-3.5 w-3.5" />Back</Quiet>; }
+function Notice({ children }: { children: React.ReactNode }) { return <p className="m-0 mt-4 rounded-[8px] border border-hairline bg-paper-2/55 px-3 py-2.5 text-[12.5px] leading-5 text-ink-2" aria-live="polite">{children}</p>; }
+function InfoRows({ rows }: { rows: Array<[string, string]> }) { return <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">{rows.map(([label, body]) => <div key={label} className="px-4 py-3"><p className="m-0 text-[13.5px] font-medium text-ink">{label}</p><p className="m-0 mt-0.5 text-[12.5px] text-ink-3">{body}</p></div>)}</div>; }
+function Choice({ selected, title, body, onClick }: { selected: boolean; title: string; body: string; onClick: () => void }) { return <button type="button" aria-pressed={selected} onClick={onClick} className={cn("rounded-[10px] border px-4 py-3 text-left", selected ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/35")}><span className="flex items-center gap-2 text-[14px] font-medium text-ink">{selected ? <Check className="h-4 w-4 text-accent" /> : <span className="h-4 w-4 rounded-full border border-hairline-strong" />}{title}</span><span className="mt-1 block pl-6 text-[12.5px] leading-5 text-ink-3">{body}</span></button>; }
+function Platform({ title, body, connected, action, busy, onClick }: { title: string; body: string; connected: boolean; action: string; busy: boolean; onClick: () => void }) { return <div className="flex flex-wrap items-center gap-3 rounded-[10px] border border-hairline bg-paper-2/40 p-4"><div className="min-w-0 flex-1"><p className="m-0 flex items-center gap-2 text-[15px] font-medium text-ink">{title}{connected ? <span className="rounded-pill bg-risk-fresh/15 px-2 py-0.5 font-mono text-[10px] text-risk-fresh">Connected</span> : null}</p><p className="m-0 mt-1 text-[12.5px] leading-5 text-ink-3">{body}</p></div>{!connected ? <Primary disabled={busy} onClick={onClick}>{busy ? "Working..." : action}</Primary> : null}</div>; }
+function Summary({ label, value, ok }: { label: string; value: string; ok: boolean }) { return <div className="flex items-center justify-between gap-3 px-4 py-3"><span className="text-[13px] text-ink-2">{label}</span><span className={cn("flex items-center gap-1.5 font-mono text-[11px]", ok ? "text-risk-fresh" : "text-ink-3")}>{ok ? <Check className="h-3.5 w-3.5" /> : null}{value}</span></div>; }

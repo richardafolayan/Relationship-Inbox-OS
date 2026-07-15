@@ -1,14 +1,14 @@
 # Set up AI help
 
-Tovi uses Google's Gemini service to create summaries, action items, and
-optional writing help. You need a free Gemini key so Google can recognise the
-app's requests. You do not need to know how to code, edit a file, or use
-Terminal.
+Tovi can use Google's Gemini service to create summaries, action items, and
+optional writing help. AI help is optional. If you choose it, you need a free
+Gemini key so Google can recognise the app's requests. You do not need to know
+how to code, edit a file, or use Terminal.
 
 ## Add your key during first setup
 
 1. Open Tovi and press **Start setup**.
-2. On **Add your free AI key**, press the
+2. On **Optional AI help**, choose **Use optional AI help**, then press the
    **aistudio.google.com/apikey** link. A Google page opens.
 3. Sign in with a Google account and accept Google's terms if asked. A personal
    Google account is usually simplest. A school or work account may prevent
@@ -18,8 +18,8 @@ Terminal.
    project dialog, then copy the new key. You do not need to add a payment card
    for Google's free tier.
 5. Return to Tovi, click the box labelled **Paste your API key**, and paste.
-6. Press **Save key**. Tovi checks the key with Google and shows
-   **AI is set up** when it is ready. You do not need to restart the app.
+6. Press **Check and save**. Tovi checks the key with Google and shows that AI
+   is ready. You do not need to restart the app.
 7. Press **Continue**.
 
 If you skipped setup, open **Settings > Setup**, press **Run setup assistant**,

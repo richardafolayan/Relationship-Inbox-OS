@@ -7,7 +7,7 @@ This guide is for student pilots. **You do not need to know how to code.**
 
 You paste one command into Terminal. It checks your Mac, installs anything
 that's missing, downloads the app, sets it up, and opens it in your browser.
-Then the app walks you through connecting iMessage and LinkedIn.
+Then the app asks which message sources and optional features you want.
 
 The app runs entirely on your own Mac. Nothing is uploaded to a server.
 
@@ -18,7 +18,7 @@ The app runs entirely on your own Mac. Nothing is uploaded to a server.
 - **Messages working on your Mac.** If you've ever sent an iMessage from this
   Mac, you're set.
 - A **LinkedIn account**, if you want to test LinkedIn.
-- **At least 10GB free space** (20GB is comfortable).
+- **At least 4GB free space** (8GB is comfortable).
 - **Stable Wi-Fi.**
 - About **20 to 30 minutes** for the first setup, mostly waiting and clicking
   "Allow".
@@ -80,8 +80,7 @@ Either way, the installer takes over from here. While it runs it will:
 - install the app into **`~/RelationshipInboxOS`** and set up what it needs,
 - create **Relationship Inbox OS.app** in your Applications folder,
 - set up your local database,
-- download a small voice-transcription model (about 150 MB) so voice notes
-  transcribe automatically,
+- leave voice transcription off until you explicitly choose a local model,
 - start the app and open it at **http://localhost:3100**.
 
 The long part is "Installing the app", which takes a few minutes. It is normal
@@ -104,12 +103,17 @@ npm run start:student
 Once the app opens in your browser, it guides you through the rest:
 
 1. Press **Start setup** on the welcome screen.
-2. Add a free Google Gemini key for summaries and optional writing help.
-3. Connect iMessage or LinkedIn.
-4. Press **Go to Today**.
+2. Add your name, then choose iMessage, LinkedIn, WhatsApp, or none.
+3. Follow the connection card for each source you chose.
+4. Check that Contacts are available if you chose iMessage.
+5. Choose whether to use optional Gemini AI help.
+6. Leave voice transcription off, or download Standard (about 150 MB) or
+   Enhanced (about 500 MB).
+7. Review the green checks, then press **Go to Today**. You can also open safe
+   demo conversations first.
 
-You can skip either setup step. To come back later, open **Settings > Setup**
-and press **Run setup assistant**.
+To change anything later, open **Settings > Setup**. Optional components can
+be turned off and downloaded transcription models can be removed there.
 
 ### Connect iMessage
 

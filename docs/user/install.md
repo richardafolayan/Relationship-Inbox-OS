@@ -11,7 +11,7 @@ You need:
 - Messages signed in on the Mac if you want iMessage;
 - Google Chrome signed in to LinkedIn if you want LinkedIn personal-profile
   mode;
-- at least 10 GB free, with 20 GB recommended;
+- at least 4 GB free, with 8 GB recommended;
 - a stable internet connection for the first install.
 
 The pilot installer uses Node 22. If the Mac does not already have the exact
@@ -26,7 +26,7 @@ checksum, and installs it under `~/.rios-node` without `sudo`.
    folder into Terminal, then press Return.
 4. Wait while the installer copies the tracked application into
    `~/RelationshipInboxOS`, installs dependencies, creates the database,
-   downloads the local transcription model, prepares the dashboard, and
+   prepares the dashboard, and
    creates `~/Applications/Relationship Inbox OS.app`.
 
 The installer is safe to rerun. It preserves the existing `.env`, `data/`,
@@ -42,17 +42,11 @@ Open Relationship Inbox OS from Applications or Launchpad. The source-install
 launcher starts the local runner and dashboard and opens
 `http://localhost:3100`.
 
-On a new install, the setup assistant opens before Today. Press **Start setup**
-and follow the two steps on screen:
-
-1. Create and paste a free Google Gemini key for summaries and optional writing
-   help. The app checks and saves it for you. You do not need to edit a file or
-   restart the app.
-2. Connect iMessage or LinkedIn. The assistant explains each permission and
-   sign-in as you reach it.
-
-You can skip either step. To return later, open **Settings > Setup** and press
-**Run setup assistant**.
+On a new install, the setup assistant opens before Today. It asks for your
+name, lets you choose iMessage, LinkedIn, and WhatsApp independently, checks
+Contacts, and offers optional AI help and optional local voice transcription.
+Nothing is required just to open Today. Every choice can be changed later in
+**Settings > Setup**.
 
 Grant only the permissions needed for features you choose:
 
@@ -88,10 +82,18 @@ the normal path.
 
 ### WhatsApp
 
-WhatsApp is opt-in and disabled unless the build has
-`WHATSAPP_ENABLED=true`. When enabled, Settings displays a QR flow. Scan it
-with the linked-device flow in WhatsApp. The runner stores a local session
-below the installation's `data/profiles/whatsapp` directory.
+Choose WhatsApp in the setup assistant. Press **Connect WhatsApp**, then open
+WhatsApp on your phone, open **Settings > Linked Devices > Link a Device**, and
+scan the QR code Tovi shows. The local linked-device session is kept below the
+installation's `data/profiles/whatsapp` directory.
+
+## Configure voice transcription
+
+Voice transcription is off on a fresh install and uses no model space. Choose
+**Standard** to download the local `whisper-base.en` model at about 150 MB, or
+**Enhanced** to download `whisper-small.en` at about 500 MB. Audio stays on the
+Mac. Open **Settings > Setup > Optional components** to switch models, turn
+transcription off, or remove the downloaded model later.
 
 Instagram and TikTok adapters are beta and are not part of the primary pilot
 setup.

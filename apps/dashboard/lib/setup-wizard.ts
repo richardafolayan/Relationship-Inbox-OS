@@ -3,9 +3,8 @@
 // New installs land on Today with an empty inbox, no AI key, and nothing
 // connected; the only setup path was hand-editing .env. The wizard is a
 // full-screen overlay shown before Today that walks a first-time user
-// through the two things the app needs: a free Gemini API key and at least
-// one connected message platform. Everything is skippable; nobody is ever
-// trapped in it.
+// through identity, chosen message sources, Contacts, optional AI, optional
+// local transcription, and updates. Nothing is required just to reach Today.
 //
 // This module holds the pure, node-testable pieces: the gating decision,
 // the localStorage flag, and the window-event bridge Settings uses to
@@ -31,7 +30,7 @@ export function markSetupComplete(storage: SetupWizardStorage): void {
 }
 
 export type SetupGateDecision =
-  /** Fresh install with nothing configured: show the wizard. */
+  /** Fresh install with no previous setup state: show the wizard. */
   | "show"
   /**
    * The install is already set up (an AI provider is configured or a
@@ -53,10 +52,9 @@ export interface SetupGateInput {
 }
 
 /**
- * Decide whether the wizard shows on app open. Setup counts as incomplete
- * only when BOTH the AI key and every platform are missing. Unknown state
- * (runner offline, request failed) never shows the wizard: a flaky boot
- * must not greet an already-set-up operator with first-run setup.
+ * Legacy upgrade gate retained for older callers and its regression tests.
+ * The current wizard also reads durable setup progress from the runner.
+ * Unknown state never shows first-run UI over a temporarily offline app.
  */
 export function resolveSetupGate(input: SetupGateInput): SetupGateDecision {
   if (input.storedComplete) return "hidden";

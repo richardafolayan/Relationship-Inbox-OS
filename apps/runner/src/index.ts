@@ -26,6 +26,12 @@ import {
   upsertEnvFile,
   validateGeminiKey
 } from "./services/setup-ai-key";
+import {
+  getSetupPreferences,
+  updateSetupPreferences,
+  type SetupTranscriptionMode
+} from "./services/setup-preferences";
+import { createTranscriptionSetupManager } from "./services/transcription-setup";
 import { createAuditService } from "./services/audit";
 import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
@@ -886,6 +892,45 @@ const nearbyMessagesResolver = textRefinementService
     }
   : null;
 
+// The setup assistant can turn local transcription on without restarting the
+// runner. When transcription was off at boot there is no provider yet, so use
+// a small model-aware proxy that builds the chosen Transformers provider on
+// first use and keeps one cached instance per model.
+if (
+  runnerConfig.audioTranscription.provider === "transformers" ||
+  (!runnerConfig.audioTranscription.enabled && !transcriptionProvider)
+) {
+  const setupProviders = new Map<string, TranscriptionProvider>();
+  transcriptionProvider = {
+    id: "transformers",
+    modelLabel: "whisper",
+    transcribe(request) {
+      const config = runnerConfig.audioTranscription.transformers;
+      let provider = setupProviders.get(config.modelId);
+      if (!provider) {
+        provider = createTransformersWhisperProvider({
+          config: {
+            modelId: config.modelId,
+            modelDir: config.modelDir,
+            timeoutMs: config.timeoutMs
+          }
+        });
+        setupProviders.set(config.modelId, provider);
+      }
+      return provider.transcribe(request);
+    }
+  };
+}
+
+const transcriptionServiceConfig = {
+  enabled: runnerConfig.audioTranscription.enabled,
+  apiKey: runnerConfig.openAiApiKey ?? null,
+  model: runnerConfig.audioTranscription.model,
+  language: runnerConfig.audioTranscription.language,
+  maxBytes: runnerConfig.audioTranscription.maxBytes,
+  maxSeconds: runnerConfig.audioTranscription.maxSeconds
+};
+
 const transcriptionService = createTranscriptionService({
   prisma,
   provider: transcriptionProvider,
@@ -895,18 +940,7 @@ const transcriptionService = createTranscriptionService({
   refinementEnabled: refinementConfig.enabled,
   nearbyMessages: nearbyMessagesResolver,
   attachmentResolver: compositeAttachmentResolver,
-  config: {
-    enabled: runnerConfig.audioTranscription.enabled,
-    // `apiKey` here is the disabled-path guard the service uses to
-    // refuse running when nothing's wired. For local-whisper that
-    // gate is the provider object itself; we pass the OpenAI key when
-    // present so the existing OpenAI-path check still works.
-    apiKey: runnerConfig.openAiApiKey ?? null,
-    model: runnerConfig.audioTranscription.model,
-    language: runnerConfig.audioTranscription.language,
-    maxBytes: runnerConfig.audioTranscription.maxBytes,
-    maxSeconds: runnerConfig.audioTranscription.maxSeconds
-  },
+  config: transcriptionServiceConfig,
   // #760: a finished transcript replaces the "[Voice note]" placeholder in
   // the thread's inbox/Today preview. THREAD_UPDATED bumps the version-gated
   // /data/inbox cache and nudges the dashboard over SSE.
@@ -922,6 +956,30 @@ const transcriptionService = createTranscriptionService({
           `[transcription] preview propagation failed for message ${messageId}: ${error instanceof Error ? error.message : String(error)}`
         );
       });
+  }
+});
+
+const transcriptionSetup = createTranscriptionSetupManager({
+  modelDir: runnerConfig.audioTranscription.transformers.modelDir,
+  downloadScript: resolve(projectRoot, "scripts", "fetch-whisper-model.mjs"),
+  initialEnabled: () => transcriptionServiceConfig.enabled,
+  initialModelId: () => runnerConfig.audioTranscription.transformers.modelId,
+  persist: (_mode, enabled, modelId) => {
+    const envPath = resolveEnvWritePath();
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_ENABLED", String(enabled));
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_PROVIDER", "transformers");
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_LOCAL_MODEL", modelId);
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_PROGRESSIVE_MODE", "false");
+  },
+  applyRuntime: (_mode, enabled, modelId) => {
+    process.env.AUDIO_TRANSCRIPTION_ENABLED = String(enabled);
+    process.env.AUDIO_TRANSCRIPTION_PROVIDER = "transformers";
+    process.env.AUDIO_TRANSCRIPTION_LOCAL_MODEL = modelId;
+    runnerConfig.audioTranscription.enabled = enabled;
+    runnerConfig.audioTranscription.provider = "transformers";
+    runnerConfig.audioTranscription.transformers.modelId = modelId;
+    runnerConfig.audioTranscription.progressive.enabled = false;
+    transcriptionServiceConfig.enabled = enabled;
   }
 });
 
@@ -2353,6 +2411,7 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
         ? settings.geminiModel?.trim() || runnerConfig.geminiModel
         : runnerConfig.openAiModel;
   res.json({
+    enabled: settings.aiEnabled !== false,
     activeProvider,
     activeModel,
     configuredProviders,
@@ -2378,7 +2437,83 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
     res.status(result.status).json({ error: result.message });
     return;
   }
+  await settingsStore.updateSettings({ aiEnabled: true, aiProvider: "gemini" });
+  await updateSetupPreferences({ aiEnabled: true });
   res.json({ ok: true, provider: "gemini" });
+}));
+
+app.get("/data/setup/status", asyncRoute(async (_req, res) => {
+  const [preferences, settings, platforms, operatorProfile] = await Promise.all([
+    getSetupPreferences(),
+    settingsStore.getSettings(),
+    prisma.platform.findMany({
+      where: { name: { in: ["IMESSAGE", "LINKEDIN", "WHATSAPP"] } },
+      select: { name: true, status: true, connectedAt: true, lastError: true }
+    }),
+    settingsStore.getOperatorProfile()
+  ]);
+  res.json({
+    preferences,
+    settings: {
+      enabledPlatforms: settings.enabledPlatforms,
+      aiEnabled: settings.aiEnabled !== false,
+      automaticUpdates: settings.automaticUpdates
+    },
+    platforms,
+    operatorProfile,
+    transcription: transcriptionSetup.status(),
+    contacts: imessageNameSync?.getHealth() ?? null,
+    version: readAppVersion(projectRoot).version
+  });
+}));
+
+app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
+  const payload = z.object({
+    selectedPlatforms: z.array(z.enum(["IMESSAGE", "LINKEDIN", "WHATSAPP"])).optional(),
+    aiEnabled: z.boolean().optional(),
+    startedAt: z.string().max(100).optional(),
+    completedAt: z.string().max(100).optional()
+  }).parse(req.body);
+  const [current, currentSettings] = await Promise.all([
+    getSetupPreferences(),
+    settingsStore.getSettings()
+  ]);
+  const existingPilotPlatforms = currentSettings.enabledPlatforms.filter(
+    (platform): platform is "IMESSAGE" | "LINKEDIN" | "WHATSAPP" =>
+      platform === "IMESSAGE" || platform === "LINKEDIN" || platform === "WHATSAPP"
+  );
+  const selectedPlatforms = payload.selectedPlatforms ??
+    (current.startedAt || current.selectedPlatforms.length > 0
+      ? current.selectedPlatforms
+      : existingPilotPlatforms);
+  const aiEnabled = payload.aiEnabled ??
+    (current.startedAt ? current.aiEnabled : currentSettings.aiEnabled !== false);
+  const preferences = await updateSetupPreferences({
+    ...payload,
+    selectedPlatforms,
+    aiEnabled
+  });
+  await settingsStore.updateSettings({ enabledPlatforms: selectedPlatforms, aiEnabled });
+
+  const whatsappEnabled = selectedPlatforms.includes("WHATSAPP");
+  runnerConfig.whatsapp.enabled = whatsappEnabled;
+  process.env.WHATSAPP_ENABLED = String(whatsappEnabled);
+  upsertEnvFile(resolveEnvWritePath(), "WHATSAPP_ENABLED", String(whatsappEnabled));
+  res.json({ ok: true, preferences });
+}));
+
+app.get("/data/setup/transcription", asyncRoute(async (_req, res) => {
+  res.json(transcriptionSetup.status());
+}));
+
+app.post("/control/setup/transcription", asyncRoute(async (req, res) => {
+  const payload = z.object({
+    mode: z.enum(["off", "standard", "enhanced"]),
+    removeDownloadedModels: z.boolean().optional()
+  }).parse(req.body) as { mode: SetupTranscriptionMode; removeDownloadedModels?: boolean };
+  const status = transcriptionSetup.configure(payload.mode, payload.removeDownloadedModels === true);
+  await updateSetupPreferences({ transcriptionMode: payload.mode });
+  res.status(status.phase === "downloading" ? 202 : 200).json(status);
 }));
 
 // ---- System / self-update -------------------------------------------------
@@ -2572,6 +2707,7 @@ app.post("/control/settings", asyncRoute(async (req, res) => {
       presenterDemoMode: z.enum(["off", "sandbox", "live"]).optional(),
       presenterReadOnly: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
+      aiEnabled: z.boolean().optional(),
       aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
       // Empty string from the dashboard is normalised to undefined client-side,
       // but accept either here defensively. Length cap matches typical model
@@ -6202,6 +6338,18 @@ app.get("/data/birthdays", asyncRoute(async (_req, res) => {
 // completes / on non-macOS hosts where the sync doesn't run.
 app.get("/data/imessage-contact-health", asyncRoute(async (_req, res) => {
   res.json(imessageNameSync?.getHealth() ?? null);
+}));
+
+app.post("/control/imessage/contacts/resync", asyncRoute(async (_req, res) => {
+  if (!imessageNameSync) {
+    res.status(409).json({
+      ok: false,
+      message: "Contacts are only available when Tovi is running on a Mac."
+    });
+    return;
+  }
+  await imessageNameSync.tick();
+  res.json({ ok: true, health: imessageNameSync.getHealth() });
 }));
 
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {
