@@ -10,6 +10,7 @@ const {
   openSync,
   readFileSync,
   readdirSync,
+  rmSync,
   writeFileSync
 } = require("node:fs");
 const { get } = require("node:http");
@@ -54,6 +55,7 @@ let permissionPromptShown = false;
 let quitInProgress = false;
 let quitReady = false;
 let recoveryDialogOpen = false;
+let reclaimPortConflictsOnce = false;
 let restartHistory = [];
 let shuttingDown = false;
 
@@ -255,6 +257,22 @@ function runnerReady() {
   return request(`http://127.0.0.1:${runnerPort(process.env)}/health`, { json: true });
 }
 
+function startupConflictPath() {
+  return join(storagePaths().stateDir, "startup-conflict.json");
+}
+
+function readStartupConflict() {
+  const path = startupConflictPath();
+  try {
+    const conflict = JSON.parse(readFileSync(path, "utf8"));
+    rmSync(path, { force: true });
+    return conflict?.version === 1 && conflict?.kind === "port_conflict" ? conflict : null;
+  } catch {
+    rmSync(path, { force: true });
+    return null;
+  }
+}
+
 async function localAppReady() {
   const [dashboard, runner] = await Promise.all([dashboardReady(), runnerReady()]);
   return dashboard && runner;
@@ -314,6 +332,10 @@ function startLocalApp() {
     packaged: app.isPackaged,
     stateDir: paths.stateDir
   });
+  rmSync(startupConflictPath(), { force: true });
+  if (reclaimPortConflictsOnce) environment.RIOS_RECLAIM_PORT_CONFLICTS = "1";
+  else delete environment.RIOS_RECLAIM_PORT_CONFLICTS;
+  reclaimPortConflictsOnce = false;
   writeLog(`Starting local app from ${APP_DIR}`);
   const child = spawn(node, startAppArgs(APP_DIR), {
     cwd: APP_DIR,
@@ -329,6 +351,11 @@ function startLocalApp() {
     if (appProcess === child) appProcess = null;
     writeLog(`Local app exited with code=${code ?? ""} signal=${signalName ?? ""}`);
     if (shuttingDown || expectedProcessExits.delete(child)) return;
+    const conflict = readStartupConflict();
+    if (conflict) {
+      void showPortConflictRecovery(conflict);
+      return;
+    }
     const now = Date.now();
     restartHistory = restartHistory.filter((time) => now - time < 60_000);
     if (restartHistory.length < 1) {
@@ -348,6 +375,35 @@ function startLocalApp() {
     );
   });
   return generation;
+}
+
+async function showPortConflictRecovery(conflict) {
+  if (recoveryDialogOpen || shuttingDown) return;
+  recoveryDialogOpen = true;
+  try {
+    const recoverable = conflict.recoverable === true;
+    const result = await showMessageBox({
+      type: "warning",
+      title: APP_NAME,
+      message: recoverable ? "Another copy of Tovi is still running." : "Another app is blocking Tovi.",
+      detail: recoverable
+        ? `An older Tovi process is using port ${conflict.port}. Tovi can stop it safely and start this copy. Your message data is not removed.`
+        : `Port ${conflict.port} is being used by another application. Close that application, then choose Retry. Show Logs opens the diagnostic log.`,
+      buttons: recoverable ? ["Stop old Tovi and retry", "Show Logs", "Quit"] : ["Retry", "Show Logs", "Quit"],
+      defaultId: 0,
+      cancelId: 2,
+      noLink: true
+    });
+    if (result.response === 0) {
+      reclaimPortConflictsOnce = recoverable;
+      await restartLocalApp();
+    } else if (result.response === 1) {
+      if (currentLogPath) shell.showItemInFolder(currentLogPath);
+      else await shell.openPath(storagePaths().logsDir);
+    } else app.quit();
+  } finally {
+    recoveryDialogOpen = false;
+  }
 }
 
 async function stopLocalApp() {

@@ -18,6 +18,7 @@ import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
 import {
   portConflict,
+  reclaimPortConflict,
   recoverPriorRuntime,
   removeRuntimeState,
   stopChildGroups,
@@ -30,6 +31,7 @@ const DATA_DIR = resolve(process.env.RIOS_DATA_DIR || join(APP_DIR, "data"));
 const STATE_DIR = resolve(process.env.RIOS_STATE_DIR || join(DATA_DIR, "runtime"));
 const STAMPS_PATH = join(DATA_DIR, "app-prepare-stamps.json");
 const RUNTIME_STATE_PATH = join(STATE_DIR, "processes.json");
+const STARTUP_CONFLICT_PATH = join(STATE_DIR, "startup-conflict.json");
 const PACKAGED = process.env.RIOS_PACKAGED_APP === "1";
 const args = new Set(process.argv.slice(2));
 const PREPARE_ONLY = args.has("--prepare-only");
@@ -68,6 +70,23 @@ function saveStamps(stamps) {
   } catch {
     // The next launch can safely repeat preparation when this cache cannot be saved.
   }
+}
+
+function writeStartupConflict(label, conflict) {
+  mkdirSync(STATE_DIR, { recursive: true });
+  const recoverable = conflict.owners.length > 0 && conflict.owners.every((owner) => owner.toviOwned);
+  writeFileSync(
+    STARTUP_CONFLICT_PATH,
+    `${JSON.stringify({
+      version: 1,
+      kind: "port_conflict",
+      label,
+      port: conflict.port,
+      recoverable,
+      ownerCount: conflict.owners.length
+    }, null, 2)}\n`,
+    { mode: 0o600 }
+  );
 }
 
 function hashPaths(paths) {
@@ -378,8 +397,20 @@ async function main() {
     for (const [label, port] of [["dashboard", DASHBOARD_PORT], ["local service", RUNNER_PORT]]) {
       const conflict = portConflict(port, APP_DIR);
       if (!conflict) continue;
+      if (process.env.RIOS_RECLAIM_PORT_CONFLICTS === "1") {
+        const reclaimed = await reclaimPortConflict(conflict);
+        if (reclaimed.status === "recovered") {
+          say(`  Stopped an older Tovi process that was using port ${port}.`);
+          continue;
+        }
+      }
+      writeStartupConflict(label, conflict);
       say(`Could not start because port ${port} for the ${label} is already in use.`);
-      say("Close the other application using that port, then choose Retry in Tovi.");
+      say(
+        conflict.owners.every((owner) => owner.toviOwned)
+          ? "Choose Stop old Tovi and retry in the recovery dialog."
+          : "Close the other application using that port, then choose Retry in Tovi."
+      );
       process.exit(1);
     }
   }

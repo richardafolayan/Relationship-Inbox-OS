@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { dirname, resolve, sep } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 
 function canonicalPath(path) {
   try {
@@ -103,6 +103,57 @@ export function processBelongsToApp(snapshot, appDir) {
   return snapshot.command.includes(root) || snapshot.command.includes(resolve(appDir));
 }
 
+function productRootFromDirectory(path) {
+  if (!path) return "";
+  let current = canonicalPath(path);
+  while (true) {
+    try {
+      const manifest = JSON.parse(readFileSync(join(current, "package.json"), "utf8"));
+      if (manifest?.name === "relationship-inbox-os" && existsSync(join(current, "scripts", "start-app.mjs"))) {
+        return current;
+      }
+    } catch {}
+    const parent = dirname(current);
+    if (parent === current) return "";
+    current = parent;
+  }
+}
+
+export function processBelongsToTovi(snapshot) {
+  if (!snapshot?.pid) return false;
+  if (productRootFromDirectory(snapshot.cwd)) return true;
+  const command = String(snapshot.command || "").replaceAll("\\", "/").toLowerCase();
+  if (command.includes("/tovi.app/contents/resources/app/")) return true;
+  if (command.includes("/tovi/resources/app/")) return true;
+  return command.includes("relationship-inbox-os") && [
+    "/scripts/start-app.mjs",
+    "/apps/dashboard/",
+    "/apps/runner/"
+  ].some((marker) => command.includes(marker));
+}
+
+function toviIdentity(snapshot) {
+  const root = productRootFromDirectory(snapshot?.cwd);
+  if (root) return canonicalPath(root);
+  const command = String(snapshot?.command || "").replaceAll("\\", "/");
+  const packaged = command.match(/^(.*?\/Tovi(?:\.app)?\/Contents\/Resources\/app)(?:\/|\s|$)/i)
+    || command.match(/^(.*?\/Tovi\/resources\/app)(?:\/|\s|$)/i);
+  return packaged?.[1] ? packaged[1].toLowerCase() : "";
+}
+
+function isToviRuntimeCommand(command) {
+  const normalized = String(command || "").replaceAll("\\", "/").toLowerCase();
+  return [
+    "/scripts/start-app.mjs",
+    "/apps/runner/",
+    "/apps/dashboard/",
+    "next-server",
+    "tsx watch",
+    "npm run start",
+    "npm run dev"
+  ].some((marker) => normalized.includes(marker));
+}
+
 export function listeningPids(port, exec = execFileSync) {
   if (process.platform === "win32") {
     try {
@@ -188,9 +239,92 @@ export function portConflict(port, appDir) {
     owners: owners.map((owner) => ({
       pid: owner.pid,
       owned: processBelongsToApp(owner, appDir),
+      toviOwned: processBelongsToTovi(owner),
       command: owner.command
     }))
   };
+}
+
+function processParentPid(pid, exec = execFileSync) {
+  if (process.platform === "win32") return null;
+  try {
+    return positivePid(exec("ps", ["-p", String(pid), "-o", "ppid="], { encoding: "utf8" }).trim());
+  } catch {
+    return null;
+  }
+}
+
+function processTreePids(rootPid, exec = execFileSync) {
+  if (process.platform === "win32") return [rootPid];
+  let rows;
+  try {
+    rows = exec("ps", ["-axo", "pid=,ppid="], { encoding: "utf8" });
+  } catch {
+    return [rootPid];
+  }
+  const children = new Map();
+  for (const line of rows.split("\n")) {
+    const [pid, parentPid] = line.trim().split(/\s+/).map(positivePid);
+    if (!pid || !parentPid) continue;
+    const siblings = children.get(parentPid) || [];
+    siblings.push(pid);
+    children.set(parentPid, siblings);
+  }
+  const ordered = [];
+  const visit = (pid) => {
+    for (const childPid of children.get(pid) || []) visit(childPid);
+    ordered.push(pid);
+  };
+  visit(rootPid);
+  return ordered;
+}
+
+function toviProcessRoot(pid) {
+  let current = positivePid(pid);
+  const identity = toviIdentity(processSnapshot(current));
+  if (!identity) return null;
+  let root = current;
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const parentPid = processParentPid(current);
+    if (!parentPid) break;
+    const parent = processSnapshot(parentPid);
+    if (toviIdentity(parent) !== identity || !isToviRuntimeCommand(parent.command)) break;
+    root = parentPid;
+    current = parentPid;
+  }
+  return root;
+}
+
+export async function reclaimPortConflict(conflict, { graceMs = 2500 } = {}) {
+  if (!conflict?.owners?.length || conflict.owners.some((owner) => !owner.toviOwned)) {
+    return { status: "refused", stopped: [] };
+  }
+  const roots = [...new Set(conflict.owners.map((owner) => toviProcessRoot(owner.pid)).filter(Boolean))];
+  if (roots.length === 0) return { status: "refused", stopped: [] };
+
+  if (process.platform === "win32") {
+    for (const pid of roots) {
+      try {
+        execFileSync("taskkill.exe", ["/PID", String(pid), "/T"], { stdio: "ignore" });
+      } catch {
+        // A process can finish while the recovery action is running.
+      }
+    }
+  } else {
+    const pids = [...new Set(roots.flatMap((pid) => processTreePids(pid)))];
+    for (const pid of pids) signal({ pid, group: false }, "SIGTERM");
+    await delay(graceMs);
+    for (const pid of pids) {
+      if (processIsAlive(pid)) signal({ pid, group: false }, "SIGKILL");
+    }
+  }
+
+  await delay(100);
+  return listeningPids(conflict.port).length === 0
+    ? { status: "recovered", stopped: roots }
+    : { status: "failed", stopped: roots };
 }
 
 export async function stopChildGroups(children, { graceMs = 4000 } = {}) {

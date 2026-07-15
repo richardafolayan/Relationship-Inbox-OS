@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import {
   portConflict,
   processBelongsToApp,
+  processBelongsToTovi,
   processIsAlive,
   processSnapshot,
+  reclaimPortConflict,
   readRuntimeState,
   recoverPriorRuntime,
   removeRuntimeState,
@@ -73,6 +75,20 @@ test("processBelongsToApp requires the cwd or command to sit inside the app", ()
   assert.equal(processBelongsToApp(null, appDir), false);
 });
 
+test("processBelongsToTovi recognizes product checkouts without trusting unrelated node processes", () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-product-"));
+  try {
+    mkdirSync(join(appDir, "scripts"));
+    mkdirSync(join(appDir, "apps", "dashboard"), { recursive: true });
+    writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "relationship-inbox-os" }));
+    writeFileSync(join(appDir, "scripts", "start-app.mjs"), "");
+    assert.equal(processBelongsToTovi({ pid: 10, cwd: join(appDir, "apps", "dashboard"), command: "node" }), true);
+    assert.equal(processBelongsToTovi({ pid: 10, cwd: "/tmp", command: "node server.js" }), false);
+  } finally {
+    rmSync(appDir, { recursive: true, force: true });
+  }
+});
+
 test("recoverPriorRuntime cleans stale state and reclaims owned processes", async () => {
   const appDir = mkdtempSync(join(tmpdir(), "rios-appdir-"));
   const statePath = join(appDir, "processes.json");
@@ -134,4 +150,35 @@ test("processSnapshot and portConflict tolerate missing tools and processes", ()
   assert.equal(processSnapshot("junk").pid, null);
   // An unused high port has no owners.
   assert.equal(portConflict(64999, "/nonexistent"), null);
+});
+
+test("reclaimPortConflict stops only a verified Tovi process tree", async () => {
+  const appDir = mkdtempSync(join(tmpdir(), "rios-product-"));
+  mkdirSync(join(appDir, "scripts"));
+  writeFileSync(join(appDir, "package.json"), JSON.stringify({ name: "relationship-inbox-os" }));
+  writeFileSync(join(appDir, "scripts", "start-app.mjs"), "");
+  const child = spawn(process.execPath, ["-e", "const s=require('node:http').createServer();s.listen(0,'127.0.0.1',()=>console.log(s.address().port))"], {
+    cwd: appDir,
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  try {
+    const port = await new Promise((resolvePort) => child.stdout.once("data", (chunk) => resolvePort(chunk.toString().trim())));
+    const conflict = portConflict(port, "/another/tovi/install");
+    assert.equal(conflict.owners.every((owner) => owner.toviOwned), true);
+    const result = await reclaimPortConflict(conflict, { graceMs: 100 });
+    assert.equal(result.status, "recovered");
+    assert.equal(processIsAlive(child.pid), false);
+  } finally {
+    if (processIsAlive(child.pid)) child.kill("SIGKILL");
+    rmSync(appDir, { recursive: true, force: true });
+  }
+});
+
+test("reclaimPortConflict refuses unverified owners", async () => {
+  const result = await reclaimPortConflict({
+    port: "3100",
+    owners: [{ pid: process.pid, toviOwned: false }]
+  });
+  assert.equal(result.status, "refused");
+  assert.equal(processIsAlive(process.pid), true);
 });
