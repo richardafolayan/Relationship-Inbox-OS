@@ -6324,6 +6324,47 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
   );
 }));
 
+app.get("/data/favourites", asyncRoute(async (_req, res) => {
+  const MENU_FAVOURITE_LIMIT = 5;
+  const [favouritePeople, visibleThreadGroups] = await Promise.all([
+    prisma.person.findMany({
+      where: { favouritedAt: { not: null } },
+      orderBy: { favouritedAt: "desc" },
+      take: MENU_FAVOURITE_LIMIT,
+      select: { id: true, displayName: true, platform: true }
+    }),
+    loadVisibleThreadRows()
+  ]);
+
+  const favouriteRiskSettings = await settingsStore.getSettings();
+  const favouriteThresholds = {
+    amberHours: favouriteRiskSettings.amberHours,
+    redHours: favouriteRiskSettings.redHours
+  };
+  const favouriteCounts = personThreadCounts(visibleThreadGroups);
+
+  const latestThreadByPerson = new Map<string, { threadId: string; at: number }>();
+  for (const group of visibleThreadGroups) {
+    const count =
+      favouriteCounts.get(personThreadCountKey(group.source.platform, group.source.personId)) ?? 1;
+    const shaped = toInboxRow(group, count, favouriteThresholds);
+    const at = shaped.lastMessageAt ? Date.parse(shaped.lastMessageAt) : 0;
+    const existing = latestThreadByPerson.get(shaped.personId);
+    if (!existing || at > existing.at) {
+      latestThreadByPerson.set(shaped.personId, { threadId: shaped.id, at });
+    }
+  }
+
+  res.json(
+    favouritePeople.map((person) => ({
+      id: person.id,
+      name: person.displayName,
+      platform: person.platform,
+      threadId: latestThreadByPerson.get(person.id)?.threadId ?? null
+    }))
+  );
+}));
+
 app.get("/data/birthdays", asyncRoute(async (_req, res) => {
   // Contacts whose macOS Contacts card carries a birthday, surfaced as a
   // gentle "reach out" reminder. Each links to the person's most-recent

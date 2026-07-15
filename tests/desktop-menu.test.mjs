@@ -55,3 +55,62 @@ test("Help menu opens the in-app feedback modal via the pilot event", async () =
   assert.match(source, /JSON\.stringify\(eventName\)/);
   assert.match(source, /JSON\.stringify\(detail \?\? null\)/);
 });
+
+test("Favourites menu lists pinned contacts and links to their thread", async () => {
+  const source = await mainSource();
+  assert.match(source, /label: "Favourites"/);
+  // Empty state until the first runner fetch lands.
+  assert.match(source, /label: "No favourites yet", enabled: false/);
+  // A favourite opens its most-recent thread, or falls back to an inbox
+  // search by name when it has none.
+  assert.match(source, /openDashboardPath\(`\/thread\/\$\{encodeURIComponent\(contact\.threadId\)\}`\)/);
+  assert.match(source, /openDashboardPath\(`\/inbox\?q=\$\{encodeURIComponent\(contact\.name\)\}`\)/);
+  // Fetched from the runner's favourites endpoint and capped at five.
+  assert.match(source, /getRunnerJson\("\/data\/favourites"\)/);
+  assert.match(source, /\.slice\(0, 5\)/);
+  assert.match(source, /label: "All People\.\.\."/);
+});
+
+test("Favourites refresh is wired to load, focus and a background poll", async () => {
+  const source = await mainSource();
+  // Rebuild only when the list actually changed (no menu churn on every poll).
+  assert.match(source, /JSON\.stringify\(next\) === JSON\.stringify\(favouriteContacts\)/);
+  assert.match(source, /mainWindow\.on\("focus"/);
+  assert.match(source, /setInterval\(/);
+  assert.match(source, /MENU_REFRESH_INTERVAL_MS/);
+});
+
+test("Text Size menu drives the shared in-app UI scale", async () => {
+  const source = await mainSource();
+  assert.match(source, /label: "Text Size"/);
+  assert.match(source, /label: "Bigger", accelerator: "CommandOrControl\+="/);
+  assert.match(source, /label: "Smaller", accelerator: "CommandOrControl\+-"/);
+  assert.match(source, /label: "Actual Size", accelerator: "CommandOrControl\+0"/);
+  // Radio items reflect the current level.
+  assert.match(source, /type: "radio"/);
+  assert.match(source, /checked: currentTextSize === value/);
+  // It must speak the SAME localStorage key + change event as the dashboard
+  // lib (apps/dashboard/lib/ui-scale.ts), or Settings and the menu diverge.
+  assert.match(source, /UI_SCALE_STORAGE_KEY = "inbox_os_ui_scale"/);
+  assert.match(source, /UI_SCALE_CHANGE_EVENT = "inbox-ui-scale"/);
+  // Prefer the renderer bridge so the Settings control stays in sync.
+  assert.match(source, /window\.__toviUiScale/);
+});
+
+test("Go menu adds People and a Settings-sections submenu", async () => {
+  const source = await mainSource();
+  assert.match(source, /label: "People", accelerator: "CommandOrControl\+5".*openDashboardPath\("\/people"\)/);
+  for (const [label, hash] of [
+    ["Platforms", "platforms"],
+    ["Notifications", "notifications"],
+    ["Reply Style", "writing"],
+    ["Focus", "focus"],
+    ["App & Updates", "app"]
+  ]) {
+    assert.match(
+      source,
+      new RegExp(`label: "${label}".*openDashboardPath\\("/settings#${hash}"\\)`),
+      `Settings submenu should deep-link ${label} -> /settings#${hash}`
+    );
+  }
+});
