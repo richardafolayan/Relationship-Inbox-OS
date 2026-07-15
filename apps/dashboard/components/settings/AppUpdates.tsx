@@ -58,7 +58,10 @@ export function AppUpdates() {
     if (manual) setCheckMsg("Checking…");
     try {
       const res = await apiGetRaw<UpdateCheck>("/runner/system/update-check");
-      setInfo(res);
+      setInfo({
+        ...res,
+        currentReleaseNotes: Array.isArray(res.currentReleaseNotes) ? res.currentReleaseNotes : []
+      });
       setAutomaticUpdates(res.automaticUpdates);
       if (res.error) {
         setError("Couldn’t check the update feed. Try again in a moment.");
