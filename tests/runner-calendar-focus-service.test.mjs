@@ -159,6 +159,44 @@ test("a hand-started manual window is left alone even while an event is live", a
   assert.equal(store.writes, 0);
 });
 
+test("a manual window started DURING the fetch is not clobbered", async () => {
+  const store = fakeStore();
+  const feed = icsFor("20260710T090000Z", "20260710T100000Z");
+  const service = createCalendarFocusService({
+    settingsStore: store,
+    now: () => new Date("2026-07-10T09:30:00Z"),
+    // The operator taps "start focus" by hand while the feed is mid-fetch.
+    fetchIcs: async () => {
+      await store.updateOperatorProfile({
+        focusWindow: baseWindow({ active: true, source: "manual", windowId: "w-manual" })
+      });
+      return feed;
+    }
+  });
+  const action = await service.tick();
+  assert.equal(action.type, "none", "the tick must defer to the fresh manual window");
+  assert.equal(store.current().focusWindow.source, "manual");
+  assert.equal(store.current().focusWindow.windowId, "w-manual");
+});
+
+test("a subscription change DURING the fetch aborts the tick (stale occurrence)", async () => {
+  const store = fakeStore();
+  const service = createCalendarFocusService({
+    settingsStore: store,
+    now: () => new Date("2026-07-10T09:30:00Z"),
+    fetchIcs: async () => {
+      // Operator edits the URL while the old feed is being fetched.
+      await store.updateOperatorProfile({
+        calendarSync: { ...store.current().calendarSync, url: "https://y/other.ics" }
+      });
+      return icsFor("20260710T090000Z", "20260710T100000Z");
+    }
+  });
+  const action = await service.tick();
+  assert.equal(action.type, "none");
+  assert.equal(store.current().focusWindow.active, false, "no window opened from the stale feed");
+});
+
 test("refresh() clears the cache and re-checks immediately", async () => {
   const store = fakeStore();
   let feed = icsFor("20260710T090000Z", "20260710T100000Z");

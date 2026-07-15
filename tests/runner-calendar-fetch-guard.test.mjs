@@ -40,6 +40,23 @@ test("fetchIcsText refuses a loopback target by default (SSRF guard)", async () 
   );
 });
 
+test("fetchIcsText refuses a plain http feed in production (token-leak guard)", async () => {
+  await assert.rejects(
+    () => fetchIcsText("http://cal.example.com/secret-token/basic.ics"),
+    (err) => err instanceof CalendarFetchError && /https/i.test(err.message)
+  );
+});
+
+test("fetchIcsText refuses an https feed that redirects down to http (no downgrade)", async () => {
+  const resolveAddresses = async () => ["93.184.216.34"]; // public, avoids real DNS
+  const fetchImpl = async () =>
+    new Response(null, { status: 302, headers: { location: "http://cal.example.com/basic.ics" } });
+  await assert.rejects(
+    () => fetchIcsText("https://cal.example.com/basic.ics", { resolveAddresses, fetchImpl }),
+    (err) => err instanceof CalendarFetchError && /https/i.test(err.message)
+  );
+});
+
 test("fetchIcsText reads a feed when the private-target escape hatch is set", async () => {
   const body = "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nEND:VCALENDAR";
   const server = http.createServer((_req, res) => {

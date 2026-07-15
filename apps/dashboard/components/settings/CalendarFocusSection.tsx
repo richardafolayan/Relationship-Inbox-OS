@@ -59,84 +59,92 @@ export function CalendarFocusSection() {
   const [check, setCheck] = useState<CheckState>({ kind: "idle" });
   const hydrated = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const pending = useRef<CalendarSyncSettings | null>(null);
+  // Single source of truth for what should be saved. Every edit updates it, and
+  // both the debounced text saves and the immediate toggle/audience saves send
+  // THIS value - so a slow debounced URL save can never land last and revert a
+  // toggle made after it (an immediate save also cancels the pending debounce).
+  const latest = useRef<CalendarSyncSettings>(calendarSync);
 
   // Own local editor state once the real profile lands, so a background
   // profile refresh can't clobber an in-progress edit.
   useEffect(() => {
     if (profile && !hydrated.current) {
       setLocal(calendarSync);
+      latest.current = calendarSync;
       hydrated.current = true;
     }
   }, [profile, calendarSync]);
 
-  useEffect(
-    () => () => {
-      if (debounceRef.current) clearTimeout(debounceRef.current);
-      if (pending.current) void saveCalendarSync(pending.current);
-    },
-    [saveCalendarSync]
-  );
-
-  const persist = async (next: CalendarSyncSettings) => {
+  const persistNow = async () => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+      debounceRef.current = null;
+    }
     setStatus("saving");
     try {
-      await saveCalendarSync(next);
+      await saveCalendarSync(latest.current);
       setStatus("saved");
     } catch {
       setStatus("error");
     }
   };
 
-  const persistDebounced = (next: CalendarSyncSettings) => {
-    pending.current = next;
+  const persistDebounced = () => {
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      const toSave = pending.current;
-      pending.current = null;
-      if (toSave) void persist(toSave);
+      debounceRef.current = null;
+      void persistNow();
     }, TEXT_DEBOUNCE_MS);
   };
 
-  const flush = () => {
-    if (debounceRef.current) clearTimeout(debounceRef.current);
-    const toSave = pending.current;
-    pending.current = null;
-    if (toSave) void persist(toSave);
+  // Flush any pending debounced save on unmount so a fast tab switch doesn't
+  // drop the last keystrokes.
+  useEffect(
+    () => () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+        void saveCalendarSync(latest.current);
+      }
+    },
+    [saveCalendarSync]
+  );
+
+  // Update both the rendered state and the save source of truth together.
+  const apply = (next: CalendarSyncSettings) => {
+    setLocal(next);
+    latest.current = next;
   };
 
+  const flush = () => void persistNow();
+
   const setUrl = (url: string) => {
-    const next = { ...local, url };
-    setLocal(next);
+    apply({ ...latest.current, url });
     setCheck({ kind: "idle" });
-    persistDebounced(next);
+    persistDebounced();
   };
 
   const setKeyword = (keyword: string) => {
-    const next = { ...local, keyword };
-    setLocal(next);
-    persistDebounced(next);
+    apply({ ...latest.current, keyword });
+    persistDebounced();
   };
 
   const toggleEnabled = () => {
-    const next = { ...local, enabled: !local.enabled };
-    setLocal(next);
-    void persist(next);
+    apply({ ...latest.current, enabled: !latest.current.enabled });
+    void persistNow();
   };
 
   const chooseAudience = (audience: FocusAudience) => {
-    const next = { ...local, audience };
-    setLocal(next);
-    void persist(next);
+    apply({ ...latest.current, audience });
+    void persistNow();
   };
 
   const runCheck = async () => {
-    flush(); // make sure the latest URL is saved before we test it
+    await persistNow(); // make sure the latest URL is saved before we test it
     setCheck({ kind: "checking" });
     try {
       const data = await apiPost<CalendarPreviewResponse>("/runner/control/calendar/preview", {
-        url: local.url,
-        keyword: local.keyword
+        url: latest.current.url,
+        keyword: latest.current.keyword
       });
       setCheck({ kind: "result", data });
     } catch {

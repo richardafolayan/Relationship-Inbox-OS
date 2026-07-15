@@ -135,13 +135,12 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
     if (running) return { type: "none" };
     running = true;
     try {
-      const profile = await deps.settingsStore.getOperatorProfile();
-      const settings = profile.calendarSync;
-      const current = profile.focusWindow;
+      const settings = (await deps.settingsStore.getOperatorProfile()).calendarSync;
       const currentNow = now();
 
       let activeOcc: IcsOccurrence | null = null;
-      if (settings.enabled && settings.url.trim()) {
+      const fetching = settings.enabled && !!settings.url.trim();
+      if (fetching) {
         try {
           const ics = await getIcsCached(settings.url);
           activeOcc = summarizeCalendar(ics, { now: currentNow, keyword: settings.keyword }).active;
@@ -158,7 +157,26 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
         }
       }
 
-      const action = computeCalendarFocusAction(current, activeOcc, settings, currentNow);
+      // Re-read the freshest profile AFTER the (possibly slow) fetch. A manual
+      // window the operator started during the await must not be clobbered by
+      // a decision built from the pre-fetch snapshot, and a subscription the
+      // operator changed mid-fetch makes this tick's activeOcc stale.
+      const fresh = await deps.settingsStore.getOperatorProfile();
+      const freshSettings = fresh.calendarSync;
+      if (
+        fetching &&
+        (!freshSettings.enabled ||
+          freshSettings.url.trim() !== settings.url.trim() ||
+          freshSettings.keyword !== settings.keyword)
+      ) {
+        // The URL/keyword/enabled changed while we were fetching, so the
+        // occurrence we resolved no longer reflects the operator's intent.
+        // Let the next tick (or the settings-save refresh) redo it cleanly.
+        return { type: "none" };
+      }
+
+      const current = fresh.focusWindow;
+      const action = computeCalendarFocusAction(current, activeOcc, freshSettings, currentNow);
       if (action.type === "start") {
         await deps.settingsStore.updateOperatorProfile({ focusWindow: action.window });
       } else if (action.type === "end") {

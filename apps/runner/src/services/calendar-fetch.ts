@@ -110,6 +110,15 @@ export async function fetchIcsText(
         throw new CalendarFetchError(`unsupported protocol: ${current.protocol}`);
       }
     } else {
+      // The secret iCal URL carries a bearer-like token in its path, so it
+      // (and every redirect hop) must stay on https - a downgrade to http
+      // would leak that token in cleartext. http is only reachable through
+      // the allowPrivateTargets test hatch above.
+      if (current.protocol !== "https:") {
+        throw new CalendarFetchError(
+          `calendar feed must use https (got ${current.protocol || "an unknown scheme"})`
+        );
+      }
       try {
         await assertSafeRequestTarget(current, opts.resolveAddresses);
       } catch (error) {
