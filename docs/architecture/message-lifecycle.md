@@ -41,8 +41,8 @@ the [adapter reference](../developer/platform-adapters.md).
    uses the caller's safe fallback.
 9. **The final thread update is committed.** The runner persists summaries,
    open loops, memory, reply brief, category, close status, risk, and current
-   message metadata. A new inbound clears snooze and can resurface an archived
-   thread.
+   message metadata. A new inbound clears snooze and a manual handled boundary,
+   while explicitly archived threads stay archived.
 10. **The runner announces the change.** `THREAD_UPDATED`, scan progress, and
     scan completion events enter the bounded event bus and invalidate the
     inbox cache. Audit receipts record the job, platform, stage, and outcome.

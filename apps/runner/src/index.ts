@@ -7734,7 +7734,8 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
       unreadCount: 0,
       riskLevel: "GREEN",
       riskReason: "Marked done manually",
-      slaDueAt: null
+      slaDueAt: null,
+      handledAt: new Date()
     }
   });
 

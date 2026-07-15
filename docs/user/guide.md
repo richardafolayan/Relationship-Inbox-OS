@@ -24,8 +24,8 @@ rules. You can open the thread, snooze it, or mark it handled.
 
 Inbox is the full active list. It supports search, platform and category
 filters, favorites, ordering, selection, bulk mark-done, snooze, and rescan.
-Archived and future-snoozed threads are not shown here. A new inbound message
-can bring an archived or snoozed conversation back.
+Archived and future-snoozed threads are not shown here. New inbound messages
+clear snooze, while archived conversations stay archived until you restore them.
 
 ### Reconnect
 
