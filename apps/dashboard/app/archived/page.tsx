@@ -141,13 +141,18 @@ export default function ArchivedPage() {
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<ArchSort>("recent");
 
-  // WhatsApp is opt-in, so its chip only appears once there are archived
-  // WhatsApp threads to filter to. Keeps the popover at two platforms for
-  // pilots who never linked it.
   const platformOptions = useMemo(() => {
-    const showWhatsApp = (rows ?? []).some((row) => row.platform === "WHATSAPP");
-    return PLATFORM_FILTERS.filter((option) => option.key !== "WHATSAPP" || showWhatsApp);
+    const available = new Set((rows ?? []).map((row) => row.platform));
+    return PLATFORM_FILTERS.filter(
+      (option) => option.key === "all" || available.has(option.key)
+    );
   }, [rows]);
+
+  useEffect(() => {
+    if (platformFilter === "all") return;
+    if (platformOptions.some((option) => option.key === platformFilter)) return;
+    setPlatformFilter("all");
+  }, [platformFilter, platformOptions]);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [forceSelectMode, setForceSelectMode] = useState(false);
