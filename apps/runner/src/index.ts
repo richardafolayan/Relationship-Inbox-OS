@@ -7726,21 +7726,6 @@ app.post("/control/thread/:threadId/delete-draft", asyncRoute(async (req, res) =
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "mark the thread handled", kind: "thread-mutation" })) return;
-  // If the operator hasn't replied to the latest inbound, "Mark as
-  // handled" really means "I'm done with this conversation, take it
-  // out of my view" — so we archive the thread alongside clearing the
-  // needs-reply / risk fields. When the operator already replied,
-  // mark-done is just a confirmation and we leave the archive state
-  // alone (issue #246).
-  const existing = await prisma.thread.findUnique({
-    where: { id: threadId },
-    select: { lastInboundAt: true, lastOutboundAt: true, archivedAt: true }
-  });
-  const inbound = existing?.lastInboundAt?.getTime() ?? 0;
-  const outbound = existing?.lastOutboundAt?.getTime() ?? 0;
-  const operatorHasNotReplied = !existing?.lastOutboundAt || inbound > outbound;
-  const shouldArchive = operatorHasNotReplied && !existing?.archivedAt;
-
   const targetIds = await actionTargetThreadIds(threadId);
   await prisma.thread.updateMany({
     where: { id: { in: targetIds } },
@@ -7749,8 +7734,7 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
       unreadCount: 0,
       riskLevel: "GREEN",
       riskReason: "Marked done manually",
-      slaDueAt: null,
-      ...(shouldArchive ? { archivedAt: new Date() } : {})
+      slaDueAt: null
     }
   });
 
@@ -7758,10 +7742,10 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
     action: "MARK_DONE",
     stage: "Send",
     status: "OK",
-    details: { threadId, archived: shouldArchive, propagatedTo: targetIds.length }
+    details: { threadId, propagatedTo: targetIds.length }
   });
 
-  res.json({ status: "ok", archived: shouldArchive });
+  res.json({ status: "ok" });
 }));
 
 app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) => {
