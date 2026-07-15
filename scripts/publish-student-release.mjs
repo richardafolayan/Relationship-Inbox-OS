@@ -41,8 +41,10 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { findForbiddenEntries, sha256Buffer, sha256File, validateLatestJson } from "./lib/release-manifest.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const APP_NAME = resolveAppName();
 const RELEASE_DIR = join(ROOT, "release-dist");
 const LATEST_ZIP = join(RELEASE_DIR, "relationship-inbox-os-student-latest.zip");
 const MANIFEST = join(RELEASE_DIR, "latest.json");
@@ -313,7 +315,7 @@ async function verifyLiveFeed(expected) {
 
 // ---- main ----------------------------------------------------------------
 async function main() {
-  say(`\n${C.b}Tovi — publish student release${C.reset}`);
+  say(`\n${C.b}${APP_NAME} — publish student release${C.reset}`);
   if (args.dryRun) say(`${C.y}(dry run — building + verifying, uploading nothing)${C.reset}`);
 
   // One-time setup: resolve stable (no-`st=`) share links for the configured

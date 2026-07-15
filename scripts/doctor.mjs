@@ -18,8 +18,10 @@ import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveAppName } from "./lib/branding.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const APP_NAME = resolveAppName();
 
 const isTTY = process.stdout.isTTY;
 const C = isTTY
@@ -86,7 +88,7 @@ const RUNNER_PORT = env.RUNNER_PORT || process.env.RUNNER_PORT || "4001";
 function checkMacOS() {
   if (process.platform !== "darwin") {
     add(FAIL, "macOS", `This is not a Mac (${process.platform}).`,
-      "Tovi needs a Mac for iMessage. Run it on a MacBook.");
+      `${APP_NAME} needs a Mac for iMessage. Run it on a MacBook.`);
     return;
   }
   const ver = sh("sw_vers -productVersion") || "unknown";
@@ -127,7 +129,7 @@ function checkAppFolder() {
     add(PASS, "App folder", APP_DIR);
   } else {
     add(FAIL, "App folder", `Doesn't look like the app: ${APP_DIR}`,
-      "Run the doctor from inside the Tovi folder.");
+      `Run the doctor from inside the ${APP_NAME} folder.`);
   }
 }
 
@@ -212,7 +214,7 @@ async function checkDashboard() {
     add(PASS, "Dashboard", `Responding on port ${DASHBOARD_PORT}.`);
   } else {
     add(WARN, "Dashboard", `Nothing on port ${DASHBOARD_PORT}.`,
-      `Start Tovi from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
+      `Start ${APP_NAME} from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
@@ -225,7 +227,7 @@ async function checkRunner() {
       "The runner is starting or unhealthy — wait a moment, then reload the app.");
   } else {
     add(WARN, "Runner", `Nothing on port ${RUNNER_PORT}.`,
-      `Start Tovi from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
+      `Start ${APP_NAME} from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
@@ -246,7 +248,7 @@ function checkMessagesDb() {
     add(PASS, "iMessage database", imessageOn ? "Readable." : "Readable (iMessage is off in .env).");
   } catch {
     add(FAIL, "iMessage database", "Found but not readable.",
-      "Give Tovi Full Disk Access: System Settings → Privacy & Security → Full Disk Access → turn on Tovi, then restart the app.");
+      `Give ${APP_NAME} Full Disk Access: System Settings → Privacy & Security → Full Disk Access → turn on ${APP_NAME}, then restart the app.`);
   }
 }
 
@@ -359,7 +361,7 @@ async function main() {
     s === WARN ? `${C.yellow}WARN${C.reset}` :
     `${C.red}FAIL${C.reset}`;
 
-  process.stdout.write(`\n${C.bold}${C.cyan}Tovi — health check${C.reset}\n\n`);
+  process.stdout.write(`\n${C.bold}${C.cyan}${APP_NAME} — health check${C.reset}\n\n`);
   for (const r of results) {
     process.stdout.write(`  [${badge(r.status)}] ${C.bold}${r.label}${C.reset} — ${r.detail || ""}\n`);
     if (r.next && r.status !== PASS) {

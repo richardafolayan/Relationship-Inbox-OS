@@ -1,6 +1,6 @@
-# Use Relationship Inbox OS
+# Use Tovi
 
-Relationship Inbox OS is a calm place to understand conversations and reply
+Tovi is a calm place to understand conversations and reply
 in your own words. It does not send automatically.
 
 ## The daily loop

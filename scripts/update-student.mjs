@@ -49,6 +49,9 @@ import { fileURLToPath } from "node:url";
 import {
   compareVersions, isAllowedRemoteUpdateUrl, isNewer, sha256Buffer, validateLatestJson
 } from "./lib/release-manifest.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
+
+const APP_NAME = resolveAppName();
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_APP_DIR = resolve(SCRIPT_DIR, "..");
@@ -104,7 +107,7 @@ function macAppBundleDir() {
 
 function macAppBundlePath() {
   const out = macAppBundleDir();
-  return out ? join(out, "Tovi.app") : "";
+  return out ? join(out, `${APP_NAME}.app`) : "";
 }
 
 function refreshMacAppBundle() {
@@ -119,7 +122,7 @@ function refreshMacAppBundle() {
       cwd: APP_DIR,
       stdio: "ignore"
     });
-    say(`  Created the Tovi Mac app.`);
+    say(`  Created the ${APP_NAME} Mac app.`);
   } catch {
     say(`  ${C.y}Could not refresh the Mac app. The Terminal start command still works.${C.reset}`);
   }
@@ -204,7 +207,7 @@ function report(current, manifest) {
     }, null, 2));
     return available;
   }
-  say(`\n  ${C.b}Tovi — update check${C.reset}`);
+  say(`\n  ${C.b}${APP_NAME} — update check${C.reset}`);
   say(`  Installed:  ${current}`);
   say(`  Latest:     ${manifest.version}`);
   if (available) {

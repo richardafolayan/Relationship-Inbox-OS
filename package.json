@@ -59,7 +59,6 @@
   },
   "build": {
     "appId": "relationship-inbox-os",
-    "productName": "Tovi",
     "asar": false,
     "npmRebuild": false,
     "directories": {
@@ -113,15 +112,13 @@
             "x64"
           ]
         }
-      ],
-      "artifactName": "Tovi-Setup-${version}-${arch}.${ext}"
+      ]
     },
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "createStartMenuShortcut": true,
-      "shortcutName": "Tovi"
+      "createStartMenuShortcut": true
     }
   },
   "overrides": {

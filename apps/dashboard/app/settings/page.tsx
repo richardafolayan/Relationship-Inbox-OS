@@ -31,6 +31,7 @@ import {
   subscribeNotificationPermission
 } from "@/lib/notifications";
 import { localDateString } from "@/lib/overdue-digest";
+import { APP_NAME } from "@/lib/branding";
 import { interpretReassessAllResult } from "@/lib/reassess-all-result";
 import type { MarkAllReassessResponse } from "@/lib/reassess-all-result";
 import type {
@@ -695,7 +696,7 @@ function PlatformSettingsSection({
           title="LinkedIn"
           body={
             findRow("LINKEDIN")?.browserProfileMode === "isolated"
-              ? "Uses a dedicated Chrome profile. Sign in when Tovi opens it."
+              ? `Uses a dedicated Chrome profile. Sign in when ${APP_NAME} opens it.`
               : "Uses your normal Chrome session. Sign in there first."
           }
           actionLabel={findRow("LINKEDIN")?.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}

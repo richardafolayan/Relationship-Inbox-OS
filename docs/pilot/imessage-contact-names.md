@@ -5,7 +5,7 @@ address instead of the person's name, this page explains why and how to fix it.
 
 ## Why it happens
 
-Relationship Inbox OS reads your messages from the Messages app's local
+Tovi reads your messages from the Messages app's local
 database. That database only stores the **handle** a message came from (the raw
 phone number or email), never the contact's name. To turn `+44 7538...` into
 "Marianne", the app looks the handle up in **your Mac's Contacts app**.
@@ -39,7 +39,7 @@ sync going forward.
      Contacts**.
 3. Open the **Contacts** app on the Mac and wait a minute for your contacts to
    appear.
-4. Back in Relationship Inbox OS, run a scan (or just wait, it refreshes
+4. Back in Tovi, run a scan (or just wait, it refreshes
    automatically within a few minutes). The numbers are replaced with names,
    including for chats you'd already imported.
 
@@ -56,7 +56,7 @@ If you'd rather not use iCloud Contacts:
    gear menu, **Export vCard**.
 2. On the Mac, open the **Contacts** app and drag the `.vcf` file into it (or
    use **File, Import**).
-3. Run a scan in Relationship Inbox OS, and names replace the numbers.
+3. Run a scan in Tovi, and names replace the numbers.
 
 ### Power-user override
 
@@ -86,5 +86,5 @@ npm run imessage:backfill-names --workspace @inbox-os/runner -- --apply # apply
 - Make sure the saved number matches the one the message came from. The app
   matches on the last 10 digits, so country-code formatting differences are
   fine.
-- Confirm Relationship Inbox OS has Full Disk Access. Messages already works, so
+- Confirm Tovi has Full Disk Access. Messages already works, so
   this is usually fine, because Contacts is read with the same permission.

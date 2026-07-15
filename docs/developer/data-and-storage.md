@@ -123,7 +123,7 @@ Paths below are relative to the active project root unless stated otherwise.
 | Location | Purpose |
 | --- | --- |
 | `~/RelationshipInboxOS` | Default source installation and its data/logs |
-| `~/Applications/Relationship Inbox OS.app` | Lightweight launcher created by the source installer |
+| `~/Applications/Tovi.app` | Lightweight launcher created by the source installer |
 | `~/.rios-node` | App-managed Node 22 for the source installer |
 | `~/Library/Messages/chat.db` plus WAL/SHM | Apple Messages database, read-only by this app |
 | `~/Library/Application Support/AddressBook` | Contacts databases, read-only by this app |
@@ -134,7 +134,7 @@ Paths below are relative to the active project root unless stated otherwise.
 | Sibling `.rios-backup-<timestamp>` directories | Source updater rollback copies, newest two retained by default |
 
 The packaged app reads code from
-`Relationship Inbox OS.app/Contents/Resources/app` but does not write runtime
+`Tovi.app/Contents/Resources/app` but does not write runtime
 state there. On first packaged launch, if `~/RelationshipInboxOS/data` exists
 and the new database does not, the user can import the legacy data and `.env`,
 start fresh, or quit. Import copies data and preserves the source directory.

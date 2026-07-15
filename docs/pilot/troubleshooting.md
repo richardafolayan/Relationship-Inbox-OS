@@ -16,7 +16,7 @@ useful pilot feedback. If a fix here does not sort it, open a bug from the
 ## The app keeps the Terminal window busy
 
 Older installs kept Terminal busy while the app was running. Current installs
-create **Relationship Inbox OS.app** in Applications, so you can open the app
+create **Tovi.app** in Applications, so you can open the app
 from Applications or Launchpad and close Terminal once the browser is open.
 
 If the app icon was not created, use the Terminal fallback:
@@ -25,9 +25,9 @@ If the app icon was not created, use the Terminal fallback:
 ## The page says "Can't reach the runner"
 
 The app has two halves and one of them is not up. Almost always: Relationship
-Inbox OS is not running, or it crashed during startup.
+Tovi is not running, or it crashed during startup.
 
-1. Open **Relationship Inbox OS** from Applications or Launchpad.
+1. Open **Tovi** from Applications or Launchpad.
 2. Wait for it to settle, then reload `http://localhost:3100`.
 
 ## A scan finished but no messages showed up
@@ -36,7 +36,7 @@ Inbox OS is not running, or it crashed during startup.
 - Make sure you are **signed into LinkedIn in Chrome** (the normal Chrome
   window, not a private one).
 - Press **⌘K**, type `scan`, and run **Full LinkedIn rescan** once.
-- iMessage threads need Full Disk Access for Relationship Inbox OS (see "My iMessage
+- iMessage threads need Full Disk Access for Tovi (see "My iMessage
   conversations don't show up" below).
 
 ## My iMessage conversations don't show up
@@ -44,12 +44,12 @@ Inbox OS is not running, or it crashed during startup.
 iMessage needs one macOS permission that LinkedIn does not. Check these, in
 order:
 
-1. **Full Disk Access.** Relationship Inbox OS must have it.
+1. **Full Disk Access.** Tovi must have it.
    Open **System Settings → Privacy & Security → Full Disk Access** and make
-   sure **Relationship Inbox OS** is switched on. If it is not listed, click
-   **+** and add `~/Applications/Relationship Inbox OS.app`.
+   sure **Tovi** is switched on. If it is not listed, click
+   **+** and add `~/Applications/Tovi.app`.
 2. **Restart the app after granting it.** The permission only takes effect on
-   a fresh start: quit Relationship Inbox OS, then open it again.
+   a fresh start: quit Tovi, then open it again.
 3. **Be signed into Messages.** Open the **Messages** app once and confirm you
    can see your chats.
 4. **Run a scan.** Press **⌘K**, type `scan`, choose **Run scan now**.
@@ -67,7 +67,7 @@ If it keeps happening, tell me. That is worth knowing.
 ## "Port already in use"
 
 Another copy of the app is still running. Quit any other running copy of
-Relationship Inbox OS, then start it once more. If it persists, restart your
+Tovi, then start it once more. If it persists, restart your
 Mac and try again.
 
 ## macOS asked for permission
@@ -78,7 +78,7 @@ expected:
 - **Full Disk Access** lets the app *read* your iMessages. You grant this
   yourself in System Settings (see "My iMessage conversations don't show up"
   above).
-- **"Relationship Inbox OS wants to control Messages"** appears the first time
+- **"Tovi wants to control Messages"** appears the first time
   you *send* an iMessage reply. Click **Allow**. If you dismissed it by
   accident, sending will fail, tell me and we will re-trigger it.
 
@@ -92,7 +92,7 @@ bug worth reporting.
 
 ## I want to start completely fresh
 
-1. Quit Relationship Inbox OS.
+1. Quit Tovi.
 2. Open it again from Applications or Launchpad.
 
 That is usually enough. A full data reset is a bigger step, ask me first

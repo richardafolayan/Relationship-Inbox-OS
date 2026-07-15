@@ -4,9 +4,11 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync }
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
+import { DEFAULT_APP_NAME, resolveAppName, LEGACY_APP_NAME } from "./lib/branding.mjs";
 
-export const APP_NAME = "Tovi";
-export const LEGACY_APP_NAME = "Relationship Inbox OS";
+// Display name only — driven by RIOS_APP_NAME (default "Tovi").
+export const APP_NAME = resolveAppName();
+export { LEGACY_APP_NAME };
 export const DEFAULT_BUNDLE_ID = "com.relationshipinboxos.app";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -80,9 +82,9 @@ export function buildInfoPlist({ bundleId = DEFAULT_BUNDLE_ID, version = "0.0.0"
   <key>LSMinimumSystemVersion</key>
   <string>13.0</string>
   <key>NSAppleEventsUsageDescription</key>
-  <string>Tovi asks before sending through Messages. Sending is always user-triggered.</string>
+  <string>${APP_NAME} asks before sending through Messages. Sending is always user-triggered.</string>
   <key>NSContactsUsageDescription</key>
-  <string>Tovi uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.</string>
+  <string>${APP_NAME} uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.</string>
 </dict>
 </plist>
 `;
@@ -101,7 +103,7 @@ mkdir -p "$LOG_DIR" 2>/dev/null || LOG_DIR="\${TMPDIR:-/tmp}"
 LOG_FILE="$LOG_DIR/app-$(date +%Y%m%d-%H%M%S).log"
 
 alert() {
-  /usr/bin/osascript -e "display dialog \\"$1\\" buttons {\\"OK\\"} default button \\"OK\\" with title \\"Tovi\\"" >/dev/null 2>&1 || true
+  /usr/bin/osascript -e "display dialog \\"$1\\" buttons {\\"OK\\"} default button \\"OK\\" with title \\"${APP_NAME}\\"" >/dev/null 2>&1 || true
 }
 
 if /usr/bin/curl -fsS --max-time 2 "$DASHBOARD_URL" >/dev/null 2>&1; then
@@ -110,7 +112,7 @@ if /usr/bin/curl -fsS --max-time 2 "$DASHBOARD_URL" >/dev/null 2>&1; then
 fi
 
 if [ ! -f "$APP_DIR/scripts/start-student.mjs" ]; then
-  alert "Tovi is not installed where this app expects it. Run the installer again."
+  alert "${APP_NAME} is not installed where this app expects it. Run the installer again."
   exit 1
 fi
 
@@ -126,14 +128,14 @@ elif command -v node >/dev/null 2>&1; then
 fi
 
 if [ -z "$NODE" ]; then
-  alert "Node.js is missing. Run the Tovi installer again so it can repair the app."
+  alert "Node.js is missing. Run the ${APP_NAME} installer again so it can repair the app."
   exit 1
 fi
 
 export PATH="$(dirname "$NODE"):$APP_DIR/node_modules/.bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 cd "$APP_DIR" || exit 1
 
-echo "Starting Tovi from $APP_DIR" >>"$LOG_FILE"
+echo "Starting ${APP_NAME} from $APP_DIR" >>"$LOG_FILE"
 exec "$NODE" "$APP_DIR/scripts/start-student.mjs" >>"$LOG_FILE" 2>&1
 `;
 }
@@ -163,10 +165,11 @@ export function createMacosAppBundle({ appDir = ROOT, out, nodeDir, bundleId = D
   writeFileSync(executablePath, buildLauncherScript({ appDir: resolvedAppDir, nodeDir: resolvedNodeDir }));
   chmodSync(executablePath, 0o755);
 
-  // Updates from the pre-Tovi name leave the old wrapper beside the new one;
-  // remove it only when it is ours (same launcher-bundle identifier).
-  const legacyBundle = join(dirname(bundlePath), `${LEGACY_APP_NAME}.app`);
-  if (legacyBundle !== bundlePath && existsSync(legacyBundle)) {
+  // A display-name change can leave an older wrapper beside the new one.
+  // Remove known prior names only when the bundle identifier proves it is ours.
+  for (const priorName of new Set([DEFAULT_APP_NAME, LEGACY_APP_NAME])) {
+    const legacyBundle = join(dirname(bundlePath), `${priorName}.app`);
+    if (legacyBundle === bundlePath || !existsSync(legacyBundle)) continue;
     try {
       const plist = readFileSync(join(legacyBundle, "Contents", "Info.plist"), "utf8");
       if (plist.includes(`<string>${bundleId}</string>`)) {
@@ -181,14 +184,14 @@ export function createMacosAppBundle({ appDir = ROOT, out, nodeDir, bundleId = D
 }
 
 function printHelp() {
-  process.stdout.write(`Create a local macOS app bundle for Tovi.
+  process.stdout.write(`Create a local macOS app bundle for ${APP_NAME}.
 
 Usage:
   node scripts/create-macos-app-bundle.mjs [--app-dir DIR] [--out DIR_OR_APP] [--node-dir DIR]
 
 Defaults:
   --app-dir   current repo/install folder
-  --out       ~/Applications/Tovi.app
+  --out       ~/Applications/${APP_NAME}.app
   --node-dir  ~/.rios-node
 `);
 }

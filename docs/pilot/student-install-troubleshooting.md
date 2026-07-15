@@ -60,10 +60,10 @@ The runner reads `~/Library/Messages/chat.db`. Two things must be true:
 
 1. **You're signed into Messages.** Open the **Messages** app and confirm you
    can see recent conversations.
-2. **Relationship Inbox OS has Full Disk Access.** System Settings → Privacy
-   & Security → **Full Disk Access** → turn **Relationship Inbox OS** on. If
+2. **Tovi has Full Disk Access.** System Settings → Privacy
+   & Security → **Full Disk Access** → turn **Tovi** on. If
    it is not listed, click **+** and add
-   `~/Applications/Relationship Inbox OS.app`. Then quit and reopen the app,
+   `~/Applications/Tovi.app`. Then quit and reopen the app,
    because the permission only takes effect on a fresh start.
 
 `node scripts/doctor.mjs` reports the iMessage database as **FAIL** when the
@@ -91,11 +91,11 @@ in `.env`; the app then opens its own browser window for you to sign into.
 The app has two halves: the dashboard (port 3100) and the runner (port 4001).
 "Can't reach the runner" means the runner half isn't up.
 
-1. Check that **Relationship Inbox OS** is running. If in doubt, open it from
+1. Check that **Tovi** is running. If in doubt, open it from
    Applications or Launchpad.
 2. Run `npm run doctor` (from `~/RelationshipInboxOS`). It pings both ports and
    the runner's `/health` endpoint.
-3. Restart the app: quit **Relationship Inbox OS**, then open it again.
+3. Restart the app: quit **Tovi**, then open it again.
 
 If the runner crashes immediately on start, the log
 (`~/Library/Logs/RelationshipInboxOS/install-*.log`) has the reason. Send it
@@ -105,7 +105,7 @@ to me.
 
 Another copy of the app (or another program) is already on that port.
 
-- Quit any other running copy of Relationship Inbox OS, then start it once.
+- Quit any other running copy of Tovi, then start it once.
 - Find what's holding a port:
 
   ```bash

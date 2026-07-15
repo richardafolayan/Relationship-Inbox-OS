@@ -6,6 +6,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import type { AiHelpLevel, OperatorProfile, ReplyStyle } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { buildPendingSavePartial, type PendingProfileSave } from "@/lib/voice-profile-save";
+import { APP_NAME } from "@/lib/branding";
 
 // The reply-style fields that "Analyse my sent messages" (#438) can fill.
 // displayName (identity) and aiHelpLevel (a preference) are never inferred.
@@ -298,7 +299,7 @@ export function UserVoiceProfile({
           </p>
           <p className="mt-1 max-w-[60ch] text-[13px] leading-[1.55] text-ink-2">
             {isOnboarding
-              ? "Tovi helps you reply in your own words. Take a minute to tell it how you write, so summaries and any drafts sound like you. You can change all of this later."
+              ? `${APP_NAME} helps you reply in your own words. Take a minute to tell it how you write, so summaries and any drafts sound like you. You can change all of this later.`
               : "Help the app understand how you normally message people. It uses this to support your replies without making everything sound like AI. Nothing here is shared."}
           </p>
         </div>

@@ -1,4 +1,8 @@
 import type { InboxRow } from "@/lib/types";
+// Relative (not "@/lib/...") so the tsx test runner, which imports this .ts
+// directly, resolves this value import without the Next path alias. (The type
+// import above is erased at runtime, so its alias is harmless.)
+import { APP_NAME } from "./branding";
 
 // Proactive new-message notifications.
 //
@@ -246,7 +250,7 @@ export function notifyNewMessageDigest(rows: InboxRow[], onOpen: () => void): vo
 export function notifyAppUpdateAvailable(latestVersion: string, onUpdate: () => void): boolean {
   return show(
     `Update available v${latestVersion}`,
-    "Click to update and reopen Tovi.",
+    `Click to update and reopen ${APP_NAME}.`,
     `inbox-os:update:${latestVersion}`,
     onUpdate
   );

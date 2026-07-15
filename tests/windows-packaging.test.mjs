@@ -7,7 +7,7 @@ import {
   nodeArchiveName,
   windowsRuntimeDir
 } from "../scripts/prepare-windows-runtime.mjs";
-import { npmInvocation } from "../scripts/build-windows-installer.mjs";
+import { electronBuilderArgs, npmInvocation } from "../scripts/build-windows-installer.mjs";
 
 test("Windows runtime helpers select the verified Node archive", () => {
   assert.equal(nodeArchiveName("22.21.1", "x64"), "node-v22.21.1-win-x64.zip");
@@ -72,4 +72,11 @@ test("Windows builder invokes npm through Node instead of the npm.cmd shim", () 
     "run",
     "db:generate"
   ]);
+});
+
+test("Windows builder applies the configured display name", () => {
+  const args = electronBuilderArgs("Lumen");
+  assert.ok(args.includes("--config.productName=Lumen"));
+  assert.ok(args.includes("--config.win.artifactName=Lumen-Setup-${version}-${arch}.${ext}"));
+  assert.ok(args.includes("--config.nsis.shortcutName=Lumen"));
 });

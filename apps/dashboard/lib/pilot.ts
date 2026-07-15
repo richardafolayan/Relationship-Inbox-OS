@@ -10,6 +10,7 @@
 // Relative (not "@/lib/...") so the tsx test runner, which imports this .ts
 // directly without the Next.js path-alias plugin, can resolve it.
 import { getRecentClientError } from "./client-error-log";
+import { APP_NAME } from "./branding";
 
 // localStorage flag: once the first-run welcome card on Today is dismissed,
 // it stays dismissed. Settings can clear this to bring it back.
@@ -138,7 +139,7 @@ export function buildPilotReportPayload(input: {
 /** Render a submitted report as plain text — used by the copy fallback. */
 export function formatReportForCopy(payload: PilotReportPayload): string {
   const lines = [
-    `Tovi pilot: ${PILOT_REPORT_TYPE_LABELS[payload.type]}`,
+    `${APP_NAME} pilot: ${PILOT_REPORT_TYPE_LABELS[payload.type]}`,
     "",
     `Title: ${payload.title}`,
     "",

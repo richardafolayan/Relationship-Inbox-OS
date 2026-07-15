@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { apiGetRaw, apiPost } from "@/lib/api";
+import { APP_NAME, LEGACY_APP_NAME } from "@/lib/branding";
 
 // Calm "App updates" card for the Settings > Pilot area. The runner starts a
 // detached updater so pilots do not need a terminal or a manual restart.
@@ -82,7 +83,7 @@ export function AppUpdates() {
           updateAvailable: false,
           releaseNotes: []
         });
-        setError("Couldn’t check for updates. Restart Tovi, then try again.");
+        setError(`Couldn’t check for updates. Restart ${APP_NAME}, then try again.`);
       } catch {
         setRunnerOffline(true);
         setInfo(null);
@@ -100,7 +101,7 @@ export function AppUpdates() {
   const prepareUpdate = useCallback(async () => {
     if (info?.applyMode === "replace_app") {
       setInstallHelp(
-        "Quit Tovi, open the latest DMG, drag Tovi into Applications and choose Replace, then reopen it. If an app named Relationship Inbox OS is still in Applications, remove it. Your messages and settings are kept."
+        `Quit ${APP_NAME}, open the latest DMG, drag ${APP_NAME} into Applications and choose Replace, then reopen it. If an app named ${LEGACY_APP_NAME} is still in Applications, remove it. Your messages and settings are kept.`
       );
       return;
     }
@@ -139,7 +140,7 @@ export function AppUpdates() {
       window.setTimeout(() => void check(true), 6000);
     } catch (err) {
       const message = err instanceof Error && err.message ? err.message : "";
-      setError(message || "Couldn’t start the runner. Try reopening Tovi.");
+      setError(message || `Couldn’t start the runner. Try reopening ${APP_NAME}.`);
     } finally {
       setRunnerStarting(false);
     }
@@ -222,7 +223,7 @@ export function AppUpdates() {
         <div>
           <p className="text-[13px] font-medium text-ink">Install updates automatically</p>
           <p className="mt-1 max-w-[58ch] text-[12px] leading-relaxed text-ink-3">
-            Tovi checks shortly after opening and once an hour. When an update is ready,
+            {APP_NAME} checks shortly after opening and once an hour. When an update is ready,
             it installs it and reopens with your messages and settings kept.
           </p>
         </div>
@@ -262,7 +263,7 @@ export function AppUpdates() {
       {started ? (
         <p className="mt-3 text-[12px] leading-relaxed text-ink-2" aria-live="polite">
           {started.message ?? "Update started."} v{started.from} to v{started.to}. This
-          page may disconnect for a moment while Tovi reopens.
+          page may disconnect for a moment while {APP_NAME} reopens.
           Your messages and settings are kept.
         </p>
       ) : null}

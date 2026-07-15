@@ -17,8 +17,11 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
+import { resolveAppName } from "./lib/branding.mjs";
 
-export const APP_NAME = "Tovi";
+// Display name only — driven by RIOS_APP_NAME (default "Tovi"). The DMG volume,
+// the .app folder and CFBundleName/DisplayName all follow this.
+export const APP_NAME = resolveAppName();
 // BUNDLE_ID intentionally keeps the original identifier: macOS TCC permission
 // grants (Full Disk Access, Automation, Accessibility) are keyed to it.
 export const BUNDLE_ID = "com.relationshipinboxos.desktop";
@@ -371,10 +374,10 @@ function rewriteInfoPlist(appPath, version) {
   plistSet(plist, "LSMinimumSystemVersion", "13.0");
   plistSetBoolean(plist, "LSMultipleInstancesProhibited", true);
   plistSetBoolean(plist, "NSHighResolutionCapable", true);
-  plistSet(plist, "NSAppleEventsUsageDescription", "Tovi asks before sending through Messages. Sending is always user-triggered.");
-  plistSet(plist, "NSContactsUsageDescription", "Tovi uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.");
-  plistSet(plist, "NSMicrophoneUsageDescription", "Tovi uses the microphone only when you choose dictation.");
-  plistSet(plist, "NSCameraUsageDescription", "Tovi uses the camera only if you choose a feature that asks for it.");
+  plistSet(plist, "NSAppleEventsUsageDescription", `${APP_NAME} asks before sending through Messages. Sending is always user-triggered.`);
+  plistSet(plist, "NSContactsUsageDescription", `${APP_NAME} uses contacts stored on this Mac to show familiar names. Contact data stays on this Mac.`);
+  plistSet(plist, "NSMicrophoneUsageDescription", `${APP_NAME} uses the microphone only when you choose dictation.`);
+  plistSet(plist, "NSCameraUsageDescription", `${APP_NAME} uses the camera only if you choose a feature that asks for it.`);
   plistDelete(plist, "NSBluetoothAlwaysUsageDescription");
   plistDelete(plist, "NSBluetoothPeripheralUsageDescription");
 }
@@ -412,7 +415,7 @@ function copyBundle(source, destination) {
 function createDmg(appPath, outDir, version) {
   ensureTool("hdiutil");
   const dmgRoot = join(outDir, "dmg-root");
-  const dmgPath = join(outDir, `Tovi-${version}.dmg`);
+  const dmgPath = join(outDir, `${APP_NAME}-${version}.dmg`);
   rmSync(dmgRoot, { recursive: true, force: true });
   mkdirSync(dmgRoot, { recursive: true });
   copyBundle(appPath, join(dmgRoot, basename(appPath)));
@@ -434,7 +437,7 @@ export function directorySizeBytes(path) {
 export function planPaths({ out, version = appVersion() } = {}) {
   const outDir = resolve(ROOT, out || "release-dist/macos");
   const appPath = join(outDir, `${APP_NAME}.app`);
-  const dmgPath = join(outDir, `Tovi-${version}.dmg`);
+  const dmgPath = join(outDir, `${APP_NAME}-${version}.dmg`);
   const runtimeDir = join(outDir, "runtime", `node-v${REQUIRED_NODE_MAJOR}-darwin-${macArchToNodeArch()}`);
   return { outDir, appPath, dmgPath, runtimeDir };
 }
@@ -478,7 +481,8 @@ export async function buildMacosDmg(options = {}) {
       version: releaseVersion,
       build: new Date().toISOString(),
       commit: execFileSync("git", ["rev-parse", ref], { cwd: ROOT, encoding: "utf8" }).trim(),
-      channel
+      channel,
+      appName: APP_NAME
     };
     if (channel === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
     writeFileSync(
@@ -522,7 +526,7 @@ export async function buildMacosDmg(options = {}) {
 }
 
 function printHelp() {
-  process.stdout.write(`Build a local macOS DMG for Tovi.
+  process.stdout.write(`Build a local macOS DMG for ${APP_NAME}.
 
 Usage:
   npm run build:macos-dmg -- [options]
