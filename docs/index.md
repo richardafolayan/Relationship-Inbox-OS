@@ -1,4 +1,4 @@
-# Relationship Inbox OS documentation
+# Tovi documentation
 
 This is the documentation entry point for the student-pilot baseline. The
 behavior described here was verified against `v1/strip-back-pr1` at commit

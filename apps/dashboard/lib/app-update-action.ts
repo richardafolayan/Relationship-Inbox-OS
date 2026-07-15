@@ -4,6 +4,7 @@ import { apiPost } from "@/lib/api";
 import { showToast } from "@/lib/feedback";
 import { dismissCenterNotification, markCenterNotificationsSeen } from "@/lib/notification-center";
 import { UPDATE_NOTICE_ID } from "@/lib/update-notice";
+import { APP_NAME } from "@/lib/branding";
 
 interface UpdateStartResponse {
   ok: boolean;
@@ -23,7 +24,7 @@ export function startAppUpdate(latestVersion?: string): Promise<UpdateStartRespo
     id: UPDATE_NOTICE_ID,
     kind: "pending",
     title: latestVersion ? `Updating to v${latestVersion}…` : "Updating app…",
-    description: "Tovi will close and reopen itself."
+    description: `${APP_NAME} will close and reopen itself.`
   });
 
   inFlight = apiPost<UpdateStartResponse>("/runner/system/update", {})

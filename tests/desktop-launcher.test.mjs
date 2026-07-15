@@ -165,9 +165,9 @@ test("rebrand pins storage and permissions to the pre-Tovi identifiers", () => {
   );
 });
 
-test("desktop recovery offers a one-click fix only for verified Tovi conflicts", () => {
+test("desktop recovery offers a branded one-click fix only for verified app conflicts", () => {
   const mainSource = readFileSync(join(resolve("apps/desktop"), "main.cjs"), "utf8");
-  assert.match(mainSource, /Stop old Tovi and retry/);
+  assert.match(mainSource, /Stop old \$\{APP_NAME\} and retry/);
   assert.match(mainSource, /conflict\.recoverable === true/);
   assert.match(mainSource, /RIOS_RECLAIM_PORT_CONFLICTS/);
 });

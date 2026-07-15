@@ -1,7 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { extname } from "node:path";
 import type { PrismaClient } from "@prisma/client";
-import type { AttachmentPlaceholder } from "@inbox-os/core";
+import { resolveAppName, type AttachmentPlaceholder } from "@inbox-os/core";
 import { convertCafToM4a, convertVideoToAudioM4a } from "../imessage-attachment-server";
 import { buildAudioFingerprint } from "./fingerprint";
 import type {
@@ -1014,7 +1014,7 @@ export function createTranscriptionService(deps: TranscriptionServiceDeps): Tran
     retentionWarningAt = now;
     warn(
       "[transcription] iMessage voice note missing from disk before transcription could run. " +
-        "Apple Messages may be expiring audio files before Inbox OS reads them. " +
+        `Apple Messages may be expiring audio files before ${resolveAppName()} reads them. ` +
         "Open Messages, Settings > Messages, and set Audio Messages > Expire to Never (or Keep) " +
         "to stop future voice notes being lost."
     );

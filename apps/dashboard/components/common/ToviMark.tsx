@@ -1,13 +1,14 @@
 import { cn } from "@/lib/utils";
+import { APP_NAME } from "@/lib/branding";
 
-// The Tovi brand mark: the app-icon artwork (speech bubble + amber dot on a
+// The brand mark: the app-icon artwork (speech bubble + amber dot on a
 // cream tile), kept byte-identical to apps/desktop/assets/icon.svg geometry.
 export function ToviMark({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 512 512"
       role="img"
-      aria-label="Tovi"
+      aria-label={APP_NAME}
       xmlns="http://www.w3.org/2000/svg"
       className={cn("h-8 w-8", className)}
     >

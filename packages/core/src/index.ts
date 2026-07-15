@@ -9,3 +9,4 @@ export * from "./birthday.js";
 export * from "./deleted-placeholder.js";
 export * from "./imessage-system-events.js";
 export * from "./overdue-digest.js";
+export * from "./branding.js";

@@ -19,6 +19,7 @@ import { cn } from "@/lib/utils";
 import { openPilotFeedback } from "@/lib/pilot";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
 import { ToviMark } from "@/components/common/ToviMark";
+import { APP_NAME } from "@/lib/branding";
 
 interface SidebarProps {
   // `undefined` = the first /health fetch is still in flight (cold mount);
@@ -117,12 +118,12 @@ export function Sidebar({
         <Link
           href="/today"
           className="flex items-center gap-2 text-ink"
-          aria-label="Tovi"
-          title={collapsed ? "Tovi" : undefined}
+          aria-label={APP_NAME}
+          title={collapsed ? APP_NAME : undefined}
         >
           <ToviMark className="h-8 w-8" />
           {!collapsed ? (
-            <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">Tovi</span>
+            <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">{APP_NAME}</span>
           ) : null}
         </Link>
         {!collapsed ? (

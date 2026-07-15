@@ -11,7 +11,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, LEGACY_APP_NAME, resolveAppName, stableHash } from "@inbox-os/core";
 import { Prisma } from "@prisma/client";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
@@ -2130,7 +2130,7 @@ app.post("/control/imessage/permission-help", asyncRoute(async (_req, res) => {
   } catch {
     ranSteps.push("settings_open_failed");
   }
-  const requester = process.env.RIOS_DESKTOP === "1" ? "Tovi" : "your terminal app";
+  const requester = process.env.RIOS_DESKTOP === "1" ? resolveAppName() : "your terminal app";
   res.json({
     ok: true,
     steps: ranSteps,
@@ -2602,7 +2602,7 @@ async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
     return {
       status: "replace_app_required",
       message:
-        "Quit Tovi, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old Relationship Inbox OS app if it is still in Applications. Your data and settings in Application Support are preserved."
+        `Quit ${resolveAppName()}, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old ${LEGACY_APP_NAME} app if it is still in Applications. Your data and settings in Application Support are preserved.`
     };
   }
   const appBundle = packaged ? containingAppBundle(projectRoot) : "";
@@ -2657,7 +2657,7 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
       fromVersion: result.fromVersion,
       toVersion: result.toVersion,
       logPath: result.logPath,
-      message: "Update started. Tovi will reopen when it finishes."
+      message: `Update started. ${resolveAppName()} will reopen when it finishes.`
     });
     return;
   }
@@ -6424,7 +6424,7 @@ app.post("/control/imessage/contacts/resync", asyncRoute(async (_req, res) => {
   if (!imessageNameSync) {
     res.status(409).json({
       ok: false,
-      message: "Contacts are only available when Tovi is running on a Mac."
+      message: `Contacts are only available when ${resolveAppName()} is running on a Mac.`
     });
     return;
   }

@@ -169,9 +169,9 @@ async function preparePackagedStorage() {
     const result = await showMessageBox({
       type: "question",
       title: APP_NAME,
-      message: "Existing Tovi (Relationship Inbox OS) data was found.",
+      message: `Existing ${APP_NAME} (${STORAGE_DIR_NAME}) data was found.`,
       detail:
-        "Import your existing settings, message database and browser sessions into Tovi? The original folder will remain unchanged, so you can return to it if needed.",
+        `Import your existing settings, message database and browser sessions into ${APP_NAME}? The original folder will remain unchanged, so you can return to it if needed.`,
       buttons: ["Import existing data", "Start fresh", "Quit"],
       defaultId: 0,
       cancelId: 2,
@@ -286,7 +286,7 @@ async function localAppReady() {
   return dashboard && runner;
 }
 
-function showLoading(message = "Starting Tovi...") {
+function showLoading(message = `Starting ${APP_NAME}...`) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   void mainWindow
     .loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml(message))}`)
@@ -325,7 +325,7 @@ function startLocalApp() {
   if (!node) {
     dialog.showErrorBox(
       APP_NAME,
-      `Node.js ${REQUIRED_NODE_MAJOR} is missing from this Tovi installation. Reinstall Tovi, then try again.`
+      `Node.js ${REQUIRED_NODE_MAJOR} is missing from this Mac app. Reinstall ${APP_NAME} from the DMG, then try again.`
     );
     quitReady = true;
     app.quit();
@@ -394,11 +394,11 @@ async function showPortConflictRecovery(conflict) {
     const result = await showMessageBox({
       type: "warning",
       title: APP_NAME,
-      message: recoverable ? "Another copy of Tovi is still running." : "Another app is blocking Tovi.",
+      message: recoverable ? `Another copy of ${APP_NAME} is still running.` : `Another app is blocking ${APP_NAME}.`,
       detail: recoverable
-        ? `An older Tovi process is using port ${conflict.port}. Tovi can stop it safely and start this copy. Your message data is not removed.`
+        ? `An older ${APP_NAME} process is using port ${conflict.port}. ${APP_NAME} can stop it safely and start this copy. Your message data is not removed.`
         : `Port ${conflict.port} is being used by another application. Close that application, then choose Retry. Show Logs opens the diagnostic log.`,
-      buttons: recoverable ? ["Stop old Tovi and retry", "Show Logs", "Quit"] : ["Retry", "Show Logs", "Quit"],
+      buttons: recoverable ? [`Stop old ${APP_NAME} and retry`, "Show Logs", "Quit"] : ["Retry", "Show Logs", "Quit"],
       defaultId: 0,
       cancelId: 2,
       noLink: true
@@ -450,7 +450,7 @@ async function stopLocalApp() {
 async function restartLocalApp() {
   if (shuttingDown) return;
   ++lifecycleGeneration;
-  showLoading("Restarting Tovi...");
+  showLoading(`Restarting ${APP_NAME}...`);
   await stopLocalApp();
   restartHistory = [];
   const generation = startLocalApp();
@@ -464,7 +464,7 @@ async function showStartupRecovery(reason) {
     const result = await showMessageBox({
       type: "warning",
       title: APP_NAME,
-      message: "Tovi needs help starting.",
+      message: `${APP_NAME} needs help starting.`,
       detail: `${reason}\n\nRetry starts the runner and dashboard again. Show Logs opens the diagnostic log. Your message data is not removed.`,
       buttons: ["Retry", "Show Logs", "Quit"],
       defaultId: 0,
@@ -521,7 +521,7 @@ async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
       title: "Set up Messages",
       message: "Messages is not ready on this Mac.",
       detail:
-        "1. Open the Messages app.\n2. Sign in and confirm a conversation is visible.\n3. Return to Tovi and choose Check Permissions from the app menu.\n\nNo SIP changes are required.",
+        `1. Open the Messages app.\n2. Sign in and confirm a conversation is visible.\n3. Return to ${APP_NAME} and choose Check Permissions from the app menu.\n\nNo SIP changes are required.`,
       buttons: ["Open Messages", "Not now"],
       defaultId: 0,
       cancelId: 1,
@@ -534,9 +534,9 @@ async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
     const result = await showMessageBox({
       type: "warning",
       title: "Allow iMessage access",
-      message: "Tovi needs Full Disk Access to read your local Messages database.",
+      message: `${APP_NAME} needs Full Disk Access to read your local Messages database.`,
       detail:
-        "1. Open System Settings, then Privacy & Security, then Full Disk Access.\n2. Turn on Tovi. If it is not listed, use the plus button and choose the app from Applications.\n3. Quit and reopen Tovi, then choose Check Permissions.\n\nContacts names use the same local access. Sending asks separately for Automation only when you choose Send. File attachments may also ask for Accessibility. No SIP changes are required.",
+        `1. Open System Settings, then Privacy & Security, then Full Disk Access.\n2. Turn on ${APP_NAME}. If it is not listed, use the plus button and choose the app from Applications.\n3. Quit and reopen ${APP_NAME}, then choose Check Permissions.\n\nContacts names use the same local access. Sending asks separately for Automation only when you choose Send. File attachments may also ask for Accessibility. No SIP changes are required.`,
       buttons: ["Open Full Disk Access", "Retry", "Not now"],
       defaultId: 0,
       cancelId: 2,
@@ -555,7 +555,7 @@ async function showPermissionHelp({ onlyWhenMissing = false } = {}) {
     title: "Mac permissions",
     message: "iMessage reading is ready.",
     detail:
-      "Automation is requested only when you choose Send. Allow Tovi to control Messages, then retry the send. File attachments may also require Accessibility. Contacts names are read locally and are never uploaded by the desktop app.",
+      `Automation is requested only when you choose Send. Allow ${APP_NAME} to control Messages, then retry the send. File attachments may also require Accessibility. Contacts names are read locally and are never uploaded by the desktop app.`,
     buttons: ["Done", "Open Privacy & Security"],
     defaultId: 0,
     cancelId: 0,
@@ -939,7 +939,7 @@ if (!gotLock) {
     if (generation) void loadDashboardWhenReady(mainWindow, dashboardUrl(process.env), generation);
   }).catch((error) => {
     writeLog(`Desktop startup failed: ${error.message}`);
-    dialog.showErrorBox(APP_NAME, `Tovi could not start.\n\n${error.message}`);
+    dialog.showErrorBox(APP_NAME, `${APP_NAME} could not start.\n\n${error.message}`);
     quitReady = true;
     app.quit();
   });

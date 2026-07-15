@@ -7,7 +7,7 @@ import type {
   AiSource,
   ReplyBrief
 } from "@inbox-os/core";
-import { isNonContentIMessageSystemEvent } from "@inbox-os/core";
+import { isNonContentIMessageSystemEvent, resolveAppName } from "@inbox-os/core";
 import { z } from "zod";
 import { runnerConfig, type AiProvider } from "../config";
 import { safeTruncate, capAskSummary, stripUnpairedSurrogates } from "../platforms/utils";
@@ -3793,7 +3793,7 @@ Return strict JSON: { "close": "string", "professional": "string", "reason": "st
     if (!client) {
       return null;
     }
-    const prompt = `Triage this report from a small pilot of Tovi (formerly Relationship Inbox OS), a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
+    const prompt = `Triage this report from a small pilot of ${resolveAppName()}, a calm reply-workspace app. Turn the tester's own words into a short developer note. Use ONLY the report text and metadata below — do not invent details or assume features that are not mentioned.
 
 Return strict JSON matching this exact shape:
 {

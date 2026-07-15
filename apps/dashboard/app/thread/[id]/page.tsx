@@ -40,6 +40,7 @@ import {
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
+import { APP_NAME } from "@/lib/branding";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
@@ -2179,7 +2180,7 @@ export default function ThreadPage() {
               try {
                 const result = await apiPost<{ message?: string }>("/runner/control/imessage/permission-help", {});
                 setError(
-                  result.message ?? "Open Automation, allow Tovi to control Messages, return here, then click retry."
+                  result.message ?? `Open Automation, allow ${APP_NAME} to control Messages, return here, then click retry.`
                 );
               } catch (err) {
                 setError(err instanceof Error ? err.message : "Could not open Mac permission settings");

@@ -2,7 +2,7 @@
 
 _Living document. Keep this updated as the direction changes. Last updated: 2026-07-13._
 
-Relationship Inbox OS is being prepared for a small 3-5 student pilot. It should
+Tovi is being prepared for a small 3-5 student pilot. It should
 feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
 analytics console, or AI ghostwriter.
 

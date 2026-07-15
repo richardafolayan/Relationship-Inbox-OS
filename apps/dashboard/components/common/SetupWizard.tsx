@@ -16,6 +16,7 @@ import {
   UserRound
 } from "lucide-react";
 import { apiGet, apiGetRaw, apiPost, ApiRequestError } from "@/lib/api";
+import { APP_NAME, LEGACY_APP_NAME } from "@/lib/branding";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
 import { startPilotTour } from "@/lib/pilot-tour";
@@ -149,7 +150,7 @@ export function SetupWizard() {
   if (!open) return null;
 
   return (
-    <div role="dialog" aria-modal="true" aria-label="Set up Tovi" data-testid="setup-wizard" className="fixed inset-0 z-[100] overflow-y-auto bg-paper">
+    <div role="dialog" aria-modal="true" aria-label={`Set up ${APP_NAME}`} data-testid="setup-wizard" className="fixed inset-0 z-[100] overflow-y-auto bg-paper">
       <div className="mx-auto flex min-h-full w-full max-w-[720px] flex-col px-5 py-8 sm:py-12">
         <div className="mb-8 flex items-center justify-between gap-4">
           <div className="flex items-center gap-[8px]" aria-label={`Step ${index + 1} of ${steps.length}`}>
@@ -165,10 +166,10 @@ export function SetupWizard() {
         </div>
 
         {step === "welcome" ? (
-          <Card icon={<Sparkles />} eyebrow="Welcome" title="Make Tovi yours." body="Choose what you want Tovi to help with. You can add, change, or remove anything later in Settings.">
+          <Card icon={<Sparkles />} eyebrow="Welcome" title={`Make ${APP_NAME} yours.`} body={`Choose what you want ${APP_NAME} to help with. You can add, change, or remove anything later in Settings.`}>
             <InfoRows rows={[
               ["Messages", "Choose only the places you actually use."],
-              ["AI help", "Optional. Tovi still works as a calm reply inbox without it."],
+              ["AI help", `Optional. ${APP_NAME} still works as a calm reply inbox without it.`],
               ["Voice notes", "Off by default. A local model downloads only if you choose one."]
             ]} />
             <Actions><Primary onClick={() => { void savePreferences({ startedAt: status?.preferences.startedAt || new Date().toISOString() }); next(); }}>Start setup <ArrowRight /></Primary></Actions>
@@ -196,7 +197,7 @@ export function SetupWizard() {
         ) : null}
 
         {step === "done" ? (
-          <Card icon={<Check />} eyebrow="Ready" title="Tovi is ready when you are." body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
+          <Card icon={<Check />} eyebrow="Ready" title={`${APP_NAME} is ready when you are.`} body="New conversations appear after their first scan. You can rerun this assistant or manage optional parts from Settings at any time.">
             <Actions>
               <Primary onClick={() => { void finish().then(() => router.push("/today")); }}>Go to Today</Primary>
               <Quiet onClick={() => { void finish().then(() => { router.push("/today"); window.setTimeout(() => startPilotTour(), 350); }); }}>Show me with safe demo messages</Quiet>
@@ -219,7 +220,7 @@ function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; o
     setBusy(false);
     onNext();
   };
-  return <Card icon={<UserRound />} eyebrow="About you" title="What should Tovi call you?" body="This name stays in your app and makes the welcome screen feel like yours.">
+  return <Card icon={<UserRound />} eyebrow="About you" title={`What should ${APP_NAME} call you?`} body="This name stays in your app and makes the welcome screen feel like yours.">
     <label className="mt-5 block text-[13px] text-ink-2">Your first name<input value={name} onChange={(event) => setName(event.target.value)} autoFocus className="mt-2 block w-full rounded-[8px] border border-hairline bg-paper px-3 py-[10px] text-[14px] text-ink focus:border-hairline-strong focus:outline-none" placeholder="For example, Maya" /></label>
     <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void save()}>{busy ? "Saving..." : name.trim() ? "Save and continue" : "Skip for now"}</Primary></Actions>
   </Card>;
@@ -255,11 +256,11 @@ function ConnectStep({ selected, onBack, onNext }: { selected: SetupPlatform[]; 
   const imessage = rows.find((row) => row.platform === "IMESSAGE");
   const linkedin = rows.find((row) => row.platform === "LINKEDIN");
   const needsAccess = isIMessageFullDiskAccessProblem(imessage);
-  return <Card icon={<MessageSquareText />} eyebrow="Connect messages" title="Connect each source you chose." body="Complete one card at a time. Tovi reads conversations into your inbox. Sending always needs your click.">
+  return <Card icon={<MessageSquareText />} eyebrow="Connect messages" title="Connect each source you chose." body={`Complete one card at a time. ${APP_NAME} reads conversations into your inbox. Sending always needs your click.`}>
     {notice ? <Notice>{notice}</Notice> : null}
     <div className="mt-5 grid gap-3">
-      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? "Press Open Mac permission. In Full Disk Access, turn on Tovi or Relationship Inbox OS. Then quit and reopen Tovi." : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
-      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body="Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until Tovi says connected." action="Connect LinkedIn" busy={busy === "LINKEDIN"} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
+      {selected.includes("IMESSAGE") ? <Platform title="iMessage" connected={imessage?.status === "CONNECTED"} body={needsAccess ? `Press Open Mac permission. In Full Disk Access, turn on ${APP_NAME} or ${LEGACY_APP_NAME}. Then quit and reopen ${APP_NAME}.` : "Press Scan iMessage. macOS may ask for permission the first time."} action={needsAccess ? "Open Mac permission" : "Scan iMessage"} busy={busy === "IMESSAGE"} onClick={() => void act("IMESSAGE", needsAccess ? "/runner/control/imessage/full-disk-access" : "/runner/control/scan", needsAccess ? {} : { platform: "IMESSAGE" })} /> : null}
+      {selected.includes("LINKEDIN") ? <Platform title="LinkedIn" connected={linkedin?.status === "CONNECTED"} body={`Press Connect LinkedIn. A Chrome window opens. Sign in yourself if asked, then leave the window open until ${APP_NAME} says connected.`} action="Connect LinkedIn" busy={busy === "LINKEDIN"} onClick={() => void act("LINKEDIN", "/runner/control/platform/connect", { platform: "LINKEDIN" })} /> : null}
       {selected.includes("WHATSAPP") ? <div className="rounded-[10px] border border-hairline bg-paper-2/45 p-4"><WhatsAppConnect /><ol className="mb-0 mt-3 pl-5 text-[12.5px] leading-6 text-ink-2"><li>Open WhatsApp on your phone.</li><li>Open Settings, then Linked Devices.</li><li>Press Link a Device and scan the code shown here.</li></ol></div> : null}
     </div>
     <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Continue</Primary><Quiet onClick={onNext}>Finish connections later</Quiet></Actions>
@@ -271,8 +272,8 @@ function ContactsStep({ health, onBack, onNext }: { health: ContactHealth | null
   const [busy, setBusy] = useState(false);
   const recheck = async () => { setBusy(true); const result = await apiPost<{ health: ContactHealth }>("/runner/control/imessage/contacts/resync", {}).catch(() => null); if (result) setCurrent(result.health); setBusy(false); };
   const ready = (current?.addressBookContactCount ?? 0) > 0;
-  return <Card icon={<ContactRound />} eyebrow="Contact names" title="Make sure names can show." body="Tovi matches iMessage phone numbers and email addresses with the Contacts app on this Mac.">
-    <Notice>{ready ? `${current!.addressBookContactCount} contact records are available. Tovi will use them when it can match a conversation.` : "No Mac contacts were found yet. Your messages still work, but some people may appear as a phone number."}</Notice>
+  return <Card icon={<ContactRound />} eyebrow="Contact names" title="Make sure names can show." body={`${APP_NAME} matches iMessage phone numbers and email addresses with the Contacts app on this Mac.`}>
+    <Notice>{ready ? `${current!.addressBookContactCount} contact records are available. ${APP_NAME} will use them when it can match a conversation.` : "No Mac contacts were found yet. Your messages still work, but some people may appear as a phone number."}</Notice>
     {!ready ? <ol className="mt-4 pl-5 text-[13px] leading-6 text-ink-2"><li>Open the Contacts app on this Mac.</li><li>If your contacts are on your iPhone, open System Settings, your name, iCloud, then turn on Contacts.</li><li>Wait for names to appear in Contacts, then return here and press Check again.</li></ol> : null}
     <Actions><Back onClick={onBack} /><Primary disabled={busy} onClick={() => void recheck()}>{busy ? "Checking..." : ready ? "Check again" : "Check Contacts again"}</Primary><Quiet onClick={onNext}>{ready ? "Continue" : "Continue for now"}</Quiet></Actions>
   </Card>;
@@ -285,7 +286,7 @@ function AiStep({ enabled, configured, onEnabled, onConfigured, onBack, onNext }
   const saveKey = async () => { setBusy(true); setError(""); try { await apiPost("/runner/control/setup/ai-key", { key: key.trim() }); await onEnabled(true); onConfigured(); } catch (err) { const payload = err instanceof ApiRequestError ? err.payload as { error?: string } : undefined; setError(payload?.error ?? "The key could not be checked. Try copying it again."); } finally { setBusy(false); } };
   return <Card icon={<KeyRound />} eyebrow="Optional AI help" title="Would you like summaries and writing help?" body="AI is optional. When it is on, the relevant conversation text is sent to Google Gemini for summaries or help you request. Nothing is ever sent to another person automatically.">
     <div className="mt-5 grid gap-3"><Choice selected={!enabled} title="No AI help" body="Keep message organisation and reply tracking. No conversation text is sent to an AI service." onClick={() => void onEnabled(false)} /><Choice selected={enabled} title="Use optional AI help" body="Add a free Gemini key. You can turn this off later." onClick={() => void onEnabled(true)} /></div>
-    {enabled ? configured ? <Notice>AI is ready. Your saved Gemini key will be used.</Notice> : <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/40 p-4"><ol className="m-0 pl-5 text-[13px] leading-6 text-ink-2"><li>Open <a className="underline" target="_blank" rel="noreferrer" href="https://aistudio.google.com/apikey">Google AI Studio</a> and sign in.</li><li>Press Create API key, then Copy.</li><li>Paste the key below. Tovi checks it and keeps it on this Mac.</li></ol><div className="mt-3 flex gap-2"><input type="password" value={key} onChange={(event) => setKey(event.target.value)} className="min-w-0 flex-1 rounded-[8px] border border-hairline bg-paper px-3 py-2 font-mono text-[13px]" placeholder="Paste Gemini API key" /><Primary disabled={busy || !key.trim()} onClick={() => void saveKey()}>{busy ? "Checking..." : "Check and save"}</Primary></div>{error ? <Notice>{error}</Notice> : null}</div> : null}
+    {enabled ? configured ? <Notice>AI is ready. Your saved Gemini key will be used.</Notice> : <div className="mt-4 rounded-[10px] border border-hairline bg-paper-2/40 p-4"><ol className="m-0 pl-5 text-[13px] leading-6 text-ink-2"><li>Open <a className="underline" target="_blank" rel="noreferrer" href="https://aistudio.google.com/apikey">Google AI Studio</a> and sign in.</li><li>Press Create API key, then Copy.</li><li>Paste the key below. {APP_NAME} checks it and keeps it on this Mac.</li></ol><div className="mt-3 flex gap-2"><input type="password" value={key} onChange={(event) => setKey(event.target.value)} className="min-w-0 flex-1 rounded-[8px] border border-hairline bg-paper px-3 py-2 font-mono text-[13px]" placeholder="Paste Gemini API key" /><Primary disabled={busy || !key.trim()} onClick={() => void saveKey()}>{busy ? "Checking..." : "Check and save"}</Primary></div>{error ? <Notice>{error}</Notice> : null}</div> : null}
     <Actions><Back onClick={onBack} /><Primary onClick={onNext}>{enabled && !configured ? "Set up later" : "Continue"}</Primary></Actions>
   </Card>;
 }
@@ -312,7 +313,7 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
   const refresh = async () => { setBusy(true); const value = await onRefresh().catch(() => null) as { setup?: SetupStatus } | null; if (value?.setup) setSetup(value.setup); setBusy(false); };
   useEffect(() => { void refresh(); }, []);
   const rows = setup?.platforms ?? [];
-  return <Card icon={<Settings2 />} eyebrow="Final check" title="Here is what Tovi will use." body="Green means ready now. Anything unfinished can be completed later from Settings.">
+  return <Card icon={<Settings2 />} eyebrow="Final check" title={`Here is what ${APP_NAME} will use.`} body="Green means ready now. Anything unfinished can be completed later from Settings.">
     <div className="mt-5 divide-y divide-hairline rounded-[10px] border border-hairline bg-paper-2/35">
       {selected.length ? selected.map((platform) => { const connected = rows.some((row) => row.name === platform && row.status === "CONNECTED"); return <Summary key={platform} label={{ IMESSAGE: "iMessage", LINKEDIN: "LinkedIn", WHATSAPP: "WhatsApp" }[platform]} value={connected ? "Connected" : "Finish in Settings"} ok={connected} />; }) : <Summary label="Message sources" value="None selected" ok />}
       {selected.includes("IMESSAGE") ? <Summary label="Contact names" value={(setup?.contacts?.addressBookContactCount ?? 0) > 0 ? `${setup!.contacts!.addressBookContactCount} records available` : "Check Contacts later"} ok={(setup?.contacts?.addressBookContactCount ?? 0) > 0} /> : null}
@@ -321,7 +322,7 @@ function ReviewStep({ selected, aiEnabled, aiConfigured, automaticUpdates, versi
       <Summary label="Automatic updates" value={automaticUpdates ? "On" : "Off"} ok={automaticUpdates} />
       <Summary label="Installed version" value={version || "Current install"} ok />
     </div>
-    <p className="mt-4 text-[12.5px] leading-5 text-ink-3">When an update is ready, Tovi checks automatically. Keep automatic updates on in Settings. If Tovi asks you to replace the app, download the new installer, open it, and drag Tovi into Applications again. Your data and choices stay in place.</p>
+    <p className="mt-4 text-[12.5px] leading-5 text-ink-3">When an update is ready, {APP_NAME} checks automatically. Keep automatic updates on in Settings. If {APP_NAME} asks you to replace the app, download the new installer, open it, and drag {APP_NAME} into Applications again. Your data and choices stay in place.</p>
     <Actions><Back onClick={onBack} /><Primary onClick={onNext}>Finish setup</Primary><Quiet onClick={() => void refresh()}>{busy ? "Checking..." : "Check again"}</Quiet></Actions>
   </Card>;
 }

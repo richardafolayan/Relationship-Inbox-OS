@@ -50,6 +50,7 @@ set -u
 # when the installer is run via a download link, not from inside the folder.
 APP_ZIP_URL_DEFAULT="REPLACE_WITH_PRIVATE_ZIP_URL"
 APP_ZIP_URL="${RIOS_APP_ZIP_URL:-$APP_ZIP_URL_DEFAULT}"
+APP_NAME="${RIOS_APP_NAME:-Tovi}"
 
 INSTALL_DIR="${RIOS_INSTALL_DIR:-$HOME/RelationshipInboxOS}"
 APP_BUNDLE_DIR="${RIOS_APP_BUNDLE_DIR:-$HOME/Applications}"
@@ -147,7 +148,7 @@ check_macos() {
   step "Checking your Mac"
 
   if [ "$(uname -s)" != "Darwin" ]; then
-    die "This installer is for macOS only. Tovi needs a Mac for iMessage."
+    die "This installer is for macOS only. $APP_NAME needs a Mac for iMessage."
   fi
   ok "macOS detected"
 
@@ -417,7 +418,7 @@ install_from_source() {
     rm -rf "$backup"
     ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
   else
-    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like Tovi. Move it aside and run the installer again."
+    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like $APP_NAME. Move it aside and run the installer again."
   fi
 
   APP_DIR="$INSTALL_DIR"
@@ -442,7 +443,7 @@ download_app() {
   tmp_zip="${TMPDIR:-/tmp}/relationship-inbox-os.zip"
   extract_tmp="${TMPDIR:-/tmp}/rios-extract-$$"
 
-  info "Downloading Tovi..."
+  info "Downloading $APP_NAME..."
   if ! curl -fSL --progress-bar --max-time 1200 "$APP_ZIP_URL" -o "$tmp_zip" 2>>"$LOG_FILE"; then
     die "Couldn't download the app. Check your Wi-Fi and the link, then try again."
   fi
@@ -582,7 +583,7 @@ create_app_bundle() {
   fi
 
   if [ "$DRY_RUN" = true ]; then
-    warn "[dry-run] would create Tovi.app in $(display_path "$APP_BUNDLE_DIR")"
+    warn "[dry-run] would create $APP_NAME.app in $(display_path "$APP_BUNDLE_DIR")"
     return 0
   fi
 
@@ -590,6 +591,9 @@ create_app_bundle() {
     warn "[skip-deps] skipping the app bundle"
     return 0
   fi
+
+  APP_NAME="$(cd "$APP_DIR" && node --input-type=module -e 'import { resolveAppName } from "./scripts/lib/branding.mjs"; process.stdout.write(resolveAppName())')" \
+    || die "The configured app name is invalid. Check RIOS_APP_NAME in .env."
 
   local script="$APP_DIR/scripts/create-macos-app-bundle.mjs"
   if [ ! -f "$script" ]; then
@@ -602,9 +606,9 @@ create_app_bundle() {
     return 0
   }
 
-  if run "Creating Tovi.app..." \
+  if run "Creating $APP_NAME.app..." \
        node "$script" --app-dir "$APP_DIR" --out "$APP_BUNDLE_DIR" --node-dir "$RIOS_NODE_DIR"; then
-    ok "Created $(display_path "$APP_BUNDLE_DIR")/Tovi.app"
+    ok "Created $(display_path "$APP_BUNDLE_DIR")/$APP_NAME.app"
   else
     warn "Couldn't create the Mac app. You can still start from Terminal."
   fi
@@ -629,20 +633,20 @@ wait_for_dashboard() {
 start_app() {
   local disp app_bundle
   disp="$(display_path "$APP_DIR")"
-  app_bundle="$APP_BUNDLE_DIR/Tovi.app"
+  app_bundle="$APP_BUNDLE_DIR/$APP_NAME.app"
 
   if [ "$NO_START" = true ] || [ "$DRY_RUN" = true ]; then
     step "Skipping app launch (per your request)"
     say ""
     say "  To start the app yourself:"
-    say "    ${BOLD}open \"$APP_BUNDLE_DIR/Tovi.app\"${RESET}"
+    say "    ${BOLD}open \"$APP_BUNDLE_DIR/$APP_NAME.app\"${RESET}"
     say "  Or from Terminal:"
     say "    ${BOLD}cd $disp && npm run start:student${RESET}"
     say "  Then open ${BOLD}$DASHBOARD_URL${RESET} in Chrome."
     return 0
   fi
 
-  step "Starting Tovi"
+  step "Starting $APP_NAME"
   cd "$APP_DIR" || die "Couldn't open the app folder $APP_DIR."
 
   if [ "$NO_APP_BUNDLE" != true ] && [ -d "$app_bundle" ]; then
@@ -691,14 +695,14 @@ print_success() {
   if [ "$mode" = "terminal" ]; then
     cat <<EOF
 
-  ${GREEN}${BOLD}Tovi is running.${RESET}
+  ${GREEN}${BOLD}$APP_NAME is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
   • ${BOLD}Leave this Terminal window open${RESET} - it keeps the app running.
   • To stop the app: click this window and press ${BOLD}Ctrl + C${RESET}.
   • To start it again later:
-        ${BOLD}open "$APP_BUNDLE_DIR/Tovi.app"${RESET}
+        ${BOLD}open "$APP_BUNDLE_DIR/$APP_NAME.app"${RESET}
     or  ${BOLD}cd $disp && npm run start:student${RESET}
 
   Next, Tovi's setup assistant lets you choose:
@@ -717,14 +721,14 @@ EOF
 
   cat <<EOF
 
-  ${GREEN}${BOLD}Tovi is running.${RESET}
+  ${GREEN}${BOLD}$APP_NAME is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
-  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/Tovi.app${RESET}
-  • Next time, open ${BOLD}Tovi${RESET} from Applications or Launchpad.
+  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/$APP_NAME.app${RESET}
+  • Next time, open ${BOLD}$APP_NAME${RESET} from Applications or Launchpad.
   • You can close this Terminal once the browser is open.
-  • To stop the app: quit ${BOLD}Tovi${RESET} from the Dock.
+  • To stop the app: quit ${BOLD}$APP_NAME${RESET} from the Dock.
 
   Next, Tovi's setup assistant lets you choose:
     1. The message sources you actually use
@@ -744,7 +748,7 @@ EOF
 # --------------------------------------------------------------------------
 
 main() {
-  printf '\n%s%sTovi — installer%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf '\n%s%s%s installer%s\n' "$BOLD" "$BLUE" "$APP_NAME" "$RESET"
   printf '%sLog: %s%s\n' "$DIM" "$LOG_FILE" "$RESET"
   [ "$DRY_RUN" = true ] && printf '%s(dry run — nothing will be changed)%s\n' "$YELLOW" "$RESET"
 

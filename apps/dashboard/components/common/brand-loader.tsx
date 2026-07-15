@@ -8,6 +8,8 @@
 // show it, so fast paths stay flash-free. Pure server component - no hooks,
 // no client bundle.
 
+import { APP_NAME } from "@/lib/branding";
+
 const DOT_DELAYS_MS = [0, 160, 320] as const;
 
 export function BrandLoader({ className = "" }: { className?: string }) {
@@ -18,7 +20,7 @@ export function BrandLoader({ className = "" }: { className?: string }) {
       aria-label="Loading"
     >
       <span className="font-display text-[13px] font-semibold tracking-[-0.01em] text-ink-2">
-        Tovi
+        {APP_NAME}
       </span>
       <span className="flex items-center gap-[4px]" aria-hidden>
         {DOT_DELAYS_MS.map((delay) => (

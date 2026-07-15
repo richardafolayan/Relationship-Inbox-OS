@@ -164,7 +164,7 @@ test("packaging prune keeps runtime files for the target macOS architecture", ()
 
 test("desktop icon is a local SVG with no remote assets", () => {
   const svg = readFileSync(join(ROOT, "apps/desktop/assets/icon.svg"), "utf8");
-  assert.match(svg, /Tovi/);
+  assert.match(svg, /aria-label="App icon"/);
   assert.doesNotMatch(svg, /href="https?:\/\//);
   assert.match(svg, /#F7F2E8/);
   assert.match(svg, /#202A35/);

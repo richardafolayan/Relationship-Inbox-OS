@@ -1,4 +1,4 @@
-# Install Relationship Inbox OS on your Mac
+# Install Tovi on your Mac
 
 > The maintained installation procedure is [Install on macOS](../user/install.md).
 > This pilot page is retained for call-specific facilitation notes.
@@ -78,7 +78,7 @@ Either way, the installer takes over from here. While it runs it will:
   so **no admin rights or Mac password are needed** (it works on a managed or
   non-admin Mac too),
 - install the app into **`~/RelationshipInboxOS`** and set up what it needs,
-- create **Relationship Inbox OS.app** in your Applications folder,
+- create **Tovi.app** in your Applications folder,
 - set up your local database,
 - leave voice transcription off until you explicitly choose a local model,
 - start the app and open it at **http://localhost:3100**.
@@ -87,7 +87,7 @@ The long part is "Installing the app", which takes a few minutes. It is normal
 for Terminal to sit quietly while it works.
 
 Once the browser opens, you can close Terminal. To start the app again later,
-open **Relationship Inbox OS** from Applications or Launchpad.
+open **Tovi** from Applications or Launchpad.
 
 If the app icon was not created for some reason, the Terminal fallback is:
 
@@ -117,26 +117,26 @@ be turned off and downloaded transcription models can be removed there.
 
 ### Connect iMessage
 
-Relationship Inbox OS reads the messages already stored on your Mac. It never
+Tovi reads the messages already stored on your Mac. It never
 logs into anything and never sends anything on its own.
 
 1. Open **Messages** on your Mac and check you can see recent conversations.
 2. In Tovi's setup assistant, press **Open Full Disk Access**.
-3. In the Mac window that opens, find **Relationship Inbox OS** and turn it
+3. In the Mac window that opens, find **Tovi** and turn it
    **on**. If it is not listed, press **+** and add
-   `~/Applications/Relationship Inbox OS.app`.
+   `~/Applications/Tovi.app`.
 4. macOS may say the app must quit to use the new permission. Quit
-   **Relationship Inbox OS**, then open it again.
+   **Tovi**, then open it again.
 5. Return to the setup assistant and press **Scan iMessage**.
-6. The first time you *send* an iMessage reply, macOS asks "Relationship Inbox
-   OS wants to control Messages". Click **Allow**.
+6. The first time you *send* an iMessage reply, macOS asks "Tovi wants to
+   control Messages". Click **Allow**.
 
 What it does: reads your local iMessage/SMS history, summarises it, and shows
 what needs a reply. What it doesn't do: send anything unless you press send.
 
 ### Connect LinkedIn
 
-Relationship Inbox OS uses a normal, signed-in Chrome. **It never asks for or
+Tovi uses a normal, signed-in Chrome. **It never asks for or
 stores your LinkedIn password.**
 
 1. Sign into LinkedIn in your normal Google Chrome window.
@@ -198,7 +198,7 @@ there is nothing to configure.
 
 The easy way is in the app itself: **Settings > App updates > Check for
 updates**, then **Update and relaunch** if one is available. It stages the
-update; quit Relationship Inbox OS and open it again to finish.
+update; quit Tovi and open it again to finish.
 
 The same thing from the Terminal, in the app folder
 (`cd ~/RelationshipInboxOS`):

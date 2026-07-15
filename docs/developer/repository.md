@@ -1,6 +1,6 @@
 # Repository, workspaces, and module map
 
-Relationship Inbox OS is an npm-workspaces monorepo coordinated by Turbo. The
+Tovi is an npm-workspaces monorepo coordinated by Turbo. The
 runtime dependency direction is:
 
 ```text

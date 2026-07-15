@@ -1,6 +1,6 @@
 # System architecture
 
-Relationship Inbox OS is a local-first macOS application. A dashboard renders
+Tovi is a local-first desktop application. A dashboard renders
 the reply workflow, a local runner owns external integrations and persistence,
 an optional Electron shell hosts the dashboard, and the core workspace holds
 shared contracts and the Prisma schema.

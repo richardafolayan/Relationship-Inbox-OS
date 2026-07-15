@@ -6,6 +6,7 @@ import { useVisiblePolling } from "@/lib/use-visible-polling";
 import { selectImessageFdaRecovery } from "@/lib/imessage-fda";
 import { Button } from "@/components/ui/button";
 import type { PlatformCard } from "@/lib/types";
+import { APP_NAME } from "@/lib/branding";
 
 // App-wide recovery banner for the "an update reset macOS Full Disk Access"
 // case. A dev auto-update re-signs Tovi ad-hoc, which changes the app's code
@@ -71,17 +72,17 @@ export function FullDiskAccessBanner() {
         "/runner/control/imessage/full-disk-access",
         {}
       );
-      const name = result.runnerProcess?.executableName ?? "Tovi";
+      const name = result.runnerProcess?.executableName ?? APP_NAME;
       const path = result.runnerProcess?.executablePath;
       setOpenedNote(
         path
-          ? `Opened Full Disk Access. Remove ${name} if it is listed, then add it again and turn it on. macOS may show it as ${name}: ${path}. After that, quit Tovi fully and reopen it.`
+          ? `Opened Full Disk Access. Remove ${name} if it is listed, then add it again and turn it on. macOS may show it as ${name}: ${path}. After that, quit ${APP_NAME} fully and reopen it.`
           : result.message ??
-              "Opened Full Disk Access. Remove Tovi if it is listed, then add it again and turn it on. After that, quit Tovi fully and reopen it."
+              `Opened Full Disk Access. Remove ${APP_NAME} if it is listed, then add it again and turn it on. After that, quit ${APP_NAME} fully and reopen it.`
       );
     } catch {
       setOpenedNote(
-        "Could not open Full Disk Access automatically. Open System Settings, then Privacy and Security, then Full Disk Access, and re-grant Tovi there."
+        `Could not open Full Disk Access automatically. Open System Settings, then Privacy and Security, then Full Disk Access, and re-grant ${APP_NAME} there.`
       );
     } finally {
       setOpening(false);
@@ -104,7 +105,7 @@ export function FullDiskAccessBanner() {
           </p>
           <p className="max-w-prose text-[12px] leading-[1.5] text-ink-2">
             {openedNote ??
-              "The update reset macOS Full Disk Access, so Tovi can no longer read Messages and cannot send or check iMessage. Re-grant Full Disk Access to fix it, then quit and reopen Tovi."}
+              `The update reset macOS Full Disk Access, so ${APP_NAME} can no longer read Messages and cannot send or check iMessage. Re-grant Full Disk Access to fix it, then quit and reopen ${APP_NAME}.`}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-2">

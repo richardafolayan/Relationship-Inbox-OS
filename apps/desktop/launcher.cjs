@@ -1,7 +1,49 @@
+const { readFileSync } = require("node:fs");
 const { homedir } = require("node:os");
 const { delimiter, dirname, join, resolve, win32 } = require("node:path");
 
-const APP_NAME = "Tovi";
+// Read RIOS_APP_NAME from the app's .env as a fallback so the packaged/dev
+// desktop shell reflects the configured name even when the Electron process was
+// not started with the variable already exported. Defensive: any failure just
+// yields "" and the default applies.
+function configuredAppName(appDir = resolve(__dirname, "../..")) {
+  try {
+    const text = readFileSync(join(appDir, ".env"), "utf8");
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      const eq = line.indexOf("=");
+      if (eq === -1 || line.slice(0, eq).trim() !== "RIOS_APP_NAME") continue;
+      let value = line.slice(eq + 1).trim();
+      if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+        value = value.slice(1, -1);
+      }
+      return value.trim();
+    }
+  } catch {}
+  try {
+    const release = JSON.parse(readFileSync(join(appDir, "release.json"), "utf8"));
+    return typeof release.appName === "string" ? release.appName.trim() : "";
+  } catch {}
+  return "";
+}
+
+function validateAppName(value) {
+  if (!/^[\p{L}\p{N}][\p{L}\p{N} ._()-]{0,79}$/u.test(value)) {
+    throw new Error(
+      "RIOS_APP_NAME must be 1-80 letters, numbers, spaces, dots, underscores, parentheses or hyphens."
+    );
+  }
+  return value;
+}
+
+// Display name only — driven by RIOS_APP_NAME (default "Tovi") so the whole app
+// can be rebranded from one place in .env. This is what shows in the macOS app
+// menu, window title and dialogs. The storage identity below is NOT derived
+// from it (see the STORAGE_DIR_NAME note).
+const APP_NAME = validateAppName(
+  (process.env.RIOS_APP_NAME || "").trim() || configuredAppName() || "Tovi"
+);
 const APP_ID = "relationship-inbox-os";
 // The storage folder keeps the pre-rebrand name: macOS TCC grants and every
 // existing install's data live under this directory, keyed alongside the
@@ -165,7 +207,7 @@ function escapeHtml(value) {
     .replaceAll('"', "&quot;");
 }
 
-function loadingHtml(message = "Starting Tovi...") {
+function loadingHtml(message = `Starting ${APP_NAME}...`) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -203,7 +245,7 @@ function loadingHtml(message = "Starting Tovi...") {
 </head>
 <body>
   <main>
-    <svg class="mark" viewBox="0 0 512 512" role="img" aria-label="Tovi"><rect x="36" y="36" width="440" height="440" rx="96.8" fill="#F7F2E8"/><path d="M 146 374 C 106 352 80 313 75 266 C 69 212 90 160 132 124 C 171 91 220 76 271 81 C 334 87 387 117 418 162 C 447 204 450 260 426 310 C 399 365 346 394 282 394 H 224 C 207 394 191 399 177 408 L 126 440" fill="none" stroke="#202A35" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" transform="translate(71.200 71.200) scale(0.721875)"/><circle cx="254.556" cy="253.113" r="21.656" fill="#D9902F"/></svg>
+    <svg class="mark" viewBox="0 0 512 512" role="img" aria-label="${escapeHtml(APP_NAME)}"><rect x="36" y="36" width="440" height="440" rx="96.8" fill="#F7F2E8"/><path d="M 146 374 C 106 352 80 313 75 266 C 69 212 90 160 132 124 C 171 91 220 76 271 81 C 334 87 387 117 418 162 C 447 204 450 260 426 310 C 399 365 346 394 282 394 H 224 C 207 394 191 399 177 408 L 126 440" fill="none" stroke="#202A35" stroke-width="26" stroke-linecap="round" stroke-linejoin="round" transform="translate(71.200 71.200) scale(0.721875)"/><circle cx="254.556" cy="253.113" r="21.656" fill="#D9902F"/></svg>
     <p>${escapeHtml(message)}</p>
   </main>
 </body>
@@ -217,6 +259,7 @@ module.exports = {
   STORAGE_DIR_NAME,
   REQUIRED_NODE_MAJOR,
   bundledNodePath,
+  configuredAppName,
   dashboardPort,
   dashboardUrl,
   desktopCapabilities,

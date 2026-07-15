@@ -2,7 +2,8 @@
 
 set -u
 
-APP_NAME="Tovi"
+DEFAULT_APP_NAME="Tovi"
+APP_NAME="${RIOS_APP_NAME:-$DEFAULT_APP_NAME}"
 # Pre-rebrand name: bundles and folders created before the Tovi rename.
 LEGACY_APP_NAME="Relationship Inbox OS"
 INSTALL_DIR="${RIOS_INSTALL_DIR:-$HOME/RelationshipInboxOS}"
@@ -21,7 +22,7 @@ for arg in "$@"; do
     --dry-run) DRY_RUN=true ;;
     -h|--help)
       cat <<EOF
-Uninstall Tovi from this Mac.
+Uninstall $APP_NAME from this Mac.
 
   --yes        skip the confirmation prompt
   --keep-data  remove the app but keep messages, settings and logs
@@ -59,6 +60,8 @@ append_unique_bundle() {
 BUNDLES=()
 append_unique_bundle "$APP_BUNDLE_DIR/$APP_NAME.app"
 append_unique_bundle "/Applications/$APP_NAME.app"
+append_unique_bundle "$APP_BUNDLE_DIR/$DEFAULT_APP_NAME.app"
+append_unique_bundle "/Applications/$DEFAULT_APP_NAME.app"
 append_unique_bundle "$APP_BUNDLE_DIR/$LEGACY_APP_NAME.app"
 append_unique_bundle "/Applications/$LEGACY_APP_NAME.app"
 
@@ -73,7 +76,7 @@ LEGACY_TARGET=""
 if [ -d "$INSTALL_DIR" ]; then
   LEGACY_TARGET="$(cd "$INSTALL_DIR" 2>/dev/null && pwd || printf '%s' "$INSTALL_DIR")"
   if ! is_app_root "$LEGACY_TARGET"; then
-    echo "Refusing to delete $LEGACY_TARGET because it does not look like Tovi."
+    echo "Refusing to delete $LEGACY_TARGET because it does not look like $APP_NAME."
     exit 1
   fi
   if [ -e "$LEGACY_TARGET/.git" ]; then
@@ -88,12 +91,12 @@ if [ "$KEEP_DATA" != true ] && { [ -d "$APP_SUPPORT_DIR" ] || [ -d "$LOG_DIR" ];
 fi
 
 if [ -z "$LEGACY_TARGET" ] && [ "${#BUNDLES[@]}" -eq 0 ] && [ "$HAS_DATA" != true ]; then
-  echo "Nothing to remove. Tovi was not found in the configured locations."
+  echo "Nothing to remove. $APP_NAME was not found in the configured locations."
   exit 0
 fi
 
 echo ""
-echo "Tovi uninstaller"
+echo "$APP_NAME uninstaller"
 echo ""
 [ -n "$LEGACY_TARGET" ] && echo "App folder: $LEGACY_TARGET"
 for bundle in ${BUNDLES[@]+"${BUNDLES[@]}"}; do echo "Mac app:    $bundle"; done
@@ -123,7 +126,7 @@ fi
 
 for bundle in ${BUNDLES[@]+"${BUNDLES[@]}"}; do
   if ! is_our_bundle "$bundle"; then
-    echo "Refusing to delete $bundle because its bundle identifier does not match Tovi."
+    echo "Refusing to delete $bundle because its bundle identifier does not match $APP_NAME."
     exit 1
   fi
 done
@@ -135,7 +138,7 @@ for port in "${DASHBOARD_PORT:-3100}" "${RUNNER_PORT:-4001}"; do
     [ -n "$cwd" ] || continue
     case "$cwd" in
       "${LEGACY_TARGET:-/nonexistent}"|"${LEGACY_TARGET:-/nonexistent}"/*|*.app/Contents/Resources/app|*.app/Contents/Resources/app/*)
-        kill "$pid" 2>/dev/null && echo "Stopped a Tovi service (pid $pid)."
+        kill "$pid" 2>/dev/null && echo "Stopped an $APP_NAME service (pid $pid)."
         ;;
     esac
   done
@@ -176,5 +179,5 @@ echo ""
 if [ "$KEEP_DATA" = true ]; then
   echo "Done. Your local data is still available for a future reinstall."
 else
-  echo "Done. Tovi and its local app data were removed."
+  echo "Done. $APP_NAME and its local app data were removed."
 fi

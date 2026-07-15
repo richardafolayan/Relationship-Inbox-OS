@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { prepareWindowsRuntime } from "./prepare-windows-runtime.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -17,6 +18,15 @@ export function npmInvocation(args, env = process.env) {
     command: process.execPath,
     args: [env.npm_execpath, ...args]
   };
+}
+
+export function electronBuilderArgs(appName = resolveAppName()) {
+  return [
+    "exec", "--", "electron-builder", "--win", "nsis", "--x64",
+    `--config.productName=${appName}`,
+    `--config.win.artifactName=${appName}-Setup-\${version}-\${arch}.\${ext}`,
+    `--config.nsis.shortcutName=${appName}`
+  ];
 }
 
 function runNpm(args) {
@@ -42,7 +52,7 @@ export async function buildWindowsInstaller() {
   runNpm(["run", "build", "--workspace", "@inbox-os/dashboard"]);
   run("node.exe", ["-e", "require('better-sqlite3')"]);
   await prepareWindowsRuntime({ arch: "x64", root: ROOT });
-  runNpm(["exec", "--", "electron-builder", "--win", "nsis", "--x64"]);
+  runNpm(electronBuilderArgs());
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

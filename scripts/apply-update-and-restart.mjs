@@ -6,6 +6,9 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
+
+const APP_NAME = resolveAppName();
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_APP_DIR = resolve(SCRIPT_DIR, "..");
@@ -155,7 +158,7 @@ function launchApp() {
       say(`Could not restart the app: ${error.message}`);
     });
     child.unref();
-    say(`Started Tovi again (pid ${child.pid ?? "unknown"}).`);
+    say(`Started ${APP_NAME} again (pid ${child.pid ?? "unknown"}).`);
   } finally {
     closeSync(fd);
   }

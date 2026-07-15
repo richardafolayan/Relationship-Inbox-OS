@@ -4,9 +4,10 @@ import { AppShell } from "@/components/layout/app-shell";
 import { FullDemoProvider } from "@/components/full-demo/FullDemoProvider";
 import { FullDemoOverlay } from "@/components/full-demo/FullDemoOverlay";
 import { UiScaleBridge } from "@/components/common/ui-scale-bridge";
+import { APP_NAME } from "@/lib/branding";
 
 export const metadata: Metadata = {
-  title: "Tovi",
+  title: APP_NAME,
   description: "Local-first command centre for relationship replies"
 };
 

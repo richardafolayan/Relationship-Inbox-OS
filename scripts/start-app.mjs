@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
 import { packagedDashboardArgs } from "./lib/dashboard-command.mjs";
 import { prismaDbPushInvocation } from "./lib/prisma-command.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
 import {
   portConflict,
   reclaimPortConflict,
@@ -27,6 +28,7 @@ import {
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 loadAppEnv(APP_DIR);
+const APP_NAME = resolveAppName();
 const DATA_DIR = resolve(process.env.RIOS_DATA_DIR || join(APP_DIR, "data"));
 const STATE_DIR = resolve(process.env.RIOS_STATE_DIR || join(DATA_DIR, "runtime"));
 const STAMPS_PATH = join(DATA_DIR, "app-prepare-stamps.json");
@@ -156,7 +158,7 @@ function ensureNativeModules() {
   const probe = probeNativeModule("better-sqlite3");
   if (probe.status === 0) return true;
   if (PACKAGED || !nativeModuleNeedsRebuild(probe)) {
-    say(`  ${C.yellow}The local database driver could not be loaded. Reinstall Tovi and try again.${C.reset}`);
+    say(`  ${C.yellow}The local database driver could not be loaded. Reinstall ${APP_NAME} and try again.${C.reset}`);
     return false;
   }
   say(`  ${C.yellow}The local database driver needs to be rebuilt for Node.js.${C.reset}`);
@@ -194,7 +196,7 @@ function packagedArtifactsReady() {
   ];
   const missing = required.filter((path) => !existsSync(join(APP_DIR, path)));
   if (missing.length === 0) return true;
-  say(`  ${C.yellow}The Tovi installation is incomplete (${missing.join(", ")}). Reinstall it and try again.${C.reset}`);
+  say(`  ${C.yellow}The ${APP_NAME} installation is incomplete (${missing.join(", ")}). Reinstall it and try again.${C.reset}`);
   return false;
 }
 
@@ -374,7 +376,7 @@ async function startApp(prod) {
     await shutdown(1);
     return;
   }
-  say(`  ${C.green}Tovi is ready.${C.reset}`);
+  say(`  ${C.green}${APP_NAME} is ready.${C.reset}`);
 }
 
 async function main() {
@@ -387,7 +389,7 @@ async function main() {
       reclaim: process.env.RIOS_RECLAIM_EXISTING === "1"
     });
     if (recovery.status === "already_running") {
-      say("Tovi is already running.");
+      say(`${APP_NAME} is already running.`);
       process.exit(2);
     }
     if (recovery.status === "recovered") {
@@ -400,7 +402,7 @@ async function main() {
       if (process.env.RIOS_RECLAIM_PORT_CONFLICTS === "1") {
         const reclaimed = await reclaimPortConflict(conflict);
         if (reclaimed.status === "recovered") {
-          say(`  Stopped an older Tovi process that was using port ${port}.`);
+          say(`  Stopped an older ${APP_NAME} process that was using port ${port}.`);
           continue;
         }
       }
@@ -408,8 +410,8 @@ async function main() {
       say(`Could not start because port ${port} for the ${label} is already in use.`);
       say(
         conflict.owners.every((owner) => owner.toviOwned)
-          ? "Choose Stop old Tovi and retry in the recovery dialog."
-          : "Close the other application using that port, then choose Retry in Tovi."
+          ? `Choose Stop old ${APP_NAME} and retry in the recovery dialog.`
+          : `Close the other application using that port, then choose Retry in ${APP_NAME}.`
       );
       process.exit(1);
     }

@@ -77,7 +77,7 @@ edit, New version).
 
 ```javascript
 /**
- * Relationship Inbox OS: pilot feedback intake.
+ * Tovi: pilot feedback intake.
  *
  * doPost: append a report row, save any screenshots to Drive, then (when
  *         GitHub issue sync is configured) open a GitHub issue and record

@@ -27,7 +27,7 @@ checksum, and installs it under `~/.rios-node` without `sudo`.
 4. Wait while the installer copies the tracked application into
    `~/RelationshipInboxOS`, installs dependencies, creates the database,
    prepares the dashboard, and
-   creates `~/Applications/Relationship Inbox OS.app`.
+   creates `~/Applications/Tovi.app`.
 
 The installer is safe to rerun. It preserves the existing `.env`, `data/`,
 and `logs/` while replacing application code.
@@ -38,7 +38,7 @@ an untrusted download URL.
 
 ## First launch and permissions
 
-Open Relationship Inbox OS from Applications or Launchpad. The source-install
+Open Tovi from Applications or Launchpad. The source-install
 launcher starts the local runner and dashboard and opens
 `http://localhost:3100`.
 
@@ -52,7 +52,7 @@ Grant only the permissions needed for features you choose:
 
 | Permission | Needed for | When and how |
 | --- | --- | --- |
-| Full Disk Access | Reading Messages `chat.db` and local Contacts databases | Open System Settings, Privacy & Security, Full Disk Access. Add or enable `~/Applications/Relationship Inbox OS.app`, then quit and reopen the app. macOS does not show an automatic prompt for this permission. |
+| Full Disk Access | Reading Messages `chat.db` and local Contacts databases | Open System Settings, Privacy & Security, Full Disk Access. Add or enable `~/Applications/Tovi.app`, then quit and reopen the app. macOS does not show an automatic prompt for this permission. |
 | Automation for Messages | Sending an iMessage or SMS after you press Send | macOS prompts on the first send. Choose Allow. |
 | Accessibility | Sending iMessage file attachments through Messages UI scripting | Grant the launcher or terminal process in System Settings, Privacy & Security, Accessibility only if an attachment send reports that it is required. Text-only sends do not need this UI-scripting path. |
 | Microphone | Dictation and recording a voice note | The browser or Electron shell asks after you press the microphone control. |
@@ -67,7 +67,7 @@ dashboard requests audio only and has no current camera capture flow.
 
 1. Confirm recent conversations appear in Apple's Messages app.
 2. In the setup assistant, press **Open Full Disk Access**. Turn on
-   **Relationship Inbox OS**, then quit and reopen the app.
+   **Tovi**, then quit and reopen the app.
 3. In the setup assistant, press **Scan iMessage**. You can also do this later
    from Settings.
 4. On the first user-triggered send, allow Messages automation.
@@ -125,7 +125,7 @@ npm run doctor
 
 ## Start, stop, and reopen
 
-- Start: open Relationship Inbox OS from Applications or Launchpad.
+- Start: open Tovi from Applications or Launchpad.
 - Stop: quit the app. If using the Terminal fallback, press Control-C.
 - Terminal fallback:
 
