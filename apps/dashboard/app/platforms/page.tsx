@@ -19,7 +19,8 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   INSTAGRAM: "Instagram",
   TIKTOK: "TikTok",
   IMESSAGE: "iMessage",
-  WHATSAPP: "WhatsApp"
+  WHATSAPP: "WhatsApp",
+  GOOGLE_MESSAGES: "Google Messages"
 };
 
 const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
@@ -27,7 +28,8 @@ const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
   IMESSAGE: "iM",
   INSTAGRAM: "ig",
   TIKTOK: "tt",
-  WHATSAPP: "wa"
+  WHATSAPP: "wa",
+  GOOGLE_MESSAGES: "gm"
 };
 
 // Platforms - 2-up card grid. Each card: glyph (left), name + one-line

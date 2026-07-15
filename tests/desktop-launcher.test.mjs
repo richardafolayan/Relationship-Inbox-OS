@@ -82,7 +82,8 @@ test("Windows desktop launch uses the bundled Node runtime and Windows capabilit
   assert.deepEqual(launcher.packagedFeatureDefaults("win32"), {
     BROWSER_PROFILE_MODE: "isolated",
     IMESSAGE_ENABLED: "false",
-    WHATSAPP_ENABLED: "true"
+    WHATSAPP_ENABLED: "true",
+    GOOGLE_MESSAGES_ENABLED: "true"
   });
 });
 

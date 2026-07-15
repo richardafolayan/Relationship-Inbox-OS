@@ -2,6 +2,7 @@
 
 > The maintained installation procedure is [Install on macOS](../user/install.md).
 > This pilot page is retained for call-specific facilitation notes.
+> Windows pilots should use [Windows pilot install](./windows-install.md).
 
 This guide is for student pilots. **You do not need to know how to code.**
 
@@ -13,8 +14,8 @@ The app runs entirely on your own Mac. Nothing is uploaded to a server.
 
 ## You will need
 
-- A **Mac** (a MacBook is fine). iMessage doesn't work on Windows, so the
-  pilot is Mac-only.
+- A **Mac** (a MacBook is fine). This page covers the Mac pilot. Windows
+  pilots use Google Messages with an Android phone instead of iMessage.
 - **Messages working on your Mac.** If you've ever sent an iMessage from this
   Mac, you're set.
 - A **LinkedIn account**, if you want to test LinkedIn.

@@ -7,7 +7,13 @@ export type { ReplyBrief, ReplyBriefPoint, ReplyBriefPointStatus } from "@inbox-
 // Mirrors the runner's PlatformName prisma enum — extend BOTH when a new
 // platform lands (WhatsApp was missed everywhere because this union used to
 // be repeated inline per interface).
-export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
+export type PlatformName =
+  | "LINKEDIN"
+  | "INSTAGRAM"
+  | "TIKTOK"
+  | "IMESSAGE"
+  | "WHATSAPP"
+  | "GOOGLE_MESSAGES";
 
 export interface InboxRow {
   id: string;

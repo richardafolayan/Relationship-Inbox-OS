@@ -23,7 +23,7 @@ test("drops are gated to attachment-capable platforms and safe file kinds", asyn
   const source = await pageSource();
   assert.match(
     source,
-    /composerAcceptsFiles =\s*\n?\s*thread\?\.platform === "IMESSAGE" \|\| thread\?\.platform === "WHATSAPP"/
+    /composerAcceptsFiles =[\s\S]*?thread\?\.platform === "IMESSAGE"[\s\S]*?thread\?\.platform === "WHATSAPP"[\s\S]*?thread\?\.platform === "GOOGLE_MESSAGES";/
   );
   assert.match(source, /mime\.startsWith\("image\/"\)/);
   assert.match(source, /mime === "application\/pdf"/);

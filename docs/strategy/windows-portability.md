@@ -4,9 +4,8 @@ Status: Windows pilot implemented. It answers pilot feedback R-0111 (issue 847):
 and if iMessage cannot come along, can Android messages, WhatsApp, and
 LinkedIn stand in?
 
-Scope note: the Windows pilot supports WhatsApp and LinkedIn with iMessage
-cleanly unavailable. Google Messages for web remains a separately scoped
-adapter, not part of the first Windows pilot build.
+Scope note: the Windows pilot supports Google Messages, WhatsApp, and LinkedIn
+with iMessage cleanly unavailable.
 
 ## TL;DR
 
@@ -42,6 +41,7 @@ adapter, not part of the first Windows pilot build.
 | AI processing | Cloud providers (`openai`, `gemini`, `glm`) | Portable. Provider selection is in [`ai-providers.ts`](../../apps/runner/src/services/ai-providers.ts); no local model is required for text. |
 | LinkedIn | Patchright/Playwright browser | Portable in isolated mode. Windows pilots sign in once in Tovi's dedicated browser profile; personal-mode cookie mirroring is macOS-only. |
 | WhatsApp | `whatsapp-web.js` and its Puppeteer | Portable. QR/linked-device auth has no OS dependency. |
+| Google Messages | Patchright browser adapter | Portable. Google-account pairing provides Android SMS, MMS, and RCS conversations, groups, attachments, and reactions. |
 | SQLite storage | `better-sqlite3` | Portable native module; needs a per-platform prebuild (see native modules below). |
 | Local Whisper (optional) | `whisper.cpp` CLI | `whisper.cpp` builds on Windows; the WAV pre-step needs a non-Apple converter (see audio below). |
 
@@ -123,15 +123,14 @@ Windows path forward.
 The pilot specifically asks whether "messages from an Android could work."
 Options, best fit first.
 
-1. Google Messages for web (recommended). `messages.google.com/web` pairs
-   with the phone by QR, exactly like WhatsApp web, and exposes SMS/RCS
-   conversations in a DOM we can drive. This fits the existing browser
-   adapter pattern (LinkedIn, Instagram/TikTok beta) and the
-   [`PlatformAdapter`](../../packages/core/src/adapters.ts) contract: read
-   recent threads, normalize messages, send text, verify the sent bubble. It
-   needs a new selector registry entry and identity/parse/send tests, per
-   [ADR 0002](../adr/0002-platform-adapter-boundary.md). This is the single
-   largest new build in a Windows track, but it is well-trodden ground here.
+1. Google Messages for web (implemented). `messages.google.com/web` pairs with
+   the Android phone through the same Google account and may ask the user to
+   confirm matching emoji. The adapter reads recent and unread conversations,
+   normalizes one-to-one and group messages, sends text and attachments only
+   after the user presses Send, verifies the resulting bubble, and supports
+   message reactions. It follows the existing
+   [`PlatformAdapter`](../../packages/core/src/adapters.ts) contract and keeps
+   its browser profile across restarts.
 2. Android Debug Bridge or a companion app. Reading the phone's SMS database
    over ADB, or shipping a paired Android app, would be more faithful but is
    a heavy, fragile, support-intensive path with a much larger consent and
@@ -162,9 +161,9 @@ shippable and independently valuable.
   isolated LinkedIn browser profile, and presents iMessage as unavailable.
 - Phase 1, complete for compose dictation. Browser-recorded WAV is consumed
   directly by the local transformers/ONNX provider on Windows.
-- Phase 2, Android messages. Build the Google Messages for web adapter as a
-  new browser platform: selector registry, identity, parse, send, and
-  verification tests, dashboard connect flow with QR. This is the large one.
+- Phase 2, complete on the parity track. Google Messages for Android includes
+  selector registry, identity, parse, send verification, reactions,
+  attachments, setup, filters, and persistent pairing.
 - Phase 3, polish. Windows auto-update through the packaging track, contact
   name resolution from platform data in the absence of AddressBook, and
   Windows-specific QA.
@@ -183,12 +182,12 @@ shippable and independently valuable.
   parts for a single user to keep connected.
 - Support and QA surface roughly doubles: a second OS, a second installer, a
   second auto-update path, and native rebuilds for a new ABI.
-- None of this is on the committed roadmap. Opening a Windows track is a
-  prioritization decision, not a technical blocker.
+- Google Messages on the web can display quoted replies but cannot create a
+  new quoted reply. Tovi does not claim or emulate that missing web action.
 
 ## Recommendation
 
-Use the Windows pilot installer to validate WhatsApp, LinkedIn, reply review,
-user-triggered sending, and compose dictation with Windows students. Treat a
-Google Messages adapter as the next explicit product decision; it remains the
-largest new platform build and should be justified by pilot demand.
+Use the Windows pilot installer to validate Google Messages, WhatsApp,
+LinkedIn, reply review, user-triggered sending, and compose dictation with
+Windows students. Keep iMessage and macOS Contacts clearly unavailable rather
+than suggesting there is a Windows permission that can enable them.
