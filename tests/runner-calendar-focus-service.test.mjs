@@ -258,6 +258,53 @@ test("checks every selected calendar and uses the most recently started live eve
   assert.equal(store.current().focusWindow.reason, "Seminar");
 });
 
+test("a broken selected calendar does not hide a live event from another calendar", async () => {
+  const store = fakeStore({
+    calendarSync: {
+      ...fakeStore().current().calendarSync,
+      additionalUrls: ["https://broken/cal.ics"]
+    }
+  });
+  const service = createCalendarFocusService({
+    settingsStore: store,
+    now: () => new Date("2026-07-10T09:30:00Z"),
+    fetchIcs: async (url) => {
+      if (url.includes("broken/")) throw new Error("temporary feed failure");
+      return icsFor("20260710T090000Z", "20260710T100000Z", "Deep work");
+    }
+  });
+
+  const action = await service.tick();
+  assert.equal(action.type, "start");
+  assert.equal(store.current().focusWindow.reason, "Deep work");
+});
+
+test("a partial feed failure does not close a running calendar window without evidence", async () => {
+  const store = fakeStore({
+    calendarSync: {
+      ...fakeStore().current().calendarSync,
+      additionalUrls: ["https://healthy/cal.ics"]
+    },
+    focusWindow: baseWindow({
+      active: true,
+      source: "calendar",
+      sourceEventKey: "possibly-from-failed-feed"
+    })
+  });
+  const service = createCalendarFocusService({
+    settingsStore: store,
+    now: () => new Date("2026-07-10T09:30:00Z"),
+    fetchIcs: async (url) => {
+      if (url.includes("x/")) throw new Error("temporary feed failure");
+      return "BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR";
+    }
+  });
+
+  const action = await service.tick();
+  assert.equal(action.type, "none");
+  assert.equal(store.current().focusWindow.active, true);
+});
+
 test("opted-in AI phrasing uses the event title and saves both note registers", async () => {
   const store = fakeStore({
     calendarSync: { ...fakeStore().current().calendarSync, phraseWithAi: true }

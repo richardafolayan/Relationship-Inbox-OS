@@ -147,30 +147,33 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
       const currentNow = now();
 
       let activeOcc: IcsOccurrence | null = null;
+      let feedCheckIncomplete = false;
       const urls = calendarUrls(settings);
       const fetching = settings.enabled && urls.length > 0;
       if (fetching) {
-        try {
-          const summaries = await Promise.all(
-            urls.map(async (url) =>
-              summarizeCalendar(await getIcsCached(url), {
-                now: currentNow,
-                keyword: settings.keyword
-              })
-            )
-          );
-          activeOcc = mergeCalendarSummaries(summaries).active;
-        } catch (error) {
-          // A transient fetch/parse failure must not tear down a running
-          // auto-window (its endsAt still expires it client-side as a
-          // backstop). Skip this tick without deciding.
-          console.warn(
-            `[calendar-focus] feed check failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-          return { type: "none" };
+        const results = await Promise.allSettled(
+          urls.map(async (url) =>
+            summarizeCalendar(await getIcsCached(url), {
+              now: currentNow,
+              keyword: settings.keyword
+            })
+          )
+        );
+        const summaries: CalendarSummary[] = [];
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            summaries.push(result.value);
+          } else {
+            feedCheckIncomplete = true;
+            console.warn(
+              `[calendar-focus] feed check failed: ${
+                result.reason instanceof Error ? result.reason.message : String(result.reason)
+              }`
+            );
+          }
         }
+        if (summaries.length === 0) return { type: "none" };
+        activeOcc = mergeCalendarSummaries(summaries).active;
       }
 
       // Re-read the freshest profile AFTER the (possibly slow) fetch. A manual
@@ -188,6 +191,15 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
         // The URL/keyword/enabled changed while we were fetching, so the
         // occurrence we resolved no longer reflects the operator's intent.
         // Let the next tick (or the settings-save refresh) redo it cleanly.
+        return { type: "none" };
+      }
+
+      if (
+        feedCheckIncomplete &&
+        !activeOcc &&
+        fresh.focusWindow.active &&
+        fresh.focusWindow.source === "calendar"
+      ) {
         return { type: "none" };
       }
 

@@ -59,6 +59,8 @@ export function CalendarFocusSection() {
   const [check, setCheck] = useState<CheckState>({ kind: "idle" });
   const hydrated = useRef(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const saveRequestRef = useRef(0);
   // Single source of truth for what should be saved. Every edit updates it, and
   // both the debounced text saves and the immediate toggle/audience saves send
   // THIS value - so a slow debounced URL save can never land last and revert a
@@ -80,12 +82,19 @@ export function CalendarFocusSection() {
       clearTimeout(debounceRef.current);
       debounceRef.current = null;
     }
+    const requestId = ++saveRequestRef.current;
     setStatus("saving");
+    const pending = saveQueueRef.current
+      .catch(() => undefined)
+      .then(async () => {
+        await saveCalendarSync(latest.current);
+      });
+    saveQueueRef.current = pending.catch(() => undefined);
     try {
-      await saveCalendarSync(latest.current);
-      setStatus("saved");
+      await pending;
+      if (requestId === saveRequestRef.current) setStatus("saved");
     } catch {
-      setStatus("error");
+      if (requestId === saveRequestRef.current) setStatus("error");
     }
   };
 
@@ -103,7 +112,12 @@ export function CalendarFocusSection() {
     () => () => {
       if (debounceRef.current) {
         clearTimeout(debounceRef.current);
-        void saveCalendarSync(latest.current);
+        const pending = saveQueueRef.current
+          .catch(() => undefined)
+          .then(async () => {
+            await saveCalendarSync(latest.current);
+          });
+        saveQueueRef.current = pending.catch(() => undefined);
       }
     },
     [saveCalendarSync]
