@@ -7,6 +7,7 @@ import { cn } from "@/lib/utils";
 import {
   aggregatePollVotes,
   getWhatsAppPoll,
+  whatsappPollErrorMessage,
   type PollOptionTally,
   type PollVoteRecord
 } from "@/lib/whatsapp-poll";
@@ -36,7 +37,6 @@ export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }
   const [error, setError] = useState<string | null>(null);
   const [votesStatus, setVotesStatus] = useState<"hidden" | "loading" | "shown">("hidden");
   const [tallies, setTallies] = useState<PollOptionTally[] | null>(null);
-  const [votesError, setVotesError] = useState<string | null>(null);
 
   if (!poll || options.length === 0) return null;
 
@@ -60,23 +60,21 @@ export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }
       setStatus("voted");
     } catch (voteError) {
       setStatus("idle");
-      setError(voteError instanceof Error ? voteError.message : "Poll vote failed");
+      setError(whatsappPollErrorMessage(voteError, "Poll vote failed"));
     }
   };
 
   const loadVotes = async () => {
     if (!onFetchVotes || votesStatus === "loading") return;
     setVotesStatus("loading");
-    setVotesError(null);
+    setError(null);
     try {
       const votes = await onFetchVotes(message.id);
       setTallies(aggregatePollVotes(options, votes));
       setVotesStatus("shown");
     } catch (fetchError) {
       setVotesStatus(tallies ? "shown" : "hidden");
-      setVotesError(
-        fetchError instanceof Error ? fetchError.message : "Could not load votes"
-      );
+      setError(whatsappPollErrorMessage(fetchError, "Could not load votes"));
     }
   };
 
@@ -162,8 +160,7 @@ export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }
           ) : null}
         </div>
       ) : null}
-      {votesError ? <span className="text-[11px] text-ink-2">{votesError}</span> : null}
-      {error ? <span className="text-[11px] text-ink-2">{error}</span> : null}
+      {error ? <p role="alert" className="text-[11px] text-ink-2">{error}</p> : null}
     </div>
   );
 }

@@ -73,6 +73,21 @@ export interface WhatsAppAdapterDeps {
 
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
 
+export class WhatsAppSessionUnavailableError extends Error {
+  constructor() {
+    super("WhatsApp lost its connection. Reconnect it in Settings, then try again.");
+    this.name = "WhatsAppSessionUnavailableError";
+  }
+}
+
+export function isWhatsAppSessionUnavailableError(error: unknown): boolean {
+  if (error instanceof WhatsAppSessionUnavailableError) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /detached\s+frame|session closed|target closed|execution context was destroyed|adapter not connected/i.test(
+    message
+  );
+}
+
 export class WhatsAppAdapter implements PlatformAdapter {
   readonly platform: PlatformName = PLATFORM_WHATSAPP;
   private client: Client | null = null;
@@ -411,14 +426,18 @@ export class WhatsAppAdapter implements PlatformAdapter {
     platformMessageKey: string,
     selectedOptions: string[]
   ): Promise<void> {
-    const client = this.requireClient();
-    const message = await (client as unknown as {
-      getMessageById: (messageId: string) => Promise<{ type?: string; vote?: (selectedOptions: string[]) => Promise<void> } | null>;
-    }).getMessageById(platformMessageKey);
-    if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
-      throw new Error("WhatsApp poll vote failed: poll message not found");
+    try {
+      const client = this.requireClient();
+      const message = await (client as unknown as {
+        getMessageById: (messageId: string) => Promise<{ type?: string; vote?: (selectedOptions: string[]) => Promise<void> } | null>;
+      }).getMessageById(platformMessageKey);
+      if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
+        throw new Error("WhatsApp poll vote failed: poll message not found");
+      }
+      await message.vote(selectedOptions);
+    } catch (error) {
+      await this.rethrowPollSessionFailure(error);
     }
-    await message.vote(selectedOptions);
   }
 
   /**
@@ -433,52 +452,56 @@ export class WhatsAppAdapter implements PlatformAdapter {
     _thread: ThreadStub,
     platformMessageKey: string
   ): Promise<PollVoteRecord[]> {
-    const client = this.requireClient();
-    const message = await (client as unknown as {
-      getMessageById: (messageId: string) => Promise<{
-        type?: string;
-        getPollVotes?: () => Promise<
-          Array<{
-            voter?: string;
-            selectedOptions?: Array<{ name?: string } | null>;
-            interractedAtTs?: number;
-          }>
-        >;
-      } | null>;
-    }).getMessageById(platformMessageKey);
-    if (!message || message.type !== "poll_creation" || typeof message.getPollVotes !== "function") {
-      throw new Error("WhatsApp poll votes unavailable: poll message not found");
-    }
-    const votes = await message.getPollVotes();
-    const myId =
-      (client as unknown as { info?: { wid?: { _serialized?: string } } }).info?.wid
-        ?._serialized ?? null;
-    return Promise.all(
-      votes.map(async (vote) => {
-        const voterId = vote.voter ?? "";
-        let voterName: string | null = null;
-        if (voterId) {
-          try {
-            const contact = await client.getContactById(voterId);
-            voterName = contact.pushname || contact.name || null;
-          } catch {
-            // Left-the-group / unknown voters keep the bare JID.
+    try {
+      const client = this.requireClient();
+      const message = await (client as unknown as {
+        getMessageById: (messageId: string) => Promise<{
+          type?: string;
+          getPollVotes?: () => Promise<
+            Array<{
+              voter?: string;
+              selectedOptions?: Array<{ name?: string } | null>;
+              interractedAtTs?: number;
+            }>
+          >;
+        } | null>;
+      }).getMessageById(platformMessageKey);
+      if (!message || message.type !== "poll_creation" || typeof message.getPollVotes !== "function") {
+        throw new Error("WhatsApp poll votes unavailable: poll message not found");
+      }
+      const votes = await message.getPollVotes();
+      const myId =
+        (client as unknown as { info?: { wid?: { _serialized?: string } } }).info?.wid
+          ?._serialized ?? null;
+      return Promise.all(
+        votes.map(async (vote) => {
+          const voterId = vote.voter ?? "";
+          let voterName: string | null = null;
+          if (voterId) {
+            try {
+              const contact = await client.getContactById(voterId);
+              voterName = contact.pushname || contact.name || null;
+            } catch {
+              // Left-the-group / unknown voters keep the bare JID.
+            }
           }
-        }
-        return {
-          voterId,
-          voterName,
-          isMe: myId !== null && voterId === myId,
-          selectedOptions: (vote.selectedOptions ?? [])
-            .map((option) => (option?.name ?? "").trim())
-            .filter((name) => name.length > 0),
-          votedAt:
-            typeof vote.interractedAtTs === "number" && Number.isFinite(vote.interractedAtTs)
-              ? new Date(vote.interractedAtTs).toISOString()
-              : null
-        };
-      })
-    );
+          return {
+            voterId,
+            voterName,
+            isMe: myId !== null && voterId === myId,
+            selectedOptions: (vote.selectedOptions ?? [])
+              .map((option) => (option?.name ?? "").trim())
+              .filter((name) => name.length > 0),
+            votedAt:
+              typeof vote.interractedAtTs === "number" && Number.isFinite(vote.interractedAtTs)
+                ? new Date(vote.interractedAtTs).toISOString()
+                : null
+          };
+        })
+      );
+    } catch (error) {
+      return this.rethrowPollSessionFailure(error);
+    }
   }
 
   async closeSession(_reason?: string): Promise<void> {
@@ -566,6 +589,14 @@ export class WhatsAppAdapter implements PlatformAdapter {
     await this.closeSession("detached_frame");
     await this.ensureConnected();
     return this.requireClient().getChats();
+  }
+
+  private async rethrowPollSessionFailure(error: unknown): Promise<never> {
+    if (!isWhatsAppSessionUnavailableError(error)) {
+      throw error;
+    }
+    await this.closeSession("poll_session_unavailable");
+    throw new WhatsAppSessionUnavailableError();
   }
 
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {

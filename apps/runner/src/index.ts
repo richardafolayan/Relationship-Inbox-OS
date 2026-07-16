@@ -61,6 +61,7 @@ import { createAdapters, type WhatsAppConnectState } from "./services/platform-f
 import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
 import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
+import { isWhatsAppSessionUnavailableError } from "./platforms/whatsapp-adapter";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
@@ -4326,6 +4327,13 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
         status: "FAIL",
         details: { threadId, messageId, optionCount: payload.selectedOptions.length, ...summarizeError(error) }
       });
+      if (isWhatsAppSessionUnavailableError(error)) {
+        res.status(409).json({
+          error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
+          reason: "whatsapp_session_unavailable"
+        });
+        return;
+      }
       throw error;
     }
   });
@@ -4366,10 +4374,21 @@ app.get("/control/thread/:threadId/message/:messageId/poll-votes", asyncRoute(as
   // Serialised with sends/votes on the same platform lock — wweb.js store
   // reads are cheap, but interleaving them with an in-flight send has
   // produced Puppeteer races elsewhere, so stay consistent with poll-vote.
-  const votes = await withPlatformControlLock(target.platform, () =>
-    adapter.getPollVotes!(threadStub, message.platformMessageKey!)
-  );
-  res.json({ votes });
+  try {
+    const votes = await withPlatformControlLock(target.platform, () =>
+      adapter.getPollVotes!(threadStub, message.platformMessageKey!)
+    );
+    res.json({ votes });
+  } catch (error) {
+    if (isWhatsAppSessionUnavailableError(error)) {
+      res.status(409).json({
+        error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
+        reason: "whatsapp_session_unavailable"
+      });
+      return;
+    }
+    throw error;
+  }
 }));
 
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {

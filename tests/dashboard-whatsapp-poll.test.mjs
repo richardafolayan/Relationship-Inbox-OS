@@ -71,6 +71,30 @@ const vote = (over = {}) => ({
   ...over
 });
 
+test("poll session failures use one actionable message", async () => {
+  const { whatsappPollErrorMessage } = await import("../apps/dashboard/lib/whatsapp-poll.ts");
+  const message = whatsappPollErrorMessage(
+    {
+      payload: {
+        error: "technical detail",
+        reason: "whatsapp_session_unavailable"
+      }
+    },
+    "Poll action failed"
+  );
+  const source = await readFile(
+    new URL("../apps/dashboard/components/thread/whatsapp-poll.tsx", import.meta.url),
+    "utf8"
+  );
+
+  assert.equal(
+    message,
+    "WhatsApp lost its connection. Reconnect it in Settings, then try again."
+  );
+  assert.doesNotMatch(source, /votesError|setVotesError/);
+  assert.equal(source.match(/role="alert"/g)?.length, 1);
+});
+
 test("aggregatePollVotes folds votes per option in poll order", async () => {
   const { aggregatePollVotes } = await import("../apps/dashboard/lib/whatsapp-poll.ts");
   const tallies = aggregatePollVotes(

@@ -201,6 +201,44 @@ test("scanUnreadThreads reconnects once when WhatsApp replaces its browser frame
   assert.deepEqual(states, ["connecting", "connected", "disconnected", "connecting", "connected"]);
 });
 
+test("poll actions invalidate a detached WhatsApp session", async () => {
+  for (const action of ["vote", "view_votes"]) {
+    let destroyed = false;
+    const states = [];
+    const client = createFakeClient({
+      getMessageById: async () => {
+        throw new Error("Attempted to use detached Frame '7EE3D604511108886782BA4502E441CD'.");
+      },
+      destroy: async () => {
+        destroyed = true;
+      }
+    });
+    const adapter = new WhatsAppAdapter({
+      ...baseDeps(),
+      createClient: () => client,
+      onStateChange: (state) => states.push(state)
+    });
+    const ready = adapter.ensureConnected();
+    setImmediate(() => client.emit("ready"));
+    await ready;
+
+    const pollAction = action === "vote"
+      ? adapter.voteOnPoll(
+          { platformThreadId: "a@c.us", displayName: "A", lastMessagePreview: "" },
+          "poll-1",
+          ["Yes"]
+        )
+      : adapter.getPollVotes(
+          { platformThreadId: "a@c.us", displayName: "A", lastMessagePreview: "" },
+          "poll-1"
+        );
+
+    await assert.rejects(pollAction, /WhatsApp lost its connection/);
+    assert.equal(destroyed, true, action);
+    assert.deepEqual(states, ["connecting", "connected", "disconnected"], action);
+  }
+});
+
 test("scanUnreadThreads does not reconnect for unrelated collection failures", async () => {
   const client = createFakeClient({
     getChats: async () => {

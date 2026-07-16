@@ -23,6 +23,20 @@ export type PollOptionTally = {
   voters: string[];
 };
 
+export function whatsappPollErrorMessage(error: unknown, fallback: string): string {
+  if (error && typeof error === "object" && "payload" in error) {
+    const payload = (error as { payload?: unknown }).payload;
+    if (
+      payload &&
+      typeof payload === "object" &&
+      (payload as { reason?: unknown }).reason === "whatsapp_session_unavailable"
+    ) {
+      return "WhatsApp lost its connection. Reconnect it in Settings, then try again.";
+    }
+  }
+  return error instanceof Error ? error.message : fallback;
+}
+
 /**
  * Fold raw vote records into a per-option tally in the poll's own option
  * order. A voter with an empty selection (retracted vote) counts nowhere.
