@@ -517,7 +517,7 @@ export function GuidedTour(props: GuidedTourProps) {
               onClick={onNext}
               disabled={!!busy}
               data-testid={`${variant}-tour-next`}
-              className="rounded-pill bg-ink px-3 py-[6px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-60"
+              className="rounded-pill bg-ink px-3 py-[6px] text-[12.5px] font-medium text-paper transition-colors duration-calm hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-60"
             >
               {isLast ? "Done" : "Next"}
             </button>

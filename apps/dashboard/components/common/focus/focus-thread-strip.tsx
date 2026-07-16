@@ -115,7 +115,7 @@ export function FocusThreadStrip({
           type="button"
           onClick={dismissPostFocusReminder}
           aria-label="Dismiss reminder"
-          className="grid h-6 w-6 shrink-0 place-items-center rounded-[6px] text-ink-4 transition-colors duration-calm hover:bg-black/5 hover:text-ink-2"
+          className="grid h-6 w-6 shrink-0 place-items-center rounded-[6px] text-ink-4 transition-colors duration-calm hover:bg-paper-2 hover:text-ink-2"
         >
           <X className="h-[13px] w-[13px]" strokeWidth={1.9} />
         </button>
@@ -204,7 +204,7 @@ export function FocusThreadStrip({
           type="button"
           onClick={() => void dismiss()}
           aria-label="Dismiss"
-          className="grid h-6 w-6 place-items-center rounded-[6px] text-ink-4 transition-colors duration-calm hover:bg-black/5 hover:text-ink-2"
+          className="grid h-6 w-6 place-items-center rounded-[6px] text-ink-4 transition-colors duration-calm hover:bg-paper-2 hover:text-ink-2"
         >
           <X className="h-[13px] w-[13px]" strokeWidth={1.9} />
         </button>

@@ -81,7 +81,7 @@ export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }
   };
 
   return (
-    <div className="flex min-w-[min(72vw,300px)] flex-col gap-2 rounded-[12px] border border-hairline bg-paper p-3 text-ink">
+    <div className="flex min-w-[min(72vw,300px)] flex-col gap-2 rounded-[12px] border border-hairline bg-transparent p-3 text-ink">
       <div className="text-[12px] font-medium uppercase tracking-[0.08em] text-ink-3">
         WhatsApp poll
       </div>
@@ -100,8 +100,8 @@ export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }
               className={cn(
                 "flex w-full items-center gap-2 rounded-[8px] border px-3 py-2 text-left text-[13px] transition-colors duration-calm disabled:cursor-not-allowed disabled:opacity-60",
                 checked
-                  ? "border-ink bg-paper text-ink"
-                  : "border-hairline bg-paper-2 text-ink hover:border-hairline-strong"
+                  ? "border-ink bg-paper-2/60 text-ink"
+                  : "border-hairline bg-transparent text-ink hover:border-hairline-strong hover:bg-paper-2/50"
               )}
               aria-pressed={checked}
             >
@@ -109,7 +109,7 @@ export function WhatsAppPoll({ message, disabled = false, onVote, onFetchVotes }
                 className={cn(
                   "flex h-[16px] w-[16px] shrink-0 items-center justify-center border border-hairline-strong",
                   poll.allowMultipleAnswers ? "rounded-[4px]" : "rounded-full",
-                  checked ? "bg-ink text-paper" : "bg-paper"
+                  checked ? "bg-ink text-paper" : "bg-transparent"
                 )}
               >
                 {checked ? <Check className="h-[11px] w-[11px]" strokeWidth={2} /> : null}

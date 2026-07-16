@@ -49,15 +49,15 @@ test("getWhatsAppPoll falls back to old flattened poll text", () => {
   });
 });
 
-test("poll question and options use an isolated, valid themed surface", async () => {
+test("poll question and options use transparent themed surfaces", async () => {
   const source = await readFile(
     new URL("../apps/dashboard/components/thread/whatsapp-poll.tsx", import.meta.url),
     "utf8"
   );
 
-  assert.match(source, /border-hairline bg-paper p-3 text-ink/);
-  assert.match(source, /border-hairline bg-paper-2 text-ink/);
-  assert.doesNotMatch(source, /bg-paper\/60/);
+  assert.match(source, /border-hairline bg-transparent p-3 text-ink/);
+  assert.match(source, /border-hairline bg-transparent text-ink/);
+  assert.doesNotMatch(source, /border-hairline bg-paper p-3 text-ink/);
 });
 
 // --- #818 (R-0100): per-option vote tallies ---
