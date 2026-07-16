@@ -1,10 +1,11 @@
 import type {
   CalendarSyncSettings,
   FocusWindowState,
+  OperatorProfile,
   SettingsStore
 } from "../types/runtime";
 import { fetchIcsText } from "./calendar-fetch";
-import { summarizeCalendar, type IcsOccurrence } from "./calendar-ics";
+import { summarizeCalendar, type CalendarSummary, type IcsOccurrence } from "./calendar-ics";
 
 // Calendar auto-focus (issue #786, pilot R-0097).
 //
@@ -106,6 +107,12 @@ interface CalendarFocusDeps {
   now?: () => Date;
   /** Fetch the ICS text for a URL. Defaults to the SSRF-guarded fetcher. */
   fetchIcs?: (url: string) => Promise<string>;
+  /** Optional AI bridge. Calendar title phrasing is explicit opt-in and the
+   *  service still opens a normal template-backed window if AI is unavailable. */
+  phraseEvent?: (input: {
+    activity: string;
+    operatorProfile: OperatorProfile;
+  }) => Promise<{ close: string; professional: string } | null>;
   /** How long to reuse fetched feed text before hitting the network again. */
   cacheTtlMs?: number;
 }
@@ -121,13 +128,14 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let running = false;
-  let cache: { url: string; text: string; at: number } | null = null;
+  const cache = new Map<string, { text: string; at: number }>();
 
   async function getIcsCached(url: string): Promise<string> {
     const stamp = Date.now();
-    if (cache && cache.url === url && stamp - cache.at < cacheTtlMs) return cache.text;
+    const cached = cache.get(url);
+    if (cached && stamp - cached.at < cacheTtlMs) return cached.text;
     const text = await fetchIcs(url);
-    cache = { url, text, at: stamp };
+    cache.set(url, { text, at: stamp });
     return text;
   }
 
@@ -139,22 +147,33 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
       const currentNow = now();
 
       let activeOcc: IcsOccurrence | null = null;
-      const fetching = settings.enabled && !!settings.url.trim();
+      let feedCheckIncomplete = false;
+      const urls = calendarUrls(settings);
+      const fetching = settings.enabled && urls.length > 0;
       if (fetching) {
-        try {
-          const ics = await getIcsCached(settings.url);
-          activeOcc = summarizeCalendar(ics, { now: currentNow, keyword: settings.keyword }).active;
-        } catch (error) {
-          // A transient fetch/parse failure must not tear down a running
-          // auto-window (its endsAt still expires it client-side as a
-          // backstop). Skip this tick without deciding.
-          console.warn(
-            `[calendar-focus] feed check failed: ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          );
-          return { type: "none" };
+        const results = await Promise.allSettled(
+          urls.map(async (url) =>
+            summarizeCalendar(await getIcsCached(url), {
+              now: currentNow,
+              keyword: settings.keyword
+            })
+          )
+        );
+        const summaries: CalendarSummary[] = [];
+        for (const result of results) {
+          if (result.status === "fulfilled") {
+            summaries.push(result.value);
+          } else {
+            feedCheckIncomplete = true;
+            console.warn(
+              `[calendar-focus] feed check failed: ${
+                result.reason instanceof Error ? result.reason.message : String(result.reason)
+              }`
+            );
+          }
         }
+        if (summaries.length === 0) return { type: "none" };
+        activeOcc = mergeCalendarSummaries(summaries).active;
       }
 
       // Re-read the freshest profile AFTER the (possibly slow) fetch. A manual
@@ -166,7 +185,7 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
       if (
         fetching &&
         (!freshSettings.enabled ||
-          freshSettings.url.trim() !== settings.url.trim() ||
+          calendarSettingsKey(freshSettings) !== calendarSettingsKey(settings) ||
           freshSettings.keyword !== settings.keyword)
       ) {
         // The URL/keyword/enabled changed while we were fetching, so the
@@ -175,13 +194,64 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
         return { type: "none" };
       }
 
-      const current = fresh.focusWindow;
-      const action = computeCalendarFocusAction(current, activeOcc, freshSettings, currentNow);
+      if (
+        feedCheckIncomplete &&
+        !activeOcc &&
+        fresh.focusWindow.active &&
+        fresh.focusWindow.source === "calendar"
+      ) {
+        return { type: "none" };
+      }
+
+      const action = computeCalendarFocusAction(
+        fresh.focusWindow,
+        activeOcc,
+        freshSettings,
+        currentNow
+      );
       if (action.type === "start") {
-        await deps.settingsStore.updateOperatorProfile({ focusWindow: action.window });
+        let nextWindow = action.window;
+        if (freshSettings.phraseWithAi && activeOcc?.title.trim() && deps.phraseEvent) {
+          let composed: { close: string; professional: string } | null = null;
+          try {
+            composed = await deps.phraseEvent({
+              activity: activeOcc.title.trim(),
+              operatorProfile: fresh
+            });
+          } catch (error) {
+            console.warn(
+              `[calendar-focus] event phrasing failed: ${
+                error instanceof Error ? error.message : String(error)
+              }`
+            );
+          }
+
+          // AI can take several seconds. Re-read once more so a manual window
+          // started meanwhile, or a changed subscription, always wins.
+          const latest = await deps.settingsStore.getOperatorProfile();
+          if (calendarSettingsKey(latest.calendarSync) !== calendarSettingsKey(freshSettings)) {
+            return { type: "none" };
+          }
+          const latestAction = computeCalendarFocusAction(
+            latest.focusWindow,
+            activeOcc,
+            latest.calendarSync,
+            currentNow
+          );
+          if (latestAction.type !== "start") return { type: "none" };
+          nextWindow = composed
+            ? {
+                ...latestAction.window,
+                note: composed.close,
+                professionalNote: composed.professional
+              }
+            : latestAction.window;
+        }
+        await deps.settingsStore.updateOperatorProfile({ focusWindow: nextWindow });
+        return { type: "start", window: nextWindow };
       } else if (action.type === "end") {
         await deps.settingsStore.updateOperatorProfile({
-          focusWindow: { ...current, active: false }
+          focusWindow: { ...fresh.focusWindow, active: false }
         });
       }
       return action;
@@ -218,9 +288,48 @@ export function createCalendarFocusService(deps: CalendarFocusDeps): CalendarFoc
   }
 
   async function refresh(): Promise<void> {
-    cache = null;
+    cache.clear();
     await tick();
   }
 
   return { start, stop, tick, refresh };
+}
+
+/** Normalised selected feeds, retaining the first-release `url` field. */
+export function calendarUrls(settings: CalendarSyncSettings): string[] {
+  return [settings.url, ...(settings.additionalUrls ?? [])]
+    .map((url) => url.trim())
+    .filter((url, index, all) => url.length > 0 && all.indexOf(url) === index)
+    .slice(0, 12);
+}
+
+function calendarSettingsKey(settings: CalendarSyncSettings): string {
+  return JSON.stringify({
+    urls: calendarUrls(settings),
+    enabled: settings.enabled,
+    keyword: settings.keyword,
+    audience: settings.audience,
+    phraseWithAi: settings.phraseWithAi
+  });
+}
+
+/** Combine selected calendars using the same overlap rules as one feed. */
+export function mergeCalendarSummaries(summaries: CalendarSummary[]): CalendarSummary {
+  let active: IcsOccurrence | null = null;
+  let next: IcsOccurrence | null = null;
+  for (const summary of summaries) {
+    const candidate = summary.active;
+    if (
+      candidate &&
+      (!active ||
+        candidate.startMs > active.startMs ||
+        (candidate.startMs === active.startMs && candidate.endMs > active.endMs))
+    ) {
+      active = candidate;
+    }
+    if (summary.next && (!next || summary.next.startMs < next.startMs)) {
+      next = summary.next;
+    }
+  }
+  return { active, next };
 }

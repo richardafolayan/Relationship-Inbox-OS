@@ -331,14 +331,18 @@ export interface FocusSettings {
  * window while an event is live. No OAuth; still never auto-sends.
  */
 export interface CalendarSyncSettings {
-  /** The secret iCal (ICS) feed URL. "" = not configured. */
+  /** First secret iCal feed URL, retained for compatibility with saved profiles. */
   url: string;
+  /** Additional selected calendar feeds. */
+  additionalUrls: string[];
   /** Master switch. Nothing runs until this is on, even with a URL saved. */
   enabled: boolean;
   /** Optional case-insensitive title filter. "" = every busy timed event. */
   keyword: string;
   /** Audience an auto-opened window covers. */
   audience: FocusAudience;
+  /** Whether the event title should be handed to AI to draft this window's notes. */
+  phraseWithAi: boolean;
 }
 
 /** POST /runner/control/calendar/preview response — the live and next events

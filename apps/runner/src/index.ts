@@ -90,7 +90,11 @@ import { createSendQueue } from "./services/send-queue";
 import { parsePersistedSendFailure } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
-import { createCalendarFocusService } from "./services/calendar-focus";
+import {
+  calendarUrls,
+  createCalendarFocusService,
+  mergeCalendarSummaries
+} from "./services/calendar-focus";
 import { fetchIcsText } from "./services/calendar-fetch";
 import { summarizeCalendar } from "./services/calendar-ics";
 import { createBirthdaySync } from "./services/birthday-sync";
@@ -1222,7 +1226,23 @@ scheduledSendPromoter.start();
 // subscription enabled, open a Focus window on its own whenever a live event
 // is happening and close it when the event ends. Runs every 60s; the feed is
 // cached between network fetches. No-op until a URL is saved and enabled.
-const calendarFocusService = createCalendarFocusService({ settingsStore });
+const calendarFocusService = createCalendarFocusService({
+  settingsStore,
+  phraseEvent: async ({ activity, operatorProfile }) => {
+    const rows = await prisma.message.findMany({
+      where: { direction: "OUT" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: 200,
+      select: { text: true, direction: true, sentVia: true }
+    });
+    const composed = await aiService.composeFocusNote({
+      activity,
+      operatorProfile,
+      voiceSampleTexts: selectStyleSampleTexts(rows, 8)
+    });
+    return composed ? { close: composed.close, professional: composed.professional } : null;
+  }
+});
 calendarFocusService.start();
 
 // Syncs contact birthdays from the macOS AddressBook into Person rows once
@@ -6991,9 +7011,11 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
       calendarSync: z
         .object({
           url: z.string().max(2000),
+          additionalUrls: z.array(z.string().max(2000)).max(11).default([]),
           enabled: z.boolean(),
           keyword: z.string().max(120),
-          audience: z.enum(["favourites", "all_personal"])
+          audience: z.enum(["favourites", "all_personal"]),
+          phraseWithAi: z.boolean().default(false)
         })
         .optional()
     })
@@ -7013,17 +7035,34 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
 // { ok } flag so the dashboard shows a calm message, not a thrown error.
 app.post("/control/calendar/preview", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "check your calendar", kind: "external-action" })) return;
-  const { url, keyword } = z
-    .object({ url: z.string().max(2000), keyword: z.string().max(120).optional() })
+  const { url, additionalUrls, keyword } = z
+    .object({
+      url: z.string().max(2000).default(""),
+      additionalUrls: z.array(z.string().max(2000)).max(11).default([]),
+      keyword: z.string().max(120).optional()
+    })
     .parse(req.body);
-  const trimmed = url.trim();
-  if (!trimmed) {
-    res.json({ ok: false, error: "Add your calendar's secret iCal address first." });
+  const urls = calendarUrls({
+    url,
+    additionalUrls,
+    enabled: true,
+    keyword: keyword ?? "",
+    audience: "favourites",
+    phraseWithAi: false
+  });
+  if (urls.length === 0) {
+    res.json({ ok: false, error: "Add at least one calendar's secret iCal address first." });
     return;
   }
   try {
-    const { text } = await fetchIcsText(trimmed);
-    const summary = summarizeCalendar(text, { now: new Date(), keyword: keyword ?? "" });
+    const now = new Date();
+    const summaries = await Promise.all(
+      urls.map(async (calendarUrl) => {
+        const { text } = await fetchIcsText(calendarUrl);
+        return summarizeCalendar(text, { now, keyword: keyword ?? "" });
+      })
+    );
+    const summary = mergeCalendarSummaries(summaries);
     res.json({ ok: true, active: summary.active, next: summary.next });
   } catch (error) {
     res.json({

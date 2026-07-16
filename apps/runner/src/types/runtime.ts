@@ -210,8 +210,13 @@ export interface FocusSettings {
  * window does.
  */
 export interface CalendarSyncSettings {
-  /** The secret iCal (ICS) feed URL. "" = not configured. */
+  /** The first secret iCal (ICS) feed URL. "" = not configured. Kept as a
+   *  scalar so profiles saved by the first calendar release still load. */
   url: string;
+  /** Further calendar feeds. Google exposes one secret address per calendar,
+   *  so operators with separate work / study / personal calendars can opt in
+   *  only the calendars that should activate focus. */
+  additionalUrls: string[];
   /** Master switch. Even with a URL saved, nothing runs until this is on. */
   enabled: boolean;
   /** Optional case-insensitive title filter. "" = every busy timed event
@@ -219,6 +224,10 @@ export interface CalendarSyncSettings {
   keyword: string;
   /** Audience an auto-opened window covers (same choices as a manual one). */
   audience: FocusAudience;
+  /** Explicit opt-in to run the existing "Help me phrase this" composer with
+   *  the live event title and save its two editable note variants on the
+   *  window. Off by default: AI drafts remain optional. */
+  phraseWithAi: boolean;
 }
 
 export interface OperatorProfile {
