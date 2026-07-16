@@ -94,7 +94,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   {
     id: "platforms",
     label: "Platforms",
-    description: "Connect iMessage, Google Messages, LinkedIn, and WhatsApp.",
+    description: "Connect messaging and social accounts available on this computer.",
     icon: Plug
   },
   {
@@ -373,7 +373,7 @@ export default function SettingsPage() {
             </p>
           </div>
 
-          {activeTab === "setup" ? <SetupGuideSection /> : null}
+          {activeTab === "setup" ? <SetupGuideSection rows={platformRows} /> : null}
 
           {activeTab === "platforms" ? (
             <PlatformSettingsSection
@@ -660,6 +660,9 @@ function PlatformSettingsSection({
   const findRow = (platform: PlatformCard["platform"]) =>
     rows.find((row) => row.platform === platform);
   const imessageRow = findRow("IMESSAGE");
+  const googleMessagesRow = findRow("GOOGLE_MESSAGES");
+  const linkedinRow = findRow("LINKEDIN");
+  const whatsappRow = findRow("WHATSAPP");
   const imessageNeedsFullDiskAccess = isIMessageFullDiskAccessProblem(imessageRow);
 
   return (
@@ -670,62 +673,60 @@ function PlatformSettingsSection({
       {error ? <p className="m-0 mb-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
       {notice ? <p className="m-0 mb-3 font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
       <div className="grid gap-3 xl:grid-cols-2 3xl:grid-cols-3">
-        <PlatformSetupCard
-          row={imessageRow}
-          fallbackPlatform="IMESSAGE"
-          title="iMessage"
-          body={
-            imessageRow?.supported === false
-              ? imessageRow.unavailableReason ?? "iMessage is not available on this computer."
-              : "Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
-          }
-          actionLabel={
-            imessageRow?.supported === false
-              ? "Not available"
-              : imessageNeedsFullDiskAccess
-                ? "Open Full Disk Access"
-                : "Scan iMessage"
-          }
-          busy={busy === "IMESSAGE"}
-          onPrimary={() =>
-            onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
-          }
-        />
-        <PlatformSetupCard
-          row={findRow("GOOGLE_MESSAGES")}
-          fallbackPlatform="GOOGLE_MESSAGES"
-          title="Google Messages"
-          body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
-          actionLabel={findRow("GOOGLE_MESSAGES")?.status === "CONNECTED" ? "Open Google Messages" : "Pair Android phone"}
-          busy={busy === "GOOGLE_MESSAGES"}
-          onPrimary={() =>
-            onAction(
-              "GOOGLE_MESSAGES",
-              findRow("GOOGLE_MESSAGES")?.status === "CONNECTED" ? "open-browser" : "connect"
-            )
-          }
-        />
-        <PlatformSetupCard
-          row={findRow("LINKEDIN")}
-          fallbackPlatform="LINKEDIN"
-          title="LinkedIn"
-          body={
-            findRow("LINKEDIN")?.browserProfileMode === "isolated"
-              ? `Uses a dedicated Chrome profile. Sign in when ${APP_NAME} opens it.`
-              : "Uses your normal Chrome session. Sign in there first."
-          }
-          actionLabel={findRow("LINKEDIN")?.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}
-          busy={busy === "LINKEDIN"}
-          onPrimary={() =>
-            onAction(
-              "LINKEDIN",
-              findRow("LINKEDIN")?.status === "CONNECTED" ? "open-browser" : "connect"
-            )
-          }
-        />
-        <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
-          <WhatsAppConnect />
-        </div>
+        {imessageRow ? (
+          <PlatformSetupCard
+            row={imessageRow}
+            fallbackPlatform="IMESSAGE"
+            title="iMessage"
+            body="Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
+            actionLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan iMessage"}
+            busy={busy === "IMESSAGE"}
+            onPrimary={() =>
+              onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
+            }
+          />
+        ) : null}
+        {googleMessagesRow ? (
+          <PlatformSetupCard
+            row={googleMessagesRow}
+            fallbackPlatform="GOOGLE_MESSAGES"
+            title="Google Messages"
+            body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
+            actionLabel={googleMessagesRow.status === "CONNECTED" ? "Open Google Messages" : "Pair Android phone"}
+            busy={busy === "GOOGLE_MESSAGES"}
+            onPrimary={() =>
+              onAction(
+                "GOOGLE_MESSAGES",
+                googleMessagesRow.status === "CONNECTED" ? "open-browser" : "connect"
+              )
+            }
+          />
+        ) : null}
+        {linkedinRow ? (
+          <PlatformSetupCard
+            row={linkedinRow}
+            fallbackPlatform="LINKEDIN"
+            title="LinkedIn"
+            body={
+              linkedinRow.browserProfileMode === "isolated"
+                ? `Uses a dedicated Chrome profile. Sign in when ${APP_NAME} opens it.`
+                : "Uses your normal Chrome session. Sign in there first."
+            }
+            actionLabel={linkedinRow.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}
+            busy={busy === "LINKEDIN"}
+            onPrimary={() =>
+              onAction(
+                "LINKEDIN",
+                linkedinRow.status === "CONNECTED" ? "open-browser" : "connect"
+              )
+            }
+          />
+        ) : null}
+        {whatsappRow ? (
+          <div className="rounded-[8px] bg-paper-2/45 px-4 py-4">
+            <WhatsAppConnect />
+          </div>
+        ) : null}
       </div>
     </section>
   );
@@ -817,7 +818,8 @@ function PlatformSetupCard({
   );
 }
 
-function SetupGuideSection() {
+function SetupGuideSection({ rows }: { rows: PlatformCard[] }) {
+  const available = new Set(rows.map((row) => row.platform));
   return (
     <section className="mb-9">
       <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-[8px] bg-paper-2/45 px-4 py-4">
@@ -850,34 +852,51 @@ function SetupGuideSection() {
           ]}
           defaultOpen
         />
-        <SetupGuideDrawer
-          name="iMessage shows phone numbers"
-          desc="Sync or import contacts on this Mac."
-          steps={[
-            "Open Contacts on Mac and check if your people are there.",
-            "Best fix: turn on iCloud Contacts on iPhone and Mac.",
-            "No iCloud: AirDrop a .vcf file to the Mac, then import it into Contacts.",
-            "Run a scan after names appear."
-          ]}
-        />
-        <SetupGuideDrawer
-          name="Connect LinkedIn"
-          desc="Use a normal Chrome session. The app never asks for your password."
-          steps={[
-            "Install Chrome if needed.",
-            "Sign into LinkedIn in a normal Chrome window.",
-            "Use Connect LinkedIn, complete security checks yourself, then run a scan."
-          ]}
-        />
-        <SetupGuideDrawer
-          name="Connect WhatsApp"
-          desc="Link this Mac from WhatsApp on your phone."
-          steps={[
-            "Open Platforms, then Connect WhatsApp.",
-            "On your phone, open WhatsApp Settings, Linked Devices, Link a device.",
-            "Scan the QR code shown in the app."
-          ]}
-        />
+        {available.has("IMESSAGE") ? (
+          <SetupGuideDrawer
+            name="iMessage shows phone numbers"
+            desc="Sync or import contacts on this Mac."
+            steps={[
+              "Open Contacts on Mac and check if your people are there.",
+              "Best fix: turn on iCloud Contacts on iPhone and Mac.",
+              "No iCloud: AirDrop a .vcf file to the Mac, then import it into Contacts.",
+              "Run a scan after names appear."
+            ]}
+          />
+        ) : null}
+        {available.has("GOOGLE_MESSAGES") ? (
+          <SetupGuideDrawer
+            name="Connect Google Messages"
+            desc="Pair your Android phone from this Windows computer."
+            steps={[
+              "Open Platforms, then Pair Android phone.",
+              "Follow the Google Messages pairing steps in Chrome.",
+              "Keep the Chrome window open until the app says connected."
+            ]}
+          />
+        ) : null}
+        {available.has("LINKEDIN") ? (
+          <SetupGuideDrawer
+            name="Connect LinkedIn"
+            desc="Use a normal Chrome session. The app never asks for your password."
+            steps={[
+              "Install Chrome if needed.",
+              "Sign into LinkedIn in a normal Chrome window.",
+              "Use Connect LinkedIn, complete security checks yourself, then run a scan."
+            ]}
+          />
+        ) : null}
+        {available.has("WHATSAPP") ? (
+          <SetupGuideDrawer
+            name="Connect WhatsApp"
+            desc="Link this computer from WhatsApp on your phone."
+            steps={[
+              "Open Platforms, then Connect WhatsApp.",
+              "On your phone, open WhatsApp Settings, Linked Devices, Link a device.",
+              "Scan the QR code shown in the app."
+            ]}
+          />
+        ) : null}
         <SetupGuideDrawer
           name="Space and first setup"
           desc="The first install downloads the app, browser, dependencies, and local voice model."

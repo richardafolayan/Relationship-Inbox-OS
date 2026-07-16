@@ -38,16 +38,19 @@ export function visibleImplementedPlatforms(
     connectedAt: string | null;
     enabled?: boolean;
     supported?: boolean;
-  }> | null | undefined
+  }> | null | undefined,
+  fallbackPlatforms: ReadonlyArray<string> = IMPLEMENTED_PLATFORMS
 ): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"> {
-  if (!platforms) return IMPLEMENTED_PLATFORMS;
-  return platforms
-    .filter((platform) => platform.supported !== false)
-    .filter(
-      (platform) =>
-        platform.platform !== "WHATSAPP" || platform.enabled || hasEverConnected(platform)
-    )
-    .map((platform) => platform.platform)
+  const candidates = platforms
+    ? platforms
+        .filter((platform) => platform.supported !== false)
+        .filter(
+          (platform) =>
+            platform.platform !== "WHATSAPP" || platform.enabled || hasEverConnected(platform)
+        )
+        .map((platform) => platform.platform)
+    : fallbackPlatforms;
+  return candidates
     .filter(
       (platform): platform is "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
         platform === "LINKEDIN" ||

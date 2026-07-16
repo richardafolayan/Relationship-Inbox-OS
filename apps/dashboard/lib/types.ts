@@ -697,6 +697,7 @@ export interface HealthResponse {
   lastScanAt: string | null;
   queueDepth: number;
   connectedPlatforms: number;
+  availablePlatforms?: PlatformName[];
   /**
    * Platform currently being scanned. Used by the status bar so the
    * "Scanning …" label names the actual platform (LinkedIn, iMessage)

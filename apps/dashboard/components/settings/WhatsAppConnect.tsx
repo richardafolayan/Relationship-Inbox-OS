@@ -12,13 +12,16 @@ interface WhatsAppStatus {
   state: "qr_ready" | "connecting" | "connected" | "disconnected";
   qrDataUrl: string | null;
   updatedAt: string;
+  hasPersistedSession?: boolean;
 }
 
 export function WhatsAppConnect() {
   const [status, setStatus] = useState<WhatsAppStatus | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [refreshingQr, setRefreshingQr] = useState(false);
+  const [resetting, setResetting] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -50,6 +53,7 @@ export function WhatsAppConnect() {
     if (connecting) return;
     setConnecting(true);
     setError("");
+    setNotice("");
     try {
       await apiPost("/runner/control/whatsapp/connect", {});
       await refresh();
@@ -64,6 +68,7 @@ export function WhatsAppConnect() {
     if (refreshingQr) return;
     setRefreshingQr(true);
     setError("");
+    setNotice("");
     try {
       await apiPost("/runner/control/whatsapp/refresh-qr", {});
       await refresh();
@@ -71,6 +76,22 @@ export function WhatsAppConnect() {
       setError("Couldn't refresh the WhatsApp QR code. Is the app running?");
     } finally {
       setRefreshingQr(false);
+    }
+  };
+
+  const reset = async () => {
+    if (resetting) return;
+    setResetting(true);
+    setError("");
+    setNotice("");
+    try {
+      await apiPost("/runner/control/whatsapp/reset", {});
+      await refresh();
+      setNotice("WhatsApp reset. Connect again to get a new QR code.");
+    } catch {
+      setError("Couldn't reset WhatsApp. Close WhatsApp Web and try again.");
+    } finally {
+      setResetting(false);
     }
   };
 
@@ -103,6 +124,7 @@ export function WhatsAppConnect() {
           </div>
         ) : null}
         {error ? <p className="m-0 mt-[8px] rounded-row border border-hairline bg-paper px-3 py-2 text-[12px] leading-[1.45] text-ink-2">{error}</p> : null}
+        {notice ? <p className="m-0 mt-[8px] font-mono text-[11px] text-risk-fresh">{notice}</p> : null}
       </div>
       <div className="flex flex-wrap items-center gap-[10px]">
         <span className="font-mono text-[11px] text-ink-3">
@@ -120,8 +142,8 @@ export function WhatsAppConnect() {
           <button
             type="button"
             onClick={refreshQr}
-            disabled={refreshingQr}
-            className="inline-flex items-center rounded-pill border border-hairline bg-paper px-3 py-[7px] text-[12px] font-medium text-ink hover:bg-[oklch(95%_0.004_80)] disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={refreshingQr || resetting}
+            className="inline-flex items-center rounded-pill border border-hairline bg-paper px-3 py-[7px] text-[12px] font-medium text-ink hover:bg-paper-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {refreshingQr ? "Refreshing..." : "New QR code"}
           </button>
@@ -130,10 +152,20 @@ export function WhatsAppConnect() {
           <button
             type="button"
             onClick={connect}
-            disabled={connecting || state === "connecting"}
+            disabled={connecting || resetting || state === "connecting"}
             className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {state === "connecting" ? "Connecting..." : "Connect WhatsApp"}
+          </button>
+        ) : null}
+        {(connected || status?.hasPersistedSession) && state !== "connecting" ? (
+          <button
+            type="button"
+            onClick={reset}
+            disabled={resetting || refreshingQr}
+            className="inline-flex items-center rounded-pill border border-hairline bg-transparent px-3 py-[7px] text-[12px] font-medium text-ink-2 hover:bg-paper-2 hover:text-ink disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {resetting ? "Resetting..." : "Reset WhatsApp"}
           </button>
         ) : null}
       </div>
