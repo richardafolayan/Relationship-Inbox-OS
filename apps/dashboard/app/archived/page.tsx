@@ -11,7 +11,6 @@ import { PersonAvatar } from "@/components/common/person-avatar";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { cn } from "@/lib/utils";
 import {
-  OXBLOOD_PAGE_VARS,
   TOOL_CLASS,
   XIcon,
   FilterGlyph,
@@ -331,7 +330,7 @@ export default function ArchivedPage() {
   const isEmpty = !rows || rows.length === 0;
 
   return (
-    <Canvas style={OXBLOOD_PAGE_VARS}>
+    <Canvas>
       <Link
         href="/inbox"
         className="mb-[16px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"

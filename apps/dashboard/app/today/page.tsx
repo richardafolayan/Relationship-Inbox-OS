@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { useRouter } from "next/navigation";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
@@ -95,20 +95,6 @@ function writeTonightProgress(value: TonightProgress): void {
     // Storage disabled or over quota: progress just won't survive a reload.
   }
 }
-
-// Today-scoped oxblood palette — match the redesign prototype's colours
-// ("colours and all"). These CSS-var overrides live on the Today canvas
-// ONLY: the sidebar / app-shell render outside this subtree, and every
-// other page keeps the app's global coral tokens. Accent + overdue +
-// needs-reply go oxblood; waiting stays amber, fresh stays green.
-const OXBLOOD_TODAY_VARS = {
-  "--accent": "#7B1F1F",
-  "--accent-ink": "#7B1F1F",
-  "--accent-soft": "rgba(123,31,31,0.08)",
-  "--risk-overdue": "#7B1F1F",
-  "--risk-waiting": "#9a6a12",
-  "--risk-fresh": "#1f6b3a"
-} as CSSProperties;
 
 // Hydration-safe clock text (R-0106 / #824). The prod build statically
 // prerenders this page, so computing the date line / greeting from
@@ -558,7 +544,6 @@ export default function TodayPage() {
   return (
     <Canvas
       className="max-w-[1240px] pb-[calc(96px+env(safe-area-inset-bottom))] md:pb-10 3xl:max-w-[1400px]"
-      style={OXBLOOD_TODAY_VARS}
     >
       <header className="sticky top-0 z-10 -mx-5 mb-6 flex flex-col gap-1 bg-[color-mix(in_oklch,var(--paper)_95%,transparent)] px-5 pb-3 pt-4 backdrop-blur-md backdrop-saturate-150 sm:-mx-8 sm:flex-row sm:items-baseline sm:justify-between sm:gap-6 sm:px-8 sm:pt-6 lg:-mx-12 lg:px-12">
         <div className="min-w-0">
