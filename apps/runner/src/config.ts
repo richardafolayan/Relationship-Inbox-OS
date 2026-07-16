@@ -1,13 +1,20 @@
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, resolve, win32 } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import dotenv from "dotenv";
-
-dotenv.config({ path: resolve(process.cwd(), ".env") });
+import {
+  availablePlatformNames,
+  resolvePlatformAvailability,
+  type PlatformAvailability
+} from "./platform-availability";
+import type { PlatformName } from "@inbox-os/core";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = resolve(currentDir, "../../..");
-export const dataDir = resolve(projectRoot, "data");
+const configDir = process.env.RIOS_CONFIG_DIR?.trim();
+if (configDir) dotenv.config({ path: resolve(configDir, ".env") });
+dotenv.config({ path: resolve(process.cwd(), ".env") });
+export const dataDir = resolve(process.env.RIOS_DATA_DIR?.trim() || resolve(projectRoot, "data"));
 
 export type BrowserProfileMode = "isolated" | "personal";
 export type BrowserProfileFallbackBehavior = "allow_isolated" | "error";
@@ -63,12 +70,18 @@ export interface RunnerConfig {
     /** whatsapp-web.js LocalAuth root. Separate from the Playwright-managed
      * profiles above — WhatsApp uses its own Puppeteer instance. */
     WHATSAPP: string;
+    GOOGLE_MESSAGES: string;
   };
+  platformAvailability: PlatformAvailability;
+  availablePlatforms: PlatformName[];
   /** WhatsApp Web adapter config (#774). Off by default. */
   whatsapp: {
     enabled: boolean;
     mediaDir: string;
     send: { dailyCap: number; minIntervalMs: number };
+  };
+  googleMessages: {
+    mediaDir: string;
   };
   imessage: {
     enabled: boolean;
@@ -76,7 +89,7 @@ export interface RunnerConfig {
     /**
      * Debounce window for the chat.db filesystem watcher. SQLite writes a
      * burst of WAL/SHM events per message; we collapse them into one scan
-     * enqueue. 500ms is empirically enough to coalesce a single iMessage
+     * enqueue. 200ms is enough to coalesce a single iMessage
      * arrival without noticeably delaying its appearance in the inbox.
      */
     watchDebounceMs: number;
@@ -480,9 +493,23 @@ export function resolveConnectTimeoutMs(profileMode: BrowserProfileMode, env: No
   return profileMode === "personal" ? personalTimeoutMs : isolatedTimeoutMs;
 }
 
+export function resolveDefaultChromeUserDataDir(
+  env: NodeJS.ProcessEnv = process.env,
+  platform = process.platform
+): string {
+  const homeDir = env.HOME ?? env.USERPROFILE ?? "/Users/richard";
+  if (platform === "win32") {
+    const localAppData = env.LOCALAPPDATA ?? win32.join(homeDir, "AppData", "Local");
+    return win32.resolve(localAppData, "Google", "Chrome", "User Data");
+  }
+  if (platform === "darwin") {
+    return resolve(homeDir, "Library", "Application Support", "Google", "Chrome");
+  }
+  return resolve(env.XDG_CONFIG_HOME ?? resolve(homeDir, ".config"), "google-chrome");
+}
+
 export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env): BrowserProfileConfig {
-  const homeDir = env.HOME ?? "/Users/richard";
-  const defaultChromeUserDataDir = resolve(homeDir, "Library", "Application Support", "Google", "Chrome");
+  const defaultChromeUserDataDir = resolveDefaultChromeUserDataDir(env);
   const mode = env.BROWSER_PROFILE_MODE?.toLowerCase() === "personal" ? "personal" : "isolated";
   const fallbackRaw = env.PERSONAL_PROFILE_FALLBACK?.toLowerCase();
   const fallbackBehavior =
@@ -515,6 +542,7 @@ export function resolveBrowserProfileConfig(env: NodeJS.ProcessEnv = process.env
 }
 
 export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): RunnerConfig {
+  const platformAvailability = resolvePlatformAvailability(env);
   return {
     port: parseIntOrDefault(env.RUNNER_PORT, 4001),
     bindHost: env.RUNNER_HOST?.trim() || "127.0.0.1",
@@ -584,14 +612,17 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
       INSTAGRAM: resolve(dataDir, "profiles", "instagram"),
       TIKTOK: resolve(dataDir, "profiles", "tiktok"),
       IMESSAGE: resolve(dataDir, "profiles", "imessage"),
-      WHATSAPP: resolve(dataDir, "profiles", "whatsapp")
+      WHATSAPP: resolve(dataDir, "profiles", "whatsapp"),
+      GOOGLE_MESSAGES: resolve(dataDir, "profiles", "google-messages")
     },
+    platformAvailability,
+    availablePlatforms: availablePlatformNames(platformAvailability),
     whatsapp: {
       // WhatsApp Web adapter via whatsapp-web.js (#774). OFF by default: it
       // spins up its own headless Chromium and needs a one-time QR scan, so
       // it must never boot for pilots who haven't opted in. Set
       // WHATSAPP_ENABLED=true to turn it on, then connect via Settings.
-      enabled: (env.WHATSAPP_ENABLED ?? "").trim().toLowerCase() === "true",
+      enabled: platformAvailability.WHATSAPP,
       mediaDir: resolve(dataDir, "whatsapp-media"),
       // Send guard: cap outbound volume + minimum spacing so an automation
       // bug can't blast a WhatsApp number (ban-sensitive). Conservative
@@ -601,13 +632,16 @@ export function resolveRunnerConfig(env: NodeJS.ProcessEnv = process.env): Runne
         minIntervalMs: parseIntOrDefault(env.WHATSAPP_MIN_INTERVAL_MS, 15_000)
       }
     },
+    googleMessages: {
+      mediaDir: resolve(dataDir, "google-messages-media")
+    },
     imessage: {
       // Mac-only adapter. Default off so Linux/CI runners don't try to open
       // a non-existent chat.db. Set IMESSAGE_ENABLED=true on a Mac with
       // Full Disk Access granted to the runner's parent process.
-      enabled: (env.IMESSAGE_ENABLED ?? "").trim().toLowerCase() === "true" && process.platform === "darwin",
+      enabled: platformAvailability.IMESSAGE,
       dbPath: env.IMESSAGE_DB_PATH?.trim() || resolve(env.HOME ?? "/Users/richard", "Library", "Messages", "chat.db"),
-      watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 500),
+      watchDebounceMs: parseIntOrDefault(env.IMESSAGE_WATCH_DEBOUNCE_MS, 200),
       contactsVcfPath: env.IMESSAGE_CONTACTS_VCF?.trim() || resolve(dataDir, "contacts.vcf")
     },
     contacts: {

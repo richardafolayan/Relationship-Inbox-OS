@@ -4,7 +4,7 @@
 // optimistically hides the selected rows by adding their ids to `removedIds`.
 // applyInbox then self-heals that set: on the next payload it keeps an id only
 // if the row is gone OR its needsReply flipped to false. That self-heal works
-// for membership-changing actions (mark-done removes / archives the thread,
+// for membership-changing actions (mark-done clears needsReply,
 // snooze flips needsReply), but Rescan only re-parses messages and changes
 // neither — so optimistically removing a still-needs-reply thread would strand
 // it in `removedIds` until a full page reload.

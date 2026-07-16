@@ -12,10 +12,14 @@ export interface AppVersion {
   build?: string;
   commit?: string;
   channel?: string;
+  releaseNotes?: string[];
+  /** Dev-channel builds bake the feed they self-update from into release.json. */
+  updateFeedUrl?: string;
 }
 
 export interface UpdateCheckResult {
   currentVersion: string;
+  currentReleaseNotes: string[];
   latestVersion: string;
   updateAvailable: boolean;
   releaseNotes: string[];
@@ -43,7 +47,11 @@ export function readAppVersion(projectRoot: string): AppVersion {
           version: String(parsed.version),
           build: typeof parsed.build === "string" ? parsed.build : undefined,
           commit: typeof parsed.commit === "string" ? parsed.commit : undefined,
-          channel: typeof parsed.channel === "string" ? parsed.channel : undefined
+          channel: typeof parsed.channel === "string" ? parsed.channel : undefined,
+          releaseNotes: Array.isArray(parsed.releaseNotes)
+            ? parsed.releaseNotes.filter((note: unknown): note is string => typeof note === "string")
+            : undefined,
+          updateFeedUrl: typeof parsed.updateFeedUrl === "string" ? parsed.updateFeedUrl : undefined
         };
       }
     } catch {
@@ -51,6 +59,44 @@ export function readAppVersion(projectRoot: string): AppVersion {
     }
   }
   return { version: "0.0.0" };
+}
+
+/**
+ * The feed this install self-updates from. A dev-channel build bakes its feed
+ * into release.json (paired atomically with the code). A dev install uses ONLY
+ * that baked feed and never the env-configured URL: RIOS_UPDATE_FEED_URL is the
+ * pilot Dropbox link that .env reconcile always maintains, so falling back to it
+ * would silently point a dev install at a stale pilot version (a wrong-channel
+ * feed). If a dev install somehow has no baked feed, return undefined ("updates
+ * not configured") rather than the misleading pilot feed. Non-dev installs use
+ * the configured URL as before.
+ */
+export function resolveUpdateFeedUrl(projectRoot: string, configuredUrl?: string): string | undefined {
+  const app = readAppVersion(projectRoot);
+  if (app.channel === "dev") return app.updateFeedUrl;
+  return configuredUrl;
+}
+
+/**
+ * Whether this install may swap its own code in place. Zip installs always
+ * could; a PACKAGED app (code inside Tovi.app) only on the dev channel, where
+ * the detached helper quits the app, swaps Contents/Resources/app, re-signs
+ * the bundle, and relaunches. Student packaged installs keep the calmer
+ * "install the new DMG" path.
+ */
+export function canSelfUpdateInPlace(projectRoot: string, packaged: boolean): boolean {
+  if (!packaged) return true;
+  return readAppVersion(projectRoot).channel === "dev";
+}
+
+/**
+ * For a project root inside a mac app bundle (…/Tovi.app/Contents/Resources/app),
+ * the bundle path; empty string otherwise.
+ */
+export function containingAppBundle(projectRoot: string): string {
+  const normalized = resolve(projectRoot);
+  const match = normalized.match(/^(.*\.app)\/Contents\/Resources\/[^/]+$/);
+  return match?.[1] ?? "";
 }
 
 /**
@@ -70,9 +116,11 @@ export function runUpdateCheck(opts: {
   const updaterPath = opts.updaterPath ?? resolve(projectRoot, "scripts/update-student.mjs");
   const nodeBin = opts.nodeBin ?? process.execPath;
   const timeoutMs = opts.timeoutMs ?? 20_000;
-  const current = readAppVersion(projectRoot).version;
+  const installed = readAppVersion(projectRoot);
+  const current = installed.version;
   const base: UpdateCheckResult = {
     currentVersion: current,
+    currentReleaseNotes: installed.releaseNotes ?? [],
     latestVersion: current,
     updateAvailable: false,
     releaseNotes: []
@@ -102,6 +150,7 @@ export function runUpdateCheck(opts: {
           const parsed = JSON.parse(out);
           done({
             currentVersion: String(parsed.currentVersion ?? current),
+            currentReleaseNotes: installed.releaseNotes ?? [],
             latestVersion: String(parsed.latestVersion ?? current),
             updateAvailable: Boolean(parsed.updateAvailable),
             releaseNotes: Array.isArray(parsed.releaseNotes)
@@ -134,6 +183,8 @@ export function launchUpdateApplyAndRestart(opts: {
   projectRoot: string;
   feedUrl: string;
   nodeBin?: string;
+  /** Packaged mode: the helper quits the app bundle, swaps its code, re-signs, and relaunches it. */
+  appBundle?: string;
 }): { pid?: number; logPath: string } {
   const helperPath = resolve(opts.projectRoot, "scripts/apply-update-and-restart.mjs");
   const logsDir = resolve(opts.projectRoot, "logs");
@@ -141,10 +192,12 @@ export function launchUpdateApplyAndRestart(opts: {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const logPath = resolve(logsDir, `update-restart-${stamp}.log`);
   const fd = openSync(logPath, "a");
+  const helperArgs = [helperPath, "--url", opts.feedUrl, "--dir", opts.projectRoot];
+  if (opts.appBundle) helperArgs.push("--bundle", opts.appBundle);
   try {
     const child = spawn(
       opts.nodeBin ?? process.execPath,
-      [helperPath, "--url", opts.feedUrl, "--dir", opts.projectRoot],
+      helperArgs,
       {
         cwd: opts.projectRoot,
         detached: true,
@@ -159,4 +212,66 @@ export function launchUpdateApplyAndRestart(opts: {
   } finally {
     closeSync(fd);
   }
+}
+
+export interface AutomaticUpdateScheduler {
+  start(): void;
+  stop(): void;
+  runNow(): Promise<"busy" | "disabled" | "checked">;
+}
+
+export function createAutomaticUpdateScheduler(opts: {
+  isEnabled(): Promise<boolean>;
+  installIfAvailable(): Promise<void>;
+  initialDelayMs?: number;
+  intervalMs?: number;
+  onError?(error: unknown): void;
+}): AutomaticUpdateScheduler {
+  const initialDelayMs = opts.initialDelayMs ?? 15_000;
+  const intervalMs = opts.intervalMs ?? 60 * 60_000;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let stopped = true;
+  let running = false;
+
+  const schedule = (delayMs: number): void => {
+    if (stopped) return;
+    timer = setTimeout(() => {
+      void runAndReschedule();
+    }, delayMs);
+    timer.unref();
+  };
+
+  const runNow = async (): Promise<"busy" | "disabled" | "checked"> => {
+    if (running) return "busy";
+    running = true;
+    try {
+      if (!(await opts.isEnabled())) return "disabled";
+      await opts.installIfAvailable();
+      return "checked";
+    } catch (error) {
+      opts.onError?.(error);
+      return "checked";
+    } finally {
+      running = false;
+    }
+  };
+
+  const runAndReschedule = async (): Promise<void> => {
+    await runNow();
+    schedule(intervalMs);
+  };
+
+  return {
+    start() {
+      if (!stopped) return;
+      stopped = false;
+      schedule(initialDelayMs);
+    },
+    stop() {
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      timer = null;
+    },
+    runNow
+  };
 }

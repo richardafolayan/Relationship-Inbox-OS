@@ -17,7 +17,8 @@ const SELECTOR_FILES: Partial<Record<PlatformName, string>> = {
   // message APIs, no DOM scraping). Stub file kept so the per-platform
   // selector loader, override store, and `/platforms` selector-test page
   // all work uniformly across platforms.
-  WHATSAPP: "whatsapp.json"
+  WHATSAPP: "whatsapp.json",
+  GOOGLE_MESSAGES: "google-messages.json"
 };
 
 export function loadDefaultSelectors(platform: PlatformName, baseDir: string): SelectorRegistry {

@@ -2,6 +2,7 @@ import type { AppSettings } from "./types";
 
 export const defaultSettings: AppSettings = {
   scanIntervalSeconds: 60,
+  automaticUpdates: true,
   amberHours: 6,
   redHours: 18,
   // Headful by default ON PURPOSE. Headless is one of the strongest bot
@@ -14,7 +15,8 @@ export const defaultSettings: AppSettings = {
   // force true headless for CI/debug, but it must never be the default.
   headless: false,
   maxMessagesPerThread: 15,
-  enabledPlatforms: ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"],
+  enabledPlatforms: ["LINKEDIN", "IMESSAGE"],
+  aiEnabled: true,
   demoMode: false,
   presenterDemoMode: "off",
   presenterReadOnly: false,

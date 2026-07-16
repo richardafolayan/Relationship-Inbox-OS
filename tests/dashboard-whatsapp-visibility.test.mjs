@@ -2,12 +2,9 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { visibleImplementedPlatforms, IMPLEMENTED_PLATFORMS } from "../apps/dashboard/lib/risk.ts";
 
-// WhatsApp is opt-in per operator (PR #780/#781 shipped the adapter off by
-// default). The dashboard must not surface WhatsApp — in the "X/N connected"
-// count, the reconnect modal, or the Inbox/Archived filter chips — to a pilot
-// who never linked it. `visibleImplementedPlatforms` is the single gate: it
-// keeps LinkedIn + iMessage always on and adds WhatsApp only once the operator
-// has EVER connected it (connectedAt set, the same signal as #708/#710).
+// The runner's /data/platforms response is the availability boundary. The
+// dashboard must mirror that exact set, including an enabled platform that
+// has not been connected yet and excluding a platform disabled in .env.
 
 const card = (over = {}) => ({
   platform: "WHATSAPP",
@@ -16,7 +13,7 @@ const card = (over = {}) => ({
   ...over
 });
 
-test("LinkedIn + iMessage are always visible, WhatsApp is not by default", () => {
+test("older runners without platform data keep the legacy LinkedIn and iMessage fallback", () => {
   const visible = visibleImplementedPlatforms(null);
   assert.deepEqual([...visible], [...IMPLEMENTED_PLATFORMS]);
   assert.ok(visible.includes("LINKEDIN"));
@@ -24,9 +21,14 @@ test("LinkedIn + iMessage are always visible, WhatsApp is not by default", () =>
   assert.ok(!visible.includes("WHATSAPP"));
 });
 
-test("WhatsApp stays hidden when its card exists but was never connected", () => {
-  const visible = visibleImplementedPlatforms([card({ connectedAt: null })]);
-  assert.ok(!visible.includes("WHATSAPP"));
+test("WhatsApp is visible when the runner exposes it, before first connect", () => {
+  const visible = visibleImplementedPlatforms([card({ connectedAt: null, enabled: true })]);
+  assert.deepEqual([...visible], ["WHATSAPP"]);
+});
+
+test("WhatsApp is visible when the pilot build explicitly enables it", () => {
+  const visible = visibleImplementedPlatforms([card({ connectedAt: null, enabled: true })]);
+  assert.ok(visible.includes("WHATSAPP"));
 });
 
 test("WhatsApp becomes visible once it has ever been connected", () => {
@@ -34,6 +36,13 @@ test("WhatsApp becomes visible once it has ever been connected", () => {
     card({ status: "CONNECTED", connectedAt: "2026-07-06T10:00:00.000Z" })
   ]);
   assert.ok(visible.includes("WHATSAPP"));
+});
+
+test("disabled platforms are absent even if other platforms are available", () => {
+  const visible = visibleImplementedPlatforms([
+    card({ platform: "LINKEDIN" })
+  ]);
+  assert.deepEqual([...visible], ["LINKEDIN"]);
 });
 
 test("WhatsApp stays visible after a disconnect if it was connected before", () => {
@@ -53,4 +62,24 @@ test("the visible set does not mutate IMPLEMENTED_PLATFORMS", () => {
   ]);
   assert.deepEqual([...IMPLEMENTED_PLATFORMS], before);
   assert.ok(!IMPLEMENTED_PLATFORMS.includes("WHATSAPP"));
+});
+
+test("unsupported host platforms are excluded from connected totals", () => {
+  const visible = visibleImplementedPlatforms([
+    { platform: "LINKEDIN", connectedAt: null, supported: true },
+    { platform: "IMESSAGE", connectedAt: null, supported: false },
+    { platform: "WHATSAPP", connectedAt: null, supported: true }
+  ]);
+
+  assert.deepEqual(visible, ["LINKEDIN"]);
+});
+
+test("thread page sibling filter offers WhatsApp behind the same opt-in idea (#820)", async () => {
+  const { readFile } = await import("node:fs/promises");
+  const source = await readFile(
+    new URL("../apps/dashboard/app/thread/[id]/page.tsx", import.meta.url),
+    "utf8"
+  );
+  assert.match(source, /<option value="WHATSAPP">WhatsApp<\/option>/);
+  assert.match(source, /siblings\.some\(\(row\) => row\.platform === "WHATSAPP"\)/);
 });

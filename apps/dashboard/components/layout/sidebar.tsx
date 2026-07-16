@@ -18,6 +18,8 @@ import { formatAttentionBadge } from "@/lib/attention-badge";
 import { cn } from "@/lib/utils";
 import { openPilotFeedback } from "@/lib/pilot";
 import { ThemeToggle } from "@/components/layout/theme-toggle";
+import { ToviMark } from "@/components/common/ToviMark";
+import { APP_NAME } from "@/lib/branding";
 
 interface SidebarProps {
   // `undefined` = the first /health fetch is still in flight (cold mount);
@@ -116,14 +118,12 @@ export function Sidebar({
         <Link
           href="/today"
           className="flex items-center gap-2 text-ink"
-          aria-label="Relationship Inbox OS"
-          title={collapsed ? "Relationship Inbox OS" : undefined}
+          aria-label={APP_NAME}
+          title={collapsed ? APP_NAME : undefined}
         >
-          <span className="grid h-8 w-8 place-items-center rounded-[10px] bg-ink font-display text-[14px] font-bold text-paper tracking-[-0.04em]">
-            R
-          </span>
+          <ToviMark className="h-8 w-8" />
           {!collapsed ? (
-            <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">Inbox OS</span>
+            <span className="font-display text-[14px] font-semibold tracking-[-0.01em]">{APP_NAME}</span>
           ) : null}
         </Link>
         {!collapsed ? (

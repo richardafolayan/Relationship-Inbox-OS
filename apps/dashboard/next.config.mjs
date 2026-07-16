@@ -2,12 +2,24 @@
 // Truthiness (not ??) so a set-but-blank RUNNER_PORT ("") falls back to
 // the default instead of producing "http://localhost:" (port 80) and
 // pointing the /runner and /artifacts rewrites at the wrong place.
+import { resolveAppName } from "../../scripts/lib/branding.mjs";
+
 const runnerPort = process.env.RUNNER_PORT?.trim() || "4001";
 const runnerBase = `http://localhost:${runnerPort}`;
+
+// The app display name is configured once via RIOS_APP_NAME (server, runner,
+// scripts all read it). Expose it to the browser bundle as NEXT_PUBLIC_APP_NAME
+// so a single .env variable renames the app everywhere. Falls back to "Tovi".
+const appName = resolveAppName({
+  RIOS_APP_NAME: process.env.RIOS_APP_NAME || process.env.NEXT_PUBLIC_APP_NAME
+});
 
 const nextConfig = {
   reactStrictMode: true,
   devIndicators: false,
+  env: {
+    NEXT_PUBLIC_APP_NAME: appName
+  },
   // @inbox-os/core ships TypeScript source with NodeNext (".js") import
   // specifiers. The dashboard now imports its birthday/date helpers at
   // runtime (not just as types), so Next must transpile the package to

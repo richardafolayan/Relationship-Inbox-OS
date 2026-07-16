@@ -21,6 +21,8 @@ import {
   writeFullDemoState
 } from "@/lib/full-demo-state";
 import { installLiveDemoFetchInterceptor } from "@/lib/full-demo-fetch";
+import { getDemoThreadIds, isDemoThread } from "@/lib/demo-threads";
+import { dismissCenterNotifications } from "@/lib/notification-center";
 
 /**
  * FullDemoProvider holds the runtime state for the full-presenter-demo
@@ -372,6 +374,19 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const exit = useCallback(async () => {
+    const demoNotificationIds = new Set(
+      getDemoThreadIds(
+        Array.from(threadIdMap, ([platformThreadId, id]) => ({ id, platformThreadId }))
+      )
+    );
+    try {
+      const inbox = await apiGet<InboxResponse>("/runner/data/inbox");
+      for (const row of inbox.rows) {
+        if (isDemoThread(row)) demoNotificationIds.add(row.id);
+      }
+    } catch {
+      /* use the last resolved sandbox thread map */
+    }
     try {
       await apiPost("/runner/control/presenter-demo/reset", {});
     } catch (err) {
@@ -387,9 +402,10 @@ export function FullDemoProvider({ children }: { children: React.ReactNode }) {
     setAutoplayState(false);
     setLiveThreadIds([]);
     clearFullDemoState();
+    dismissCenterNotifications([...demoNotificationIds]);
     await refreshSettings();
     signalInboxResync();
-  }, [refreshSettings]);
+  }, [refreshSettings, threadIdMap]);
   // `next` is declared above `exit` and needs to trigger teardown when
   // pressed on the final step. Keep a ref so that callback can reach the
   // current `exit` without re-creating itself on every render.

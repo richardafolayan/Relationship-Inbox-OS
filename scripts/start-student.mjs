@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — start (student wrapper).
+// Tovi — start (student wrapper).
 //
 // Starts the app and opens it in your browser, then keeps running so the app
 // stays up. This is the friendly way to re-launch after the first install:
@@ -15,9 +15,11 @@ import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAppEnv } from "./lib/env-file.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
 import { reconcileEnvWithExample } from "./lib/release-manifest.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const APP_NAME = resolveAppName();
 loadAppEnv(APP_DIR);
 const DASHBOARD_PORT = process.env.DASHBOARD_PORT || "3100";
 const DASHBOARD_URL = `http://localhost:${DASHBOARD_PORT}`;
@@ -50,7 +52,7 @@ async function openWhenReady() {
     if (await dashboardUp()) {
       spawn("open", [DASHBOARD_URL], { stdio: "ignore" }).on("error", () => {});
       say("");
-      say(`  ${C.green}${C.bold}Relationship Inbox OS is running.${C.reset}`);
+      say(`  ${C.green}${C.bold}${APP_NAME} is running.${C.reset}`);
       say(`  • Open in your browser:  ${C.bold}${DASHBOARD_URL}${C.reset}`);
       say(`  • ${C.bold}Leave this window open${C.reset} — it keeps the app running.`);
       say(`  • To stop: press ${C.bold}Ctrl + C${C.reset}.`);
@@ -134,7 +136,7 @@ function reconcileEnvFile() {
 await applyPendingUpdate();
 reconcileEnvFile();
 
-say(`\n${C.bold}Starting Relationship Inbox OS…${C.reset}`);
+say(`\n${C.bold}Starting ${APP_NAME}…${C.reset}`);
 say(`${C.dim}(the first start after an update takes a minute)${C.reset}`);
 
 // start-app.mjs prepares the app (database client, schema, optimised
@@ -148,7 +150,7 @@ const dev = spawn(process.execPath, [resolve(APP_DIR, "scripts/start-app.mjs")],
 
 dev.on("error", (err) => {
   say(`Could not start the app: ${err.message}`);
-  say(`Try closing this window and starting Relationship Inbox OS again.`);
+  say(`Try closing this window and starting ${APP_NAME} again.`);
   process.exit(1);
 });
 dev.on("exit", (code) => process.exit(code ?? 0));

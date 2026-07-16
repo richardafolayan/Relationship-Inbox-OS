@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — doctor.
+// Tovi — doctor.
 //
 // A plain-English health check for the student pilot. Run it any time the app
 // looks wrong:
@@ -18,8 +18,10 @@ import { accessSync, constants, existsSync, readdirSync, readFileSync, statSync 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { resolveAppName } from "./lib/branding.mjs";
 
 const APP_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+const APP_NAME = resolveAppName();
 
 const isTTY = process.stdout.isTTY;
 const C = isTTY
@@ -86,7 +88,7 @@ const RUNNER_PORT = env.RUNNER_PORT || process.env.RUNNER_PORT || "4001";
 function checkMacOS() {
   if (process.platform !== "darwin") {
     add(FAIL, "macOS", `This is not a Mac (${process.platform}).`,
-      "Relationship Inbox OS needs a Mac for iMessage. Run it on a MacBook.");
+      `${APP_NAME} needs a Mac for iMessage. Run it on a MacBook.`);
     return;
   }
   const ver = sh("sw_vers -productVersion") || "unknown";
@@ -127,7 +129,7 @@ function checkAppFolder() {
     add(PASS, "App folder", APP_DIR);
   } else {
     add(FAIL, "App folder", `Doesn't look like the app: ${APP_DIR}`,
-      "Run the doctor from inside the Relationship Inbox OS folder.");
+      `Run the doctor from inside the ${APP_NAME} folder.`);
   }
 }
 
@@ -212,7 +214,7 @@ async function checkDashboard() {
     add(PASS, "Dashboard", `Responding on port ${DASHBOARD_PORT}.`);
   } else {
     add(WARN, "Dashboard", `Nothing on port ${DASHBOARD_PORT}.`,
-      `Start Relationship Inbox OS from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
+      `Start ${APP_NAME} from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
@@ -225,13 +227,14 @@ async function checkRunner() {
       "The runner is starting or unhealthy — wait a moment, then reload the app.");
   } else {
     add(WARN, "Runner", `Nothing on port ${RUNNER_PORT}.`,
-      `Start Relationship Inbox OS from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
+      `Start ${APP_NAME} from Applications, or run: cd "${APP_DIR}" && npm run start:student`);
   }
 }
 
 function checkMessagesDb() {
   if (process.platform !== "darwin") return;
   const imessageOn = (env.IMESSAGE_ENABLED || "").trim().toLowerCase() === "true";
+  if (!imessageOn) return;
   const dbPath = (env.IMESSAGE_DB_PATH || "").trim() ||
     join(homedir(), "Library", "Messages", "chat.db");
   if (!existsSync(dbPath)) {
@@ -245,22 +248,29 @@ function checkMessagesDb() {
     add(PASS, "iMessage database", imessageOn ? "Readable." : "Readable (iMessage is off in .env).");
   } catch {
     add(FAIL, "iMessage database", "Found but not readable.",
-      "Give Relationship Inbox OS Full Disk Access: System Settings → Privacy & Security → Full Disk Access → turn on Relationship Inbox OS, then restart the app.");
+      `Give ${APP_NAME} Full Disk Access: System Settings → Privacy & Security → Full Disk Access → turn on ${APP_NAME}, then restart the app.`);
   }
 }
 
 function checkLinkedInBrowser() {
-  const chromiumGlob = join(homedir(), "Library", "Caches", "ms-playwright");
-  const hasChromium = existsSync(chromiumGlob) &&
-    sh(`ls -d "${chromiumGlob}"/chromium* 2>/dev/null | head -1`);
-  if (!hasChromium) {
-    add(WARN, "LinkedIn browser", "Chromium for LinkedIn isn't installed yet.",
-      `Run: cd "${APP_DIR}" && npx playwright install chromium`);
-  } else {
-    add(PASS, "LinkedIn browser", "Chromium installed.");
-  }
+  const linkedinFlag = (env.LINKEDIN_ENABLED || "").trim().toLowerCase();
+  if (["0", "false", "no", "off"].includes(linkedinFlag)) return;
 
   const mode = (env.BROWSER_PROFILE_MODE || "personal").trim().toLowerCase();
+  if (mode === "personal") {
+    add(PASS, "LinkedIn browser", "Uses the installed Google Chrome app. No separate browser download needed.");
+  } else {
+    const chromiumGlob = join(homedir(), "Library", "Caches", "ms-playwright");
+    const hasChromium = existsSync(chromiumGlob) &&
+      sh(`ls -d "${chromiumGlob}"/chromium* 2>/dev/null | head -1`);
+    if (!hasChromium) {
+      add(WARN, "LinkedIn browser", "Chromium for LinkedIn isn't installed yet.",
+        `Run: cd "${APP_DIR}" && npx playwright install chromium`);
+    } else {
+      add(PASS, "LinkedIn browser", "Chromium installed.");
+    }
+  }
+
   if (mode === "personal") {
     const userData = (env.PERSONAL_CHROME_USER_DATA_DIR || "").trim() ||
       join(homedir(), "Library", "Application Support", "Google", "Chrome");
@@ -295,9 +305,7 @@ function checkAiKey() {
     add(PASS, "AI key",
       `${configured} key set (AI_PROVIDER is ${provider} with no key, so the app uses ${configured}).`);
   } else {
-    add(WARN, "AI key", "No AI key in .env.",
-      "Add an OpenAI or Gemini key (see docs/pilot/getting-ai-keys.md). " +
-      "AI summaries and reply help stay off until then; the app still works without it.");
+    add(PASS, "AI key", "Not configured. AI help is optional and can be added in Settings.");
   }
 }
 
@@ -353,7 +361,7 @@ async function main() {
     s === WARN ? `${C.yellow}WARN${C.reset}` :
     `${C.red}FAIL${C.reset}`;
 
-  process.stdout.write(`\n${C.bold}${C.cyan}Relationship Inbox OS — health check${C.reset}\n\n`);
+  process.stdout.write(`\n${C.bold}${C.cyan}${APP_NAME} — health check${C.reset}\n\n`);
   for (const r of results) {
     process.stdout.write(`  [${badge(r.status)}] ${C.bold}${r.label}${C.reset} — ${r.detail || ""}\n`);
     if (r.next && r.status !== PASS) {

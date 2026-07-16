@@ -3,6 +3,7 @@ import { mkdir } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
 import { basename, join, resolve } from "node:path";
 import { spawn } from "node:child_process";
+import { performance } from "node:perf_hooks";
 import express from "express";
 import compression from "compression";
 import multer from "multer";
@@ -10,7 +11,7 @@ import OpenAI from "openai";
 import { z } from "zod";
 import { v4 as uuid } from "uuid";
 import type { NormalizedMessage, PlatformAdapter, PlatformName, RememberItem, SelectorRegistry, SuggestedRepliesOutput, ThreadStub } from "@inbox-os/core";
-import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, stableHash } from "@inbox-os/core";
+import { BIRTHDAY_HORIZON_DAYS, calculateRisk, daysUntilBirthday, isNonContentIMessageSystemEvent, LEGACY_APP_NAME, resolveAppName, stableHash } from "@inbox-os/core";
 import { Prisma } from "@prisma/client";
 import { cleanText } from "./platforms/utils";
 import { prisma } from "./db";
@@ -19,7 +20,20 @@ import { ensurePathInside, safeUploadFilename, streamFileToResponse } from "./ut
 import { safeJsonParse } from "./utils/json";
 import { filterDismissedOpenLoops } from "./utils/open-loops";
 import { createSettingsStore } from "./services/settings";
+import {
+  applyGeminiKey,
+  resolveEnvWritePath,
+  upsertEnvFile,
+  validateGeminiKey
+} from "./services/setup-ai-key";
+import {
+  getSetupPreferences,
+  updateSetupPreferences,
+  type SetupTranscriptionMode
+} from "./services/setup-preferences";
+import { createTranscriptionSetupManager } from "./services/transcription-setup";
 import { createAuditService } from "./services/audit";
+import { summarizeControlBody } from "./services/control-audit";
 import { createEventBus } from "./services/event-bus";
 import {
   createAiService,
@@ -47,6 +61,7 @@ import { createAdapters, type WhatsAppConnectState } from "./services/platform-f
 import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
 import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
+import { isWhatsAppSessionUnavailableError } from "./platforms/whatsapp-adapter";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
@@ -58,23 +73,40 @@ import {
   imessageVoiceSnapshotPath,
   snapshotImessageVoice
 } from "./services/imessage-voice-store";
-import { createScanQueue } from "./services/scan-queue";
+import { createScanQueue, type ScanTrigger } from "./services/scan-queue";
 import { runReassessForThread } from "./services/reassess-thread";
 import { resolveSseResumeCursor } from "./services/sse-resume-cursor";
 import { resummarizeThread } from "./services/resummarize-thread";
 import { pickCanonicalThread, canonicalWriteTargetId } from "./services/canonical-thread";
 import { parseAllowedProfileUrl, ProfileUrlPolicyError } from "./services/profile-url-policy";
 import { createIMessageWatcher } from "./services/imessage-watcher";
+import { createChangeTriggeredScan } from "./services/change-triggered-scan";
+import {
+  createMessageSyncLatencyTracker,
+  MESSAGE_SYNC_METRICS,
+  type MessageSyncMetric
+} from "./services/message-sync-latency";
 import { createSendService } from "./services/send";
 import { createSendQueue } from "./services/send-queue";
 import { parsePersistedSendFailure } from "./services/send-failure";
 import { createReassessOnSendHandler } from "./services/reassess-on-send";
 import { createScheduledSendPromoter } from "./services/scheduled-send-promoter";
+import {
+  calendarUrls,
+  createCalendarFocusService,
+  mergeCalendarSummaries
+} from "./services/calendar-focus";
+import { fetchIcsText } from "./services/calendar-fetch";
+import { summarizeCalendar } from "./services/calendar-ics";
 import { createBirthdaySync } from "./services/birthday-sync";
 import { createImessageNameSync, type ImessageNameSync } from "./services/imessage-name-sync";
 import {
+  canSelfUpdateInPlace,
+  containingAppBundle,
+  createAutomaticUpdateScheduler,
   launchUpdateApplyAndRestart,
   readAppVersion,
+  resolveUpdateFeedUrl,
   runUpdateCheck,
   stagePendingUpdate
 } from "./services/system-update";
@@ -116,6 +148,10 @@ import { cleanupDemoData, seedDemoData } from "./services/demo";
 import { checkPresenterGuard } from "./middleware/presenter-guard";
 import { createKeyedMutex } from "./services/keyed-mutex";
 import { createRunLogger } from "./services/run-logger";
+import {
+  createCompressedJsonCacheEntry,
+  type CompressedJsonCacheEntry
+} from "./services/compressed-json-cache";
 import {
   createLinkedInSmokeLogger,
   writeLatestLinkedInSmokePointer
@@ -255,6 +291,7 @@ const settingsStore = createSettingsStore();
 const overdueDigestStore = createOverdueDigestStore(prisma);
 const auditService = createAuditService();
 const eventBus = createEventBus();
+const messageSyncLatency = createMessageSyncLatencyTracker();
 const aiService = createAiService(settingsStore);
 const selectorReports = createSelectorTestStore();
 
@@ -270,7 +307,26 @@ const selectorReports = createSelectorTestStore();
 // snooze expiry) honest even if some future write path forgets to signal.
 // ---------------------------------------------------------------------------
 const INBOX_CACHE_TTL_MS = 20_000;
-const inboxResponseCache = new Map<string, { expires: number; body: unknown }>();
+const inboxResponseCache = new Map<string, CompressedJsonCacheEntry>();
+
+function sendCachedInboxResponse(
+  req: express.Request,
+  res: express.Response,
+  cached: CompressedJsonCacheEntry,
+  cacheStatus: "hit" | "miss",
+  startedAt: number
+): void {
+  res.setHeader("X-RIOS-Cache", cacheStatus);
+  res.setHeader("Server-Timing", `inbox-prep;dur=${(performance.now() - startedAt).toFixed(2)}`);
+  res.vary("Accept-Encoding");
+  res.type("application/json");
+  if (req.acceptsEncodings("gzip") === "gzip") {
+    res.setHeader("Content-Encoding", "gzip");
+    res.send(cached.gzip);
+    return;
+  }
+  res.send(cached.json);
+}
 let dataVersion = 0;
 function bumpDataVersion(): void {
   dataVersion += 1;
@@ -306,20 +362,20 @@ const whatsappConnect: {
 let enqueueWhatsAppInitialScan: (() => void) | null = null;
 // Debounced "an inbound WhatsApp message arrived → scan" nudge. Late-bound to
 // the scan queue for the same reason.
-let onWhatsAppMessageArrived: (() => void) | null = null;
+let onWhatsAppMessageArrived:
+  | ((input: { platformThreadId: string; sourceChangedAt: string }) => void)
+  | null = null;
+let onLinkedInInboxChanged:
+  | ((change: { reason: string; sourceChangedAt: string }) => void)
+  | null = null;
 
-// Ensure WHATSAPP is in the operator's enabledPlatforms once they link a
-// device, so the scheduled scan loop keeps pulling WhatsApp on the normal
-// cadence (the real-time message watcher covers the gaps between ticks). The
-// scan gate still no-ops WhatsApp whenever it isn't connected, so enabling it
-// is safe across disconnects. Idempotent — a no-op once WHATSAPP is present.
-async function ensureWhatsAppEnabledInSettings(): Promise<void> {
+async function ensurePlatformEnabledInSettings(platform: PlatformName): Promise<void> {
   const settings = await settingsStore.getSettings();
-  if (settings.enabledPlatforms.includes("WHATSAPP")) {
+  if (settings.enabledPlatforms.includes(platform)) {
     return;
   }
   await settingsStore.updateSettings({
-    enabledPlatforms: [...settings.enabledPlatforms, "WHATSAPP"]
+    enabledPlatforms: [...settings.enabledPlatforms, platform]
   });
 }
 
@@ -366,7 +422,7 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
       // kick an initial scan so threads appear right away instead of waiting
       // for the next tick. Both go through the normal paths, so the scan
       // shows in the TopStatus ticker like any other.
-      void ensureWhatsAppEnabledInSettings().catch((error) => {
+      void ensurePlatformEnabledInSettings("WHATSAPP").catch((error) => {
         console.warn(
           `[whatsapp] could not enable in settings: ${
             error instanceof Error ? error.message : String(error)
@@ -377,7 +433,7 @@ const { adapters, resolveSelectorsForPlatform, sessionManager } = createAdapters
     }
     eventBus.emit({ type: "WHATSAPP_STATE", jobId: uuid(), state });
   },
-  onWhatsAppIncomingMessage: () => onWhatsAppMessageArrived?.(),
+  onWhatsAppIncomingMessage: (input) => onWhatsAppMessageArrived?.(input),
   onWhatsAppQr: (qr) => {
     whatsappConnect.qr = qr;
     whatsappConnect.updatedAt = new Date().toISOString();
@@ -435,7 +491,7 @@ const selectorTestService = createSelectorTestService({
 
 const operationMutex = createKeyedMutex();
 const defaultPersonKey = "default";
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
+const allPlatforms: PlatformName[] = runnerConfig.availablePlatforms;
 
 type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
   syncThreadForIngest: (input: {
@@ -444,6 +500,7 @@ type ScanQueueWithSmokeIngest = ReturnType<typeof createScanQueue> & {
     maxMessages: number;
     requestId: string;
     messages?: NormalizedMessage[];
+    trigger?: ScanTrigger;
   }) => Promise<{ updatedThreads: number; parsedMessages: number }>;
 };
 
@@ -838,6 +895,45 @@ const nearbyMessagesResolver = textRefinementService
     }
   : null;
 
+// The setup assistant can turn local transcription on without restarting the
+// runner. When transcription was off at boot there is no provider yet, so use
+// a small model-aware proxy that builds the chosen Transformers provider on
+// first use and keeps one cached instance per model.
+if (
+  runnerConfig.audioTranscription.provider === "transformers" ||
+  (!runnerConfig.audioTranscription.enabled && !transcriptionProvider)
+) {
+  const setupProviders = new Map<string, TranscriptionProvider>();
+  transcriptionProvider = {
+    id: "transformers",
+    modelLabel: "whisper",
+    transcribe(request) {
+      const config = runnerConfig.audioTranscription.transformers;
+      let provider = setupProviders.get(config.modelId);
+      if (!provider) {
+        provider = createTransformersWhisperProvider({
+          config: {
+            modelId: config.modelId,
+            modelDir: config.modelDir,
+            timeoutMs: config.timeoutMs
+          }
+        });
+        setupProviders.set(config.modelId, provider);
+      }
+      return provider.transcribe(request);
+    }
+  };
+}
+
+const transcriptionServiceConfig = {
+  enabled: runnerConfig.audioTranscription.enabled,
+  apiKey: runnerConfig.openAiApiKey ?? null,
+  model: runnerConfig.audioTranscription.model,
+  language: runnerConfig.audioTranscription.language,
+  maxBytes: runnerConfig.audioTranscription.maxBytes,
+  maxSeconds: runnerConfig.audioTranscription.maxSeconds
+};
+
 const transcriptionService = createTranscriptionService({
   prisma,
   provider: transcriptionProvider,
@@ -847,18 +943,7 @@ const transcriptionService = createTranscriptionService({
   refinementEnabled: refinementConfig.enabled,
   nearbyMessages: nearbyMessagesResolver,
   attachmentResolver: compositeAttachmentResolver,
-  config: {
-    enabled: runnerConfig.audioTranscription.enabled,
-    // `apiKey` here is the disabled-path guard the service uses to
-    // refuse running when nothing's wired. For local-whisper that
-    // gate is the provider object itself; we pass the OpenAI key when
-    // present so the existing OpenAI-path check still works.
-    apiKey: runnerConfig.openAiApiKey ?? null,
-    model: runnerConfig.audioTranscription.model,
-    language: runnerConfig.audioTranscription.language,
-    maxBytes: runnerConfig.audioTranscription.maxBytes,
-    maxSeconds: runnerConfig.audioTranscription.maxSeconds
-  },
+  config: transcriptionServiceConfig,
   // #760: a finished transcript replaces the "[Voice note]" placeholder in
   // the thread's inbox/Today preview. THREAD_UPDATED bumps the version-gated
   // /data/inbox cache and nudges the dashboard over SSE.
@@ -877,6 +962,30 @@ const transcriptionService = createTranscriptionService({
   }
 });
 
+const transcriptionSetup = createTranscriptionSetupManager({
+  modelDir: runnerConfig.audioTranscription.transformers.modelDir,
+  downloadScript: resolve(projectRoot, "scripts", "fetch-whisper-model.mjs"),
+  initialEnabled: () => transcriptionServiceConfig.enabled,
+  initialModelId: () => runnerConfig.audioTranscription.transformers.modelId,
+  persist: (_mode, enabled, modelId) => {
+    const envPath = resolveEnvWritePath();
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_ENABLED", String(enabled));
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_PROVIDER", "transformers");
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_LOCAL_MODEL", modelId);
+    upsertEnvFile(envPath, "AUDIO_TRANSCRIPTION_PROGRESSIVE_MODE", "false");
+  },
+  applyRuntime: (_mode, enabled, modelId) => {
+    process.env.AUDIO_TRANSCRIPTION_ENABLED = String(enabled);
+    process.env.AUDIO_TRANSCRIPTION_PROVIDER = "transformers";
+    process.env.AUDIO_TRANSCRIPTION_LOCAL_MODEL = modelId;
+    runnerConfig.audioTranscription.enabled = enabled;
+    runnerConfig.audioTranscription.provider = "transformers";
+    runnerConfig.audioTranscription.transformers.modelId = modelId;
+    runnerConfig.audioTranscription.progressive.enabled = false;
+    transcriptionServiceConfig.enabled = enabled;
+  }
+});
+
 const scanQueue = createScanQueue({
   adapters,
   eventBus,
@@ -887,6 +996,7 @@ const scanQueue = createScanQueue({
   screenshotDir: runnerConfig.screenshotDir,
   domDumpDir: runnerConfig.domDumpDir,
   auditLog: (input) => auditService.log(input),
+  recordLatency: (input) => messageSyncLatency.record(input),
   onNewPerson: (input) => enqueueEnrichmentForScan?.(input),
   // WhatsApp only scans while the operator has linked a device: an unlinked
   // scan would launch a headless whatsapp-web.js Puppeteer and park it on a
@@ -913,7 +1023,10 @@ const scanQueue = createScanQueue({
 // Late-bind the initial-scan kick now that the scan queue exists (the
 // WhatsApp state-change hook above was wired before this point).
 enqueueWhatsAppInitialScan = () => {
-  const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+  const result = scanQueue.enqueueScan("WHATSAPP", {
+    respectCooldown: true,
+    coalesceWithPending: true
+  });
   void auditService.log({
     platform: "WHATSAPP",
     stage: "Scan",
@@ -925,25 +1038,21 @@ enqueueWhatsAppInitialScan = () => {
   });
 };
 
-// Real-time WhatsApp inbound → debounced scan. whatsapp-web.js fires a
-// "message" event per inbound message; a busy group could fire many in a
-// burst, so we coalesce them into one scan on a trailing timer (the WhatsApp
-// analogue of the iMessage chat.db watcher's debounce). The scan itself is
-// serialised by the queue, so overlapping nudges can't produce parallel
-// WhatsApp scans. Only enqueues while connected — a nudge that lands
-// mid-disconnect is dropped by the scan gate anyway.
-const WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS = 4000;
-let whatsappMessageScanTimer: ReturnType<typeof setTimeout> | null = null;
-onWhatsAppMessageArrived = () => {
-  if (whatsappMessageScanTimer) {
-    return;
-  }
-  whatsappMessageScanTimer = setTimeout(() => {
-    whatsappMessageScanTimer = null;
-    if (whatsappConnect.state !== "connected") {
-      return;
-    }
-    const result = scanQueue.enqueueScan("WHATSAPP", { respectCooldown: true });
+const whatsappChangeTriggeredScan = createChangeTriggeredScan({
+  platform: "WHATSAPP",
+  debounceMs: 750,
+  enqueue: (signal) => {
+    if (whatsappConnect.state !== "connected") return { ok: true };
+    const result = scanQueue.enqueueScan("WHATSAPP", {
+      respectCooldown: true,
+      coalesceWithPending: true,
+      platformThreadId: signal.platformThreadId,
+      trigger: {
+        kind: "platform_event",
+        sourceChangedAt: signal.sourceChangedAt,
+        reason: signal.reason
+      }
+    });
     void auditService.log({
       platform: "WHATSAPP",
       stage: "Scan",
@@ -953,8 +1062,76 @@ onWhatsAppMessageArrived = () => {
         ? { jobId: result.jobId, status: result.status }
         : { blocked: result.blocked, blockReason: result.reason }
     });
-  }, WHATSAPP_MESSAGE_SCAN_DEBOUNCE_MS);
+    return result;
+  },
+  log: (line) => console.log(line)
+});
+onWhatsAppMessageArrived = (input) => {
+  whatsappChangeTriggeredScan.notify({
+    reason: "message",
+    sourceChangedAt: input.sourceChangedAt,
+    platformThreadId: input.platformThreadId
+  });
 };
+
+const imessageChangeTriggeredScan = createChangeTriggeredScan({
+  platform: "IMESSAGE",
+  debounceMs: 25,
+  enqueue: (signal) =>
+    scanQueue.enqueueScan("IMESSAGE", {
+      respectCooldown: true,
+      coalesceWithPending: true,
+      trigger: {
+        kind: "filesystem",
+        sourceChangedAt: signal.sourceChangedAt,
+        reason: signal.reason
+      }
+    }),
+  log: (line) => console.log(line)
+});
+
+const linkedinChangeTriggeredScan = createChangeTriggeredScan({
+  platform: "LINKEDIN",
+  debounceMs: 500,
+  enqueue: (signal) =>
+    scanQueue.enqueueScan("LINKEDIN", {
+      respectCooldown: true,
+      coalesceWithPending: true,
+      trigger: {
+        kind: "browser_change",
+        sourceChangedAt: signal.sourceChangedAt,
+        reason: signal.reason
+      }
+    }),
+  log: (line) => console.log(line)
+});
+onLinkedInInboxChanged = ({ reason, sourceChangedAt }) => {
+  if (scanQueue.isScanning() && scanQueue.getCurrentScanPlatform() === "LINKEDIN") return;
+  void settingsStore.getSettings().then((settings) => {
+    if (!settings.enabledPlatforms.includes("LINKEDIN")) return;
+    linkedinChangeTriggeredScan.notify({
+      reason,
+      sourceChangedAt
+    });
+  });
+};
+
+function startLinkedInRealtimeWatcher(): void {
+  const realtimeAdapter = adapters.LINKEDIN as
+    | (PlatformAdapter & {
+        startInboxRealtimeWatcher?: (input: {
+          debounceMs: number;
+          onChange: (change: { reason: string; sourceChangedAt: string }) => void;
+          log?: (line: string) => void;
+        }) => { stop(): void };
+      })
+    | undefined;
+  realtimeAdapter?.startInboxRealtimeWatcher?.({
+    debounceMs: 300,
+    onChange: (change) => onLinkedInInboxChanged?.(change),
+    log: (line) => console.log(line)
+  });
+}
 
 // Boot-time WhatsApp resume. The connect state machine lives in memory, so a
 // runner restart forgets a linked session even though whatsapp-web.js's
@@ -993,6 +1170,7 @@ const sendService = createSendService({
   eventBus,
   settingsStore,
   auditLog: (input) => auditService.log(input),
+  onPlatformResult: (input) => messageSyncLatency.finishSend(input),
   // Same per-platform mutex key the scan queue uses, so a send and a scan
   // never drive the shared managed page at the same time.
   withPlatformLock: withPlatformControlLock
@@ -1045,10 +1223,33 @@ const scheduledSendPromoter = createScheduledSendPromoter({
 });
 scheduledSendPromoter.start();
 
+// Calendar auto-focus (issue #786): while the operator has a calendar
+// subscription enabled, open a Focus window on its own whenever a live event
+// is happening and close it when the event ends. Runs every 60s; the feed is
+// cached between network fetches. No-op until a URL is saved and enabled.
+const calendarFocusService = createCalendarFocusService({
+  settingsStore,
+  phraseEvent: async ({ activity, operatorProfile }) => {
+    const rows = await prisma.message.findMany({
+      where: { direction: "OUT" },
+      orderBy: [{ timestamp: "desc" }, { id: "desc" }],
+      take: 200,
+      select: { text: true, direction: true, sentVia: true }
+    });
+    const composed = await aiService.composeFocusNote({
+      activity,
+      operatorProfile,
+      voiceSampleTexts: selectStyleSampleTexts(rows, 8)
+    });
+    return composed ? { close: composed.close, professional: composed.professional } : null;
+  }
+});
+calendarFocusService.start();
+
 // Syncs contact birthdays from the macOS AddressBook into Person rows once
 // at boot and then daily. Mac-only and read-only against Contacts; a no-op
 // when Contacts data is unreadable. Feeds the dashboard's birthday surfaces.
-if (runnerConfig.contacts.birthdaySyncEnabled) {
+if (runnerConfig.contacts.birthdaySyncEnabled && runnerConfig.platformAvailability.IMESSAGE) {
   createBirthdaySync().start();
 }
 
@@ -1059,7 +1260,7 @@ if (runnerConfig.contacts.birthdaySyncEnabled) {
 // idempotent (steady-state ticks write nothing). Also feeds the dashboard's
 // "this Mac has no saved contacts" hint via getHealth().
 let imessageNameSync: ImessageNameSync | null = null;
-if (process.platform === "darwin") {
+if (runnerConfig.platformAvailability.IMESSAGE) {
   imessageNameSync = createImessageNameSync();
   imessageNameSync.start();
 }
@@ -1135,8 +1336,10 @@ const enrichmentQueue = createEnrichmentQueue({
 // re-enrich admin endpoint) so the operator can opt into a single
 // "research this person" action. Set ENRICH_AUTO_ENABLED=1 to turn
 // the periodic + on-scan auto-enrichment back on.
-const autoEnrichmentEnabled = (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "1"
-  || (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "true";
+const autoEnrichmentEnabled = runnerConfig.platformAvailability.LINKEDIN && (
+  (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "1"
+  || (process.env.ENRICH_AUTO_ENABLED ?? "").toLowerCase() === "true"
+);
 enqueueEnrichmentForScan = (input) => {
   if (!autoEnrichmentEnabled) return;
   void enrichmentQueue.enqueue(input.personId, input.trigger);
@@ -1159,7 +1362,7 @@ async function withGlobalResetLock<T>(work: () => Promise<T>): Promise<T> {
 }
 
 function parsePlatform(value: unknown): PlatformName {
-  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).parse(value);
+  const parsed = z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]).parse(value);
   return parsed;
 }
 
@@ -1173,7 +1376,13 @@ interface ControlTraceContext {
 }
 
 function maybeParsePlatform(value: unknown): PlatformName | undefined {
-  if (value !== "LINKEDIN" && value !== "INSTAGRAM" && value !== "TIKTOK" && value !== "IMESSAGE") {
+  if (
+    value !== "LINKEDIN" &&
+    value !== "INSTAGRAM" &&
+    value !== "TIKTOK" &&
+    value !== "IMESSAGE" &&
+    value !== "GOOGLE_MESSAGES"
+  ) {
     return undefined;
   }
   return value;
@@ -1225,41 +1434,6 @@ function buildControlAction(method: string, path: string, phase: "START" | "END"
     .toUpperCase();
   const suffix = normalized || "ROOT";
   return `${method.toUpperCase()}_${suffix}_${phase}`;
-}
-
-function summarizeControlBody(body: unknown): Record<string, unknown> {
-  if (!body || typeof body !== "object" || Array.isArray(body)) {
-    return { bodyType: typeof body };
-  }
-
-  const record = body as Record<string, unknown>;
-  const summary: Record<string, unknown> = {
-    bodyKeys: Object.keys(record).slice(0, 12)
-  };
-
-  if (typeof record.platform === "string") {
-    summary.platform = record.platform;
-  }
-  if (typeof record.mode === "string") {
-    summary.mode = record.mode;
-  }
-  if (typeof record.key === "string") {
-    summary.key = record.key;
-  }
-  if (typeof record.hours === "number") {
-    summary.hours = record.hours;
-  }
-  if (typeof record.selector === "string") {
-    summary.selectorLength = record.selector.length;
-  }
-  if (typeof record.text === "string") {
-    summary.textLength = record.text.length;
-  }
-  if (typeof record.clientSendId === "string") {
-    summary.hasClientSendId = true;
-  }
-
-  return summary;
 }
 
 function summarizeError(error: unknown): Record<string, unknown> {
@@ -1360,7 +1534,8 @@ function summarizeFailureDetails(details: Record<string, unknown> | undefined): 
   };
 }
 
-function connectTimeoutMsForCurrentProfile(): number {
+function connectTimeoutMsForCurrentProfile(platform?: PlatformName): number {
+  if (platform === "GOOGLE_MESSAGES") return 120_000;
   return resolveConnectTimeoutMs(runnerConfig.browserProfile.mode, process.env);
 }
 
@@ -1428,6 +1603,9 @@ async function getThreadStub(threadId: string): Promise<{
   });
 
   if (!thread) {
+    throw new Error("Thread not found");
+  }
+  if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
     throw new Error("Thread not found");
   }
 
@@ -1578,8 +1756,12 @@ async function loadVisibleThreadRows(options?: {
   const now = new Date();
   const threads = await prisma.thread.findMany({
     where: options?.archived
-      ? { archivedAt: { not: null } }
+      ? {
+          platform: { in: runnerConfig.availablePlatforms },
+          archivedAt: { not: null }
+        }
       : {
+          platform: { in: runnerConfig.availablePlatforms },
           archivedAt: null,
           // Hide snoozed threads from active views until the timer expires.
           // The dashboard polls every 10s, so threads resurface naturally
@@ -1618,7 +1800,7 @@ async function loadVisibleThreadRows(options?: {
 app.post("/admin/reset", asyncRoute(async (req, res) => {
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).default("LINKEDIN"),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).default("LINKEDIN"),
       confirm: z.string().trim().min(1),
       token: z.string().trim().optional()
     })
@@ -1770,7 +1952,7 @@ app.get("/health", asyncRoute(async (_req, res) => {
   // isn't running; the DB rows stay harmless and the queue's own
   // start() recovery picks them up if ENRICH_AUTO_ENABLED is set.
   const [platforms, enrichmentPending, enrichmentRunning] = await Promise.all([
-    prisma.platform.findMany(),
+    prisma.platform.findMany({ where: { name: { in: runnerConfig.availablePlatforms } } }),
     autoEnrichmentEnabled
       ? prisma.enrichmentJob.count({
           where: {
@@ -1827,6 +2009,7 @@ app.get("/health", asyncRoute(async (_req, res) => {
   })();
 
   res.json({
+    application: "relationship-inbox-os",
     runnerStatus,
     lastScanAt: lastScanAt?.toISOString() ?? null,
     queueDepth: scanQueue.getQueueDepth(),
@@ -1949,13 +2132,7 @@ app.get("/artifacts/:type/:name", (req, res) => {
   }
 });
 
-// Reset macOS Automation permissions and re-trigger the Allow-Messages
-// dialog. Called from the dashboard banner when a send fails with -1743.
-// Runs `tccutil reset AppleEvents` (macOS-only, no-op on other OSes) and
-// then attempts a benign `osascript` against Messages so the system
-// re-prompts for Automation. Also opens System Settings -> Privacy ->
-// Automation as a fallback so the operator can flip the toggle directly.
-app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
+app.post("/control/imessage/permission-help", asyncRoute(async (_req, res) => {
   if (process.platform !== "darwin") {
     res.status(400).json({ error: "macOS only" });
     return;
@@ -1965,35 +2142,23 @@ app.post("/control/imessage/permission-reset", asyncRoute(async (_req, res) => {
   const run = promisify(execFile);
   const ranSteps: string[] = [];
   try {
-    await run("tccutil", ["reset", "AppleEvents"], { timeout: 10_000 });
-    ranSteps.push("tccutil_reset");
-  } catch (error) {
-    ranSteps.push(`tccutil_reset_failed:${(error as Error).message}`);
-  }
-  try {
-    // Trigger a benign event so macOS knows we want Messages access; this
-    // pops the Allow-prompt on next osascript invocation against Messages.
     await run("osascript", ["-e", 'tell application "Messages" to count of services'], { timeout: 8_000 });
     ranSteps.push("messages_probe_ok");
   } catch (error) {
-    // Expected: the probe re-pops the Allow dialog. Operator clicks Allow,
-    // and the next real send works. If the probe still errored we surface
-    // the deeplink to settings as the fallback path.
-    ranSteps.push(`messages_probe_prompt:${((error as Error).message ?? "").slice(0, 80)}`);
+    ranSteps.push(`messages_probe_denied:${((error as Error).message ?? "").slice(0, 80)}`);
   }
   try {
-    // Open BOTH panes in turn so the operator can verify Automation +
-    // Accessibility — file sends now go through UI scripting (clipboard
-    // paste in the Messages window), which needs Accessibility on top of
-    // Automation. The first one opened wins focus; macOS keeps the other
-    // available a click away.
     await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Automation"], { timeout: 5_000 });
-    await run("open", ["x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"], { timeout: 5_000 });
     ranSteps.push("settings_opened");
   } catch {
-    // non-fatal
+    ranSteps.push("settings_open_failed");
   }
-  res.json({ ok: true, steps: ranSteps, message: "Permissions reset. Toggle your terminal app ON for both Automation > Messages AND Accessibility, then retry the send." });
+  const requester = process.env.RIOS_DESKTOP === "1" ? resolveAppName() : "your terminal app";
+  res.json({
+    ok: true,
+    steps: ranSteps,
+    message: `In Automation, turn on Messages under ${requester}, return to the app, then retry. For file attachments, also turn on ${requester} in Accessibility. No permissions were reset.`
+  });
 }));
 
 app.post("/control/imessage/full-disk-access", asyncRoute(async (_req, res) => {
@@ -2225,6 +2390,18 @@ app.get("/data/whatsapp-attachment/:guid", asyncRoute(async (req, res) => {
   await streamWhatsAppMedia({ ...media, res });
 }));
 
+app.get("/data/google-messages-attachment/:guid", asyncRoute(async (req, res) => {
+  const { guid } = z.object({
+    guid: z.string().regex(/^[a-f0-9]{64}\.[a-z0-9]{1,9}$/i)
+  }).parse(req.params);
+  const absolutePath = ensurePathInside(runnerConfig.googleMessages.mediaDir, guid);
+  if (!existsSync(absolutePath)) {
+    res.status(404).json({ error: "Google Messages attachment not found" });
+    return;
+  }
+  res.sendFile(absolutePath);
+}));
+
 // Stream a LinkedIn voice-message audio file to the dashboard. Mirror
 // of /data/imessage-attachment but for the bytes captured by the
 // LinkedIn adapter during scan (`captureLinkedInVoiceMessage`). The
@@ -2288,11 +2465,112 @@ app.get("/data/ai-status", asyncRoute(async (_req, res) => {
         ? settings.geminiModel?.trim() || runnerConfig.geminiModel
         : runnerConfig.openAiModel;
   res.json({
+    enabled: settings.aiEnabled !== false,
     activeProvider,
     activeModel,
     configuredProviders,
     activeProviderConfigured: configuredProviders.includes(activeProvider)
   });
+}));
+
+// First-run setup (#845): save a Gemini API key from the setup wizard.
+// Validates the key live against Google before persisting, writes it into
+// the .env the runner reads (atomic parse-and-update, other keys and
+// comments preserved), then applies it to the live process so AI calls use
+// it immediately — no restart. The key value is never logged.
+app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
+  const result = await applyGeminiKey(req.body?.key, {
+    validate: (key) => validateGeminiKey(key, runnerConfig.geminiBaseUrl),
+    persist: (key) => upsertEnvFile(resolveEnvWritePath(), "GEMINI_API_KEY", key),
+    applyRuntime: (key) => {
+      process.env.GEMINI_API_KEY = key;
+      runnerConfig.geminiApiKey = key;
+    }
+  });
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.message });
+    return;
+  }
+  await settingsStore.updateSettings({ aiEnabled: true, aiProvider: "gemini" });
+  await updateSetupPreferences({ aiEnabled: true });
+  res.json({ ok: true, provider: "gemini" });
+}));
+
+app.get("/data/setup/status", asyncRoute(async (_req, res) => {
+  const [preferences, settings, platforms, operatorProfile] = await Promise.all([
+    getSetupPreferences(),
+    settingsStore.getSettings(),
+    prisma.platform.findMany({
+      where: { name: { in: ["IMESSAGE", "LINKEDIN", "WHATSAPP", "GOOGLE_MESSAGES"] } },
+      select: { name: true, status: true, connectedAt: true, lastError: true }
+    }),
+    settingsStore.getOperatorProfile()
+  ]);
+  res.json({
+    preferences,
+    settings: {
+      enabledPlatforms: settings.enabledPlatforms,
+      aiEnabled: settings.aiEnabled !== false,
+      automaticUpdates: settings.automaticUpdates
+    },
+    platforms,
+    operatorProfile,
+    transcription: transcriptionSetup.status(),
+    contacts: imessageNameSync?.getHealth() ?? null,
+    version: readAppVersion(projectRoot).version
+  });
+}));
+
+app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
+  const payload = z.object({
+    selectedPlatforms: z.array(z.enum(["IMESSAGE", "LINKEDIN", "WHATSAPP", "GOOGLE_MESSAGES"])).optional(),
+    aiEnabled: z.boolean().optional(),
+    startedAt: z.string().max(100).optional(),
+    completedAt: z.string().max(100).optional()
+  }).parse(req.body);
+  const [current, currentSettings] = await Promise.all([
+    getSetupPreferences(),
+    settingsStore.getSettings()
+  ]);
+  const existingPilotPlatforms = currentSettings.enabledPlatforms.filter(
+    (platform): platform is "IMESSAGE" | "LINKEDIN" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
+      platform === "IMESSAGE" ||
+      platform === "LINKEDIN" ||
+      platform === "WHATSAPP" ||
+      platform === "GOOGLE_MESSAGES"
+  );
+  const selectedPlatforms = payload.selectedPlatforms ??
+    (current.startedAt || current.selectedPlatforms.length > 0
+      ? current.selectedPlatforms
+      : existingPilotPlatforms);
+  const aiEnabled = payload.aiEnabled ??
+    (current.startedAt ? current.aiEnabled : currentSettings.aiEnabled !== false);
+  const preferences = await updateSetupPreferences({
+    ...payload,
+    selectedPlatforms,
+    aiEnabled
+  });
+  await settingsStore.updateSettings({ enabledPlatforms: selectedPlatforms, aiEnabled });
+
+  const whatsappEnabled = selectedPlatforms.includes("WHATSAPP");
+  runnerConfig.whatsapp.enabled = whatsappEnabled;
+  process.env.WHATSAPP_ENABLED = String(whatsappEnabled);
+  upsertEnvFile(resolveEnvWritePath(), "WHATSAPP_ENABLED", String(whatsappEnabled));
+  res.json({ ok: true, preferences });
+}));
+
+app.get("/data/setup/transcription", asyncRoute(async (_req, res) => {
+  res.json(transcriptionSetup.status());
+}));
+
+app.post("/control/setup/transcription", asyncRoute(async (req, res) => {
+  const payload = z.object({
+    mode: z.enum(["off", "standard", "enhanced"]),
+    removeDownloadedModels: z.boolean().optional()
+  }).parse(req.body) as { mode: SetupTranscriptionMode; removeDownloadedModels?: boolean };
+  const status = transcriptionSetup.configure(payload.mode, payload.removeDownloadedModels === true);
+  await updateSetupPreferences({ transcriptionMode: payload.mode });
+  res.status(status.phase === "downloading" ? 202 : 200).json(status);
 }));
 
 // ---- System / self-update -------------------------------------------------
@@ -2306,49 +2584,72 @@ app.get("/system/version", asyncRoute(async (_req, res) => {
 }));
 
 app.get("/system/update-check", asyncRoute(async (_req, res) => {
-  const feedUrl = runnerConfig.updateFeedUrl;
+  const packaged = process.env.RIOS_PACKAGED_APP === "1";
+  const settings = await settingsStore.getSettings();
+  const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
   if (!feedUrl) {
-    const current = readAppVersion(projectRoot).version;
+    const current = readAppVersion(projectRoot);
     res.json({
       configured: false,
-      currentVersion: current,
-      latestVersion: current,
+      automaticUpdates: settings.automaticUpdates,
+      currentVersion: current.version,
+      currentReleaseNotes: current.releaseNotes ?? [],
+      latestVersion: current.version,
       updateAvailable: false,
       releaseNotes: []
     });
     return;
   }
   const result = await runUpdateCheck({ projectRoot, feedUrl });
-  res.json({ configured: true, ...result });
+  res.json({
+    configured: true,
+    automaticUpdates: settings.automaticUpdates,
+    // Dev-channel packaged installs self-update in place (quit, swap, relaunch);
+    // student packaged installs still ask for a DMG reinstall.
+    applyMode: packaged && !canSelfUpdateInPlace(projectRoot, packaged) ? "replace_app" : "automatic",
+    ...result
+  });
 }));
 
-app.post("/system/update", asyncRoute(async (_req, res) => {
-  // /system/update is NOT a /control/ path, so the dashboard's default-deny
-  // fetch interceptor never sees it — the Settings app update button
-  // would otherwise start a real self-update mid-presentation. Gate
-  // it server-side as an external action (blocked live + sandbox).
-  if (await checkPresenterGuard(res, settingsStore, { action: "update and restart the app", kind: "external-action" })) return;
-  const feedUrl = runnerConfig.updateFeedUrl;
-  if (!feedUrl) {
-    res.status(409).json({ ok: false, reason: "no_feed_configured" });
-    return;
-  }
+type UpdateStartResult =
+  | { status: "started"; fromVersion: string; toVersion: string; logPath: string }
+  | { status: "already_starting" }
+  | { status: "no_feed_configured" }
+  | { status: "dev_checkout" }
+  | { status: "check_failed"; error: string }
+  | { status: "no_update_available"; currentVersion: string }
+  | { status: "replace_app_required"; message: string };
+
+let updateLaunchInProgress = false;
+let updateStartInProgress = false;
+
+async function checkAndStartAvailableUpdate(): Promise<UpdateStartResult> {
+  const packaged = process.env.RIOS_PACKAGED_APP === "1";
+  const feedUrl = resolveUpdateFeedUrl(projectRoot, runnerConfig.updateFeedUrl);
+  if (!feedUrl) return { status: "no_feed_configured" };
   if (existsSync(join(projectRoot, ".git"))) {
-    res.status(409).json({
-      ok: false,
-      reason: "dev_checkout",
-      message: "This checkout is updated with git, not the student updater."
-    });
-    return;
+    return { status: "dev_checkout" };
   }
   const check = await runUpdateCheck({ projectRoot, feedUrl });
   if (check.error) {
-    res.status(502).json({ ok: false, reason: "check_failed", error: check.error });
-    return;
+    return { status: "check_failed", error: check.error };
   }
   if (!check.updateAvailable) {
-    res.status(409).json({ ok: false, reason: "no_update_available", currentVersion: check.currentVersion });
-    return;
+    return { status: "no_update_available", currentVersion: check.currentVersion };
+  }
+  if (packaged && !canSelfUpdateInPlace(projectRoot, packaged)) {
+    return {
+      status: "replace_app_required",
+      message:
+        `Quit ${resolveAppName()}, install the latest DMG by replacing the app in Applications, then reopen it. Remove the old ${LEGACY_APP_NAME} app if it is still in Applications. Your data and settings in Application Support are preserved.`
+    };
+  }
+  const appBundle = packaged ? containingAppBundle(projectRoot) : "";
+  if (packaged && !appBundle) {
+    return {
+      status: "replace_app_required",
+      message: "This packaged install has an unexpected layout, so the in-place updater refuses to run. Reinstall from the latest DMG instead."
+    };
   }
   const intent = {
     requestedAt: new Date().toISOString(),
@@ -2357,30 +2658,114 @@ app.post("/system/update", asyncRoute(async (_req, res) => {
     feedUrl
   };
   stagePendingUpdate(dataDir, intent);
-  const restart = launchUpdateApplyAndRestart({ projectRoot, feedUrl });
-  res.status(202).json({
-    ok: true,
-    updating: true,
+  const restart = launchUpdateApplyAndRestart({
+    projectRoot,
+    feedUrl,
+    ...(appBundle ? { appBundle } : {})
+  });
+  updateLaunchInProgress = true;
+  return {
+    status: "started",
     fromVersion: intent.fromVersion,
     toVersion: intent.toVersion,
-    logPath: restart.logPath,
-    message: "Update started. Relationship Inbox OS will reopen when it finishes."
-  });
+    logPath: restart.logPath
+  };
+}
+
+async function startAvailableUpdate(): Promise<UpdateStartResult> {
+  if (updateLaunchInProgress || updateStartInProgress) return { status: "already_starting" };
+  updateStartInProgress = true;
+  try {
+    return await checkAndStartAvailableUpdate();
+  } finally {
+    updateStartInProgress = false;
+  }
+}
+
+app.post("/system/update", asyncRoute(async (_req, res) => {
+  // /system/update is NOT a /control/ path, so the dashboard's default-deny
+  // fetch interceptor never sees it — the Settings app update button
+  // would otherwise start a real self-update mid-presentation. Gate
+  // it server-side as an external action (blocked live + sandbox).
+  if (await checkPresenterGuard(res, settingsStore, { action: "update and restart the app", kind: "external-action" })) return;
+  const result = await startAvailableUpdate();
+  if (result.status === "started") {
+    res.status(202).json({
+      ok: true,
+      updating: true,
+      fromVersion: result.fromVersion,
+      toVersion: result.toVersion,
+      logPath: result.logPath,
+      message: `Update started. ${resolveAppName()} will reopen when it finishes.`
+    });
+    return;
+  }
+  if (result.status === "check_failed") {
+    res.status(502).json({ ok: false, reason: result.status, error: result.error });
+    return;
+  }
+  if (result.status === "replace_app_required") {
+    res.status(409).json({ ok: false, reason: result.status, message: result.message });
+    return;
+  }
+  if (result.status === "dev_checkout") {
+    res.status(409).json({
+      ok: false,
+      reason: result.status,
+      message: "This checkout is updated with git, not the student updater."
+    });
+    return;
+  }
+  if (result.status === "no_update_available") {
+    res.status(409).json({ ok: false, reason: result.status, currentVersion: result.currentVersion });
+    return;
+  }
+  if (result.status === "already_starting") {
+    res.status(202).json({ ok: true, updating: true, message: "The update is already starting." });
+    return;
+  }
+  res.status(409).json({ ok: false, reason: result.status });
 }));
+
+const automaticUpdateScheduler = createAutomaticUpdateScheduler({
+  async isEnabled() {
+    const settings = await settingsStore.getSettings();
+    return settings.automaticUpdates &&
+      !settings.demoMode &&
+      settings.presenterDemoMode !== "sandbox" &&
+      settings.presenterDemoMode !== "live" &&
+      !settings.presenterReadOnly;
+  },
+  async installIfAvailable() {
+    const result = await startAvailableUpdate();
+    if (result.status === "started") {
+      console.log(`[system-update] automatic update ${result.fromVersion} -> ${result.toVersion} started`);
+    } else if (result.status === "check_failed") {
+      console.warn(`[system-update] automatic check failed: ${result.error}`);
+    }
+  },
+  onError(error) {
+    console.warn(
+      `[system-update] automatic update failed: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+});
 
 app.post("/control/settings", asyncRoute(async (req, res) => {
   const payload = z
     .object({
       scanIntervalSeconds: z.number().int().min(10).max(3600).optional(),
+      automaticUpdates: z.boolean().optional(),
       amberHours: z.number().int().min(1).max(72).optional(),
       redHours: z.number().int().min(1).max(168).optional(),
       headless: z.boolean().optional(),
       maxMessagesPerThread: z.number().int().min(5).max(100).optional(),
-      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"])).optional(),
+      enabledPlatforms: z.array(z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"])).optional(),
       demoMode: z.boolean().optional(),
       presenterDemoMode: z.enum(["off", "sandbox", "live"]).optional(),
       presenterReadOnly: z.boolean().optional(),
       recentThreadSweepCount: z.number().int().min(5).max(100).optional(),
+      aiEnabled: z.boolean().optional(),
       aiProvider: z.enum(["openai", "glm", "gemini"]).optional(),
       // Empty string from the dashboard is normalised to undefined client-side,
       // but accept either here defensively. Length cap matches typical model
@@ -2901,13 +3286,18 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "run a scan", kind: "external-action" })) return;
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"]).optional(),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).optional(),
       maxThreads: z.number().nullable().optional(),
       maxOpens: z.number().nullable().optional(),
       forceFallback: z.boolean().nullable().optional(),
       scope: z.enum(["update", "full"]).optional()
     })
     .parse(req.body ?? {});
+
+  if (payload.platform && !runnerConfig.availablePlatforms.includes(payload.platform)) {
+    res.status(404).json({ ok: false, reason: "platform_disabled" });
+    return;
+  }
 
   // #774: never let a WhatsApp scan run before the operator has linked a
   // device. The scan path calls ensureConnected(), which for a disconnected
@@ -2982,11 +3372,11 @@ app.post("/control/scan", asyncRoute(async (req, res) => {
 
 app.post("/control/platform/connect", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "connect a platform", kind: "external-action" })) return;
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]) }).parse(req.body);
   const platform = parsePlatform(payload.platform);
   const requestId = getControlTrace(res)?.requestId ?? uuid();
   const startedAt = Date.now();
-  const connectTimeoutMs = connectTimeoutMsForCurrentProfile();
+  const connectTimeoutMs = connectTimeoutMsForCurrentProfile(platform);
 
   await withPlatformControlLock(platform, async () => {
     await auditService.log({
@@ -3071,12 +3461,17 @@ app.post("/control/platform/connect", asyncRoute(async (req, res) => {
         }
       });
 
+      await ensurePlatformEnabledInSettings(platform);
+
       eventBus.emit({
         type: "PLATFORM_STATUS_CHANGED",
         jobId: uuid(),
         platform,
         status: "CONNECTED"
       });
+      if (platform === "LINKEDIN") {
+        startLinkedInRealtimeWatcher();
+      }
 
       await auditService.log({
         platform,
@@ -3159,7 +3554,7 @@ app.post("/control/platform/test-selectors", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "run selector tests", kind: "external-action" })) return;
   const payload = z
     .object({
-      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]),
+      platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]),
       key: z
         .enum([
           "thread_list",
@@ -3280,6 +3675,7 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
     .object({
       text: z.string(),
       clientSendId: z.string().uuid(),
+      clientRequestedAt: z.string().datetime().optional(),
       // Optional ISO 8601 timestamp. When present, the send is persisted
       // as SCHEDULED and the scheduled-send promoter flips it to PENDING
       // when the time elapses. When absent, the send is enqueued
@@ -3360,6 +3756,10 @@ app.post("/control/thread/:threadId/send", maybeMultipart, asyncRoute(async (req
   // the dashboard tab does not lose the send — the row is in the DB and
   // the worker keeps draining.
   try {
+    messageSyncLatency.startSend(
+      payload.clientSendId,
+      payload.clientRequestedAt ?? new Date().toISOString()
+    );
     const queueResult = await sendQueue.enqueueAndKick({
       threadId,
       text: payload.text,
@@ -3927,9 +4327,68 @@ app.post("/control/thread/:threadId/message/:messageId/poll-vote", asyncRoute(as
         status: "FAIL",
         details: { threadId, messageId, optionCount: payload.selectedOptions.length, ...summarizeError(error) }
       });
+      if (isWhatsAppSessionUnavailableError(error)) {
+        res.status(409).json({
+          error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
+          reason: "whatsapp_session_unavailable"
+        });
+        return;
+      }
       throw error;
     }
   });
+}));
+
+// Live poll tallies for the dashboard's "View votes" affordance
+// (R-0100 / #818). Read-only: no presenter guard, no audit row. Fetched on
+// demand because platform-side tallies mutate continuously — persisting
+// counts at scan time would show stale numbers within minutes.
+app.get("/control/thread/:threadId/message/:messageId/poll-votes", asyncRoute(async (req, res) => {
+  const { threadId, messageId } = z
+    .object({ threadId: z.string().min(1), messageId: z.string().min(1) })
+    .parse(req.params);
+
+  const message = await prisma.message.findUnique({ where: { id: messageId } });
+  if (!message || message.threadId !== threadId) {
+    res.status(404).json({ error: "message not found in thread" });
+    return;
+  }
+  if (!message.platformMessageKey) {
+    res.status(400).json({ error: "message has no platform key" });
+    return;
+  }
+
+  const target = await getThreadStub(threadId);
+  const adapter = requireAdapter(target.platform);
+  if (!adapter.getPollVotes) {
+    res.status(400).json({ error: `${target.platform} adapter does not support poll votes` });
+    return;
+  }
+  const threadStub: ThreadStub = {
+    platformThreadId: target.platformThreadId,
+    displayName: target.displayName,
+    threadUrl: target.threadUrl,
+    lastMessagePreview: ""
+  };
+
+  // Serialised with sends/votes on the same platform lock — wweb.js store
+  // reads are cheap, but interleaving them with an in-flight send has
+  // produced Puppeteer races elsewhere, so stay consistent with poll-vote.
+  try {
+    const votes = await withPlatformControlLock(target.platform, () =>
+      adapter.getPollVotes!(threadStub, message.platformMessageKey!)
+    );
+    res.json({ votes });
+  } catch (error) {
+    if (isWhatsAppSessionUnavailableError(error)) {
+      res.status(409).json({
+        error: "WhatsApp lost its connection. Reconnect it in Settings, then try again.",
+        reason: "whatsapp_session_unavailable"
+      });
+      return;
+    }
+    throw error;
+  }
 }));
 
 app.post("/control/thread/:threadId/rescan", asyncRoute(async (req, res) => {
@@ -4353,6 +4812,10 @@ app.post("/control/thread/:threadId/check-draft", asyncRoute(async (req, res) =>
     res.status(404).json({ error: "Thread not found" });
     return;
   }
+  if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
 
   const rawOpenLoops = thread.openLoopsJson ? (JSON.parse(thread.openLoopsJson) as string[]) : [];
   const dismissed = new Set(
@@ -4542,6 +5005,7 @@ app.post(
 );
 
 app.get("/data/inbox", asyncRoute(async (req, res) => {
+  const startedAt = performance.now();
   const search = typeof req.query.search === "string" ? req.query.search : undefined;
   const platform = typeof req.query.platform === "string" ? (req.query.platform as PlatformName) : undefined;
   const risk = typeof req.query.risk === "string" ? req.query.risk : undefined;
@@ -4561,7 +5025,7 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   const cacheKey = req.originalUrl;
   const cached = inboxResponseCache.get(cacheKey);
   if (cached && Date.now() < cached.expires) {
-    res.json(cached.body);
+    sendCachedInboxResponse(req, res, cached, "hit", startedAt);
     return;
   }
   const versionAtStart = dataVersion;
@@ -4672,15 +5136,16 @@ app.get("/data/inbox", asyncRoute(async (req, res) => {
   };
 
   const body = { rows, summary };
+  const response = createCompressedJsonCacheEntry(body, Date.now() + INBOX_CACHE_TTL_MS);
   // Only cache if no write/event landed while we were computing — otherwise
   // this response may already be missing that change.
   if (dataVersion === versionAtStart) {
     if (inboxResponseCache.size > 50) {
       inboxResponseCache.clear();
     }
-    inboxResponseCache.set(cacheKey, { expires: Date.now() + INBOX_CACHE_TTL_MS, body });
+    inboxResponseCache.set(cacheKey, response);
   }
-  res.json(body);
+  sendCachedInboxResponse(req, res, response, "miss", startedAt);
 }));
 
 app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
@@ -4719,6 +5184,10 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
   });
 
   if (!thread) {
+    res.status(404).json({ error: "Thread not found" });
+    return;
+  }
+  if (!runnerConfig.availablePlatforms.includes(thread.platform as PlatformName)) {
     res.status(404).json({ error: "Thread not found" });
     return;
   }
@@ -5501,14 +5970,17 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 }));
 
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
-  const settings = await settingsStore.getSettings();
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
+  const platformsForDisplay = process.platform === "darwin"
+    ? runnerConfig.availablePlatforms
+    : Array.from(new Set([...runnerConfig.availablePlatforms, "IMESSAGE" as const]));
   const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
-    (["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"] as PlatformName[]).map(async (platform) => {
+    platformsForDisplay.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
+      const supported = platform !== "IMESSAGE" || process.platform === "darwin";
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
         prisma.auditLog.findFirst({
@@ -5540,7 +6012,10 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
         lastScanAt: row?.lastScanAt?.toISOString() ?? null,
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
-        enabled: settings.enabledPlatforms.includes(platform),
+        enabled: true,
+        supported,
+        unavailableReason:
+          supported ? null : "iMessage is only available on macOS.",
         runnerProcess: platform === "IMESSAGE" ? runnerProcessInfo : undefined,
         profileDir: sharedProfileDir,
         browserProfileMode: runnerConfig.browserProfile.mode,
@@ -5591,6 +6066,7 @@ app.get("/data/logs", asyncRoute(async (req, res) => {
   const requested = Number(req.query.limit);
   const limit = Number.isFinite(requested) && requested > 0 ? Math.min(requested, 1000) : 200;
   const logs = await prisma.auditLog.findMany({
+    where: { OR: [{ platform: null }, { platform: { in: runnerConfig.availablePlatforms } }] },
     orderBy: { timestamp: "desc" },
     take: limit
   });
@@ -5693,7 +6169,7 @@ app.get("/data/archived", asyncRoute(async (_req, res) => {
 app.get("/data/send-queue", asyncRoute(async (_req, res) => {
   const [activeRows, scheduledRows, recentDoneRows] = await Promise.all([
     prisma.sendRequest.findMany({
-      where: { status: "PENDING" },
+      where: { status: "PENDING", thread: { platform: { in: runnerConfig.availablePlatforms } } },
       include: {
         thread: {
           include: { person: true }
@@ -5702,7 +6178,7 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
       orderBy: { createdAt: "asc" }
     }),
     prisma.sendRequest.findMany({
-      where: { status: "SCHEDULED" },
+      where: { status: "SCHEDULED", thread: { platform: { in: runnerConfig.availablePlatforms } } },
       include: {
         thread: {
           include: { person: true }
@@ -5714,7 +6190,10 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
     // before fading out, and so a failed send is visible even if the user
     // misses the live transition.
     prisma.sendRequest.findMany({
-      where: { status: { in: ["SENT", "FAILED"] } },
+      where: {
+        status: { in: ["SENT", "FAILED"] },
+        thread: { platform: { in: runnerConfig.availablePlatforms } }
+      },
       include: {
         thread: {
           include: { person: true }
@@ -5768,6 +6247,31 @@ app.get("/data/send-queue", asyncRoute(async (_req, res) => {
   });
 }));
 
+app.post("/control/message-sync-latency", asyncRoute(async (req, res) => {
+  const payload = z
+    .object({
+      metric: z.enum(MESSAGE_SYNC_METRICS),
+      durationMs: z.number().finite().min(0).max(24 * 60 * 60 * 1_000),
+      platform: z.enum(["LINKEDIN", "IMESSAGE", "WHATSAPP", "GOOGLE_MESSAGES"]).optional(),
+      outcome: z.enum(["success", "failure"]).optional()
+    })
+    .parse(req.body) as {
+      metric: MessageSyncMetric;
+      durationMs: number;
+      platform?: PlatformName;
+      outcome?: "success" | "failure";
+    };
+  messageSyncLatency.record(payload);
+  res.json({ status: "recorded" });
+}));
+
+app.get("/data/message-sync-latency", (_req, res) => {
+  res.json({
+    generatedAt: new Date().toISOString(),
+    summary: messageSyncLatency.summary()
+  });
+});
+
 app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
   const { clientSendId } = z.object({ clientSendId: z.string().uuid() }).parse(req.params);
   const row = await prisma.sendRequest.findUnique({
@@ -5805,6 +6309,7 @@ app.get("/data/send-status/:clientSendId", asyncRoute(async (req, res) => {
 app.get("/data/people", asyncRoute(async (_req, res) => {
   const [people, visibleThreadGroups, enrichments] = await Promise.all([
     prisma.person.findMany({
+      where: { platform: { in: runnerConfig.availablePlatforms } },
       orderBy: {
         updatedAt: "desc"
       }
@@ -5881,12 +6386,56 @@ app.get("/data/people", asyncRoute(async (_req, res) => {
   );
 }));
 
+app.get("/data/favourites", asyncRoute(async (_req, res) => {
+  const MENU_FAVOURITE_LIMIT = 5;
+  const [favouritePeople, visibleThreadGroups] = await Promise.all([
+    prisma.person.findMany({
+      where: { favouritedAt: { not: null } },
+      orderBy: { favouritedAt: "desc" },
+      take: MENU_FAVOURITE_LIMIT,
+      select: { id: true, displayName: true, platform: true }
+    }),
+    loadVisibleThreadRows()
+  ]);
+
+  const favouriteRiskSettings = await settingsStore.getSettings();
+  const favouriteThresholds = {
+    amberHours: favouriteRiskSettings.amberHours,
+    redHours: favouriteRiskSettings.redHours
+  };
+  const favouriteCounts = personThreadCounts(visibleThreadGroups);
+
+  const latestThreadByPerson = new Map<string, { threadId: string; at: number }>();
+  for (const group of visibleThreadGroups) {
+    const count =
+      favouriteCounts.get(personThreadCountKey(group.source.platform, group.source.personId)) ?? 1;
+    const shaped = toInboxRow(group, count, favouriteThresholds);
+    const at = shaped.lastMessageAt ? Date.parse(shaped.lastMessageAt) : 0;
+    const existing = latestThreadByPerson.get(shaped.personId);
+    if (!existing || at > existing.at) {
+      latestThreadByPerson.set(shaped.personId, { threadId: shaped.id, at });
+    }
+  }
+
+  res.json(
+    favouritePeople.map((person) => ({
+      id: person.id,
+      name: person.displayName,
+      platform: person.platform,
+      threadId: latestThreadByPerson.get(person.id)?.threadId ?? null
+    }))
+  );
+}));
+
 app.get("/data/birthdays", asyncRoute(async (_req, res) => {
   // Contacts whose macOS Contacts card carries a birthday, surfaced as a
   // gentle "reach out" reminder. Each links to the person's most-recent
   // thread so the dashboard can open the conversation in one click.
   const people = await prisma.person.findMany({
-    where: { birthday: { not: null } },
+    where: {
+      platform: { in: runnerConfig.availablePlatforms },
+      birthday: { not: null }
+    },
     select: {
       id: true,
       displayName: true,
@@ -5930,13 +6479,29 @@ app.get("/data/birthdays", asyncRoute(async (_req, res) => {
 // latest iMessage name-sync health snapshot, or null until the first tick
 // completes / on non-macOS hosts where the sync doesn't run.
 app.get("/data/imessage-contact-health", asyncRoute(async (_req, res) => {
-  res.json(imessageNameSync?.getHealth() ?? null);
+  res.json(runnerConfig.platformAvailability.IMESSAGE ? imessageNameSync?.getHealth() ?? null : null);
+}));
+
+app.post("/control/imessage/contacts/resync", asyncRoute(async (_req, res) => {
+  if (!imessageNameSync) {
+    res.status(409).json({
+      ok: false,
+      message: `Contacts are only available when ${resolveAppName()} is running on a Mac.`
+    });
+    return;
+  }
+  await imessageNameSync.tick();
+  res.json({ ok: true, health: imessageNameSync.getHealth() });
 }));
 
 app.get("/data/person/:personId", asyncRoute(async (req, res) => {
   const { personId } = z.object({ personId: z.string().min(1) }).parse(req.params);
   const person = await prisma.person.findUnique({ where: { id: personId } });
   if (!person) {
+    res.status(404).json({ error: "person not found" });
+    return;
+  }
+  if (!runnerConfig.availablePlatforms.includes(person.platform as PlatformName)) {
     res.status(404).json({ error: "person not found" });
     return;
   }
@@ -6441,7 +7006,12 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           professionalNote: z.string().max(2000).default(""),
           audience: z.enum(["favourites", "all_personal"]),
           windowId: z.string().max(80),
-          ackedPersonIds: z.array(z.string().max(120)).max(5000)
+          ackedPersonIds: z.array(z.string().max(120)).max(5000),
+          // Calendar auto-focus (#786). Older dashboard builds don't send
+          // these; default so a hand-started window round-trips as "manual"
+          // and a calendar window keeps its dismissal key through an edit/end.
+          source: z.enum(["manual", "calendar"]).default("manual"),
+          sourceEventKey: z.string().max(120).default("")
         })
         .optional(),
       ackTemplates: z
@@ -6456,11 +7026,69 @@ app.post("/control/operator-profile", asyncRoute(async (req, res) => {
           oneNotePerPerson: z.boolean(),
           audience: z.enum(["favourites", "all_personal"])
         })
+        .optional(),
+      calendarSync: z
+        .object({
+          url: z.string().max(2000),
+          additionalUrls: z.array(z.string().max(2000)).max(11).default([]),
+          enabled: z.boolean(),
+          keyword: z.string().max(120),
+          audience: z.enum(["favourites", "all_personal"]),
+          phraseWithAi: z.boolean().default(false)
+        })
         .optional()
     })
     .parse(req.body);
   const updated = await settingsStore.updateOperatorProfile(payload);
+  // When the calendar subscription changed, re-check the feed right away so a
+  // just-enabled window opens without waiting for the next 60s tick.
+  if (payload.calendarSync !== undefined) {
+    void calendarFocusService.refresh().catch(() => undefined);
+  }
   res.json(updated);
+}));
+
+// Calendar auto-focus (#786): the Settings "check calendar" button. Fetches
+// the operator's iCal feed once (SSRF-guarded) and reports the live event and
+// the next upcoming one so they can confirm the URL works. Always 200 with an
+// { ok } flag so the dashboard shows a calm message, not a thrown error.
+app.post("/control/calendar/preview", asyncRoute(async (req, res) => {
+  if (await checkPresenterGuard(res, settingsStore, { action: "check your calendar", kind: "external-action" })) return;
+  const { url, additionalUrls, keyword } = z
+    .object({
+      url: z.string().max(2000).default(""),
+      additionalUrls: z.array(z.string().max(2000)).max(11).default([]),
+      keyword: z.string().max(120).optional()
+    })
+    .parse(req.body);
+  const urls = calendarUrls({
+    url,
+    additionalUrls,
+    enabled: true,
+    keyword: keyword ?? "",
+    audience: "favourites",
+    phraseWithAi: false
+  });
+  if (urls.length === 0) {
+    res.json({ ok: false, error: "Add at least one calendar's secret iCal address first." });
+    return;
+  }
+  try {
+    const now = new Date();
+    const summaries = await Promise.all(
+      urls.map(async (calendarUrl) => {
+        const { text } = await fetchIcsText(calendarUrl);
+        return summarizeCalendar(text, { now, keyword: keyword ?? "" });
+      })
+    );
+    const summary = mergeCalendarSummaries(summaries);
+    res.json({ ok: true, active: summary.active, next: summary.next });
+  } catch (error) {
+    res.json({
+      ok: false,
+      error: error instanceof Error ? error.message : "Could not read that calendar."
+    });
+  }
 }));
 
 // Issue #438 (pilot R-0059). Opt-in: infer the operator's reply-style fields
@@ -6685,7 +7313,7 @@ app.get("/control/pilot-feedback/status", asyncRoute(async (_req, res) => {
 
 app.post("/control/platform/open-browser", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "open the platform browser", kind: "external-action" })) return;
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]) }).parse(req.body);
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]) }).parse(req.body);
   await withPlatformControlLock(payload.platform, async () => {
     // The zod payload restricts platform to the three with adapters today,
     // but the adapters map is now Partial — narrow via requireAdapter to
@@ -7179,21 +7807,6 @@ app.post("/control/thread/:threadId/delete-draft", asyncRoute(async (req, res) =
 app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
   const { threadId } = z.object({ threadId: z.string().min(1) }).parse(req.params);
   if (await checkPresenterGuard(res, settingsStore, { threadId, action: "mark the thread handled", kind: "thread-mutation" })) return;
-  // If the operator hasn't replied to the latest inbound, "Mark as
-  // handled" really means "I'm done with this conversation, take it
-  // out of my view" — so we archive the thread alongside clearing the
-  // needs-reply / risk fields. When the operator already replied,
-  // mark-done is just a confirmation and we leave the archive state
-  // alone (issue #246).
-  const existing = await prisma.thread.findUnique({
-    where: { id: threadId },
-    select: { lastInboundAt: true, lastOutboundAt: true, archivedAt: true }
-  });
-  const inbound = existing?.lastInboundAt?.getTime() ?? 0;
-  const outbound = existing?.lastOutboundAt?.getTime() ?? 0;
-  const operatorHasNotReplied = !existing?.lastOutboundAt || inbound > outbound;
-  const shouldArchive = operatorHasNotReplied && !existing?.archivedAt;
-
   const targetIds = await actionTargetThreadIds(threadId);
   await prisma.thread.updateMany({
     where: { id: { in: targetIds } },
@@ -7203,7 +7816,7 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
       riskLevel: "GREEN",
       riskReason: "Marked done manually",
       slaDueAt: null,
-      ...(shouldArchive ? { archivedAt: new Date() } : {})
+      handledAt: new Date()
     }
   });
 
@@ -7211,10 +7824,10 @@ app.post("/control/thread/:threadId/mark-done", asyncRoute(async (req, res) => {
     action: "MARK_DONE",
     stage: "Send",
     status: "OK",
-    details: { threadId, archived: shouldArchive, propagatedTo: targetIds.length }
+    details: { threadId, propagatedTo: targetIds.length }
   });
 
-  res.json({ status: "ok", archived: shouldArchive });
+  res.json({ status: "ok" });
 }));
 
 app.get("/control/thread/:threadId/suggest-snooze", asyncRoute(async (req, res) => {
@@ -7374,7 +7987,7 @@ app.post("/control/thread/:threadId/unsnooze", asyncRoute(async (req, res) => {
 
 app.post("/control/platform/reset-session", asyncRoute(async (req, res) => {
   if (await checkPresenterGuard(res, settingsStore, { action: "reset the platform session", kind: "external-action" })) return;
-  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE"]).optional() }).parse(req.body ?? {});
+  const payload = z.object({ platform: z.enum(["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "GOOGLE_MESSAGES"]).optional() }).parse(req.body ?? {});
 
   await withGlobalResetLock(async () => {
     scanQueue.requestAbort("session_reset:manual");
@@ -7639,41 +8252,23 @@ async function start(): Promise<void> {
     const watcher = createIMessageWatcher({
       dbPath: runnerConfig.imessage.dbPath,
       debounceMs: runnerConfig.imessage.watchDebounceMs,
-      onChange: (reason) => {
-        // Honour the operator-facing settings toggle. The chat.db watcher
-        // is gated by the env-level imessage.enabled flag (does this host
-        // even have iMessage?), but settings.enabledPlatforms is the
-        // user-facing "scan iMessage" switch the dashboard renders. If
-        // the operator has it off we must not enqueue scans — otherwise
-        // /data/platforms shows iMessage disabled while the runner is
-        // happily scanning it in the background (issue #202).
-        void settingsStore.getSettings().then((currentSettings) => {
-          if (!currentSettings.enabledPlatforms.includes("IMESSAGE")) {
-            return auditService.log({
-              platform: "IMESSAGE",
-              stage: "Scan",
-              action: "IMESSAGE_WATCH_TRIGGER",
-              status: "OK",
-              details: { reason, skipped: "disabled_in_settings" }
-            });
-          }
-          const result = scanQueue.enqueueScan("IMESSAGE", { respectCooldown: true });
-          return auditService.log({
-            platform: "IMESSAGE",
-            stage: "Scan",
-            action: "IMESSAGE_WATCH_TRIGGER",
-            status: result.ok ? "OK" : "FAIL",
-            details: {
-              reason,
-              ...(result.ok
-                ? { jobId: result.jobId, status: result.status }
-                : { blocked: result.blocked, blockReason: result.reason })
-            }
-          });
+      onChange: ({ reason, sourceChangedAt }) => {
+        imessageChangeTriggeredScan.notify({ reason, sourceChangedAt });
+        void auditService.log({
+          platform: "IMESSAGE",
+          stage: "Scan",
+          action: "IMESSAGE_WATCH_TRIGGER",
+          status: "OK",
+          details: { reason, sourceChangedAt, status: "change_coalesced" }
         });
       }
     });
     watcher.start();
+  }
+
+  const linkedInPlatform = await prisma.platform.findUnique({ where: { name: "LINKEDIN" } });
+  if (runnerConfig.platformAvailability.LINKEDIN && linkedInPlatform?.connectedAt) {
+    startLinkedInRealtimeWatcher();
   }
 
   await new Promise<void>((resolve, reject) => {
@@ -7684,6 +8279,7 @@ async function start(): Promise<void> {
     });
     server.on("error", (error) => reject(error));
   });
+  automaticUpdateScheduler.start();
 }
 
 start().catch((error) => {

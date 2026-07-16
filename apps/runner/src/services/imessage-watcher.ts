@@ -5,7 +5,7 @@ export interface IMessageWatcherDeps {
   dbPath: string;
   debounceMs: number;
   /** Called once per debounced burst of chat.db / WAL / SHM writes. */
-  onChange: (reason: string) => void;
+  onChange: (change: { reason: string; sourceChangedAt: string }) => void;
   /** Optional logger; falls back to console.log. */
   log?: (line: string) => void;
 }
@@ -40,14 +40,19 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
   let watcher: FSWatcher | undefined;
   let debounceTimer: ReturnType<typeof setTimeout> | null = null;
   let pendingReason: string | null = null;
+  let pendingSourceChangedAt: string | null = null;
+  let reattachTimer: ReturnType<typeof setTimeout> | null = null;
+  let reattachAttempts = 0;
   let stopped = false;
 
   function fireDebounced(): void {
     const reason = pendingReason ?? "unknown";
+    const sourceChangedAt = pendingSourceChangedAt ?? new Date().toISOString();
     pendingReason = null;
+    pendingSourceChangedAt = null;
     debounceTimer = null;
     try {
-      deps.onChange(reason);
+      deps.onChange({ reason, sourceChangedAt });
     } catch (error) {
       log(`[imessage-watcher] onChange threw: ${(error as Error).message ?? error}`);
     }
@@ -55,10 +60,23 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
 
   function armDebounce(reason: string): void {
     pendingReason = reason;
+    pendingSourceChangedAt ??= new Date().toISOString();
     if (debounceTimer) {
       clearTimeout(debounceTimer);
     }
     debounceTimer = setTimeout(fireDebounced, deps.debounceMs);
+    debounceTimer.unref?.();
+  }
+
+  function scheduleAttach(baseDelayMs: number): void {
+    if (stopped || reattachTimer) return;
+    const delayMs = Math.min(60_000, baseDelayMs * 2 ** Math.min(reattachAttempts, 5));
+    reattachAttempts += 1;
+    reattachTimer = setTimeout(() => {
+      reattachTimer = null;
+      attach();
+    }, delayMs);
+    reattachTimer.unref?.();
   }
 
   function attach(): void {
@@ -70,15 +88,16 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
         armDebounce(filename.toString());
       });
       watcher.on("error", (error) => {
-        log(`[imessage-watcher] watcher error: ${error.message}; re-arming in 1s`);
+        log(`[imessage-watcher] watcher error: ${error.message}; re-arming with backoff`);
         watcher?.close();
         watcher = undefined;
-        setTimeout(attach, 1_000);
+        scheduleAttach(1_000);
       });
+      reattachAttempts = 0;
       log(`[imessage-watcher] armed on ${watchDir} (debounce ${deps.debounceMs}ms)`);
     } catch (error) {
-      log(`[imessage-watcher] failed to arm watcher: ${(error as Error).message}; retrying in 5s`);
-      setTimeout(attach, 5_000);
+      log(`[imessage-watcher] failed to arm watcher: ${(error as Error).message}; retrying with backoff`);
+      scheduleAttach(5_000);
     }
   }
 
@@ -94,6 +113,11 @@ export function createIMessageWatcher(deps: IMessageWatcherDeps): IMessageWatche
         clearTimeout(debounceTimer);
         debounceTimer = null;
         pendingReason = null;
+        pendingSourceChangedAt = null;
+      }
+      if (reattachTimer) {
+        clearTimeout(reattachTimer);
+        reattachTimer = null;
       }
       watcher?.close();
       watcher = undefined;

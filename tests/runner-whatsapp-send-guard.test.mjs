@@ -84,6 +84,9 @@ test("checkSendGuard rejects when a send to the same recipient is within the int
   assert.equal(result.allowed, false);
   assert.match(result.reason, /Per-recipient send interval not yet elapsed/);
   assert.match(result.reason, /20s remaining/);
+  // The interval denial is transient, so it advertises how long to wait —
+  // the adapter queues the send for this long instead of failing (#816).
+  assert.equal(result.retryAfterMs, 20_000);
 });
 
 test("checkSendGuard allows a send when the prior send to this recipient was OUTSIDE the interval window", async () => {
@@ -100,6 +103,8 @@ test("checkSendGuard rejects when the rolling-24h cap is hit", async () => {
   );
   assert.equal(result.allowed, false);
   assert.match(result.reason, /24h send cap reached \(30\/30\)/);
+  // Cap denials are NOT waitable — no retry hint, the send must fail.
+  assert.equal(result.retryAfterMs, undefined);
 });
 
 test("checkSendGuard rejects when the rolling-24h cap is exceeded", async () => {

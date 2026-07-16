@@ -54,6 +54,7 @@ import {
   normalizeCanonicalLinkedInThreadId
 } from "../linkedin/linkedinIdentity.js";
 import { parseLinkedInListTimestamp } from "../linkedin/linkedinTime.js";
+import type { MessageSyncMetric } from "./message-sync-latency";
 
 interface ScanQueueDeps {
   // Partial: not every PlatformName has an adapter on main today. The
@@ -102,6 +103,11 @@ interface ScanQueueDeps {
    * (the /control/scan route already 409s an unlinked WhatsApp scan).
    */
   isPlatformScannable?: (platform: PlatformName) => boolean;
+  recordLatency?: (input: {
+    metric: MessageSyncMetric;
+    durationMs: number;
+    platform?: PlatformName;
+  }) => void;
 }
 
 /**
@@ -124,7 +130,15 @@ type ScanJob = {
   scope: ScanScope;
   /** Drives per-platform adaptive backoff bookkeeping in runJob (#403). */
   fromScheduler?: boolean;
+  platformThreadId?: string;
+  trigger?: ScanTrigger;
 };
+
+export interface ScanTrigger {
+  kind: "filesystem" | "platform_event" | "browser_change";
+  sourceChangedAt: string;
+  reason: string;
+}
 
 interface TraceAwareAdapter {
   setRunLogger?: (logger: RunLogger | null) => void;
@@ -214,7 +228,14 @@ interface LinkedInScanAdapter extends PlatformAdapter {
   }): Promise<ThreadStub[]>;
 }
 
-const allPlatforms: PlatformName[] = ["LINKEDIN", "INSTAGRAM", "TIKTOK", "IMESSAGE", "WHATSAPP"];
+const allPlatforms: PlatformName[] = [
+  "LINKEDIN",
+  "INSTAGRAM",
+  "TIKTOK",
+  "IMESSAGE",
+  "WHATSAPP",
+  "GOOGLE_MESSAGES"
+];
 
 type EnqueueScanOptions = {
   respectCooldown?: boolean;
@@ -222,6 +243,9 @@ type EnqueueScanOptions = {
   maxThreads?: number;
   maxOpens?: number;
   forceFallback?: boolean;
+  coalesceWithPending?: boolean;
+  platformThreadId?: string;
+  trigger?: ScanTrigger;
   /** Default "update". See ScanScope for what each value means. */
   scope?: ScanScope;
   /**
@@ -408,35 +432,21 @@ export function decideSameThreadTwinDeleteMerge(
   });
 }
 
-/**
- * A new inbound on an ARCHIVED thread should bring it back to the active
- * inbox — the same reasoning as the snooze-clear in the thread upsert:
- * archiving means "done for now", not "hide this person's future replies
- * forever". Without this a contact who messages after being archived is
- * silently lost from the active inbox (Richard, 2026-07-05: "Tim" was
- * archived, messaged again twice, and never resurfaced — the operator had
- * to hunt for him in Archived).
- *
- * Resurface only when BOTH hold:
- *   - the newest inbound is newer than the archive decision — a genuinely
- *     new message arrived AFTER archiving. A rescan of the same history, or
- *     an old unreplied inbound the operator archived on purpose, must NOT
- *     un-archive.
- *   - the thread now needs a reply — a bare reaction / acknowledgement that
- *     doesn't flip needsReply shouldn't drag a handled thread back.
- *
- * Compares against archivedAt (not the last-seen inbound) so it also
- * self-heals threads already stuck in this state from before the fix.
- */
-export function decideArchivedResurface(input: {
-  archivedAt: Date | null;
+export function applyHandledBoundary(input: {
   needsReply: boolean;
+  handledAt: Date | null;
   lastInboundAt: Date | null;
-}): boolean {
-  if (!input.archivedAt) return false;
-  if (!input.needsReply) return false;
-  if (!input.lastInboundAt) return false;
-  return input.lastInboundAt.getTime() > input.archivedAt.getTime();
+}): { needsReply: boolean; clearHandledAt: boolean } {
+  if (!input.handledAt) {
+    return { needsReply: input.needsReply, clearHandledAt: false };
+  }
+  const receivedNewInbound = Boolean(
+    input.lastInboundAt && input.lastInboundAt.getTime() > input.handledAt.getTime()
+  );
+  return {
+    needsReply: receivedNewInbound ? input.needsReply : false,
+    clearHandledAt: receivedNewInbound
+  };
 }
 
 export function normalizePositiveScanCap(value: unknown): number | undefined {
@@ -631,6 +641,27 @@ export function resolveEnqueueStatus(
   processingBeforeEnqueue: boolean
 ): "queued" | "running" {
   return processingBeforeEnqueue ? "queued" : "running";
+}
+
+export function jobCoversTriggeredScan(
+  job: Pick<ScanJob, "platform" | "platformThreadId">,
+  requestedPlatform: PlatformName | undefined,
+  requestedThreadId: string | undefined
+): boolean {
+  if (requestedPlatform === undefined) {
+    return job.platform === undefined && job.platformThreadId === undefined;
+  }
+  if (job.platform !== undefined && job.platform !== requestedPlatform) return false;
+  if (job.platformThreadId === undefined) return true;
+  return requestedThreadId !== undefined && job.platformThreadId === requestedThreadId;
+}
+
+function earlierTrigger(current: ScanTrigger | undefined, incoming: ScanTrigger | undefined): ScanTrigger | undefined {
+  if (!current) return incoming;
+  if (!incoming) return current;
+  return Date.parse(current.sourceChangedAt) <= Date.parse(incoming.sourceChangedAt)
+    ? { ...current, reason: current.reason === incoming.reason ? current.reason : `${current.reason},${incoming.reason}` }
+    : { ...incoming, reason: current.reason === incoming.reason ? incoming.reason : `${current.reason},${incoming.reason}` };
 }
 
 export function createScanQueue(deps: ScanQueueDeps) {
@@ -1064,7 +1095,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
     options?: EnqueueScanOptions
   ): EnqueueScanResult {
     const requestId = options?.requestId ?? uuid();
-    if (isLinkedInInFlight({
+    if (options?.coalesceWithPending) {
+      const pending = queue.find((entry) =>
+        jobCoversTriggeredScan(entry, platform, options.platformThreadId)
+      );
+      if (pending) {
+        pending.trigger = earlierTrigger(pending.trigger, options.trigger);
+        return {
+          ok: true,
+          jobId: pending.jobId,
+          status: "queued",
+          requestId: pending.jobId,
+          platform: pending.platform
+        };
+      }
+    }
+    if (!options?.coalesceWithPending && isLinkedInInFlight({
       requestedPlatform: platform,
       currentJob,
       queuedJobs: queue
@@ -1124,7 +1170,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
       maxOpens: normalizePositiveScanCap(options?.maxOpens),
       forceFallback: shouldUseForceFallback(options?.forceFallback),
       scope: options?.scope ?? "update",
-      fromScheduler: options?.fromScheduler === true
+      fromScheduler: options?.fromScheduler === true,
+      platformThreadId: options?.platformThreadId,
+      trigger: options?.trigger
     };
 
     // Capture whether a job is already in flight BEFORE triggerProcessNext():
@@ -1147,26 +1195,33 @@ export function createScanQueue(deps: ScanQueueDeps) {
   function startScheduler(): void {
     if (isAutoScanDisabledInDev()) {
       if (scheduler) {
-        clearInterval(scheduler);
+        clearTimeout(scheduler);
         scheduler = undefined;
       }
       return;
     }
 
     if (scheduler) {
-      clearInterval(scheduler);
+      clearTimeout(scheduler);
     }
 
-    scheduler = setInterval(() => {
-      void (async () => {
+    const scheduleNext = (delayMs: number): void => {
+      scheduler = setTimeout(() => void tick(), Math.max(1_000, Math.min(delayMs, 60_000)));
+      scheduler.unref?.();
+    };
+
+    const tick = async (): Promise<void> => {
+      try {
         const settings = await deps.settingsStore.getSettings();
         if (settings.demoMode) {
+          scheduleNext(60_000);
           return;
         }
 
         const now = Date.now();
         const intervalMs = settings.scanIntervalSeconds * 1000;
         if (processing) {
+          scheduleNext(1_000);
           return;
         }
 
@@ -1175,9 +1230,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         // with active backoff (#403) are skipped this tick and picked
         // up on a later one. The queue serialises jobs so this never
         // produces parallel scans of different platforms.
-        const enabledPlatforms = settings.enabledPlatforms.filter((platform) =>
-          allPlatforms.includes(platform)
-        );
+        const enabledPlatforms = allPlatforms.filter((platform) => Boolean(deps.adapters[platform]));
         for (const platform of enabledPlatforms) {
           if (deps.isPlatformScannable && !deps.isPlatformScannable(platform)) {
             continue;
@@ -1197,8 +1250,22 @@ export function createScanQueue(deps: ScanQueueDeps) {
             fromScheduler: true
           });
         }
-      })().catch((error) => {
-        void deps.auditLog({
+
+        if (processing || queue.length > 0) {
+          scheduleNext(1_000);
+          return;
+        }
+        const nextDueMs = enabledPlatforms.reduce((soonest, platform) => {
+          const state = adaptiveBackoffByPlatform.get(platform);
+          if (!state) return Math.min(soonest, intervalMs);
+          const dueAt =
+            state.lastScheduledScanAt +
+            intervalMs * adaptiveBackoffMultiplier(state.consecutiveNoChange);
+          return Math.min(soonest, Math.max(1_000, dueAt - Date.now()));
+        }, 60_000);
+        scheduleNext(nextDueMs);
+      } catch (error) {
+        await deps.auditLog({
           stage: "Scan",
           action: "SCHEDULER_TICK_FAIL",
           status: "FAIL",
@@ -1208,8 +1275,11 @@ export function createScanQueue(deps: ScanQueueDeps) {
             stack: error instanceof Error ? error.stack : undefined
           }
         });
-      });
-    }, 1000);
+        scheduleNext(5_000);
+      }
+    };
+
+    scheduleNext(1_000);
   }
 
   async function processNext(): Promise<void> {
@@ -1253,9 +1323,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const settings = await deps.settingsStore.getSettings();
     const scanPlatforms = job.platform
       ? [job.platform]
-      : settings.enabledPlatforms.filter(
+      : allPlatforms.filter(
           (platform) =>
-            allPlatforms.includes(platform) &&
+            Boolean(deps.adapters[platform]) &&
             (!deps.isPlatformScannable || deps.isPlatformScannable(platform))
         );
 
@@ -1343,12 +1413,6 @@ export function createScanQueue(deps: ScanQueueDeps) {
 
         const adapter = deps.adapters[platform];
         if (!adapter) {
-          // Adapter map is Partial: a platform appearing in enabledPlatforms
-          // without a registered adapter is a config drift, not a fatal
-          // runtime state. Log and skip this iteration. Every enabled
-          // platform now has a registered adapter or the calm not-implemented
-          // stub (WHATSAPP when WHATSAPP_ENABLED is off), so this skip is a
-          // belt-and-braces guard against future drift.
           await deps.auditLog({
             platform,
             stage: "Scan",
@@ -2124,7 +2188,24 @@ export function createScanQueue(deps: ScanQueueDeps) {
             // below costs seconds of synchronous SQLite per tick on a real
             // Messages library and used to run on EVERY watcher tick.
             let incrementalPlan: IncrementalScanPlan | null = null;
-            if (adapterSupportsIncrementalScan(adapter)) {
+            if (job.platformThreadId && adapter.fetchThreadById) {
+              const targeted = await adapter.fetchThreadById(job.platformThreadId);
+              candidatesToSync = targeted ? [{ thread: targeted }] : [];
+              rawThreadCount = candidatesToSync.length;
+              effectiveThreadCount = rawThreadCount;
+              candidatesBeforeCap = rawThreadCount;
+              threadsScannedCount = rawThreadCount;
+              unreadCandidatesCount = targeted && (targeted.unreadCount ?? 0) > 0 ? 1 : 0;
+              needsReplyCandidatesCount = targeted?.needsReplyFromList ? 1 : 0;
+              runLogger.logDecision({
+                stage: "collect_threads",
+                decision: "Resolved event-targeted thread",
+                details: {
+                  platformThreadId: job.platformThreadId,
+                  found: Boolean(targeted)
+                }
+              });
+            } else if (adapterSupportsIncrementalScan(adapter)) {
               const storedWatermark = await loadScanWatermark(platform);
               incrementalPlan = await resolveIncrementalScanPlan(adapter, storedWatermark);
               capturedScanWatermark = incrementalPlan.watermark;
@@ -2140,7 +2221,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
               });
             }
 
-            if (incrementalPlan && incrementalPlan.mode === "skip") {
+            if (job.platformThreadId && adapter.fetchThreadById) {
+              headline("COLLECT_TARGETED_OK", "event-targeted candidate collection complete", {
+                platformThreadId: job.platformThreadId,
+                candidatesCount: candidatesToSync.length
+              });
+            } else if (incrementalPlan && incrementalPlan.mode === "skip") {
               // Nothing changed upstream since the last completed scan -
               // finish the tick with zero candidates. Same flow/events as a
               // scan that found no work, so consumers see a normal scan.
@@ -2344,7 +2430,9 @@ export function createScanQueue(deps: ScanQueueDeps) {
                 job.jobId,
                 runLogger,
                 candidateToSync.messages,
-                markedFullBackfill
+                markedFullBackfill,
+                false,
+                job.trigger
               );
               updatedThreads += syncResult.updatedThreads;
               platformUpdatedThreads += syncResult.updatedThreads;
@@ -2887,7 +2975,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     // AI for ACTIVE threads — running it synchronously across hundreds of
     // dormant backfill threads just rate-limits the AI provider and is not
     // what the backfill is for.
-    skipAi = false
+    skipAi = false,
+    trigger?: ScanTrigger
   ): Promise<{ updatedThreads: number; parsedMessages: number }> {
     const candidateListTimestamp = parseCandidateListTimestamp(candidate.lastMessageAt);
     const adapter = deps.adapters[platform];
@@ -3410,6 +3499,29 @@ export function createScanQueue(deps: ScanQueueDeps) {
       }
     }
 
+    const persistedAt = new Date().toISOString();
+    const syncTiming = trigger
+      ? {
+          sourceChangedAt: trigger.sourceChangedAt,
+          persistedAt,
+          trigger: trigger.kind
+        }
+      : undefined;
+    if (syncTiming) {
+      deps.recordLatency?.({
+        metric: "source_change_to_persisted_message",
+        durationMs: Date.parse(syncTiming.persistedAt) - Date.parse(syncTiming.sourceChangedAt),
+        platform
+      });
+      deps.eventBus.emit({
+        type: "MESSAGES_PERSISTED",
+        jobId,
+        threadId: thread.id,
+        platform,
+        syncTiming
+      });
+    }
+
     // Transcription enqueue. We resolve the persisted Message ids in a
     // single query rather than per-message lookups, then hand each one to
     // the optional hook. Fire-and-forget: scans never block on OpenAI
@@ -3534,7 +3646,13 @@ export function createScanQueue(deps: ScanQueueDeps) {
     const messageDerivedNeedsReply = Boolean(
       resolvedLastInboundAt && (!resolvedLastOutboundAt || resolvedLastInboundAt > resolvedLastOutboundAt)
     );
-    const resolvedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
+    const derivedNeedsReply = hasPersistedMessages ? messageDerivedNeedsReply : Boolean(candidate.needsReplyFromList);
+    const handledBoundary = applyHandledBoundary({
+      needsReply: derivedNeedsReply,
+      handledAt: thread.handledAt,
+      lastInboundAt: resolvedLastInboundAt
+    });
+    const resolvedNeedsReply = handledBoundary.needsReply;
     // latestRealMessage already excludes system-event placeholders. The
     // previous fallback `?? latestMessagesDesc[0]` could surface a
     // "[system event]" row as lastMessageDirection/Text on threads where
@@ -3780,21 +3898,12 @@ export function createScanQueue(deps: ScanQueueDeps) {
         (!thread.lastInboundAt || resolvedLastInboundAt.getTime() > thread.lastInboundAt.getTime())
           ? { snoozedUntil: null }
           : {}),
-        // Resurface an archived thread when the contact sends a NEW message
-        // that needs a reply. Twin of the snooze-clear above: archiving is
-        // "done for now", not "hide their future replies forever", so a
-        // reply arriving after the archive must return the thread to the
-        // active inbox instead of silently disappearing into Archived.
-        ...(decideArchivedResurface({
-          archivedAt: thread.archivedAt,
-          needsReply: resolvedNeedsReply,
-          lastInboundAt: resolvedLastInboundAt
-        })
-          ? { archivedAt: null }
-          : {}),
-        riskLevel: risk.level,
-        slaDueAt: risk.slaDueAt,
-        riskReason: hasPersistedMessages
+        ...(handledBoundary.clearHandledAt ? { handledAt: null } : {}),
+        riskLevel: resolvedNeedsReply ? risk.level : "GREEN",
+        slaDueAt: resolvedNeedsReply ? risk.slaDueAt : null,
+        riskReason: thread.handledAt && !handledBoundary.clearHandledAt
+          ? "Marked done manually"
+          : hasPersistedMessages
           ? risk.riskReason
           : resolvedNeedsReply
             ? "Awaiting reply (list preview signal)"
@@ -3847,7 +3956,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
     deps.eventBus.emit({
       type: "THREAD_UPDATED",
       jobId,
-      threadId: thread.id
+      threadId: thread.id,
+      syncTiming
     });
 
     await deps.auditLog({
@@ -3932,6 +4042,7 @@ export function createScanQueue(deps: ScanQueueDeps) {
         runLogger?: RunLogger;
         messages?: NormalizedMessage[];
         skipAi?: boolean;
+        trigger?: ScanTrigger;
       }
     ) =>
       syncThread(
@@ -3942,7 +4053,8 @@ export function createScanQueue(deps: ScanQueueDeps) {
         input.runLogger,
         input.messages,
         false,
-        input.skipAi ?? false
+        input.skipAi ?? false,
+        input.trigger
       ),
     clearAbort
   };

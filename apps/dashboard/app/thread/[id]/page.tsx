@@ -40,6 +40,7 @@ import {
 import { Menu } from "@/components/ui/menu";
 import { apiGet, apiPost, apiPostForm, peekCache, runAction } from "@/lib/api";
 import { BrandLoader } from "@/components/common/brand-loader";
+import { APP_NAME } from "@/lib/branding";
 import { setFavourite } from "@/lib/favourites";
 import { runActionWithFeedback, showToast } from "@/lib/feedback";
 import { signalReassessStart } from "@/lib/reassess-status";
@@ -60,9 +61,10 @@ import type {
 } from "@/lib/types";
 import { IMessageMedia, VoiceMessageTranscript } from "@/components/thread/imessage-media";
 import { WhatsAppMedia } from "@/components/thread/whatsapp-media";
+import { GoogleMessagesMedia } from "@/components/thread/google-messages-media";
 import { WhatsAppPoll } from "@/components/thread/whatsapp-poll";
 import { WhatsAppText } from "@/components/thread/whatsapp-text";
-import { getWhatsAppPoll } from "@/lib/whatsapp-poll";
+import { getWhatsAppPoll, type PollVoteRecord } from "@/lib/whatsapp-poll";
 import { isNonContentIMessageSystemEvent } from "@/lib/imessage-system-events";
 import { foldSynthesizedReactions } from "@/lib/synthesized-reactions";
 import { formatClock, formatRelative } from "@/lib/time";
@@ -101,6 +103,11 @@ import { ThreadBriefBand } from "@/components/thread/ThreadBriefBand";
 import { chooseDisplayBrief } from "@/lib/reply-brief";
 import { restoreFailedAttachments } from "@/lib/composer-attachments";
 import { nextMorningSendSlot, shouldOfferLateNightSchedule } from "@/lib/late-night-send";
+import {
+  afterNextPaint,
+  recordMessageSyncLatency
+} from "@/lib/message-sync-latency";
+import { nextSendReconcileDelayMs } from "@/lib/send-reconcile";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
 import { resolveSendRecovery, type SendStatusResponse } from "@/lib/send-delivery";
 
@@ -523,7 +530,9 @@ export default function ThreadPage() {
     () => peekCache<ThreadResponse>(`/runner/data/thread/${threadId}`) ?? null
   );
   const [siblings, setSiblings] = useState<InboxRow[]>([]);
-  const [siblingPlatform, setSiblingPlatform] = useState<"all" | "LINKEDIN" | "IMESSAGE">("all");
+  const [siblingPlatform, setSiblingPlatform] = useState<
+    "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
+  >("all");
   const [platforms, setPlatforms] = useState<PlatformCard[]>([]);
   const [logs, setLogs] = useState<AuditLogRow[]>([]);
   // Focused thread: cuid of the parent message whose thread we're zoomed
@@ -666,6 +675,8 @@ export default function ThreadPage() {
   // send. Each entry holds the actual File for upload + a previewUrl for the
   // chip thumbnail (image previews; a generic icon for everything else).
   const [composerAttachments, setComposerAttachments] = useState<ComposerAttachment[]>([]);
+  const [dropActive, setDropActive] = useState(false);
+  const dragDepthRef = useRef(0);
   const [recording, setRecording] = useState(false);
   const recorderRef = useRef<MediaRecorder | null>(null);
   const recordedChunksRef = useRef<BlobPart[]>([]);
@@ -846,7 +857,7 @@ export default function ThreadPage() {
   // the composer keys off the local time, so this lets it appear/disappear
   // live as the clock crosses the 22:00 / 06:00 quiet-window boundary without
   // the operator needing to re-type. One render a minute is negligible next to
-  // the 3s send-queue poll already running on this page.
+  // the active-window send reconciliation already running on this page.
   const [clockNow, setClockNow] = useState(() => new Date());
   useEffect(() => {
     const id = setInterval(() => setClockNow(new Date()), 60_000);
@@ -1182,6 +1193,12 @@ export default function ThreadPage() {
         errorMessage?: string;
         errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
         stage?: string;
+        platform?: "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
+        syncTiming?: {
+          sourceChangedAt: string;
+          persistedAt: string;
+          trigger: string;
+        };
       }>).detail;
       if (!detail || !threadId) return;
       // Sibling-aware routing: accept events for the open thread OR any sibling
@@ -1207,6 +1224,17 @@ export default function ThreadPage() {
               : p
           )
         );
+      } else if (detail.type === "MESSAGES_PERSISTED" && detail.syncTiming) {
+        const persistedAt = detail.syncTiming.persistedAt;
+        void refreshThread().then(() => {
+          afterNextPaint(() => {
+            recordMessageSyncLatency({
+              metric: "persisted_message_to_visible_ui",
+              durationMs: Date.now() - Date.parse(persistedAt),
+              platform: detail.platform
+            });
+          });
+        });
       } else if (detail.type === "SUGGESTED_REPLIES_UPDATED" || detail.type === "THREAD_UPDATED") {
         // Thread-only + debounced: a scan burst of THREAD_UPDATED events
         // collapses into one /data/thread refetch instead of N full refreshes.
@@ -1235,11 +1263,16 @@ export default function ThreadPage() {
 
   // Send-queue polling fallback for SSE-degraded environments.
   useEffect(() => {
-    if (!threadId) return undefined;
+    if (!threadId || pendingSends.length === 0) return undefined;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const startedAt = Date.now();
     const tick = async () => {
       if (cancelled) return;
-      if (pendingSendsRef.current.length === 0) return;
+      if (
+        pendingSendsRef.current.length === 0 ||
+        pendingSendsRef.current.every((pending) => pending.failed)
+      ) return;
       try {
         const queue = await apiGet<{
           recent: Array<{
@@ -1287,14 +1320,22 @@ export default function ThreadPage() {
       } catch {
         // Network blip - try again next tick.
       }
+      if (
+        cancelled ||
+        pendingSendsRef.current.length === 0 ||
+        pendingSendsRef.current.every((pending) => pending.failed)
+      ) return;
+      timer = setTimeout(
+        () => void tick(),
+        nextSendReconcileDelayMs(Date.now() - startedAt, document.visibilityState === "visible")
+      );
     };
-    const timer = setInterval(() => void tick(), 3000);
     void tick();
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      if (timer) clearTimeout(timer);
     };
-  }, [threadId, refresh]);
+  }, [threadId, refresh, pendingSends.length]);
 
   const checkPendingDelivery = useCallback(
     async (clientSendId: string) => {
@@ -1438,6 +1479,13 @@ export default function ThreadPage() {
       ...prev,
       { clientSendId, text, sentAt, attachments: attachmentsToSend }
     ]);
+    afterNextPaint(() => {
+      recordMessageSyncLatency({
+        metric: "send_click_to_visible_acknowledgement",
+        durationMs: Date.now() - Date.parse(sentAt),
+        platform: thread.platform
+      });
+    });
     setComposer("");
     // Reset the source too: an emptied composer must never keep the AI-predraft
     // accent frame + badge (#350). Without this the badge frames a blank input
@@ -1456,6 +1504,7 @@ export default function ThreadPage() {
         const form = new FormData();
         form.append("text", text);
         form.append("clientSendId", clientSendId);
+        form.append("clientRequestedAt", sentAt);
         if (replyToMessageId) form.append("replyToMessageId", replyToMessageId);
         for (const a of attachmentsToSend) {
           form.append("attachments", a.file, a.file.name);
@@ -1465,6 +1514,7 @@ export default function ThreadPage() {
         await apiPost(`/runner/control/thread/${thread.id}/send`, {
           text,
           clientSendId,
+          clientRequestedAt: sentAt,
           ...(replyToMessageId ? { replyToMessageId } : {})
         });
       }
@@ -1527,6 +1577,76 @@ export default function ThreadPage() {
       if (removed?.previewUrl) URL.revokeObjectURL(removed.previewUrl);
       return next;
     });
+  }, []);
+
+  const composerAcceptsFiles =
+    thread?.platform === "IMESSAGE" ||
+    thread?.platform === "WHATSAPP" ||
+    thread?.platform === "GOOGLE_MESSAGES";
+
+  const isAttachableFile = useCallback((file: File) => {
+    const mime = (file.type ?? "").toLowerCase();
+    return (
+      mime.startsWith("image/") ||
+      mime.startsWith("video/") ||
+      mime.startsWith("audio/") ||
+      mime === "application/pdf" ||
+      file.name.toLowerCase().endsWith(".gif")
+    );
+  }, []);
+
+  const dragHasFiles = (event: React.DragEvent) =>
+    Array.from(event.dataTransfer?.types ?? []).includes("Files");
+
+  const onComposerDragEnter = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles || !dragHasFiles(event)) return;
+      event.preventDefault();
+      dragDepthRef.current += 1;
+      setDropActive(true);
+    },
+    [composerAcceptsFiles]
+  );
+  const onComposerDragOver = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles || !dragHasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = "copy";
+    },
+    [composerAcceptsFiles]
+  );
+  const onComposerDragLeave = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles || !dragHasFiles(event)) return;
+      dragDepthRef.current = Math.max(0, dragDepthRef.current - 1);
+      if (dragDepthRef.current === 0) setDropActive(false);
+    },
+    [composerAcceptsFiles]
+  );
+  const onComposerDrop = useCallback(
+    (event: React.DragEvent) => {
+      if (!composerAcceptsFiles) return;
+      event.preventDefault();
+      dragDepthRef.current = 0;
+      setDropActive(false);
+      const files = Array.from(event.dataTransfer?.files ?? []).filter(isAttachableFile);
+      if (files.length > 0) addFiles(files);
+    },
+    [composerAcceptsFiles, addFiles, isAttachableFile]
+  );
+
+  useEffect(() => {
+    const prevent = (event: DragEvent) => {
+      if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) {
+        event.preventDefault();
+      }
+    };
+    window.addEventListener("dragover", prevent);
+    window.addEventListener("drop", prevent);
+    return () => {
+      window.removeEventListener("dragover", prevent);
+      window.removeEventListener("drop", prevent);
+    };
   }, []);
 
   const replaceComposerRange = useCallback(
@@ -2047,17 +2167,26 @@ export default function ThreadPage() {
     const platformName = platform ?? thread.platform;
     switch (pending.errorKind) {
       case "AUTH_REQUIRED":
+        if (platformName === "WHATSAPP") {
+          // WhatsApp reconnects via the QR flow on the Settings page, not the
+          // open-browser control (its zod payload rejects WHATSAPP). Send the
+          // operator straight to the connect surface.
+          return {
+            label: "Reconnect WhatsApp",
+            run: () => router.push("/settings")
+          };
+        }
         if (platformName === "IMESSAGE") {
           return {
             label: "Grant Messages access",
             run: async () => {
               try {
-                await apiPost("/runner/control/imessage/permission-reset", {});
+                const result = await apiPost<{ message?: string }>("/runner/control/imessage/permission-help", {});
                 setError(
-                  "Permission reset triggered. macOS should re-pop the Allow Messages dialog (or System Settings opened to Automation). Click Allow, then click retry."
+                  result.message ?? `Open Automation, allow ${APP_NAME} to control Messages, return here, then click retry.`
                 );
               } catch (err) {
-                setError(err instanceof Error ? err.message : "Permission reset failed");
+                setError(err instanceof Error ? err.message : "Could not open Mac permission settings");
               }
             }
           };
@@ -2307,6 +2436,17 @@ export default function ThreadPage() {
       { selectedOptions }
     );
     await refresh();
+  };
+
+  // Live tallies for the poll bubble's "View votes" (R-0100 / #818).
+  // Always fetched fresh — WhatsApp-side votes change under us, so there
+  // is nothing worth caching.
+  const fetchPollVotes = async (messageId: string) => {
+    if (!thread) return [];
+    const response = await apiGet<{ votes: PollVoteRecord[] }>(
+      `/runner/control/thread/${thread.id}/message/${messageId}/poll-votes`
+    );
+    return response.votes;
   };
 
   const startMessageEdit = (message: ThreadMessage) => {
@@ -2997,10 +3137,10 @@ export default function ThreadPage() {
   const lastTimestamp = thread.messages[thread.messages.length - 1]?.timestamp ?? null;
   const riskLabel =
     risk === "overdue"
-      ? `overdue · last reply ${formatRelative(lastInboundAt)}`
+      ? `overdue · received ${formatRelative(lastInboundAt)}`
       : risk === "waiting"
-        ? `waiting · last reply ${formatRelative(lastInboundAt)}`
-        : `fresh · last reply ${formatRelative(lastTimestamp)}`;
+        ? `waiting · received ${formatRelative(lastInboundAt)}`
+        : `fresh · last message ${formatRelative(lastTimestamp)}`;
 
   // Suggestion source: prefer runner-generated chips when present,
   // otherwise fall back to the static prototype set so the dropdown is
@@ -3118,13 +3258,23 @@ export default function ThreadPage() {
               <div className="flex items-center gap-1">
                 <select
                   value={siblingPlatform}
-                  onChange={(e) => setSiblingPlatform(e.target.value as "all" | "LINKEDIN" | "IMESSAGE")}
+                  onChange={(e) =>
+                    setSiblingPlatform(
+                      e.target.value as "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
+                    )
+                  }
                   className="rounded border border-hairline bg-paper px-1 py-[2px] font-mono text-[10px] uppercase tracking-[0.06em] text-ink-2 focus:border-ink-3 focus:outline-none"
                   aria-label="Filter sibling threads by platform"
                 >
                   <option value="all">All</option>
                   <option value="LINKEDIN">LinkedIn</option>
                   <option value="IMESSAGE">iMessage</option>
+                  {siblings.some((row) => row.platform === "GOOGLE_MESSAGES") ? (
+                    <option value="GOOGLE_MESSAGES">Google Messages</option>
+                  ) : null}
+                  {siblings.some((row) => row.platform === "WHATSAPP") ? (
+                    <option value="WHATSAPP">WhatsApp</option>
+                  ) : null}
                 </select>
                 <button
                   type="button"
@@ -3213,7 +3363,24 @@ export default function ThreadPage() {
       </aside>
 
       {/* ───── Chat column ───── */}
-      <div className="flex h-full min-h-0 flex-col border-r border-hairline">
+      <div
+        className="relative flex h-full min-h-0 flex-col border-r border-hairline"
+        onDragEnter={onComposerDragEnter}
+        onDragOver={onComposerDragOver}
+        onDragLeave={onComposerDragLeave}
+        onDrop={onComposerDrop}
+      >
+        {dropActive ? (
+          <div
+            data-testid="composer-drop-overlay"
+            className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center bg-[color-mix(in_oklch,var(--paper)_78%,transparent)] backdrop-blur-sm"
+          >
+            <div className="flex items-center gap-2 rounded-[12px] border border-dashed border-ink-3 bg-paper px-5 py-3 text-[13px] font-medium text-ink shadow-[0_4px_24px_rgba(0,0,0,0.18)]">
+              <Paperclip className="h-[15px] w-[15px]" strokeWidth={1.8} />
+              Drop to attach
+            </div>
+          </div>
+        ) : null}
         {degraded ? (
           <div className="flex-shrink-0 px-4 pt-6 sm:px-8 lg:px-12">
             <DegradedBanner
@@ -3943,19 +4110,7 @@ export default function ThreadPage() {
                       const whatsappPoll = thread.platform === "WHATSAPP" ? getWhatsAppPoll(message) : null;
                       const isAttachmentOnlyText = /^\[.+\]$/.test(displayText.trim());
                       const showText = !(hasInlineMedia && isAttachmentOnlyText) && !whatsappPoll;
-                      // Pilot R-0094: an image sent with no caption shouldn't
-                      // sit in the coloured message bubble - the operator wants
-                      // just the picture. When the message is nothing but
-                      // photos/stickers, drop the bubble chrome (background,
-                      // padding, tail) so the image floats on the thread. Video
-                      // and audio keep the bubble: video carries its own frame
-                      // and both surface a transcript line that needs it.
-                      const isImageOnly =
-                        hasInlineMedia &&
-                        !showText &&
-                        playableAttachments.every(
-                          (a) => a.kind === "photo" || a.kind === "sticker"
-                        );
+                      const isRichContentOnly = (hasInlineMedia || Boolean(whatsappPoll)) && !showText;
                       // #703. A message that is exactly one URL renders as a
                       // preview card instead of a bare-link bubble (same
                       // as iMessage). Mixed text keeps its bubble and
@@ -3980,7 +4135,8 @@ export default function ThreadPage() {
                       // reactions are read-only here (applied from the Messages
                       // app, surfaced via synthesised stickers), so we never show
                       // the picker for them.
-                      const canReact = thread.platform === "LINKEDIN";
+                      const canReact =
+                        thread.platform === "LINKEDIN" || thread.platform === "GOOGLE_MESSAGES";
                       const canEdit =
                         thread.platform === "LINKEDIN" && message.direction === "OUT" && showText;
                       const pickerOpen = reactionPickerMessageId === message.id;
@@ -3998,7 +4154,7 @@ export default function ThreadPage() {
                           ) : (
                           <div
                             className={
-                              isImageOnly
+                              isRichContentOnly
                                 ? "flex flex-col gap-2"
                                 : `flex flex-col gap-2 px-4 py-3 text-[14.5px] leading-[1.5] ${
                                     message.direction === "OUT"
@@ -4012,6 +4168,8 @@ export default function ThreadPage() {
                                 {playableAttachments.map((a, attIdx) => (
                                   thread.platform === "WHATSAPP" ? (
                                     <WhatsAppMedia key={a.guid ?? attIdx} attachment={a} />
+                                  ) : thread.platform === "GOOGLE_MESSAGES" ? (
+                                    <GoogleMessagesMedia key={a.guid ?? attIdx} attachment={a} />
                                   ) : (
                                     <IMessageMedia key={a.guid ?? attIdx} attachment={a} />
                                   )
@@ -4046,6 +4204,7 @@ export default function ThreadPage() {
                                 message={message}
                                 disabled={thread.platform !== "WHATSAPP"}
                                 onVote={voteOnPoll}
+                                onFetchVotes={fetchPollVotes}
                               />
                             ) : null}
                             {showText ? (
@@ -5055,7 +5214,7 @@ export default function ThreadPage() {
                               }
                               void scheduleSend(at);
                             }}
-                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+                            className="mt-2 w-full rounded-pill bg-ink px-3 py-[7px] text-[12px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
                           >
                             {scheduling ? "Scheduling…" : "Schedule"}
                           </button>
@@ -5063,7 +5222,9 @@ export default function ThreadPage() {
                       </div>
                     ) : null}
                   </div>
-                  {thread.platform === "IMESSAGE" || thread.platform === "WHATSAPP" ? (
+                  {thread.platform === "IMESSAGE" ||
+                  thread.platform === "WHATSAPP" ||
+                  thread.platform === "GOOGLE_MESSAGES" ? (
                     <>
                       <input
                         type="file"
@@ -5375,7 +5536,7 @@ export default function ThreadPage() {
               {/* Split button: primary action + a chevron to flip the mode.
                   The mode switcher only appears when full AI drafts are on;
                   otherwise this is an Ask-only button. */}
-              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-[oklch(28%_0.01_80)]">
+              <div className="relative inline-flex rounded-pill bg-ink text-paper transition-[background-color] duration-calm hover:bg-ink-2">
                 <button
                   type="button"
                   disabled={composing || !composeIntent.trim()}

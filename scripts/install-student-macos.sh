@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Relationship Inbox OS — student-pilot installer (macOS).
+# Tovi — student-pilot installer (macOS).
 #
 # Goal: a non-technical student pastes ONE command into Terminal and ends up
 # with the app installed, the local database set up, and the app open in their
@@ -50,6 +50,7 @@ set -u
 # when the installer is run via a download link, not from inside the folder.
 APP_ZIP_URL_DEFAULT="REPLACE_WITH_PRIVATE_ZIP_URL"
 APP_ZIP_URL="${RIOS_APP_ZIP_URL:-$APP_ZIP_URL_DEFAULT}"
+APP_NAME="${RIOS_APP_NAME:-Tovi}"
 
 INSTALL_DIR="${RIOS_INSTALL_DIR:-$HOME/RelationshipInboxOS}"
 APP_BUNDLE_DIR="${RIOS_APP_BUNDLE_DIR:-$HOME/Applications}"
@@ -58,8 +59,8 @@ NODE_RELEASE_DIR="https://nodejs.org/download/release/latest-v22.x"
 # Where a user-local Node 22 is installed when one isn't already present.
 # A plain folder in the home dir — no admin rights needed to write here.
 RIOS_NODE_DIR="${RIOS_NODE_DIR:-$HOME/.rios-node}"
-MIN_FREE_GB=10
-REC_FREE_GB=20
+MIN_FREE_GB=4
+REC_FREE_GB=8
 MIN_MACOS_MAJOR=13            # Ventura
 DASHBOARD_PORT="${DASHBOARD_PORT:-3100}"
 DASHBOARD_URL="http://localhost:${DASHBOARD_PORT}"
@@ -147,7 +148,7 @@ check_macos() {
   step "Checking your Mac"
 
   if [ "$(uname -s)" != "Darwin" ]; then
-    die "This installer is for macOS only. Relationship Inbox OS needs a Mac for iMessage."
+    die "This installer is for macOS only. $APP_NAME needs a Mac for iMessage."
   fi
   ok "macOS detected"
 
@@ -168,6 +169,10 @@ check_macos() {
 }
 
 check_disk() {
+  if [ "$SKIP_DEPS" = true ]; then
+    info "[skip-deps] skipping the production disk-space check"
+    return 0
+  fi
   # Available GB on the volume that holds the install target's parent.
   local target_parent free
   target_parent="$(dirname "$INSTALL_DIR")"
@@ -413,7 +418,7 @@ install_from_source() {
     rm -rf "$backup"
     ok "Updated $(display_path "$INSTALL_DIR") (your data was kept)"
   else
-    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like Relationship Inbox OS. Move it aside and run the installer again."
+    die "$(display_path "$INSTALL_DIR") already exists but doesn't look like $APP_NAME. Move it aside and run the installer again."
   fi
 
   APP_DIR="$INSTALL_DIR"
@@ -438,7 +443,7 @@ download_app() {
   tmp_zip="${TMPDIR:-/tmp}/relationship-inbox-os.zip"
   extract_tmp="${TMPDIR:-/tmp}/rios-extract-$$"
 
-  info "Downloading Relationship Inbox OS..."
+  info "Downloading $APP_NAME..."
   if ! curl -fSL --progress-bar --max-time 1200 "$APP_ZIP_URL" -o "$tmp_zip" 2>>"$LOG_FILE"; then
     die "Couldn't download the app. Check your Wi-Fi and the link, then try again."
   fi
@@ -522,7 +527,7 @@ ensure_env() {
     set_env_var "$env_file" "OPENAI_API_KEY" "$RIOS_OPENAI_API_KEY"
     ok "OpenAI key saved"
   elif ! grep -q '^OPENAI_API_KEY=.\+' "$env_file" 2>/dev/null; then
-    warn "No OpenAI key set yet — Richard will give you one to paste into .env"
+    info "No AI key set. AI is optional and can be added safely in Tovi's setup assistant."
   fi
 }
 
@@ -536,13 +541,12 @@ install_app() {
 
   if [ "$DRY_RUN" = true ]; then
     warn "[dry-run] would run: npm install --include=dev"
-    warn "[dry-run] would run: npx playwright install chromium"
     warn "[dry-run] would run: npm run db:generate && npm run db:push"
     return 0
   fi
 
   if [ "$SKIP_DEPS" = true ]; then
-    warn "[skip-deps] skipping npm install, the LinkedIn browser, and database setup"
+    warn "[skip-deps] skipping npm install and database setup"
     return 0
   fi
 
@@ -550,26 +554,11 @@ install_app() {
     || die "Installing dependencies failed. The log has the details: $LOG_FILE"
   ok "Dependencies installed"
 
-  run "Installing the browser for LinkedIn (Chromium only)..." npx playwright install chromium \
-    || warn "Couldn't install the LinkedIn browser now — you can retry later with: npx playwright install chromium"
-  ok "LinkedIn browser ready"
-
   run "Preparing the local database..." npm run db:generate \
     || die "Database setup (generate) failed. The log has the details: $LOG_FILE"
   run "Creating the local database..." npm run db:push \
     || die "Database setup (create) failed. The log has the details: $LOG_FILE"
   ok "Local database ready"
-
-  # Download the local voice-transcription model so transcription works on
-  # first run. Non-fatal: a network hiccup must not fail the whole install —
-  # voice notes simply transcribe once the model is fetched (retryable).
-  if run "Downloading the voice-transcription model (one-time, ~150 MB)..." \
-       env TRANSCRIPTION_MODEL_DIR="$APP_DIR/data/models" npm run fetch:whisper-model; then
-    ok "Voice-transcription model ready"
-  else
-    warn "Couldn't download the transcription model now — voice notes will transcribe once it's fetched."
-    warn "Retry later with:  cd \"$APP_DIR\" && npm run fetch:whisper-model"
-  fi
 
   # Build the optimised (production) dashboard now so the first launch is
   # instant instead of compiling pages on demand. Non-fatal: the launcher
@@ -594,7 +583,7 @@ create_app_bundle() {
   fi
 
   if [ "$DRY_RUN" = true ]; then
-    warn "[dry-run] would create Relationship Inbox OS.app in $(display_path "$APP_BUNDLE_DIR")"
+    warn "[dry-run] would create $APP_NAME.app in $(display_path "$APP_BUNDLE_DIR")"
     return 0
   fi
 
@@ -602,6 +591,9 @@ create_app_bundle() {
     warn "[skip-deps] skipping the app bundle"
     return 0
   fi
+
+  APP_NAME="$(cd "$APP_DIR" && node --input-type=module -e 'import { resolveAppName } from "./scripts/lib/branding.mjs"; process.stdout.write(resolveAppName())')" \
+    || die "The configured app name is invalid. Check RIOS_APP_NAME in .env."
 
   local script="$APP_DIR/scripts/create-macos-app-bundle.mjs"
   if [ ! -f "$script" ]; then
@@ -614,9 +606,9 @@ create_app_bundle() {
     return 0
   }
 
-  if run "Creating Relationship Inbox OS.app..." \
+  if run "Creating $APP_NAME.app..." \
        node "$script" --app-dir "$APP_DIR" --out "$APP_BUNDLE_DIR" --node-dir "$RIOS_NODE_DIR"; then
-    ok "Created $(display_path "$APP_BUNDLE_DIR")/Relationship Inbox OS.app"
+    ok "Created $(display_path "$APP_BUNDLE_DIR")/$APP_NAME.app"
   else
     warn "Couldn't create the Mac app. You can still start from Terminal."
   fi
@@ -641,20 +633,20 @@ wait_for_dashboard() {
 start_app() {
   local disp app_bundle
   disp="$(display_path "$APP_DIR")"
-  app_bundle="$APP_BUNDLE_DIR/Relationship Inbox OS.app"
+  app_bundle="$APP_BUNDLE_DIR/$APP_NAME.app"
 
   if [ "$NO_START" = true ] || [ "$DRY_RUN" = true ]; then
     step "Skipping app launch (per your request)"
     say ""
     say "  To start the app yourself:"
-    say "    ${BOLD}open \"$APP_BUNDLE_DIR/Relationship Inbox OS.app\"${RESET}"
+    say "    ${BOLD}open \"$APP_BUNDLE_DIR/$APP_NAME.app\"${RESET}"
     say "  Or from Terminal:"
     say "    ${BOLD}cd $disp && npm run start:student${RESET}"
     say "  Then open ${BOLD}$DASHBOARD_URL${RESET} in Chrome."
     return 0
   fi
 
-  step "Starting Relationship Inbox OS"
+  step "Starting $APP_NAME"
   cd "$APP_DIR" || die "Couldn't open the app folder $APP_DIR."
 
   if [ "$NO_APP_BUNDLE" != true ] && [ -d "$app_bundle" ]; then
@@ -703,20 +695,21 @@ print_success() {
   if [ "$mode" = "terminal" ]; then
     cat <<EOF
 
-  ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
+  ${GREEN}${BOLD}$APP_NAME is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
   • ${BOLD}Leave this Terminal window open${RESET} - it keeps the app running.
   • To stop the app: click this window and press ${BOLD}Ctrl + C${RESET}.
   • To start it again later:
-        ${BOLD}open "$APP_BUNDLE_DIR/Relationship Inbox OS.app"${RESET}
+        ${BOLD}open "$APP_BUNDLE_DIR/$APP_NAME.app"${RESET}
     or  ${BOLD}cd $disp && npm run start:student${RESET}
 
-  Next, the app walks you through:
-    1. iMessage access   (a one-time macOS permission)
-    2. Connecting LinkedIn
-    3. Your first scan
+  Next, Tovi's setup assistant lets you choose:
+    1. The message sources you actually use
+    2. Optional AI help and an optional Gemini key
+    3. Optional local voice transcription
+    4. Contacts, updates, and your first scan
 
   Setup guide:  docs/pilot/student-install-guide.md
   Stuck?        docs/pilot/student-install-troubleshooting.md
@@ -728,19 +721,20 @@ EOF
 
   cat <<EOF
 
-  ${GREEN}${BOLD}Relationship Inbox OS is running.${RESET}
+  ${GREEN}${BOLD}$APP_NAME is running.${RESET}
 
   • It's open in your browser at  ${BOLD}$DASHBOARD_URL${RESET}
   • The app is installed at  ${BOLD}$disp${RESET}
-  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/Relationship Inbox OS.app${RESET}
-  • Next time, open ${BOLD}Relationship Inbox OS${RESET} from Applications or Launchpad.
+  • The Mac app is in ${BOLD}$(display_path "$APP_BUNDLE_DIR")/$APP_NAME.app${RESET}
+  • Next time, open ${BOLD}$APP_NAME${RESET} from Applications or Launchpad.
   • You can close this Terminal once the browser is open.
-  • To stop the app: quit ${BOLD}Relationship Inbox OS${RESET} from the Dock.
+  • To stop the app: quit ${BOLD}$APP_NAME${RESET} from the Dock.
 
-  Next, the app walks you through:
-    1. iMessage access   (a one-time macOS permission)
-    2. Connecting LinkedIn
-    3. Your first scan
+  Next, Tovi's setup assistant lets you choose:
+    1. The message sources you actually use
+    2. Optional AI help and an optional Gemini key
+    3. Optional local voice transcription
+    4. Contacts, updates, and your first scan
 
   Setup guide:  docs/pilot/student-install-guide.md
   Stuck?        docs/pilot/student-install-troubleshooting.md
@@ -754,7 +748,7 @@ EOF
 # --------------------------------------------------------------------------
 
 main() {
-  printf '\n%s%sRelationship Inbox OS — installer%s\n' "$BOLD" "$BLUE" "$RESET"
+  printf '\n%s%s%s installer%s\n' "$BOLD" "$BLUE" "$APP_NAME" "$RESET"
   printf '%sLog: %s%s\n' "$DIM" "$LOG_FILE" "$RESET"
   [ "$DRY_RUN" = true ] && printf '%s(dry run — nothing will be changed)%s\n' "$YELLOW" "$RESET"
 

@@ -1,6 +1,7 @@
 "use client";
 
 import { X } from "lucide-react";
+import { APP_NAME } from "@/lib/branding";
 
 // A calm product note for pilot testers — not a landing page. Used in three
 // places:
@@ -50,7 +51,7 @@ export function PilotWelcomeCard({
             Reply properly, not just fast.
           </h2>
           <p className="m-0 mt-[8px] text-[12.5px] leading-[1.5] text-ink-2">
-            RI-OS shows who’s waiting, what they said, and what you still need to address.
+            {APP_NAME} shows who’s waiting, what they said, and what you still need to address.
           </p>
           <p className="m-0 mt-[10px] border-t border-hairline pt-[10px] text-[12px] leading-[1.55] text-ink-3">
             You write the reply. AI help is optional, and nothing sends unless you choose to.
@@ -92,7 +93,7 @@ export function PilotWelcomeCard({
         </div>
 
         <h2 className="m-0 mt-2 max-w-[34ch] font-display text-[22px] font-semibold leading-[1.2] tracking-[-0.02em]">
-          Relationship Inbox OS helps you reply properly.
+          {APP_NAME} helps you reply properly.
         </h2>
 
         <p className="m-0 mt-3 text-[13.5px] leading-[1.55] text-ink-2">It shows:</p>

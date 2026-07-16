@@ -46,7 +46,12 @@ test("build-student-release reads the release version from the archived ref", ()
   const out = join(work, "release-dist");
   try {
     const ref = commitPackageVersion("9.8.7", work);
-    execFileSync(process.execPath, [BUILD, "--ref", ref, "--out", out], {
+    execFileSync(process.execPath, [
+      BUILD,
+      "--ref", ref,
+      "--out", out,
+      "--notes", "A concise release summary"
+    ], {
       cwd: ROOT,
       stdio: "ignore",
       env: {
@@ -60,7 +65,11 @@ test("build-student-release reads the release version from the archived ref", ()
 
     const manifest = JSON.parse(readFileSync(join(out, "latest.json"), "utf8"));
     assert.equal(manifest.version, "9.8.7");
-    assert.equal(manifest.minimumInstallerVersion, "9.8.7");
+    assert.deepEqual(manifest.releaseNotes, ["A concise release summary"]);
+    // The student channel's minimumInstallerVersion must default to the stable
+    // floor, NOT the release version — otherwise every older install
+    // self-blocks (see the updater's enforceMinimumInstallerVersion gate).
+    assert.equal(manifest.minimumInstallerVersion, "0.1.0");
 
     const release = JSON.parse(execFileSync(
       "unzip", ["-p", versionedZip, "relationship-inbox-os/release.json"],
@@ -68,6 +77,33 @@ test("build-student-release reads the release version from the archived ref", ()
     ));
     assert.equal(release.version, "9.8.7");
     assert.equal(release.commit, ref);
+    assert.deepEqual(release.releaseNotes, manifest.releaseNotes);
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("build-student-release: --min-installer overrides the default floor", () => {
+  const work = mkdtempSync(join(tmpdir(), "rios-build-release-mininstaller-"));
+  const out = join(work, "release-dist");
+  try {
+    const ref = commitPackageVersion("9.8.7", work);
+    execFileSync(process.execPath, [BUILD, "--ref", ref, "--out", out, "--min-installer", "9.5.0"], {
+      cwd: ROOT,
+      stdio: "ignore",
+      env: {
+        ...process.env,
+        RIOS_RELEASE_ENV_FILE: "/nonexistent/.env.release.local"
+      }
+    });
+
+    const manifest = JSON.parse(readFileSync(join(out, "latest.json"), "utf8"));
+    assert.equal(manifest.version, "9.8.7");
+    assert.equal(
+      manifest.minimumInstallerVersion,
+      "9.5.0",
+      "an explicit --min-installer must win over the default floor"
+    );
   } finally {
     rmSync(work, { recursive: true, force: true });
   }

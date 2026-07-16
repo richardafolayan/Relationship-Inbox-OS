@@ -356,6 +356,13 @@ async function detectAuthRequired(page: Page, platform: PlatformName): Promise<{
     }
   }
 
+  if (platform === "GOOGLE_MESSAGES") {
+    const bodyText = (await page.locator("body").innerText().catch(() => "")).toLowerCase();
+    if (/\/web\/welcome|accounts\.google\.com/i.test(url) || bodyText.includes("welcome to google messages")) {
+      return { required: true, reason: "phone_pairing_required" };
+    }
+  }
+
   return {
     required: false
   };

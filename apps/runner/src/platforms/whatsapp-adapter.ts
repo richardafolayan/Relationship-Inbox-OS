@@ -23,6 +23,7 @@ import type {
   OutboundPoll,
   PlatformAdapter,
   PlatformName,
+  PollVoteRecord,
   SendReceipt,
   ThreadStub
 } from "@inbox-os/core";
@@ -60,18 +61,39 @@ export interface WhatsAppAdapterDeps {
    * still picks those up on the next scheduled pass. Must never throw or
    * block the wweb.js event loop.
    */
-  onIncomingMessage?: () => void;
+  onIncomingMessage?: (input: {
+    platformThreadId: string;
+    sourceChangedAt: string;
+  }) => void;
   /** Client factory override, for tests. */
   createClient?: (authDir: string) => Client;
+  /** Sleep override so tests can fast-forward the send-guard wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 const PLATFORM_WHATSAPP: PlatformName = "WHATSAPP";
+
+export class WhatsAppSessionUnavailableError extends Error {
+  constructor() {
+    super("WhatsApp lost its connection. Reconnect it in Settings, then try again.");
+    this.name = "WhatsAppSessionUnavailableError";
+  }
+}
+
+export function isWhatsAppSessionUnavailableError(error: unknown): boolean {
+  if (error instanceof WhatsAppSessionUnavailableError) return true;
+  const message = error instanceof Error ? error.message : String(error);
+  return /detached\s+frame|session closed|target closed|execution context was destroyed|adapter not connected/i.test(
+    message
+  );
+}
 
 export class WhatsAppAdapter implements PlatformAdapter {
   readonly platform: PlatformName = PLATFORM_WHATSAPP;
   private client: Client | null = null;
   private ready = false;
   private readyPromise: Promise<void> | null = null;
+  private indexedExistingChats = false;
 
   constructor(private readonly deps: WhatsAppAdapterDeps) {}
 
@@ -126,9 +148,12 @@ export class WhatsAppAdapter implements PlatformAdapter {
       // the library's event loop.
       if (this.deps.onIncomingMessage) {
         const notify = this.deps.onIncomingMessage;
-        client.on("message", () => {
+        client.on("message", (message: WaMessage) => {
           try {
-            notify();
+            notify({
+              platformThreadId: message.from,
+              sourceChangedAt: new Date().toISOString()
+            });
           } catch {
             // Fire-and-forget: never let a scan-enqueue hiccup crash the
             // wweb.js message pipeline.
@@ -146,14 +171,20 @@ export class WhatsAppAdapter implements PlatformAdapter {
   }
 
   async scanUnreadThreads(): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
+    const chats = await this.getChatsWithDetachedFrameRecovery();
     return chats.filter((c) => (c.unreadCount ?? 0) > 0).map(chatToThreadStub);
   }
 
   async fetchRecentThreads(limit: number): Promise<ThreadStub[]> {
-    const chats = await this.requireClient().getChats();
-    // Chats arrive ordered by most-recent activity from wweb.js.
-    return chats.slice(0, limit).map(chatToThreadStub);
+    const chats = await this.getChatsWithDetachedFrameRecovery();
+    const selected = this.indexedExistingChats ? chats.slice(0, limit) : chats;
+    this.indexedExistingChats = true;
+    return selected.map(chatToThreadStub);
+  }
+
+  async fetchThreadById(platformThreadId: string): Promise<ThreadStub | null> {
+    const chat = await this.requireClient().getChatById(platformThreadId).catch(() => null);
+    return chat ? chatToThreadStub(chat) : null;
   }
 
   async fetchThreadMessages(thread: ThreadStub, limit: number): Promise<NormalizedMessage[]> {
@@ -170,26 +201,21 @@ export class WhatsAppAdapter implements PlatformAdapter {
     attachments?: OutboundAttachment[]
   ): Promise<SendReceipt> {
     const client = this.requireClient();
-    const guard = await checkSendGuard(
-      {
-        client,
-        prisma: this.deps.prisma,
-        config: this.deps.sendGuardConfig
-      },
-      thread.platformThreadId
-    );
-    if (!guard.allowed) {
-      throw new Error(`WhatsApp send blocked: ${guard.reason}`);
-    }
+    await this.awaitSendClearance(thread.platformThreadId);
 
     // No attachments → original text-only path. wweb.js's sendMessage
     // returns the sent Message object, whose timestamp we mirror.
     const media = (attachments ?? []).filter((a) => a.absolutePath && a.absolutePath.length > 0);
     if (media.length === 0) {
       const sent = await client.sendMessage(thread.platformThreadId, text);
+      const acknowledgedAt = new Date().toISOString();
+      const verifiedBy = await this.waitForAcknowledgement(sent);
       return {
         sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
-        verifiedBy: "best_effort"
+        acknowledgedAt,
+        platformResultAt: new Date().toISOString(),
+        platformMessageKey: sent.id?._serialized,
+        verifiedBy
       };
     }
 
@@ -202,6 +228,9 @@ export class WhatsAppAdapter implements PlatformAdapter {
     // because they're all part of one operator action.
     const sentAttachments: AttachmentPlaceholder[] = [];
     let firstSentTs: number | undefined;
+    let firstMessageKey: string | undefined;
+    let everyMessageAcknowledged = true;
+    let acknowledgedAt: string | undefined;
     for (let i = 0; i < media.length; i++) {
       const a = media[i]!;
       let payload: unknown;
@@ -230,10 +259,16 @@ export class WhatsAppAdapter implements PlatformAdapter {
       if (a.kind === "gif") opts.sendVideoAsGif = true;
       if (a.kind === "sticker") opts.sendMediaAsSticker = true;
       const sent = await (client as unknown as {
-        sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<{ timestamp: number; id: { _serialized: string } }>;
+        sendMessage: (jid: string, content: unknown, options?: Record<string, unknown>) => Promise<WaMessage>;
       }).sendMessage(thread.platformThreadId, payload, opts);
+      acknowledgedAt ??= new Date().toISOString();
+      const messageVerification = await this.waitForAcknowledgement(sent);
+      if (messageVerification !== "platform_acknowledged") {
+        everyMessageAcknowledged = false;
+      }
       if (firstSentTs === undefined) firstSentTs = sent.timestamp;
       const rawGuid = sent.id?._serialized ?? "";
+      firstMessageKey ??= rawGuid || undefined;
       const safeGuid = rawGuid ? safeIdForFilename(rawGuid) : "";
 
       // Mirror the staged file under whatsappMediaDir keyed by the sent
@@ -273,24 +308,17 @@ export class WhatsAppAdapter implements PlatformAdapter {
       sentAt:
         epochSecondsToIso(firstSentTs ?? Math.floor(Date.now() / 1000)) ??
         new Date().toISOString(),
-      verifiedBy: "best_effort",
+      acknowledgedAt,
+      platformResultAt: new Date().toISOString(),
+      platformMessageKey: firstMessageKey,
+      verifiedBy: everyMessageAcknowledged ? "platform_acknowledged" : "best_effort",
       attachments: sentAttachments
     };
   }
 
   async sendPoll(thread: ThreadStub, poll: OutboundPoll): Promise<SendReceipt> {
     const client = this.requireClient();
-    const guard = await checkSendGuard(
-      {
-        client,
-        prisma: this.deps.prisma,
-        config: this.deps.sendGuardConfig
-      },
-      thread.platformThreadId
-    );
-    if (!guard.allowed) {
-      throw new Error(`WhatsApp send blocked: ${guard.reason}`);
-    }
+    await this.awaitSendClearance(thread.platformThreadId);
 
     const question = poll.question.trim();
     const options = poll.options.map((option) => option.trim()).filter(Boolean);
@@ -318,8 +346,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
       allowMultipleAnswers: Boolean(poll.allowMultipleAnswers)
     });
     const sent = await (client as unknown as {
-      sendMessage: (jid: string, content: unknown) => Promise<{ timestamp: number; id?: { _serialized?: string } }>;
+      sendMessage: (jid: string, content: unknown) => Promise<WaMessage>;
     }).sendMessage(thread.platformThreadId, payload);
+    const acknowledgedAt = new Date().toISOString();
+    const verifiedBy = await this.waitForAcknowledgement(sent);
     const structuredPoll: WhatsAppPollPayload = {
       question,
       options: options.map((name) => ({ name })),
@@ -327,8 +357,10 @@ export class WhatsAppAdapter implements PlatformAdapter {
     };
     return {
       sentAt: epochSecondsToIso(sent.timestamp) ?? new Date().toISOString(),
+      acknowledgedAt,
+      platformResultAt: new Date().toISOString(),
       platformMessageKey: sent.id?._serialized,
-      verifiedBy: "best_effort",
+      verifiedBy,
       attachments: [
         {
           type: "poll",
@@ -350,19 +382,126 @@ export class WhatsAppAdapter implements PlatformAdapter {
     return;
   }
 
+  private async waitForAcknowledgement(
+    sent: Pick<WaMessage, "ack" | "id">
+  ): Promise<SendReceipt["verifiedBy"]> {
+    const currentAck = Number(sent.ack);
+    if (currentAck < 0) {
+      throw new Error("WhatsApp reported a failed platform acknowledgement");
+    }
+    if (currentAck >= 1) {
+      return "platform_acknowledged";
+    }
+
+    const messageId = sent.id?._serialized;
+    if (!messageId) return "best_effort";
+    const client = this.requireClient();
+
+    return new Promise<SendReceipt["verifiedBy"]>((resolve, reject) => {
+      let settled = false;
+      const finish = (result: SendReceipt["verifiedBy"], error?: Error): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        client.removeListener("message_ack", onAck);
+        if (error) reject(error);
+        else resolve(result);
+      };
+      const onAck = (message: WaMessage, ack: number): void => {
+        if (message.id?._serialized !== messageId) return;
+        if (ack < 0) {
+          finish("best_effort", new Error("WhatsApp reported a failed platform acknowledgement"));
+        } else if (ack >= 1) {
+          finish("platform_acknowledged");
+        }
+      };
+      const timer = setTimeout(() => finish("best_effort"), 5_000);
+      timer.unref?.();
+      client.on("message_ack", onAck);
+    });
+  }
+
   async voteOnPoll(
     _thread: ThreadStub,
     platformMessageKey: string,
     selectedOptions: string[]
   ): Promise<void> {
-    const client = this.requireClient();
-    const message = await (client as unknown as {
-      getMessageById: (messageId: string) => Promise<{ type?: string; vote?: (selectedOptions: string[]) => Promise<void> } | null>;
-    }).getMessageById(platformMessageKey);
-    if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
-      throw new Error("WhatsApp poll vote failed: poll message not found");
+    try {
+      const client = this.requireClient();
+      const message = await (client as unknown as {
+        getMessageById: (messageId: string) => Promise<{ type?: string; vote?: (selectedOptions: string[]) => Promise<void> } | null>;
+      }).getMessageById(platformMessageKey);
+      if (!message || message.type !== "poll_creation" || typeof message.vote !== "function") {
+        throw new Error("WhatsApp poll vote failed: poll message not found");
+      }
+      await message.vote(selectedOptions);
+    } catch (error) {
+      await this.rethrowPollSessionFailure(error);
     }
-    await message.vote(selectedOptions);
+  }
+
+  /**
+   * Live poll tallies for the dashboard's "View votes" affordance
+   * (R-0100 / #818). Read-only: fetches the poll message from the wweb.js
+   * store and maps its PollVote records, resolving voter display names
+   * best-effort (a failed contact lookup falls back to the bare JID).
+   * Fetched on demand because tallies mutate continuously — persisted
+   * counts would be stale within minutes (see normaliseMessage note).
+   */
+  async getPollVotes(
+    _thread: ThreadStub,
+    platformMessageKey: string
+  ): Promise<PollVoteRecord[]> {
+    try {
+      const client = this.requireClient();
+      const message = await (client as unknown as {
+        getMessageById: (messageId: string) => Promise<{
+          type?: string;
+          getPollVotes?: () => Promise<
+            Array<{
+              voter?: string;
+              selectedOptions?: Array<{ name?: string } | null>;
+              interractedAtTs?: number;
+            }>
+          >;
+        } | null>;
+      }).getMessageById(platformMessageKey);
+      if (!message || message.type !== "poll_creation" || typeof message.getPollVotes !== "function") {
+        throw new Error("WhatsApp poll votes unavailable: poll message not found");
+      }
+      const votes = await message.getPollVotes();
+      const myId =
+        (client as unknown as { info?: { wid?: { _serialized?: string } } }).info?.wid
+          ?._serialized ?? null;
+      return Promise.all(
+        votes.map(async (vote) => {
+          const voterId = vote.voter ?? "";
+          let voterName: string | null = null;
+          if (voterId) {
+            try {
+              const contact = await client.getContactById(voterId);
+              voterName = contact.pushname || contact.name || null;
+            } catch {
+              // Left-the-group / unknown voters keep the bare JID.
+            }
+          }
+          return {
+            voterId,
+            voterName,
+            isMe: myId !== null && voterId === myId,
+            selectedOptions: (vote.selectedOptions ?? [])
+              .map((option) => (option?.name ?? "").trim())
+              .filter((name) => name.length > 0),
+            votedAt:
+              typeof vote.interractedAtTs === "number" && Number.isFinite(vote.interractedAtTs)
+                ? new Date(vote.interractedAtTs).toISOString()
+                : null
+          };
+        })
+      );
+    } catch (error) {
+      return this.rethrowPollSessionFailure(error);
+    }
   }
 
   async closeSession(_reason?: string): Promise<void> {
@@ -394,11 +533,70 @@ export class WhatsAppAdapter implements PlatformAdapter {
 
   // --- internals ---
 
+  /**
+   * Run the send guard, and when the only obstacle is the per-recipient
+   * interval, wait it out and re-check instead of failing the send
+   * (R-0098 / #816: the operator expects a quick follow-up to queue, not
+   * error). Non-waitable denials (unsaved contact, daily cap) still throw
+   * immediately. Total wait is bounded to one interval window plus slack —
+   * the direct send-poll HTTP route sits behind Next's 30s proxy timeout,
+   * and a second re-arm mid-wait means something else is actively sending
+   * to this recipient, which should surface rather than stack waits.
+   */
+  private async awaitSendClearance(recipientJid: string): Promise<void> {
+    const sleep =
+      this.deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const deadline = Date.now() + this.deps.sendGuardConfig.minIntervalMs + 10_000;
+    const maxWaits = 2;
+    for (let waits = 0; ; waits += 1) {
+      const guard = await checkSendGuard(
+        {
+          client: this.requireClient(),
+          prisma: this.deps.prisma,
+          config: this.deps.sendGuardConfig
+        },
+        recipientJid
+      );
+      if (guard.allowed) return;
+      if (guard.retryAfterMs === undefined) {
+        throw new Error(`WhatsApp send blocked: ${guard.reason}`);
+      }
+      // +250ms so the re-check lands after the interval boundary, not on it.
+      const waitMs = guard.retryAfterMs + 250;
+      if (waits >= maxWaits || Date.now() + waitMs > deadline) {
+        throw new Error(`WhatsApp send blocked: ${guard.reason}`);
+      }
+      await sleep(waitMs);
+    }
+  }
+
   private requireClient(): Client {
     if (!this.client || !this.ready) {
       throw new Error("WhatsApp adapter not connected — call ensureConnected() first");
     }
     return this.client;
+  }
+
+  private async getChatsWithDetachedFrameRecovery(): Promise<Awaited<ReturnType<Client["getChats"]>>> {
+    try {
+      return await this.requireClient().getChats();
+    } catch (error) {
+      if (!isDetachedFrameError(error)) {
+        throw error;
+      }
+    }
+
+    await this.closeSession("detached_frame");
+    await this.ensureConnected();
+    return this.requireClient().getChats();
+  }
+
+  private async rethrowPollSessionFailure(error: unknown): Promise<never> {
+    if (!isWhatsAppSessionUnavailableError(error)) {
+      throw error;
+    }
+    await this.closeSession("poll_session_unavailable");
+    throw new WhatsAppSessionUnavailableError();
   }
 
   private async normaliseMessage(msg: WaMessage, isGroup: boolean): Promise<NormalizedMessage> {
@@ -487,6 +685,11 @@ export class WhatsAppAdapter implements PlatformAdapter {
       attachments
     };
   }
+}
+
+function isDetachedFrameError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /detached\s+frame/i.test(message);
 }
 
 /**

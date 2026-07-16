@@ -18,6 +18,7 @@ import { apiGet, apiPost } from "@/lib/api";
 import { Canvas, PageHead } from "@/components/common/canvas";
 import { UserVoiceProfile } from "@/components/settings/UserVoiceProfile";
 import { FocusSettingsSection } from "@/components/settings/FocusSettingsSection";
+import { CalendarFocusSection } from "@/components/settings/CalendarFocusSection";
 import { AppUpdates } from "@/components/settings/AppUpdates";
 import { WhatsAppConnect } from "@/components/settings/WhatsAppConnect";
 import { PilotWelcomeCard } from "@/components/common/pilot-welcome";
@@ -30,6 +31,7 @@ import {
   subscribeNotificationPermission
 } from "@/lib/notifications";
 import { localDateString } from "@/lib/overdue-digest";
+import { APP_NAME } from "@/lib/branding";
 import { interpretReassessAllResult } from "@/lib/reassess-all-result";
 import type { MarkAllReassessResponse } from "@/lib/reassess-all-result";
 import type {
@@ -50,10 +52,19 @@ import {
 } from "@/lib/scan-interval";
 import { cn } from "@/lib/utils";
 import { classifyConsumerFailure } from "@/lib/consumer-failure";
+import { isIMessageFullDiskAccessProblem } from "@/lib/platform-setup";
+import { startSetupWizard } from "@/lib/setup-wizard";
+import { OptionalComponents } from "@/components/settings/OptionalComponents";
+import {
+  applyUiScale,
+  onUiScaleChange,
+  readUiScale,
+  UI_SCALE_OPTIONS,
+  type UiScale
+} from "@/lib/ui-scale";
 
 const AUTO_SCAN_KEY = "linkedin_dashboard_autoscan_enabled";
 const QUIET_HOURS_KEY = "inbox_quiet_hours";
-const UI_SCALE_KEY = "inbox_os_ui_scale";
 const DEFAULT_SETTINGS_TAB: SettingsTabId = "setup";
 
 type SettingsTabId =
@@ -83,7 +94,7 @@ const SETTINGS_TABS: SettingsTab[] = [
   {
     id: "platforms",
     label: "Platforms",
-    description: "Connect iMessage, LinkedIn, and WhatsApp.",
+    description: "Connect iMessage, Google Messages, LinkedIn, and WhatsApp.",
     icon: Plug
   },
   {
@@ -124,20 +135,14 @@ const SETTINGS_TABS: SettingsTab[] = [
   }
 ];
 
-type UiScale = "normal" | "large" | "extra";
-
-const UI_SCALE_OPTIONS: Array<{ id: UiScale; label: string }> = [
-  { id: "normal", label: "Normal" },
-  { id: "large", label: "Large" },
-  { id: "extra", label: "Extra" }
-];
 
 const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   LINKEDIN: "LinkedIn",
   INSTAGRAM: "Instagram",
   TIKTOK: "TikTok",
   IMESSAGE: "iMessage",
-  WHATSAPP: "WhatsApp"
+  WHATSAPP: "WhatsApp",
+  GOOGLE_MESSAGES: "Google Messages"
 };
 
 type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-access";
@@ -145,14 +150,6 @@ type PlatformActionEndpoint = "open-browser" | "connect" | "scan" | "full-disk-a
 interface FullDiskAccessResponse {
   message?: string;
   runnerProcess?: PlatformCard["runnerProcess"];
-}
-
-function isIMessageFullDiskAccessProblem(row?: PlatformCard): boolean {
-  if (row?.platform !== "IMESSAGE") return false;
-  if (row.status === "CONNECTED") return false;
-  const text = `${row.lastError ?? ""} ${row.lastScanFailure?.errorSummary ?? ""}`;
-  if (/NODE_MODULE_VERSION|better_sqlite3|different Node\.js version/i.test(text)) return false;
-  return /Full Disk Access|chat\.db|Cannot read iMessage|unable to open database file/i.test(text);
 }
 
 function isSettingsTabId(value: string): value is SettingsTabId {
@@ -236,8 +233,7 @@ export default function SettingsPage() {
     setAutoScan(window.localStorage.getItem(AUTO_SCAN_KEY) === "true");
     setScanInterval(readScanInterval());
     setQuietHours(window.localStorage.getItem(QUIET_HOURS_KEY) === "1");
-    const storedScale = window.localStorage.getItem(UI_SCALE_KEY);
-    setUiScale(storedScale === "large" || storedScale === "extra" ? storedScale : "normal");
+    setUiScale(readUiScale());
     void apiGet<{ headless?: boolean }>("/runner/data/settings")
       .then((data) => {
         if (data && typeof data.headless === "boolean") setHeadless(data.headless);
@@ -257,6 +253,8 @@ export default function SettingsPage() {
     window.addEventListener("runner-resync", onResync);
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refreshPlatforms]);
+
+  useEffect(() => onUiScaleChange(() => setUiScale(readUiScale())), []);
 
   const toggleQuietHours = () => {
     const next = !quietHours;
@@ -298,14 +296,7 @@ export default function SettingsPage() {
   };
 
   const chooseUiScale = (next: UiScale) => {
-    setUiScale(next);
-    if (next === "normal") {
-      window.localStorage.removeItem(UI_SCALE_KEY);
-      document.documentElement.removeAttribute("data-ui-scale");
-    } else {
-      window.localStorage.setItem(UI_SCALE_KEY, next);
-      document.documentElement.setAttribute("data-ui-scale", next);
-    }
+    setUiScale(applyUiScale(next));
     setSavedAt(Date.now());
   };
 
@@ -516,7 +507,12 @@ export default function SettingsPage() {
             </>
           ) : null}
 
-          {activeTab === "focus" ? <FocusSettingsSection /> : null}
+          {activeTab === "focus" ? (
+            <>
+              <FocusSettingsSection />
+              <CalendarFocusSection />
+            </>
+          ) : null}
 
           {activeTab === "app" ? (
             <>
@@ -678,18 +674,46 @@ function PlatformSettingsSection({
           row={imessageRow}
           fallbackPlatform="IMESSAGE"
           title="iMessage"
-          body="Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
-          actionLabel={imessageNeedsFullDiskAccess ? "Open Full Disk Access" : "Scan iMessage"}
+          body={
+            imessageRow?.supported === false
+              ? imessageRow.unavailableReason ?? "iMessage is not available on this computer."
+              : "Reads Messages on this Mac. macOS will not show a Full Disk Access pop-up."
+          }
+          actionLabel={
+            imessageRow?.supported === false
+              ? "Not available"
+              : imessageNeedsFullDiskAccess
+                ? "Open Full Disk Access"
+                : "Scan iMessage"
+          }
           busy={busy === "IMESSAGE"}
           onPrimary={() =>
             onAction("IMESSAGE", imessageNeedsFullDiskAccess ? "full-disk-access" : "scan")
           }
         />
         <PlatformSetupCard
+          row={findRow("GOOGLE_MESSAGES")}
+          fallbackPlatform="GOOGLE_MESSAGES"
+          title="Google Messages"
+          body="Pairs with Google Messages on your Android phone. SMS, MMS, and RCS stay user-triggered."
+          actionLabel={findRow("GOOGLE_MESSAGES")?.status === "CONNECTED" ? "Open Google Messages" : "Pair Android phone"}
+          busy={busy === "GOOGLE_MESSAGES"}
+          onPrimary={() =>
+            onAction(
+              "GOOGLE_MESSAGES",
+              findRow("GOOGLE_MESSAGES")?.status === "CONNECTED" ? "open-browser" : "connect"
+            )
+          }
+        />
+        <PlatformSetupCard
           row={findRow("LINKEDIN")}
           fallbackPlatform="LINKEDIN"
           title="LinkedIn"
-          body="Uses your normal Chrome session. Sign in there first."
+          body={
+            findRow("LINKEDIN")?.browserProfileMode === "isolated"
+              ? `Uses a dedicated Chrome profile. Sign in when ${APP_NAME} opens it.`
+              : "Uses your normal Chrome session. Sign in there first."
+          }
           actionLabel={findRow("LINKEDIN")?.status === "CONNECTED" ? "Open LinkedIn" : "Connect LinkedIn"}
           busy={busy === "LINKEDIN"}
           onPrimary={() =>
@@ -727,6 +751,7 @@ function PlatformSetupCard({
   const status = row?.status ?? "NOT_CONNECTED";
   const connected = status === "CONNECTED";
   const enabled = row?.enabled ?? true;
+  const supported = row?.supported !== false;
   const runnerProcess = fallbackPlatform === "IMESSAGE" ? row?.runnerProcess : undefined;
   const platformFailure = row?.lastError
     ? classifyConsumerFailure(new Error(row.lastError), {
@@ -734,7 +759,9 @@ function PlatformSetupCard({
         method: "POST"
       })
     : null;
-  const statusLabel = !enabled
+  const statusLabel = !supported
+    ? "Not available"
+    : !enabled
     ? "Off"
     : connected
       ? "Connected"
@@ -760,7 +787,7 @@ function PlatformSetupCard({
           {statusLabel}
         </span>
       </div>
-      {platformFailure ? (
+      {supported && platformFailure ? (
         <p className="m-0 mt-3 rounded-row border border-hairline bg-paper px-3 py-2 text-[12.5px] leading-[1.45] text-ink-2">
           {platformFailure.message} {platformFailure.nextAction}
         </p>
@@ -775,8 +802,8 @@ function PlatformSetupCard({
         <button
           type="button"
           onClick={onPrimary}
-          disabled={busy || !enabled}
-          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-[oklch(28%_0.01_80)] disabled:cursor-not-allowed disabled:opacity-50"
+          disabled={busy || !enabled || !supported}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2 disabled:cursor-not-allowed disabled:opacity-50"
         >
           {busy ? "Working..." : actionLabel}
         </button>
@@ -793,6 +820,22 @@ function PlatformSetupCard({
 function SetupGuideSection() {
   return (
     <section className="mb-9">
+      <div className="mb-5 flex flex-wrap items-center justify-between gap-3 rounded-[8px] bg-paper-2/45 px-4 py-4">
+        <div className="min-w-0">
+          <p className="m-0 text-[15.5px] font-medium text-ink">Setup assistant</p>
+          <p className="m-0 mt-[3px] text-[13.5px] leading-[1.45] text-ink-3">
+            Choose message sources, Contacts, optional AI, voice transcription, and updates, step by step.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => startSetupWizard()}
+          className="inline-flex items-center rounded-pill bg-ink px-3 py-[7px] text-[12.5px] font-medium text-paper hover:bg-ink-2"
+        >
+          Run setup assistant
+        </button>
+      </div>
+      <OptionalComponents />
       <p className="mb-3 font-mono text-[10px] uppercase tracking-[0.08em] text-ink-3">
         Setup guide
       </p>

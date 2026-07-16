@@ -1,6 +1,6 @@
 # Design
 
-Visual design system for Relationship Inbox OS. Captured from the live dashboard
+Visual design system for Tovi (formerly Relationship Inbox OS). Captured from the live dashboard
 (`apps/dashboard`): `app/globals.css`, `tailwind.config.ts`, and the component library.
 This is the source of truth for staying on-brand. See [PRODUCT.md](PRODUCT.md) for the
 strategic "who / what / why".

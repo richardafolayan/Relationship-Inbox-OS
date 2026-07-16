@@ -1,5 +1,9 @@
 # Automated student release publishing
 
+> [Release, update, and rollback](../operations/releases.md) is the canonical
+> description of current build, publish, update, and rollback behavior. This
+> page retains provider-specific setup detail.
+
 Publishing happens **automatically when code reaches `main`**: every push to
 `main` builds the student release, overwrites the two files in Dropbox (so the
 pilots' feed URL stays the same), verifies the live feed end to end, and fails
@@ -194,3 +198,41 @@ publish a new build. Leave all three blank and in-app feedback is simply off
 - A Dropbox share link is not private authentication: anyone with the link can
   download the build, so the zip must stay free of secrets (the checks above
   enforce that).
+
+## The dev channel (Richard's own install)
+
+Separate from the pilot channel above, every push to `v1/strip-back-pr1`
+publishes a **dev-channel** build via `.github/workflows/publish-dev-release.yml`.
+It needs no Dropbox setup and no secrets: the repo is public, so the build is
+uploaded to a rolling GitHub prerelease tagged `dev`, and the asset URLs are
+deterministic:
+
+```text
+https://github.com/richardafolayan/relationship-inbox-os/releases/download/dev/latest.json
+https://github.com/richardafolayan/relationship-inbox-os/releases/download/dev/relationship-inbox-os-dev-latest.zip
+```
+
+How it differs from the pilot channel:
+
+- **Versioning.** Dev builds are stamped `<package version>-dev.<commit count>`
+  (for example `0.1.15-dev.5021`), so every push is strictly newer than the
+  last one without touching `package.json`. Pilot releases still require a real
+  version bump on `main`.
+- **Channel guard.** `release.json` and `latest.json` both carry
+  `channel: "dev"`. The updater refuses to apply a feed whose channel does not
+  match the install, so a dev install can never swallow a pilot build or the
+  other way round.
+- **In-place packaged updates.** A dev-channel `Tovi.app` (built with
+  `npm run build:macos-dmg`, which stamps `channel: "dev"` and the dev feed URL
+  into `release.json` by default) updates itself from Settings: the app quits,
+  the helper swaps `Contents/Resources/app`, reinstalls dependencies, rebuilds,
+  ad-hoc re-signs the bundle, and reopens it. Student packaged installs keep
+  the "install the new DMG" instructions.
+- **No feedback token.** Dev zips never bake the pilot-feedback token
+  (release assets are world-readable); an installed app keeps the values
+  already present in its `.env`.
+
+Bootstrap: an install made before this existed lacks the dev updater code and
+channel stamp, so build and install one dev DMG by hand
+(`npm run build:macos-dmg`); every update after that is one click in
+Settings > App updates.

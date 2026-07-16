@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 // Dashboard helpers ship as TypeScript; the runner is `node --import tsx`
 // from the root package.json so the .ts import below resolves at runtime.
-const { isDemoThread, scopeRowsToSandbox } = await import(
+const { getDemoThreadIds, isDemoThread, scopeRowsToSandbox } = await import(
   "../apps/dashboard/lib/demo-threads.ts"
 );
 
@@ -46,4 +46,9 @@ test("scopeRowsToSandbox: outside a sandbox flow, real threads are untouched", (
   const normal = scopeRowsToSandbox(rows, false);
   assert.equal(normal, rows, "no copy / no filtering in normal app mode");
   assert.ok(normal.some((r) => r.platformThreadId === "real-a"));
+});
+
+test("getDemoThreadIds returns only seeded sandbox thread ids", () => {
+  const rows = [realRow("a"), demoRow("serena-imessage"), demoRow("timi-linkedin")];
+  assert.deepEqual(getDemoThreadIds(rows), ["serena-imessage", "timi-linkedin"]);
 });

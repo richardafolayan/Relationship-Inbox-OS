@@ -6,6 +6,7 @@ import { ExternalLink, Loader2, X } from "lucide-react";
 import { apiGet } from "@/lib/api";
 import { displayHost } from "@/lib/linkify";
 import { fetchPreviewPath, type LinkPreviewData } from "@/components/thread/link-preview-card";
+import { APP_NAME } from "@/lib/branding";
 
 export type InAppBrowserTarget = {
   url: string;
@@ -153,7 +154,7 @@ export function InAppBrowser({
             <span className="text-[15px] font-medium leading-snug text-ink">{preview.title}</span>
           ) : null}
           <span className="text-[13px] text-ink-3">
-            This site can't be viewed inside Inbox OS.
+            This site can't be viewed inside {APP_NAME}.
           </span>
         </div>
         <button

@@ -9,9 +9,11 @@ import { MobileDock } from "@/components/layout/mobile-dock";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { TopStatus } from "@/components/layout/top-status";
 import { ConsumerRecovery } from "@/components/common/consumer-recovery";
+import { FullDiskAccessBanner } from "@/components/common/full-disk-access-banner";
 import { ToastHost } from "@/components/common/toast-host";
 import { PilotFeedbackModal } from "@/components/common/pilot-feedback-modal";
 import { PilotTour } from "@/components/common/PilotTour";
+import { SetupWizard } from "@/components/common/SetupWizard";
 import { FocusOverlays } from "@/components/common/focus/focus-overlays";
 import { FullDemoBanner } from "@/components/full-demo/FullDemoBanner";
 import { apiGet, apiGetRaw, apiPost } from "@/lib/api";
@@ -379,7 +381,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       dismissCenterNotification(UPDATE_NOTICE_ID);
       return;
     }
-    const notice = buildUpdateNotice(check.latestVersion);
+    const notice = buildUpdateNotice(check.latestVersion, check.applyMode);
     recordCenterNotifications([
       {
         id: UPDATE_NOTICE_ID,
@@ -393,7 +395,11 @@ export function AppShell({ children }: { children: ReactNode }) {
     writeNotifiedUpdateVersion(check.latestVersion);
     if (plan === "record-and-toast") {
       const activateUpdate = () => {
-        void startAppUpdate(check.latestVersion);
+        if (check.applyMode === "replace_app") {
+          router.push("/settings#app-updates");
+        } else {
+          void startAppUpdate(check.latestVersion);
+        }
       };
       const tabHidden =
         typeof document !== "undefined" && document.visibilityState === "hidden";
@@ -411,7 +417,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         });
       }
     }
-  }, []);
+  }, [router]);
 
   useEffect(() => {
     void checkAppUpdate();
@@ -492,14 +498,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       const skip = autoScanInFlightRef.current || isQuietHoursActive() || !isWithinActiveHours();
       if (!skip) {
         autoScanInFlightRef.current = true;
-        // Kick LinkedIn (rate-limited browser session) and iMessage (local
-        // chat.db read, essentially free) on the same cadence. The runner
-        // serializes them per-platform; iMessage will usually finish in
-        // under a second while LinkedIn is still going.
-        void Promise.all([
-          apiPost("/runner/control/scan", { platform: "LINKEDIN", scope: "update" }).catch(() => undefined),
-          apiPost("/runner/control/scan", { platform: "IMESSAGE", scope: "update" }).catch(() => undefined)
-        ]).finally(() => {
+        void apiPost("/runner/control/scan", { scope: "update" }).catch(() => undefined).finally(() => {
           autoScanInFlightRef.current = false;
         });
       }
@@ -766,6 +765,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <div className="flex h-app-screen min-h-0 flex-col">
         <FullDemoBanner />
         <TopStatus />
+        <FullDiskAccessBanner />
         {runtimeFailure ?? startupFailure ? (
           <div className="border-b border-hairline bg-paper px-3 py-2 sm:px-6">
             <ConsumerRecovery
@@ -785,6 +785,7 @@ export function AppShell({ children }: { children: ReactNode }) {
       <ToastHost />
       <PilotFeedbackModal />
       <PilotTour />
+      <SetupWizard />
       <FocusOverlays />
     </div>
   );

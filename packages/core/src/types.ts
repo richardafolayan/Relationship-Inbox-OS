@@ -5,13 +5,23 @@
 // landing in a follow-up. Removing either from this union without
 // also removing the underlying DB rows would break the runner's
 // prisma reads.
-export type PlatformName = "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP";
+export type PlatformName =
+  | "LINKEDIN"
+  | "INSTAGRAM"
+  | "TIKTOK"
+  | "IMESSAGE"
+  | "WHATSAPP"
+  | "GOOGLE_MESSAGES";
 export type RiskLevel = "GREEN" | "AMBER" | "RED";
 export type Direction = "IN" | "OUT";
 export type PlatformStatus = "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
 export type RunnerStatus = "ONLINE" | "SCANNING" | "ERROR";
 
-export type VerificationMethod = "bubble_detected" | "timestamp_advanced" | "best_effort";
+export type VerificationMethod =
+  | "platform_acknowledged"
+  | "bubble_detected"
+  | "timestamp_advanced"
+  | "best_effort";
 
 export interface ThreadStub {
   platformThreadId: string;
@@ -98,6 +108,8 @@ export interface OutboundPoll {
 
 export interface SendReceipt {
   sentAt: string;
+  acknowledgedAt?: string;
+  platformResultAt?: string;
   screenshotFile?: string;
   verifiedBy: VerificationMethod;
   /**
@@ -196,7 +208,25 @@ export type RunnerEvent =
       // line in that case instead of claiming "No new messages".
       failed?: boolean;
     })
-  | (RunnerEventBase & { type: "THREAD_UPDATED"; threadId: string })
+  | (RunnerEventBase & {
+      type: "MESSAGES_PERSISTED";
+      threadId: string;
+      platform: PlatformName;
+      syncTiming: {
+        sourceChangedAt: string;
+        persistedAt: string;
+        trigger: string;
+      };
+    })
+  | (RunnerEventBase & {
+      type: "THREAD_UPDATED";
+      threadId: string;
+      syncTiming?: {
+        sourceChangedAt: string;
+        persistedAt: string;
+        trigger: string;
+      };
+    })
   | (RunnerEventBase & {
       type: "WHATSAPP_STATE";
       state: "qr_ready" | "connecting" | "connected" | "disconnected";
@@ -210,6 +240,9 @@ export type RunnerEvent =
       // UI match this event to a specific pending bubble in the timeline so
       // the right one gets cleared when the runner confirms delivery.
       clientSendId?: string;
+      verifiedBy?: VerificationMethod;
+      acknowledgedAt?: string;
+      platformResultAt?: string;
     })
   | (RunnerEventBase & {
       type: "MESSAGE_SEND_FAILED";
@@ -222,6 +255,7 @@ export type RunnerEvent =
       // a one-tap recovery action without parsing the error message.
       // Mirrors the categories in the README's troubleshooting table.
       errorKind?: "AUTH_REQUIRED" | "SELECTOR_FAIL" | "PROFILE_LOCKED" | "TRANSIENT" | "DELIVERY_UNCERTAIN" | "UNKNOWN";
+      platformResultAt?: string;
     })
   | (RunnerEventBase & {
       // Fired when an async send is queued, started, or its position changes.
@@ -434,11 +468,13 @@ export type PresenterDemoMode = "off" | "sandbox" | "live";
 
 export interface AppSettings {
   scanIntervalSeconds: number;
+  automaticUpdates: boolean;
   amberHours: number;
   redHours: number;
   headless: boolean;
   maxMessagesPerThread: number;
   enabledPlatforms: PlatformName[];
+  aiEnabled?: boolean;
   demoMode: boolean;
   /**
    * Full-presenter-demo mode. See PresenterDemoMode. Optional so old rows

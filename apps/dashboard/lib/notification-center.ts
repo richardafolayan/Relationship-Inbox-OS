@@ -65,6 +65,14 @@ export function removeNotification(
   return existing.filter((entry) => entry.id !== id);
 }
 
+export function removeNotifications(
+  existing: CenterNotification[],
+  ids: string[]
+): CenterNotification[] {
+  const targets = new Set(ids);
+  return existing.filter((entry) => !targets.has(entry.id));
+}
+
 export function markNotificationsSeen(
   existing: CenterNotification[],
   ids: string[]
@@ -217,6 +225,11 @@ export function recordOverdueDigestNotification(
 export function dismissCenterNotification(id: string): void {
   if (typeof window === "undefined") return;
   writeCenterNotifications(removeNotification(readCenterNotifications(), id));
+}
+
+export function dismissCenterNotifications(ids: string[]): void {
+  if (typeof window === "undefined" || ids.length === 0) return;
+  writeCenterNotifications(removeNotifications(readCenterNotifications(), ids));
 }
 
 // Storage wrapper for pruneRepliedNotifications (#758). Called on every

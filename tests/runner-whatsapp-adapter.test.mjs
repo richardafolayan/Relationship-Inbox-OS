@@ -16,7 +16,8 @@ function createFakeClient(overrides = {}) {
     getChats: overrides.getChats ?? (async () => []),
     getChatById: overrides.getChatById ?? (async () => null),
     sendMessage:
-      overrides.sendMessage ?? (async () => ({ timestamp: 1700000100, id: { _serialized: "x" } })),
+      overrides.sendMessage ??
+      (async () => ({ timestamp: 1700000100, id: { _serialized: "x" }, ack: 1 })),
     getMessageById: overrides.getMessageById ?? (async () => null),
     getContactById:
       overrides.getContactById ??
@@ -121,6 +122,25 @@ test("ensureConnected is idempotent — second call returns the same in-flight p
   assert.equal(initCount, 1);
 });
 
+test("incoming WhatsApp message includes a targeted thread hint", async () => {
+  const client = createFakeClient();
+  const changes = [];
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client,
+    onIncomingMessage: (change) => changes.push(change)
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  client.emit("message", { from: "group@g.us", fromMe: false });
+
+  assert.equal(changes.length, 1);
+  assert.equal(changes[0].platformThreadId, "group@g.us");
+  assert.equal(Number.isFinite(Date.parse(changes[0].sourceChangedAt)), true);
+});
+
 test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   const chats = [
     { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },
@@ -144,7 +164,105 @@ test("scanUnreadThreads filters chats by unreadCount > 0", async () => {
   assert.equal(stubs[1].isGroup, true);
 });
 
-test("fetchRecentThreads slices to the requested limit", async () => {
+test("scanUnreadThreads reconnects once when WhatsApp replaces its browser frame", async () => {
+  let firstDestroyed = false;
+  const staleClient = createFakeClient({
+    getChats: async () => {
+      throw new Error("Attempted to use detached Frame '7EE3D604511108886782BA4502E441CD'.");
+    },
+    destroy: async () => {
+      firstDestroyed = true;
+    }
+  });
+  const liveClient = createFakeClient({
+    getChats: async () => [
+      { id: { _serialized: "a@c.us" }, name: "A", unreadCount: 0, isGroup: false },
+      { id: { _serialized: "b@c.us" }, name: "B", unreadCount: 2, isGroup: false }
+    ]
+  });
+  const clients = [staleClient, liveClient];
+  const states = [];
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => clients.shift(),
+    onStateChange: (state) => states.push(state)
+  });
+
+  const initialConnection = adapter.ensureConnected();
+  setImmediate(() => staleClient.emit("ready"));
+  await initialConnection;
+
+  const scan = adapter.scanUnreadThreads();
+  setImmediate(() => liveClient.emit("ready"));
+  const threads = await scan;
+
+  assert.equal(firstDestroyed, true);
+  assert.deepEqual(threads.map((thread) => thread.platformThreadId), ["b@c.us"]);
+  assert.deepEqual(states, ["connecting", "connected", "disconnected", "connecting", "connected"]);
+});
+
+test("poll actions invalidate a detached WhatsApp session", async () => {
+  for (const action of ["vote", "view_votes"]) {
+    let destroyed = false;
+    const states = [];
+    const client = createFakeClient({
+      getMessageById: async () => {
+        throw new Error("Attempted to use detached Frame '7EE3D604511108886782BA4502E441CD'.");
+      },
+      destroy: async () => {
+        destroyed = true;
+      }
+    });
+    const adapter = new WhatsAppAdapter({
+      ...baseDeps(),
+      createClient: () => client,
+      onStateChange: (state) => states.push(state)
+    });
+    const ready = adapter.ensureConnected();
+    setImmediate(() => client.emit("ready"));
+    await ready;
+
+    const pollAction = action === "vote"
+      ? adapter.voteOnPoll(
+          { platformThreadId: "a@c.us", displayName: "A", lastMessagePreview: "" },
+          "poll-1",
+          ["Yes"]
+        )
+      : adapter.getPollVotes(
+          { platformThreadId: "a@c.us", displayName: "A", lastMessagePreview: "" },
+          "poll-1"
+        );
+
+    await assert.rejects(pollAction, /WhatsApp lost its connection/);
+    assert.equal(destroyed, true, action);
+    assert.deepEqual(states, ["connecting", "connected", "disconnected"], action);
+  }
+});
+
+test("scanUnreadThreads does not reconnect for unrelated collection failures", async () => {
+  const client = createFakeClient({
+    getChats: async () => {
+      throw new Error("WhatsApp collection timed out");
+    }
+  });
+  let factoryCalls = 0;
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => {
+      factoryCalls += 1;
+      return client;
+    }
+  });
+
+  const connecting = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await connecting;
+
+  await assert.rejects(adapter.scanUnreadThreads(), /collection timed out/);
+  assert.equal(factoryCalls, 1);
+});
+
+test("fetchRecentThreads indexes every existing chat on the first sweep", async () => {
   const chats = Array.from({ length: 10 }, (_, i) => ({
     id: { _serialized: `c${i}@c.us` },
     name: `C${i}`,
@@ -159,6 +277,26 @@ test("fetchRecentThreads slices to the requested limit", async () => {
   const ready = adapter.ensureConnected();
   setImmediate(() => client.emit("ready"));
   await ready;
+  const stubs = await adapter.fetchRecentThreads(3);
+  assert.equal(stubs.length, 10);
+});
+
+test("fetchRecentThreads applies the requested limit after the initial index", async () => {
+  const chats = Array.from({ length: 10 }, (_, i) => ({
+    id: { _serialized: `c${i}@c.us` },
+    name: `C${i}`,
+    isGroup: false,
+    unreadCount: 0
+  }));
+  const client = createFakeClient({ getChats: async () => chats });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+  await adapter.fetchRecentThreads(3);
   const stubs = await adapter.fetchRecentThreads(3);
   assert.equal(stubs.length, 3);
 });
@@ -193,7 +331,7 @@ test("sendMessage allows WhatsApp group sends even when the group is not a saved
     },
     sendMessage: async (jid) => {
       sentJid = jid;
-      return { timestamp: 1700000100, id: { _serialized: "group-msg-1" } };
+      return { timestamp: 1700000100, id: { _serialized: "group-msg-1" }, ack: 1 };
     }
   });
   const adapter = new WhatsAppAdapter({
@@ -216,7 +354,7 @@ test("sendMessage allows WhatsApp group sends even when the group is not a saved
 
   assert.equal(sentJid, "120363123456789@g.us");
   assert.equal(contactLookups, 0);
-  assert.equal(receipt.verifiedBy, "best_effort");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
 });
 
 test("sendMessage delegates to client.sendMessage when the guard allows", async () => {
@@ -225,7 +363,7 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
     sendMessage: async (jid, text) => {
       sentText = text;
       assert.equal(jid, "447111222333@c.us");
-      return { timestamp: 1700000100, id: { _serialized: "msg-1" } };
+      return { timestamp: 1700000100, id: { _serialized: "msg-1" }, ack: 1 };
     }
   });
   const adapter = new WhatsAppAdapter({
@@ -240,7 +378,8 @@ test("sendMessage delegates to client.sendMessage when the guard allows", async 
     "hello"
   );
   assert.equal(sentText, "hello");
-  assert.equal(receipt.verifiedBy, "best_effort");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(receipt.platformMessageKey, "msg-1");
   assert.equal(receipt.sentAt, "2023-11-14T22:15:00.000Z");
 });
 
@@ -251,7 +390,7 @@ test("sendPoll sends a native WhatsApp poll and returns structured metadata", as
     sendMessage: async (jid, content) => {
       sentJid = jid;
       sentPoll = content;
-      return { timestamp: 1700000100, id: { _serialized: "poll-msg-1" } };
+      return { timestamp: 1700000100, id: { _serialized: "poll-msg-1" }, ack: 1 };
     }
   });
   const adapter = new WhatsAppAdapter({
@@ -675,4 +814,228 @@ test("no 'message' listener is attached when onIncomingMessage is omitted", asyn
   setImmediate(() => client.emit("ready"));
   await connecting;
   assert.equal(client.listenerCount("message"), 0);
+});
+
+// --- #816 (R-0098): interval-blocked sends queue until clear instead of failing ---
+
+test("sendMessage waits out the per-recipient interval and then sends (queued, not failed)", async () => {
+  // First guard check sees a 24s-old outbound (30s interval -> ~6s
+  // remaining); after the adapter sleeps the advertised remainder, the
+  // re-check sees nothing recent and the send proceeds.
+  let findFirstCalls = 0;
+  const slept = [];
+  let sentText = null;
+  const client = createFakeClient({
+    // ack: 1 -> already platform-acknowledged, so the #827 ack-wait
+    // resolves immediately instead of waiting on a message_ack event.
+    sendMessage: async (jid, text) => {
+      sentText = text;
+      return { timestamp: 1700000100, ack: 1, id: { _serialized: "msg-queued" } };
+    }
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({
+      findFirst: async () => {
+        findFirstCalls += 1;
+        return findFirstCalls === 1 ? { timestamp: new Date(Date.now() - 24_000) } : null;
+      }
+    }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendMessage(
+    { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+    "queued follow-up"
+  );
+
+  assert.equal(sentText, "queued follow-up");
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(findFirstCalls, 2);
+  assert.equal(slept.length, 1);
+  // Waits the guard's advertised remainder (~6s) plus the 250ms buffer.
+  assert.ok(slept[0] > 5_000 && slept[0] <= 6_000 + 250, `waited ${slept[0]}ms`);
+});
+
+test("sendPoll also waits out the per-recipient interval instead of failing", async () => {
+  let findFirstCalls = 0;
+  const slept = [];
+  const client = createFakeClient({
+    sendMessage: async () => ({ timestamp: 1700000100, ack: 1, id: { _serialized: "poll-queued" } })
+  });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({
+      findFirst: async () => {
+        findFirstCalls += 1;
+        return findFirstCalls === 1 ? { timestamp: new Date(Date.now() - 5_000) } : null;
+      }
+    }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const receipt = await adapter.sendPoll(
+    { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+    { question: "Sunday at 3?", options: ["Yes", "No"], allowMultipleAnswers: false }
+  );
+
+  assert.equal(receipt.verifiedBy, "platform_acknowledged");
+  assert.equal(slept.length, 1);
+});
+
+test("non-waitable guard denials (daily cap) still fail immediately without sleeping", async () => {
+  const slept = [];
+  const client = createFakeClient();
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({ count: async () => 30 }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "over cap"
+    ),
+    /WhatsApp send blocked.*24h send cap reached/
+  );
+  assert.equal(slept.length, 0);
+});
+
+test("a wait that would exceed the bounded deadline fails instead of stacking sleeps", async () => {
+  // Every check keeps reporting a freshly re-armed interval (something else
+  // is actively sending to this recipient). The adapter must give up once
+  // the deadline (one interval window + slack) would be exceeded, not loop.
+  const slept = [];
+  const client = createFakeClient();
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    prisma: createFakePrisma({
+      // Always "just sent": full 30s remaining on every check.
+      findFirst: async () => ({ timestamp: new Date(Date.now()) })
+    }),
+    createClient: () => client,
+    sleep: async (ms) => {
+      slept.push(ms);
+    }
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.sendMessage(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "never clears"
+    ),
+    /WhatsApp send blocked.*Per-recipient send interval/
+  );
+  // Bounded: at most one interval window fits inside the deadline.
+  assert.ok(slept.length <= 2, `slept ${slept.length} times`);
+});
+
+// --- #818 (R-0100): live poll tallies ---
+
+test("getPollVotes maps wweb.js PollVote records with name resolution and self-detection", async () => {
+  const client = createFakeClient({
+    getMessageById: async (id) => {
+      assert.equal(id, "poll-msg-1");
+      return {
+        type: "poll_creation",
+        getPollVotes: async () => [
+          {
+            voter: "447111222333@c.us",
+            selectedOptions: [{ name: "Yes" }],
+            interractedAtTs: 1_780_000_000_000
+          },
+          {
+            voter: "me@c.us",
+            selectedOptions: [{ name: "Yes" }, { name: "No" }],
+            interractedAtTs: 1_780_000_100_000
+          },
+          // Retracted vote (deselected everything) + unresolvable contact.
+          { voter: "unknown@c.us", selectedOptions: [] }
+        ]
+      };
+    },
+    getContactById: async (jid) => {
+      if (jid === "unknown@c.us") throw new Error("contact left");
+      if (jid === "me@c.us") return { isMyContact: true, pushname: "", name: "" };
+      return { isMyContact: true, pushname: "Cynthia", name: "Cynthia A" };
+    }
+  });
+  client.info = { wid: { _serialized: "me@c.us" } };
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  const votes = await adapter.getPollVotes(
+    { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+    "poll-msg-1"
+  );
+
+  assert.deepEqual(votes, [
+    {
+      voterId: "447111222333@c.us",
+      voterName: "Cynthia",
+      isMe: false,
+      selectedOptions: ["Yes"],
+      votedAt: new Date(1_780_000_000_000).toISOString()
+    },
+    {
+      voterId: "me@c.us",
+      voterName: null,
+      isMe: true,
+      selectedOptions: ["Yes", "No"],
+      votedAt: new Date(1_780_000_100_000).toISOString()
+    },
+    {
+      voterId: "unknown@c.us",
+      voterName: null,
+      isMe: false,
+      selectedOptions: [],
+      votedAt: null
+    }
+  ]);
+});
+
+test("getPollVotes throws a readable error when the poll message cannot be found", async () => {
+  const client = createFakeClient({ getMessageById: async () => null });
+  const adapter = new WhatsAppAdapter({
+    ...baseDeps(),
+    createClient: () => client
+  });
+  const ready = adapter.ensureConnected();
+  setImmediate(() => client.emit("ready"));
+  await ready;
+
+  await assert.rejects(
+    adapter.getPollVotes(
+      { platformThreadId: "447111222333@c.us", displayName: "Cynthia", lastMessagePreview: "" },
+      "gone"
+    ),
+    /poll message not found/
+  );
 });

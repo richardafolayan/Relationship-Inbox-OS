@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — student updater.
+// Tovi — student updater.
 //
 // Checks whether a newer pilot build exists and, on request, applies it while
 // preserving the pilot's personal data. Safe by design: it verifies a sha256
@@ -29,6 +29,12 @@
 //   --dry-run           print exactly what --apply would do; change nothing
 //   --url <latest-url>  the latest.json URL (else RIOS_UPDATE_FEED_URL)
 //   --dir <app-dir>     the install to update (default: this app folder)
+//   --backup-root <dir> where staging + backups live (default: the app folder's
+//                       parent). Packaged installs pass a dir OUTSIDE the .app
+//                       bundle so old copies never bloat the signed bundle.
+//   --resign <bundle>   after a successful apply, ad-hoc re-sign this mac .app
+//                       bundle (packaged installs; restores the codesign seal
+//                       the in-place swap breaks, same as a rebuild would)
 //   --no-deps           skip npm install + db setup after swapping (advanced/testing)
 //   --keep-backups <n>  how many old backups to keep (default 2)
 //   --json              machine-readable output for --check-only
@@ -43,6 +49,9 @@ import { fileURLToPath } from "node:url";
 import {
   compareVersions, isAllowedRemoteUpdateUrl, isNewer, sha256Buffer, validateLatestJson
 } from "./lib/release-manifest.mjs";
+import { resolveAppName } from "./lib/branding.mjs";
+
+const APP_NAME = resolveAppName();
 
 const SCRIPT_DIR = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_APP_DIR = resolve(SCRIPT_DIR, "..");
@@ -60,6 +69,8 @@ function parseArgs(argv) {
     else if (a === "--dry-run") out.dryRun = true;
     else if (a === "--url") out.url = next();
     else if (a === "--dir") out.dir = next();
+    else if (a === "--backup-root") out.backupRoot = next();
+    else if (a === "--resign") out.resign = next();
     else if (a === "--no-deps") out.noDeps = true;
     else if (a === "--keep-backups") out.keepBackups = Number(next());
     else if (a === "--json") out.json = true;
@@ -77,6 +88,11 @@ if (args.help) {
 
 const APP_DIR = resolve(args.dir ? resolve(process.cwd(), args.dir) : DEFAULT_APP_DIR);
 const FEED_URL = args.url || process.env.RIOS_UPDATE_FEED_URL || "";
+// Staging + backups default next to the install; a packaged app passes a dir
+// outside its .app bundle. Must be on the same volume as APP_DIR (the swap is
+// a rename).
+const BACKUP_ROOT = args.backupRoot ? resolve(process.cwd(), args.backupRoot) : dirname(APP_DIR);
+const RESIGN_BUNDLE = args.resign ? resolve(process.cwd(), args.resign) : "";
 
 const C = process.stdout.isTTY
   ? { b: "\x1b[1m", d: "\x1b[2m", g: "\x1b[32m", y: "\x1b[33m", r: "\x1b[31m", reset: "\x1b[0m" }
@@ -91,7 +107,7 @@ function macAppBundleDir() {
 
 function macAppBundlePath() {
   const out = macAppBundleDir();
-  return out ? join(out, "Relationship Inbox OS.app") : "";
+  return out ? join(out, `${APP_NAME}.app`) : "";
 }
 
 function refreshMacAppBundle() {
@@ -106,7 +122,7 @@ function refreshMacAppBundle() {
       cwd: APP_DIR,
       stdio: "ignore"
     });
-    say(`  Created the Relationship Inbox OS Mac app.`);
+    say(`  Created the ${APP_NAME} Mac app.`);
   } catch {
     say(`  ${C.y}Could not refresh the Mac app. The Terminal start command still works.${C.reset}`);
   }
@@ -120,6 +136,26 @@ function currentVersion(dir) {
     } catch { /* try next */ }
   }
   return "0.0.0";
+}
+
+function currentChannel(dir) {
+  try {
+    const channel = JSON.parse(readFileSync(join(dir, "release.json"), "utf8")).channel;
+    if (typeof channel === "string" && channel.trim()) return channel.trim();
+  } catch { /* no release.json = dev checkout or very old install */ }
+  return "";
+}
+
+// A dev install must never apply a student feed (or vice versa): the versions
+// are not comparable across channels and the wrong code would land. Older
+// manifests carry no channel, so only enforce when BOTH sides declare one.
+function enforceChannelMatch(installedChannel, manifest) {
+  const feedChannel = typeof manifest.channel === "string" ? manifest.channel.trim() : "";
+  if (!installedChannel || !feedChannel || installedChannel === feedChannel) return;
+  die(
+    `This install is on the "${installedChannel}" channel but the update feed serves "${feedChannel}".\n` +
+    `  Check RIOS_UPDATE_FEED_URL (or the baked release.json feed) before updating.`
+  );
 }
 
 function looksLikeHtml(buf) {
@@ -171,7 +207,7 @@ function report(current, manifest) {
     }, null, 2));
     return available;
   }
-  say(`\n  ${C.b}Relationship Inbox OS — update check${C.reset}`);
+  say(`\n  ${C.b}${APP_NAME} — update check${C.reset}`);
   say(`  Installed:  ${current}`);
   say(`  Latest:     ${manifest.version}`);
   if (available) {
@@ -235,11 +271,10 @@ async function applyUpdate(current, manifest) {
       `  The zip updater would replace the working copy, so it refuses to run here.\n` +
       `  Update a checkout with git instead (e.g. git pull).`);
   }
-  const parent = dirname(APP_DIR);
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-  const stagingRoot = join(parent, `.rios-update-${stamp}`);
+  const stagingRoot = join(BACKUP_ROOT, `.rios-update-${stamp}`);
   const appNew = join(stagingRoot, "relationship-inbox-os");
-  const backupDir = join(parent, `.rios-backup-${stamp}`);
+  const backupDir = join(BACKUP_ROOT, `.rios-backup-${stamp}`);
   const zipPath = join(stagingRoot, "download.zip");
 
   if (args.dryRun) {
@@ -250,6 +285,7 @@ async function applyUpdate(current, manifest) {
     say(`  4. preserve into the new copy: ${PRESERVE.join(", ")}`);
     say(`  5. swap in the new app code`);
     say(`  6. ${args.noDeps ? "skip deps (--no-deps)" : "npm install --include=dev, then db setup"}`);
+    if (RESIGN_BUNDLE) say(`  6b. ad-hoc re-sign ${RESIGN_BUNDLE}`);
     say(`  7. roll back automatically if any step fails\n`);
     return;
   }
@@ -322,32 +358,72 @@ async function applyUpdate(current, manifest) {
 
   // 6. Dependencies + database. On failure, roll back to the backup.
   if (!args.noDeps) {
+    // Packaged installs (RESIGN_BUNDLE set) run these WITHOUT the packaged
+    // flag: packaged start-app refuses to build anything ("reinstall from the
+    // DMG"), but the freshly swapped-in zip is source-only, so the core /
+    // runner / dashboard artifacts must be rebuilt right here.
+    const childEnv = { ...process.env };
+    if (RESIGN_BUNDLE) delete childEnv.RIOS_PACKAGED_APP;
+    const opts = { cwd: APP_DIR, stdio: "inherit", env: childEnv };
     try {
       say(`  Installing dependencies (a few minutes)…`);
-      execFileSync("npm", ["install", "--include=dev"], { cwd: APP_DIR, stdio: "inherit" });
-      execFileSync("npm", ["run", "db:generate"], { cwd: APP_DIR, stdio: "inherit" });
-      execFileSync("npm", ["run", "db:push"], { cwd: APP_DIR, stdio: "inherit" });
+      execFileSync("npm", ["install", "--include=dev"], opts);
+      execFileSync("npm", ["run", "db:generate"], opts);
+      execFileSync("npm", ["run", "db:push"], opts);
+      if (RESIGN_BUNDLE) {
+        // Fatal for packaged installs: without these artifacts the packaged
+        // launcher cannot boot (it never builds), so a failed build must roll
+        // back rather than leave a dead app.
+        say(`  Building the app (a few minutes)…`);
+        execFileSync("node", ["scripts/start-app.mjs", "--prepare-only"], opts);
+        const missing = [
+          "packages/core/dist/index.js",
+          "apps/runner/dist/index.js",
+          "apps/dashboard/.next/BUILD_ID"
+        ].filter((p) => !existsSync(join(APP_DIR, p)));
+        if (missing.length) {
+          throw new Error(`packaged build artifacts missing after prepare: ${missing.join(", ")}`);
+        }
+      }
     } catch (err) {
       say(`  ${C.y}Dependency step failed — rolling back.${C.reset}`);
       rollback(APP_DIR, backupDir);
       die(`Update rolled back to ${current}. Your data is safe.\n  ${err.message}`);
     }
-    // Pre-build the optimised dashboard so the relaunch is instant.
-    // Non-fatal: the launcher rebuilds (or falls back to dev mode) itself.
-    try {
-      say(`  Optimising the app for speed (about a minute)…`);
-      execFileSync("node", ["scripts/start-app.mjs", "--prepare-only"], { cwd: APP_DIR, stdio: "inherit" });
-    } catch {
-      say(`  ${C.y}Pre-build didn't finish — the next launch will do it instead.${C.reset}`);
+    if (!RESIGN_BUNDLE) {
+      // Pre-build the optimised dashboard so the relaunch is instant.
+      // Non-fatal: the launcher rebuilds (or falls back to dev mode) itself.
+      try {
+        say(`  Optimising the app for speed (about a minute)…`);
+        execFileSync("node", ["scripts/start-app.mjs", "--prepare-only"], opts);
+      } catch {
+        say(`  ${C.y}Pre-build didn't finish — the next launch will do it instead.${C.reset}`);
+      }
     }
   }
 
-  refreshMacAppBundle();
-  pruneBackups(parent, Math.max(0, args.keepBackups));
+  if (RESIGN_BUNDLE) {
+    // The in-place swap broke the bundle's codesign seal; an ad-hoc re-sign
+    // restores it, exactly like rebuilding the DMG would. Best-effort: the
+    // packaged app is not quarantined, so a failed re-sign still launches.
+    try {
+      say(`  Re-signing ${RESIGN_BUNDLE}…`);
+      execFileSync("codesign", ["--force", "--deep", "--sign", "-", RESIGN_BUNDLE], { stdio: "ignore" });
+    } catch {
+      say(`  ${C.y}Could not re-sign the app bundle. It should still open normally.${C.reset}`);
+    }
+  } else {
+    refreshMacAppBundle();
+  }
+  pruneBackups(BACKUP_ROOT, Math.max(0, args.keepBackups));
   say(`\n  ${C.g}${C.b}Updated to ${manifest.version}.${C.reset}`);
-  const bundlePath = macAppBundlePath();
-  if (bundlePath) say(`  Start the app again:  ${C.b}open "${bundlePath}"${C.reset}`);
-  say(`  Terminal fallback:  ${C.b}npm run start:student${C.reset}`);
+  if (RESIGN_BUNDLE) {
+    say(`  Start the app again:  ${C.b}open "${RESIGN_BUNDLE}"${C.reset}`);
+  } else {
+    const bundlePath = macAppBundlePath();
+    if (bundlePath) say(`  Start the app again:  ${C.b}open "${bundlePath}"${C.reset}`);
+    say(`  Terminal fallback:  ${C.b}npm run start:student${C.reset}`);
+  }
   say(`  Previous version kept at: ${backupDir}\n`);
 }
 
@@ -374,7 +450,12 @@ async function main() {
   }
   const current = currentVersion(APP_DIR);
   const manifest = await loadManifest(FEED_URL);
-  enforceMinimumInstallerVersion(current, manifest);
+  enforceChannelMatch(currentChannel(APP_DIR), manifest);
+  // The minimum-installer gate only applies when we're about to CHANGE the
+  // install. --check-only (used by the in-app "App updates" card) must always
+  // report, never die — otherwise every install older than the release's floor
+  // would see a hard error instead of "update available" and in-app updates
+  // would self-block.
   const available = report(current, manifest);
 
   if (args.apply) {
@@ -382,8 +463,10 @@ async function main() {
       say(`  Nothing to do — already on the latest version.\n`);
       return;
     }
+    enforceMinimumInstallerVersion(current, manifest);
     await applyUpdate(current, manifest);
   } else if (args.dryRun) {
+    enforceMinimumInstallerVersion(current, manifest);
     await applyUpdate(current, manifest);
   }
 }

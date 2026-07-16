@@ -1,12 +1,14 @@
 # Current Product Direction
 
-_Living document. Keep this updated as the direction changes. Last updated: 2026-05-21._
+_Living document. Keep this updated as the direction changes. Last updated: 2026-07-15._
 
-Relationship Inbox OS is being prepared for a small 3-5 student pilot. It should
+Tovi is being prepared for a small 3-5 student pilot. It should
 feel like a calm place to reply properly, not a dashboard, CRM, marketing tool,
 analytics console, or AI ghostwriter.
 
-The current baseline is `v1/strip-back-pr1`.
+The current pilot baseline is `v1/strip-back-pr1`. The Windows parity track is
+`feat/google-messages-windows-parity`. Google Messages is an explicit pilot
+requirement for Android phone users, overriding the earlier Phase 0 exclusion.
 
 ## Product principles
 
@@ -22,7 +24,7 @@ The current baseline is `v1/strip-back-pr1`.
 
 Do not build any of these unless explicitly instructed:
 
-- WhatsApp
+- WhatsApp expansion beyond the committed Windows Phase 0 track
 - People CRM
 - At Risk dashboard
 - analytics dashboard
@@ -39,6 +41,14 @@ Stop adding core product features. Prepare and run the 3-5 student pilot.
 
 Only build small operational improvements that reduce pilot friction, for
 example direct feedback submission, install/readme clarity, or setup hardening.
+
+## Windows pilot parity
+
+Package and boot Tovi on Windows with Google Messages, LinkedIn, and WhatsApp.
+Google Messages supplies Android SMS, MMS, and RCS through a user-paired web
+session. iMessage and macOS Contacts birthday sync remain clearly unavailable
+because they depend on Apple-only local services. All sends remain
+user-triggered.
 
 ---
 

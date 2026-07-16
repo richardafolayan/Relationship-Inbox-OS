@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useFullDemo } from "@/components/full-demo/FullDemoProvider";
 import { scopeRowsToSandbox } from "@/lib/demo-threads";
@@ -20,16 +20,20 @@ import { MacContactsHint } from "@/components/common/mac-contacts-hint";
 import dynamic from "next/dynamic";
 import { PersonAvatar } from "@/components/common/person-avatar";
 import { readInboxQueryParam } from "@/lib/inbox-query";
+import {
+  INBOX_INITIAL_VISIBLE_ROWS,
+  nextInboxVisibleCount,
+  windowInboxSections
+} from "@/lib/inbox-pagination";
 import { formatRelative } from "@/lib/time";
 import { normalizePreview } from "@/lib/preview";
-import { hasEverConnected, isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
+import { isDegradedAndInUse, PLATFORM_LABEL, toDisplayRisk } from "@/lib/risk";
 import { isWithinHorizon } from "@/lib/horizon";
 import { isLikelyClosed } from "@/lib/closed-conversation";
 import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
 import { cn } from "@/lib/utils";
 import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 import {
-  OXBLOOD_PAGE_VARS,
   TOOL_CLASS,
   XIcon,
   FilterGlyph,
@@ -42,7 +46,7 @@ import {
 
 type RiskTab = "all" | "overdue" | "waiting" | "fresh" | "scheduled";
 type CategoryFilter = "any" | "genuine" | "outreach" | "needs_reply" | "waiting_on_them";
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
 type PriorityGroupFilter = "all" | string;
 type SortMode = "oldest" | "recent" | "name";
 
@@ -70,15 +74,14 @@ const CATEGORY_FILTERS: { key: CategoryFilter; label: string }[] = [
   { key: "outreach", label: "Outreach" }
 ];
 
-// Full label list, including opt-in platforms. The popover renders a
-// filtered view (see platformFilterOptions in the page component) so a
-// pilot who never linked WhatsApp doesn't see its chip; ChipsRow keeps
-// reading labels from the full list.
+// Full label lookup. The popover filters this against /data/platforms so
+// disabled platforms never appear while active chip labels stay available.
 const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "LINKEDIN", label: "LinkedIn" },
   { key: "IMESSAGE", label: "iMessage" },
-  { key: "WHATSAPP", label: "WhatsApp" }
+  { key: "WHATSAPP", label: "WhatsApp" },
+  { key: "GOOGLE_MESSAGES", label: "Google Messages" }
 ];
 
 const SORT_MODES: { key: SortMode; label: string }[] = [
@@ -92,7 +95,8 @@ const PLATFORM_GLYPH: Record<InboxRow["platform"], string> = {
   IMESSAGE: "iM",
   INSTAGRAM: "ig",
   TIKTOK: "tt",
-  WHATSAPP: "wa"
+  WHATSAPP: "wa",
+  GOOGLE_MESSAGES: "gm"
 };
 
 function applyTab(row: InboxRow, tab: RiskTab): boolean {
@@ -253,6 +257,7 @@ export default function InboxPage() {
   const [favouritesOnly, setFavouritesOnly] = useState(false);
   const [priorityGroup, setPriorityGroup] = useState<PriorityGroupFilter>("all");
   const [sortMode, setSortMode] = useState<SortMode>("oldest");
+  const [visibleRowLimit, setVisibleRowLimit] = useState(INBOX_INITIAL_VISIBLE_ROWS);
   // Optimistic favourite state keyed by personId, so tapping a row's star
   // re-sorts and re-marks instantly without waiting for the 10s poll. Merged
   // over the server rows below; reverted if the toggle request fails.
@@ -288,20 +293,22 @@ export default function InboxPage() {
   // runner event means the data DID change, so serving a <4s-old cache and
   // skipping revalidation would delay the update until the next poll.
   const refresh = useCallback(async (opts?: { force?: boolean }) => {
-    const [inbox, platformRows, logRows] = await Promise.all([
-      // SWR: paint the cached list immediately, revalidate in the background.
-      apiGet<InboxResponse>("/runner/data/inbox", {
+    const supportingContext = Promise.all([
+      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => []),
+      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100", { ttlMs: 5000 }).catch(() => [])
+    ]).then(([platformRows, logRows]) => {
+      setPlatforms(platformRows ?? []);
+      setLogs(logRows ?? []);
+    });
+
+    const inbox = await apiGet<InboxResponse>("/runner/data/inbox", {
         ttlMs: opts?.force ? 0 : 4000,
         swr: true,
         onFresh: (d) => applyInbox(d as InboxResponse)
-      }).catch(() => null),
-      apiGet<PlatformCard[]>("/runner/data/platforms", { ttlMs: 10000 }).catch(() => []),
-      apiGet<AuditLogRow[]>("/runner/data/logs?limit=100", { ttlMs: 5000 }).catch(() => [])
-    ]);
+      }).catch(() => null);
     if (inbox) applyInbox(inbox);
-    setPlatforms(platformRows ?? []);
-    setLogs(logRows ?? []);
     setLoaded(true);
+    void supportingContext;
   }, [applyInbox]);
 
   // Seed search from a ?q= deep link (the thread participant popover's
@@ -377,15 +384,18 @@ export default function InboxPage() {
     return Array.from(groups).sort((a, b) => a.localeCompare(b));
   }, [allRows]);
 
-  // WhatsApp is opt-in: its filter chip only shows for an operator who has
-  // linked it at least once (or still has WhatsApp threads from before a
-  // disconnect). Everyone else keeps the two-platform popover.
   const platformFilterOptions = useMemo(() => {
-    const showWhatsApp =
-      platforms.some((p) => p.platform === "WHATSAPP" && hasEverConnected(p)) ||
-      allRows.some((row) => row.platform === "WHATSAPP");
-    return PLATFORM_FILTERS.filter((option) => option.key !== "WHATSAPP" || showWhatsApp);
-  }, [platforms, allRows]);
+    const available = new Set(platforms.map((platform) => platform.platform));
+    return PLATFORM_FILTERS.filter(
+      (option) => option.key === "all" || available.has(option.key)
+    );
+  }, [platforms]);
+
+  useEffect(() => {
+    if (platformFilter === "all") return;
+    if (platformFilterOptions.some((option) => option.key === platformFilter)) return;
+    setPlatformFilter("all");
+  }, [platformFilter, platformFilterOptions]);
 
   useEffect(() => {
     if (priorityGroup === "all") return;
@@ -569,6 +579,20 @@ export default function InboxPage() {
     () => sections.flatMap((section) => section.items),
     [sections]
   );
+  const renderedSections = useMemo(
+    () => windowInboxSections(sections, visibleRowLimit),
+    [sections, visibleRowLimit]
+  );
+  const renderedRows = useMemo(
+    () => orderedRows.slice(0, visibleRowLimit),
+    [orderedRows, visibleRowLimit]
+  );
+  const renderedRowCount = Math.min(visibleRowLimit, orderedRows.length);
+  const hasMoreRows = renderedRowCount < orderedRows.length;
+
+  useEffect(() => {
+    setVisibleRowLimit(INBOX_INITIAL_VISIBLE_ROWS);
+  }, [query, tab, category, platformFilter, favouritesOnly, priorityGroup, showAll, sortMode]);
 
   // Only platforms the operator actually uses (connected at least once) raise
   // an error banner; a never-connected platform is "not set up". (issue #708)
@@ -683,7 +707,7 @@ export default function InboxPage() {
   );
 
   return (
-    <Canvas style={OXBLOOD_PAGE_VARS}>
+    <Canvas>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"
@@ -913,7 +937,7 @@ export default function InboxPage() {
       ) : (
         <>
           {grouped ? (
-            sections.map((section, index) => (
+            renderedSections.map((section, index) => (
               <section key={section.key}>
                 <SectionDivider label={section.label ?? ""} tight={index === 0} />
                 <div className="flex flex-col">
@@ -932,7 +956,7 @@ export default function InboxPage() {
             ))
           ) : (
             <div className="mt-4 flex flex-col">
-              {orderedRows.map((row) => (
+              {renderedRows.map((row) => (
                 <InboxRowItem
                   key={row.id}
                   row={row}
@@ -946,6 +970,21 @@ export default function InboxPage() {
           )}
         </>
       )}
+
+      {loaded && hasMoreRows ? (
+        <div className="mt-8 flex flex-col items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setVisibleRowLimit((current) => nextInboxVisibleCount(current, orderedRows.length))}
+            className="rounded-pill border border-hairline bg-paper px-4 py-2 text-[13px] font-medium text-ink transition-colors duration-calm hover:bg-paper-2"
+          >
+            Show {Math.min(INBOX_INITIAL_VISIBLE_ROWS, orderedRows.length - renderedRowCount)} more
+          </button>
+          <span className="font-mono text-[10px] uppercase tracking-[0.06em] text-ink-3" aria-live="polite">
+            {renderedRowCount} of {orderedRows.length}
+          </span>
+        </div>
+      ) : null}
 
       {loaded ? (
         <div className="mt-14 flex flex-col items-center gap-3 border-t border-hairline pt-6">
@@ -1270,7 +1309,7 @@ interface InboxRowItemProps {
   onToggleFavourite: (personId: string | undefined, next: boolean) => void;
 }
 
-function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }: InboxRowItemProps) {
+const InboxRowItem = memo(function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }: InboxRowItemProps) {
   const right = rightLabelFor(row);
   const dot = dotFor(row);
   const fav = row.personFavourite === true;
@@ -1401,4 +1440,4 @@ function InboxRowItem({ row, selectMode, selected, onToggle, onToggleFavourite }
       </span>
     </Link>
   );
-}
+});

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 //
-// Relationship Inbox OS — student release builder.
+// Tovi — student release builder.
 //
 // Produces a pilot-install source zip plus the latest.json the updater reads.
 // Run it from a checkout of the branch you want to release (normally
@@ -35,9 +35,19 @@
 //   --zip-url <url>     Dropbox (dl=1) URL of the uploaded zip, written into latest.json
 //   --ref <git-ref>     git ref to archive (default: HEAD)
 //   --out <dir>         output directory (default: release-dist/)
+//   --channel <name>    release channel: "student" (default) or "dev". The dev
+//                       channel stamps version <pkg>-dev.<commit count> so every
+//                       push is strictly newer than the last within the channel,
+//                       names the zips -dev- instead of -student-, floors
+//                       minimumInstallerVersion so dev installs always qualify,
+//                       and bakes the self-update feed into release.json.
+//   --update-feed-url <url>  dev only: the feed release.json points at (default:
+//                       derived from the git origin; or RIOS_DEV_UPDATE_FEED_URL)
 //   --notes <line>      a release-note line (repeatable)
 //   --notes-file <path> read release notes from a file (one per line)
-//   --min-installer <v> minimumInstallerVersion in latest.json (default: package version)
+//   --min-installer <v> minimumInstallerVersion in latest.json (default: the channel
+//                       floor — 0.1.0 student / 0.0.1 dev — the oldest installer that
+//                       can apply updates, NOT the release version)
 //   --manifest-only     do not rebuild the zip; just (re)write latest.json from an existing zip
 //   --zip <path>        which zip to checksum in --manifest-only mode (default: the -latest zip)
 
@@ -108,6 +118,8 @@ function parseArgs(argv) {
     if (a === "--zip-url") out.zipUrl = next();
     else if (a === "--ref") out.ref = next();
     else if (a === "--out") out.out = next();
+    else if (a === "--channel") out.channel = next();
+    else if (a === "--update-feed-url") out.updateFeedUrl = next();
     else if (a === "--notes") out.notes.push(next());
     else if (a === "--notes-file") out.notesFile = next();
     else if (a === "--min-installer") out.minInstaller = next();
@@ -128,9 +140,45 @@ if (args.help) {
 const OUT_DIR = resolve(ROOT, args.out || "release-dist");
 const REF = args.ref || "HEAD";
 const PLACEHOLDER_URL = "https://REPLACE-WITH-DROPBOX-DIRECT-LINK?dl=1";
+const CHANNELS = ["student", "dev"];
+const CHANNEL = args.channel || "student";
+if (!CHANNELS.includes(CHANNEL)) {
+  die(`Unknown --channel "${CHANNEL}". Use one of: ${CHANNELS.join(", ")}.`);
+}
+// The dev channel updates on every push without a package.json bump, so dev
+// installs must never trip the minimum-installer gate. Note the floor sits
+// BELOW any real version: a prerelease like 1.2.3-dev.9 ranks under 1.2.3, so
+// a floor equal to a core version would block that core's own dev builds.
+const DEV_MIN_INSTALLER = "0.0.1";
+// The student floor is the OLDEST installer that can still correctly apply an
+// update — NOT the version being released. Defaulting it to the new version
+// (the old behaviour) made every older install self-block: the updater would
+// refuse to apply (or even report) an update it thinks it is too old for, so a
+// pilot on 0.1.13 checking a 0.1.14 feed saw a hard error instead of "update
+// available". Only bump this (via --min-installer) for a genuinely breaking
+// change to the swap/preserve protocol that an old updater really can't handle.
+const STUDENT_MIN_INSTALLER = "0.1.0";
 
 function git(...a) {
   return execFileSync("git", a, { cwd: ROOT, encoding: "utf8" }).trim();
+}
+// The feed a dev install self-updates from. It MUST be baked into the zip's
+// release.json (not just the DMG's): a self-update installs this zip's
+// release.json OVER the old one, so if the feed pointer were missing here the
+// app would forget its dev feed after the first update and fall back to the
+// env RIOS_UPDATE_FEED_URL (the pilot Dropbox link), stranding the dev channel
+// on a stale pilot version. Overridable for tests/forks; otherwise derived
+// from the git origin like the DMG builder does.
+function devUpdateFeedUrl() {
+  const override = (args.updateFeedUrl || process.env.RIOS_DEV_UPDATE_FEED_URL || "").trim();
+  if (override) return override;
+  let remote = "";
+  try { remote = git("remote", "get-url", "origin"); } catch { /* no remote */ }
+  const match = remote.match(/github\.com[:/]([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  if (!match) {
+    die("could not derive the dev update feed from git origin; set RIOS_DEV_UPDATE_FEED_URL or pass --update-feed-url.");
+  }
+  return `https://github.com/${match[1]}/${match[2]}/releases/download/dev/latest.json`;
 }
 function pkgVersion() {
   return JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).version;
@@ -139,6 +187,17 @@ function pkgVersionFromRef(ref) {
   const pkg = JSON.parse(git("show", `${ref}:package.json`));
   if (!pkg.version) die(`package.json at ${ref} does not have a version.`);
   return pkg.version;
+}
+// Dev builds append -dev.<commit count> so semver prerelease comparison makes
+// every push to the branch strictly newer than the previous dev build.
+function releaseVersionFromRef(ref) {
+  const core = pkgVersionFromRef(ref);
+  if (CHANNEL !== "dev") return core;
+  const count = git("rev-list", "--count", ref);
+  return `${core}-dev.${count}`;
+}
+function zipBaseName() {
+  return `${APP_FOLDER_NAME}-${CHANNEL}`;
 }
 function die(msg) {
   process.stderr.write(`\n  ✗ ${msg}\n`);
@@ -153,25 +212,31 @@ function walk(dir, base = dir, acc = []) {
   return acc;
 }
 
-function readNotes(version) {
+function readNotes(version, commit) {
   if (args.notesFile) {
     return readFileSync(resolve(ROOT, args.notesFile), "utf8")
       .split(/\r?\n/).map((l) => l.replace(/^[-*]\s*/, "").trim()).filter(Boolean);
   }
   if (args.notes.length) return args.notes;
+  if (CHANNEL === "dev") {
+    let subject = "";
+    try { subject = git("log", "-1", "--format=%s", REF); } catch { /* not a git checkout */ }
+    return [subject ? `Dev build ${commit}: ${subject}` : `Dev build ${commit || version}.`];
+  }
   return [`Student pilot build ${version}.`];
 }
 
-function writeManifest({ version, build, commit, zipPath, sha256 }) {
+function writeManifest({ version, build, commit, zipPath, sha256, releaseNotes = readNotes(version, commit) }) {
   const zipUrl = args.zipUrl || PLACEHOLDER_URL;
   const manifest = {
     version,
     build,
     commit,
+    channel: CHANNEL,
     zipUrl,
     sha256,
-    releaseNotes: readNotes(version),
-    minimumInstallerVersion: args.minInstaller || version
+    releaseNotes,
+    minimumInstallerVersion: args.minInstaller || (CHANNEL === "dev" ? DEV_MIN_INSTALLER : STUDENT_MIN_INSTALLER)
   };
   const manifestPath = join(OUT_DIR, "latest.json");
   writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
@@ -185,7 +250,7 @@ async function manifestOnly() {
   mkdirSync(OUT_DIR, { recursive: true });
   const zipPath = args.zip
     ? resolve(ROOT, args.zip)
-    : join(OUT_DIR, `${APP_FOLDER_NAME}-student-latest.zip`);
+    : join(OUT_DIR, `${zipBaseName()}-latest.zip`);
   if (!existsSync(zipPath)) die(`No zip to checksum at ${zipPath}. Build a release first, or pass --zip.`);
   const sha256 = await sha256File(zipPath);
 
@@ -194,6 +259,7 @@ async function manifestOnly() {
   let version = pkgVersion();
   let build = new Date().toISOString();
   let commit = "";
+  let releaseNotes;
   try {
     const baked = JSON.parse(
       execFileSync("unzip", ["-p", zipPath, `${APP_FOLDER_NAME}/release.json`], { encoding: "utf8" })
@@ -201,10 +267,13 @@ async function manifestOnly() {
     if (baked.version) version = baked.version;
     if (baked.build) build = baked.build;
     if (baked.commit) commit = String(baked.commit).slice(0, 7);
+    if (!args.notesFile && args.notes.length === 0 && Array.isArray(baked.releaseNotes)) {
+      releaseNotes = baked.releaseNotes.filter((note) => typeof note === "string");
+    }
   } catch {
     try { commit = git("rev-parse", "--short", REF); } catch { /* not a git checkout */ }
   }
-  const { manifestPath, zipUrl } = writeManifest({ version, build, commit, zipPath, sha256 });
+  const { manifestPath, zipUrl } = writeManifest({ version, build, commit, zipPath, sha256, releaseNotes });
 
   process.stdout.write(`\n  Regenerated manifest only.\n`);
   process.stdout.write(`  latest.json : ${manifestPath}\n`);
@@ -218,12 +287,13 @@ async function manifestOnly() {
 
 // ---- full build ----------------------------------------------------------
 async function build() {
-  const version = pkgVersionFromRef(REF);
+  const version = releaseVersionFromRef(REF);
   const build = new Date().toISOString();
   const commit = git("rev-parse", "--short", REF);
   const fullCommit = git("rev-parse", REF);
+  const releaseNotes = readNotes(version, commit);
 
-  process.stdout.write(`\n  Building student release ${version} (${commit}) from ${REF}\n`);
+  process.stdout.write(`\n  Building ${CHANNEL} release ${version} (${commit}) from ${REF}\n`);
 
   mkdirSync(OUT_DIR, { recursive: true });
   const staging = mkdtempSync(join(tmpdir(), "rios-release-"));
@@ -237,10 +307,14 @@ async function build() {
     execFileSync("tar", ["-xf", tarPath, "-C", appDir]);
     rmSync(tarPath, { force: true });
 
-    // 2. Bake a release.json so the installed app knows what it is.
+    // 2. Bake a release.json so the installed app knows what it is. Dev builds
+    // also carry the feed they self-update from, so the pointer survives each
+    // in-place update (see devUpdateFeedUrl).
+    const releaseInfo = { version, build, commit: fullCommit, channel: CHANNEL, releaseNotes };
+    if (CHANNEL === "dev") releaseInfo.updateFeedUrl = devUpdateFeedUrl();
     writeFileSync(
       join(appDir, "release.json"),
-      JSON.stringify({ version, build, commit: fullCommit, channel: "student" }, null, 2) + "\n"
+      JSON.stringify(releaseInfo, null, 2) + "\n"
     );
 
     // 2b. Bake the pilot-feedback token into .env.example (if provided at
@@ -260,8 +334,8 @@ async function build() {
     }
 
     // 4. Zip (top-level relationship-inbox-os/ folder). -X drops macOS extras.
-    const versionedZip = join(OUT_DIR, `${APP_FOLDER_NAME}-student-${version}.zip`);
-    const latestZip = join(OUT_DIR, `${APP_FOLDER_NAME}-student-latest.zip`);
+    const versionedZip = join(OUT_DIR, `${zipBaseName()}-${version}.zip`);
+    const latestZip = join(OUT_DIR, `${zipBaseName()}-latest.zip`);
     rmSync(versionedZip, { force: true });
     execFileSync("zip", ["-r", "-X", "-q", versionedZip, APP_FOLDER_NAME], { cwd: staging });
 
@@ -277,7 +351,7 @@ async function build() {
     // 6. latest copy + checksum + manifest.
     cpSync(versionedZip, latestZip);
     const sha256 = await sha256File(versionedZip);
-    const { manifestPath, shaPath, zipUrl } = writeManifest({ version, build, commit, zipPath: versionedZip, sha256 });
+    const { manifestPath, shaPath, zipUrl } = writeManifest({ version, build, commit, zipPath: versionedZip, sha256, releaseNotes });
 
     const sizeMb = (statSync(versionedZip).size / (1024 * 1024)).toFixed(1);
     process.stdout.write(`\n  Built (${sizeMb} MB, ${zipEntries.length} files):\n`);
@@ -287,7 +361,7 @@ async function build() {
     process.stdout.write(`    manifest        : ${manifestPath}\n`);
     process.stdout.write(`    sha256          : ${sha256}\n`);
     process.stdout.write(`\n  Next:\n`);
-    process.stdout.write(`    1. Upload ${APP_FOLDER_NAME}-student-latest.zip to Dropbox.\n`);
+    process.stdout.write(`    1. Upload ${zipBaseName()}-latest.zip to Dropbox.\n`);
     process.stdout.write(`    2. Copy its share link and change dl=0 to dl=1.\n`);
     process.stdout.write(`    3. npm run build:student-release -- --manifest-only --zip-url "<that dl=1 link>"\n`);
     process.stdout.write(`    4. Upload latest.json to Dropbox (use raw=1 or dl=1 for its link).\n`);

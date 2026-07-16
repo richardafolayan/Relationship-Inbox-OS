@@ -1,3 +1,7 @@
+// Relative (not "@/lib/...") so the tsx test runner, which imports this .ts
+// directly, resolves it without the Next path alias.
+import { APP_NAME } from "./branding";
+
 export type ConsumerFailureCode =
   | "RUNNER_OFFLINE"
   | "PARTIAL_STARTUP"
@@ -96,7 +100,7 @@ export function classifyConsumerFailure(
       code: "PARTIAL_STARTUP",
       title: "Your conversations are not available yet.",
       message: "The app started, but its local data service did not finish opening.",
-      nextAction: "Choose Try again. If this continues, reopen Relationship Inbox OS.",
+      nextAction: `Choose Try again. If this continues, reopen ${APP_NAME}.`,
       actionLabel: "Try again",
       retrySafe: true,
       dataUncertain: true
@@ -130,9 +134,9 @@ export function classifyConsumerFailure(
   if (networkFailure) {
     return failure({
       code: "RUNNER_OFFLINE",
-      title: "Relationship Inbox OS is reconnecting.",
+      title: `${APP_NAME} is reconnecting.`,
       message: "The local helper is not responding, so replies and sending are paused.",
-      nextAction: "Choose Start runner. If it does not reconnect, reopen Relationship Inbox OS.",
+      nextAction: `Choose Start runner. If it does not reconnect, reopen ${APP_NAME}.`,
       actionLabel: "Start runner",
       retrySafe: true
     });
@@ -158,7 +162,7 @@ export function classifyConsumerFailure(
   ) {
     return failure({
       code: "PERMISSION_REQUIRED",
-      title: "Relationship Inbox OS needs permission to continue.",
+      title: `${APP_NAME} needs permission to continue.`,
       message: "macOS or your browser is blocking access needed for this action.",
       nextAction: "Open Settings, grant the requested access, then try again.",
       actionLabel: "Open Settings",
@@ -205,7 +209,7 @@ export function classifyConsumerFailure(
     return failure({
       code: "DATABASE_UNAVAILABLE",
       title: "Your local inbox data could not be opened.",
-      message: "Relationship Inbox OS has paused changes to avoid making the problem worse.",
+      message: `${APP_NAME} has paused changes to avoid making the problem worse.`,
       nextAction: "Reopen the app. If this continues, use Help to send a diagnostics-only report.",
       actionLabel: "Reopen app",
       retrySafe: false,
@@ -229,7 +233,7 @@ export function classifyConsumerFailure(
       code: "UPDATE_FAILED",
       title: "The update did not start.",
       message: "The current app remains installed and your local data was not changed.",
-      nextAction: "Check for updates again. If it still fails, reopen Relationship Inbox OS.",
+      nextAction: `Check for updates again. If it still fails, reopen ${APP_NAME}.`,
       actionLabel: "Check again",
       retrySafe: true
     });
@@ -278,7 +282,7 @@ export function classifyConsumerFailure(
     return failure({
       code: "INTEGRATION_UNAVAILABLE",
       title: "This account is not ready.",
-      message: "Relationship Inbox OS cannot reach the connected service safely.",
+      message: `${APP_NAME} cannot reach the connected service safely.`,
       nextAction: "Open Settings and reconnect the account before trying again.",
       actionLabel: "Open Settings",
       actionHref: "/settings#platforms",

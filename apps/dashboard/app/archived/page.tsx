@@ -11,7 +11,6 @@ import { PersonAvatar } from "@/components/common/person-avatar";
 import { Canvas, CaughtUp } from "@/components/common/canvas";
 import { cn } from "@/lib/utils";
 import {
-  OXBLOOD_PAGE_VARS,
   TOOL_CLASS,
   XIcon,
   FilterGlyph,
@@ -28,7 +27,7 @@ interface ArchivedResponse {
 
 type Outcome = "handled" | "snoozed" | "ghosted";
 type OutcomeTab = "all" | Outcome;
-type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP";
+type PlatformFilter = "all" | "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES";
 type ArchSort = "recent" | "oldest" | "name";
 
 const OUTCOME_TABS: { key: OutcomeTab; label: string }[] = [
@@ -51,7 +50,8 @@ const PLATFORM_FILTERS: { key: PlatformFilter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "IMESSAGE", label: "iMessage" },
   { key: "LINKEDIN", label: "LinkedIn" },
-  { key: "WHATSAPP", label: "WhatsApp" }
+  { key: "WHATSAPP", label: "WhatsApp" },
+  { key: "GOOGLE_MESSAGES", label: "Google Messages" }
 ];
 
 const ARCH_SORTS: { key: ArchSort; label: string }[] = [
@@ -141,13 +141,18 @@ export default function ArchivedPage() {
   const [platformFilter, setPlatformFilter] = useState<PlatformFilter>("all");
   const [sortMode, setSortMode] = useState<ArchSort>("recent");
 
-  // WhatsApp is opt-in, so its chip only appears once there are archived
-  // WhatsApp threads to filter to. Keeps the popover at two platforms for
-  // pilots who never linked it.
   const platformOptions = useMemo(() => {
-    const showWhatsApp = (rows ?? []).some((row) => row.platform === "WHATSAPP");
-    return PLATFORM_FILTERS.filter((option) => option.key !== "WHATSAPP" || showWhatsApp);
+    const available = new Set((rows ?? []).map((row) => row.platform));
+    return PLATFORM_FILTERS.filter(
+      (option) => option.key === "all" || available.has(option.key)
+    );
   }, [rows]);
+
+  useEffect(() => {
+    if (platformFilter === "all") return;
+    if (platformOptions.some((option) => option.key === platformFilter)) return;
+    setPlatformFilter("all");
+  }, [platformFilter, platformOptions]);
 
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [forceSelectMode, setForceSelectMode] = useState(false);
@@ -325,7 +330,7 @@ export default function ArchivedPage() {
   const isEmpty = !rows || rows.length === 0;
 
   return (
-    <Canvas style={OXBLOOD_PAGE_VARS}>
+    <Canvas>
       <Link
         href="/inbox"
         className="mb-[16px] inline-flex items-center gap-[5px] font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3 transition-colors duration-calm hover:text-ink"

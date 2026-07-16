@@ -89,12 +89,17 @@ test("/system/update guards as an external-action before staging", () => {
     /kind:\s*"external-action"/,
     "/system/update guard must use kind: 'external-action'"
   );
-  // The guard must fire before stagePendingUpdate is reached.
+  // The guard must fire before the shared manual/automatic update path is reached.
   const guardIdx = routeBody.indexOf("checkPresenterGuard");
-  const stageIdx = routeBody.indexOf("stagePendingUpdate");
-  assert.ok(stageIdx > -1, "expected stagePendingUpdate in the /system/update handler");
+  const startIdx = routeBody.indexOf("startAvailableUpdate");
+  assert.ok(startIdx > -1, "expected startAvailableUpdate in the /system/update handler");
   assert.ok(
-    guardIdx > -1 && guardIdx < stageIdx,
-    "checkPresenterGuard must run before stagePendingUpdate so a blocked demo never stages an update"
+    guardIdx > -1 && guardIdx < startIdx,
+    "checkPresenterGuard must run before startAvailableUpdate so a blocked demo never stages an update"
   );
+  const sharedUpdatePath = indexTs.match(
+    /async function checkAndStartAvailableUpdate[\s\S]*?\n\}/
+  );
+  assert.ok(sharedUpdatePath, "shared update path not found");
+  assert.match(sharedUpdatePath[0], /stagePendingUpdate\(/);
 });

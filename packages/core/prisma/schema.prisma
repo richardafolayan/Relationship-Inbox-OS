@@ -20,6 +20,7 @@ enum PlatformName {
   // (see feat/whatsapp-phase-b on origin for the in-flight adapter).
   IMESSAGE
   WHATSAPP
+  GOOGLE_MESSAGES
 }
 
 enum PlatformStatus {
@@ -213,6 +214,7 @@ model Thread {
   personId          String
   unreadCount       Int          @default(0)
   needsReply        Boolean      @default(false)
+  handledAt         DateTime?
   lastMessagePreview String?
   lastMessageAt     DateTime?
   lastInboundAt     DateTime?

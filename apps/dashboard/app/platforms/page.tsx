@@ -6,7 +6,6 @@ import { apiGet, apiPost, runAction } from "@/lib/api";
 import { runActionWithFeedback } from "@/lib/feedback";
 import type { AuditLogRow, PlatformCard } from "@/lib/types";
 import { formatRelative } from "@/lib/time";
-import { IMPLEMENTED_PLATFORMS } from "@/lib/risk";
 import { Button } from "@/components/ui/button";
 import { Menu } from "@/components/ui/menu";
 import { Canvas, PageHead } from "@/components/common/canvas";
@@ -20,7 +19,8 @@ const PLATFORM_DISPLAY: Record<PlatformCard["platform"], string> = {
   INSTAGRAM: "Instagram",
   TIKTOK: "TikTok",
   IMESSAGE: "iMessage",
-  WHATSAPP: "WhatsApp"
+  WHATSAPP: "WhatsApp",
+  GOOGLE_MESSAGES: "Google Messages"
 };
 
 const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
@@ -28,13 +28,9 @@ const PLATFORM_GLYPH: Record<PlatformCard["platform"], string> = {
   IMESSAGE: "iM",
   INSTAGRAM: "ig",
   TIKTOK: "tt",
-  WHATSAPP: "wa"
+  WHATSAPP: "wa",
+  GOOGLE_MESSAGES: "gm"
 };
-
-const VISIBLE_PLATFORMS = IMPLEMENTED_PLATFORMS;
-const COMING_SOON_PLATFORMS: ReadonlyArray<PlatformCard["platform"]> = (
-  ["INSTAGRAM", "TIKTOK", "LINKEDIN", "IMESSAGE"] as const
-).filter((p) => !IMPLEMENTED_PLATFORMS.includes(p));
 
 // Platforms - 2-up card grid. Each card: glyph (left), name + one-line
 // status (centre), icon row of actions (right). Coming-soon platforms
@@ -64,9 +60,9 @@ export default function PlatformsPage() {
     return () => window.removeEventListener("runner-resync", onResync);
   }, [refresh]);
 
-  const visibleRows = rows.filter((row) => VISIBLE_PLATFORMS.includes(row.platform));
+  const visibleRows = rows;
   const connected = visibleRows.filter((row) => row.status === "CONNECTED").length;
-  const total = visibleRows.length || VISIBLE_PLATFORMS.length;
+  const total = visibleRows.length;
 
   return (
     <Canvas>
@@ -127,9 +123,6 @@ export default function PlatformsPage() {
             refresh={refresh}
           />
         ))}
-        {COMING_SOON_PLATFORMS.map((platform) => (
-          <EmptyPlatformCard key={platform} platform={platform} />
-        ))}
       </div>
 
       <div className="mt-10 flex justify-end font-mono text-[11px] uppercase tracking-[0.06em] text-ink-3">
@@ -170,7 +163,9 @@ function PlatformCardView({
   const display = PLATFORM_DISPLAY[row.platform];
   const glyph = PLATFORM_GLYPH[row.platform];
   const statusToken =
-    row.status === "CONNECTED"
+    row.supported === false
+      ? { className: "text-ink-3", label: "not available" }
+      : row.status === "CONNECTED"
       ? { className: "text-risk-fresh", label: "connected" }
       : row.status === "DEGRADED"
         ? { className: "text-risk-waiting", label: "needs a look" }
@@ -178,7 +173,9 @@ function PlatformCardView({
           ? { className: "text-ink-2", label: "needs attention" }
           : { className: "text-ink-3", label: "not connected" };
 
-  const scanLine = row.lastScanAt
+  const scanLine = row.supported === false
+    ? "macOS only"
+    : row.lastScanAt
     ? `last scan ${formatRelative(row.lastScanAt)}`
     : row.lastError
       ? classifyConsumerFailure(new Error(row.lastError), {
@@ -227,24 +224,30 @@ function PlatformCardView({
           >
             <Info className="h-[14px] w-[14px]" strokeWidth={1.6} />
           </button>
-          <Button
-            variant="quiet"
-            className="px-[12px] py-[7px] text-[12px]"
-            onClick={() =>
-              runActionWithFeedback(
-                apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
-                {
-                  pending: `Opening ${display}…`,
-                  success: `${display} opened`,
-                  failure: `Couldn't open ${display}`,
-                  setError: setActionError
-                }
-              )
-            }
-          >
-            {row.status === "CONNECTED" ? "Open browser" : "Connect"}
-          </Button>
-          <Menu
+          {row.supported === false ? (
+            <Button variant="quiet" className="px-[12px] py-[7px] text-[12px]" disabled>
+              Not available
+            </Button>
+          ) : (
+            <Button
+              variant="quiet"
+              className="px-[12px] py-[7px] text-[12px]"
+              onClick={() =>
+                runActionWithFeedback(
+                  apiPost("/runner/control/platform/open-browser", { platform: row.platform }),
+                  {
+                    pending: `Opening ${display}…`,
+                    success: `${display} opened`,
+                    failure: `Couldn't open ${display}`,
+                    setError: setActionError
+                  }
+                )
+              }
+            >
+              {row.status === "CONNECTED" ? "Open browser" : "Connect"}
+            </Button>
+          )}
+          {row.supported !== false ? <Menu
             trigger={
               <button
                 type="button"
@@ -311,7 +314,7 @@ function PlatformCardView({
                 }
               }
             ]}
-          />
+          /> : null}
         </div>
       </div>
 
@@ -369,32 +372,6 @@ function PlatformCardView({
           )}
         </div>
       ) : null}
-    </article>
-  );
-}
-
-function EmptyPlatformCard({ platform }: { platform: PlatformCard["platform"] }) {
-  const display = PLATFORM_DISPLAY[platform];
-  const glyph = PLATFORM_GLYPH[platform];
-  return (
-    <article className="grid grid-cols-[36px_1fr_auto] items-center gap-[14px] rounded-[16px] border border-dashed border-hairline-strong bg-paper px-[20px] py-[18px] text-ink-3">
-      <span
-        aria-hidden
-        className="grid h-[36px] w-[36px] place-items-center rounded-[10px] border border-dashed border-hairline-strong bg-transparent font-mono text-[14px] font-semibold text-ink-3"
-      >
-        {glyph}
-      </span>
-      <div className="min-w-0">
-        <h4 className="m-0 mb-[2px] font-display text-[16px] font-medium tracking-[-0.01em] text-ink-3">
-          {display}
-        </h4>
-        <p className="m-0 font-mono text-[11px] text-ink-3">
-          coming later · join waitlist
-        </p>
-      </div>
-      <Button variant="quiet" className="px-[12px] py-[7px] text-[12px]">
-        Notify me
-      </Button>
     </article>
   );
 }

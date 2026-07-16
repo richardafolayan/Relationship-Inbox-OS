@@ -18,9 +18,11 @@
     "repair:linkedin-timestamps": "tsx src/scripts/repair-linkedin-synthetic-timestamps.ts",
     "db:reset:linkedin": "tsx src/scripts/reset-linkedin-inbox.ts --platform LINKEDIN --confirm RESET",
     "cleanup:artifacts": "tsx src/scripts/cleanup-artifacts.ts",
+    "evaluate:ai-fidelity": "tsx src/scripts/evaluate-ai-fidelity.ts",
+    "review:local-ai-fidelity": "tsx src/scripts/review-local-ai-fidelity.ts",
     "imessage:backfill-names": "tsx src/scripts/backfill-imessage-names.ts",
     "imessage:dedupe-people": "tsx src/scripts/dedupe-imessage-people.ts",
-    "imessage:reset-permissions": "tsx src/scripts/imessage-permission-reset.ts --confirm",
+    "imessage:permissions": "tsx src/scripts/imessage-permission-help.ts",
     "imessage:purge-automated": "tsx src/scripts/purge-automated-imessage.ts",
     "imessage:keep-voice-notes": "tsx src/scripts/imessage-keep-voice-notes.ts",
     "imessage:repair-send-keys": "tsx src/scripts/repair-imessage-send-keys.ts",
@@ -30,27 +32,28 @@
     "@huggingface/transformers": "^3.0.0",
     "@inbox-os/core": "0.1.0",
     "@prisma/client": "^6.3.1",
-    "@types/multer": "^2.1.0",
     "better-sqlite3": "^11.10.0",
     "compression": "^1.8.1",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
+    "ical.js": "^2.2.1",
     "multer": "^2.1.1",
+    "onnxruntime-node": "1.21.0",
     "openai": "^4.78.1",
     "patchright": "^1.59.4",
-    "playwright": "^1.50.1",
+    "qrcode": "^1.5.4",
     "uuid": "^11.0.5",
-    "zod": "^3.24.1",
     "whatsapp-web.js": "^1.34.7",
-    "qrcode": "^1.5.4"
+    "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/compression": "^1.8.1",
     "@types/express": "^5.0.0",
+    "@types/multer": "^2.1.0",
     "@types/node": "^22.10.6",
+    "@types/qrcode": "^1.5.5",
     "tsx": "^4.19.2",
-    "typescript": "^5.7.3",
-    "@types/qrcode": "^1.5.5"
+    "typescript": "^5.7.3"
   }
 }

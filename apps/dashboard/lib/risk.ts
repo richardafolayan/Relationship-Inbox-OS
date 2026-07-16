@@ -12,37 +12,49 @@ export function toDisplayRisk(level: RunnerRisk): DisplayRisk {
 }
 
 export const PLATFORM_LABEL: Record<
-  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP",
+  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES",
   string
 > = {
   LINKEDIN: "linkedin",
   INSTAGRAM: "instagram",
   TIKTOK: "tiktok",
   IMESSAGE: "imessage",
-  WHATSAPP: "whatsapp"
+  WHATSAPP: "whatsapp",
+  GOOGLE_MESSAGES: "google messages"
 };
 
-// Platforms whose adapter is live in the runner. The "X/N connected"
-// denominator and the platforms list both key off this so adding a new
-// adapter only requires updating one place. WHATSAPP is intentionally not
-// here: it is opt-in per operator, so it joins the visible set dynamically
-// via visibleImplementedPlatforms below once the operator has linked it.
+// Compatibility fallback for an older runner that does not return platform
+// cards. Current runners return the exact env-enabled set.
 export const IMPLEMENTED_PLATFORMS: ReadonlyArray<
-  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"
+  "LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"
 > = ["LINKEDIN", "IMESSAGE"];
 
-// The platform set the operator actually sees in connected-counts, the
-// reconnect modal, and filter chips. LinkedIn + iMessage are always on;
-// WhatsApp appears only once this operator has EVER linked it (connectedAt,
-// the same "uses this platform" signal as #708) — a pilot who never opted in
-// must not see a third platform materialise. Pass the /data/platforms cards.
+// The platform set the operator sees in connected counts, the reconnect
+// modal, and filter chips. /data/platforms is already filtered by the runner's
+// environment switches, so the dashboard mirrors it exactly.
 export function visibleImplementedPlatforms(
-  platforms: ReadonlyArray<{ platform: string; connectedAt: string | null }> | null | undefined
-): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP"> {
-  const whatsapp = platforms?.find((p) => p.platform === "WHATSAPP");
-  return whatsapp && hasEverConnected(whatsapp)
-    ? [...IMPLEMENTED_PLATFORMS, "WHATSAPP"]
-    : IMPLEMENTED_PLATFORMS;
+  platforms: ReadonlyArray<{
+    platform: string;
+    connectedAt: string | null;
+    enabled?: boolean;
+    supported?: boolean;
+  }> | null | undefined
+): ReadonlyArray<"LINKEDIN" | "INSTAGRAM" | "TIKTOK" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES"> {
+  if (!platforms) return IMPLEMENTED_PLATFORMS;
+  return platforms
+    .filter((platform) => platform.supported !== false)
+    .filter(
+      (platform) =>
+        platform.platform !== "WHATSAPP" || platform.enabled || hasEverConnected(platform)
+    )
+    .map((platform) => platform.platform)
+    .filter(
+      (platform): platform is "LINKEDIN" | "IMESSAGE" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
+        platform === "LINKEDIN" ||
+        platform === "IMESSAGE" ||
+        platform === "WHATSAPP" ||
+        platform === "GOOGLE_MESSAGES"
+    );
 }
 
 // A platform the operator has never connected is "not set up", not "broken".

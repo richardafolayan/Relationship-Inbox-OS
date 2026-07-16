@@ -1,6 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { resolveEnqueueStatus } from "../apps/runner/dist/services/scan-queue.js";
+import {
+  jobCoversTriggeredScan,
+  resolveEnqueueStatus
+} from "../apps/runner/dist/services/scan-queue.js";
 
 // Regression for P1-L3: enqueueScan must report "running" for the job that
 // starts immediately, not always "queued".
@@ -19,4 +22,19 @@ test("resolveEnqueueStatus reports running when no job is in flight", () => {
 test("resolveEnqueueStatus reports queued when a job is already in flight", () => {
   // processing was true before enqueue -> this job waits behind the active one.
   assert.equal(resolveEnqueueStatus(true), "queued");
+});
+
+test("platform-wide queued scans cover targeted change triggers", () => {
+  assert.equal(
+    jobCoversTriggeredScan({ platform: "WHATSAPP" }, "WHATSAPP", "group@g.us"),
+    true
+  );
+  assert.equal(
+    jobCoversTriggeredScan(
+      { platform: "WHATSAPP", platformThreadId: "a@c.us" },
+      "WHATSAPP",
+      "b@c.us"
+    ),
+    false
+  );
 });

@@ -1,4 +1,4 @@
-# Student Pilot: How to Test Relationship Inbox OS
+# Student Pilot: How to Test Tovi
 
 Thanks for trying this. It's an early build, not a finished product. The
 point of the pilot is to find out whether it actually helps you reply to
@@ -19,7 +19,7 @@ once it's running. If something looks stuck, see
 
 ## What the app is for
 
-Relationship Inbox OS helps you reply properly. It shows:
+Tovi helps you reply properly. It shows:
 
 - **Who is waiting**: conversations sorted by who's waited longest.
 - **What they said**: a short summary so you don't reread a cold thread.
