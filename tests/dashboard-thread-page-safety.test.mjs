@@ -67,8 +67,11 @@ test("onSend has a synchronous sendingRef re-entrancy guard", () => {
   assert.match(src, /sendingRef\.current = false;/);
 });
 
-test("rich-only messages drop the message bubble chrome", () => {
-  assert.match(src, /const isRichContentOnly\s*=\s*\(hasInlineMedia \|\| Boolean\(whatsappPoll\)\) && !showText/);
-  assert.match(src, /isRichContentOnly\s*\?\s*"flex flex-col gap-2"/);
+test("rich messages drop the message bubble chrome", () => {
+  assert.match(
+    src,
+    /const usesTransparentRichSurface\s*=\s*hasInlineMedia \|\| Boolean\(whatsappPoll\) \|\| Boolean\(inlineCardUrl\)/
+  );
+  assert.match(src, /usesTransparentRichSurface\s*\?\s*"flex flex-col gap-2[^\"]*text-ink"/);
   assert.match(src, /bg-ink text-paper/); // bubble bg still exists for the non-image branch
 });

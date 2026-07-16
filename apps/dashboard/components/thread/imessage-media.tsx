@@ -255,7 +255,7 @@ export function IMessageMedia({ attachment }: IMessageMediaProps) {
       href={url}
       target="_blank"
       rel="noreferrer"
-      className="inline-flex items-center gap-2 rounded bg-paper-2 px-3 py-2 text-[13px] text-ink hover:bg-paper-3"
+      className="inline-flex items-center gap-2 rounded border border-hairline bg-transparent px-3 py-2 text-[13px] text-ink hover:bg-paper-2"
     >
       <span>📎</span>
       <span>{attachment.rawLabel ?? labelFor(attachment.kind)}</span>
