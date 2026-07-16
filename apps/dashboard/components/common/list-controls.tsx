@@ -1,24 +1,12 @@
 "use client";
 
-import { useEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { cn } from "@/lib/utils";
 
 // Shared list-control primitives for the redesigned list pages (Inbox,
 // Archived). The consolidated filter bar — ghost search + status tabs + a
 // compact Sort / Filters / Select cluster — is the same family across
 // these screens, so the reusable atoms live here.
-
-// Page-scoped oxblood palette. Applied as `style` on a page's Canvas so the
-// redesign reads as one family; because the sidebar / app-shell render
-// outside the page subtree they stay coral, and globals.css is untouched.
-export const OXBLOOD_PAGE_VARS = {
-  "--accent": "#7B1F1F",
-  "--accent-ink": "#7B1F1F",
-  "--accent-soft": "rgba(123,31,31,0.08)",
-  "--risk-overdue": "#7B1F1F",
-  "--risk-waiting": "#9a6a12",
-  "--risk-fresh": "#1f6b3a"
-} as CSSProperties;
 
 // "tool" button styling for the bar cluster (Sort / Filters / Select).
 export const TOOL_CLASS =

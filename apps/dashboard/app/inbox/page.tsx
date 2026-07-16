@@ -34,7 +34,6 @@ import { bulkActionRemovesRow } from "@/lib/inbox-bulk";
 import { cn } from "@/lib/utils";
 import { prefetchThreadData, cancelThreadPrefetch } from "@/lib/thread-prefetch";
 import {
-  OXBLOOD_PAGE_VARS,
   TOOL_CLASS,
   XIcon,
   FilterGlyph,
@@ -708,7 +707,7 @@ export default function InboxPage() {
   );
 
   return (
-    <Canvas style={OXBLOOD_PAGE_VARS}>
+    <Canvas>
       <PageHead
         eyebrow="All conversations"
         title="Inbox"

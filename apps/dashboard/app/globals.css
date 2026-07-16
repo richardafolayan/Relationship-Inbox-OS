@@ -16,13 +16,13 @@
   --tovi-mark-tile: #f7f2e8;
   --tovi-mark-stroke: #202a35;
 
-  /* Single accent - warm coral */
-  --accent: oklch(66% 0.16 32);
-  --accent-soft: oklch(94% 0.04 32);
-  --accent-ink: oklch(38% 0.13 32);
+  /* Single accent - Tovi oxblood */
+  --accent: #9a2727;
+  --accent-soft: #f5e6e6;
+  --accent-ink: #7b1f1f;
 
   /* Risk semantics - type-led, single dot */
-  --risk-overdue: oklch(60% 0.18 28);
+  --risk-overdue: var(--accent);
   --risk-waiting: oklch(70% 0.11 75);
   --risk-fresh:   oklch(64% 0.09 155);
 
@@ -40,9 +40,9 @@
 }
 
 [data-theme="dark"] {
-  --paper:   oklch(15% 0.008 260);
-  --paper-2: oklch(19% 0.009 260);
-  --paper-3: oklch(24% 0.010 260);
+  --paper:   #000000;
+  --paper-2: #0c0e10;
+  --paper-3: #16191c;
   --ink:     oklch(96% 0.005 260);
   --ink-2:   oklch(82% 0.006 260);
   --ink-3:   oklch(64% 0.008 260);
@@ -51,8 +51,8 @@
   --hairline-strong: oklch(36% 0.014 260);
   --tovi-mark-tile: #000000;
   --tovi-mark-stroke: #f7f2e8;
-  --accent-soft: oklch(28% 0.07 32);
-  --accent-ink: oklch(82% 0.10 32);
+  --accent-soft: #301313;
+  --accent-ink: #df7676;
 }
 
 /* Native form controls (<audio>, <video>) render their chrome based on
