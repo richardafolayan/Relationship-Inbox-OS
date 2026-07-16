@@ -17,3 +17,13 @@ test("runner refreshes WhatsApp QR by resetting the session before reconnecting"
   assert.match(runner, /qrDataUrl = null/);
   assert.match(runner, /ensureConnected\(\)/);
 });
+
+test("WhatsApp can be reset to a clean session with inline feedback", () => {
+  assert.match(component, /apiPost\("\/runner\/control\/whatsapp\/reset"/);
+  assert.match(component, /Reset WhatsApp/);
+  assert.match(component, /Resetting\.\.\./);
+  assert.match(component, /WhatsApp reset\. Connect again to get a new QR code\./);
+  assert.match(runner, /app\.post\("\/control\/whatsapp\/reset"/);
+  assert.match(runner, /clearPersistedWhatsAppSession/);
+  assert.match(runner, /RESET_WHATSAPP_SESSION/);
+});

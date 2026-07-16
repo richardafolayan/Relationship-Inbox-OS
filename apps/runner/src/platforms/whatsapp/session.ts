@@ -12,6 +12,7 @@
 // session is the older ground truth).
 
 import { existsSync, readdirSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { join } from "node:path";
 
 const DEFAULT_CLIENT_ID = "inbox-os";
@@ -34,4 +35,11 @@ export function hasPersistedWhatsAppSession(authDir: string, clientId = DEFAULT_
     // as no session rather than throwing during boot.
     return false;
   }
+}
+
+export async function clearPersistedWhatsAppSession(
+  authDir: string,
+  clientId = DEFAULT_CLIENT_ID
+): Promise<void> {
+  await rm(whatsAppSessionDir(authDir, clientId), { recursive: true, force: true });
 }

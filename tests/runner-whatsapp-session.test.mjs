@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  clearPersistedWhatsAppSession,
   hasPersistedWhatsAppSession,
   whatsAppSessionDir
 } from "../apps/runner/dist/platforms/whatsapp/session.js";
@@ -39,6 +40,22 @@ test("session detected when the session dir has contents", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "ChromeFeatureState"), "x");
     assert.equal(hasPersistedWhatsAppSession(authDir), true);
+  } finally {
+    rmSync(authDir, { recursive: true, force: true });
+  }
+});
+
+test("persisted session can be cleared for a clean relink", async () => {
+  const authDir = mkdtempSync(join(tmpdir(), "wa-reset-"));
+  try {
+    const dir = whatsAppSessionDir(authDir);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "Default"), "state");
+    assert.equal(hasPersistedWhatsAppSession(authDir), true);
+
+    await clearPersistedWhatsAppSession(authDir);
+
+    assert.equal(hasPersistedWhatsAppSession(authDir), false);
   } finally {
     rmSync(authDir, { recursive: true, force: true });
   }

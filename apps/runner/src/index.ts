@@ -59,9 +59,16 @@ import { createSelectorTestService, isSelectorTestServiceError } from "./service
 import { extractFailureUrl, resolveConnectFailureResponse } from "./services/failure-routing";
 import { createAdapters, type WhatsAppConnectState } from "./services/platform-factory";
 import { isWhatsAppScannable } from "./platforms/whatsapp/scannable";
-import { hasPersistedWhatsAppSession } from "./platforms/whatsapp/session";
+import {
+  clearPersistedWhatsAppSession,
+  hasPersistedWhatsAppSession
+} from "./platforms/whatsapp/session";
 import { findWhatsAppMediaByGuid, streamWhatsAppMedia } from "./platforms/whatsapp/media";
 import { isWhatsAppSessionUnavailableError } from "./platforms/whatsapp-adapter";
+import {
+  connectedPlatformCount,
+  effectivePlatformStatus
+} from "./platform-availability";
 import QRCode from "qrcode";
 import { IMessageDb } from "./platforms/imessage-db";
 import { groupStubFields } from "./platforms/imessage-group-name";
@@ -395,8 +402,8 @@ async function syncWhatsAppPlatformRow(state: WhatsAppConnectState): Promise<voi
   const connectedAt = state === "connected" ? new Date() : undefined;
   await prisma.platform.upsert({
     where: { name: "WHATSAPP" },
-    update: { status, ...(connectedAt ? { connectedAt, lastError: null } : {}) },
-    create: { name: "WHATSAPP", status, ...(connectedAt ? { connectedAt } : {}) }
+    update: { status, lastError: null, ...(connectedAt ? { connectedAt } : {}) },
+    create: { name: "WHATSAPP", status, lastError: null, ...(connectedAt ? { connectedAt } : {}) }
   });
 }
 
@@ -1971,7 +1978,11 @@ app.get("/health", asyncRoute(async (_req, res) => {
     .sort((a, b) => (a!.getTime() > b!.getTime() ? -1 : 1))[0];
 
   const runnerStatus = scanQueue.isScanning() ? "SCANNING" : "ONLINE";
-  const connectedPlatforms = platforms.filter((platform) => platform.status === "CONNECTED").length;
+  const connectedPlatforms = connectedPlatformCount(
+    runnerConfig.availablePlatforms,
+    platforms,
+    whatsappConnect.state
+  );
 
   // Determinate scan progress: surfaced so the status bar can render a real
   // progress bar instead of an indeterminate sweep. ETA is computed against
@@ -2014,6 +2025,7 @@ app.get("/health", asyncRoute(async (_req, res) => {
     lastScanAt: lastScanAt?.toISOString() ?? null,
     queueDepth: scanQueue.getQueueDepth(),
     connectedPlatforms,
+    availablePlatforms: runnerConfig.availablePlatforms,
     // Current platform being scanned, if any. Drives the status bar's
     // "Scanning <platform>" label so it stops claiming "linkedin" when
     // an iMessage scan is running.
@@ -2497,17 +2509,30 @@ app.post("/control/setup/ai-key", asyncRoute(async (req, res) => {
 }));
 
 app.get("/data/setup/status", asyncRoute(async (_req, res) => {
-  const [preferences, settings, platforms, operatorProfile] = await Promise.all([
+  const [preferences, settings, platformRows, operatorProfile] = await Promise.all([
     getSetupPreferences(),
     settingsStore.getSettings(),
     prisma.platform.findMany({
-      where: { name: { in: ["IMESSAGE", "LINKEDIN", "WHATSAPP", "GOOGLE_MESSAGES"] } },
+      where: { name: { in: runnerConfig.availablePlatforms } },
       select: { name: true, status: true, connectedAt: true, lastError: true }
     }),
     settingsStore.getOperatorProfile()
   ]);
+  const platforms = runnerConfig.availablePlatforms.map((platform) => {
+    const row = platformRows.find((entry) => entry.name === platform);
+    return {
+      name: platform,
+      status: effectivePlatformStatus(platform, row?.status, whatsappConnect.state),
+      connectedAt: row?.connectedAt ?? null,
+      lastError: row?.lastError ?? null
+    };
+  });
+  const available = new Set(platforms.map((platform) => platform.name));
   res.json({
-    preferences,
+    preferences: {
+      ...preferences,
+      selectedPlatforms: preferences.selectedPlatforms.filter((platform) => available.has(platform))
+    },
     settings: {
       enabledPlatforms: settings.enabledPlatforms,
       aiEnabled: settings.aiEnabled !== false,
@@ -2534,15 +2559,17 @@ app.post("/control/setup/preferences", asyncRoute(async (req, res) => {
   ]);
   const existingPilotPlatforms = currentSettings.enabledPlatforms.filter(
     (platform): platform is "IMESSAGE" | "LINKEDIN" | "WHATSAPP" | "GOOGLE_MESSAGES" =>
-      platform === "IMESSAGE" ||
-      platform === "LINKEDIN" ||
-      platform === "WHATSAPP" ||
-      platform === "GOOGLE_MESSAGES"
+      runnerConfig.availablePlatforms.includes(platform) &&
+      (platform === "IMESSAGE" ||
+        platform === "LINKEDIN" ||
+        platform === "WHATSAPP" ||
+        platform === "GOOGLE_MESSAGES")
   );
-  const selectedPlatforms = payload.selectedPlatforms ??
+  const selectedPlatforms = (payload.selectedPlatforms ??
     (current.startedAt || current.selectedPlatforms.length > 0
       ? current.selectedPlatforms
-      : existingPilotPlatforms);
+      : existingPilotPlatforms)
+  ).filter((platform) => runnerConfig.availablePlatforms.includes(platform));
   const aiEnabled = payload.aiEnabled ??
     (current.startedAt ? current.aiEnabled : currentSettings.aiEnabled !== false);
   const preferences = await updateSetupPreferences({
@@ -5971,16 +5998,14 @@ app.get("/data/thread/:threadId", asyncRoute(async (req, res) => {
 
 app.get("/data/platforms", asyncRoute(async (_req, res) => {
   const platforms = await prisma.platform.findMany({ orderBy: { name: "asc" } });
-  const platformsForDisplay = process.platform === "darwin"
-    ? runnerConfig.availablePlatforms
-    : Array.from(new Set([...runnerConfig.availablePlatforms, "IMESSAGE" as const]));
+  const platformsForDisplay = runnerConfig.availablePlatforms;
   const failureActions = ["SCAN_FAIL", "SELECTOR_FAIL", "SCAN_AUTH_REQUIRED"] as const;
   const recoveryActions = ["SCAN_END", "SELECTOR_TEST", "POST_SCAN_END", "POST_PLATFORM_TEST_SELECTORS_END"] as const;
 
   const data = await Promise.all(
     platformsForDisplay.map(async (platform) => {
       const row = platforms.find((entry) => entry.name === platform);
-      const supported = platform !== "IMESSAGE" || process.platform === "darwin";
+      const supported = true;
       const sharedProfileDir = sessionManager.getProfileDir(defaultPersonKey);
       const [latestFailure, latestRecovery] = await Promise.all([
         prisma.auditLog.findFirst({
@@ -6008,7 +6033,7 @@ app.get("/data/platforms", asyncRoute(async (_req, res) => {
 
       return {
         platform,
-        status: row?.status ?? "NOT_CONNECTED",
+        status: effectivePlatformStatus(platform, row?.status, whatsappConnect.state),
         lastScanAt: row?.lastScanAt?.toISOString() ?? null,
         connectedAt: row?.connectedAt?.toISOString() ?? null,
         lastError: row?.lastError ?? null,
@@ -6961,8 +6986,43 @@ app.get("/data/whatsapp/status", asyncRoute(async (_req, res) => {
     enabled: runnerConfig.whatsapp.enabled,
     state: whatsappConnect.state,
     qrDataUrl: whatsappConnect.qrDataUrl,
-    updatedAt: whatsappConnect.updatedAt
+    updatedAt: whatsappConnect.updatedAt,
+    hasPersistedSession: hasPersistedWhatsAppSession(runnerConfig.profileDirs.WHATSAPP)
   });
+}));
+
+app.post("/control/whatsapp/reset", asyncRoute(async (_req, res) => {
+  if (!runnerConfig.whatsapp.enabled) {
+    res.status(409).json({
+      ok: false,
+      reason: "disabled",
+      message: "Turn on WhatsApp in setup before resetting its connection."
+    });
+    return;
+  }
+  const adapter = adapters.WHATSAPP;
+  if (!adapter) {
+    res.status(500).json({ ok: false, reason: "no_adapter" });
+    return;
+  }
+
+  await withPlatformControlLock("WHATSAPP", async () => {
+    await adapter.closeSession("manual_reset");
+    await clearPersistedWhatsAppSession(runnerConfig.profileDirs.WHATSAPP);
+    whatsappConnect.qr = null;
+    whatsappConnect.qrDataUrl = null;
+    whatsappConnect.state = "disconnected";
+    whatsappConnect.updatedAt = new Date().toISOString();
+    await syncWhatsAppPlatformRow("disconnected");
+  });
+
+  await auditService.log({
+    platform: "WHATSAPP",
+    stage: "Connect",
+    action: "RESET_WHATSAPP_SESSION",
+    status: "OK"
+  });
+  res.json({ ok: true, state: "disconnected", hasPersistedSession: false });
 }));
 
 // #703 link previews. Unfurl a URL into title/description/image server-side

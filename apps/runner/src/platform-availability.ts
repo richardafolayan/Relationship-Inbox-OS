@@ -9,6 +9,8 @@ export const CONFIGURABLE_PLATFORMS = [
 
 export type ConfigurablePlatform = (typeof CONFIGURABLE_PLATFORMS)[number];
 export type PlatformAvailability = Record<ConfigurablePlatform, boolean>;
+export type StoredPlatformStatus = "CONNECTED" | "NOT_CONNECTED" | "DEGRADED" | "ERROR";
+export type WhatsAppRuntimeState = "qr_ready" | "connecting" | "connected" | "disconnected";
 
 function envFlag(value: string | undefined, fallback: boolean): boolean {
   if (value === undefined || value.trim() === "") return fallback;
@@ -23,10 +25,35 @@ export function resolvePlatformAvailability(
     LINKEDIN: envFlag(env.LINKEDIN_ENABLED, true),
     IMESSAGE: envFlag(env.IMESSAGE_ENABLED, false) && hostPlatform === "darwin",
     WHATSAPP: envFlag(env.WHATSAPP_ENABLED, false),
-    GOOGLE_MESSAGES: envFlag(env.GOOGLE_MESSAGES_ENABLED, hostPlatform === "win32")
+    GOOGLE_MESSAGES:
+      hostPlatform === "win32" && envFlag(env.GOOGLE_MESSAGES_ENABLED, true)
   };
 }
 
 export function availablePlatformNames(availability: PlatformAvailability): PlatformName[] {
   return CONFIGURABLE_PLATFORMS.filter((platform) => availability[platform]);
+}
+
+export function effectivePlatformStatus(
+  platform: PlatformName,
+  storedStatus: StoredPlatformStatus | undefined,
+  whatsappState: WhatsAppRuntimeState
+): StoredPlatformStatus {
+  if (platform === "WHATSAPP") {
+    return whatsappState === "connected" ? "CONNECTED" : "NOT_CONNECTED";
+  }
+  return storedStatus ?? "NOT_CONNECTED";
+}
+
+export function connectedPlatformCount(
+  availablePlatforms: readonly PlatformName[],
+  rows: ReadonlyArray<{ name: PlatformName; status: StoredPlatformStatus }>,
+  whatsappState: WhatsAppRuntimeState
+): number {
+  const statusByPlatform = new Map(rows.map((row) => [row.name, row.status]));
+  return availablePlatforms.filter(
+    (platform) =>
+      effectivePlatformStatus(platform, statusByPlatform.get(platform), whatsappState) ===
+      "CONNECTED"
+  ).length;
 }

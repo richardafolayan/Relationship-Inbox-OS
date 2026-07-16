@@ -468,7 +468,7 @@ export function TopStatus() {
     return () => window.removeEventListener("runner-event", onEvent as EventListener);
   }, []);
 
-  const visiblePlatforms = visibleImplementedPlatforms(platforms);
+  const visiblePlatforms = visibleImplementedPlatforms(platforms, health?.availablePlatforms);
   const implemented = platforms?.filter((p) => visiblePlatforms.includes(p.platform)) ?? null;
   const total = implemented?.length ?? visiblePlatforms.length;
   const connected =

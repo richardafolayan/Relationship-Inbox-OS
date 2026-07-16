@@ -90,7 +90,10 @@ export function SetupWizard() {
       apiGetRaw<AiStatus>("/runner/data/ai-status")
     ]);
     setStatus(setup);
-    setSelected(setup.preferences.selectedPlatforms);
+    const availablePlatforms = new Set(setup.platforms.map((platform) => platform.name));
+    setSelected(
+      setup.preferences.selectedPlatforms.filter((platform) => availablePlatforms.has(platform))
+    );
     setAiEnabled(setup.preferences.aiEnabled);
     setAiConfigured(ai.configuredProviders.length > 0);
     return { setup, ai };
@@ -179,7 +182,13 @@ export function SetupWizard() {
         {step === "profile" ? <ProfileStep initial={status?.operatorProfile} onBack={back} onNext={next} /> : null}
 
         {step === "sources" ? (
-          <SourcesStep selected={selected} onChange={setSelected} onBack={back} onNext={async () => { await savePreferences({ selectedPlatforms: selected }); next(); }} />
+          <SourcesStep
+            selected={selected}
+            available={status?.platforms.map((platform) => platform.name) ?? []}
+            onChange={setSelected}
+            onBack={back}
+            onNext={async () => { await savePreferences({ selectedPlatforms: selected }); next(); }}
+          />
         ) : null}
 
         {step === "connect" ? <ConnectStep selected={selected} onBack={back} onNext={next} /> : null}
@@ -226,14 +235,15 @@ function ProfileStep({ initial, onBack, onNext }: { initial?: OperatorProfile; o
   </Card>;
 }
 
-function SourcesStep({ selected, onChange, onBack, onNext }: { selected: SetupPlatform[]; onChange: (value: SetupPlatform[]) => void; onBack: () => void; onNext: () => Promise<void> }) {
+function SourcesStep({ selected, available, onChange, onBack, onNext }: { selected: SetupPlatform[]; available: SetupPlatform[]; onChange: (value: SetupPlatform[]) => void; onBack: () => void; onNext: () => Promise<void> }) {
   const [busy, setBusy] = useState(false);
-  const choices: Array<[SetupPlatform, string, string]> = [
+  const allChoices: Array<[SetupPlatform, string, string]> = [
     ["IMESSAGE", "iMessage", "Messages and Contacts on this Mac"],
     ["GOOGLE_MESSAGES", "Google Messages", "SMS, MMS, and RCS from your Android phone"],
     ["LINKEDIN", "LinkedIn", "Your normal LinkedIn account in Chrome"],
     ["WHATSAPP", "WhatsApp", "Link this computer from WhatsApp on your phone"]
   ];
+  const choices = allChoices.filter(([platform]) => available.includes(platform));
   const toggle = (platform: SetupPlatform) => onChange(selected.includes(platform) ? selected.filter((item) => item !== platform) : [...selected, platform]);
   return <Card icon={<MessageSquareText />} eyebrow="Message sources" title="Where do you get messages?" body="Select only what you use. Unselected services stay inactive and do not need to be connected.">
     <div className="mt-5 grid gap-3">{choices.map(([value, label, body]) => <button key={value} type="button" aria-pressed={selected.includes(value)} onClick={() => toggle(value)} className={cn("flex items-center gap-3 rounded-[10px] border px-4 py-4 text-left", selected.includes(value) ? "border-accent bg-accent/5" : "border-hairline bg-paper-2/40")}><span className={cn("grid h-5 w-5 place-items-center rounded-[5px] border", selected.includes(value) ? "border-accent bg-accent text-white" : "border-hairline-strong")}>{selected.includes(value) ? <Check className="h-3.5 w-3.5" /> : null}</span><span><span className="block text-[15px] font-medium text-ink">{label}</span><span className="mt-0.5 block text-[12.5px] text-ink-3">{body}</span></span></button>)}</div>
