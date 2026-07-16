@@ -87,7 +87,7 @@ jobs:
             $googleMessages = $platforms | Where-Object { $_.platform -eq "GOOGLE_MESSAGES" }
             $imessage = $platforms | Where-Object { $_.platform -eq "IMESSAGE" }
             if (-not $googleMessages -or -not $googleMessages.supported) { throw "Google Messages is not enabled in the Windows package" }
-            if (-not $imessage -or $imessage.supported) { throw "iMessage is not marked unavailable on Windows" }
+            if ($imessage) { throw "iMessage should not be exposed on Windows" }
           } finally {
             if (-not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }
           }
