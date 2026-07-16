@@ -43,9 +43,11 @@ export const DEFAULT_FOCUS_SETTINGS: FocusSettings = {
 // Calendar auto-focus (issue #786): disabled with no URL by default.
 export const DEFAULT_CALENDAR_SYNC: CalendarSyncSettings = {
   url: "",
+  additionalUrls: [],
   enabled: false,
   keyword: "",
-  audience: "favourites"
+  audience: "favourites",
+  phraseWithAi: false
 };
 
 export const EMPTY_FOCUS_WINDOW: FocusWindowState = {
@@ -107,7 +109,13 @@ export function readFocusSettings(profile: OperatorProfile | null | undefined): 
 export function readCalendarSync(
   profile: OperatorProfile | null | undefined
 ): CalendarSyncSettings {
-  return profile?.calendarSync ?? DEFAULT_CALENDAR_SYNC;
+  return profile?.calendarSync
+    ? {
+        ...DEFAULT_CALENDAR_SYNC,
+        ...profile.calendarSync,
+        additionalUrls: profile.calendarSync.additionalUrls ?? []
+      }
+    : DEFAULT_CALENDAR_SYNC;
 }
 
 /** True when this live window was opened by the calendar rather than by hand

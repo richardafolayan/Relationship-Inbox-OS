@@ -5,7 +5,14 @@ import { computeCalendarFocusAction } from "../apps/runner/dist/services/calenda
 // Pure decision logic for calendar auto-focus (#786): given the current focus
 // window, the event live right now, and the operator's settings, what happens?
 
-const SETTINGS = { url: "https://x/cal.ics", enabled: true, keyword: "", audience: "all_personal" };
+const SETTINGS = {
+  url: "https://x/cal.ics",
+  additionalUrls: [],
+  enabled: true,
+  keyword: "",
+  audience: "all_personal",
+  phraseWithAi: false
+};
 const NOW = new Date("2026-07-10T10:15:00Z");
 
 const OCC = {

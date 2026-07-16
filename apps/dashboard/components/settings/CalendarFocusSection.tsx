@@ -117,10 +117,28 @@ export function CalendarFocusSection() {
 
   const flush = () => void persistNow();
 
-  const setUrl = (url: string) => {
-    apply({ ...latest.current, url });
+  const setUrl = (index: number, url: string) => {
+    const urls = [latest.current.url, ...latest.current.additionalUrls];
+    urls[index] = url;
+    apply({ ...latest.current, url: urls[0] ?? "", additionalUrls: urls.slice(1) });
     setCheck({ kind: "idle" });
     persistDebounced();
+  };
+
+  const addUrl = () => {
+    apply({
+      ...latest.current,
+      additionalUrls: [...latest.current.additionalUrls, ""]
+    });
+  };
+
+  const removeUrl = (index: number) => {
+    const urls = [latest.current.url, ...latest.current.additionalUrls].filter(
+      (_url, urlIndex) => urlIndex !== index
+    );
+    apply({ ...latest.current, url: urls[0] ?? "", additionalUrls: urls.slice(1) });
+    setCheck({ kind: "idle" });
+    void persistNow();
   };
 
   const setKeyword = (keyword: string) => {
@@ -130,6 +148,11 @@ export function CalendarFocusSection() {
 
   const toggleEnabled = () => {
     apply({ ...latest.current, enabled: !latest.current.enabled });
+    void persistNow();
+  };
+
+  const togglePhraseWithAi = () => {
+    apply({ ...latest.current, phraseWithAi: !latest.current.phraseWithAi });
     void persistNow();
   };
 
@@ -144,6 +167,7 @@ export function CalendarFocusSection() {
     try {
       const data = await apiPost<CalendarPreviewResponse>("/runner/control/calendar/preview", {
         url: latest.current.url,
+        additionalUrls: latest.current.additionalUrls,
         keyword: latest.current.keyword
       });
       setCheck({ kind: "result", data });
@@ -156,6 +180,8 @@ export function CalendarFocusSection() {
   };
 
   const checkLine = renderCheckLine(check);
+  const calendarUrls = [local.url, ...local.additionalUrls];
+  const hasCalendarUrl = calendarUrls.some((url) => url.trim());
 
   return (
     <section className="mb-9">
@@ -174,35 +200,63 @@ export function CalendarFocusSection() {
 
       <div className="rounded-card border border-hairline bg-paper p-6">
         <p className="m-0 mb-[18px] max-w-[64ch] text-[13.5px] leading-[1.5] text-ink-2">
-          Connect a calendar and focus starts on its own while you are in an event, then ends when it
-          does. Open your calendar's settings and copy its{" "}
-          <span className="text-accent-ink">secret address in iCal format</span> (Google Calendar,
-          Apple Calendar and Outlook all offer one). It is read only, and nothing is ever sent for
-          you.
+          Connect the calendars that contain your real focus blocks. Focus starts on its own while
+          you are in a busy event, then ends when it does. The connection is read only, and nothing
+          is ever sent for you.
         </p>
 
-        <label className="mb-1 block text-[13.5px] font-medium text-ink">
-          Secret iCal address
-        </label>
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-          <input
-            type="url"
-            inputMode="url"
-            spellCheck={false}
-            autoComplete="off"
-            value={local.url}
-            placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
-            onChange={(event) => setUrl(event.target.value)}
-            onBlur={flush}
-            className="w-full flex-1 rounded-[9px] border border-hairline bg-paper px-3 py-[10px] font-mono text-[12.5px] leading-[1.5] text-ink outline-none transition-colors duration-calm focus:border-accent"
-          />
+        <div className="mb-2 flex items-baseline justify-between gap-3">
+          <label className="block text-[13.5px] font-medium text-ink">Calendar addresses</label>
+          <span className="text-[11.5px] text-ink-3">Up to 12 calendars</span>
+        </div>
+        <p className="mb-3 text-[12px] leading-[1.5] text-ink-3">
+          Each Google calendar has its own secret iCal address. Add only the calendars whose busy
+          events should turn focus on.
+        </p>
+        <div className="flex flex-col gap-2">
+          {calendarUrls.map((url, index) => (
+            <div key={index} className="flex items-center gap-2">
+              <input
+                type="url"
+                inputMode="url"
+                spellCheck={false}
+                autoComplete="off"
+                aria-label={`Calendar ${index + 1} secret iCal address`}
+                value={url}
+                placeholder="https://calendar.google.com/calendar/ical/.../basic.ics"
+                onChange={(event) => setUrl(index, event.target.value)}
+                onBlur={flush}
+                className="w-full flex-1 rounded-[9px] border border-hairline bg-paper px-3 py-[10px] font-mono text-[12.5px] leading-[1.5] text-ink outline-none transition-colors duration-calm focus:border-accent"
+              />
+              {calendarUrls.length > 1 ? (
+                <button
+                  type="button"
+                  onClick={() => removeUrl(index)}
+                  className="rounded-[9px] border border-hairline px-3 py-[10px] text-[12px] text-ink-3 transition-colors duration-calm hover:border-hairline-strong hover:text-ink"
+                  aria-label={`Remove calendar ${index + 1}`}
+                >
+                  Remove
+                </button>
+              ) : null}
+            </div>
+          ))}
+        </div>
+        <div className="mt-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <button
+            type="button"
+            onClick={addUrl}
+            disabled={calendarUrls.length >= 12}
+            className="self-start text-[12.5px] font-medium text-accent-ink disabled:cursor-not-allowed disabled:text-ink-3"
+          >
+            + Add another calendar
+          </button>
           <button
             type="button"
             onClick={runCheck}
-            disabled={!local.url.trim() || check.kind === "checking"}
+            disabled={!hasCalendarUrl || check.kind === "checking"}
             className={cn(
               "shrink-0 rounded-[9px] border px-4 py-[10px] text-[13px] font-medium transition-colors duration-calm",
-              !local.url.trim() || check.kind === "checking"
+              !hasCalendarUrl || check.kind === "checking"
                 ? "cursor-not-allowed border-hairline text-ink-3"
                 : "border-accent text-accent-ink hover:bg-accent-soft"
             )}
@@ -212,12 +266,37 @@ export function CalendarFocusSection() {
         </div>
         {checkLine ? <p className={cn("mt-2 text-[12.5px] leading-[1.5]", checkLine.tone)}>{checkLine.text}</p> : null}
 
+        <details className="mt-4 rounded-[10px] border border-hairline bg-paper-2/40 px-4 py-3">
+          <summary className="cursor-pointer text-[12.5px] font-medium text-ink">
+            Where to find this in Google Calendar
+          </summary>
+          <ol className="mb-0 mt-3 list-decimal space-y-1.5 pl-5 text-[12px] leading-[1.5] text-ink-3">
+            <li>Open Google Calendar on a computer, then open Settings.</li>
+            <li>Under Settings for my calendars, choose one calendar.</li>
+            <li>Open Integrate calendar, then copy Secret address in iCal format.</li>
+            <li>Paste it above. Repeat for each calendar you want Tovi to watch.</li>
+          </ol>
+          <p className="mb-0 mt-3 text-[11.5px] leading-[1.5] text-ink-3">
+            Treat each address like a password. Tovi stores it in your local profile and uses it
+            only to read that calendar.
+          </p>
+        </details>
+
         <div className="mt-5 border-t border-hairline">
           <ToggleRow
             name="Start focus from my calendar"
             desc="While this is on, focus turns on by itself during your events and off when they end. Turn it off any time to go back to starting focus by hand."
             on={local.enabled}
             onChange={toggleEnabled}
+          />
+        </div>
+
+        <div className="border-t border-hairline">
+          <ToggleRow
+            name="Draft notes from the event title"
+            desc="Optional. When an event starts, Tovi gives its title and a small sample of your sent messages to your chosen AI provider, then saves the two draft notes on the focus window. You still review and tap send yourself."
+            on={local.phraseWithAi}
+            onChange={togglePhraseWithAi}
           />
         </div>
 

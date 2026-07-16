@@ -58,9 +58,11 @@ const emptyFocusWindow: FocusWindowState = {
 
 const defaultCalendarSync: CalendarSyncSettings = {
   url: "",
+  additionalUrls: [],
   enabled: false,
   keyword: "",
-  audience: "favourites"
+  audience: "favourites",
+  phraseWithAi: false
 };
 
 const defaultFocusSettings: FocusSettings = {
@@ -137,11 +139,17 @@ function asFocusWindow(value: unknown): FocusWindowState {
 
 function asCalendarSync(value: unknown): CalendarSyncSettings {
   const raw = value && typeof value === "object" ? (value as Record<string, unknown>) : {};
+  const urls = [asString(raw.url), ...asStringArray(raw.additionalUrls)]
+    .map((url) => url.trim())
+    .filter((url, index, all) => url.length > 0 && all.indexOf(url) === index)
+    .slice(0, 12);
   return {
-    url: asString(raw.url),
+    url: urls[0] ?? "",
+    additionalUrls: urls.slice(1),
     enabled: asBoolean(raw.enabled, defaultCalendarSync.enabled),
     keyword: asString(raw.keyword),
-    audience: asFocusAudience(raw.audience)
+    audience: asFocusAudience(raw.audience),
+    phraseWithAi: asBoolean(raw.phraseWithAi, defaultCalendarSync.phraseWithAi)
   };
 }
 

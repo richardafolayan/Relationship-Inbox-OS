@@ -28,7 +28,14 @@ function profile(input: Partial<OperatorProfile> & Pick<OperatorProfile, "displa
     },
     ackTemplates: { close: "", professional: "" },
     focusSettings: { reasonLabel: true, oneNotePerPerson: true, audience: "favourites" },
-    calendarSync: { url: "", enabled: false, keyword: "", audience: "favourites" }
+    calendarSync: {
+      url: "",
+      additionalUrls: [],
+      enabled: false,
+      keyword: "",
+      audience: "favourites",
+      phraseWithAi: false
+    }
   };
 }
 
